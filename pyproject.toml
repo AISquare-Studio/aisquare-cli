@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aisquare"
+version = "0.1.0"
+description = "Portable memory layer for coding agents — persistent user and project context across sessions."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "AISquare", email = "anmol@aisquare.studio" }]
+keywords = ["cli", "ai", "agents", "memory", "context"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "pydantic>=2.7",
+  "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "mypy>=1.10",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+aisquare = "aisquare.cli.app:main"
+asq = "aisquare.cli.app:main"
+
+[project.urls]
+Homepage = "https://aisquare.studio"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aisquare"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aisquare", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+strict = true
+pretty = true
+plugins = ["pydantic.mypy"]

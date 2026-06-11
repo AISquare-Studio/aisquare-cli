@@ -1,0 +1,63 @@
+"""Typed TOML configuration: schema, defaults, load and save.
+
+Loading and saving are real; everything that *uses* the config is still
+stubbed. Unknown keys in the file are ignored so old configs keep loading.
+"""
+
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+from typing import Any
+
+import tomli_w
+from pydantic import BaseModel, Field
+
+from aisquare.core import paths
+from aisquare.models import Pool, RedactionLevel
+
+
+class CaptureSettings(BaseModel):
+    """Settings for the background capture pipeline."""
+
+    enabled: bool = True
+
+
+class RedactionSettings(BaseModel):
+    """Settings controlling how captured data is scrubbed."""
+
+    level: RedactionLevel = RedactionLevel.standard
+
+
+class AppConfig(BaseModel):
+    """Root configuration object persisted at ``~/.aisquare/config.toml``."""
+
+    profile: str = "default"
+    api_url: str = "https://api.aisquare.studio"
+    default_pool: Pool = "project"
+    capture: CaptureSettings = Field(default_factory=CaptureSettings)
+    redaction: RedactionSettings = Field(default_factory=RedactionSettings)
+
+
+def load_config(path: Path | None = None) -> AppConfig:
+    """Load configuration from ``path`` (default: the standard location).
+
+    A missing file yields the built-in defaults.
+    """
+    target = path or paths.config_path()
+    if not target.exists():
+        return AppConfig()
+    with target.open("rb") as fh:
+        data: dict[str, Any] = tomllib.load(fh)
+    return AppConfig.model_validate(data)
+
+
+def save_config(config: AppConfig, path: Path | None = None) -> Path:
+    """Write ``config`` as TOML to ``path`` (default: the standard location).
+
+    Parent directories are created on demand. Returns the written path.
+    """
+    target = path or paths.config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(tomli_w.dumps(config.model_dump(mode="json")), encoding="utf-8")
+    return target

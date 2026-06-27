@@ -84,3 +84,13 @@ class InjectionRecord(BaseModel):
     user_count: int = 0
     project_count: int = 0
     entry_ids: list[str] = Field(default_factory=list)
+
+
+class SetupReport(BaseModel):
+    """What ``init`` did, for reporting back to the user."""
+
+    home: Path
+    already_initialized: bool
+    project: ProjectInfo
+    onboarded: int = 0
+    notes: list[str] = Field(default_factory=list)

@@ -54,6 +54,11 @@ def last_injection_path() -> Path:
     return cache_dir() / "last_injection.json"
 
 
+def state_path() -> Path:
+    """Path of the small runtime-state file (e.g. the pinned active project)."""
+    return aisquare_home() / "state.json"
+
+
 def credentials_path() -> Path:
     """Path of the credentials file (API keys, tokens)."""
     return aisquare_home() / "credentials"

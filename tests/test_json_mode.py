@@ -10,10 +10,10 @@ from aisquare.cli.app import app
 
 
 def test_json_error_shape(runner: CliRunner) -> None:
-    result = runner.invoke(app, ["--json", "project", "info"])
+    result = runner.invoke(app, ["--json", "config", "list"])
     assert result.exit_code == 70  # pinned: the documented not-implemented exit code
     payload = json.loads(result.stdout)
-    assert payload == {"error": "not_implemented", "command": "project info"}
+    assert payload == {"error": "not_implemented", "command": "config list"}
 
 
 def test_json_top_level_command(runner: CliRunner) -> None:

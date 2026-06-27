@@ -18,6 +18,7 @@ from tests.cli_tree import leaf_invocations
 # as commands graduate from stub to service.
 IMPLEMENTED: set[tuple[str, ...]] = {
     ("remember",),
+    ("init",),
     ("inject",),
     ("why",),
     *(
@@ -35,6 +36,11 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "export",
             "preview",
         )
+    ),
+    *(
+        (group, command)
+        for group in ("project", "workspace")
+        for command in ("info", "list", "switch", "link", "onboard")
     ),
 }
 
@@ -68,8 +74,8 @@ def test_stub_message_goes_to_stderr(runner: CliRunner) -> None:
     assert result.stdout == ""
 
 
-def test_workspace_alias_reports_canonical_command(runner: CliRunner) -> None:
-    # An alias (workspace → project) still reports the canonical command name.
-    result = runner.invoke(app, ["workspace", "info"])
+def test_a_stubbed_group_command_still_reports_canonically(runner: CliRunner) -> None:
+    # Group subcommands report their full canonical path in the stub message.
+    result = runner.invoke(app, ["config", "list"])
     assert result.exit_code == EXIT_NOT_IMPLEMENTED
-    assert "aisquare project info is not implemented yet" in result.output
+    assert "aisquare config list is not implemented yet" in result.output

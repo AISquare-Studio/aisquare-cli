@@ -23,6 +23,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 from aisquare.core import paths
@@ -98,6 +99,10 @@ class ContextStore(Protocol):
     def delete(self, entry_id: str) -> None: ...
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
+    def list_projects(self) -> list[ProjectInfo]: ...
+    def get_project(self, project_id: str) -> ProjectInfo | None: ...
+    def find_projects(self, term: str) -> list[ProjectInfo]: ...
+    def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
     def close(self) -> None: ...
 
 
@@ -117,6 +122,14 @@ def _row_to_entry(row: sqlite3.Row) -> ContextEntry:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
         deleted_at=datetime.fromisoformat(deleted_at) if deleted_at else None,
+    )
+
+
+def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
+    return ProjectInfo(
+        id=row["id"],
+        root=Path(row["root"]),
+        linked_repos=json.loads(row["linked_repos"]),
     )
 
 
@@ -272,6 +285,39 @@ class SqliteStore:
             ),
         )
         self._conn.commit()
+
+    def list_projects(self) -> list[ProjectInfo]:
+        rows = self._conn.execute(
+            "SELECT id, root, linked_repos FROM project ORDER BY name"
+        ).fetchall()
+        return [_row_to_project(row) for row in rows]
+
+    def get_project(self, project_id: str) -> ProjectInfo | None:
+        row = self._conn.execute(
+            "SELECT id, root, linked_repos FROM project WHERE id = ?", (project_id,)
+        ).fetchone()
+        return _row_to_project(row) if row is not None else None
+
+    def find_projects(self, term: str) -> list[ProjectInfo]:
+        rows = self._conn.execute(
+            "SELECT id, root, linked_repos FROM project WHERE id GLOB ? OR name = ? ORDER BY name",
+            (_glob_prefix(term), term),
+        ).fetchall()
+        return [_row_to_project(row) for row in rows]
+
+    def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo:
+        project = self.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        if repo not in project.linked_repos:
+            self._conn.execute(
+                "UPDATE project SET linked_repos = ? WHERE id = ?",
+                (json.dumps([*project.linked_repos, repo]), project_id),
+            )
+            self._conn.commit()
+        updated = self.get_project(project_id)
+        assert updated is not None  # just confirmed it exists
+        return updated
 
     def close(self) -> None:
         self._conn.close()

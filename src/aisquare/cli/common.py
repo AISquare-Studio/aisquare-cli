@@ -11,7 +11,7 @@ from rich.table import Table
 
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
-from aisquare.models import ContextEntry, InjectionRecord, Pool
+from aisquare.models import ContextEntry, InjectionRecord, Pool, ProjectInfo, SetupReport
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
@@ -127,6 +127,66 @@ def emit_injection_record(record: InjectionRecord | None) -> None:
         f"  {total} entries — {record.user_count} from your user pool, "
         f"{record.project_count} from this project"
     )
+
+
+def emit_project_detail(project: ProjectInfo) -> None:
+    """Render one project — JSON under ``--json``, a key/value view otherwise."""
+    if get_state().json_output:
+        typer.echo(project.model_dump_json())
+        return
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold")
+    grid.add_column()
+    grid.add_row("name", project.root.name or project.id)
+    grid.add_row("id", project.id)
+    grid.add_row("root", str(project.root))
+    if project.linked_repos:
+        grid.add_row("repos", ", ".join(project.linked_repos))
+    stdout_console().print(grid)
+
+
+def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
+    """Render the project list — a JSON array under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps([project.model_dump(mode="json") for project in projects]))
+        return
+    if not projects:
+        stdout_console().print("No projects registered yet. Run: aisquare init")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("", no_wrap=True)
+    table.add_column("NAME")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("ROOT")
+    for project in projects:
+        marker = "*" if project.id == active_id else ""
+        table.add_row(marker, project.root.name or "—", project.id, str(project.root))
+    stdout_console().print(table)
+
+
+def emit_project_action(message: str, project: ProjectInfo) -> None:
+    """Confirm a project action — the project as JSON under ``--json``, a message otherwise."""
+    if get_state().json_output:
+        typer.echo(project.model_dump_json())
+    else:
+        stdout_console().print(message)
+
+
+def emit_setup(report: SetupReport) -> None:
+    """Render the outcome of ``init``."""
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    verb = "already initialized" if report.already_initialized else "initialized"
+    console.print(f"✓ aisquare {verb} at {report.home}")
+    console.print(
+        f"  project: {report.project.root.name or report.project.id} ({report.project.id})"
+    )
+    if report.onboarded:
+        console.print(f"  onboarded {report.onboarded} context entries")
+    for note in report.notes:
+        console.print(f"  note: {note}")
 
 
 def fail(message: str, *, error: str, ref: str | None = None, exit_code: int = 1) -> NoReturn:

@@ -175,6 +175,33 @@ def test_schema_rejects_inconsistent_pool(store: ContextStore) -> None:
         store.add(bad)
 
 
+def test_list_and_get_projects(store: ContextStore) -> None:
+    other = ProjectInfo(id="prj_other", root=Path("/tmp/another-app"), linked_repos=[])
+    store.ensure_project(other)  # PROJECT is already registered by the fixture
+    ids = {project.id for project in store.list_projects()}
+    assert ids == {PROJECT.id, "prj_other"}
+    assert store.get_project("prj_other") == other
+    assert store.get_project("prj_missing") is None
+
+
+def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
+    assert [p.id for p in store.find_projects("example-project")] == [PROJECT.id]  # by name
+    assert [p.id for p in store.find_projects(PROJECT.id[:8])] == [PROJECT.id]  # by id prefix
+    assert store.find_projects("nope") == []
+
+
+def test_add_linked_repo_is_idempotent(store: ContextStore) -> None:
+    updated = store.add_linked_repo(PROJECT.id, "git@github.com:acme/app.git")
+    assert updated.linked_repos == ["git@github.com:acme/app.git"]
+    again = store.add_linked_repo(PROJECT.id, "git@github.com:acme/app.git")
+    assert again.linked_repos == ["git@github.com:acme/app.git"]  # no duplicate
+
+
+def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
+    with pytest.raises(KeyError):
+        store.add_linked_repo("prj_missing", "repo")
+
+
 def test_data_persists_across_reopen() -> None:
     first = open_store()
     first.ensure_project(PROJECT)

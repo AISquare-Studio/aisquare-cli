@@ -5,7 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from aisquare.core.ids import PROJECT_PREFIX
-from aisquare.core.workspace import current_project, find_project_root, project_id_for
+from aisquare.core.store import store_session
+from aisquare.core.workspace import (
+    active_project,
+    current_project,
+    find_project_root,
+    pin_project,
+    pinned_project_id,
+    project_id_for,
+)
+from aisquare.models import ProjectInfo
 
 
 def test_root_is_nearest_marker_ancestor(tmp_path: Path) -> None:
@@ -33,3 +42,31 @@ def test_current_project_describes_the_resolved_root(tmp_path: Path) -> None:
     assert project.root == tmp_path.resolve()
     assert project.id == project_id_for(tmp_path.resolve())
     assert project.linked_repos == []
+
+
+def test_pin_round_trips() -> None:
+    assert pinned_project_id() is None
+    pin_project("prj_abc")
+    assert pinned_project_id() == "prj_abc"
+    pin_project(None)
+    assert pinned_project_id() is None
+
+
+def test_active_project_prefers_a_registered_pin(tmp_path: Path) -> None:
+    pinned = ProjectInfo(id="prj_pinned", root=tmp_path / "pinned", linked_repos=[])
+    with store_session() as store:
+        store.ensure_project(pinned)
+        pin_project(pinned.id)
+        # Even resolving from an unrelated cwd, the pin wins.
+        assert active_project(store, cwd=tmp_path).id == "prj_pinned"
+
+
+def test_active_project_falls_back_to_cwd(tmp_path: Path) -> None:
+    with store_session() as store:
+        assert active_project(store, cwd=tmp_path).id == project_id_for(tmp_path.resolve())
+
+
+def test_active_project_ignores_a_stale_pin(tmp_path: Path) -> None:
+    pin_project("prj_never_registered")
+    with store_session() as store:
+        assert active_project(store, cwd=tmp_path).id == project_id_for(tmp_path.resolve())

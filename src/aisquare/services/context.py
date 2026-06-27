@@ -5,16 +5,15 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
 from aisquare.core.config import load_config
 from aisquare.core.editor import edit_text
-from aisquare.core.ids import new_entry_id
+from aisquare.core.entries import new_entry
 from aisquare.core.injection import build_block, record_injection
 from aisquare.core.store import store_session
-from aisquare.core.workspace import current_project
+from aisquare.core.workspace import active_project
 from aisquare.models import ContextEntry, ExportFormat, Pool
 
 
@@ -26,32 +25,16 @@ def remember(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
 def inject() -> str:
     """Assemble the in-scope context block, record the injection, and return it."""
     with store_session() as store:
-        project = current_project()
+        project = active_project(store)
         entries = store.entries(project_id=project.id)
     record_injection(entries, project)
     return build_block(entries, project)
 
 
 def list_entries() -> list[ContextEntry]:
-    """List context in scope here: the user pool plus the current project's."""
+    """List context in scope here: the user pool plus the active project's."""
     with store_session() as store:
-        return store.entries(project_id=current_project().id)
-
-
-def _build_entry(
-    text: str, pool: Pool, project_id: str | None, tags: list[str], source: str
-) -> ContextEntry:
-    now = datetime.now(tz=UTC)
-    return ContextEntry(
-        id=new_entry_id(),
-        pool=pool,
-        project_id=project_id,
-        text=text,
-        tags=tags,
-        source=source,
-        created_at=now,
-        updated_at=now,
-    )
+        return store.entries(project_id=active_project(store).id)
 
 
 def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
@@ -60,10 +43,10 @@ def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
     with store_session() as store:
         project_id: str | None = None
         if resolved == "project":
-            project = current_project()
+            project = active_project(store)
             store.ensure_project(project)
             project_id = project.id
-        return store.add(_build_entry(text, resolved, project_id, tags, "cli"))
+        return store.add(new_entry(text, resolved, project_id, tags, "cli"))
 
 
 def show_entry(entry_id: str) -> ContextEntry:
@@ -100,13 +83,13 @@ def remove_entry(entry_id: str) -> None:
 def search_entries(query: str) -> list[ContextEntry]:
     """Search context in scope here: the user pool plus the current project's."""
     with store_session() as store:
-        return store.search(query, project_id=current_project().id)
+        return store.search(query, project_id=active_project(store).id)
 
 
 def preview() -> str:
     """Return the context block that would be injected right now (no side effects)."""
     with store_session() as store:
-        project = current_project()
+        project = active_project(store)
         entries = store.entries(project_id=project.id)
     return build_block(entries, project)
 
@@ -124,7 +107,7 @@ def import_entries(file: Path) -> int:
     incoming = _parse_import(file)
     default_pool = load_config().default_pool
     with store_session() as store:
-        project = current_project()
+        project = active_project(store)
         project_ready = False
         count = 0
         for item in incoming:
@@ -135,7 +118,7 @@ def import_entries(file: Path) -> int:
                     store.ensure_project(project)
                     project_ready = True
                 project_id = project.id
-            store.add(_build_entry(item.text, pool, project_id, item.tags, "import"))
+            store.add(new_entry(item.text, pool, project_id, item.tags, "import"))
             count += 1
         return count
 
@@ -143,7 +126,7 @@ def import_entries(file: Path) -> int:
 def export_entries(file: Path | None, fmt: ExportFormat) -> None:
     """Export in-scope entries to ``file`` (or stdout) as Markdown or JSON."""
     with store_session() as store:
-        entries = store.entries(project_id=current_project().id)
+        entries = store.entries(project_id=active_project(store).id)
     content = _to_json(entries) if fmt is ExportFormat.json else _to_markdown(entries)
     if file is None:
         sys.stdout.write(content)

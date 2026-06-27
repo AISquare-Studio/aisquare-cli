@@ -7,7 +7,13 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_block, emit_entry, emit_injection_record, resolve_pool
+from aisquare.cli.common import (
+    emit_block,
+    emit_entry,
+    emit_injection_record,
+    emit_setup,
+    resolve_pool,
+)
 from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
@@ -39,7 +45,7 @@ def init(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Answer yes to every prompt.")] = False,
 ) -> None:
     """Set up aisquare on this machine and connect your agents."""
-    lifecycle_service.initialize(
+    report = lifecycle_service.initialize(
         path,
         api_key=api_key,
         local=local,
@@ -48,6 +54,7 @@ def init(
         reinit=reinit,
         assume_yes=yes,
     )
+    emit_setup(report)
 
 
 def status() -> None:

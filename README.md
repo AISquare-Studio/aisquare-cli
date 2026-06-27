@@ -5,9 +5,10 @@ like Claude Code and keeps their context — your preferences and each project's
 conventions — persistent across sessions and machines.
 
 > **Status: early.** The full command surface exists and parses arguments. The
-> context layer is implemented and backed by a local SQLite store —
-> `remember` and the full `context` group (see [Implemented](#implemented)).
-> Every other command is still a stub: it prints
+> context and project layers are implemented and backed by a local SQLite store
+> — `init`, `remember`, the full `context` group, `inject`/`why`, and the
+> `project` group (see [Implemented](#implemented)). Every other command is
+> still a stub: it prints
 > `⚠ aisquare <command> is not implemented yet (planned: <tier>)` to stderr and
 > exits with code `70`. Features are implemented one service module at a time —
 > see [Implementing a feature](#implementing-a-feature-stub--service).
@@ -15,9 +16,10 @@ conventions — persistent across sessions and machines.
 ## Implemented
 
 ```sh
+aisquare init                    # set up ~/.aisquare, register & onboard this project
 aisquare remember "prefer pytest over unittest" --user --tag testing
 aisquare context add "run make check before pushing" --project
-aisquare context list            # user pool + the current project's pool
+aisquare context list            # user pool + the active project's pool
 aisquare context search pytest   # full-text search (SQLite FTS5)
 aisquare context show a3f2       # by id or unambiguous prefix (git-style)
 aisquare context edit a3f2       # opens the entry in $EDITOR
@@ -28,13 +30,18 @@ aisquare context import notes.md # seed context from Markdown bullets or JSON
 aisquare context preview         # the context block that would be injected
 aisquare inject                  # emit that block (and record the injection)
 aisquare why                     # explain the last injection
-aisquare --json context list     # machine-readable array (any command)
+aisquare project list            # registered projects (active one marked *)
+aisquare project switch alpha    # pin the active project (name or id prefix)
+aisquare project onboard         # seed project context from ecosystem markers
+aisquare --json context list     # machine-readable output (any command)
 ```
 
-Context lives in two pools — `user` (global) and `project` (scoped to the repo
-you're in) — persisted in a SQLite database at `~/.aisquare/context.db`. Entries
-carry sync-ready metadata (`updated_at`, soft-delete tombstones) from day one.
-Entry ids are time-sortable and resolve from any unambiguous prefix.
+Context lives in two pools — `user` (global) and `project` — persisted in a
+SQLite database at `~/.aisquare/context.db`. The **active project** is whichever
+you `project switch` to (pinned in `state.json`), else the one containing your
+working directory; everything scopes to it consistently. Entries carry
+sync-ready metadata (`updated_at`, soft-delete tombstones) and time-sortable,
+prefix-addressable ids from day one.
 
 ## Requirements
 
@@ -121,7 +128,8 @@ src/aisquare/
 │   ├── config.py #   typed TOML config load/save (Pydantic + tomllib/tomli-w)
 │   ├── store.py  #   SQLite context store (ContextStore protocol + open_store)
 │   ├── ids.py    #   ULID-style, time-sortable, prefix-addressable entry ids
-│   ├── workspace.py #  resolve the active project from the working directory
+│   ├── entries.py#   shared ContextEntry factory (add / import / onboard)
+│   ├── workspace.py #  resolve the active project (pin in state.json, else cwd)
 │   ├── injection.py #  assemble the context block + record injections (why)
 │   ├── editor.py #   launch $EDITOR for `context edit`
 │   ├── state.py  #   runtime state from the global flags
@@ -136,10 +144,11 @@ Flow: `cli/<group>.py` parses arguments → calls `services/<domain>.py` →
 
 **What is real today:** `--help` everywhere, `--version`, global-flag parsing
 into `core/state.py`, the `~/.aisquare/` layout, TOML config load/save, the
-SQLite context store (`core/store.py`), and the commands wired to it —
+SQLite context store (`core/store.py`), and the commands wired to it — `init`,
 `remember`, the full `context` group (`add`, `list`, `show`, `edit`, `remove`,
-`search`, `promote`, `import`, `export`, `preview`), plus `inject` and `why`.
-Everything else is a stub.
+`search`, `promote`, `import`, `export`, `preview`), `inject`, `why`, and the
+`project` group (`info`, `list`, `switch`, `link`, `onboard`). Everything else
+is a stub.
 
 ### `~/.aisquare/` layout
 
@@ -148,6 +157,7 @@ Everything else is a stub.
 ├── config.toml   # typed configuration (core/config.py)
 ├── credentials   # API keys / tokens
 ├── context.db    # SQLite store: context entries and projects (core/store.py)
+├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of detected & connected agents
 ├── cache/        # disposable cached data
 └── log/          # capture and diagnostic logs

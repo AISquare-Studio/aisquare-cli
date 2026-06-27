@@ -4,6 +4,7 @@ Layout:
     ~/.aisquare/
     ├── config.toml     # typed TOML configuration (see core.config)
     ├── credentials     # API keys / tokens
+    ├── context.db      # SQLite store: context entries and projects (see core.store)
     ├── agents.json     # registry of detected and connected agents
     ├── cache/          # disposable cached data
     └── log/            # capture and diagnostic logs
@@ -41,6 +42,16 @@ def log_dir() -> Path:
 def config_path() -> Path:
     """Path of the TOML config file."""
     return aisquare_home() / "config.toml"
+
+
+def db_path() -> Path:
+    """Path of the SQLite database holding context entries and projects."""
+    return aisquare_home() / "context.db"
+
+
+def last_injection_path() -> Path:
+    """Path of the record describing the most recent context injection."""
+    return cache_dir() / "last_injection.json"
 
 
 def credentials_path() -> Path:

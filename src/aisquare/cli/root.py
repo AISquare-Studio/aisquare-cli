@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import resolve_pool
+from aisquare.cli.common import emit_block, emit_entry, emit_injection_record, resolve_pool
 from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
@@ -62,7 +62,7 @@ def doctor() -> None:
 
 def inject() -> None:
     """Inject relevant context into the current agent session."""
-    context_service.inject()
+    emit_block(context_service.inject())
 
 
 def remember(
@@ -77,7 +77,8 @@ def remember(
     ] = None,
 ) -> None:
     """Remember something across sessions (shorthand for `context add`)."""
-    context_service.remember(text, pool=resolve_pool(user, project), tags=tag or [])
+    entry = context_service.remember(text, pool=resolve_pool(user, project), tags=tag or [])
+    emit_entry(entry, verb="remembered")
 
 
 def sync() -> None:
@@ -87,7 +88,7 @@ def sync() -> None:
 
 def why() -> None:
     """Explain what context was injected last, and why."""
-    diagnostics_service.why()
+    emit_injection_record(diagnostics_service.last_injection())
 
 
 def log() -> None:

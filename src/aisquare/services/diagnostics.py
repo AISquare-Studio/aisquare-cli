@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from aisquare.core.injection import load_last
 from aisquare.core.stubs import stub
+from aisquare.models import InjectionRecord
 
 
 def status() -> None:
@@ -15,9 +17,9 @@ def doctor() -> None:
     stub("doctor")
 
 
-def why() -> None:
-    """Explain the most recent context injection."""
-    stub("why")
+def last_injection() -> InjectionRecord | None:
+    """Return the most recent injection record (backs ``why``), or None."""
+    return load_last()
 
 
 def show_log() -> None:

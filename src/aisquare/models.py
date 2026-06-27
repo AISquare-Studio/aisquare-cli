@@ -38,10 +38,15 @@ class ContextEntry(BaseModel):
 
     id: str
     pool: Pool
+    project_id: str | None = None
+    """Owning project for ``pool == "project"`` entries; ``None`` for the user pool."""
     text: str
     tags: list[str] = Field(default_factory=list)
     source: str = "manual"
     created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None = None
+    """Set when the entry is soft-deleted; tombstones survive so deletes can sync."""
 
 
 class DataEnvelope(BaseModel):
@@ -69,3 +74,13 @@ class ProjectInfo(BaseModel):
     id: str
     root: Path
     linked_repos: list[str] = Field(default_factory=list)
+
+
+class InjectionRecord(BaseModel):
+    """A record of the most recent context injection, surfaced by ``why``."""
+
+    injected_at: datetime
+    project_id: str | None = None
+    user_count: int = 0
+    project_count: int = 0
+    entry_ids: list[str] = Field(default_factory=list)

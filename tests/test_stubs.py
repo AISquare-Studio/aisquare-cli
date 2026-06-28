@@ -21,6 +21,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("init",),
     ("inject",),
     ("why",),
+    ("status",),
+    ("doctor",),
     *(
         (group, command)
         for group in ("context", "ctx")
@@ -42,6 +44,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
         for group in ("project", "workspace")
         for command in ("info", "list", "switch", "link", "onboard")
     ),
+    *(("config", command) for command in ("list", "get", "set", "redaction")),
+    *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),
 }
 
 
@@ -68,14 +72,14 @@ def test_every_implemented_command_is_still_a_leaf() -> None:
 
 
 def test_stub_message_goes_to_stderr(runner: CliRunner) -> None:
-    result = runner.invoke(app, ["doctor"])
+    result = runner.invoke(app, ["log"])
     assert result.exit_code == EXIT_NOT_IMPLEMENTED
-    assert "⚠ aisquare doctor is not implemented yet (planned: v0)" in result.stderr
+    assert "⚠ aisquare log is not implemented yet (planned: v0)" in result.stderr
     assert result.stdout == ""
 
 
 def test_a_stubbed_group_command_still_reports_canonically(runner: CliRunner) -> None:
     # Group subcommands report their full canonical path in the stub message.
-    result = runner.invoke(app, ["config", "list"])
+    result = runner.invoke(app, ["auth", "status"])
     assert result.exit_code == EXIT_NOT_IMPLEMENTED
-    assert "aisquare config list is not implemented yet" in result.output
+    assert "aisquare auth status is not implemented yet" in result.output

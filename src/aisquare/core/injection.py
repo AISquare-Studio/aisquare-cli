@@ -21,15 +21,21 @@ def build_block(entries: list[ContextEntry], project: ProjectInfo) -> str:
     lines = ["# Context (via aisquare)", ""]
     if user:
         lines.append("## Your preferences")
-        lines += [f"- {entry.text}" for entry in user]
+        lines += [_bullet(entry.text) for entry in user]
         lines.append("")
     if project_entries:
         lines.append(f"## Project: {project.root.name or project.id}")
-        lines += [f"- {entry.text}" for entry in project_entries]
+        lines += [_bullet(entry.text) for entry in project_entries]
         lines.append("")
     if not user and not project_entries:
         lines += ["_No saved context yet._", ""]
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _bullet(text: str) -> str:
+    """Render entry text as one Markdown list item, indenting continuation lines."""
+    first, *rest = text.splitlines() or [""]
+    return "\n".join([f"- {first}", *(f"  {line}" for line in rest)])
 
 
 def record_injection(entries: list[ContextEntry], project: ProjectInfo) -> InjectionRecord:

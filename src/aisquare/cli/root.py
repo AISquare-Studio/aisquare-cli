@@ -9,9 +9,11 @@ import typer
 
 from aisquare.cli.common import (
     emit_block,
+    emit_doctor,
     emit_entry,
     emit_injection_record,
     emit_setup,
+    emit_status,
     resolve_pool,
 )
 from aisquare.services import auth as auth_service
@@ -59,12 +61,15 @@ def init(
 
 def status() -> None:
     """Show installation health, the active project and connected agents."""
-    diagnostics_service.status()
+    emit_status(diagnostics_service.status())
 
 
 def doctor() -> None:
     """Run diagnostics and suggest fixes for common problems."""
-    diagnostics_service.doctor()
+    checks = diagnostics_service.doctor()
+    emit_doctor(checks)
+    if any(not check.ok for check in checks):
+        raise typer.Exit(1)
 
 
 def inject() -> None:

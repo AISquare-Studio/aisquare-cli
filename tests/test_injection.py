@@ -61,6 +61,11 @@ def test_build_block_empty() -> None:
     assert "_No saved context yet._" in block
 
 
+def test_build_block_indents_multiline_entries() -> None:
+    block = build_block([_entry("first line\nsecond line", "user")], PROJECT)
+    assert "- first line\n  second line" in block  # continuation indented under the bullet
+
+
 # --- unit: injection record -------------------------------------------------
 
 

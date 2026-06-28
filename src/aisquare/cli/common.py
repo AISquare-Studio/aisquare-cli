@@ -6,12 +6,23 @@ import json
 from pathlib import Path
 from typing import NoReturn
 
+import tomli_w
 import typer
 from rich.table import Table
 
+from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
-from aisquare.models import ContextEntry, InjectionRecord, Pool, ProjectInfo, SetupReport
+from aisquare.models import (
+    AgentInfo,
+    ContextEntry,
+    DoctorCheck,
+    InjectionRecord,
+    Pool,
+    ProjectInfo,
+    SetupReport,
+    StatusReport,
+)
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
@@ -187,6 +198,88 @@ def emit_setup(report: SetupReport) -> None:
         console.print(f"  onboarded {report.onboarded} context entries")
     for note in report.notes:
         console.print(f"  note: {note}")
+
+
+def emit_config(config: AppConfig) -> None:
+    """Render the full config — JSON under ``--json``, TOML otherwise."""
+    if get_state().json_output:
+        typer.echo(config.model_dump_json())
+    else:
+        typer.echo(tomli_w.dumps(config.model_dump(mode="json")), nl=False)
+
+
+def emit_config_value(key: str, value: str) -> None:
+    """Render one config value — ``{key: value}`` under ``--json``, ``key = value`` otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps({key: value}))
+    else:
+        stdout_console().print(f"{key} = {value}")
+
+
+def emit_agents(agents: list[AgentInfo]) -> None:
+    """Render detected agents — a JSON array under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps([agent.model_dump(mode="json") for agent in agents]))
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("AGENT")
+    table.add_column("DETECTED")
+    table.add_column("CONNECTED")
+    table.add_column("CONTEXT")
+    for agent in agents:
+        context = ", ".join(str(path) for path in agent.config_paths) or "—"
+        table.add_row(
+            agent.name,
+            "yes" if agent.detected else "no",
+            "yes" if agent.connected else "no",
+            context,
+        )
+    stdout_console().print(table)
+
+
+def emit_connected(name: str, count: int) -> None:
+    """Confirm an agent connection and how many context entries it imported."""
+    if get_state().json_output:
+        typer.echo(json.dumps({"connected": name, "imported": count}, separators=(",", ":")))
+        return
+    noun = "entry" if count == 1 else "entries"
+    stdout_console().print(f"✓ connected {name} — imported {count} {noun} from its context")
+
+
+def emit_disconnected(name: str) -> None:
+    """Confirm an agent disconnection."""
+    if get_state().json_output:
+        typer.echo(json.dumps({"disconnected": name}, separators=(",", ":")))
+    else:
+        stdout_console().print(f"✓ disconnected {name}")
+
+
+def emit_status(report: StatusReport) -> None:
+    """Render the status summary."""
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    project = report.active_project
+    console.print(f"aisquare: {'initialized' if report.initialized else 'not initialized'}")
+    console.print(f"home:     {report.home}")
+    console.print(f"project:  {project.root.name or project.id} ({project.id})")
+    console.print(
+        f"context:  {report.user_entries} user, {report.project_entries} in this project; "
+        f"{report.project_count} project(s) registered"
+    )
+    console.print(f"detected: {', '.join(report.agents_detected) or 'none'}")
+    console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")
+
+
+def emit_doctor(checks: list[DoctorCheck]) -> None:
+    """Render diagnostic check results."""
+    if get_state().json_output:
+        typer.echo(json.dumps([check.model_dump(mode="json") for check in checks]))
+        return
+    console = stdout_console()
+    for check in checks:
+        console.print(f"{'✓' if check.ok else '✗'} {check.name}: {check.detail}")
 
 
 def fail(message: str, *, error: str, ref: str | None = None, exit_code: int = 1) -> NoReturn:

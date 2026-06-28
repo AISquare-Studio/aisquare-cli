@@ -94,3 +94,24 @@ class SetupReport(BaseModel):
     project: ProjectInfo
     onboarded: int = 0
     notes: list[str] = Field(default_factory=list)
+
+
+class StatusReport(BaseModel):
+    """A snapshot of installation health for ``status``."""
+
+    home: Path
+    initialized: bool
+    user_entries: int
+    project_entries: int
+    active_project: ProjectInfo
+    project_count: int
+    agents_detected: list[str] = Field(default_factory=list)
+    agents_connected: list[str] = Field(default_factory=list)
+
+
+class DoctorCheck(BaseModel):
+    """One diagnostic check result from ``doctor``."""
+
+    name: str
+    ok: bool
+    detail: str

@@ -4,14 +4,16 @@
 like Claude Code and keeps their context — your preferences and each project's
 conventions — persistent across sessions and machines.
 
-> **Status: early.** The full command surface exists and parses arguments. The
-> context and project layers are implemented and backed by a local SQLite store
-> — `init`, `remember`, the full `context` group, `inject`/`why`, and the
-> `project` group (see [Implemented](#implemented)). Every other command is
-> still a stub: it prints
+> **Status: early.** The full command surface exists and parses arguments.
+> Implemented and backed by a local SQLite store: `init`, `remember`, the full
+> `context` group, `inject`/`why`, the `project` group, `status`/`doctor`, the
+> `config` group, and the `agents` group — which detects coding agents and can
+> pull Claude Code's `CLAUDE.md` into your context (see
+> [Implemented](#implemented)). The remaining commands (`auth`/cloud,
+> `capture`, `sync`, `connectors`, `policy`) are stubs: each prints
 > `⚠ aisquare <command> is not implemented yet (planned: <tier>)` to stderr and
-> exits with code `70`. Features are implemented one service module at a time —
-> see [Implementing a feature](#implementing-a-feature-stub--service).
+> exits `70`. Features land one service module at a time — see
+> [Implementing a feature](#implementing-a-feature-stub--service).
 
 ## Implemented
 
@@ -33,6 +35,11 @@ aisquare why                     # explain the last injection
 aisquare project list            # registered projects (active one marked *)
 aisquare project switch alpha    # pin the active project (name or id prefix)
 aisquare project onboard         # seed project context from ecosystem markers
+aisquare agents scan             # detect installed agents (Claude Code, …)
+aisquare agents connect claude-code  # pull Claude Code's CLAUDE.md into context
+aisquare status                  # health, pools, active project, agents
+aisquare doctor                  # diagnostic checks
+aisquare config set default_pool user   # read/write config (get/list/redaction)
 aisquare --json context list     # machine-readable output (any command)
 ```
 
@@ -131,6 +138,7 @@ src/aisquare/
 │   ├── entries.py#   shared ContextEntry factory (add / import / onboard)
 │   ├── workspace.py #  resolve the active project (pin in state.json, else cwd)
 │   ├── injection.py #  assemble the context block + record injections (why)
+│   ├── agents.py #   detect coding agents + the connected-agents registry
 │   ├── editor.py #   launch $EDITOR for `context edit`
 │   ├── state.py  #   runtime state from the global flags
 │   ├── console.py#   Rich console factories honouring --no-color
@@ -146,9 +154,11 @@ Flow: `cli/<group>.py` parses arguments → calls `services/<domain>.py` →
 into `core/state.py`, the `~/.aisquare/` layout, TOML config load/save, the
 SQLite context store (`core/store.py`), and the commands wired to it — `init`,
 `remember`, the full `context` group (`add`, `list`, `show`, `edit`, `remove`,
-`search`, `promote`, `import`, `export`, `preview`), `inject`, `why`, and the
-`project` group (`info`, `list`, `switch`, `link`, `onboard`). Everything else
-is a stub.
+`search`, `promote`, `import`, `export`, `preview`), `inject`, `why`, the
+`project` group (`info`, `list`, `switch`, `link`, `onboard`), `status`,
+`doctor`, the `config` group (`list`, `get`, `set`, `redaction`), and the
+`agents` group (`scan`, `list`, `status`, `connect`, `disconnect`). Everything
+else is a stub.
 
 ### `~/.aisquare/` layout
 

@@ -16,6 +16,7 @@ from aisquare.core.state import get_state
 from aisquare.models import (
     AgentConnection,
     AgentInfo,
+    CheckStatus,
     ContextEntry,
     DoctorCheck,
     InjectionRecord,
@@ -318,14 +319,19 @@ def emit_status(report: StatusReport) -> None:
     console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")
 
 
+_CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
+
+
 def emit_doctor(checks: list[DoctorCheck]) -> None:
-    """Render diagnostic check results."""
+    """Render diagnostic check results, with a fix hint for anything not OK."""
     if get_state().json_output:
         typer.echo(json.dumps([check.model_dump(mode="json") for check in checks]))
         return
     console = stdout_console()
     for check in checks:
-        console.print(f"{'✓' if check.ok else '✗'} {check.name}: {check.detail}")
+        console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {check.detail}")
+        if check.fix and check.status is not CheckStatus.ok:
+            console.print(f"    → {check.fix}")
 
 
 def fail(message: str, *, error: str, ref: str | None = None, exit_code: int = 1) -> NoReturn:

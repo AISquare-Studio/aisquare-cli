@@ -17,6 +17,7 @@ from aisquare.cli.common import (
     emit_status,
     resolve_pool,
 )
+from aisquare.models import CheckStatus
 from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
@@ -69,7 +70,7 @@ def doctor() -> None:
     """Run diagnostics and suggest fixes for common problems."""
     checks = diagnostics_service.doctor()
     emit_doctor(checks)
-    if any(not check.ok for check in checks):
+    if any(check.status is CheckStatus.fail for check in checks):
         raise typer.Exit(1)
 
 

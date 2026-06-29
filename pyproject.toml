@@ -25,7 +25,7 @@ dependencies = [
   "typer>=0.26.8",
   "rich>=13.7",
   "pydantic>=2.7",
-  "tomli-w>=1.0",
+  "tomli-w>=1.2.0",
 ]
 
 [project.optional-dependencies]

@@ -74,6 +74,19 @@ index (char offsets + token counts), stored under
 ## Requirements
 
 - Python 3.11+
+- Optional, for codebase snapshots: Node.js + [repomix](https://github.com/yamadashy/repomix) (or it runs via `npx`)
+
+## Install
+
+```sh
+pipx install aisquare-cli     # recommended — isolated, stable `aisquare` / `asq` on PATH
+# or:  pip install aisquare-cli
+```
+
+Installs two equivalent commands: `aisquare` and `asq`. The PyPI distribution is
+**`aisquare-cli`** (the `aisquare` name belongs to the AISquare SDK); the command
+stays `aisquare`. `pipx` is recommended so the Claude Code hook keeps a stable
+path. Run `aisquare doctor` to see what's set up and what's missing.
 
 ## Install (development)
 
@@ -83,15 +96,12 @@ source .venv/bin/activate
 make install          # = pip install -e ".[dev]"
 ```
 
-Two equivalent entry points are installed: `aisquare` and `asq`.
-
 ## Quick check
 
 ```sh
 aisquare --help
 aisquare --version
-aisquare status              # stub → exits 70
-aisquare --json status       # {"error":"not_implemented","command":"status"}
+aisquare doctor              # install/deps/integration health
 asq ctx list                 # aliases work too
 ```
 

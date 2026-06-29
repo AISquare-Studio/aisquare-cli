@@ -69,7 +69,23 @@ def test_init_stores_api_key_and_notes_it(runner: CliRunner) -> None:
     assert "Stored API key" in result.stdout
 
 
-def test_init_notes_unsupported_agent_request(runner: CliRunner) -> None:
-    result = runner.invoke(app, ["init", "--agent", "claude", "--local"])
+def test_init_unknown_agent_is_noted(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["init", "--agent", "bogus", "--local"])
     assert result.exit_code == 0, result.output
-    assert "Agent hooks not installed yet" in result.stdout
+    assert "Could not connect bogus" in result.stdout
+
+
+def test_init_connects_a_detected_agent(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "agenthome"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "CLAUDE.md").write_text("# Prefs\nuse tabs\n", encoding="utf-8")
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    result = runner.invoke(app, ["init", "--agent", "claude-code", "--local"])
+    assert result.exit_code == 0, result.output
+    assert "Connected claude-code" in result.stdout
+    # The Claude Code hooks were installed into its settings.
+    settings = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert "SessionStart" in settings["hooks"]
+    assert "UserPromptSubmit" in settings["hooks"]

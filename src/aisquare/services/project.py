@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.core.workspace import (
@@ -12,7 +14,7 @@ from aisquare.core.workspace import (
     pin_project,
     project_id_for,
 )
-from aisquare.models import ContextEntry, ProjectInfo
+from aisquare.models import ContextEntry, OnboardReport, ProjectInfo, Snapshot
 
 # Files at a project root that imply a fact worth seeding during onboarding.
 _ECOSYSTEM_MARKERS: tuple[tuple[str, str], ...] = (
@@ -64,12 +66,12 @@ def link(repo: str) -> ProjectInfo:
         return store.add_linked_repo(project.id, repo)
 
 
-def onboard(path: Path | None, *, refresh: bool) -> list[ContextEntry]:
-    """Seed the project's context pool from detected ecosystem markers.
+def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
+    """Pack the codebase into a snapshot and seed facts from ecosystem markers.
 
-    A first onboard seeds one fact per detected marker. Subsequent calls are a
-    no-op unless ``refresh`` is set, which re-scans and adds any newly-detected
-    facts. Existing facts are never duplicated. Returns the entries seeded.
+    Generates the Repomix snapshot (full pack + skeleton + index) on first run,
+    or when ``refresh`` is set, and seeds one fact per detected marker. Existing
+    facts are never duplicated; the snapshot is reused unless ``refresh``.
     """
     root = find_project_root(path or Path.cwd())
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
@@ -78,13 +80,27 @@ def onboard(path: Path | None, *, refresh: bool) -> list[ContextEntry]:
     with store_session() as store:
         store.ensure_project(project)
         project_entries = store.entries("project", project_id=project.id)
-        if any(entry.source == "onboard" for entry in project_entries) and not refresh:
-            return []
-        existing = {entry.text for entry in project_entries}
-        for fact in facts:
-            if fact in existing:
-                continue
-            seeded.append(
-                store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
-            )
-    return seeded
+        already_onboarded = any(entry.source == "onboard" for entry in project_entries)
+        if not (already_onboarded and not refresh):
+            existing = {entry.text for entry in project_entries}
+            for fact in facts:
+                if fact in existing:
+                    continue
+                seeded.append(
+                    store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
+                )
+    return OnboardReport(seeded=seeded, snapshot=_ensure_snapshot(project, refresh=refresh))
+
+
+def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
+    """Generate (or reuse) the codebase snapshot; ``None`` if repomix is unavailable."""
+    if snapshot_core.exists(project.id) and not refresh:
+        return snapshot_core.load(project.id)
+    try:
+        return snapshot_core.generate(
+            project.id, project.root, head=snapshot_core.head_sha(project.root)
+        )
+    except snapshot_core.RepomixUnavailableError:
+        return None
+    except (subprocess.SubprocessError, OSError):
+        return None

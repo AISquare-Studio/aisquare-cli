@@ -14,12 +14,15 @@ from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import (
+    AgentConnection,
     AgentInfo,
     ContextEntry,
     DoctorCheck,
     InjectionRecord,
+    OnboardReport,
     Pool,
     ProjectInfo,
+    PromptRecord,
     SetupReport,
     StatusReport,
 )
@@ -237,13 +240,56 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     stdout_console().print(table)
 
 
-def emit_connected(name: str, count: int) -> None:
-    """Confirm an agent connection and how many context entries it imported."""
+def emit_connected(connection: AgentConnection) -> None:
+    """Confirm an agent connection: hook install + context ingested."""
     if get_state().json_output:
-        typer.echo(json.dumps({"connected": name, "imported": count}, separators=(",", ":")))
+        typer.echo(connection.model_dump_json())
         return
-    noun = "entry" if count == 1 else "entries"
-    stdout_console().print(f"✓ connected {name} — imported {count} {noun} from its context")
+    hooks = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
+    noun = "entry" if connection.imported == 1 else "entries"
+    stdout_console().print(
+        f"✓ connected {connection.name} — {hooks}; imported {connection.imported} {noun}"
+    )
+
+
+def emit_onboard(report: OnboardReport) -> None:
+    """Render the outcome of ``project onboard`` — snapshot summary + seeded facts."""
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    snapshot = report.snapshot
+    if snapshot is not None and snapshot.status == "ready":
+        line = f"✓ snapshot: {snapshot.file_count} files, {snapshot.token_count} tokens"
+        if snapshot.skeleton_token_count:
+            line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
+        console.print(line)
+    elif snapshot is not None and snapshot.status == "too_large":
+        console.print("snapshot: codebase too large to pack within the token budget")
+    else:
+        console.print("snapshot: skipped (repomix/Node not available)")
+    if report.seeded:
+        console.print(f"seeded {len(report.seeded)} project fact(s):")
+        for entry in report.seeded:
+            console.print(f"  - {entry.text}")
+
+
+def emit_prompts(prompts: list[PromptRecord]) -> None:
+    """Render captured prompt history — a JSON array under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps([prompt.model_dump(mode="json") for prompt in prompts]))
+        return
+    if not prompts:
+        stdout_console().print(
+            "No prompts captured yet. Connect Claude Code: aisquare agents connect claude-code"
+        )
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("WHEN", no_wrap=True)
+    table.add_column("PROMPT")
+    for prompt in prompts:
+        table.add_row(prompt.created_at.strftime("%Y-%m-%d %H:%M"), prompt.text)
+    stdout_console().print(table)
 
 
 def emit_disconnected(name: str) -> None:

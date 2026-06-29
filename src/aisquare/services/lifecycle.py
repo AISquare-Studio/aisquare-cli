@@ -10,6 +10,7 @@ from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
+from aisquare.services import agents as agents_service
 from aisquare.services import project as project_service
 
 
@@ -23,12 +24,12 @@ def initialize(
     reinit: bool,
     assume_yes: bool,
 ) -> SetupReport:
-    """Set up ``~/.aisquare`` and register the project at ``path`` (or the cwd).
+    """Set up ``~/.aisquare``, register & snapshot the project, and connect agents.
 
     Idempotent and non-interactive: safe to re-run (``assume_yes`` is therefore
-    moot for now). ``reinit`` resets ``config.toml`` to defaults. Agent-hook
-    installation and cloud auth are not wired yet; requests for them are
-    reported as notes rather than performed.
+    moot for now). ``reinit`` resets ``config.toml`` to defaults. Agents named via
+    ``--agent`` are connected (hooks installed + context ingested); cloud auth is
+    not wired yet.
     """
     home = paths.aisquare_home()
     already_initialized = paths.config_path().exists() or paths.db_path().exists()
@@ -51,13 +52,28 @@ def initialize(
         notes.append(
             "No API key given — running local-only; re-run with --api-key to connect later."
         )
-    if agents:
-        requested = ", ".join(agents)
-        notes.append(
-            f"Agent hooks not installed yet (requested: {requested}); coming with `agents connect`."
-        )
 
-    onboarded = len(project_service.onboard(path, refresh=False)) if onboard else 0
+    onboarded = 0
+    if onboard:
+        report = project_service.onboard(path, refresh=False)
+        onboarded = len(report.seeded)
+        if report.snapshot is not None and report.snapshot.status == "ready":
+            notes.append(
+                f"Snapshot: {report.snapshot.file_count} files, "
+                f"{report.snapshot.token_count} tokens packed for fast agent context."
+            )
+        elif report.snapshot is None:
+            notes.append("Codebase snapshot skipped (repomix/Node not available).")
+
+    for agent in agents:
+        try:
+            connection = agents_service.connect(agent)
+        except (KeyError, ValueError) as exc:
+            notes.append(f"Could not connect {agent}: {exc}")
+            continue
+        hook_note = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
+        notes.append(f"Connected {agent}: {hook_note}, imported {connection.imported} entries.")
+
     return SetupReport(
         home=home,
         already_initialized=already_initialized,

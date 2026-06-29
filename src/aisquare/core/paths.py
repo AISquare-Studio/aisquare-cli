@@ -59,6 +59,11 @@ def state_path() -> Path:
     return aisquare_home() / "state.json"
 
 
+def project_data_dir(project_id: str) -> Path:
+    """Per-project data directory (codebase snapshots, future sync artifacts)."""
+    return aisquare_home() / "projects" / project_id
+
+
 def credentials_path() -> Path:
     """Path of the credentials file (API keys, tokens)."""
     return aisquare_home() / "credentials"

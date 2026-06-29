@@ -27,11 +27,10 @@ from pathlib import Path
 from typing import Protocol
 
 from aisquare.core import paths
-from aisquare.models import ContextEntry, Pool, ProjectInfo
+from aisquare.core.ids import new_prompt_id
+from aisquare.models import ContextEntry, Pool, ProjectInfo, PromptRecord
 
-SCHEMA_VERSION = 1
-
-_SCHEMA = """
+_SCHEMA_V1 = """
 CREATE TABLE entry (
     id          TEXT PRIMARY KEY,
     pool        TEXT NOT NULL CHECK (pool IN ('user', 'project')),
@@ -71,7 +70,24 @@ CREATE TRIGGER entry_au AFTER UPDATE ON entry BEGIN
 END;
 """
 
+# v2: capture of how the user prompts their agent, for replay and smarter context.
+_SCHEMA_V2 = """
+CREATE TABLE prompt (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT REFERENCES project (id),
+    text        TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'claude-code',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX prompt_project ON prompt (project_id, created_at);
+"""
+
+# Ordered migrations; index i upgrades the db from user_version i to i+1.
+_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2)
+SCHEMA_VERSION = len(_MIGRATIONS)
+
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
+_PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 
 
 class AmbiguousIdError(LookupError):
@@ -103,6 +119,12 @@ class ContextStore(Protocol):
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
+    def add_prompt(
+        self, text: str, project_id: str | None, source: str = "claude-code"
+    ) -> PromptRecord: ...
+    def recent_prompts(
+        self, project_id: str | None = None, *, limit: int = 20
+    ) -> list[PromptRecord]: ...
     def close(self) -> None: ...
 
 
@@ -130,6 +152,16 @@ def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
         id=row["id"],
         root=Path(row["root"]),
         linked_repos=json.loads(row["linked_repos"]),
+    )
+
+
+def _row_to_prompt(row: sqlite3.Row) -> PromptRecord:
+    return PromptRecord(
+        id=row["id"],
+        project_id=row["project_id"],
+        text=row["text"],
+        source=row["source"],
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
@@ -319,6 +351,45 @@ class SqliteStore:
         assert updated is not None  # just confirmed it exists
         return updated
 
+    def add_prompt(
+        self, text: str, project_id: str | None, source: str = "claude-code"
+    ) -> PromptRecord:
+        record = PromptRecord(
+            id=new_prompt_id(),
+            project_id=project_id,
+            text=text,
+            source=source,
+            created_at=datetime.now(tz=UTC),
+        )
+        self._conn.execute(
+            f"INSERT INTO prompt ({_PROMPT_COLUMNS}) VALUES (?, ?, ?, ?, ?)",
+            (
+                record.id,
+                record.project_id,
+                record.text,
+                record.source,
+                record.created_at.isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return record
+
+    def recent_prompts(
+        self, project_id: str | None = None, *, limit: int = 20
+    ) -> list[PromptRecord]:
+        if project_id is None:
+            rows = self._conn.execute(
+                f"SELECT {_PROMPT_COLUMNS} FROM prompt ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"SELECT {_PROMPT_COLUMNS} FROM prompt "
+                "WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+        return [_row_to_prompt(row) for row in rows]
+
     def close(self) -> None:
         self._conn.close()
 
@@ -331,10 +402,10 @@ def _glob_prefix(ref: str) -> str:
 
 def _migrate(connection: sqlite3.Connection) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version < 1:
-        connection.executescript(_SCHEMA)
-        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        connection.commit()
+    for index in range(version, len(_MIGRATIONS)):
+        connection.executescript(_MIGRATIONS[index])
+        connection.execute(f"PRAGMA user_version = {index + 1}")
+    connection.commit()
 
 
 def open_store() -> ContextStore:

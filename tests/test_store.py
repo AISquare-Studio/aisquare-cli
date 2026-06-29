@@ -202,6 +202,32 @@ def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
         store.add_linked_repo("prj_missing", "repo")
 
 
+def test_add_and_list_prompts(store: ContextStore) -> None:
+    store.add_prompt("first prompt", PROJECT.id)
+    store.add_prompt("second prompt", PROJECT.id)
+    prompts = store.recent_prompts(PROJECT.id)
+    assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first
+
+
+def test_recent_prompts_are_scoped_to_project(store: ContextStore) -> None:
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other"), linked_repos=[]))
+    store.add_prompt("here", PROJECT.id)
+    store.add_prompt("there", "prj_other")
+    assert [p.text for p in store.recent_prompts(PROJECT.id)] == ["here"]
+
+
+def test_migrations_reach_the_current_schema_version() -> None:
+    from aisquare.core.store import SCHEMA_VERSION
+
+    open_store().close()  # creates and migrates the database
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        raw.close()
+    assert version == SCHEMA_VERSION == 2
+
+
 def test_data_persists_across_reopen() -> None:
     first = open_store()
     first.ensure_project(PROJECT)

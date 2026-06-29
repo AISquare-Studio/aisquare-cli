@@ -8,7 +8,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import (
-    emit_entries,
+    emit_onboard,
     emit_project_action,
     emit_project_detail,
     emit_projects,
@@ -62,6 +62,5 @@ def onboard(
         bool, typer.Option("--refresh", help="Re-scan even if already onboarded.")
     ] = False,
 ) -> None:
-    """Analyse a project and seed its context pool."""
-    seeded = project_service.onboard(path, refresh=refresh)
-    emit_entries(seeded, empty_message="Nothing new to onboard — already up to date.")
+    """Pack the codebase into a snapshot and seed its context pool."""
+    emit_onboard(project_service.onboard(path, refresh=refresh))

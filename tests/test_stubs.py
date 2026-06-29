@@ -23,6 +23,9 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("why",),
     ("status",),
     ("doctor",),
+    ("log",),
+    ("hook", "session-start"),
+    ("hook", "user-prompt-submit"),
     *(
         (group, command)
         for group in ("context", "ctx")
@@ -72,9 +75,9 @@ def test_every_implemented_command_is_still_a_leaf() -> None:
 
 
 def test_stub_message_goes_to_stderr(runner: CliRunner) -> None:
-    result = runner.invoke(app, ["log"])
+    result = runner.invoke(app, ["open"])
     assert result.exit_code == EXIT_NOT_IMPLEMENTED
-    assert "⚠ aisquare log is not implemented yet (planned: v0)" in result.stderr
+    assert "⚠ aisquare open is not implemented yet (planned: v0)" in result.stderr
     assert result.stdout == ""
 
 

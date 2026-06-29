@@ -22,6 +22,7 @@ _RAND_BYTES = 10  # 80 bits of randomness → 16 base32 chars
 
 ENTRY_PREFIX = "ctx_"
 PROJECT_PREFIX = "prj_"
+PROMPT_PREFIX = "prm_"
 
 
 def _encode(value: int, length: int) -> str:
@@ -33,8 +34,18 @@ def _encode(value: int, length: int) -> str:
     return "".join(chars)
 
 
-def new_entry_id() -> str:
-    """Return a fresh, time-sortable context entry id (``ctx_…``)."""
+def _new_id(prefix: str) -> str:
+    """A fresh, time-sortable ULID-style id behind ``prefix``."""
     timestamp_ms = int(time.time() * 1000)
     randomness = int.from_bytes(os.urandom(_RAND_BYTES), "big")
-    return ENTRY_PREFIX + _encode(timestamp_ms, _TS_CHARS) + _encode(randomness, 16)
+    return prefix + _encode(timestamp_ms, _TS_CHARS) + _encode(randomness, 16)
+
+
+def new_entry_id() -> str:
+    """Return a fresh, time-sortable context entry id (``ctx_…``)."""
+    return _new_id(ENTRY_PREFIX)
+
+
+def new_prompt_id() -> str:
+    """Return a fresh, time-sortable captured-prompt id (``prm_…``)."""
+    return _new_id(PROMPT_PREFIX)

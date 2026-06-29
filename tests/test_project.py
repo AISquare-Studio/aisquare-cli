@@ -99,12 +99,12 @@ def test_onboard_seeds_from_ecosystem_markers(
 
     seeded = runner.invoke(app, ["--json", "project", "onboard"])
     assert seeded.exit_code == 0, seeded.output
-    texts = [entry["text"] for entry in _json(seeded.stdout)]
+    texts = [entry["text"] for entry in _json(seeded.stdout)["seeded"]]
     assert any("Python project" in text for text in texts)
 
     # Already onboarded: a second run without --refresh seeds nothing.
     again = runner.invoke(app, ["--json", "project", "onboard"])
-    assert _json(again.stdout) == []
+    assert _json(again.stdout)["seeded"] == []
 
     listed = runner.invoke(app, ["--json", "context", "list"])
     assert any("Python project" in e["text"] for e in _json(listed.stdout))

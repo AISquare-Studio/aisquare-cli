@@ -40,14 +40,14 @@ def status(
 
 @app.command("connect")
 def connect(name: AgentName) -> None:
-    """Connect an agent by pulling its existing context into aisquare."""
+    """Connect an agent: install aisquare's hooks and ingest its existing context."""
     try:
-        count = agents_service.connect(name)
+        connection = agents_service.connect(name)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
     except ValueError as exc:
         fail(str(exc), error="not_installed", ref=name)
-    emit_connected(name, count)
+    emit_connected(connection)
 
 
 @app.command("disconnect")

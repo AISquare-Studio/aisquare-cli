@@ -6,13 +6,13 @@ conventions — persistent across sessions and machines.
 
 > **Status: early.** The full command surface exists and parses arguments.
 > Implemented and backed by a local SQLite store: `init`, `remember`, the full
-> `context` group, `inject`/`why`, the `project` group, `status`/`doctor`, the
-> `config` group, and the `agents` group — which detects coding agents and can
-> pull Claude Code's `CLAUDE.md` into your context (see
-> [Implemented](#implemented)). The remaining commands (`auth`/cloud,
-> `capture`, `sync`, `connectors`, `policy`) are stubs: each prints
-> `⚠ aisquare <command> is not implemented yet (planned: <tier>)` to stderr and
-> exits `70`. Features land one service module at a time — see
+> `context` group, `inject`/`why`, the `project` group (incl. a **Repomix
+> codebase snapshot**), `status`/`doctor`, the `config` group, `log`, and the
+> `agents` group — which **installs into Claude Code** (see
+> [Claude Code integration](#claude-code-integration)). The remaining commands
+> (`auth`/cloud, `capture`, `sync`, `connectors`, `policy`) are stubs: each
+> prints `⚠ aisquare <command> is not implemented yet (planned: <tier>)` to
+> stderr and exits `70`. Features land one service module at a time — see
 > [Implementing a feature](#implementing-a-feature-stub--service).
 
 ## Implemented
@@ -34,9 +34,10 @@ aisquare inject                  # emit that block (and record the injection)
 aisquare why                     # explain the last injection
 aisquare project list            # registered projects (active one marked *)
 aisquare project switch alpha    # pin the active project (name or id prefix)
-aisquare project onboard         # seed project context from ecosystem markers
+aisquare project onboard         # pack a Repomix snapshot + seed ecosystem facts
 aisquare agents scan             # detect installed agents (Claude Code, …)
-aisquare agents connect claude-code  # pull Claude Code's CLAUDE.md into context
+aisquare agents connect claude-code  # install hooks + ingest CLAUDE.md
+aisquare log                     # captured prompt history for this project
 aisquare status                  # health, pools, active project, agents
 aisquare doctor                  # diagnostic checks
 aisquare config set default_pool user   # read/write config (get/list/redaction)
@@ -49,6 +50,26 @@ you `project switch` to (pinned in `state.json`), else the one containing your
 working directory; everything scopes to it consistently. Entries carry
 sync-ready metadata (`updated_at`, soft-delete tombstones) and time-sortable,
 prefix-addressable ids from day one.
+
+## Claude Code integration
+
+`aisquare agents connect claude-code` makes aisquare an active part of Claude
+Code by writing two hooks into `~/.claude/settings.json` (merged, never
+clobbering your other settings; remove them with `agents disconnect`):
+
+- **`SessionStart` → `aisquare hook session-start`** — injects a directive that
+  points Claude at the codebase snapshot (skeleton first, full pack on demand)
+  and the prompt history, plus your in-scope context — so Claude orients without
+  burning tokens grepping for files.
+- **`UserPromptSubmit` → `aisquare hook user-prompt-submit`** — captures how you
+  prompt, so Claude can replay your intent (`aisquare log`).
+
+The **codebase snapshot** (`project onboard`, or `init`) mirrors the server-side
+[Repomix](https://github.com/yamadashy/repomix) packing for sync-consistency: a
+full pack (`repomix --style xml`), a skeleton (`--compress`), and a per-file
+index (char offsets + token counts), stored under
+`~/.aisquare/projects/<id>/snapshot/`. Requires Node + repomix on PATH (run via
+`npx` otherwise); if neither is present the snapshot is skipped, not fatal.
 
 ## Requirements
 
@@ -138,7 +159,8 @@ src/aisquare/
 │   ├── entries.py#   shared ContextEntry factory (add / import / onboard)
 │   ├── workspace.py #  resolve the active project (pin in state.json, else cwd)
 │   ├── injection.py #  assemble the context block + record injections (why)
-│   ├── agents.py #   detect coding agents + the connected-agents registry
+│   ├── agents.py #   detect agents + install Claude Code hooks (settings.json)
+│   ├── snapshot.py #  Repomix codebase pack (full + skeleton + index)
 │   ├── editor.py #   launch $EDITOR for `context edit`
 │   ├── state.py  #   runtime state from the global flags
 │   ├── console.py#   Rich console factories honouring --no-color
@@ -155,10 +177,10 @@ into `core/state.py`, the `~/.aisquare/` layout, TOML config load/save, the
 SQLite context store (`core/store.py`), and the commands wired to it — `init`,
 `remember`, the full `context` group (`add`, `list`, `show`, `edit`, `remove`,
 `search`, `promote`, `import`, `export`, `preview`), `inject`, `why`, the
-`project` group (`info`, `list`, `switch`, `link`, `onboard`), `status`,
-`doctor`, the `config` group (`list`, `get`, `set`, `redaction`), and the
-`agents` group (`scan`, `list`, `status`, `connect`, `disconnect`). Everything
-else is a stub.
+`project` group (`info`, `list`, `switch`, `link`, `onboard`+snapshot),
+`status`, `doctor`, the `config` group (`list`, `get`, `set`, `redaction`),
+`log`, and the `agents` group (`scan`, `list`, `status`, `connect`+hooks,
+`disconnect`). Everything else is a stub.
 
 ### `~/.aisquare/` layout
 
@@ -166,10 +188,11 @@ else is a stub.
 ~/.aisquare/
 ├── config.toml   # typed configuration (core/config.py)
 ├── credentials   # API keys / tokens
-├── context.db    # SQLite store: context entries and projects (core/store.py)
+├── context.db    # SQLite store: context entries, projects, captured prompts
 ├── state.json    # small runtime state (e.g. the pinned active project)
-├── agents.json   # registry of detected & connected agents
-├── cache/        # disposable cached data
+├── agents.json   # registry of connected agents
+├── projects/     # per-project data — <id>/snapshot/ (Repomix pack + skeleton + index)
+├── cache/        # disposable cached data (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```
 

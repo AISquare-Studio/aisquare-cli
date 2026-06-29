@@ -5,7 +5,7 @@ from __future__ import annotations
 from aisquare.core import agents as agent_core
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
-from aisquare.models import AgentInfo
+from aisquare.models import AgentConnection, AgentInfo
 
 
 def list_agents() -> list[AgentInfo]:
@@ -28,11 +28,13 @@ def status(name: str | None = None) -> list[AgentInfo]:
     return [info]
 
 
-def connect(name: str) -> int:
-    """Pull an agent's existing context into the user pool; return entries added.
+def connect(name: str) -> AgentConnection:
+    """Install aisquare's hooks into the agent and ingest its existing context.
 
-    Raises ``KeyError`` for an unknown agent and ``ValueError`` if it is not
-    installed. Live capture (hooks) is not wired yet; this is a one-time ingest.
+    Installs SessionStart/UserPromptSubmit hooks (so the agent auto-injects
+    aisquare context and aisquare captures prompts), then one-time-ingests the
+    agent's context files (e.g. ``~/.claude/CLAUDE.md``) into the user pool.
+    Raises ``KeyError`` for an unknown agent and ``ValueError`` if not installed.
     """
     info = agent_core.detect(name)
     if info is None:
@@ -53,14 +55,20 @@ def connect(name: str) -> int:
             store.add(new_entry(text, "user", None, [name], name))
             existing.add(text)
             added += 1
+
+    hooks_installed = agent_core.install_hooks(name)
     agent_core.set_connected(name, True)
-    return added
+    return AgentConnection(name=name, hooks_installed=hooks_installed, imported=added)
 
 
 def disconnect(name: str) -> None:
-    """Mark an agent disconnected. Ingested context is kept. Raises ``KeyError``."""
+    """Remove aisquare's hooks and mark the agent disconnected (ingested context kept).
+
+    Raises ``KeyError`` for an unknown agent.
+    """
     if agent_core.detect(name) is None:
         raise KeyError(name)
+    agent_core.remove_hooks(name)
     agent_core.set_connected(name, False)
 
 

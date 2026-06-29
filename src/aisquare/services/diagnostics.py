@@ -9,7 +9,7 @@ from aisquare.core.injection import load_last
 from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
-from aisquare.models import DoctorCheck, InjectionRecord, StatusReport
+from aisquare.models import DoctorCheck, InjectionRecord, PromptRecord, StatusReport
 
 
 def status() -> StatusReport:
@@ -82,9 +82,11 @@ def last_injection() -> InjectionRecord | None:
     return load_last()
 
 
-def show_log() -> None:
-    """Show recent capture and injection activity."""
-    stub("log")
+def show_log(limit: int = 20) -> list[PromptRecord]:
+    """Recent captured user prompts for the active project (newest first)."""
+    with store_session() as store:
+        project = active_project(store)
+        return store.recent_prompts(project.id, limit=limit)
 
 
 def open_home() -> None:

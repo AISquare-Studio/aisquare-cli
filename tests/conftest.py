@@ -28,6 +28,21 @@ def fresh_state() -> Iterator[None]:
     reset_state()
 
 
+@pytest.fixture(autouse=True)
+def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the repomix subprocess by default so tests never shell out.
+
+    Snapshot generation degrades to "skipped". Tests that exercise the packing
+    logic override ``snapshot._run_repomix`` with a fake returning synthetic XML.
+    """
+    from aisquare.core import snapshot
+
+    def _unavailable(*_args: object, **_kwargs: object) -> tuple[str, str]:
+        raise snapshot.RepomixUnavailableError("repomix disabled in tests")
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _unavailable)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     """A Click test runner for invoking the Typer app."""

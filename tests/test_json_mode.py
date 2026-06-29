@@ -17,6 +17,6 @@ def test_json_error_shape(runner: CliRunner) -> None:
 
 
 def test_json_top_level_command(runner: CliRunner) -> None:
-    result = runner.invoke(app, ["--json", "log"])
+    result = runner.invoke(app, ["--json", "open"])
     assert result.exit_code == 70
-    assert json.loads(result.stdout) == {"error": "not_implemented", "command": "log"}
+    assert json.loads(result.stdout) == {"error": "not_implemented", "command": "open"}

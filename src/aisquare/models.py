@@ -115,3 +115,44 @@ class DoctorCheck(BaseModel):
     name: str
     ok: bool
     detail: str
+
+
+class PromptRecord(BaseModel):
+    """A captured user prompt — how the user asked their agent, for replay."""
+
+    id: str
+    project_id: str | None = None
+    text: str
+    source: str = "claude-code"
+    created_at: datetime
+
+
+class Snapshot(BaseModel):
+    """A packed snapshot of a project's codebase (Repomix full pack + skeleton)."""
+
+    project_id: str
+    head_sha: str | None = None
+    generated_at: datetime
+    pack_path: Path
+    skeleton_path: Path
+    index_path: Path
+    token_count: int = 0
+    skeleton_token_count: int = 0
+    file_count: int = 0
+    compressed: bool = False
+    status: str = "ready"
+
+
+class OnboardReport(BaseModel):
+    """Outcome of ``project onboard``: seeded facts and the codebase snapshot."""
+
+    seeded: list[ContextEntry] = Field(default_factory=list)
+    snapshot: Snapshot | None = None
+
+
+class AgentConnection(BaseModel):
+    """Outcome of ``agents connect``: hook install + context ingested."""
+
+    name: str
+    hooks_installed: bool = False
+    imported: int = 0

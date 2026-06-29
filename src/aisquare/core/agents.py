@@ -9,11 +9,16 @@ known context file) exists. The set of connected agents is persisted in
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from aisquare.core import paths
 from aisquare.models import AgentInfo
+
+# Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
+_HOOKS = (("SessionStart", "session-start"), ("UserPromptSubmit", "user-prompt-submit"))
 
 
 @dataclass(frozen=True)
@@ -24,6 +29,7 @@ class AgentSpec:
     label: str
     home: Path
     context_files: tuple[Path, ...]
+    settings_path: Path | None = None  # where aisquare installs hooks, if supported
 
 
 def _home() -> Path:
@@ -35,11 +41,109 @@ def _specs() -> list[AgentSpec]:
     home = _home()
     return [
         AgentSpec(
-            "claude-code", "Claude Code", home / ".claude", (home / ".claude" / "CLAUDE.md",)
+            "claude-code",
+            "Claude Code",
+            home / ".claude",
+            (home / ".claude" / "CLAUDE.md",),
+            settings_path=home / ".claude" / "settings.json",
         ),
         AgentSpec("cursor", "Cursor", home / ".cursor", ()),
         AgentSpec("codex", "Codex", home / ".codex", ()),
     ]
+
+
+def _aisquare_command() -> str:
+    """Absolute path to the aisquare executable, for use inside hook commands."""
+    found = shutil.which("aisquare")
+    return found or "aisquare"
+
+
+def _read_settings(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _is_aisquare_group(group: Any) -> bool:
+    if not isinstance(group, dict):
+        return False
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("command"), str)
+        and (
+            "hook session-start" in item["command"] or "hook user-prompt-submit" in item["command"]
+        )
+        for item in hooks
+    )
+
+
+def install_hooks(name: str) -> bool:
+    """Install aisquare's SessionStart/UserPromptSubmit hooks. False if unsupported."""
+    spec = _spec(name)
+    if spec is None or spec.settings_path is None:
+        return False
+    settings = _read_settings(spec.settings_path)
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    command = _aisquare_command()
+    for event, subcommand in _HOOKS:
+        groups = hooks.get(event)
+        kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
+        kept.append({"hooks": [{"type": "command", "command": f"{command} hook {subcommand}"}]})
+        hooks[event] = kept
+    settings["hooks"] = hooks
+    spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
+    spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def remove_hooks(name: str) -> bool:
+    """Remove aisquare's hooks from the agent's settings. True if any were removed."""
+    spec = _spec(name)
+    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
+        return False
+    settings = _read_settings(spec.settings_path)
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    removed = False
+    for event, _ in _HOOKS:
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        kept = [g for g in groups if not _is_aisquare_group(g)]
+        if len(kept) != len(groups):
+            removed = True
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
+    if not hooks:
+        settings.pop("hooks", None)
+    if removed:
+        spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return removed
+
+
+def hooks_installed(name: str) -> bool:
+    """Whether aisquare's hooks are present in the agent's settings."""
+    spec = _spec(name)
+    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
+        return False
+    hooks = _read_settings(spec.settings_path).get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    return any(
+        _is_aisquare_group(group) for event, _ in _HOOKS for group in (hooks.get(event) or [])
+    )
 
 
 def _spec(name: str) -> AgentSpec | None:

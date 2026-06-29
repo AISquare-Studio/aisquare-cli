@@ -12,6 +12,7 @@ from aisquare.cli.common import (
     emit_doctor,
     emit_entry,
     emit_injection_record,
+    emit_prompts,
     emit_setup,
     emit_status,
     resolve_pool,
@@ -104,8 +105,8 @@ def why() -> None:
 
 
 def log() -> None:
-    """Show recent capture and injection activity."""
-    diagnostics_service.show_log()
+    """Show recently captured user prompts for the active project."""
+    emit_prompts(diagnostics_service.show_log())
 
 
 def open_() -> None:

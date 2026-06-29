@@ -86,3 +86,42 @@ def test_disconnect_keeps_context(runner: CliRunner, fake_home: Path) -> None:
     listed = runner.invoke(app, ["--json", "agents", "list"])
     agents = {agent["name"]: agent for agent in _json(listed.stdout)}
     assert agents["claude-code"]["connected"] is False
+
+
+def _hook_commands(settings_path: Path) -> list[str]:
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    hooks = settings.get("hooks", {})
+    return [
+        item["command"]
+        for event in ("SessionStart", "UserPromptSubmit")
+        for group in hooks.get(event, [])
+        for item in group["hooks"]
+    ]
+
+
+def test_connect_installs_claude_code_hooks(runner: CliRunner, fake_home: Path) -> None:
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "hooks installed" in result.stdout
+    commands = _hook_commands(fake_home / ".claude" / "settings.json")
+    assert any("hook session-start" in command for command in commands)
+    assert any("hook user-prompt-submit" in command for command in commands)
+
+
+def test_connect_preserves_existing_hooks(runner: CliRunner, fake_home: Path) -> None:
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {"hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "mine"}]}]}}
+        ),
+        encoding="utf-8",
+    )
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "mine"  # untouched
+
+
+def test_disconnect_removes_hooks(runner: CliRunner, fake_home: Path) -> None:
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    assert _hook_commands(fake_home / ".claude" / "settings.json") == []

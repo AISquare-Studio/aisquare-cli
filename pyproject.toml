@@ -22,7 +22,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "typer>=0.12",
+  "typer>=0.26.8",
   "rich>=13.7",
   "pydantic>=2.7",
   "tomli-w>=1.0",

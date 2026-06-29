@@ -1,7 +1,7 @@
 """Pack a project's codebase with Repomix for fast, low-token LLM understanding.
 
-Mirrors the server-side packing (AISquare-Studio-BE PR #2266) so artifacts stay
-consistent for future sync:
+Mirrors AISquare's server-side Repomix packing so artifacts stay consistent for
+future sync:
 
 - **full pack** — ``repomix --style xml`` (directory tree + every file's contents);
 - **skeleton** — ``repomix --compress --style xml`` (signatures/imports, bodies dropped);

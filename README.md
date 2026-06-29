@@ -1,8 +1,28 @@
 # aisquare
 
+[![PyPI](https://img.shields.io/pypi/v/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)
+[![Python versions](https://img.shields.io/pypi/pyversions/aisquare-cli.svg)](https://pypi.org/project/aisquare-cli/)
+[![CI](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Portable memory layer for coding agents.** `aisquare` installs into agents
 like Claude Code and keeps their context — your preferences and each project's
 conventions — persistent across sessions and machines.
+
+## Quickstart
+
+```sh
+pipx install aisquare-cli              # or: pip install aisquare-cli
+cd path/to/your/repo
+aisquare init                          # set up ~/.aisquare + snapshot this project
+aisquare agents connect claude-code    # install into Claude Code (optional)
+aisquare doctor                        # optional, recommended — verify setup & deps
+```
+
+Installs two commands, `aisquare` and `asq`. The PyPI package is **`aisquare-cli`**;
+the command stays `aisquare`. `pipx` is recommended (isolated, stable on PATH).
+Requires **Python 3.11+**; optional **Node.js + [repomix](https://github.com/yamadashy/repomix)**
+for codebase snapshots (`aisquare doctor` tells you what's missing).
 
 > **Status: early.** The full command surface exists and parses arguments.
 > Implemented and backed by a local SQLite store: `init`, `remember`, the full
@@ -71,30 +91,16 @@ index (char offsets + token counts), stored under
 `~/.aisquare/projects/<id>/snapshot/`. Requires Node + repomix on PATH (run via
 `npx` otherwise); if neither is present the snapshot is skipped, not fatal.
 
-## Requirements
-
-- Python 3.11+
-- Optional, for codebase snapshots: Node.js + [repomix](https://github.com/yamadashy/repomix) (or it runs via `npx`)
-
-## Install
-
-```sh
-pipx install aisquare-cli     # recommended — isolated, stable `aisquare` / `asq` on PATH
-# or:  pip install aisquare-cli
-```
-
-Installs two equivalent commands: `aisquare` and `asq`. The PyPI distribution is
-**`aisquare-cli`** (the `aisquare` name belongs to the AISquare SDK); the command
-stays `aisquare`. `pipx` is recommended so the Claude Code hook keeps a stable
-path. Run `aisquare doctor` to see what's set up and what's missing.
-
 ## Install (development)
 
 ```sh
+git clone https://github.com/AISquare-Studio/aisquare-cli && cd aisquare-cli
 python3 -m venv .venv
 source .venv/bin/activate
 make install          # = pip install -e ".[dev]"
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev workflow and how to implement a command.
 
 ## Quick check
 

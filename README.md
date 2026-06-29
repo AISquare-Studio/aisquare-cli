@@ -39,7 +39,7 @@ aisquare agents scan             # detect installed agents (Claude Code, …)
 aisquare agents connect claude-code  # install hooks + ingest CLAUDE.md
 aisquare log                     # captured prompt history for this project
 aisquare status                  # health, pools, active project, agents
-aisquare doctor                  # diagnostic checks
+aisquare doctor                  # checks deps/install/hooks/snapshot + how to fix each
 aisquare config set default_pool user   # read/write config (get/list/redaction)
 aisquare --json context list     # machine-readable output (any command)
 ```

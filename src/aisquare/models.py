@@ -109,12 +109,21 @@ class StatusReport(BaseModel):
     agents_connected: list[str] = Field(default_factory=list)
 
 
+class CheckStatus(StrEnum):
+    """Severity of a ``doctor`` check: healthy, degraded-but-usable, or broken."""
+
+    ok = "ok"
+    warn = "warn"
+    fail = "fail"
+
+
 class DoctorCheck(BaseModel):
     """One diagnostic check result from ``doctor``."""
 
     name: str
-    ok: bool
+    status: CheckStatus
     detail: str
+    fix: str | None = None  # actionable guidance when not ok
 
 
 class PromptRecord(BaseModel):

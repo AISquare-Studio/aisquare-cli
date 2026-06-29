@@ -20,14 +20,6 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return work
 
 
-@pytest.fixture
-def fake_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    home = tmp_path / "agenthome"
-    (home / ".claude").mkdir(parents=True)
-    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
-    return home
-
-
 def _json(output: str) -> Any:
     return json.loads(output)
 
@@ -50,15 +42,40 @@ def test_status_human(runner: CliRunner) -> None:
     assert "home:" in result.stdout
 
 
-def test_doctor_all_ok_after_init(runner: CliRunner, fake_agent_home: Path) -> None:
+def test_doctor_passes_after_init(runner: CliRunner) -> None:
     runner.invoke(app, ["init", "--no-onboard"])
     result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, result.output  # warnings don't fail doctor
     assert "✓ home" in result.stdout
-    assert "✓ agents" in result.stdout
+    assert "✓ python" in result.stdout
 
 
 def test_doctor_fresh_flags_missing_home(runner: CliRunner) -> None:
     result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 1
-    assert "missing" in result.output
+    assert result.exit_code == 1  # a hard failure
+    assert "✗ home" in result.stdout
+    assert "aisquare init" in result.stdout  # the fix hint
+
+
+def test_doctor_reports_dependency_checks(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["doctor"])
+    for name in ("python", "install", "repomix", "tiktoken", "claude-code", "snapshot"):
+        assert name in result.stdout
+
+
+def test_doctor_warns_when_repomix_missing(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner.invoke(app, ["init", "--no-onboard"])
+    monkeypatch.setattr("aisquare.services.diagnostics.shutil.which", lambda _name: None)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0  # missing optional dep is a warning, not a failure
+    assert "⚠ repomix" in result.stdout
+    assert "npm install -g repomix" in result.stdout
+
+
+def test_doctor_json_includes_status_and_fix(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["--json", "doctor"])
+    checks = {check["name"]: check for check in _json(result.stdout)}
+    assert checks["home"]["status"] == "fail"  # fresh, no init
+    assert "init" in checks["home"]["fix"]

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import importlib.util
+import shutil
+import sys
+from pathlib import Path
+
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
-from aisquare.models import DoctorCheck, InjectionRecord, PromptRecord, StatusReport
+from aisquare.models import CheckStatus, DoctorCheck, InjectionRecord, PromptRecord, StatusReport
 
 
 def status() -> StatusReport:
@@ -33,48 +39,141 @@ def status() -> StatusReport:
 
 
 def doctor() -> list[DoctorCheck]:
-    """Run health checks over the install and report each one."""
-    checks: list[DoctorCheck] = []
+    """Run health checks over the install, dependencies and integration."""
+    return [
+        _check_python(),
+        _check_install(),
+        _check_home(),
+        _check_config(),
+        _check_database(),
+        _check_repomix(),
+        _check_tiktoken(),
+        _check_claude_code(),
+        _check_snapshot(),
+    ]
 
-    home = paths.aisquare_home()
-    checks.append(
-        DoctorCheck(
-            name="home",
-            ok=home.exists(),
-            detail=f"{home} exists"
-            if home.exists()
-            else f"{home} is missing — run `aisquare init`",
+
+def _ok(name: str, detail: str) -> DoctorCheck:
+    return DoctorCheck(name=name, status=CheckStatus.ok, detail=detail)
+
+
+def _warn(name: str, detail: str, fix: str) -> DoctorCheck:
+    return DoctorCheck(name=name, status=CheckStatus.warn, detail=detail, fix=fix)
+
+
+def _fail(name: str, detail: str, fix: str) -> DoctorCheck:
+    return DoctorCheck(name=name, status=CheckStatus.fail, detail=detail, fix=fix)
+
+
+def _check_python() -> DoctorCheck:
+    info = sys.version_info
+    return _ok("python", f"Python {info.major}.{info.minor}.{info.micro}")
+
+
+def _check_install() -> DoctorCheck:
+    """Where aisquare runs from — the Claude Code hook needs a stable path."""
+    binary = shutil.which("aisquare")
+    if binary is None:
+        return _warn(
+            "install",
+            "aisquare is not on your PATH",
+            "Install as a global tool: pipx install aisquare",
         )
-    )
+    if {".venv", "venv"} & set(Path(binary).parts):
+        return _warn(
+            "install",
+            f"aisquare runs from a virtualenv ({binary})",
+            "For stable Claude Code hooks, install globally: pipx install aisquare",
+        )
+    return _ok("install", f"aisquare at {binary}")
 
+
+def _check_home() -> DoctorCheck:
+    home = paths.aisquare_home()
+    if home.exists():
+        return _ok("home", f"{home} exists")
+    return _fail("home", f"{home} is missing", "Set it up: aisquare init")
+
+
+def _check_config() -> DoctorCheck:
     try:
         load_config()
-        checks.append(DoctorCheck(name="config", ok=True, detail="config.toml is valid"))
     except Exception as exc:  # diagnostics must never crash
-        checks.append(DoctorCheck(name="config", ok=False, detail=f"config error: {exc}"))
+        return _fail(
+            "config", f"config.toml is invalid: {exc}", "Fix or reset: aisquare init --reinit"
+        )
+    return _ok("config", "config.toml is valid")
 
+
+def _check_database() -> DoctorCheck:
     try:
         with store_session() as store:
-            user_entries = len(store.entries("user"))
-        checks.append(
-            DoctorCheck(
-                name="database",
-                ok=True,
-                detail=f"context.db is readable ({user_entries} user entries)",
-            )
-        )
+            count = len(store.entries("user"))
     except Exception as exc:  # diagnostics must never crash
-        checks.append(DoctorCheck(name="database", ok=False, detail=f"database error: {exc}"))
+        return _fail("database", f"context.db is unreadable: {exc}", "Re-initialise: aisquare init")
+    return _ok("database", f"context.db is readable ({count} user entries)")
 
-    detected = [agent.name for agent in agent_core.detect_all() if agent.detected]
-    checks.append(
-        DoctorCheck(
-            name="agents",
-            ok=bool(detected),
-            detail="detected: " + ", ".join(detected) if detected else "no coding agents detected",
-        )
+
+def _check_repomix() -> DoctorCheck:
+    if shutil.which("repomix"):
+        return _ok("repomix", "repomix found — codebase snapshots enabled")
+    if shutil.which("npx"):
+        return _ok("repomix", "repomix available on demand via npx")
+    return _warn(
+        "repomix",
+        "repomix not found — codebase snapshots are disabled",
+        "Install Node.js, then: npm install -g repomix",
     )
-    return checks
+
+
+def _check_tiktoken() -> DoctorCheck:
+    if _has_module("tiktoken"):
+        return _ok("tiktoken", "exact snapshot token counts enabled")
+    return _warn(
+        "tiktoken",
+        "tiktoken not installed — snapshot token counts are estimated",
+        "Install it: pip install tiktoken (or: pipx inject aisquare tiktoken)",
+    )
+
+
+def _check_claude_code() -> DoctorCheck:
+    info = agent_core.detect("claude-code")
+    if info is None or not info.detected:
+        return _ok("claude-code", "Claude Code not detected on this machine")
+    if agent_core.hooks_installed("claude-code"):
+        return _ok("claude-code", "Claude Code connected (hooks installed)")
+    return _warn(
+        "claude-code",
+        "Claude Code detected but not connected",
+        "Connect it: aisquare agents connect claude-code",
+    )
+
+
+def _check_snapshot() -> DoctorCheck:
+    try:
+        with store_session() as store:
+            project = active_project(store)
+        snap = snapshot_core.load(project.id)
+    except Exception as exc:  # diagnostics must never crash
+        return _warn(
+            "snapshot", f"could not check the snapshot: {exc}", "Try: aisquare project onboard"
+        )
+    if snap is not None and snap.status == "ready":
+        return _ok(
+            "snapshot", f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
+        )
+    return _warn(
+        "snapshot",
+        "no codebase snapshot for the active project",
+        "Pack one: aisquare project onboard",
+    )
+
+
+def _has_module(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def last_injection() -> InjectionRecord | None:

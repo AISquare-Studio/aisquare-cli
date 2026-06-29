@@ -7,7 +7,16 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import resolve_pool
+from aisquare.cli.common import (
+    emit_block,
+    emit_doctor,
+    emit_entry,
+    emit_injection_record,
+    emit_prompts,
+    emit_setup,
+    emit_status,
+    resolve_pool,
+)
 from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
@@ -39,7 +48,7 @@ def init(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Answer yes to every prompt.")] = False,
 ) -> None:
     """Set up aisquare on this machine and connect your agents."""
-    lifecycle_service.initialize(
+    report = lifecycle_service.initialize(
         path,
         api_key=api_key,
         local=local,
@@ -48,21 +57,25 @@ def init(
         reinit=reinit,
         assume_yes=yes,
     )
+    emit_setup(report)
 
 
 def status() -> None:
     """Show installation health, the active project and connected agents."""
-    diagnostics_service.status()
+    emit_status(diagnostics_service.status())
 
 
 def doctor() -> None:
     """Run diagnostics and suggest fixes for common problems."""
-    diagnostics_service.doctor()
+    checks = diagnostics_service.doctor()
+    emit_doctor(checks)
+    if any(not check.ok for check in checks):
+        raise typer.Exit(1)
 
 
 def inject() -> None:
     """Inject relevant context into the current agent session."""
-    context_service.inject()
+    emit_block(context_service.inject())
 
 
 def remember(
@@ -77,7 +90,8 @@ def remember(
     ] = None,
 ) -> None:
     """Remember something across sessions (shorthand for `context add`)."""
-    context_service.remember(text, pool=resolve_pool(user, project), tags=tag or [])
+    entry = context_service.remember(text, pool=resolve_pool(user, project), tags=tag or [])
+    emit_entry(entry, verb="remembered")
 
 
 def sync() -> None:
@@ -87,12 +101,12 @@ def sync() -> None:
 
 def why() -> None:
     """Explain what context was injected last, and why."""
-    diagnostics_service.why()
+    emit_injection_record(diagnostics_service.last_injection())
 
 
 def log() -> None:
-    """Show recent capture and injection activity."""
-    diagnostics_service.show_log()
+    """Show recently captured user prompts for the active project."""
+    emit_prompts(diagnostics_service.show_log())
 
 
 def open_() -> None:

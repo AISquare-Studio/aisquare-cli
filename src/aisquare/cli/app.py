@@ -7,7 +7,18 @@ from typing import Annotated
 import typer
 
 from aisquare import __version__
-from aisquare.cli import agents, auth, capture, connectors, context, enforce, policy, project, root
+from aisquare.cli import (
+    agents,
+    auth,
+    capture,
+    connectors,
+    context,
+    enforce,
+    hook,
+    policy,
+    project,
+    root,
+)
 from aisquare.cli import config as config_cli
 from aisquare.core.state import RuntimeState, set_state
 
@@ -82,6 +93,7 @@ app.add_typer(capture.app, name="capture")
 app.add_typer(config_cli.app, name="config")
 app.add_typer(policy.app, name="policy")
 app.add_typer(enforce.app, name="enforce")
+app.add_typer(hook.app, name="hook", hidden=True)
 
 
 def main() -> None:

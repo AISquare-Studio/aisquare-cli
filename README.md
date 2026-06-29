@@ -4,11 +4,72 @@
 like Claude Code and keeps their context — your preferences and each project's
 conventions — persistent across sessions and machines.
 
-> **Status: skeleton.** The full command surface exists and parses arguments,
-> but every command is a stub: it prints
-> `⚠ aisquare <command> is not implemented yet (planned: <tier>)` to stderr and
-> exits with code `70`. Features are implemented one service module at a time —
-> see [Implementing a feature](#implementing-a-feature-stub--service).
+> **Status: early.** The full command surface exists and parses arguments.
+> Implemented and backed by a local SQLite store: `init`, `remember`, the full
+> `context` group, `inject`/`why`, the `project` group (incl. a **Repomix
+> codebase snapshot**), `status`/`doctor`, the `config` group, `log`, and the
+> `agents` group — which **installs into Claude Code** (see
+> [Claude Code integration](#claude-code-integration)). The remaining commands
+> (`auth`/cloud, `capture`, `sync`, `connectors`, `policy`) are stubs: each
+> prints `⚠ aisquare <command> is not implemented yet (planned: <tier>)` to
+> stderr and exits `70`. Features land one service module at a time — see
+> [Implementing a feature](#implementing-a-feature-stub--service).
+
+## Implemented
+
+```sh
+aisquare init                    # set up ~/.aisquare, register & onboard this project
+aisquare remember "prefer pytest over unittest" --user --tag testing
+aisquare context add "run make check before pushing" --project
+aisquare context list            # user pool + the active project's pool
+aisquare context search pytest   # full-text search (SQLite FTS5)
+aisquare context show a3f2       # by id or unambiguous prefix (git-style)
+aisquare context edit a3f2       # opens the entry in $EDITOR
+aisquare context promote a3f2    # move a project entry into the user pool
+aisquare context remove a3f2     # soft-delete (tombstoned)
+aisquare context export out.md   # export in-scope context (md or --format json)
+aisquare context import notes.md # seed context from Markdown bullets or JSON
+aisquare context preview         # the context block that would be injected
+aisquare inject                  # emit that block (and record the injection)
+aisquare why                     # explain the last injection
+aisquare project list            # registered projects (active one marked *)
+aisquare project switch alpha    # pin the active project (name or id prefix)
+aisquare project onboard         # pack a Repomix snapshot + seed ecosystem facts
+aisquare agents scan             # detect installed agents (Claude Code, …)
+aisquare agents connect claude-code  # install hooks + ingest CLAUDE.md
+aisquare log                     # captured prompt history for this project
+aisquare status                  # health, pools, active project, agents
+aisquare doctor                  # diagnostic checks
+aisquare config set default_pool user   # read/write config (get/list/redaction)
+aisquare --json context list     # machine-readable output (any command)
+```
+
+Context lives in two pools — `user` (global) and `project` — persisted in a
+SQLite database at `~/.aisquare/context.db`. The **active project** is whichever
+you `project switch` to (pinned in `state.json`), else the one containing your
+working directory; everything scopes to it consistently. Entries carry
+sync-ready metadata (`updated_at`, soft-delete tombstones) and time-sortable,
+prefix-addressable ids from day one.
+
+## Claude Code integration
+
+`aisquare agents connect claude-code` makes aisquare an active part of Claude
+Code by writing two hooks into `~/.claude/settings.json` (merged, never
+clobbering your other settings; remove them with `agents disconnect`):
+
+- **`SessionStart` → `aisquare hook session-start`** — injects a directive that
+  points Claude at the codebase snapshot (skeleton first, full pack on demand)
+  and the prompt history, plus your in-scope context — so Claude orients without
+  burning tokens grepping for files.
+- **`UserPromptSubmit` → `aisquare hook user-prompt-submit`** — captures how you
+  prompt, so Claude can replay your intent (`aisquare log`).
+
+The **codebase snapshot** (`project onboard`, or `init`) mirrors the server-side
+[Repomix](https://github.com/yamadashy/repomix) packing for sync-consistency: a
+full pack (`repomix --style xml`), a skeleton (`--compress`), and a per-file
+index (char offsets + token counts), stored under
+`~/.aisquare/projects/<id>/snapshot/`. Requires Node + repomix on PATH (run via
+`npx` otherwise); if neither is present the snapshot is skipped, not fatal.
 
 ## Requirements
 
@@ -93,6 +154,14 @@ src/aisquare/
 ├── core/         # shared infrastructure (already real):
 │   ├── paths.py  #   ~/.aisquare layout (override with $AISQUARE_HOME)
 │   ├── config.py #   typed TOML config load/save (Pydantic + tomllib/tomli-w)
+│   ├── store.py  #   SQLite context store (ContextStore protocol + open_store)
+│   ├── ids.py    #   ULID-style, time-sortable, prefix-addressable entry ids
+│   ├── entries.py#   shared ContextEntry factory (add / import / onboard)
+│   ├── workspace.py #  resolve the active project (pin in state.json, else cwd)
+│   ├── injection.py #  assemble the context block + record injections (why)
+│   ├── agents.py #   detect agents + install Claude Code hooks (settings.json)
+│   ├── snapshot.py #  Repomix codebase pack (full + skeleton + index)
+│   ├── editor.py #   launch $EDITOR for `context edit`
 │   ├── state.py  #   runtime state from the global flags
 │   ├── console.py#   Rich console factories honouring --no-color
 │   └── stubs.py  #   stub() — the consistent not-implemented behaviour
@@ -104,8 +173,14 @@ Flow: `cli/<group>.py` parses arguments → calls `services/<domain>.py` →
 `typer.Exit(70)`.
 
 **What is real today:** `--help` everywhere, `--version`, global-flag parsing
-into `core/state.py`, the `~/.aisquare/` layout, TOML config load/save, and the
-stub behaviour itself. Everything else is a stub.
+into `core/state.py`, the `~/.aisquare/` layout, TOML config load/save, the
+SQLite context store (`core/store.py`), and the commands wired to it — `init`,
+`remember`, the full `context` group (`add`, `list`, `show`, `edit`, `remove`,
+`search`, `promote`, `import`, `export`, `preview`), `inject`, `why`, the
+`project` group (`info`, `list`, `switch`, `link`, `onboard`+snapshot),
+`status`, `doctor`, the `config` group (`list`, `get`, `set`, `redaction`),
+`log`, and the `agents` group (`scan`, `list`, `status`, `connect`+hooks,
+`disconnect`). Everything else is a stub.
 
 ### `~/.aisquare/` layout
 
@@ -113,8 +188,11 @@ stub behaviour itself. Everything else is a stub.
 ~/.aisquare/
 ├── config.toml   # typed configuration (core/config.py)
 ├── credentials   # API keys / tokens
-├── agents.json   # registry of detected & connected agents
-├── cache/        # disposable cached data
+├── context.db    # SQLite store: context entries, projects, captured prompts
+├── state.json    # small runtime state (e.g. the pinned active project)
+├── agents.json   # registry of connected agents
+├── projects/     # per-project data — <id>/snapshot/ (Repomix pack + skeleton + index)
+├── cache/        # disposable cached data (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```
 
@@ -127,21 +205,26 @@ module. The CLI wiring, argument parsing and signatures already exist. Example �
 making `aisquare context add` real:
 
 **1. Implement the service** (`src/aisquare/services/context.py`). Replace the
-stub with real logic; keep the existing signature, it is already final:
+stub with real logic; keep the existing signature, it is already final.
+Persisted state goes through the `ContextStore` from `core/store.py`. The
+already-implemented `add_entry` is the worked example:
 
 ```python
 def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
     """Add a context entry to the user or project pool."""
-    entry = ContextEntry(
-        id=new_entry_id(),
-        pool=pool or load_config().default_pool,
-        text=text,
-        tags=tags,
-        source="cli",
-        created_at=datetime.now(tz=UTC),
-    )
-    store.append(entry)  # whatever storage you build
-    return entry
+    resolved: Pool = pool or load_config().default_pool
+    with store_session() as store:
+        project_id: str | None = None
+        if resolved == "project":
+            project = current_project()
+            store.ensure_project(project)
+            project_id = project.id
+        now = datetime.now(tz=UTC)
+        entry = ContextEntry(
+            id=new_entry_id(), pool=resolved, project_id=project_id, text=text,
+            tags=tags, source="cli", created_at=now, updated_at=now,
+        )
+        return store.add(entry)
 ```
 
 **2. Render in the CLI layer** (`src/aisquare/cli/context.py`). The CLI module

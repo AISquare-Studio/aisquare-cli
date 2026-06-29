@@ -1,0 +1,80 @@
+"""Codebase snapshot packing — the Repomix mirror (subprocess faked)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from aisquare.core import snapshot
+
+FULL = (
+    '<files>\n<file path="a.py">\nprint("hi")\n</file>\n'
+    '<file path="b.py">\ny = 1\n</file>\n</files>\n'
+)
+SKEL = '<files>\n<file path="a.py">\nprint ⋮\n</file>\n<file path="b.py">\ny ⋮\n</file>\n</files>\n'
+
+# Type of the faked _run_repomix(root, *, compress) -> (pack_text, stdout).
+FakeRepomix = Callable[..., tuple[str, str]]
+
+
+@pytest.fixture
+def fake_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake(_root: Path, *, compress: bool) -> tuple[str, str]:
+        return (SKEL, "Total Tokens: 4") if compress else (FULL, "Total Tokens: 9")
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
+
+
+def test_build_index_maps_each_file_block() -> None:
+    index = snapshot._build_index(FULL)
+    assert [entry["path"] for entry in index] == ["a.py", "b.py"]
+    for entry in index:
+        assert 0 <= entry["start"] < entry["end"] <= len(FULL)
+        block = FULL[entry["start"] : entry["end"]]
+        assert block.startswith("<file path=")
+        assert block.rstrip().endswith("</file>")
+        assert entry["token_count"] >= 1
+
+
+def test_generate_full_pack(fake_repomix: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 100)
+    meta = snapshot.generate("prj_test", Path("/tmp/repo"))
+    assert meta.status == "ready"
+    assert meta.compressed is False
+    assert meta.file_count == 2
+    assert snapshot.pack_path("prj_test").read_text(encoding="utf-8") == FULL
+    assert snapshot.skeleton_path("prj_test").read_text(encoding="utf-8") == SKEL
+    assert snapshot.index_path("prj_test").exists()
+    assert snapshot.load("prj_test") == meta
+
+
+def test_generate_marks_too_large(fake_repomix: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: snapshot.MAX_TOKENS + 1)
+    meta = snapshot.generate("prj_big", Path("/tmp/repo"))
+    assert meta.status == "too_large"
+    assert not snapshot.pack_path("prj_big").exists()
+
+
+def test_generate_falls_back_to_compressed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake(_root: Path, *, compress: bool) -> tuple[str, str]:
+        return (SKEL, "") if compress else (FULL, "")
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
+    # Full overflows, compressed fits → the stored pack is the compressed one.
+    monkeypatch.setattr(
+        snapshot,
+        "_total_tokens",
+        lambda text, _out: 10 if text == SKEL else snapshot.MAX_TOKENS + 1,
+    )
+    meta = snapshot.generate("prj_mid", Path("/tmp/repo"))
+    assert meta.status == "ready"
+    assert meta.compressed is True
+    assert snapshot.pack_path("prj_mid").read_text(encoding="utf-8") == SKEL
+
+
+def test_generate_raises_when_repomix_unavailable() -> None:
+    # The autouse no_repomix fixture makes _run_repomix raise.
+    with pytest.raises(snapshot.RepomixUnavailableError):
+        snapshot.generate("prj_none", Path("/tmp/repo"))

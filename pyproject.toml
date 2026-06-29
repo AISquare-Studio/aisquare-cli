@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
   "typer>=0.26.8",
   "rich>=13.7",
-  "pydantic>=2.7",
+  "pydantic>=2.13.4",
   "tomli-w>=1.2.0",
 ]
 

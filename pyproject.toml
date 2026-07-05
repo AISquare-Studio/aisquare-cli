@@ -29,10 +29,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+serve = [
+  "mcp>=1.10",
+]
 dev = [
   "pytest>=9.1.1",
   "mypy>=1.10",
   "ruff>=0.5",
+  "mcp>=1.10",
 ]
 
 [project.scripts]

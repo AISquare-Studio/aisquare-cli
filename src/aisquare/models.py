@@ -136,8 +136,8 @@ class PromptRecord(BaseModel):
     created_at: datetime
 
 
-TaskStatus = Literal["todo", "doing", "blocked", "done", "dropped"]
-"""Lifecycle of a shared team task: open → claimed → resolved (or parked)."""
+TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
+"""Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
 
 
 class TeamSession(BaseModel):

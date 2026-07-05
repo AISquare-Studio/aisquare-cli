@@ -43,6 +43,19 @@ def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(snapshot, "_run_repomix", _unavailable)
 
 
+@pytest.fixture(autouse=True)
+def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests from launching detached distiller processes.
+
+    Team commands fire-and-forget `aisquare team distill` after durable events;
+    in tests that would race the temp home and outlive the test. Distiller
+    behaviour is tested by calling ``distill.drain`` directly (test_brain.py).
+    """
+    from aisquare.services import distill
+
+    monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None: None)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     """A Click test runner for invoking the Typer app."""

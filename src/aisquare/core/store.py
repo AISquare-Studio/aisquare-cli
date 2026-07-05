@@ -140,8 +140,40 @@ CREATE TABLE team_event (
 CREATE INDEX team_event_project_seq ON team_event (project_id, seq);
 """
 
+# v4: the review stage of the task lifecycle (coder → review → runner verifies)
+# — a CHECK constraint cannot be altered in SQLite, so the table is rebuilt —
+# and team_meta, small durable key/values (e.g. the distiller's watermark).
+_SCHEMA_V4 = """
+DROP INDEX team_task_project_status;
+ALTER TABLE team_task RENAME TO team_task_v3;
+CREATE TABLE team_task (
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL,
+    key               TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    detail            TEXT,
+    status            TEXT NOT NULL DEFAULT 'todo'
+        CHECK (status IN ('todo', 'doing', 'review', 'blocked', 'done', 'dropped')),
+    role              TEXT,
+    claimed_by        TEXT,
+    claim_expires_at  TEXT,
+    created_by        TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    UNIQUE (project_id, key)
+);
+INSERT INTO team_task SELECT * FROM team_task_v3;
+DROP TABLE team_task_v3;
+CREATE INDEX team_task_project_status ON team_task (project_id, status);
+
+CREATE TABLE team_meta (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3)
+_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
@@ -212,6 +244,11 @@ class ContextStore(Protocol):
     def renew_leases(self, session_id: str, lease_until: datetime) -> None: ...
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask: ...
     def release_task(self, task_id: str) -> TeamTask: ...
+    def next_task(
+        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+    ) -> TeamTask | None: ...
+    def get_meta(self, key: str) -> str | None: ...
+    def set_meta(self, key: str, value: str) -> None: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
     def events_since(
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
@@ -763,6 +800,38 @@ class SqliteStore:
         updated = self.get_task(task.id)
         assert updated is not None  # just updated
         return updated
+
+    def next_task(
+        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+    ) -> TeamTask | None:
+        """The oldest task in ``status`` a session of ``role`` could pick up.
+
+        Tasks without a role hint are available to every role; tasks with one
+        only match sessions of that role (or an unfiltered query).
+        """
+        clauses = ["project_id = ?", "status = ?"]
+        params: list[str] = [project_id, status]
+        if role is not None:
+            clauses.append("(role IS NULL OR role = ?)")
+            params.append(role)
+        row = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} "
+            "ORDER BY id LIMIT 1",
+            params,
+        ).fetchone()
+        return _row_to_task(row) if row is not None else None
+
+    def get_meta(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM team_meta WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
 
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         cursor = self._conn.execute(

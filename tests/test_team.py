@@ -309,3 +309,109 @@ def test_worktrees_share_one_team_project(tmp_path: Path) -> None:
         env=env,
     )
     assert team_project(worktree).id == team_project(main).id
+
+
+# --- the loop workflow: next / review / reopen ----------------------------------
+
+
+def test_looped_pickup_review_and_reopen_cycle(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    _start(runner, PLANNER, work_dir)  # reuse the id as the runner session
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "fix login flow", "--role", "coder"])
+
+    # Coder's loop: pick up and claim the next coder task atomically.
+    picked = json.loads(
+        runner.invoke(
+            app, ["--json", "task", "next", "--role", "coder", "--claim", "--as", "bbbb2222"]
+        ).stdout
+    )
+    assert picked["status"] == "doing" and picked["claimed_by"] == CODER
+
+    # Nothing left in the todo pool for another looper.
+    empty = json.loads(
+        runner.invoke(app, ["--json", "task", "next", "--role", "coder", "--claim"]).stdout
+    )
+    assert empty is None
+
+    # Coder finishes → review; runner picks it from the review pool.
+    runner.invoke(app, ["task", "review", picked["id"], "--note", "try login", "--as", "bbbb2222"])
+    for_runner = json.loads(
+        runner.invoke(app, ["--json", "task", "next", "--status", "review"]).stdout
+    )
+    assert for_runner["id"] == picked["id"]
+
+    # Verification fails → reopen with feedback; coder's next prompt carries it.
+    runner.invoke(
+        app, ["task", "reopen", picked["id"], "--reason", "500 on submit", "--as", "aaaa1111"]
+    )
+    reopened = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]
+    assert reopened["status"] == "todo" and reopened["claimed_by"] is None
+    delta = _prompt(runner, CODER, work_dir)
+    assert "reopened" in delta.stdout and "500 on submit" in delta.stdout
+
+
+def test_next_respects_role_hints(runner: CliRunner, work_dir: Path) -> None:
+    runner.invoke(app, ["task", "add", "runner-only job", "--role", "runner"])
+    # A coder looper skips tasks hinted at another role...
+    for_coder = json.loads(runner.invoke(app, ["--json", "task", "next", "--role", "coder"]).stdout)
+    assert for_coder is None
+    # ...the runner picks it up, and role-less tasks are open to everyone.
+    for_runner = json.loads(
+        runner.invoke(app, ["--json", "task", "next", "--role", "runner"]).stdout
+    )
+    assert for_runner is not None and for_runner["title"] == "runner-only job"
+    runner.invoke(app, ["task", "add", "anyone can take this"])
+    for_coder_now = json.loads(
+        runner.invoke(app, ["--json", "task", "next", "--role", "coder"]).stdout
+    )
+    assert for_coder_now is not None and for_coder_now["title"] == "anyone can take this"
+
+
+def test_claim_flag_rejected_outside_todo(runner: CliRunner, work_dir: Path) -> None:
+    result = runner.invoke(app, ["task", "next", "--status", "review", "--claim"])
+    assert result.exit_code == 2  # usage error
+
+
+def test_v3_database_migrates_to_v4(work_dir: Path) -> None:
+    import sqlite3 as raw_sqlite
+
+    from aisquare.core import paths
+
+    # Build a v3-era database by hand: v1+v2+v3 without the v4 rebuild.
+    from aisquare.core.store import (
+        _MIGRATIONS,
+        SCHEMA_VERSION,
+        open_store,
+    )
+
+    paths.ensure_home()
+    conn = raw_sqlite.connect(str(paths.db_path()))
+    for script in _MIGRATIONS[:3]:
+        conn.executescript(script)
+    conn.execute("PRAGMA user_version = 3")
+    now = datetime.now(tz=UTC).isoformat()
+    conn.execute(
+        "INSERT INTO team_task (id, project_id, key, title, status, created_at, updated_at) "
+        "VALUES ('tsk_old', 'prj_x', 'legacy', 'legacy task', 'doing', ?, ?)",
+        (now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    store = open_store()  # migrates to v4
+    try:
+        survivor = store.get_task("tsk_old")
+        assert survivor is not None and survivor.status == "doing"
+        store.set_task_status("tsk_old", "review")  # new status is legal post-rebuild
+    finally:
+        store.close()
+    check = raw_sqlite.connect(str(paths.db_path()))
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        check.close()

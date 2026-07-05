@@ -17,10 +17,11 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import teambus
+from aisquare.core import brain, teambus
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
+from aisquare.services import distill as distill_service
 
 _SHORT_ID = 8
 _DELTA_LIMIT = 10
@@ -182,7 +183,7 @@ def add_note(
             if task is None:
                 raise KeyError(task_ref)
             task_id = task.id
-        return _emit(
+        event = _emit(
             store,
             project.id,
             kind,
@@ -191,6 +192,9 @@ def add_note(
             task_id=task_id,
             to_role=to_role,
         )
+    if kind in distill_service.DISTILL_KINDS:
+        distill_service.spawn_drain(cwd)
+    return event
 
 
 def add_task(
@@ -311,13 +315,89 @@ def _finish_task(
 def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Mark a task done (``task done``)."""
     _require_enabled()
-    return _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
+    task = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
+    distill_service.spawn_drain()
+    return task
+
+
+def review_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
+    """Send a task to review — done coding, awaiting verification (``task review``)."""
+    _require_enabled()
+    return _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
+
+
+def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> TeamTask:
+    """Send a task back to the pool with feedback (``task reopen``).
+
+    The reason lands on the pipe as a task-linked event, so whoever picks the
+    task up next (usually its previous owner's loop) sees the feedback.
+    """
+    _require_enabled()
+    with store_session() as store:
+        task = store.get_task(ref)
+        if task is None:
+            raise KeyError(ref)
+        session = _resolve_session(store, session_ref)
+        reopened = store.release_task(task.id)
+        _emit(
+            store,
+            reopened.project_id,
+            "task_reopened",
+            f"{reopened.title} — {reason}",
+            session_id=session.id if session else None,
+            task_id=reopened.id,
+        )
+    distill_service.spawn_drain()
+    return reopened
+
+
+def next_task(
+    *,
+    role: str | None = None,
+    status: TaskStatus = "todo",
+    claim: bool = False,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+) -> TeamTask | None:
+    """The oldest pickable task for a role — the heart of a looped session.
+
+    With ``claim`` (only valid for ``todo``), the returned task is atomically
+    claimed; a race with another looper simply moves on to the next task.
+    """
+    _require_enabled()
+    if claim and status != "todo":
+        raise ValueError("--claim only applies to todo tasks")
+    with store_session() as store:
+        project = _project(store, cwd)
+        session = _resolve_session(store, session_ref)
+        claimant = session.id if session else "cli"
+        lease = _now() + timedelta(minutes=teambus.lease_minutes())
+        while True:
+            task = store.next_task(project.id, role=role, status=status)
+            if task is None or not claim:
+                return task
+            if store.claim_task(task.id, claimant, lease):
+                claimed = store.get_task(task.id)
+                assert claimed is not None  # just claimed
+                _emit(
+                    store,
+                    claimed.project_id,
+                    "task_claimed",
+                    claimed.title,
+                    session_id=session.id if session else None,
+                    task_id=claimed.id,
+                )
+                return claimed
+            # Lost the race for this one — the next loop iteration sees the
+            # following todo task (the winner's claim moved this one to doing).
 
 
 def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> TeamTask:
     """Mark a task blocked, with the reason on the pipe (``task block``)."""
     _require_enabled()
-    return _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
+    task = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
+    distill_service.spawn_drain()
+    return task
 
 
 def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
@@ -344,6 +424,21 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
             task_id=released.id,
         )
         return released
+
+
+def distill_now(cwd: Path | None = None) -> int | None:
+    """Drain the pipe into the project brain synchronously (``team distill``).
+
+    ``None`` means another drain (usually a detached one) is already running.
+    """
+    _require_enabled()
+    return distill_service.drain(cwd)
+
+
+def recall(query: str, cwd: Path | None = None) -> str | None:
+    """Search the project brain (``recall``); ``None`` = brain unavailable."""
+    _require_enabled()
+    return brain.recall(teambus.team_project(cwd).id, query)
 
 
 # --- hook integration ---------------------------------------------------------
@@ -446,6 +541,8 @@ def hook_session_end(session_id: str, cwd: Path | None) -> None:
                 session_id=session.id,
                 task_id=task.id,
             )
+    # Safety drain: catch anything a per-command spawn missed this session.
+    distill_service.spawn_drain(cwd)
 
 
 # --- rendering ----------------------------------------------------------------
@@ -497,11 +594,11 @@ def _render_board(
             if stale:
                 parts.append("(stale)")
             lines.append(" ".join(parts))
-    open_tasks = [t for t in tasks if t.status in ("todo", "doing", "blocked")]
+    open_tasks = [t for t in tasks if t.status in ("todo", "doing", "review", "blocked")]
     if tasks:
         counts = ", ".join(
             f"{sum(1 for t in tasks if t.status == status)} {status}"
-            for status in ("todo", "doing", "blocked", "done")
+            for status in ("todo", "doing", "review", "blocked", "done")
             if any(t.status == status for t in tasks)
         )
         lines.append(f"tasks ({counts}):")

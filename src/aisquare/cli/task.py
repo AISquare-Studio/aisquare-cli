@@ -66,8 +66,15 @@ def list_(
     ] = None,
 ) -> None:
     """List the team's shared tasks."""
-    if status is not None and status not in ("todo", "doing", "blocked", "done", "dropped"):
-        raise typer.BadParameter("status must be todo, doing, blocked, done or dropped")
+    if status is not None and status not in (
+        "todo",
+        "doing",
+        "review",
+        "blocked",
+        "done",
+        "dropped",
+    ):
+        raise typer.BadParameter("status must be todo, doing, review, blocked, done or dropped")
     narrowed: TaskStatus | None = status  # type: ignore[assignment]
     try:
         tasks = team_service.list_tasks(narrowed)
@@ -135,6 +142,70 @@ def claim(ref: TaskRef, as_session: SessionRef = None) -> None:
     except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="claimed")
+
+
+@app.command("next")
+def next_(
+    role: Annotated[
+        str | None, typer.Option("--role", help="Only tasks for this role (or unassigned).")
+    ] = None,
+    status: Annotated[
+        str, typer.Option("--status", help="Which pool to draw from (todo or review).")
+    ] = "todo",
+    claim: Annotated[
+        bool, typer.Option("--claim", help="Atomically claim the task (todo only).")
+    ] = False,
+    as_session: SessionRef = None,
+) -> None:
+    """Pick up the next available task — built for looped sessions."""
+    if status not in ("todo", "doing", "review", "blocked", "done", "dropped"):
+        raise typer.BadParameter("status must be todo, doing, review, blocked, done or dropped")
+    narrowed: TaskStatus = status  # type: ignore[assignment]
+    try:
+        task = team_service.next_task(
+            role=role, status=narrowed, claim=claim, session_ref=as_session
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+        _fail_team(exc, as_session)
+    if task is None:
+        if get_state().json_output:
+            typer.echo(json.dumps(None))
+        else:
+            stdout_console().print(f"Nothing to pick up (status: {status}).")
+        return
+    _emit_task(task, verb="claimed" if claim else "next up")
+
+
+@app.command("review")
+def review(
+    ref: TaskRef,
+    note: Annotated[
+        str | None, typer.Option("--note", help="What to verify / what changed.")
+    ] = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Send a task to review, ready for the runner to verify."""
+    try:
+        task = team_service.review_task(ref, note=note, session_ref=as_session)
+    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+        _fail_team(exc, ref)
+    _emit_task(task, verb="sent to review")
+
+
+@app.command("reopen")
+def reopen(
+    ref: TaskRef,
+    reason: Annotated[str, typer.Option("--reason", help="The feedback: what failed and how.")],
+    as_session: SessionRef = None,
+) -> None:
+    """Send a task back to the pool with feedback (verification failed)."""
+    try:
+        task = team_service.reopen_task(ref, reason=reason, session_ref=as_session)
+    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+        _fail_team(exc, ref)
+    _emit_task(task, verb="reopened")
 
 
 @app.command("done")

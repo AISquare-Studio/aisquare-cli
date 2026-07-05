@@ -119,6 +119,42 @@ def log(
         console.print(f"{event.created_at:%H:%M} {who} {event.kind}: {event.text}", markup=False)
 
 
+@app.command("distill")
+def distill() -> None:
+    """Push undistilled decisions/results/outcomes into the project brain now."""
+    try:
+        count = team_service.distill_now()
+    except TeamDisabledError as exc:
+        _fail_team(exc)
+    if get_state().json_output:
+        typer.echo(json.dumps({"distilled": count}))
+    elif count is None:
+        stdout_console().print("… another distill is already running — it has the brain")
+    else:
+        noun = "page" if count == 1 else "pages"
+        stdout_console().print(f"✓ distilled {count} {noun} into the project brain")
+
+
+def recall(
+    query: Annotated[str, typer.Argument(help="What to look up in the project brain.")],
+) -> None:
+    """Search the team's long-term memory (decisions, results, outcomes)."""
+    try:
+        output = team_service.recall(query)
+    except TeamDisabledError as exc:
+        _fail_team(exc)
+    if output is None:
+        fail(
+            "project brain unavailable — gbrain missing, brain busy, or nothing "
+            "distilled yet (try `aisquare team distill`)",
+            error="brain_unavailable",
+        )
+    if get_state().json_output:
+        typer.echo(json.dumps({"query": query, "output": output}))
+    else:
+        stdout_console().print(output.rstrip("\n"), markup=False)
+
+
 def note(
     text: Annotated[str, typer.Argument(help="The note/decision/question/result to share.")],
     as_session: SessionRef = None,

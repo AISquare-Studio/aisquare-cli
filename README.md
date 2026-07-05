@@ -96,8 +96,8 @@ event pipe delivered to each session as a compact delta on its next prompt.
 AISQUARE_ROLE=planner claude     # launching with a role activates the bus here
 aisquare team on                 # …or activate a project explicitly
 aisquare board                   # sessions + tasks + recent updates
-aisquare task add "wire auth"    # idempotent — safe for a planner to re-emit
-aisquare task claim tsk_… --as a3f2   # exactly one session wins
+aisquare task add "wire auth" --role coder  # idempotent — planners can re-emit
+aisquare task claim tsk_… --as a3f2         # exactly one session wins
 aisquare note "JWT it is" --kind decision --as a3f2
 ```
 
@@ -107,6 +107,57 @@ did since your last prompt (nothing when it's been quiet). Worktrees resolve
 to their principal repository, so a coder in a worktree shares the planner's
 bus. Env knobs: `AISQUARE_TEAM=0` (off), `AISQUARE_ROLE`,
 `AISQUARE_TEAM_DELTA=0` (mute deltas), `AISQUARE_TEAM_LEASE_MIN` (default 120).
+
+**Looped workers.** `task next` makes a session self-serve; run your coder
+sessions on a loop of:
+
+> Run `aisquare task next --role coder --claim --as <your id>`. If nothing is
+> available, stop. Otherwise do the task, then
+> `aisquare task review <id> --note "<what to verify>" --as <your id>`.
+
+and the runner/debugger session on:
+
+> Run `aisquare task next --status review`. Verify it end-to-end. Then either
+> `aisquare task done <id> --note "verified: …"` or
+> `aisquare task reopen <id> --reason "<what failed, how to repro>"`.
+
+Reopen feedback rides the pipe back to whoever picks the task up next.
+
+**Long-term memory (gbrain).** Durable events — decisions, results, task
+outcomes, reopen feedback — are distilled into a per-project
+[gbrain](https://www.npmjs.com/package/gbrain) brain by a detached worker
+(never on the hot path; requires `gbrain` on PATH, initialised automatically
+with embeddings off). Query it any time:
+
+```sh
+aisquare recall "what did we decide about auth?"
+aisquare team distill            # drain the pipe into the brain right now
+```
+
+`AISQUARE_BRAIN=0` disables the layer; `AISQUARE_BRAIN_EMBED=1` lets distilled
+pages be embedded (uses your `OPENAI_API_KEY`, at distill time only).
+
+**Remote agents (MCP).** `aisquare serve` exposes the same bus to Claude
+clients that are not local terminal sessions — e.g. a browser-debugging agent
+in the Claude desktop app on the Windows side of WSL2:
+
+```sh
+pip install 'aisquare-cli[serve]'
+aisquare serve                   # streamable HTTP on 127.0.0.1:8747, bearer-token auth
+aisquare serve --show-token      # connection details for the client
+aisquare serve --stdio           # stdio transport (Claude Desktop launches it)
+```
+
+Remote callers act as an attributed virtual session (`mcp:<client>`): their
+tasks and notes hit the board and everyone's deltas like any teammate's. For
+Claude Desktop on Windows + WSL2, either add the HTTP URL (Windows reaches
+WSL2 via localhost) or register a stdio server in
+`claude_desktop_config.json`:
+
+```json
+{"mcpServers": {"aisquare-team": {"command": "wsl", "args": ["-e", "bash", "-lc",
+  "cd /path/to/your/repo && aisquare serve --stdio"]}}}
+```
 
 The **codebase snapshot** (`project onboard`, or `init`) mirrors the server-side
 [Repomix](https://github.com/yamadashy/repomix) packing for sync-consistency: a
@@ -151,10 +202,12 @@ aisquare
 │               export [file] [--format md|json] · promote <id>
 ├── project     info · list · switch <name> · link <repo> · onboard [path] [--refresh]
 │   (alias workspace)
-├── team        on · status · focus <text> · role <name> · log
-├── task        add <title> · list · show <id> · claim <id> · done <id> · block <id>
-│               drop <id> · release <id>     (all with [--as SESSION])
-├── note <text> [--task T] [--to ROLE] [--kind K] · board
+├── team        on · status · focus <text> · role <name> · log · distill
+├── task        add <title> · list · show <id> · next [--role R] [--status S] [--claim]
+│               claim <id> · review <id> · reopen <id> --reason · done <id>
+│               block <id> --reason · drop <id> · release <id>   (all with [--as SESSION])
+├── note <text> [--task T] [--to ROLE] [--kind K] · board · recall <query>
+├── serve       [--stdio | --port N --bind H] [--show-token]
 ├── capture     status · pause · resume · start · stop
 ├── config      list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ├── policy      list

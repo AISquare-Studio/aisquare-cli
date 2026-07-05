@@ -18,6 +18,7 @@ from aisquare.cli import (
     policy,
     project,
     root,
+    serve,
     task,
     team,
 )
@@ -99,6 +100,8 @@ app.add_typer(team.app, name="team")
 app.add_typer(task.app, name="task")
 app.command("note")(team.note)
 app.command("board")(team.board)
+app.command("recall")(team.recall)
+app.command("serve")(serve.serve)
 app.add_typer(hook.app, name="hook", hidden=True)
 
 

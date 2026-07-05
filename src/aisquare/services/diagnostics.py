@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
-from aisquare.core import paths
+from aisquare.core import brain as brain_core
+from aisquare.core import paths, teambus
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
@@ -16,6 +17,7 @@ from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
 from aisquare.models import CheckStatus, DoctorCheck, InjectionRecord, PromptRecord, StatusReport
+from aisquare.services import distill as distill_service
 
 
 def status() -> StatusReport:
@@ -50,6 +52,7 @@ def doctor() -> list[DoctorCheck]:
         _check_tiktoken(),
         _check_claude_code(),
         _check_snapshot(),
+        _check_brain(),
     ]
 
 
@@ -167,6 +170,36 @@ def _check_snapshot() -> DoctorCheck:
         "no codebase snapshot for the active project",
         "Pack one: aisquare project onboard",
     )
+
+
+def _check_brain() -> DoctorCheck:
+    """The team's long-term memory: gbrain presence, brain state, distill lag."""
+    if not brain_core.brain_enabled():
+        return _ok("brain", "brain layer disabled (AISQUARE_BRAIN=0)")
+    version = brain_core.gbrain_version()
+    if version is None:
+        return _warn(
+            "brain",
+            "gbrain not found — team decisions/results are not distilled",
+            "Install it: bun install -g gbrain (or npm install -g gbrain)",
+        )
+    try:
+        project = teambus.team_project()
+        with store_session() as store:
+            if not store.team_active(project.id):
+                return _ok("brain", f"gbrain {version} ready (team bus not active here)")
+            lag = distill_service.pending(store, project.id)
+    except Exception as exc:  # diagnostics must never crash
+        return _warn("brain", f"could not check the brain: {exc}", "Try: aisquare team distill")
+    if not brain_core.brain_ready(project.id):
+        return _warn(
+            "brain",
+            f"gbrain {version} found but this project's brain is not initialised",
+            "It initialises on the first distill: aisquare team distill",
+        )
+    if lag > 0:
+        return _ok("brain", f"gbrain {version}, brain ready ({lag} pipe events awaiting distill)")
+    return _ok("brain", f"gbrain {version}, brain ready and fully distilled")
 
 
 def _has_module(name: str) -> bool:

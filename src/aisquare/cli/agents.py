@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -38,11 +39,21 @@ def status(
     emit_agents(agents)
 
 
+ConfigDir = Annotated[
+    Path | None,
+    typer.Option(
+        "--config-dir",
+        help="Claude Code config directory to target (for CLAUDE_CONFIG_DIR "
+        "installs, e.g. ~/.claude4). Default: $CLAUDE_CONFIG_DIR or ~/.claude.",
+    ),
+]
+
+
 @app.command("connect")
-def connect(name: AgentName) -> None:
+def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
     """Connect an agent: install aisquare's hooks and ingest its existing context."""
     try:
-        connection = agents_service.connect(name)
+        connection = agents_service.connect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
     except ValueError as exc:
@@ -51,10 +62,10 @@ def connect(name: AgentName) -> None:
 
 
 @app.command("disconnect")
-def disconnect(name: AgentName) -> None:
+def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
     """Disconnect an agent (its already-imported context is kept)."""
     try:
-        agents_service.disconnect(name)
+        agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
     emit_disconnected(name)

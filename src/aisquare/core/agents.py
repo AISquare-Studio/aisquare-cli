@@ -9,6 +9,7 @@ known context file) exists. The set of connected agents is persisted in
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,15 +42,32 @@ def _home() -> Path:
     return Path.home()
 
 
-def _specs() -> list[AgentSpec]:
+def _claude_home(config_dir: Path | None = None) -> Path:
+    """Claude Code's config directory.
+
+    Users run parallel Claude installs via ``CLAUDE_CONFIG_DIR`` (e.g. an
+    alias pointing at ``~/.claude4``); hooks must land in the directory the
+    actual ``claude`` command reads. Priority: explicit ``--config-dir``,
+    then ``CLAUDE_CONFIG_DIR``, then ``~/.claude``.
+    """
+    if config_dir is not None:
+        return config_dir.expanduser()
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return _home() / ".claude"
+
+
+def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
     home = _home()
+    claude = _claude_home(config_dir)
     return [
         AgentSpec(
             "claude-code",
             "Claude Code",
-            home / ".claude",
-            (home / ".claude" / "CLAUDE.md",),
-            settings_path=home / ".claude" / "settings.json",
+            claude,
+            (claude / "CLAUDE.md",),
+            settings_path=claude / "settings.json",
         ),
         AgentSpec("cursor", "Cursor", home / ".cursor", ()),
         AgentSpec("codex", "Codex", home / ".codex", ()),
@@ -87,9 +105,9 @@ def _is_aisquare_group(group: Any) -> bool:
     )
 
 
-def install_hooks(name: str) -> bool:
-    """Install aisquare's SessionStart/UserPromptSubmit hooks. False if unsupported."""
-    spec = _spec(name)
+def install_hooks(name: str, config_dir: Path | None = None) -> bool:
+    """Install aisquare's lifecycle hooks. False if the agent is unsupported."""
+    spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return False
     settings = _read_settings(spec.settings_path)
@@ -108,9 +126,9 @@ def install_hooks(name: str) -> bool:
     return True
 
 
-def remove_hooks(name: str) -> bool:
+def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     """Remove aisquare's hooks from the agent's settings. True if any were removed."""
-    spec = _spec(name)
+    spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
     settings = _read_settings(spec.settings_path)
@@ -136,9 +154,9 @@ def remove_hooks(name: str) -> bool:
     return removed
 
 
-def hooks_installed(name: str) -> bool:
+def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
     """Whether aisquare's hooks are present in the agent's settings."""
-    spec = _spec(name)
+    spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
     hooks = _read_settings(spec.settings_path).get("hooks")
@@ -149,8 +167,8 @@ def hooks_installed(name: str) -> bool:
     )
 
 
-def _spec(name: str) -> AgentSpec | None:
-    return next((spec for spec in _specs() if spec.name == name), None)
+def _spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
+    return next((spec for spec in _specs(config_dir) if spec.name == name), None)
 
 
 def _connected_set() -> set[str]:
@@ -187,13 +205,13 @@ def detect_all() -> list[AgentInfo]:
     return [_to_info(spec, connected) for spec in _specs()]
 
 
-def detect(name: str) -> AgentInfo | None:
+def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
     """Detection state for one agent, or ``None`` if the name is unknown."""
-    spec = _spec(name)
+    spec = _spec(name, config_dir)
     return _to_info(spec, _connected_set()) if spec is not None else None
 
 
-def context_files(name: str) -> list[Path]:
+def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
     """Existing context files for an agent (its content, for ingestion)."""
-    spec = _spec(name)
+    spec = _spec(name, config_dir)
     return [path for path in spec.context_files if path.exists()] if spec else []

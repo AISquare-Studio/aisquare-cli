@@ -125,3 +125,36 @@ def test_disconnect_removes_hooks(runner: CliRunner, fake_home: Path) -> None:
     runner.invoke(app, ["agents", "connect", "claude-code"])
     runner.invoke(app, ["agents", "disconnect", "claude-code"])
     assert _hook_commands(fake_home / ".claude" / "settings.json") == []
+
+
+def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: Path) -> None:
+    # Parallel Claude installs (CLAUDE_CONFIG_DIR aliases, e.g. ~/.claude4)
+    # must receive the hooks in THEIR settings file, not ~/.claude's.
+    alt = fake_home / ".claude4"
+    alt.mkdir()
+    (alt / "CLAUDE.md").write_text("# alt rules\n", encoding="utf-8")
+    result = runner.invoke(
+        app, ["agents", "connect", "claude-code", "--config-dir", str(alt)]
+    )
+    assert result.exit_code == 0, result.output
+    settings = json.loads((alt / "settings.json").read_text(encoding="utf-8"))
+    assert set(settings["hooks"]) == {"SessionStart", "UserPromptSubmit", "SessionEnd"}
+    assert not (fake_home / ".claude" / "settings.json").exists()
+
+    disconnect = runner.invoke(
+        app, ["agents", "disconnect", "claude-code", "--config-dir", str(alt)]
+    )
+    assert disconnect.exit_code == 0
+    settings = json.loads((alt / "settings.json").read_text(encoding="utf-8"))
+    assert "hooks" not in settings
+
+
+def test_claude_config_dir_env_is_honoured(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alt = fake_home / ".claude-env"
+    alt.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(alt))
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert (alt / "settings.json").exists()

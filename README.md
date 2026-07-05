@@ -106,7 +106,13 @@ payload); each prompt heartbeats the session and injects only what teammates
 did since your last prompt (nothing when it's been quiet). Worktrees resolve
 to their principal repository, so a coder in a worktree shares the planner's
 bus. Env knobs: `AISQUARE_TEAM=0` (off), `AISQUARE_ROLE`,
-`AISQUARE_TEAM_DELTA=0` (mute deltas), `AISQUARE_TEAM_LEASE_MIN` (default 120).
+`AISQUARE_TEAM_DELTA=0` (mute deltas), `AISQUARE_TEAM_LEASE_MIN` (default 120),
+and `AISQUARE_TEAM_HUB=/path/to/hub` to pin sessions from **several repos**
+onto one shared bus (planner in one repo, coders and runner in others).
+
+Running parallel Claude installs via `CLAUDE_CONFIG_DIR` aliases? Point the
+hook install at the right one: `aisquare agents connect claude-code
+--config-dir ~/.claude4` (the env var is honoured too).
 
 **Looped workers.** `task next` makes a session self-serve; run your coder
 sessions on a loop of:

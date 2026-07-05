@@ -415,3 +415,18 @@ def test_v3_database_migrates_to_v4(work_dir: Path) -> None:
         assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         check.close()
+
+
+def test_team_hub_pins_every_directory_to_one_bus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = tmp_path / "studio-unified"
+    repo_a = tmp_path / "backend"
+    repo_b = tmp_path / "ui"
+    for directory in (hub, repo_a, repo_b):
+        directory.mkdir()
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
+    assert (
+        team_project(repo_a).id == team_project(repo_b).id == team_project(hub).id
+    )
+    assert team_project(repo_a).root == hub.resolve()

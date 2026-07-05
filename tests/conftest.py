@@ -14,9 +14,15 @@ from aisquare.core.state import reset_state
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point AISQUARE_HOME at a temp dir so tests never touch ``~/.aisquare``."""
+    """Point AISQUARE_HOME at a temp dir so tests never touch ``~/.aisquare``.
+
+    ``CLAUDE_CONFIG_DIR`` is cleared too: agent detection honours it, and a
+    developer running the suite from inside a Claude session must never have
+    tests write hooks into their real config directory.
+    """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     return home
 
 

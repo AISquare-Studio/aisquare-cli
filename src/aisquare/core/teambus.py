@@ -12,6 +12,8 @@ branch is the gate:
 - ``AISQUARE_TEAM=0``      — master off switch: hooks and commands no-op.
 - ``AISQUARE_ROLE``        — role for this session (also activates the bus
                              for the project on session start).
+- ``AISQUARE_TEAM_HUB``    — pin every session/command to one bus rooted at
+                             this directory (multi-repo executions).
 - ``AISQUARE_TEAM_DELTA=0``— mute the per-prompt teammate delta injection.
 - ``AISQUARE_TEAM_LEASE_MIN`` — claim lease in minutes (default 120; long
                              agentic turns only renew on prompt submit).
@@ -93,9 +95,16 @@ def _git_common_root(start: Path) -> Path | None:
 def team_project(cwd: Path | None = None) -> ProjectInfo:
     """The project this directory's team traffic belongs to.
 
-    Worktrees of one repository resolve to the principal checkout, so the
-    whole team shares one bus regardless of which worktree a session sits in.
+    ``AISQUARE_TEAM_HUB`` overrides everything: an execution that spans
+    several repositories (planner in one, coders and runner in others) sets
+    it to one hub directory so every session shares a single bus. Otherwise
+    worktrees resolve to their principal checkout, so the team shares one bus
+    regardless of which worktree a session sits in.
     """
+    hub = os.environ.get("AISQUARE_TEAM_HUB", "").strip()
+    if hub:
+        root = Path(hub).expanduser().resolve()
+        return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     start = (cwd or Path.cwd()).resolve()
     root = _git_common_root(start) or find_project_root(start)
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

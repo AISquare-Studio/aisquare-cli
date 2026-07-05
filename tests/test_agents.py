@@ -158,3 +158,30 @@ def test_claude_config_dir_env_is_honoured(
     result = runner.invoke(app, ["agents", "connect", "claude-code"])
     assert result.exit_code == 0, result.output
     assert (alt / "settings.json").exists()
+
+
+def test_hook_commands_are_never_a_bare_name(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A bare `aisquare` dies in hook shells with "/bin/sh: aisquare: not found".
+    # 1) The running executable wins, even when PATH knows nothing about it.
+    fake_bin = tmp_path / "somewhere" / "aisquare"
+    fake_bin.parent.mkdir(parents=True)
+    fake_bin.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(fake_bin)])
+    monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _: None)
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert result.exit_code == 0, result.output
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert command == f"{fake_bin.resolve()} hook session-start"
+
+    # 2) With no usable argv0 and nothing on PATH: python -m aisquare, never bare.
+    import sys as real_sys
+
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert result.exit_code == 0, result.output
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert command == f"{real_sys.executable} -m aisquare hook session-start"

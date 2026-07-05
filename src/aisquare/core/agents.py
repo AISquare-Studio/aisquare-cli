@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -75,9 +76,21 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
 
 
 def _aisquare_command() -> str:
-    """Absolute path to the aisquare executable, for use inside hook commands."""
+    """The command hooks should run — an absolute path that works in any shell.
+
+    The running executable wins: whoever installs hooks is the aisquare the
+    hooks should call, even when it was invoked as ``.venv/bin/aisquare``
+    without being on PATH. Falls back to PATH lookup, then to ``python -m
+    aisquare`` via the current interpreter — never to a bare name a hook
+    shell might not resolve.
+    """
+    argv0 = Path(sys.argv[0])
+    if argv0.name in ("aisquare", "asq") and argv0.exists():
+        return str(argv0.resolve())
     found = shutil.which("aisquare")
-    return found or "aisquare"
+    if found:
+        return found
+    return f"{sys.executable} -m aisquare"
 
 
 def _read_settings(path: Path) -> dict[str, Any]:

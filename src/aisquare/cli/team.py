@@ -10,6 +10,7 @@ import json
 from typing import Annotated, NoReturn
 
 import typer
+from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core.console import stdout_console
@@ -181,8 +182,20 @@ def note(
         stdout_console().print(f"✓ shared ({event.kind}): {event.text}", markup=False)
 
 
-def board() -> None:
+def board(
+    watch: Annotated[
+        bool, typer.Option("--watch", "-w", help="Full-screen live board; Ctrl-C exits.")
+    ] = False,
+    interval: Annotated[
+        float, typer.Option("--interval", "-i", help="Refresh seconds in watch mode.")
+    ] = 3.0,
+) -> None:
     """Show the live team board (sessions, tasks, recent updates)."""
+    if watch:
+        if get_state().json_output:
+            raise typer.BadParameter("--watch and --json cannot be combined")
+        _watch_board(max(interval, 0.5))
+        return
     try:
         project, sessions, tasks, events = team_service.board_data()
     except TeamDisabledError as exc:
@@ -208,3 +221,59 @@ def board() -> None:
     stdout_console().print(
         team_service.render_board(project, sessions, tasks, events), markup=False
     )
+
+
+def _watch_board(interval: float) -> None:
+    """A full-screen board that refreshes in place (unlike `watch`, it adapts
+    the event feed to the terminal height instead of clipping)."""
+    import time
+
+    from rich.live import Live
+
+    console = stdout_console()
+    try:
+        with Live(console=console, screen=True, auto_refresh=False) as live:
+            while True:
+                frame = _board_frame(console.size.height, console.size.width)
+                live.update(frame, refresh=True)
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+    except TeamDisabledError as exc:
+        _fail_team(exc)
+
+
+def _board_frame(height: int, width: int) -> Text:
+    """One watch-mode frame: header, sessions, open tasks, then as many
+    recent events as the remaining terminal rows can hold."""
+    from datetime import datetime
+
+    project, sessions, tasks, events = team_service.board_data(events=200)
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(
+        f"aisquare board — {project.root.name or project.id} — {datetime.now():%H:%M:%S}\n",
+        style="bold",
+    )
+    live_sessions = [s for s in sessions if s.ended_at is None]
+    text.append("sessions\n", style="bold cyan")
+    if live_sessions:
+        for session in live_sessions:
+            focus = f" — {session.focus}" if session.focus else ""
+            text.append(f"  {team_service.short_id(session.id)} {session.role}{focus}\n")
+    else:
+        text.append("  (none live)\n", style="dim")
+    open_tasks = [t for t in tasks if t.status in ("todo", "doing", "review", "blocked")]
+    done = sum(1 for t in tasks if t.status == "done")
+    text.append(f"tasks — {len(open_tasks)} open · {done} done\n", style="bold cyan")
+    for task in open_tasks[:10]:
+        claim = f" @{team_service.short_id(task.claimed_by)}" if task.claimed_by else ""
+        text.append(f"  {task.id[-8:]} [{task.status}{claim}] {task.title}\n")
+    if len(open_tasks) > 10:
+        text.append(f"  … {len(open_tasks) - 10} more\n", style="dim")
+    used = 3 + max(len(live_sessions), 1) + min(len(open_tasks), 10) + 2
+    room = max(3, height - used - 1)
+    text.append("updates (newest last)\n", style="bold cyan")
+    roles = {s.id: s.role for s in sessions}
+    for event in events[-room:]:
+        text.append(f"  {event.created_at:%H:%M} {team_service.event_line(event, roles)}\n")
+    return text

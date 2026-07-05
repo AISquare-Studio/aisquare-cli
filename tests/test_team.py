@@ -458,3 +458,25 @@ def test_role_cycles_are_injected_automatically(
     run = _start(runner, PLANNER, work_dir)
     assert "Your standing cycle (runner)" in run.stdout
     assert "task next --status review" in run.stdout
+
+
+def test_watch_frame_adapts_events_to_terminal_height(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.cli.team import _board_frame
+
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    for index in range(20):
+        runner.invoke(app, ["note", f"update number {index}"])
+    tall = str(_board_frame(height=40, width=100))
+    short = str(_board_frame(height=12, width=100))
+    assert "aisquare board" in tall and "planner" in tall
+    assert tall.count("update number") > short.count("update number")
+    assert "update number 19" in short  # newest events always survive the cut
+
+
+def test_watch_rejects_json_mode(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["--json", "board", "--watch"])
+    assert result.exit_code == 2

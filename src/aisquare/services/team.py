@@ -119,7 +119,7 @@ def activate(cwd: Path | None = None) -> ProjectInfo:
 
 
 def board_data(
-    cwd: Path | None = None,
+    cwd: Path | None = None, *, events: int = _BOARD_EVENTS
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """Everything the board shows: sessions, tasks and recent events."""
     _require_enabled()
@@ -129,7 +129,7 @@ def board_data(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
-            store.recent_events(project.id, limit=_BOARD_EVENTS),
+            store.recent_events(project.id, limit=events),
         )
 
 
@@ -643,7 +643,7 @@ def _render_board(
     if events:
         roles = {s.id: s.role for s in sessions}
         lines.append("recent updates:")
-        lines.extend(f"  - {_event_line(event, roles)}" for event in events)
+        lines.extend(f"  - {event_line(event, roles)}" for event in events)
     if me is not None:
         lines += [
             "Protocol: check this board before starting work; teammate updates",
@@ -685,7 +685,7 @@ def _role_cycle(me: TeamSession) -> list[str]:
     return []
 
 
-def _event_line(event: TeamEvent, roles: dict[str, str]) -> str:
+def event_line(event: TeamEvent, roles: dict[str, str]) -> str:
     who = (
         f"{short_id(event.session_id)} ({roles.get(event.session_id, '?')})"
         if event.session_id
@@ -702,7 +702,7 @@ def _render_delta(events: list[TeamEvent], roles: dict[str, str], *, truncated: 
     lines = [
         "<aisquare-team-delta>",
         f"{count} teammate update(s) since your last prompt:",
-        *(f"- {_event_line(event, roles)}" for event in events),
+        *(f"- {event_line(event, roles)}" for event in events),
     ]
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")

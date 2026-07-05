@@ -490,13 +490,46 @@ def hook_session_start(session_id: str, cwd: Path | None, source: str | None) ->
 
 
 def hook_prompt_heartbeat(session_id: str, cwd: Path | None) -> str:
-    """Heartbeat on prompt submit; returns the teammate delta to inject (or '')."""
+    """Heartbeat on prompt submit; returns the teammate delta to inject (or '').
+
+    A session unknown to the bus but prompting inside an *active* project
+    joins right here (the bus may have been activated after it started) and
+    receives the full board + protocol instead of a delta.
+    """
     if not teambus.team_enabled():
         return ""
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
-            return ""
+            project = _project(store, cwd)
+            role = teambus.env_role()
+            if not store.team_active(project.id) and role is None:
+                return ""
+            now = _now()
+            session = store.upsert_session(
+                TeamSession(
+                    id=session_id,
+                    project_id=project.id,
+                    role=role or "unassigned",
+                    started_at=now,
+                    last_seen_at=now,
+                    cursor=store.latest_seq(project.id),
+                )
+            )
+            _emit(
+                store,
+                project.id,
+                "join",
+                f"{session.role} session joined",
+                session_id=session.id,
+            )
+            return _render_board(
+                project,
+                store.team_sessions(project.id),
+                store.team_tasks(project.id),
+                store.recent_events(project.id, limit=_BOARD_EVENTS),
+                me=session,
+            )
         lease = _now() + timedelta(minutes=teambus.lease_minutes())
         store.renew_leases(session.id, lease)
         events = store.events_since(
@@ -619,9 +652,37 @@ def _render_board(
             f"working: `aisquare task claim <id> --as {short_id(me.id)}`; finish with",
             f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
             f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
+            *_role_cycle(me),
         ]
     lines.append("</aisquare-team>")
     return "\n".join(lines)
+
+
+def _role_cycle(me: TeamSession) -> list[str]:
+    """The standing work cycle for a role — injected so nobody has to paste it."""
+    sid = short_id(me.id)
+    if me.role == "planner":
+        return [
+            "Your standing cycle (planner): keep the board stocked — turn findings and",
+            'requests into `aisquare task add "<title>" --role coder|runner --detail "…"`',
+            "(re-emitting is safe). Record choices:",
+            f'`aisquare note "…" --kind decision --as {sid}`.',
+        ]
+    if me.role == "coder":
+        return [
+            f"Your standing cycle (coder): `aisquare task next --role coder --claim --as {sid}`;",
+            "if nothing is available, tell the user and stop. Otherwise do the work in the",
+            f'task\'s repo, then `aisquare task review <id> --note "<how to verify>" --as {sid}`',
+            "and pick up the next one.",
+        ]
+    if me.role == "runner":
+        return [
+            "Your standing cycle (runner): `aisquare task next --status review`; if nothing,",
+            "tell the user and stop. Otherwise verify the change end-to-end by actually",
+            f'running it, then `aisquare task done <id> --note "verified: …" --as {sid}` or',
+            f'`aisquare task reopen <id> --reason "<what failed + repro>" --as {sid}`. Repeat.',
+        ]
+    return []
 
 
 def _event_line(event: TeamEvent, roles: dict[str, str]) -> str:

@@ -430,3 +430,31 @@ def test_team_hub_pins_every_directory_to_one_bus(
         team_project(repo_a).id == team_project(repo_b).id == team_project(hub).id
     )
     assert team_project(repo_a).root == hub.resolve()
+
+
+def test_running_session_auto_joins_on_prompt_after_activation(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    # Session starts BEFORE the bus is active: silent, unregistered.
+    assert _start(runner, CODER, work_dir).stdout.strip() == ""
+    # The bus activates afterwards (e.g. someone ran `team on`).
+    runner.invoke(app, ["team", "on"])
+    # Its next prompt registers it and delivers the full board + protocol.
+    first = _prompt(runner, CODER, work_dir)
+    assert "<aisquare-team>" in first.stdout
+    assert "You are team session bbbb2222" in first.stdout
+    # After that, it behaves like any registered session (quiet when quiet).
+    assert _prompt(runner, CODER, work_dir).stdout.strip() == ""
+
+
+def test_role_cycles_are_injected_automatically(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    coder = _start(runner, CODER, work_dir)
+    assert "Your standing cycle (coder)" in coder.stdout
+    assert "task next --role coder --claim --as bbbb2222" in coder.stdout
+    monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    run = _start(runner, PLANNER, work_dir)
+    assert "Your standing cycle (runner)" in run.stdout
+    assert "task next --status review" in run.stdout

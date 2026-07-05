@@ -84,6 +84,30 @@ clobbering your other settings; remove them with `agents disconnect`):
 - **`UserPromptSubmit` → `aisquare hook user-prompt-submit`** — captures how you
   prompt, so Claude can replay your intent (`aisquare log`).
 
+### Team bus (experimental — `feat/team-bus`)
+
+Run 3–4 Claude Code sessions on one problem (a planner, coders, a runner) and
+they coordinate through a shared working-memory bus in the same SQLite store:
+a live session board, an **idempotent** shared task list with **atomic claims**
+(lease-based, so a dead session's claim self-releases), and an append-only
+event pipe delivered to each session as a compact delta on its next prompt.
+
+```sh
+AISQUARE_ROLE=planner claude     # launching with a role activates the bus here
+aisquare team on                 # …or activate a project explicitly
+aisquare board                   # sessions + tasks + recent updates
+aisquare task add "wire auth"    # idempotent — safe for a planner to re-emit
+aisquare task claim tsk_… --as a3f2   # exactly one session wins
+aisquare note "JWT it is" --kind decision --as a3f2
+```
+
+Sessions register automatically via the hooks (`session_id` from the hook
+payload); each prompt heartbeats the session and injects only what teammates
+did since your last prompt (nothing when it's been quiet). Worktrees resolve
+to their principal repository, so a coder in a worktree shares the planner's
+bus. Env knobs: `AISQUARE_TEAM=0` (off), `AISQUARE_ROLE`,
+`AISQUARE_TEAM_DELTA=0` (mute deltas), `AISQUARE_TEAM_LEASE_MIN` (default 120).
+
 The **codebase snapshot** (`project onboard`, or `init`) mirrors the server-side
 [Repomix](https://github.com/yamadashy/repomix) packing for sync-consistency: a
 full pack (`repomix --style xml`), a skeleton (`--compress`), and a per-file
@@ -127,6 +151,10 @@ aisquare
 │               export [file] [--format md|json] · promote <id>
 ├── project     info · list · switch <name> · link <repo> · onboard [path] [--refresh]
 │   (alias workspace)
+├── team        on · status · focus <text> · role <name> · log
+├── task        add <title> · list · show <id> · claim <id> · done <id> · block <id>
+│               drop <id> · release <id>     (all with [--as SESSION])
+├── note <text> [--task T] [--to ROLE] [--kind K] · board
 ├── capture     status · pause · resume · start · stop
 ├── config      list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ├── policy      list

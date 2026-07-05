@@ -18,6 +18,8 @@ from aisquare.cli import (
     policy,
     project,
     root,
+    task,
+    team,
 )
 from aisquare.cli import config as config_cli
 from aisquare.core.state import RuntimeState, set_state
@@ -93,6 +95,10 @@ app.add_typer(capture.app, name="capture")
 app.add_typer(config_cli.app, name="config")
 app.add_typer(policy.app, name="policy")
 app.add_typer(enforce.app, name="enforce")
+app.add_typer(team.app, name="team")
+app.add_typer(task.app, name="task")
+app.command("note")(team.note)
+app.command("board")(team.board)
 app.add_typer(hook.app, name="hook", hidden=True)
 
 

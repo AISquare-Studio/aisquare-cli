@@ -18,7 +18,11 @@ from aisquare.core import paths
 from aisquare.models import AgentInfo
 
 # Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
-_HOOKS = (("SessionStart", "session-start"), ("UserPromptSubmit", "user-prompt-submit"))
+_HOOKS = (
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("SessionEnd", "session-end"),
+)
 
 
 @dataclass(frozen=True)
@@ -74,12 +78,11 @@ def _is_aisquare_group(group: Any) -> bool:
     hooks = group.get("hooks")
     if not isinstance(hooks, list):
         return False
+    known = tuple(f"hook {subcommand}" for _, subcommand in _HOOKS)
     return any(
         isinstance(item, dict)
         and isinstance(item.get("command"), str)
-        and (
-            "hook session-start" in item["command"] or "hook user-prompt-submit" in item["command"]
-        )
+        and any(marker in item["command"] for marker in known)
         for item in hooks
     )
 

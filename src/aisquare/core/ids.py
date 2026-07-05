@@ -23,6 +23,8 @@ _RAND_BYTES = 10  # 80 bits of randomness → 16 base32 chars
 ENTRY_PREFIX = "ctx_"
 PROJECT_PREFIX = "prj_"
 PROMPT_PREFIX = "prm_"
+TASK_PREFIX = "tsk_"
+EVENT_PREFIX = "evt_"
 
 
 def _encode(value: int, length: int) -> str:
@@ -49,3 +51,13 @@ def new_entry_id() -> str:
 def new_prompt_id() -> str:
     """Return a fresh, time-sortable captured-prompt id (``prm_…``)."""
     return _new_id(PROMPT_PREFIX)
+
+
+def new_task_id() -> str:
+    """Return a fresh, time-sortable team-task id (``tsk_…``)."""
+    return _new_id(TASK_PREFIX)
+
+
+def new_event_id() -> str:
+    """Return a fresh, time-sortable team-event id (``evt_…``)."""
+    return _new_id(EVENT_PREFIX)

@@ -485,14 +485,8 @@ def hook_session_start(session_id: str, cwd: Path | None, source: str | None) ->
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
-        if known is None and source not in ("compact", "resume"):
-            _emit(
-                store,
-                project.id,
-                "join",
-                f"{session.role} session joined",
-                session_id=session.id,
-            )
+        # Presence is board state, not feed traffic: /clear cycles, resumes and
+        # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return _render_board(
             project,
             store.team_sessions(project.id),
@@ -528,13 +522,6 @@ def hook_prompt_heartbeat(session_id: str, cwd: Path | None) -> str:
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                 )
-            )
-            _emit(
-                store,
-                project.id,
-                "join",
-                f"{session.role} session joined",
-                session_id=session.id,
             )
             return _render_board(
                 project,
@@ -605,13 +592,8 @@ def hook_session_end(session_id: str, cwd: Path | None) -> None:
         if session is None:
             return
         released = store.end_session(session.id)
-        _emit(
-            store,
-            session.project_id,
-            "end",
-            f"{session.role} session ended",
-            session_id=session.id,
-        )
+        # No "left" feed event — the board's session panel is the presence
+        # view. Released claims below are real work signals and do go out.
         for task in released:
             _emit(
                 store,

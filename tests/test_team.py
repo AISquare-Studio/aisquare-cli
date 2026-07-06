@@ -270,10 +270,11 @@ def test_team_log_renders_envelopes_in_json(
     monkeypatch.setenv("AISQUARE_ROLE", "planner")
     _start(runner, PLANNER, work_dir)
     monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["note", "kickoff", "--kind", "decision", "--as", "aaaa1111"])
     result = runner.invoke(app, ["--json", "team", "log"])
     envelopes = json.loads(result.stdout)
-    assert envelopes and envelopes[0]["kind"] == "team.join"
-    assert envelopes[0]["scope"] == "project"
+    assert envelopes and envelopes[-1]["kind"] == "team.decision"
+    assert envelopes[-1]["scope"] == "project"
 
 
 # --- identity -------------------------------------------------------------------
@@ -509,3 +510,22 @@ def test_session_state_tracks_working_waiting_attention(
     assert any(e.kind == "attention" and "permission needed" in e.text for e in events)
     _prompt(runner, CODER, work_dir)  # answering brings it back to working
     assert state() == "working"
+
+
+def test_session_churn_stays_off_the_feed(runner: CliRunner, work_dir: Path) -> None:
+    # /clear cycles and ephemeral `claude -p` children produce start/end
+    # churn; presence belongs to the board panel, never the feed.
+    runner.invoke(app, ["team", "on"])
+    for index in range(3):
+        sid = f"eeee{index}{index}{index}{index}-0000-0000-0000-000000000000"
+        _start(runner, sid, work_dir)
+        runner.invoke(
+            app,
+            ["hook", "session-end"],
+            input=json.dumps({"cwd": str(work_dir), "session_id": sid}),
+        )
+    from aisquare.services import team as team_service
+
+    kinds = {event.kind for event in team_service.log_events(work_dir)}
+    assert "join" not in kinds and "end" not in kinds
+    assert kinds == {"activate"}

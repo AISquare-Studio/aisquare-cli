@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 from dataclasses import dataclass
@@ -88,11 +89,11 @@ def _aisquare_command() -> str:
     """
     argv0 = Path(sys.argv[0])
     if argv0.name in ("aisquare", "asq") and argv0.exists():
-        return str(argv0.resolve())
+        return shlex.quote(str(argv0.resolve()))
     found = shutil.which("aisquare")
     if found:
-        return found
-    return f"{sys.executable} -m aisquare"
+        return shlex.quote(found)
+    return f"{shlex.quote(sys.executable)} -m aisquare"
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
@@ -108,21 +109,24 @@ def _read_settings(path: Path) -> dict[str, Any]:
 def _is_aisquare_hook_command(command: str) -> bool:
     """Whether ``command`` is one of aisquare's own hook invocations.
 
-    Deliberately strict: the command must *end* with `` hook <subcommand>``
+    Deliberately strict: the command must *end* with ``hook <subcommand>``
     AND the invoked program must be aisquare itself (an ``aisquare``/``asq``
     executable, or ``python -m aisquare``). A bare-substring match would
     classify unrelated user hooks like ``webhook stop`` or ``~/bin/my-hook
-    stop`` as ours and silently delete them on connect/disconnect.
+    stop`` as ours and silently delete them on connect/disconnect. Parsing
+    uses shlex so aisquare paths containing spaces (quoted at install time)
+    keep matching.
     """
-    tail = command.strip()
-    for _, subcommand in _HOOKS:
-        suffix = f" hook {subcommand}"
-        if tail.endswith(suffix):
-            invocation = tail[: -len(suffix)].strip()
-            program = Path(invocation.split()[0]).name if invocation.split() else ""
-            if program in ("aisquare", "asq") or invocation.endswith("-m aisquare"):
-                return True
-    return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if len(tokens) < 3 or tokens[-2] != "hook":
+        return False
+    if tokens[-1] not in {subcommand for _, subcommand in _HOOKS}:
+        return False
+    program = Path(tokens[0]).name
+    return program in ("aisquare", "asq") or tokens[-4:-2] == ["-m", "aisquare"]
 
 
 def _is_aisquare_group(group: Any) -> bool:
@@ -148,7 +152,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
-    command = _aisquare_command()
+    command = _aisquare_command()  # already shell-quoted where needed
     for event, subcommand in _HOOKS:
         groups = hooks.get(event)
         kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []

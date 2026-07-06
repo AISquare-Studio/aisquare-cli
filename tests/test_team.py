@@ -619,3 +619,87 @@ def test_concurrent_first_opens_migrate_safely(work_dir: Path) -> None:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         conn.close()
+
+
+def test_concurrent_notifications_emit_one_attention_event(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    import threading
+
+    from aisquare.services import team as team_service
+
+    barrier = threading.Barrier(4)
+
+    def notify() -> None:
+        barrier.wait()
+        team_service.hook_notification(CODER, work_dir, "permission needed")
+
+    threads = [threading.Thread(target=notify) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    kinds = [e.kind for e in team_service.log_events(work_dir)]
+    assert kinds.count("attention") == 1  # atomic transition: one event, not four
+
+
+def test_task_id_tail_resolves(runner: CliRunner, work_dir: Path) -> None:
+    runner.invoke(app, ["team", "on"])
+    runner.invoke(app, ["task", "add", "find me by tail"])
+    task_id = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    shown = json.loads(runner.invoke(app, ["--json", "task", "show", task_id[-8:]]).stdout)
+    assert shown["id"] == task_id  # boards display the tail; the tail must resolve
+
+
+def test_needs_error_blames_the_needs_ref(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    result = runner.invoke(
+        app, ["--json", "task", "add", "x", "--needs", "tsk_nope", "--as", "bbbb2222"]
+    )
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ref"] == "tsk_nope"  # not the valid --as session
+
+
+def test_old_format_mcp_sessions_are_retired_by_v8(work_dir: Path) -> None:
+    import sqlite3 as raw
+
+    from aisquare.core import paths
+    from aisquare.core.store import _MIGRATIONS, SCHEMA_VERSION, open_store
+
+    paths.ensure_home()
+    conn = raw.connect(str(paths.db_path()))
+    for script in _MIGRATIONS[:7]:
+        conn.executescript(script)
+    conn.execute("PRAGMA user_version = 7")
+    now = "2026-07-06T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO team_session (id, project_id, started_at, last_seen_at) "
+        "VALUES ('mcp:remote', 'prj_x', ?, ?), ('mcp:remote:abc123', 'prj_x', ?, ?)",
+        (now, now, now, now),
+    )
+    conn.commit()
+    conn.close()
+    store = open_store()
+    try:
+        # get_session prefix-matches, so check exact ids at the SQL level.
+        exact = raw.connect(str(paths.db_path()))
+        rows = {
+            row[0]
+            for row in exact.execute("SELECT id FROM team_session WHERE id LIKE 'mcp:%'").fetchall()
+        }
+        exact.close()
+        assert rows == {"mcp:remote:abc123"}  # phantom retired, new format kept
+    finally:
+        store.close()
+    check = raw.connect(str(paths.db_path()))
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        check.close()

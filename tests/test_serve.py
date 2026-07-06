@@ -149,3 +149,32 @@ def test_virtual_session_is_scoped_per_project(
 def test_task_next_rejects_bad_status(work_dir: Path) -> None:
     team_service.activate()
     assert mcp_server.task_next(status="reviwe").startswith("error: status must be")
+
+
+def test_guard_reports_ambiguous_refs_cleanly(work_dir: Path) -> None:
+    team_service.activate()
+    mcp_server.task_add("alpha")
+    mcp_server.task_add("beta")
+    result = mcp_server.task_update("tsk_", "done")
+    assert result.startswith("error:") and "ambiguous" in result
+
+
+def test_stdio_serve_refuses_markerless_directories(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bare = tmp_path / "no-markers-here"
+    bare.mkdir()
+    monkeypatch.chdir(bare)
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    result = runner.invoke(app, ["--json", "serve", "--stdio"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] == "not_a_project"
+
+
+def test_serve_respects_master_switch(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+    result = runner.invoke(app, ["--json", "serve", "--stdio"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] in ("team_disabled", "not_a_project")

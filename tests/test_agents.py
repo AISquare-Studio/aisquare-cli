@@ -249,3 +249,29 @@ def test_partial_install_is_reported_not_healthy(runner: CliRunner, fake_home: P
     assert agent_core.hooks_installed("claude-code") is False  # partial ≠ installed
     runner.invoke(app, ["agents", "connect", "claude-code"])  # the documented fix
     assert agent_core.hooks_installed("claude-code") is True
+
+
+def test_spaced_install_path_roundtrips_through_hooks(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from aisquare.core import agents as agent_core
+
+    spaced = tmp_path / "some dir" / "aisquare"
+    spaced.parent.mkdir(parents=True)
+    spaced.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(spaced)])
+    assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
+    assert agent_core.hooks_installed("claude-code") is True  # quoted path matches
+    # Reconnect must not duplicate groups (the matcher recognizes its own).
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert len(settings["hooks"]["SessionStart"]) == 1
+    assert runner.invoke(app, ["agents", "disconnect", "claude-code"]).exit_code == 0
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert "hooks" not in settings  # removable too
+
+
+def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:
+    result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    assert result.exit_code == 0
+    assert "no aisquare hooks found" in result.output

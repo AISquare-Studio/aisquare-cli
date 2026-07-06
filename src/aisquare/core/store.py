@@ -194,8 +194,24 @@ _SCHEMA_V7 = """
 ALTER TABLE team_session ADD COLUMN transcript_path TEXT;
 """
 
+# v8: retire pre-release single-colon MCP virtual sessions (mcp:<client>);
+# the per-project format (mcp:<client>:<proj>) replaced them and the old rows
+# would otherwise linger as phantom live sessions on the first project served.
+_SCHEMA_V8 = """
+DELETE FROM team_session WHERE id LIKE 'mcp:%' AND substr(id, 5) NOT LIKE '%:%';
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7)
+_MIGRATIONS = (
+    _SCHEMA_V1,
+    _SCHEMA_V2,
+    _SCHEMA_V3,
+    _SCHEMA_V4,
+    _SCHEMA_V5,
+    _SCHEMA_V6,
+    _SCHEMA_V7,
+    _SCHEMA_V8,
+)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
@@ -261,6 +277,7 @@ class ContextStore(Protocol):
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
+    def mark_attention(self, session_id: str) -> bool: ...
     def end_session(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
     def get_task(self, ref: str) -> TeamTask | None: ...
@@ -283,6 +300,7 @@ class ContextStore(Protocol):
     ) -> list[TeamEvent]: ...
     def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
+    def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def close(self) -> None: ...
 
 
@@ -713,6 +731,25 @@ class SqliteStore:
         )
         self._conn.commit()
 
+    def mark_attention(self, session_id: str) -> bool:
+        """Flip a session into the attention state, atomically.
+
+        Returns True only for the transition — concurrent Notification hooks
+        (parallel permission prompts happen) must produce exactly one feed
+        event, so the read and the write are one conditional UPDATE.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_session SET state = 'attention', last_seen_at = ? "
+            "WHERE id = ? AND state <> 'attention'",
+            (_now_iso(), session_id),
+        )
+        self._conn.execute(
+            "UPDATE team_session SET last_seen_at = ? WHERE id = ?",
+            (_now_iso(), session_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def end_session(self, session_id: str) -> list[TeamTask]:
         """Mark the session ended and release its claims; returns released tasks."""
         released = [
@@ -779,6 +816,16 @@ class SqliteStore:
         matches = self._conn.execute(
             f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
             (_glob_prefix(ref),),
+        ).fetchall()
+        if len(matches) > 1:
+            raise AmbiguousIdError(ref)
+        if matches:
+            return _row_to_task(matches[0])
+        # Boards display the id *tail* (the unique random part), so tails
+        # must resolve too: fall back to a suffix match.
+        matches = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
+            (f"*{_glob_prefix(ref)[:-1]}",),
         ).fetchall()
         if len(matches) > 1:
             raise AmbiguousIdError(ref)
@@ -981,6 +1028,23 @@ class SqliteStore:
             (project_id,),
         ).fetchone()
         return int(row[0])
+
+    def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
+        """The latest done/dropped event per task — archive attribution.
+
+        Queried from the store (not a bounded feed cache) so a task closed
+        thousands of events ago still knows who closed it and when.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE seq IN ("
+            "  SELECT MAX(seq) FROM team_event "
+            "  WHERE project_id = ? AND task_id IS NOT NULL "
+            "  AND kind IN ('task_done', 'task_dropped') GROUP BY task_id"
+            ")",
+            (project_id,),
+        ).fetchall()
+        events = [_row_to_event(row) for row in rows]
+        return {event.task_id: event for event in events if event.task_id is not None}
 
     def close(self) -> None:
         self._conn.close()

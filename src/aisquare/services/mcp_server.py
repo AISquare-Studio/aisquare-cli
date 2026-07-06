@@ -102,8 +102,11 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         return "error: the team bus is disabled on the host (AISQUARE_TEAM=0)"
     except ClaimLostError as exc:
         return f"error: {exc}"
-    except KeyError as exc:
-        return f"error: nothing matches {exc}"
+    except LookupError as exc:
+        # KeyError (unknown ref) and AmbiguousIdError (short prefix) both
+        # subclass LookupError; remote callers get the error contract, not
+        # a raw tool exception.
+        return f"error: {exc.args[0] if isinstance(exc, KeyError) and exc.args else exc}"
     except ValueError as exc:
         return f"error: {exc}"
 
@@ -147,8 +150,11 @@ def task_next(role: str | None = None, status: str = "todo", claim: bool = False
     """Fetch (optionally claim) the next available task for a role."""
 
     def run() -> str:
-        if status not in ("todo", "doing", "review", "blocked", "done", "dropped"):
-            return "error: status must be todo, doing, review, blocked, done or dropped"
+        from typing import get_args
+
+        statuses = get_args(TaskStatus)
+        if status not in statuses:
+            return f"error: status must be one of: {', '.join(statuses)}"
         me = _ensure_virtual_session()
         narrowed: TaskStatus = status  # type: ignore[assignment]
         task = team_service.next_task(role=role, status=narrowed, claim=claim, session_ref=me)
@@ -296,7 +302,7 @@ class _BearerGuard:
         if scope.get("type") == "http":
             headers = {key: value for key, value in scope.get("headers") or []}
             supplied = headers.get(b"authorization", b"").decode("latin-1")
-            if supplied != self._token:
+            if not secrets.compare_digest(supplied, self._token):
                 from starlette.responses import JSONResponse
 
                 response = JSONResponse({"error": "unauthorized"}, status_code=401)

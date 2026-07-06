@@ -63,15 +63,18 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     return AgentConnection(name=name, hooks_installed=hooks_installed, imported=added)
 
 
-def disconnect(name: str, config_dir: Path | None = None) -> None:
+def disconnect(name: str, config_dir: Path | None = None) -> bool:
     """Remove aisquare's hooks and mark the agent disconnected (ingested context kept).
 
-    Raises ``KeyError`` for an unknown agent.
+    Returns whether any hooks were actually removed, so the CLI can say
+    "nothing to remove here" instead of a false ✓ when the hooks live in a
+    different config dir. Raises ``KeyError`` for an unknown agent.
     """
     if agent_core.detect(name, config_dir) is None:
         raise KeyError(name)
-    agent_core.remove_hooks(name, config_dir)
+    removed = agent_core.remove_hooks(name, config_dir)
     agent_core.set_connected(name, False)
+    return removed
 
 
 def _split_sections(text: str) -> list[str]:

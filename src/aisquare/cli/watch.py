@@ -192,7 +192,7 @@ def _transcript_command(path: Path, line: int) -> list[str]:
 
     editor = os.environ.get("EDITOR", "").strip()
     program = Path(editor.split()[0]).name if editor else ""
-    if program in ("vi", "vim", "nvim", "nano", "micro", "hx"):
+    if program in ("vi", "vim", "nvim", "nano", "micro", "hx", "emacs", "emacsclient"):
         return [*editor.split(), f"+{line}", str(path)]
     if program == "code":
         return [*editor.split(), "-g", f"{path}:{line}"]
@@ -218,13 +218,23 @@ def _load_saved_theme() -> str | None:
 
 
 def _save_theme(name: str) -> None:
-    """Autosave the board theme (every change persists — no save step)."""
+    """Autosave the board theme (every change persists — no save step).
+
+    Tolerates a corrupt state.json (same anticipation as the loader) and
+    writes atomically (tmp + rename) so a mid-write crash can never leave
+    the shared state file truncated.
+    """
     try:
         paths.ensure_home()
         path = paths.state_path()
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            data = {}
         data[_THEME_KEY] = name
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        temp.replace(path)
     except OSError:
         return
 
@@ -316,9 +326,11 @@ def _build_app_class(interval: float) -> Any:
             self._roles: dict[str, str] = {}
             self._statuses: dict[str, str] = {}
             self._last_seq = 0
+            self._terminal_by_task: dict[str, TeamEvent] = {}
             self._prev_states: dict[str, str] = {}
             self._autoscroll = True
             self._select_mode = False
+            self._refreshing = False
             self._show_done = False
             self._sessions: dict[str, TeamSession] = {}
             self._all_tasks: list[TeamTask] = []
@@ -370,6 +382,16 @@ def _build_app_class(interval: float) -> Any:
                 _save_theme(theme_name)
 
         def on_mount(self) -> None:
+            import os
+
+            # Resolve the project once and pin it for this process: every
+            # later tick short-circuits the git-subprocess resolution.
+            try:
+                from aisquare.core.teambus import team_project
+
+                os.environ.setdefault("AISQUARE_TEAM_HUB", str(team_project(None).root))
+            except Exception:
+                pass
             saved = _load_saved_theme()
             if saved and saved in self.available_themes:
                 self.theme = saved
@@ -387,7 +409,15 @@ def _build_app_class(interval: float) -> Any:
 
         def _refresh_data(self) -> None:
             try:
-                project, sessions, tasks, events = team_service.board_data(events=400)
+                project, sessions, tasks, events = team_service.board_data(
+                    events=400 if self._last_seq == 0 else 200,
+                    since_seq=self._last_seq or None,
+                )
+            except team_service.TeamDisabledError:
+                self.query_one("#sessions", Static).update(
+                    Text("team bus disabled (AISQUARE_TEAM=0)", style="bold red")
+                )
+                return
             except Exception:  # bus briefly unavailable — keep the last frame
                 return
             self.title = f"aisquare board — {project.root.name or project.id}"
@@ -411,24 +441,35 @@ def _build_app_class(interval: float) -> Any:
             self._prev_states = states
 
         def _done_event_for(self, task_id: str) -> TeamEvent | None:
-            """The latest task_done event for a task (who finished it, when)."""
-            found: TeamEvent | None = None
-            for event in self._events_by_id.values():
-                if (
-                    event.task_id == task_id
-                    and event.kind == "task_done"
-                    and (found is None or event.seq > found.seq)
-                ):
-                    found = event
-            return found
+            """The latest done/dropped event for a task (who closed it, when).
+
+            Resolved from the store, not the bounded feed cache — a task
+            closed thousands of events ago still knows who closed it.
+            """
+            if task_id in self._terminal_by_task:
+                return self._terminal_by_task[task_id]
+            try:
+                self._terminal_by_task = team_service.terminal_attribution()
+            except Exception:
+                return None
+            return self._terminal_by_task.get(task_id)
 
         def _refresh_tasks(self, tasks: list[TeamTask]) -> None:
+            self._refreshing = True
+            try:
+                self._refresh_tasks_inner(tasks)
+            finally:
+                self._refreshing = False
+
+        def _refresh_tasks_inner(self, tasks: list[TeamTask]) -> None:
             table = self.query_one("#tasks", DataTable)
             selected = self._cursor_task_id(table)
             table.clear()
             self._tasks_by_id = {}
             if self._show_done:
                 closed = [t for t in tasks if t.status in ("done", "dropped")]
+                if len(closed) != len(self._terminal_by_task):
+                    self._terminal_by_task = {}  # stale — refetch on demand
                 closed.sort(key=lambda t: t.updated_at, reverse=True)
                 table.border_title = f"done archive ({len(closed)}) — d for open tasks"
                 for task in closed:
@@ -581,17 +622,22 @@ def _build_app_class(interval: float) -> Any:
             self.query_one("#detailwrap", VerticalScroll).scroll_home(animate=False)
 
         def on_data_table_row_highlighted(self, event: Any) -> None:
+            if self._refreshing:
+                return  # programmatic rebuild, not a user selection
             key = event.row_key.value if event.row_key else None
             task = self._tasks_by_id.get(str(key))
             if task is None:
                 return
             detail = _task_detail(task, self._statuses)
-            done_event = self._done_event_for(task.id) if task.status == "done" else None
+            done_event = (
+                self._done_event_for(task.id) if task.status in ("done", "dropped") else None
+            )
             if done_event is not None:
                 who = team_service.short_id(done_event.session_id or "cli")
+                verb = "done" if done_event.kind == "task_done" else "dropped"
                 detail.append(
-                    f"\ndone by {who} at {local_time(done_event.created_at):%H:%M:%S}",
-                    style="green",
+                    f"\n{verb} by {who} at {local_time(done_event.created_at):%H:%M:%S}",
+                    style="green" if verb == "done" else "yellow",
                 )
                 self._detail_moment = (done_event.session_id, done_event.created_at)
             else:

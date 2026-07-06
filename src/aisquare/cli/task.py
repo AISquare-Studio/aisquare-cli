@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated
+from typing import Annotated, get_args
 
 import typer
 from rich.table import Table
@@ -16,6 +16,9 @@ from aisquare.core.store import AmbiguousIdError
 from aisquare.models import TaskStatus, TeamTask
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, TeamDisabledError
+
+_STATUSES: tuple[str, ...] = get_args(TaskStatus)
+_STATUS_HELP = ", ".join(_STATUSES)
 
 app = typer.Typer(
     help="Shared team tasks: add is idempotent, claim is atomic.", no_args_is_help=True
@@ -55,7 +58,11 @@ def add(
         )
     except ValueError as exc:
         fail(str(exc), error="invalid_needs")
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except KeyError as exc:
+        # The session resolves first in add_task, so a KeyError here names a
+        # --needs ref — blame it, not the (valid) --as session.
+        _fail_team(exc, str(exc.args[0]) if exc.args else None)
+    except (TeamDisabledError, AmbiguousIdError) as exc:
         _fail_team(exc, as_session)
     if get_state().json_output:
         typer.echo(json.dumps({"created": created, **task.model_dump(mode="json")}))
@@ -68,19 +75,12 @@ def add(
 def list_(
     status: Annotated[
         str | None,
-        typer.Option("--status", help="Filter: todo, doing, blocked, done or dropped."),
+        typer.Option("--status", help=f"Filter: {_STATUS_HELP}."),
     ] = None,
 ) -> None:
     """List the team's shared tasks."""
-    if status is not None and status not in (
-        "todo",
-        "doing",
-        "review",
-        "blocked",
-        "done",
-        "dropped",
-    ):
-        raise typer.BadParameter("status must be todo, doing, review, blocked, done or dropped")
+    if status is not None and status not in _STATUSES:
+        raise typer.BadParameter(f"status must be one of: {_STATUS_HELP}")
     narrowed: TaskStatus | None = status  # type: ignore[assignment]
     try:
         tasks = team_service.list_tasks(narrowed)
@@ -166,8 +166,8 @@ def next_(
     as_session: SessionRef = None,
 ) -> None:
     """Pick up the next available task — built for looped sessions."""
-    if status not in ("todo", "doing", "review", "blocked", "done", "dropped"):
-        raise typer.BadParameter("status must be todo, doing, review, blocked, done or dropped")
+    if status not in _STATUSES:
+        raise typer.BadParameter(f"status must be one of: {_STATUS_HELP}")
     narrowed: TaskStatus = status  # type: ignore[assignment]
     try:
         task = team_service.next_task(

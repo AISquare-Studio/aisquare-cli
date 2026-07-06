@@ -49,6 +49,14 @@ def embeddings_enabled() -> bool:
     return os.environ.get("AISQUARE_BRAIN_EMBED", "").strip() == "1"
 
 
+def embed_model() -> str:
+    """The embedding model a new brain is sized for when embeddings are on."""
+    return (
+        os.environ.get("AISQUARE_BRAIN_EMBED_MODEL", "").strip()
+        or "openai:text-embedding-3-large"
+    )
+
+
 def gbrain_version() -> str | None:
     """The installed gbrain version, or ``None`` when unavailable."""
     binary = shutil.which("gbrain")
@@ -132,11 +140,22 @@ def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int)
 
 
 def _ensure(project_id: str) -> bool:
-    """Initialise the brain if needed (idempotent; caller holds the lock)."""
+    """Initialise the brain if needed (idempotent; caller holds the lock).
+
+    The embedding schema is a create-time ("file-plane") decision in gbrain:
+    a ``--no-embedding`` brain cannot embed later even with a key present.
+    So the ``AISQUARE_BRAIN_EMBED=1`` knob must be honoured at init — size
+    the schema for :func:`embed_model` when it is set, ``--no-embedding``
+    (network-call-free) otherwise.
+    """
     if brain_ready(project_id):
         return True
     home = brain_home(project_id)
-    _run(home, ["init", "--pglite", "--no-embedding"], timeout=_INIT_TIMEOUT_S)
+    if embeddings_enabled():
+        argv = ["init", "--pglite", "--embedding-model", embed_model()]
+    else:
+        argv = ["init", "--pglite", "--no-embedding"]
+    _run(home, argv, timeout=_INIT_TIMEOUT_S)
     return brain_ready(project_id)
 
 

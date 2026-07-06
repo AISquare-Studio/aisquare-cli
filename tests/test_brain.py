@@ -163,3 +163,30 @@ def test_recall_uses_hybrid_query_when_embeddings_enabled(
     monkeypatch.setenv("AISQUARE_BRAIN_EMBED", "1")
     hybrid = runner.invoke(app, ["recall", "auth"])
     assert "hybrid results for: auth" in hybrid.stdout  # embeddings on: gbrain query
+
+
+def test_ensure_sizes_schema_for_embeddings_when_enabled(
+    monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(brain, "brain_ready", lambda _pid: False)
+    def _capture(home: object, argv: list[str], **kw: object) -> str:
+        calls.append(argv)
+        return ""
+
+    monkeypatch.setattr(brain, "_run", _capture)
+
+    monkeypatch.setenv("AISQUARE_BRAIN_EMBED", "1")
+    brain._ensure("prj_x")
+    assert "--embedding-model" in calls[-1]
+    assert "openai:text-embedding-3-large" in calls[-1]  # default model
+    assert "--no-embedding" not in calls[-1]
+
+    monkeypatch.setenv("AISQUARE_BRAIN_EMBED_MODEL", "openai:text-embedding-3-small")
+    brain._ensure("prj_x")
+    assert "openai:text-embedding-3-small" in calls[-1]  # override honoured
+
+    monkeypatch.delenv("AISQUARE_BRAIN_EMBED")
+    monkeypatch.delenv("AISQUARE_BRAIN_EMBED_MODEL")
+    brain._ensure("prj_x")
+    assert "--no-embedding" in calls[-1]  # network-call-free default

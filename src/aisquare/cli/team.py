@@ -123,10 +123,17 @@ def log(
 
 
 @app.command("distill")
-def distill() -> None:
-    """Push undistilled decisions/results/outcomes into the project brain now."""
+def distill(
+    rescan: Annotated[
+        bool,
+        typer.Option(
+            "--all", help="Backfill: re-distill the whole pipe from the beginning (idempotent)."
+        ),
+    ] = False,
+) -> None:
+    """Push undistilled notes/decisions/outcomes into the project brain now."""
     try:
-        count = team_service.distill_now()
+        count = team_service.distill_now(rescan=rescan)
     except TeamDisabledError as exc:
         _fail_team(exc)
     if get_state().json_output:

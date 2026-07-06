@@ -21,7 +21,20 @@ from aisquare.core import brain, teambus
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamEvent
 
-DISTILL_KINDS = frozenset({"decision", "result", "task_done", "task_blocked", "task_reopened"})
+# Deliberate team communication and task outcomes distill; presence churn,
+# focus flickers and permission notices do not.
+DISTILL_KINDS = frozenset(
+    {
+        "note",
+        "decision",
+        "question",
+        "result",
+        "task_review",
+        "task_done",
+        "task_blocked",
+        "task_reopened",
+    }
+)
 _BATCH = 100
 
 
@@ -35,9 +48,11 @@ def pending(store: ContextStore, project_id: str) -> int:
     return max(0, store.latest_seq(project_id) - watermark)
 
 
-def drain(cwd: Path | None = None) -> int | None:
+def drain(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
     """Distill everything new on this project's pipe; returns pages written.
 
+    ``rescan`` restarts from the beginning of the pipe (a backfill — safe,
+    since page slugs are event ids, so re-distilling updates in place).
     Returns ``None`` when another drain already holds the brain lock (the
     work is happening, just not here). Skips silently (returning 0) when the
     brain layer is disabled, gbrain is missing, or the brain cannot
@@ -51,6 +66,8 @@ def drain(cwd: Path | None = None) -> int | None:
         if not won:
             return None
         with store_session() as store:
+            if rescan:
+                store.set_meta(_watermark_key(project.id), "0")
             roles = {s.id: s.role for s in store.team_sessions(project.id)}
             while True:
                 watermark = int(store.get_meta(_watermark_key(project.id)) or 0)

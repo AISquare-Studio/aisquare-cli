@@ -439,19 +439,29 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
         return released
 
 
-def distill_now(cwd: Path | None = None) -> int | None:
+def distill_now(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
     """Drain the pipe into the project brain synchronously (``team distill``).
 
     ``None`` means another drain (usually a detached one) is already running.
     """
     _require_enabled()
-    return distill_service.drain(cwd)
+    return distill_service.drain(cwd, rescan=rescan)
 
 
 def recall(query: str, cwd: Path | None = None) -> str | None:
-    """Search the project brain (``recall``); ``None`` = brain unavailable."""
+    """Search the project brain (``recall``); ``None`` = brain unavailable.
+
+    Recall is human-invoked and latency-tolerant, so any undistilled backlog
+    is drained first — a first recall on a busy pipe initialises the brain
+    and takes a few seconds; subsequent ones are instant.
+    """
     _require_enabled()
-    return brain.recall(teambus.team_project(cwd).id, query)
+    project = teambus.team_project(cwd)
+    with store_session() as store:
+        backlog = distill_service.pending(store, project.id)
+    if backlog:
+        distill_service.drain(cwd)  # a busy (None) drain still means progress
+    return brain.recall(project.id, query)
 
 
 # --- hook integration ---------------------------------------------------------

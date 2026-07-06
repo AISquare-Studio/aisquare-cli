@@ -64,15 +64,17 @@ def _seed_events(runner: CliRunner) -> None:
     runner.invoke(app, ["task", "done", task_id, "--note", "all tests green"])
 
 
-def test_drain_distills_only_durable_kinds(
+def test_drain_distills_communication_not_churn(
     runner: CliRunner, fake_gbrain: Path, work_dir: Path
 ) -> None:
     _seed_events(runner)
-    assert distill.drain(work_dir) == 2  # the decision + task_done; chatter skipped
+    assert distill.drain(work_dir) == 3  # decision + note + task_done; task_added/activate skipped
     project = team_project(work_dir)
     puts = (brain.brain_home(project.id) / "puts.log").read_text().splitlines()
     assert any(slug.startswith("team/decision/") for slug in puts)
+    assert any(slug.startswith("team/note/") for slug in puts)
     assert any(slug.startswith("team/task-done/") for slug in puts)
+    assert not any("task-added" in slug for slug in puts)
     page = next(
         path
         for path in (brain.brain_home(project.id) / "pages").iterdir()
@@ -89,7 +91,7 @@ def test_drain_holds_watermark_on_put_failure(
     monkeypatch.setenv("FAKE_GBRAIN_FAIL", "1")
     assert distill.drain(work_dir) == 0  # first durable event failed; nothing written
     monkeypatch.delenv("FAKE_GBRAIN_FAIL")
-    assert distill.drain(work_dir) == 2  # retried from the held watermark
+    assert distill.drain(work_dir) == 3  # retried from the held watermark
 
 
 def test_drain_without_gbrain_is_a_quiet_noop(
@@ -100,24 +102,37 @@ def test_drain_without_gbrain_is_a_quiet_noop(
     assert distill.drain(work_dir) == 0
 
 
-def test_recall_roundtrip_and_unavailable_paths(
+def test_recall_auto_drains_the_backlog(
     runner: CliRunner, fake_gbrain: Path, work_dir: Path
 ) -> None:
     _seed_events(runner)
-    # Before any distill the brain is uninitialised → unavailable, exit 1.
-    missing = runner.invoke(app, ["--json", "recall", "auth"])
-    assert missing.exit_code == 1
-    assert json.loads(missing.stdout)["error"] == "brain_unavailable"
-    runner.invoke(app, ["team", "distill"])
+    # No manual distill: recall drains the backlog itself, initialising the
+    # brain on the way, then searches.
     found = runner.invoke(app, ["recall", "auth"])
-    assert found.exit_code == 0
+    assert found.exit_code == 0, found.output
     assert "results for: auth" in found.stdout
+    assert distill.drain(work_dir) == 0  # recall left nothing undistilled
+
+
+def test_distill_all_backfills_past_the_watermark(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path
+) -> None:
+    _seed_events(runner)
+    assert distill.drain(work_dir) == 3
+    # Simulate the pre-broadening era: watermark advanced, pages missing.
+    project = team_project(work_dir)
+    puts_log = brain.brain_home(project.id) / "puts.log"
+    puts_log.write_text("")
+    assert distill.drain(work_dir) == 0  # normal drain sees nothing new
+    result = runner.invoke(app, ["--json", "team", "distill", "--all"])
+    assert json.loads(result.stdout) == {"distilled": 3}  # rescan rebuilt them
+    assert len(puts_log.read_text().splitlines()) == 3
 
 
 def test_distill_cli_reports_count(runner: CliRunner, fake_gbrain: Path, work_dir: Path) -> None:
     _seed_events(runner)
     result = runner.invoke(app, ["--json", "team", "distill"])
-    assert json.loads(result.stdout) == {"distilled": 2}
+    assert json.loads(result.stdout) == {"distilled": 3}
 
 
 def test_brain_master_switch(

@@ -101,14 +101,14 @@ def test_theme_picker_stays_open_and_autosaves(
         app_cls = watch_mod._build_app_class(interval=60.0)
         async with app_cls().run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            await pilot.press("t")          # open the picker
+            await pilot.press("t")  # open the picker
             await pilot.pause()
-            await pilot.press("down")       # browsing applies instantly…
+            await pilot.press("down")  # browsing applies instantly…
             await pilot.press("down")
             await pilot.pause()
             still_open = type(pilot.app.screen).__name__ == "ThemePicker"
             applied = str(pilot.app.theme)
-            await pilot.press("escape")     # …until the explicit close
+            await pilot.press("escape")  # …until the explicit close
             await pilot.pause()
             closed = type(pilot.app.screen).__name__ != "ThemePicker"
             assert closed
@@ -187,21 +187,21 @@ def test_select_mode_freezes_feed_and_resumes_with_backlog(
             await pilot.pause()
             feed = pilot.app.query_one("#feed", OptionList)
             before = feed.option_count
-            await pilot.press("v")          # freeze into selectable text view
+            await pilot.press("v")  # freeze into selectable text view
             await pilot.pause()
             runner.invoke(app, ["note", "arrives while frozen"])
             pilot.app._refresh_data()
             await pilot.pause()
-            frozen = feed.option_count      # unchanged: select mode is stable
+            frozen = feed.option_count  # unchanged: select mode is stable
             select_visible = pilot.app.query_one("#feedtext").has_class("active")
-            await pilot.press("v")          # back to live: backlog applies
+            await pilot.press("v")  # back to live: backlog applies
             await pilot.pause()
             return before, frozen, feed.option_count, select_visible
 
     before, frozen, after, select_visible = asyncio.run(drive())
     assert select_visible
-    assert frozen == before        # nothing appended mid-selection
-    assert after == before + 1     # the frozen-period event landed on resume
+    assert frozen == before  # nothing appended mid-selection
+    assert after == before + 1  # the frozen-period event landed on resume
 
 
 def test_autoscroll_toggle(runner: CliRunner, work_dir: Path) -> None:

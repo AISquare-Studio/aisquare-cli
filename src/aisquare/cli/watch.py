@@ -94,9 +94,7 @@ def _event_detail(event: TeamEvent, roles: dict[str, str]) -> Text:
     text = Text()
     text.append(f"{event.kind}", style="bold")
     text.append(f" by {name}", style=style)
-    text.append(
-        f" at {local_time(event.created_at):%H:%M:%S} (seq {event.seq})\n", style="dim"
-    )
+    text.append(f" at {local_time(event.created_at):%H:%M:%S} (seq {event.seq})\n", style="dim")
     text.append(event.text)
     if event.task_id:
         text.append(f"\ntask: {event.task_id}", style="dim")
@@ -114,9 +112,7 @@ def _task_detail(task: TeamTask, statuses: dict[str, str]) -> Text:
     if task.claimed_by:
         text.append(f"\nclaimed by {team_service.short_id(task.claimed_by)}")
         if task.claim_expires_at:
-            text.append(
-                f" (lease until {local_time(task.claim_expires_at):%H:%M})", style="dim"
-            )
+            text.append(f" (lease until {local_time(task.claim_expires_at):%H:%M})", style="dim")
     if task.needs:
         waiting = set(unmet_needs(task, statuses))
         text.append("\nneeds: ")

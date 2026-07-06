@@ -249,6 +249,10 @@ def _build_app_class(interval: float) -> Any:
         #tasks { height: 1fr; border: round $primary; }
         #feedpane { width: 1fr; }
         #feed { height: 1fr; border: round $secondary; }
+        #feed.hidden { display: none; }
+        #feedtext { height: 1fr; border: round $success; display: none;
+                    padding: 0 1; }
+        #feedtext.active { display: block; }
         #detailwrap { height: 8; border: heavy $warning; padding: 0 1; }
         """
         BINDINGS: ClassVar = [
@@ -257,16 +261,22 @@ def _build_app_class(interval: float) -> Any:
             ("r", "refresh_now", "refresh"),
             ("t", "pick_theme", "themes"),
             ("s", "screenshot", "screenshot"),
+            ("a", "toggle_autoscroll", "autoscroll"),
+            ("v", "toggle_select", "select text"),
+            ("c", "copy_selection", "copy"),
         ]
 
         def __init__(self) -> None:
             super().__init__()
             self._events_by_id: dict[str, TeamEvent] = {}
+            self._feed_order: list[str] = []
             self._tasks_by_id: dict[str, TeamTask] = {}
             self._roles: dict[str, str] = {}
             self._statuses: dict[str, str] = {}
             self._last_seq = 0
             self._prev_states: dict[str, str] = {}
+            self._autoscroll = True
+            self._select_mode = False
             self.detail_text = ""
 
         def compose(self) -> ComposeResult:
@@ -276,6 +286,8 @@ def _build_app_class(interval: float) -> Any:
                     yield DataTable[Text](id="tasks", cursor_type="row")
                 with Vertical(id="feedpane"):
                     yield OptionList(id="feed")
+                    with VerticalScroll(id="feedtext"):
+                        yield Static(id="feedstatic")
             with VerticalScroll(id="detailwrap"):
                 yield Static(id="detail")
             yield Footer()
@@ -379,19 +391,68 @@ def _build_app_class(interval: float) -> Any:
                 return None
 
         def _append_events(self, events: list[TeamEvent]) -> None:
+            if self._select_mode:
+                return  # frozen while selecting; the backlog lands on exit
             feed = self.query_one("#feed", OptionList)
             fresh = [e for e in events if e.seq > self._last_seq]
             if not fresh:
                 return
-            at_end = feed.option_count == 0 or (
-                feed.highlighted is None or feed.highlighted >= feed.option_count - 1
-            )
             for event in fresh:
                 self._events_by_id[event.id] = event
+                self._feed_order.append(event.id)
                 feed.add_option(Option(feed_line(event, self._roles), id=event.id))
                 self._last_seq = max(self._last_seq, event.seq)
-            if at_end:
+            if self._autoscroll:
                 feed.scroll_end(animate=False)
+
+        def _feed_title(self) -> str:
+            title = "live feed"
+            if self._select_mode:
+                return f"{title} — SELECT MODE (drag to select, c copies, v resumes)"
+            if not self._autoscroll:
+                title += " — autoscroll off"
+            return title
+
+        def action_toggle_autoscroll(self) -> None:
+            self._autoscroll = not self._autoscroll
+            feed = self.query_one("#feed", OptionList)
+            feed.border_title = self._feed_title()
+            if self._autoscroll:
+                feed.scroll_end(animate=False)
+
+        def action_toggle_select(self) -> None:
+            """Swap the live feed for a frozen, mouse-selectable text view."""
+            self._select_mode = not self._select_mode
+            feed = self.query_one("#feed", OptionList)
+            wrap = self.query_one("#feedtext", VerticalScroll)
+            if self._select_mode:
+                snapshot = Text()
+                for event_id in self._feed_order:
+                    event = self._events_by_id[event_id]
+                    snapshot.append(feed_line(event, self._roles))
+                    snapshot.append("\n")
+                self.query_one("#feedstatic", Static).update(snapshot)
+                feed.add_class("hidden")
+                wrap.add_class("active")
+                wrap.border_title = self._feed_title()
+                wrap.scroll_end(animate=False)
+            else:
+                feed.remove_class("hidden")
+                wrap.remove_class("active")
+                feed.border_title = self._feed_title()
+                self._refresh_data()  # apply the backlog accumulated while frozen
+                if self._autoscroll:
+                    feed.scroll_end(animate=False)
+
+        def action_copy_selection(self) -> None:
+            """Copy the mouse-selected text (select mode) to the clipboard."""
+            getter = getattr(self.screen, "get_selected_text", None)
+            selected = getter() if callable(getter) else None
+            if not selected:
+                self.notify("nothing selected — v enters select mode, then drag", timeout=4)
+                return
+            self.copy_to_clipboard(selected)
+            self.notify(f"copied {len(selected)} chars", timeout=3)
 
         def _show_detail(self, content: Text) -> None:
             self.detail_text = content.plain  # exposed for tests

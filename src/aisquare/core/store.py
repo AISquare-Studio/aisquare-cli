@@ -17,6 +17,7 @@ removal can propagate when sync lands. Every read filters tombstones out.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sqlite3
@@ -990,11 +991,30 @@ def _glob_prefix(ref: str) -> str:
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
-    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    for index in range(version, len(_MIGRATIONS)):
-        connection.executescript(_MIGRATIONS[index])
-        connection.execute(f"PRAGMA user_version = {index + 1}")
-    connection.commit()
+    """Bring the schema to the current version, safely under concurrency.
+
+    Hooks race: several sessions can open (and try to migrate) the store in
+    the same instant. Each migration runs as ONE ``BEGIN IMMEDIATE``
+    transaction that also bumps ``user_version`` — so a rebuild like v4 can
+    never be observed half-done, and the write lock serialises racers. A
+    loser whose script then fails re-reads the version: if another process
+    advanced it, that's victory by other means; otherwise the error is real.
+    """
+    while True:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version >= len(_MIGRATIONS):
+            return
+        script = _MIGRATIONS[version]
+        try:
+            connection.executescript(
+                f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version + 1};\nCOMMIT;"
+            )
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current <= version:
+                raise  # a genuine migration failure, not a lost race
 
 
 def open_store() -> ContextStore:

@@ -566,14 +566,16 @@ def hook_prompt_heartbeat(
             )
         lease = _now() + timedelta(minutes=teambus.lease_minutes())
         store.renew_leases(session.id, lease)
-        events = store.events_since(
+        raw = store.events_since(
             session.project_id,
             session.cursor,
             exclude_session=session.id,
-            limit=_DELTA_LIMIT + 1,
+            limit=_DELTA_LIMIT * 3 + 1,
         )
+        # Attention notices are for the human board, not teammate context.
+        events = [event for event in raw if event.kind != "attention"]
         if not events or not teambus.delta_enabled():
-            cursor = events[-1].seq if events else None
+            cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
             return ""
         truncated = len(events) > _DELTA_LIMIT
@@ -600,21 +602,28 @@ def hook_stop(session_id: str, cwd: Path | None) -> None:
 
 
 def hook_notification(session_id: str, cwd: Path | None, message: str | None) -> None:
-    """The session needs the user (permission request / idle notice)."""
+    """The session needs the user (permission request / idle notice).
+
+    The feed event is emitted only on the transition INTO attention —
+    Claude re-notifies while parked, and a per-notice event floods the feed
+    with lines nobody can act on twice.
+    """
     if not teambus.team_enabled():
         return
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
             return
+        already = session.state == "attention"
         store.touch_session(session.id, state="attention")
-        _emit(
-            store,
-            session.project_id,
-            "attention",
-            message or "needs your attention",
-            session_id=session.id,
-        )
+        if not already:
+            _emit(
+                store,
+                session.project_id,
+                "attention",
+                message or "needs your attention",
+                session_id=session.id,
+            )
 
 
 def hook_session_end(session_id: str, cwd: Path | None) -> None:

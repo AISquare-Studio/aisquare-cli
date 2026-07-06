@@ -564,3 +564,58 @@ def test_cross_project_needs_is_rejected(
     runner.invoke(app, ["team", "on"])
     result = runner.invoke(app, ["task", "add", "dependent", "--needs", foreign])
     assert result.exit_code == 1, result.output  # rejected loudly, not starved silently
+
+
+def test_attention_events_dedupe_and_stay_out_of_deltas(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    notif = json.dumps({"cwd": str(work_dir), "session_id": CODER, "message": "waiting"})
+    for _ in range(4):  # Claude re-notifies while parked
+        runner.invoke(app, ["hook", "notification"], input=notif)
+    from aisquare.services import team as team_service
+
+    kinds = [e.kind for e in team_service.log_events(work_dir)]
+    assert kinds.count("attention") == 1  # transition-only, not per notice
+    runner.invoke(app, ["note", "real work item", "--as", "bbbb2222"])
+    delta = _prompt(runner, PLANNER, work_dir)
+    assert "real work item" in delta.stdout
+    assert "attention" not in delta.stdout  # human-board signal, not agent context
+
+
+def test_concurrent_first_opens_migrate_safely(work_dir: Path) -> None:
+    import threading
+
+    from aisquare.core.store import SCHEMA_VERSION, store_session
+
+    errors: list[Exception] = []
+    barrier = threading.Barrier(6)
+
+    def opener() -> None:
+        barrier.wait()
+        try:
+            with store_session() as store:
+                store.entries("user")
+        except Exception as exc:  # pragma: no cover - the assertion is below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=opener) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    import sqlite3 as raw
+
+    from aisquare.core import paths
+
+    conn = raw.connect(str(paths.db_path()))
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        conn.close()

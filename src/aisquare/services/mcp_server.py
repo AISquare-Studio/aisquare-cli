@@ -147,6 +147,8 @@ def task_next(role: str | None = None, status: str = "todo", claim: bool = False
     """Fetch (optionally claim) the next available task for a role."""
 
     def run() -> str:
+        if status not in ("todo", "doing", "review", "blocked", "done", "dropped"):
+            return "error: status must be todo, doing, review, blocked, done or dropped"
         me = _ensure_virtual_session()
         narrowed: TaskStatus = status  # type: ignore[assignment]
         task = team_service.next_task(role=role, status=narrowed, claim=claim, session_ref=me)

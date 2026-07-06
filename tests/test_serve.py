@@ -144,3 +144,8 @@ def test_virtual_session_is_scoped_per_project(
         for session_id, repo_name in zip(ids, ("repo-a", "repo-b"), strict=True):
             session = store.get_session(session_id)
             assert session is not None, repo_name
+
+
+def test_task_next_rejects_bad_status(work_dir: Path) -> None:
+    team_service.activate()
+    assert mcp_server.task_next(status="reviwe").startswith("error: status must be")

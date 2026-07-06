@@ -133,9 +133,7 @@ def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: P
     alt = fake_home / ".claude4"
     alt.mkdir()
     (alt / "CLAUDE.md").write_text("# alt rules\n", encoding="utf-8")
-    result = runner.invoke(
-        app, ["agents", "connect", "claude-code", "--config-dir", str(alt)]
-    )
+    result = runner.invoke(app, ["agents", "connect", "claude-code", "--config-dir", str(alt)])
     assert result.exit_code == 0, result.output
     settings = json.loads((alt / "settings.json").read_text(encoding="utf-8"))
     assert set(settings["hooks"]) == {"SessionStart", "UserPromptSubmit", "SessionEnd"}

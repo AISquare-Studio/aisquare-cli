@@ -19,7 +19,7 @@ from pathlib import Path
 
 from aisquare.core import brain, teambus
 from aisquare.core.ids import new_event_id, new_task_id
-from aisquare.core.store import ContextStore, store_session
+from aisquare.core.store import ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
 from aisquare.services import distill as distill_service
 
@@ -203,14 +203,26 @@ def add_task(
     key: str | None = None,
     detail: str | None = None,
     role: str | None = None,
+    needs: list[str] | None = None,
     session_ref: str | None = None,
     cwd: Path | None = None,
 ) -> tuple[TeamTask, bool]:
-    """Add a shared task; idempotent on its key (re-adding returns the original)."""
+    """Add a shared task; idempotent on its key (re-adding returns the original).
+
+    ``needs`` are task refs (prefixes fine) this task depends on; ``task
+    next`` will not hand it out until they are resolved.
+    """
     _require_enabled()
     with store_session() as store:
         project = _project(store, cwd)
         session = _resolve_session(store, session_ref)
+        resolved_needs: list[str] = []
+        for ref in needs or []:
+            needed = store.get_task(ref)
+            if needed is None:
+                raise KeyError(ref)
+            if needed.id not in resolved_needs:
+                resolved_needs.append(needed.id)
         now = _now()
         task, created = store.upsert_task(
             TeamTask(
@@ -220,6 +232,7 @@ def add_task(
                 title=title,
                 detail=detail,
                 role=role,
+                needs=resolved_needs,
                 created_by=session.id if session else None,
                 created_at=now,
                 updated_at=now,
@@ -635,9 +648,12 @@ def _render_board(
             if any(t.status == status for t in tasks)
         )
         lines.append(f"tasks ({counts}):")
+        statuses = {t.id: t.status for t in tasks}
         for task in open_tasks[:_BOARD_TASKS]:
             claim = f" @{short_id(task.claimed_by)}" if task.claimed_by else ""
-            lines.append(f"  - {task.id} [{task.status}{claim}] {task.title}")
+            waiting = unmet_needs(task, statuses)
+            waits = " ⧗ waits on " + ", ".join(need[-8:] for need in waiting) if waiting else ""
+            lines.append(f"  - {task.id} [{task.status}{claim}] {task.title}{waits}")
         if len(open_tasks) > _BOARD_TASKS:
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
     if events:

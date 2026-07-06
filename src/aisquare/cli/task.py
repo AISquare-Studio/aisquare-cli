@@ -42,12 +42,16 @@ def add(
     role: Annotated[
         str | None, typer.Option("--role", help="Suggested owner role (advisory).")
     ] = None,
+    needs: Annotated[
+        list[str] | None,
+        typer.Option("--needs", help="Task this one depends on (id prefix; repeat for several)."),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
     """Add a shared task. Re-adding the same task is safe — you get the original."""
     try:
         task, created = team_service.add_task(
-            title, key=key, detail=detail, role=role, session_ref=as_session
+            title, key=key, detail=detail, role=role, needs=needs, session_ref=as_session
         )
     except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
         _fail_team(exc, as_session)
@@ -119,6 +123,8 @@ def show(ref: TaskRef) -> None:
     grid.add_row("id", task.id)
     grid.add_row("key", task.key)
     grid.add_row("status", task.status)
+    if task.needs:
+        grid.add_row("needs", ", ".join(task.needs))
     if task.role:
         grid.add_row("role", task.role)
     if task.claimed_by:

@@ -426,9 +426,7 @@ def test_team_hub_pins_every_directory_to_one_bus(
     for directory in (hub, repo_a, repo_b):
         directory.mkdir()
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
-    assert (
-        team_project(repo_a).id == team_project(repo_b).id == team_project(hub).id
-    )
+    assert team_project(repo_a).id == team_project(repo_b).id == team_project(hub).id
     assert team_project(repo_a).root == hub.resolve()
 
 
@@ -463,7 +461,7 @@ def test_role_cycles_are_injected_automatically(
 def test_watch_frame_adapts_events_to_terminal_height(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from aisquare.cli.team import _board_frame
+    from aisquare.cli.watch import board_frame as _board_frame
 
     monkeypatch.setenv("AISQUARE_ROLE", "planner")
     _start(runner, PLANNER, work_dir)

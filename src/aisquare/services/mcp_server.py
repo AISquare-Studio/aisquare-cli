@@ -104,12 +104,21 @@ def team_board() -> str:
     return _guard(run)
 
 
-def task_add(title: str, role: str | None = None, detail: str | None = None) -> str:
-    """Add a shared task (idempotent: re-adding the same title returns the original)."""
+def task_add(
+    title: str, role: str | None = None, detail: str | None = None, needs: str | None = None
+) -> str:
+    """Add a shared task (idempotent: re-adding the same title returns the original).
+
+    ``needs``: comma-separated task ids this task depends on — it stays
+    unavailable to `task_next` until they are done.
+    """
 
     def run() -> str:
         me = _ensure_virtual_session()
-        task, created = team_service.add_task(title, detail=detail, role=role, session_ref=me)
+        needed = [ref.strip() for ref in (needs or "").split(",") if ref.strip()]
+        task, created = team_service.add_task(
+            title, detail=detail, role=role, needs=needed or None, session_ref=me
+        )
         state = "created" if created else "already existed (idempotent)"
         return f"{state}: {task.id} [{task.status}] {task.title}"
 

@@ -32,11 +32,15 @@ dependencies = [
 serve = [
   "mcp>=1.10",
 ]
+tui = [
+  "textual>=1.0",
+]
 dev = [
   "pytest>=9.1.1",
   "mypy>=1.10",
   "ruff>=0.5",
   "mcp>=1.10",
+  "textual>=1.0",
 ]
 
 [project.scripts]

@@ -168,6 +168,8 @@ class TeamTask(BaseModel):
     status: TaskStatus = "todo"
     role: str | None = None
     """Suggested owner role (planner/coder/runner/...), advisory only."""
+    needs: list[str] = Field(default_factory=list)
+    """Task ids this one depends on; ``task next`` only hands out ready tasks."""
     claimed_by: str | None = None
     claim_expires_at: datetime | None = None
     """Claim lease; an expired lease makes the task claimable again."""

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -172,15 +172,21 @@ CREATE TABLE team_meta (
 );
 """
 
+# v5: task dependencies — a JSON array of task ids; a todo task is "ready"
+# (and eligible for `task next`) only when everything it needs is resolved.
+_SCHEMA_V5 = """
+ALTER TABLE team_task ADD COLUMN needs TEXT NOT NULL DEFAULT '[]';
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4)
+_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 _SESSION_COLUMNS = "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor"
 _TASK_COLUMNS = (
-    "id, project_id, key, title, detail, status, role, "
+    "id, project_id, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
@@ -322,6 +328,7 @@ def _row_to_task(row: sqlite3.Row) -> TeamTask:
         detail=row["detail"],
         status=row["status"],
         role=row["role"],
+        needs=json.loads(row["needs"]),
         claimed_by=row["claimed_by"],
         claim_expires_at=_maybe_dt(row["claim_expires_at"]),
         created_by=row["created_by"],
@@ -342,6 +349,15 @@ def _row_to_event(row: sqlite3.Row) -> TeamEvent:
         to_role=row["to_role"],
         created_at=datetime.fromisoformat(row["created_at"]),
     )
+
+
+def unmet_needs(task: TeamTask, statuses: Mapping[str, str]) -> list[str]:
+    """The dependencies of ``task`` that are not resolved yet.
+
+    A need is satisfied once its task is ``done`` or ``dropped``; anything
+    else (including an unknown id) keeps the dependent task waiting.
+    """
+    return [need for need in task.needs if statuses.get(need) not in ("done", "dropped")]
 
 
 def _fts_match(query: str) -> str:
@@ -696,7 +712,7 @@ class SqliteStore:
         """
         cursor = self._conn.execute(
             f"INSERT INTO team_task ({_TASK_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (project_id, key) DO NOTHING",
             (
                 task.id,
@@ -706,6 +722,7 @@ class SqliteStore:
                 task.detail,
                 task.status,
                 task.role,
+                json.dumps(task.needs),
                 task.claimed_by,
                 task.claim_expires_at.isoformat() if task.claim_expires_at else None,
                 task.created_by,
@@ -804,22 +821,37 @@ class SqliteStore:
     def next_task(
         self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
     ) -> TeamTask | None:
-        """The oldest task in ``status`` a session of ``role`` could pick up.
+        """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
 
         Tasks without a role hint are available to every role; tasks with one
-        only match sessions of that role (or an unfiltered query).
+        only match sessions of that role (or an unfiltered query). A ``todo``
+        task is ready only when every task it needs is resolved — so loopers
+        never receive work whose prerequisites are still in flight.
         """
         clauses = ["project_id = ?", "status = ?"]
         params: list[str] = [project_id, status]
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
-        row = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} "
-            "ORDER BY id LIMIT 1",
+        rows = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} ORDER BY id",
             params,
-        ).fetchone()
-        return _row_to_task(row) if row is not None else None
+        ).fetchall()
+        if not rows:
+            return None
+        statuses = self.task_statuses(project_id)
+        for row in rows:
+            task = _row_to_task(row)
+            if status != "todo" or not unmet_needs(task, statuses):
+                return task
+        return None
+
+    def task_statuses(self, project_id: str) -> dict[str, str]:
+        """Every task's status, for dependency-readiness checks and rendering."""
+        rows = self._conn.execute(
+            "SELECT id, status FROM team_task WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        return {row["id"]: row["status"] for row in rows}
 
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM team_meta WHERE key = ?", (key,)).fetchone()

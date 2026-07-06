@@ -156,6 +156,8 @@ class TeamSession(BaseModel):
     """Highest team-event ``seq`` already shown to this session (delta position)."""
     state: str = "working"
     """Live activity: working (mid-turn), waiting (wants input) or attention."""
+    transcript_path: str | None = None
+    """The session's Claude Code transcript (JSONL), from hook payloads."""
 
 
 class TeamTask(BaseModel):

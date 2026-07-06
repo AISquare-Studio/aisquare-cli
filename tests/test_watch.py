@@ -221,3 +221,66 @@ def test_autoscroll_toggle(runner: CliRunner, work_dir: Path) -> None:
 
     initial, toggled = asyncio.run(drive())
     assert initial is True and toggled is False
+
+
+def test_done_archive_view_shows_who_and_when(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual.widgets import DataTable
+
+    from aisquare.cli import watch as watch_mod
+
+    monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    runner.invoke(
+        app,
+        ["hook", "session-start"],
+        input=json.dumps(
+            {
+                "cwd": str(work_dir),
+                "session_id": "ffff9999-0000-0000-0000-000000000000",
+                "source": "startup",
+                "transcript_path": str(work_dir / "transcript.jsonl"),
+            }
+        ),
+    )
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "finished thing"])
+    task_id = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    runner.invoke(app, ["task", "done", task_id, "--as", "ffff9999"])
+
+    async def drive() -> tuple[int, int, str]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = pilot.app.query_one("#tasks", DataTable)
+            open_rows = table.row_count
+            await pilot.press("d")  # flip to the done archive
+            await pilot.pause()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            return open_rows, table.row_count, pilot.app.detail_text
+
+    open_rows, done_rows, detail = asyncio.run(drive())
+    assert open_rows == 0 and done_rows == 1
+    assert "finished thing" in detail
+    assert "done by ffff9999" in detail  # who + when from the task_done event
+
+
+def test_transcript_line_near_finds_the_moment(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from aisquare.cli.watch import transcript_line_near
+
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps({"type": "x", "timestamp": f"2026-07-06T10:0{i}:00Z"}) for i in range(6)
+        ),
+        encoding="utf-8",
+    )
+    at = datetime(2026, 7, 6, 10, 3, 30, tzinfo=UTC)
+    assert transcript_line_near(transcript, at) == 5  # first line at/after 10:03:30
+    late = datetime(2026, 7, 6, 23, 0, 0, tzinfo=UTC)
+    assert transcript_line_near(transcript, late) == 6  # past the end → last line
+    assert transcript_line_near(tmp_path / "missing.jsonl", at) == 1

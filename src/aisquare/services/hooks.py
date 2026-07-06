@@ -22,7 +22,11 @@ from aisquare.services import team as team_service
 
 
 def session_start_context(
-    cwd: Path | None, *, session_id: str | None = None, source: str | None = None
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    source: str | None = None,
+    transcript_path: str | None = None,
 ) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
     with store_session() as store:
@@ -31,17 +35,27 @@ def session_start_context(
         has_prompts = bool(store.recent_prompts(project.id, limit=1))
     directive = _directive(project.id, has_prompts=has_prompts)
     block = build_block(entries, project) if entries else ""
-    team_block = team_service.hook_session_start(session_id, cwd, source) if session_id else ""
+    team_block = (
+        team_service.hook_session_start(session_id, cwd, source, transcript_path=transcript_path)
+        if session_id
+        else ""
+    )
     return "\n\n".join(part for part in (directive, block, team_block) if part)
 
 
-def prompt_submitted(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
+def prompt_submitted(
+    prompt: str | None,
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    transcript_path: str | None = None,
+) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
     if prompt is not None and prompt.strip():
         capture_prompt(prompt, cwd)
     if session_id is None:
         return ""
-    return team_service.hook_prompt_heartbeat(session_id, cwd)
+    return team_service.hook_prompt_heartbeat(session_id, cwd, transcript_path=transcript_path)
 
 
 def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:

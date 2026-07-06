@@ -185,14 +185,21 @@ _SCHEMA_V6 = """
 ALTER TABLE team_session ADD COLUMN state TEXT NOT NULL DEFAULT 'working';
 """
 
+# v7: where each session's Claude Code transcript lives (from hook payloads) —
+# lets the board jump from a task/event to the conversation that produced it.
+_SCHEMA_V7 = """
+ALTER TABLE team_session ADD COLUMN transcript_path TEXT;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6)
+_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 _SESSION_COLUMNS = (
-    "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state"
+    "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
+    "transcript_path"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -329,6 +336,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         ended_at=_maybe_dt(row["ended_at"]),
         cursor=row["cursor"],
         state=row["state"],
+        transcript_path=row["transcript_path"],
     )
 
 
@@ -613,10 +621,11 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
-            "state = 'working'",
+            "state = 'working', "
+            "transcript_path = COALESCE(excluded.transcript_path, transcript_path)",
             (
                 session.id,
                 session.project_id,
@@ -628,6 +637,7 @@ class SqliteStore:
                 session.ended_at.isoformat() if session.ended_at else None,
                 session.cursor,
                 session.state,
+                session.transcript_path,
             ),
         )
         self._conn.commit()

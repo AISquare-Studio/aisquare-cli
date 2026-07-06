@@ -481,7 +481,13 @@ def recall(query: str, cwd: Path | None = None) -> str | None:
 # --- hook integration ---------------------------------------------------------
 
 
-def hook_session_start(session_id: str, cwd: Path | None, source: str | None) -> str:
+def hook_session_start(
+    session_id: str,
+    cwd: Path | None,
+    source: str | None,
+    *,
+    transcript_path: str | None = None,
+) -> str:
     """Register this session on the bus and return the board injection.
 
     Silent (returns ``""``) unless the bus is enabled and this project has
@@ -505,6 +511,7 @@ def hook_session_start(session_id: str, cwd: Path | None, source: str | None) ->
                 started_at=now,
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
+                transcript_path=transcript_path,
             )
         )
         if role is not None and known is not None and known.role != role:
@@ -520,7 +527,9 @@ def hook_session_start(session_id: str, cwd: Path | None, source: str | None) ->
         )
 
 
-def hook_prompt_heartbeat(session_id: str, cwd: Path | None) -> str:
+def hook_prompt_heartbeat(
+    session_id: str, cwd: Path | None, *, transcript_path: str | None = None
+) -> str:
     """Heartbeat on prompt submit; returns the teammate delta to inject (or '').
 
     A session unknown to the bus but prompting inside an *active* project
@@ -545,6 +554,7 @@ def hook_prompt_heartbeat(session_id: str, cwd: Path | None) -> str:
                     started_at=now,
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
+                    transcript_path=transcript_path,
                 )
             )
             return _render_board(

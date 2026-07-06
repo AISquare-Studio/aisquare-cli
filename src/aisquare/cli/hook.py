@@ -52,6 +52,7 @@ def session_start() -> None:
             _cwd(payload),
             session_id=_str(payload, "session_id"),
             source=_str(payload, "source"),
+            transcript_path=_str(payload, "transcript_path"),
         )
     except Exception:  # never disrupt the agent
         return
@@ -69,6 +70,7 @@ def user_prompt_submit() -> None:
             prompt if isinstance(prompt, str) else None,
             _cwd(payload),
             session_id=_str(payload, "session_id"),
+            transcript_path=_str(payload, "transcript_path"),
         )
     except Exception:  # never disrupt the agent
         return

@@ -156,6 +156,50 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
     return text
 
 
+def transcript_line_near(path: Path, when: datetime) -> int:
+    """The 1-based line of a Claude Code transcript nearest ``when``.
+
+    Transcript JSONL lines carry ISO ``"timestamp"`` fields; returns the first
+    line at/after the moment (so opening there shows the surrounding turn),
+    or the last line when the moment is past the end. Never raises.
+    """
+    import re
+
+    pattern = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+    best = 1
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for number, line in enumerate(handle, start=1):
+                best = number
+                match = pattern.search(line)
+                if match is None:
+                    continue
+                try:
+                    stamp = datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if when.tzinfo is not None and stamp.tzinfo is not None and stamp >= when:
+                    return number
+    except OSError:
+        return 1
+    return best
+
+
+def _transcript_command(path: Path, line: int) -> list[str]:
+    """How to open a transcript at a line: $EDITOR when it takes +line, else less."""
+    import os
+    import shutil as _shutil
+
+    editor = os.environ.get("EDITOR", "").strip()
+    program = Path(editor.split()[0]).name if editor else ""
+    if program in ("vi", "vim", "nvim", "nano", "micro", "hx"):
+        return [*editor.split(), f"+{line}", str(path)]
+    if program == "code":
+        return [*editor.split(), "-g", f"{path}:{line}"]
+    pager = _shutil.which("less") or "more"
+    return [pager, f"+{line}", str(path)]
+
+
 # --- the interactive TUI --------------------------------------------------------
 
 _THEME_KEY = "board_theme"
@@ -260,6 +304,8 @@ def _build_app_class(interval: float) -> Any:
             ("a", "toggle_autoscroll", "autoscroll"),
             ("v", "toggle_select", "select text"),
             ("c", "copy_selection", "copy"),
+            ("d", "toggle_done", "done archive"),
+            ("o", "open_transcript", "transcript"),
         ]
 
         def __init__(self) -> None:
@@ -273,6 +319,10 @@ def _build_app_class(interval: float) -> Any:
             self._prev_states: dict[str, str] = {}
             self._autoscroll = True
             self._select_mode = False
+            self._show_done = False
+            self._sessions: dict[str, TeamSession] = {}
+            self._all_tasks: list[TeamTask] = []
+            self._detail_moment: tuple[str | None, Any] | None = None
             self.detail_text = ""
 
         def compose(self) -> ComposeResult:
@@ -342,7 +392,9 @@ def _build_app_class(interval: float) -> Any:
                 return
             self.title = f"aisquare board — {project.root.name or project.id}"
             self._roles = {s.id: s.role for s in sessions}
+            self._sessions = {s.id: s for s in sessions}
             self._statuses = {t.id: t.status for t in tasks}
+            self._all_tasks = tasks
             self.query_one("#sessions", Static).update(_session_lines(sessions))
             self._ring_on_attention(sessions)
             self._refresh_tasks(tasks)
@@ -358,25 +410,98 @@ def _build_app_class(interval: float) -> Any:
                     break
             self._prev_states = states
 
+        def _done_event_for(self, task_id: str) -> TeamEvent | None:
+            """The latest task_done event for a task (who finished it, when)."""
+            found: TeamEvent | None = None
+            for event in self._events_by_id.values():
+                if (
+                    event.task_id == task_id
+                    and event.kind == "task_done"
+                    and (found is None or event.seq > found.seq)
+                ):
+                    found = event
+            return found
+
         def _refresh_tasks(self, tasks: list[TeamTask]) -> None:
             table = self.query_one("#tasks", DataTable)
             selected = self._cursor_task_id(table)
             table.clear()
             self._tasks_by_id = {}
-            open_tasks = [t for t in tasks if t.status in ("todo", "doing", "review", "blocked")]
-            for task in open_tasks:
-                self._tasks_by_id[task.id] = task
-                marker = "⧗" if unmet_needs(task, self._statuses) else ""
-                who = team_service.short_id(task.claimed_by) if task.claimed_by else ""
-                table.add_row(
-                    Text(task.id[-8:], style="dim"),
-                    Text(f"{task.status}{marker}"),
-                    Text(who),
-                    Text(task.title, no_wrap=True, overflow="ellipsis"),
-                    key=task.id,
-                )
+            if self._show_done:
+                closed = [t for t in tasks if t.status in ("done", "dropped")]
+                closed.sort(key=lambda t: t.updated_at, reverse=True)
+                table.border_title = f"done archive ({len(closed)}) — d for open tasks"
+                for task in closed:
+                    self._tasks_by_id[task.id] = task
+                    event = self._done_event_for(task.id)
+                    who = (
+                        team_service.short_id(event.session_id)
+                        if event and event.session_id
+                        else ""
+                    )
+                    when = f"{local_time(task.updated_at):%H:%M}"
+                    table.add_row(
+                        Text(task.id[-8:], style="dim"),
+                        Text(f"{'✅' if task.status == 'done' else '🗑'} {when}"),
+                        Text(who),
+                        Text(task.title, no_wrap=True, overflow="ellipsis"),
+                        key=task.id,
+                    )
+            else:
+                open_tasks = [
+                    t for t in tasks if t.status in ("todo", "doing", "review", "blocked")
+                ]
+                table.border_title = "tasks — d for done archive"
+                for task in open_tasks:
+                    self._tasks_by_id[task.id] = task
+                    marker = "⧗" if unmet_needs(task, self._statuses) else ""
+                    who = team_service.short_id(task.claimed_by) if task.claimed_by else ""
+                    table.add_row(
+                        Text(task.id[-8:], style="dim"),
+                        Text(f"{task.status}{marker}"),
+                        Text(who),
+                        Text(task.title, no_wrap=True, overflow="ellipsis"),
+                        key=task.id,
+                    )
             if selected in self._tasks_by_id:
                 table.move_cursor(row=table.get_row_index(selected))
+
+        def action_toggle_done(self) -> None:
+            self._show_done = not self._show_done
+            self._refresh_tasks(self._all_tasks)
+
+        def _moment_transcript(self) -> tuple[Path, Any] | None:
+            """(transcript path, timestamp) for the selected item, if known."""
+            if self._detail_moment is None:
+                return None
+            session_id, when = self._detail_moment
+            session = self._sessions.get(session_id or "")
+            if session is None or not session.transcript_path:
+                return None
+            transcript = Path(session.transcript_path)
+            if not transcript.exists():
+                return None
+            return transcript, when
+
+        def action_open_transcript(self) -> None:
+            """Jump into the author session's transcript around the selected moment."""
+            import subprocess
+
+            target = self._moment_transcript()
+            if target is None:
+                self.notify(
+                    "no transcript for this item (session predates transcript capture, "
+                    "or it was a CLI/remote action)",
+                    timeout=5,
+                )
+                return
+            transcript, when = target
+            line = transcript_line_near(transcript, when)
+            try:
+                with self.suspend():
+                    subprocess.call(_transcript_command(transcript, line))
+            except Exception as exc:  # never crash the board over a viewer
+                self.notify(f"could not open transcript: {exc}", severity="error", timeout=6)
 
         def _cursor_task_id(self, table: DataTable[Text]) -> str | None:
             try:
@@ -458,14 +583,34 @@ def _build_app_class(interval: float) -> Any:
         def on_data_table_row_highlighted(self, event: Any) -> None:
             key = event.row_key.value if event.row_key else None
             task = self._tasks_by_id.get(str(key))
-            if task is not None:
-                self._show_detail(_task_detail(task, self._statuses))
+            if task is None:
+                return
+            detail = _task_detail(task, self._statuses)
+            done_event = self._done_event_for(task.id) if task.status == "done" else None
+            if done_event is not None:
+                who = team_service.short_id(done_event.session_id or "cli")
+                detail.append(
+                    f"\ndone by {who} at {local_time(done_event.created_at):%H:%M:%S}",
+                    style="green",
+                )
+                self._detail_moment = (done_event.session_id, done_event.created_at)
+            else:
+                self._detail_moment = (task.claimed_by, task.updated_at)
+            if self._moment_transcript() is not None:
+                detail.append("\npress o to open the transcript at this moment", style="dim")
+            self._show_detail(detail)
 
         def on_option_list_option_highlighted(self, event: Any) -> None:
             if event.option is not None and event.option.id is not None:
                 stored = self._events_by_id.get(event.option.id)
                 if stored is not None:
-                    self._show_detail(_event_detail(stored, self._roles))
+                    self._detail_moment = (stored.session_id, stored.created_at)
+                    detail = _event_detail(stored, self._roles)
+                    if self._moment_transcript() is not None:
+                        detail.append(
+                            "\npress o to open the transcript at this moment", style="dim"
+                        )
+                    self._show_detail(detail)
 
         def action_toggle_board(self) -> None:
             self.query_one("#board").toggle_class("collapsed")

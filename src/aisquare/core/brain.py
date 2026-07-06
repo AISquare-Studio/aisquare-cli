@@ -158,10 +158,16 @@ def drain_lock(project_id: str) -> Iterator[bool]:
 
 
 def recall(project_id: str, query: str) -> str | None:
-    """Search the project brain. ``None`` = unavailable (missing/busy/failed)."""
+    """Search the project brain. ``None`` = unavailable (missing/busy/failed).
+
+    With embeddings enabled the hybrid ``query`` (vector + keyword RRF) is
+    used — that is what the embeddings are FOR — falling back to keyword
+    ``search`` otherwise. ``--no-expand`` keeps recall LLM-free either way.
+    """
     if not brain_enabled() or not brain_ready(project_id):
         return None
+    argv = ["query", query, "--no-expand"] if embeddings_enabled() else ["search", query]
     with _lock(brain_home(project_id), wait_s=_RECALL_LOCK_WAIT_S) as won:
         if not won:
             return None
-        return _run(brain_home(project_id), ["search", query], timeout=_CALL_TIMEOUT_S)
+        return _run(brain_home(project_id), argv, timeout=_CALL_TIMEOUT_S)

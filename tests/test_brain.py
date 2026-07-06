@@ -30,6 +30,7 @@ case "$1" in
     echo "$2" >> "$GBRAIN_HOME/puts.log"
     ;;
   search) echo "results for: $2";;
+  query) echo "hybrid results for: $2";;
   *) exit 0;;
 esac
 """
@@ -150,3 +151,15 @@ def test_concurrent_drain_lock_is_exclusive(fake_gbrain: Path, work_dir: Path) -
         assert first
         with brain.drain_lock(project.id) as second:
             assert not second  # a running drain makes the next one skip
+
+
+def test_recall_uses_hybrid_query_when_embeddings_enabled(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_events(runner)
+    runner.invoke(app, ["team", "distill"])
+    keyword = runner.invoke(app, ["recall", "auth"])
+    assert "results for: auth" in keyword.stdout  # embeddings off: keyword search
+    monkeypatch.setenv("AISQUARE_BRAIN_EMBED", "1")
+    hybrid = runner.invoke(app, ["recall", "auth"])
+    assert "hybrid results for: auth" in hybrid.stdout  # embeddings on: gbrain query

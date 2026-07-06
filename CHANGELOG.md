@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Team bus** — shared working memory for parallel Claude Code sessions on one
+  problem (planner / coders / runner). Sessions register automatically through
+  hooks; each prompt delivers a compact delta of what teammates did. Works with
+  a single Claude account (sessions are per-terminal) or several installs.
+  - Shared tasks: idempotent `task add` (safe to re-emit), **atomic**
+    single-winner `claim`, `next --role --claim` for looped worker sessions,
+    the `review` → `done` / `reopen --reason` verification cycle, and
+    dependencies (`--needs`) so `next` only hands out ready work.
+  - `note` / `board` / `team` groups; role work-cycles auto-injected per
+    session (planner/coder/runner) — no standing prompts to paste.
+  - Live session states on the board — working / waiting for input /
+    needs-you — driven by the new `Stop` and `Notification` hooks.
+  - `board --watch`: an interactive TUI (`[tui]` extra) — task table +
+    bot-style live feed + click-for-detail bar, theme browser (`t`,
+    autosaved), local screenshots (`s`), feed autoscroll toggle (`a`) and a
+    select-text mode (`v`/`c`). Rich full-screen fallback without the extra.
+  - **Long-term memory (gbrain)**: durable events (decisions, results, task
+    outcomes, reopen feedback) distill into a per-project gbrain brain via a
+    detached, flock-guarded worker; `recall` searches it. Never on the hot
+    path; degrades silently when gbrain is absent.
+  - **`serve`** (`[serve]` extra): the bus as an MCP server (stdio or
+    bearer-token HTTP) so remote Claude clients — e.g. a browser-debugging
+    agent in the Claude desktop app — join as attributed virtual sessions.
+  - Multi-repo executions via `AISQUARE_TEAM_HUB`; worktree-safe project
+    identity (`git rev-parse --git-common-dir`); `agents connect --config-dir`
+    for parallel `CLAUDE_CONFIG_DIR` installs.
+  - Env knobs (no config gating): `AISQUARE_TEAM`, `AISQUARE_ROLE`,
+    `AISQUARE_TEAM_HUB`, `AISQUARE_TEAM_DELTA`, `AISQUARE_TEAM_LEASE_MIN`,
+    `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED`.
+
 ## [0.1.0] - 2026-06-29
 
 First release — a portable memory layer for coding agents.

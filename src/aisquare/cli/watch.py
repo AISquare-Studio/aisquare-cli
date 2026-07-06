@@ -122,6 +122,13 @@ def _task_detail(task: TeamTask, statuses: dict[str, str]) -> Text:
     return text
 
 
+_STATE_CHIP = {
+    "working": ("▶ working", "green"),
+    "waiting": ("⏸ waiting for input", "yellow"),
+    "attention": ("🔔 NEEDS YOU", "bold red"),
+}
+
+
 def _session_lines(sessions: list[TeamSession]) -> Text:
     text = Text(no_wrap=True, overflow="ellipsis")
     live = [s for s in sessions if s.ended_at is None]
@@ -134,7 +141,9 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         style = _ROLE_STYLE.get(session.role, "white")
         minutes = max(0, int((now - session.last_seen_at).total_seconds() // 60))
         text.append(f"{emoji} {session.role}·{team_service.short_id(session.id)}", style=style)
-        text.append(f"  {minutes}m ago", style="dim")
+        chip, chip_style = _STATE_CHIP.get(session.state, (session.state, "dim"))
+        text.append(f"  {chip}", style=chip_style)
+        text.append(f"  {minutes}m", style="dim")
         if minutes > 30:
             text.append("  (stale)", style="red dim")
         if session.focus:
@@ -179,6 +188,7 @@ def _build_app_class(interval: float) -> Any:
             self._roles: dict[str, str] = {}
             self._statuses: dict[str, str] = {}
             self._last_seq = 0
+            self._prev_states: dict[str, str] = {}
             self.detail_text = ""
 
         def compose(self) -> ComposeResult:
@@ -213,8 +223,19 @@ def _build_app_class(interval: float) -> Any:
             self._roles = {s.id: s.role for s in sessions}
             self._statuses = {t.id: t.status for t in tasks}
             self.query_one("#sessions", Static).update(_session_lines(sessions))
+            self._ring_on_attention(sessions)
             self._refresh_tasks(tasks)
             self._append_events(events)
+
+        def _ring_on_attention(self, sessions: list[TeamSession]) -> None:
+            """Terminal bell when a session newly flips to needing the user."""
+            states = {s.id: s.state for s in sessions if s.ended_at is None}
+            for session_id, state in states.items():
+                previous = self._prev_states.get(session_id)
+                if state == "attention" and previous not in (None, "attention"):
+                    self.bell()
+                    break
+            self._prev_states = states
 
         def _refresh_tasks(self, tasks: list[TeamTask]) -> None:
             table = self.query_one("#tasks", DataTable)

@@ -50,6 +50,20 @@ def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
         team_service.hook_session_end(session_id, cwd)
 
 
+def turn_stopped(cwd: Path | None, *, session_id: str | None = None) -> None:
+    """Mark the session as waiting for input (its turn just ended)."""
+    if session_id is not None:
+        team_service.hook_stop(session_id, cwd)
+
+
+def needs_attention(
+    cwd: Path | None, *, session_id: str | None = None, message: str | None = None
+) -> None:
+    """Mark the session as needing the user, and put it on the feed."""
+    if session_id is not None:
+        team_service.hook_notification(session_id, cwd, message)
+
+
 def capture_prompt(prompt: str, cwd: Path | None) -> None:
     """Record a submitted user prompt against the active project."""
     if not prompt.strip():

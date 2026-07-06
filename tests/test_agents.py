@@ -136,7 +136,13 @@ def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: P
     result = runner.invoke(app, ["agents", "connect", "claude-code", "--config-dir", str(alt)])
     assert result.exit_code == 0, result.output
     settings = json.loads((alt / "settings.json").read_text(encoding="utf-8"))
-    assert set(settings["hooks"]) == {"SessionStart", "UserPromptSubmit", "SessionEnd"}
+    assert set(settings["hooks"]) == {
+        "SessionStart",
+        "UserPromptSubmit",
+        "SessionEnd",
+        "Stop",
+        "Notification",
+    }
     assert not (fake_home / ".claude" / "settings.json").exists()
 
     disconnect = runner.invoke(

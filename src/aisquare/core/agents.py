@@ -24,6 +24,8 @@ _HOOKS = (
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "user-prompt-submit"),
     ("SessionEnd", "session-end"),
+    ("Stop", "stop"),
+    ("Notification", "notification"),
 )
 
 

@@ -478,3 +478,34 @@ def test_watch_frame_adapts_events_to_terminal_height(
 def test_watch_rejects_json_mode(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--json", "board", "--watch"])
     assert result.exit_code == 2
+
+
+def test_session_state_tracks_working_waiting_attention(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+
+    def state() -> str:
+        with store_session() as store:
+            session = store.get_session(CODER)
+            assert session is not None
+            return session.state
+
+    _prompt(runner, CODER, work_dir)
+    assert state() == "working"
+    payload = json.dumps({"cwd": str(work_dir), "session_id": CODER})
+    runner.invoke(app, ["hook", "stop"], input=payload)
+    assert state() == "waiting"
+    notif = json.dumps(
+        {"cwd": str(work_dir), "session_id": CODER, "message": "permission needed for Bash"}
+    )
+    runner.invoke(app, ["hook", "notification"], input=notif)
+    assert state() == "attention"
+    from aisquare.services import team as team_service
+
+    events = team_service.log_events(work_dir)
+    assert any(e.kind == "attention" and "permission needed" in e.text for e in events)
+    _prompt(runner, CODER, work_dir)  # answering brings it back to working
+    assert state() == "working"

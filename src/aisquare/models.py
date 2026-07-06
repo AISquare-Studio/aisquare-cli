@@ -154,6 +154,8 @@ class TeamSession(BaseModel):
     ended_at: datetime | None = None
     cursor: int = 0
     """Highest team-event ``seq`` already shown to this session (delta position)."""
+    state: str = "working"
+    """Live activity: working (mid-turn), waiting (wants input) or attention."""
 
 
 class TeamTask(BaseModel):

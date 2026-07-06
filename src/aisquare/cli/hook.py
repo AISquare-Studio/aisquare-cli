@@ -84,3 +84,27 @@ def session_end() -> None:
         hooks_service.session_ended(_cwd(payload), session_id=_str(payload, "session_id"))
     except Exception:  # never disrupt the agent
         return
+
+
+@app.command("stop")
+def stop() -> None:
+    """Mark the session as waiting for input (turn finished; no output)."""
+    try:
+        payload = _payload()
+        hooks_service.turn_stopped(_cwd(payload), session_id=_str(payload, "session_id"))
+    except Exception:  # never disrupt the agent
+        return
+
+
+@app.command("notification")
+def notification() -> None:
+    """Mark the session as needing attention (no output)."""
+    try:
+        payload = _payload()
+        hooks_service.needs_attention(
+            _cwd(payload),
+            session_id=_str(payload, "session_id"),
+            message=_str(payload, "message"),
+        )
+    except Exception:  # never disrupt the agent
+        return

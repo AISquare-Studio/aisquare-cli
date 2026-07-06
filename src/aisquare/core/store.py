@@ -178,13 +178,22 @@ _SCHEMA_V5 = """
 ALTER TABLE team_task ADD COLUMN needs TEXT NOT NULL DEFAULT '[]';
 """
 
+# v6: live session state — working (mid-turn), waiting (turn ended, wants
+# input) or attention (permission request / idle notice) — driven by the
+# UserPromptSubmit / Stop / Notification hooks.
+_SCHEMA_V6 = """
+ALTER TABLE team_session ADD COLUMN state TEXT NOT NULL DEFAULT 'working';
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5)
+_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
-_SESSION_COLUMNS = "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor"
+_SESSION_COLUMNS = (
+    "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state"
+)
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
@@ -239,7 +248,9 @@ class ContextStore(Protocol):
         label: str | None = None,
         focus: str | None = None,
     ) -> TeamSession: ...
-    def touch_session(self, session_id: str, *, cursor: int | None = None) -> None: ...
+    def touch_session(
+        self, session_id: str, *, cursor: int | None = None, state: str | None = None
+    ) -> None: ...
     def end_session(self, session_id: str) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
     def get_task(self, ref: str) -> TeamTask | None: ...
@@ -316,6 +327,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
         ended_at=_maybe_dt(row["ended_at"]),
         cursor=row["cursor"],
+        state=row["state"],
     )
 
 
@@ -600,9 +612,10 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
-            "last_seen_at = excluded.last_seen_at, ended_at = NULL",
+            "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
+            "state = 'working'",
             (
                 session.id,
                 session.project_id,
@@ -613,6 +626,7 @@ class SqliteStore:
                 session.last_seen_at.isoformat(),
                 session.ended_at.isoformat() if session.ended_at else None,
                 session.cursor,
+                session.state,
             ),
         )
         self._conn.commit()
@@ -668,18 +682,21 @@ class SqliteStore:
         assert updated is not None  # just updated
         return updated
 
-    def touch_session(self, session_id: str, *, cursor: int | None = None) -> None:
-        """Heartbeat: bump ``last_seen_at`` (and advance the delta cursor)."""
-        if cursor is None:
-            self._conn.execute(
-                "UPDATE team_session SET last_seen_at = ? WHERE id = ?",
-                (_now_iso(), session_id),
-            )
-        else:
-            self._conn.execute(
-                "UPDATE team_session SET last_seen_at = ?, cursor = ? WHERE id = ?",
-                (_now_iso(), cursor, session_id),
-            )
+    def touch_session(
+        self, session_id: str, *, cursor: int | None = None, state: str | None = None
+    ) -> None:
+        """Heartbeat: bump ``last_seen_at`` (and advance the cursor / flip state)."""
+        sets, params = ["last_seen_at = ?"], [_now_iso()]
+        if cursor is not None:
+            sets.append("cursor = ?")
+            params.append(str(cursor))
+        if state is not None:
+            sets.append("state = ?")
+            params.append(state)
+        self._conn.execute(
+            f"UPDATE team_session SET {', '.join(sets)} WHERE id = ?",
+            (*params, session_id),
+        )
         self._conn.commit()
 
     def end_session(self, session_id: str) -> list[TeamTask]:

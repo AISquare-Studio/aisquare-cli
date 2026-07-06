@@ -553,13 +553,47 @@ def hook_prompt_heartbeat(session_id: str, cwd: Path | None) -> str:
         )
         if not events or not teambus.delta_enabled():
             cursor = events[-1].seq if events else None
-            store.touch_session(session.id, cursor=cursor)
+            store.touch_session(session.id, cursor=cursor, state="working")
             return ""
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
-        store.touch_session(session.id, cursor=shown[-1].seq)
+        store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
         return _render_delta(shown, roles, truncated=truncated)
+
+
+def hook_stop(session_id: str, cwd: Path | None) -> None:
+    """The session finished its turn: it is now waiting for input.
+
+    Also renews claim leases — the end of a long agentic turn is exactly when
+    a lease is at its oldest.
+    """
+    if not teambus.team_enabled():
+        return
+    with store_session() as store:
+        session = store.get_session(session_id)
+        if session is None:
+            return
+        store.renew_leases(session.id, _now() + timedelta(minutes=teambus.lease_minutes()))
+        store.touch_session(session.id, state="waiting")
+
+
+def hook_notification(session_id: str, cwd: Path | None, message: str | None) -> None:
+    """The session needs the user (permission request / idle notice)."""
+    if not teambus.team_enabled():
+        return
+    with store_session() as store:
+        session = store.get_session(session_id)
+        if session is None:
+            return
+        store.touch_session(session.id, state="attention")
+        _emit(
+            store,
+            session.project_id,
+            "attention",
+            message or "needs your attention",
+            session_id=session.id,
+        )
 
 
 def hook_session_end(session_id: str, cwd: Path | None) -> None:

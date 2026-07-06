@@ -1022,8 +1022,11 @@ def open_store() -> ContextStore:
     paths.ensure_home()
     connection = sqlite3.connect(str(paths.db_path()))
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode = WAL")
+    # busy_timeout FIRST: on a fresh database the WAL switch takes a write
+    # lock, and racing first-opens (parallel session hooks) need patience
+    # there just as much as in the migrations that follow.
     connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA foreign_keys = ON")
     _migrate(connection)
     return SqliteStore(connection)

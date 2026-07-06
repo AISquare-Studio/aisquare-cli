@@ -87,3 +87,43 @@ def test_tui_smoke_click_task_shows_detail(runner: CliRunner, work_dir: Path) ->
     assert options >= 3  # activate + task_added x2 + decision
     assert "wire the UI" in detail and "hook Atlas chat to v3" in detail
     assert "⧗" in detail  # unmet dependency marked
+
+
+def test_theme_picker_stays_open_and_autosaves(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+
+    async def browse() -> tuple[bool, str, str]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("t")          # open the picker
+            await pilot.pause()
+            await pilot.press("down")       # browsing applies instantly…
+            await pilot.press("down")
+            await pilot.pause()
+            still_open = type(pilot.app.screen).__name__ == "ThemePicker"
+            applied = str(pilot.app.theme)
+            await pilot.press("escape")     # …until the explicit close
+            await pilot.pause()
+            closed = type(pilot.app.screen).__name__ != "ThemePicker"
+            assert closed
+            return still_open, applied, str(pilot.app.theme)
+
+    still_open, applied, final = asyncio.run(browse())
+    assert still_open  # selection does NOT close the dialog
+    assert applied == final  # the browsed theme stuck after closing
+    saved = json.loads((isolated_home / "state.json").read_text())["board_theme"]
+    assert saved == final  # …and was autosaved without any save step
+
+    async def relaunch() -> str:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            return str(pilot.app.theme)
+
+    assert asyncio.run(relaunch()) == final  # restored on next launch

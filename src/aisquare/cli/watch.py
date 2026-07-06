@@ -15,6 +15,7 @@ Only presentation lives here; all data comes from ``services.team``.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime
 from typing import Any, ClassVar
@@ -22,6 +23,7 @@ from typing import Any, ClassVar
 from rich.text import Text
 
 from aisquare.cli.common import local_time
+from aisquare.core import paths
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.store import unmet_needs
 from aisquare.models import TeamEvent, TeamSession, TeamTask
@@ -159,13 +161,81 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
 
 # --- the interactive TUI --------------------------------------------------------
 
+_THEME_KEY = "board_theme"
+
+
+def _load_saved_theme() -> str | None:
+    """The autosaved board theme from ``state.json``, if any."""
+    path = paths.state_path()
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get(_THEME_KEY)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _save_theme(name: str) -> None:
+    """Autosave the board theme (every change persists — no save step)."""
+    try:
+        paths.ensure_home()
+        path = paths.state_path()
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data[_THEME_KEY] = name
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
 
 def _build_app_class(interval: float) -> Any:
     """Build the Textual app class (a factory so tests can drive it headless)."""
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.screen import ModalScreen
     from textual.widgets import DataTable, Footer, OptionList, Static
     from textual.widgets.option_list import Option
+
+    class ThemePicker(ModalScreen[None]):
+        """A theme browser that STAYS OPEN: every highlight applies (and
+        autosaves) instantly; ``Esc`` is the explicit close."""
+
+        CSS = """
+        ThemePicker { align: center middle; }
+        #themebox { width: 44; height: 70%; border: heavy $accent;
+                    background: $surface; padding: 1; }
+        #themehint { height: 2; color: $text-muted; }
+        #themelist { height: 1fr; }
+        """
+        BINDINGS: ClassVar = [("escape", "close_picker", "close")]
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="themebox"):
+                yield Static(
+                    "browse themes — ↑/↓ or click applies instantly (autosaved) · Esc closes",
+                    id="themehint",
+                )
+                yield OptionList(id="themelist")
+
+        def on_mount(self) -> None:
+            picker = self.query_one("#themelist", OptionList)
+            current = self.app.theme
+            for index, name in enumerate(sorted(self.app.available_themes)):
+                picker.add_option(Option(name, id=name))
+                if name == current:
+                    picker.highlighted = index
+            picker.focus()
+
+        def on_option_list_option_highlighted(self, event: Any) -> None:
+            if event.option is not None and event.option.id is not None:
+                self.app.theme = event.option.id  # applied live; watcher autosaves
+
+        def on_option_list_option_selected(self, event: Any) -> None:
+            # Enter/click applies too — and the picker deliberately stays open.
+            self.on_option_list_option_highlighted(event)
+
+        def action_close_picker(self) -> None:
+            self.dismiss(None)
 
     class BoardApp(App[None]):
         TITLE = "aisquare board"
@@ -184,6 +254,7 @@ def _build_app_class(interval: float) -> Any:
             ("q", "quit", "quit"),
             ("b", "toggle_board", "board on/off"),
             ("r", "refresh_now", "refresh"),
+            ("t", "pick_theme", "themes"),
         ]
 
         def __init__(self) -> None:
@@ -207,7 +278,23 @@ def _build_app_class(interval: float) -> Any:
                 yield Static(id="detail")
             yield Footer()
 
+        def action_pick_theme(self) -> None:
+            self.push_screen(ThemePicker())
+
+        def watch_theme(self, theme_name: str) -> None:
+            # Fires on ANY theme change (our picker or the command palette):
+            # every change is the save. Restored on the next launch.
+            parent = getattr(super(), "watch_theme", None)
+            if parent is not None:
+                parent(theme_name)
+            if getattr(self, "_theme_restored", False):
+                _save_theme(theme_name)
+
         def on_mount(self) -> None:
+            saved = _load_saved_theme()
+            if saved and saved in self.available_themes:
+                self.theme = saved
+            self._theme_restored = True
             table = self.query_one("#tasks", DataTable)
             table.add_columns("id", "st", "who", "title")
             self.query_one("#sessions", Static).border_title = "team"

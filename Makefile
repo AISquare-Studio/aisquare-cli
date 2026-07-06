@@ -8,8 +8,9 @@ install:
 test:
 	pytest
 
-## lint: static checks without modifying files
+## lint: static checks without modifying files (matches CI: format + lint)
 lint:
+	ruff format --check src tests
 	ruff check src tests
 
 ## typecheck: run mypy over src and tests

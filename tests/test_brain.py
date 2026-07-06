@@ -17,11 +17,22 @@ from aisquare.services import distill
 from aisquare.services import team as team_service
 
 _FAKE_GBRAIN = """#!/bin/sh
+# Schema-aware fake: `init` records the embedding choice into config.json
+# exactly like real gbrain, and `query` (hybrid) REJECTS a vectorless brain —
+# so the suite exercises the real create-time constraint instead of passing
+# on a path that hard-fails for users.
 case "$1" in
   --version) echo "gbrain 0.42.1.0";;
   init)
     mkdir -p "$GBRAIN_HOME/.gbrain/brain.pglite"
     echo 16 > "$GBRAIN_HOME/.gbrain/brain.pglite/PG_VERSION"
+    echo "$@" >> "$GBRAIN_HOME/init.log"
+    CFG="$GBRAIN_HOME/.gbrain/config.json"
+    if echo "$@" | grep -q -- --no-embedding; then
+      echo '{"embedding_disabled": true}' > "$CFG"
+    else
+      echo '{"embedding_model": "openai:text-embedding-3-large"}' > "$CFG"
+    fi
     ;;
   put)
     [ "$FAKE_GBRAIN_FAIL" = "1" ] && exit 1
@@ -30,7 +41,11 @@ case "$1" in
     echo "$2" >> "$GBRAIN_HOME/puts.log"
     ;;
   search) echo "results for: $2";;
-  query) echo "hybrid results for: $2";;
+  query)
+    if grep -q embedding_disabled "$GBRAIN_HOME/.gbrain/config.json" 2>/dev/null; then
+      echo "hybrid query needs a vectorized brain" >&2; exit 1
+    fi
+    echo "hybrid results for: $2";;
   *) exit 0;;
 esac
 """
@@ -153,16 +168,61 @@ def test_concurrent_drain_lock_is_exclusive(fake_gbrain: Path, work_dir: Path) -
             assert not second  # a running drain makes the next one skip
 
 
-def test_recall_uses_hybrid_query_when_embeddings_enabled(
+def test_recall_uses_hybrid_on_an_embedding_brain(
     runner: CliRunner, fake_gbrain: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Brain created WITH embeddings (knob on at first distill) → hybrid query.
+    monkeypatch.setenv("AISQUARE_BRAIN_EMBED", "1")
     _seed_events(runner)
     runner.invoke(app, ["team", "distill"])
-    keyword = runner.invoke(app, ["recall", "auth"])
-    assert "results for: auth" in keyword.stdout  # embeddings off: keyword search
+    result = runner.invoke(app, ["recall", "auth"])
+    assert "hybrid results for: auth" in result.stdout
+    project = team_project(work_dir)
+    assert brain.brain_embeds(project.id)  # schema really embeds
+    assert "--embedding-model" in (brain.brain_home(project.id) / "init.log").read_text()
+
+
+def test_recall_falls_back_to_keyword_on_a_vectorless_brain(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Brain created WITHOUT embeddings, then the knob is flipped on. recall
+    # must stay functional (keyword), not hard-fail on a hybrid query the
+    # vectorless brain rejects (round-4 finding 2).
+    _seed_events(runner)
+    runner.invoke(app, ["team", "distill"])  # embeddings off → no-embedding brain
+    project = team_project(work_dir)
+    assert not brain.brain_embeds(project.id)
     monkeypatch.setenv("AISQUARE_BRAIN_EMBED", "1")
-    hybrid = runner.invoke(app, ["recall", "auth"])
-    assert "hybrid results for: auth" in hybrid.stdout  # embeddings on: gbrain query
+    result = runner.invoke(app, ["recall", "auth"])
+    assert result.exit_code == 0
+    assert "results for: auth" in result.stdout  # keyword fallback, not a failure
+    assert "hybrid" not in result.stdout
+
+
+def test_recall_degrades_when_hybrid_fails_at_query_time(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Embedding brain, but the query-time embed call fails (key expired): the
+    # hybrid `query` errors, recall must fall back to keyword rather than None.
+    monkeypatch.setenv("AISQUARE_BRAIN_EMBED", "1")
+    _seed_events(runner)
+    runner.invoke(app, ["team", "distill"])
+    monkeypatch.setattr(
+        brain,
+        "_run",
+        _degrading_run(brain._run),
+    )
+    result = runner.invoke(app, ["recall", "auth"])
+    assert "results for: auth" in result.stdout  # degraded to keyword, still works
+
+
+def _degrading_run(real: object) -> object:
+    def wrapped(home: Path, argv: list[str], **kw: object) -> object:
+        if argv and argv[0] == "query":
+            return None  # hybrid fails at query time
+        return real(home, argv, **kw)  # type: ignore[operator]
+
+    return wrapped
 
 
 def test_ensure_sizes_schema_for_embeddings_when_enabled(
@@ -191,3 +251,23 @@ def test_ensure_sizes_schema_for_embeddings_when_enabled(
     monkeypatch.delenv("AISQUARE_BRAIN_EMBED_MODEL")
     brain._ensure("prj_x")
     assert "--no-embedding" in calls[-1]  # network-call-free default
+
+
+def test_embed_knob_accepts_truthy_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    for on in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("AISQUARE_BRAIN_EMBED", on)
+        assert brain.embeddings_enabled(), on
+    for off in ("", "0", "false", "no", "off", "nope"):
+        monkeypatch.setenv("AISQUARE_BRAIN_EMBED", off)
+        assert not brain.embeddings_enabled(), off
+
+
+def test_doctor_warns_when_embed_knob_mismatches_the_schema(
+    runner: CliRunner, fake_gbrain: Path, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_events(runner)
+    runner.invoke(app, ["team", "distill"])  # embeddings off → vectorless brain
+    monkeypatch.setenv("AISQUARE_BRAIN_EMBED", "1")  # now flip the knob on
+    result = runner.invoke(app, ["doctor"])
+    assert "created WITHOUT embeddings" in result.output  # doctor surfaces the no-op
+    assert "team distill --all" in result.output  # and points to the real fix

@@ -78,6 +78,7 @@ def test_tui_smoke_click_task_shows_detail(runner: CliRunner, work_dir: Path) ->
             await pilot.pause()
             table = pilot.app.query_one("#tasks", DataTable)
             feed = pilot.app.query_one("#feed", OptionList)
+            table.focus()
             table.move_cursor(row=1)
             await pilot.pause()
             return table.row_count, feed.option_count, pilot.app.detail_text
@@ -255,9 +256,8 @@ def test_done_archive_view_shows_who_and_when(
             await pilot.pause()
             table = pilot.app.query_one("#tasks", DataTable)
             open_rows = table.row_count
-            await pilot.press("d")  # flip to the done archive
-            await pilot.pause()
-            table.move_cursor(row=0)
+            table.focus()  # user is on the task table…
+            await pilot.press("d")  # …and flips it to the done archive
             await pilot.pause()
             return open_rows, table.row_count, pilot.app.detail_text
 
@@ -295,16 +295,22 @@ def test_feed_selection_survives_a_refresh_tick(
     from aisquare.cli import watch as watch_mod
 
     team_service.activate()
-    runner.invoke(app, ["task", "add", "a task row"])
+    # Two task rows so the cursor sits on row >= 1 — the case a per-key guard
+    # misses because clear() re-posts RowHighlighted for row 0 (round-4).
+    runner.invoke(app, ["task", "add", "task one"])
+    runner.invoke(app, ["task", "add", "task two"])
     runner.invoke(app, ["note", "a feed line to select", "--kind", "decision"])
 
     async def drive() -> tuple[object, object]:
         app_cls = watch_mod._build_app_class(interval=60.0)
         async with app_cls().run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            pilot.app.query_one("#tasks", DataTable).move_cursor(row=0)
+            table = pilot.app.query_one("#tasks", DataTable)
+            table.focus()
+            table.move_cursor(row=1)  # NOT row 0
             await pilot.pause()
             feed = pilot.app.query_one("#feed", OptionList)
+            feed.focus()  # the user is now browsing the feed
             feed.highlighted = feed.option_count - 1  # select the newest feed line
             await pilot.pause()
             chosen = pilot.app._detail_moment
@@ -358,3 +364,31 @@ def test_terminal_cache_flushes_when_a_task_closes(
             return bool(pilot.app._terminal_by_task == {})
 
     assert asyncio.run(drive())  # a close flushes the attribution cache
+
+
+def test_attribution_negative_cache_avoids_refetch_every_tick(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+    from aisquare.services import team as team_service
+
+    team_service.activate()
+    calls = {"n": 0}
+    real = team_service.terminal_attribution
+
+    def counting(**kwargs: object) -> object:
+        calls["n"] += 1
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(team_service, "terminal_attribution", counting)
+
+    async def drive() -> int:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            for _ in range(5):  # a task with no terminal event, looked up repeatedly
+                pilot.app._done_event_for("tsk_never_closed")
+            return calls["n"]
+
+    assert asyncio.run(drive()) == 1  # fetched once, negative result cached

@@ -23,6 +23,7 @@ Embeddings are stripped from the environment unless ``AISQUARE_BRAIN_EMBED=1``
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import shutil
 import subprocess
@@ -34,6 +35,7 @@ from pathlib import Path
 from aisquare.core import paths
 
 _OFF_VALUES = {"0", "false", "no", "off"}
+_ON_VALUES = {"1", "true", "yes", "on"}
 _INIT_TIMEOUT_S = 120
 _CALL_TIMEOUT_S = 30
 _RECALL_LOCK_WAIT_S = 5.0
@@ -45,8 +47,13 @@ def brain_enabled() -> bool:
 
 
 def embeddings_enabled() -> bool:
-    """Whether distilled pages may be embedded (``AISQUARE_BRAIN_EMBED=1``)."""
-    return os.environ.get("AISQUARE_BRAIN_EMBED", "").strip() == "1"
+    """Whether distilled pages may be embedded (``AISQUARE_BRAIN_EMBED``).
+
+    Opt-in (default off), but accepts the usual truthy words — the value is
+    baked into the brain schema at first distill, so a natural ``true`` that
+    silently meant "off" would permanently create a vectorless brain.
+    """
+    return os.environ.get("AISQUARE_BRAIN_EMBED", "").strip().lower() in _ON_VALUES
 
 
 def embed_model() -> str:
@@ -79,6 +86,25 @@ def brain_home(project_id: str) -> Path:
 def brain_ready(project_id: str) -> bool:
     """Whether the brain has been initialised (PGLite data marker present)."""
     return (brain_home(project_id) / ".gbrain" / "brain.pglite" / "PG_VERSION").exists()
+
+
+def brain_embeds(project_id: str) -> bool:
+    """Whether the brain's *schema* was created embedding-capable.
+
+    gbrain sizes embeddings at create time and records the choice in
+    ``.gbrain/config.json`` (a ``--no-embedding`` brain carries
+    ``"embedding_disabled": true``). This reads the actual schema, so callers
+    never trust the env knob alone — a brain built before the knob was set,
+    or built with it off, is correctly reported as non-embedding.
+    """
+    config = brain_home(project_id) / ".gbrain" / "config.json"
+    if not config.exists():
+        return False
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return not data.get("embedding_disabled", False) and bool(data.get("embedding_model"))
 
 
 def _env(home: Path) -> dict[str, str]:
@@ -178,14 +204,22 @@ def drain_lock(project_id: str) -> Iterator[bool]:
 def recall(project_id: str, query: str) -> str | None:
     """Search the project brain. ``None`` = unavailable (missing/busy/failed).
 
-    With embeddings enabled the hybrid ``query`` (vector + keyword RRF) is
-    used — that is what the embeddings are FOR — falling back to keyword
-    ``search`` otherwise. ``--no-expand`` keeps recall LLM-free either way.
+    Hybrid ``query`` (vector + keyword RRF) is used only when the knob is on
+    AND the brain's schema actually embeds — that is what the vectors are for.
+    If the hybrid call then fails at query time (e.g. the OpenAI key needed to
+    embed the query text is missing or expired), it degrades to keyword
+    ``search`` rather than turning a working recall into a hard failure.
+    ``--no-expand`` keeps recall LLM-free on either path.
     """
     if not brain_enabled() or not brain_ready(project_id):
         return None
-    argv = ["query", query, "--no-expand"] if embeddings_enabled() else ["search", query]
-    with _lock(brain_home(project_id), wait_s=_RECALL_LOCK_WAIT_S) as won:
+    home = brain_home(project_id)
+    use_hybrid = embeddings_enabled() and brain_embeds(project_id)
+    with _lock(home, wait_s=_RECALL_LOCK_WAIT_S) as won:
         if not won:
             return None
-        return _run(brain_home(project_id), argv, timeout=_CALL_TIMEOUT_S)
+        if use_hybrid:
+            hybrid = _run(home, ["query", query, "--no-expand"], timeout=_CALL_TIMEOUT_S)
+            if hybrid is not None:
+                return hybrid  # fell through: hybrid failed, degrade to keyword
+        return _run(home, ["search", query], timeout=_CALL_TIMEOUT_S)

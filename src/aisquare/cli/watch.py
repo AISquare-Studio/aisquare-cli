@@ -327,6 +327,7 @@ def _build_app_class(interval: float) -> Any:
             self._statuses: dict[str, str] = {}
             self._last_seq = 0
             self._terminal_by_task: dict[str, TeamEvent] = {}
+            self._terminal_fetched = False
             self._prev_states: dict[str, str] = {}
             self._autoscroll = True
             self._select_mode = False
@@ -335,11 +336,6 @@ def _build_app_class(interval: float) -> Any:
             self._sessions: dict[str, TeamSession] = {}
             self._all_tasks: list[TeamTask] = []
             self._detail_moment: tuple[str | None, Any] | None = None
-            # The task-row key the user last chose. A programmatic rebuild
-            # restores the cursor to the same key, so RowHighlighted for an
-            # unchanged key is ignored — a synchronous flag can't guard
-            # Textual's async message pump (round-3 finding 1).
-            self._detail_task_key: str | None = None
             self.detail_text = ""
 
         def compose(self) -> ComposeResult:
@@ -431,8 +427,11 @@ def _build_app_class(interval: float) -> Any:
             self._all_tasks = tasks
             self.query_one("#sessions", Static).update(_session_lines(sessions))
             self._ring_on_attention(sessions)
-            self._refresh_tasks(tasks)
+            # Events first: a task_done/dropped this tick flushes the
+            # attribution cache BEFORE the archive rebuilds, so the closer is
+            # never one frame stale (round-4 finding 6).
             self._append_events(events)
+            self._refresh_tasks(tasks)
 
         def _ring_on_attention(self, sessions: list[TeamSession]) -> None:
             """Terminal bell when a session newly flips to needing the user."""
@@ -452,12 +451,19 @@ def _build_app_class(interval: float) -> Any:
             cache is flushed in ``_append_events`` whenever a new terminal
             event arrives, so a reopen-and-reclose re-attributes correctly.
             """
-            if task_id in self._terminal_by_task:
-                return self._terminal_by_task[task_id]
-            try:
-                self._terminal_by_task = team_service.terminal_attribution(project=self._project)
-            except Exception:
-                return None
+            # Fetch the whole attribution map once per flush, not per row: the
+            # populated dict is the cache, so a task with NO terminal event
+            # (a crash between set_task_status and its _emit, or a pre-event
+            # row) returns None from .get() without re-running the store query
+            # every tick (round-4 finding 6, negative caching).
+            if not self._terminal_fetched:
+                try:
+                    self._terminal_by_task = team_service.terminal_attribution(
+                        project=self._project
+                    )
+                except Exception:
+                    return None
+                self._terminal_fetched = True
             return self._terminal_by_task.get(task_id)
 
         def _refresh_tasks(self, tasks: list[TeamTask]) -> None:
@@ -562,9 +568,10 @@ def _build_app_class(interval: float) -> Any:
                 feed.add_option(Option(feed_line(event, self._roles), id=event.id))
                 self._last_seq = max(self._last_seq, event.seq)
                 if event.kind in ("task_done", "task_dropped"):
-                    # A close happened — attribution cache is stale (a
-                    # reopen-and-reclose must re-attribute to the new closer).
+                    # A close happened — attribution (positive AND negative
+                    # entries) is stale; a reopen-and-reclose must re-attribute.
                     self._terminal_by_task = {}
+                    self._terminal_fetched = False
             if self._autoscroll:
                 feed.scroll_end(animate=False)
 
@@ -623,14 +630,17 @@ def _build_app_class(interval: float) -> Any:
             self.query_one("#detailwrap", VerticalScroll).scroll_home(animate=False)
 
         def on_data_table_row_highlighted(self, event: Any) -> None:
-            key = event.row_key.value if event.row_key else None
-            # Every rebuild restores the cursor to the same key and re-posts
-            # RowHighlighted asynchronously; only a genuine change of row is a
-            # user selection. This is robust to Textual's async message pump
-            # where a synchronous "refreshing" flag is not (round-3 finding 1).
-            if key is None or str(key) == self._detail_task_key:
+            # A rebuild (clear/add_row/move_cursor) posts RowHighlighted
+            # asynchronously regardless of focus; a user only moves the table
+            # cursor while the table is focused. Gating on focus is a
+            # synchronous, timing-independent way to tell the two apart — a
+            # per-key or epoch/settle guard both depend on the async message
+            # pump and let the rebuild storm through (round-3/4 finding 1).
+            if not self.query_one("#tasks", DataTable).has_focus:
                 return
-            self._detail_task_key = str(key)
+            key = event.row_key.value if event.row_key else None
+            if key is None:
+                return
             task = self._tasks_by_id.get(str(key))
             if task is None:
                 return
@@ -653,6 +663,10 @@ def _build_app_class(interval: float) -> Any:
             self._show_detail(detail)
 
         def on_option_list_option_highlighted(self, event: Any) -> None:
+            # Same focus gate as the task table: only a user browsing the feed
+            # (feed focused) updates the detail pane, never an append/scroll.
+            if not self.query_one("#feed", OptionList).has_focus:
+                return
             if event.option is not None and event.option.id is not None:
                 stored = self._events_by_id.get(event.option.id)
                 if stored is not None:

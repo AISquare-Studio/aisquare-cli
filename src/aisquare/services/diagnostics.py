@@ -198,9 +198,23 @@ def _check_brain() -> DoctorCheck:
             f"gbrain {version} found but this project's brain is not initialised",
             "It initialises on the first distill: aisquare team distill",
         )
+    # The embedding schema is fixed at create time: a knob turned on after the
+    # brain already exists changes nothing until the brain is rebuilt. Surface
+    # that rather than silently writing unembedded pages and hard-failing recall.
+    if brain_core.embeddings_enabled() and not brain_core.brain_embeds(project.id):
+        return _warn(
+            "brain",
+            f"gbrain {version}, brain ready — but it was created WITHOUT embeddings, "
+            "so AISQUARE_BRAIN_EMBED has no effect here (recall stays keyword-only)",
+            "Rebuild embedding-capable: remove ~/.aisquare/projects/<id>/brain, then "
+            "AISQUARE_BRAIN_EMBED=1 aisquare team distill --all",
+        )
+    embed = " (embeddings on)" if brain_core.brain_embeds(project.id) else ""
     if lag > 0:
-        return _ok("brain", f"gbrain {version}, brain ready ({lag} pipe events awaiting distill)")
-    return _ok("brain", f"gbrain {version}, brain ready and fully distilled")
+        return _ok(
+            "brain", f"gbrain {version}, brain ready{embed} ({lag} pipe events awaiting distill)"
+        )
+    return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
 
 
 def _has_module(name: str) -> bool:

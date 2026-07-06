@@ -21,6 +21,7 @@ from typing import Any, ClassVar
 
 from rich.text import Text
 
+from aisquare.cli.common import local_time
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.store import unmet_needs
 from aisquare.models import TeamEvent, TeamSession, TeamTask
@@ -76,7 +77,7 @@ def feed_line(event: TeamEvent, roles: dict[str, str]) -> Text:
     emoji, name, style = _who(event, roles)
     verb_emoji, verb = _KIND_VERB.get(event.kind, ("•", event.kind))
     line = Text(no_wrap=True, overflow="ellipsis")
-    line.append(f"{event.created_at:%H:%M} ", style="dim")
+    line.append(f"{local_time(event.created_at):%H:%M} ", style="dim")
     line.append(f"{emoji} {name} ", style=style)
     line.append(f"{verb_emoji} {verb}: ", style="bold")
     line.append(event.text)
@@ -90,7 +91,9 @@ def _event_detail(event: TeamEvent, roles: dict[str, str]) -> Text:
     text = Text()
     text.append(f"{event.kind}", style="bold")
     text.append(f" by {name}", style=style)
-    text.append(f" at {event.created_at:%H:%M:%S} (seq {event.seq})\n", style="dim")
+    text.append(
+        f" at {local_time(event.created_at):%H:%M:%S} (seq {event.seq})\n", style="dim"
+    )
     text.append(event.text)
     if event.task_id:
         text.append(f"\ntask: {event.task_id}", style="dim")
@@ -108,7 +111,9 @@ def _task_detail(task: TeamTask, statuses: dict[str, str]) -> Text:
     if task.claimed_by:
         text.append(f"\nclaimed by {team_service.short_id(task.claimed_by)}")
         if task.claim_expires_at:
-            text.append(f" (lease until {task.claim_expires_at:%H:%M})", style="dim")
+            text.append(
+                f" (lease until {local_time(task.claim_expires_at):%H:%M})", style="dim"
+            )
     if task.needs:
         waiting = set(unmet_needs(task, statuses))
         text.append("\nneeds: ")

@@ -8,7 +8,7 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import fail, local_time
 from aisquare.cli.team import SessionRef, _fail_team
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
@@ -130,8 +130,8 @@ def show(ref: TaskRef) -> None:
     if task.claimed_by:
         grid.add_row("claimed by", team_service.short_id(task.claimed_by))
     if task.claim_expires_at:
-        grid.add_row("lease until", task.claim_expires_at.isoformat())
-    grid.add_row("created", task.created_at.isoformat())
+        grid.add_row("lease until", f"{local_time(task.claim_expires_at):%Y-%m-%d %H:%M}")
+    grid.add_row("created", f"{local_time(task.created_at):%Y-%m-%d %H:%M}")
     console = stdout_console()
     console.print(grid)
     console.print()

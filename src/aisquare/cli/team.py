@@ -11,7 +11,7 @@ from typing import Annotated, NoReturn
 
 import typer
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import fail, local_time
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import AmbiguousIdError
@@ -116,7 +116,10 @@ def log(
     console = stdout_console()
     for event in events:
         who = team_service.short_id(event.session_id) if event.session_id else "cli"
-        console.print(f"{event.created_at:%H:%M} {who} {event.kind}: {event.text}", markup=False)
+        console.print(
+            f"{local_time(event.created_at):%H:%M} {who} {event.kind}: {event.text}",
+            markup=False,
+        )
 
 
 @app.command("distill")

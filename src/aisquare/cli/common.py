@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -29,6 +30,11 @@ from aisquare.models import (
 )
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
+
+
+def local_time(value: datetime) -> datetime:
+    """A stored (UTC) timestamp in the user's local timezone, for display."""
+    return value.astimezone()
 
 
 def resolve_pool(user: bool, project: bool) -> Pool | None:

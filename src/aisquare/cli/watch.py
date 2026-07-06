@@ -455,9 +455,7 @@ def _build_app_class(interval: float) -> Any:
             if task_id in self._terminal_by_task:
                 return self._terminal_by_task[task_id]
             try:
-                self._terminal_by_task = team_service.terminal_attribution(
-                    project=self._project
-                )
+                self._terminal_by_task = team_service.terminal_attribution(project=self._project)
             except Exception:
                 return None
             return self._terminal_by_task.get(task_id)

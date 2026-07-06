@@ -170,6 +170,7 @@ def test_ensure_sizes_schema_for_embeddings_when_enabled(
 ) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(brain, "brain_ready", lambda _pid: False)
+
     def _capture(home: object, argv: list[str], **kw: object) -> str:
         calls.append(argv)
         return ""

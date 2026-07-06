@@ -52,8 +52,7 @@ def embeddings_enabled() -> bool:
 def embed_model() -> str:
     """The embedding model a new brain is sized for when embeddings are on."""
     return (
-        os.environ.get("AISQUARE_BRAIN_EMBED_MODEL", "").strip()
-        or "openai:text-embedding-3-large"
+        os.environ.get("AISQUARE_BRAIN_EMBED_MODEL", "").strip() or "openai:text-embedding-3-large"
     )
 
 

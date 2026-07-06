@@ -41,10 +41,15 @@ _TOKEN_KEY = "serve_token"
 DEFAULT_PORT = 8747
 
 
-def client_session_id() -> str:
-    """The virtual team-session id remote calls act as."""
+def client_session_id(project_id: str) -> str:
+    """The virtual team-session id remote calls act as, scoped per project.
+
+    A global id would pin the session row to the first project ever served —
+    every other project's board would render the remote unattributed while
+    the first kept a phantom live session forever.
+    """
     client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
-    return f"mcp:{client}"
+    return f"mcp:{client}:{project_id.removeprefix('prj_')[:6]}"
 
 
 def _client_role() -> str:
@@ -52,15 +57,28 @@ def _client_role() -> str:
 
 
 def _ensure_virtual_session() -> str:
-    """Register (or revive) the virtual session on the bus; returns its id."""
+    """Register (or revive) the virtual session on the bus; returns its id.
+
+    Gated like every other bus entry point: the master switch must be on and
+    the project must already be activated (``aisquare serve`` activates its
+    project explicitly at startup). Without the gate, one read-only MCP call
+    against a never-opted-in directory would permanently activate it.
+    """
     from datetime import UTC, datetime
 
     from aisquare.core.store import store_session
-    from aisquare.core.teambus import team_project
+    from aisquare.core.teambus import team_enabled, team_project
 
-    session_id = client_session_id()
+    if not team_enabled():
+        raise TeamDisabledError()
     with store_session() as store:
         project = team_project(None)
+        if not store.team_active(project.id):
+            raise ValueError(
+                f"the team bus is not active for {project.root} — start `aisquare serve` "
+                "from the project (it activates it), or run `aisquare team on` there"
+            )
+        session_id = client_session_id(project.id)
         store.ensure_project(project)
         now = datetime.now(tz=UTC)
         store.upsert_session(

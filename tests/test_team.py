@@ -529,3 +529,38 @@ def test_session_churn_stays_off_the_feed(runner: CliRunner, work_dir: Path) -> 
     kinds = {event.kind for event in team_service.log_events(work_dir)}
     assert "join" not in kinds and "end" not in kinds
     assert kinds == {"activate"}
+
+
+def test_release_cannot_resurrect_finished_tasks(runner: CliRunner, work_dir: Path) -> None:
+    runner.invoke(app, ["team", "on"])
+    runner.invoke(app, ["task", "add", "one and done"])
+    task_id = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    runner.invoke(app, ["task", "claim", task_id])
+    runner.invoke(app, ["task", "done", task_id])
+    done = json.loads(runner.invoke(app, ["--json", "task", "show", task_id]).stdout)
+    assert done["claimed_by"] is None  # terminal statuses clear the claim
+    released = runner.invoke(app, ["task", "release", task_id])
+    assert released.exit_code == 1  # done → release refused, no zombie todo
+    still = json.loads(runner.invoke(app, ["--json", "task", "show", task_id]).stdout)
+    assert still["status"] == "done"
+    # reopen IS the deliberate resurrection path.
+    reopened = runner.invoke(app, ["task", "reopen", task_id, "--reason", "regressed"])
+    assert reopened.exit_code == 0
+    assert (
+        json.loads(runner.invoke(app, ["--json", "task", "show", task_id]).stdout)["status"]
+        == "todo"
+    )
+
+
+def test_cross_project_needs_is_rejected(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner.invoke(app, ["team", "on"])
+    runner.invoke(app, ["task", "add", "task in project A"])
+    foreign = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    other = tmp_path / "other-repo"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    runner.invoke(app, ["team", "on"])
+    result = runner.invoke(app, ["task", "add", "dependent", "--needs", foreign])
+    assert result.exit_code == 1, result.output  # rejected loudly, not starved silently

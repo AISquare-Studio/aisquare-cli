@@ -31,10 +31,14 @@ def serve(
     ] = False,
 ) -> None:
     """Run the team-bus MCP server so remote Claude clients can join this project."""
-    try:
-        from aisquare.services import mcp_server
-    except ImportError:
+    import importlib.util
+
+    # mcp_server itself imports lazily, so probe the dependency directly —
+    # a bare `import` succeeds without the extra and dies later mid-request.
+    if importlib.util.find_spec("mcp") is None:
         fail(f"the serve extra is not installed — {_INSTALL_HINT}", error="serve_not_installed")
+    from aisquare.services import mcp_server
+
     if show_token:
         token = mcp_server.serve_token()
         if get_state().json_output:
@@ -44,11 +48,18 @@ def serve(
             console.print(f"URL:    http://{bind}:{port}/mcp")
             console.print(f"Header: Authorization: Bearer {token}")
         return
+    # Starting a server here IS the opt-in for this project: activate it
+    # explicitly (and visibly — `team on` semantics, with the pipe event),
+    # so remote calls never activate a directory as a side effect.
+    from aisquare.services import team as team_service
+
+    project = team_service.activate()
     if stdio:
         mcp_server.run_stdio()
         return
     stderr_console().print(
-        f"Serving the team bus at http://{bind}:{port}/mcp "
+        f"Serving the team bus for {project.root.name or project.id} at "
+        f"http://{bind}:{port}/mcp "
         "(bearer token required — see `aisquare serve --show-token`). Ctrl-C stops."
     )
     mcp_server.run_http(bind=bind, port=port)

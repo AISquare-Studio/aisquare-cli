@@ -144,11 +144,12 @@ def _check_claude_code() -> DoctorCheck:
     if info is None or not info.detected:
         return _ok("claude-code", "Claude Code not detected on this machine")
     if agent_core.hooks_installed("claude-code"):
-        return _ok("claude-code", "Claude Code connected (hooks installed)")
+        return _ok("claude-code", "Claude Code connected (all lifecycle hooks installed)")
     return _warn(
         "claude-code",
-        "Claude Code detected but not connected",
-        "Connect it: aisquare agents connect claude-code",
+        "Claude Code hooks are missing or outdated (older installs lack the "
+        "Stop/Notification/SessionEnd events)",
+        "(Re)connect it: aisquare agents connect claude-code",
     )
 
 

@@ -105,17 +105,36 @@ def _read_settings(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _is_aisquare_hook_command(command: str) -> bool:
+    """Whether ``command`` is one of aisquare's own hook invocations.
+
+    Deliberately strict: the command must *end* with `` hook <subcommand>``
+    AND the invoked program must be aisquare itself (an ``aisquare``/``asq``
+    executable, or ``python -m aisquare``). A bare-substring match would
+    classify unrelated user hooks like ``webhook stop`` or ``~/bin/my-hook
+    stop`` as ours and silently delete them on connect/disconnect.
+    """
+    tail = command.strip()
+    for _, subcommand in _HOOKS:
+        suffix = f" hook {subcommand}"
+        if tail.endswith(suffix):
+            invocation = tail[: -len(suffix)].strip()
+            program = Path(invocation.split()[0]).name if invocation.split() else ""
+            if program in ("aisquare", "asq") or invocation.endswith("-m aisquare"):
+                return True
+    return False
+
+
 def _is_aisquare_group(group: Any) -> bool:
     if not isinstance(group, dict):
         return False
     hooks = group.get("hooks")
     if not isinstance(hooks, list):
         return False
-    known = tuple(f"hook {subcommand}" for _, subcommand in _HOOKS)
     return any(
         isinstance(item, dict)
         and isinstance(item.get("command"), str)
-        and any(marker in item["command"] for marker in known)
+        and _is_aisquare_hook_command(item["command"])
         for item in hooks
     )
 
@@ -170,15 +189,21 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
 
 
 def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
-    """Whether aisquare's hooks are present in the agent's settings."""
+    """Whether aisquare's hooks are FULLY installed (every lifecycle event).
+
+    A partial install (e.g. from a version that knew fewer events) returns
+    False so ``doctor`` tells the user to re-run ``agents connect`` — an
+    any-marker check would report healthy while Stop/Notification/SessionEnd
+    silently never fire.
+    """
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
     hooks = _read_settings(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return False
-    return any(
-        _is_aisquare_group(group) for event, _ in _HOOKS for group in (hooks.get(event) or [])
+    return all(
+        any(_is_aisquare_group(group) for group in (hooks.get(event) or [])) for event, _ in _HOOKS
     )
 
 

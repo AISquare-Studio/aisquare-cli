@@ -261,6 +261,7 @@ class ContextStore(Protocol):
     def renew_leases(self, session_id: str, lease_until: datetime) -> None: ...
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask: ...
     def release_task(self, task_id: str) -> TeamTask: ...
+    def reopen_task(self, task_id: str) -> TeamTask: ...
     def next_task(
         self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
     ) -> TeamTask | None: ...
@@ -812,25 +813,66 @@ class SqliteStore:
         task = self.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
-        self._conn.execute(
-            "UPDATE team_task SET status = ?, updated_at = ? WHERE id = ?",
-            (status, _now_iso(), task.id),
-        )
+        if status in ("done", "dropped"):
+            # Terminal: clear the claim so the task never *looks* held —
+            # a lingering claimed_by invites a bogus "release" back to todo.
+            self._conn.execute(
+                "UPDATE team_task SET status = ?, claimed_by = NULL, "
+                "claim_expires_at = NULL, updated_at = ? WHERE id = ?",
+                (status, _now_iso(), task.id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE team_task SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _now_iso(), task.id),
+            )
         self._conn.commit()
         updated = self.get_task(task.id)
         assert updated is not None  # just updated
         return updated
 
     def release_task(self, task_id: str) -> TeamTask:
+        """Give a claimed (``doing``) task back to the pool.
+
+        Guarded so a "release" can never resurrect a finished task: raises
+        ``ValueError`` unless the task is currently ``doing``.
+        """
         task = self.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
-        self._conn.execute(
+        cursor = self._conn.execute(
             "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
-            "claim_expires_at = NULL, updated_at = ? WHERE id = ?",
+            "claim_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'doing'",
             (_now_iso(), task.id),
         )
         self._conn.commit()
+        if cursor.rowcount != 1:
+            raise ValueError(f"task {task.id} is {task.status}, not doing — nothing to release")
+        updated = self.get_task(task.id)
+        assert updated is not None  # just updated
+        return updated
+
+    def reopen_task(self, task_id: str) -> TeamTask:
+        """Send a non-todo task back to the pool (verification failed, etc.).
+
+        Unlike ``release_task`` this is the deliberate resurrection path —
+        it accepts ``doing``/``review``/``blocked``/``done`` (but not
+        ``dropped``: discarded work needs an explicit new task).
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        cursor = self._conn.execute(
+            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+            "claim_expires_at = NULL, updated_at = ? "
+            "WHERE id = ? AND status IN ('doing', 'review', 'blocked', 'done')",
+            (_now_iso(), task.id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise ValueError(
+                f"task {task.id} is {task.status} — reopen a doing/review/blocked/done task"
+            )
         updated = self.get_task(task.id)
         assert updated is not None  # just updated
         return updated

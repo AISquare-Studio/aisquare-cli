@@ -13,6 +13,7 @@ without any command or hook ever waiting on gbrain.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -85,11 +86,18 @@ def drain(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
                     return written
 
 
-def spawn_drain(cwd: Path | None = None) -> None:
-    """Kick off a detached drain; returns immediately, never raises."""
-    if not brain.brain_enabled() or brain.gbrain_version() is None:
+def spawn_drain(cwd: Path | None = None, *, root: Path | None = None) -> None:
+    """Kick off a detached drain; returns immediately, never raises.
+
+    This runs on durable-mutation hot paths, so it must not shell out:
+    the gbrain gate is a PATH lookup (the worker re-verifies the version),
+    and callers pass the already-resolved project ``root`` to spare a
+    ``git rev-parse`` subprocess.
+    """
+    if not brain.brain_enabled() or shutil.which("gbrain") is None:
         return
-    root = teambus.team_project(cwd).root
+    if root is None:
+        root = teambus.team_project(cwd).root
     try:
         subprocess.Popen(
             [sys.executable, "-m", "aisquare", "--quiet", "team", "distill"],

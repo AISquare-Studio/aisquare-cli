@@ -90,6 +90,12 @@ def _emit(
     )
 
 
+def _project_root(store: ContextStore, project_id: str) -> Path | None:
+    """The registered root of a project — spares hot paths a git subprocess."""
+    project = store.get_project(project_id)
+    return project.root if project is not None else None
+
+
 def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None:
     if ref is None:
         return None
@@ -193,7 +199,7 @@ def add_note(
             to_role=to_role,
         )
     if kind in distill_service.DISTILL_KINDS:
-        distill_service.spawn_drain(cwd)
+        distill_service.spawn_drain(root=project.root)
     return event
 
 
@@ -221,6 +227,10 @@ def add_task(
             needed = store.get_task(ref)
             if needed is None:
                 raise KeyError(ref)
+            if needed.project_id != project.id:
+                # A cross-project need would count as unmet forever (readiness
+                # only sees this project's statuses) — starve, silently.
+                raise ValueError(f"--needs {ref}: that task belongs to another project's board")
             if needed.id not in resolved_needs:
                 resolved_needs.append(needed.id)
         now = _now()
@@ -306,7 +316,7 @@ def _finish_task(
     *,
     note: str | None = None,
     session_ref: str | None = None,
-) -> TeamTask:
+) -> tuple[TeamTask, Path | None]:
     with store_session() as store:
         task = store.get_task(ref)
         if task is None:
@@ -322,21 +332,23 @@ def _finish_task(
             session_id=session.id if session else None,
             task_id=updated.id,
         )
-        return updated
+        return updated, _project_root(store, updated.project_id)
 
 
 def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Mark a task done (``task done``)."""
     _require_enabled()
-    task = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
-    distill_service.spawn_drain()
+    task, root = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
+    distill_service.spawn_drain(root=root)
     return task
 
 
 def review_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Send a task to review — done coding, awaiting verification (``task review``)."""
     _require_enabled()
-    return _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
+    task, root = _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
+    distill_service.spawn_drain(root=root)
+    return task
 
 
 def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> TeamTask:
@@ -351,7 +363,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         if task is None:
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
-        reopened = store.release_task(task.id)
+        reopened = store.reopen_task(task.id)
         _emit(
             store,
             reopened.project_id,
@@ -360,7 +372,8 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
             session_id=session.id if session else None,
             task_id=reopened.id,
         )
-    distill_service.spawn_drain()
+        root = _project_root(store, reopened.project_id)
+    distill_service.spawn_drain(root=root)
     return reopened
 
 
@@ -408,15 +421,16 @@ def next_task(
 def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> TeamTask:
     """Mark a task blocked, with the reason on the pipe (``task block``)."""
     _require_enabled()
-    task = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
-    distill_service.spawn_drain()
+    task, root = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
+    distill_service.spawn_drain(root=root)
     return task
 
 
 def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Drop a task that is no longer worth doing (``task drop``)."""
     _require_enabled()
-    return _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref)
+    task, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref)
+    return task
 
 
 def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
@@ -613,8 +627,9 @@ def hook_session_end(session_id: str, cwd: Path | None) -> None:
                 session_id=session.id,
                 task_id=task.id,
             )
+        root = _project_root(store, session.project_id)
     # Safety drain: catch anything a per-command spawn missed this session.
-    distill_service.spawn_drain(cwd)
+    distill_service.spawn_drain(cwd, root=root)
 
 
 # --- rendering ----------------------------------------------------------------

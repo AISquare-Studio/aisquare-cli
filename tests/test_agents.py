@@ -189,3 +189,63 @@ def test_hook_commands_are_never_a_bare_name(
     settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert command == f"{real_sys.executable} -m aisquare hook session-start"
+
+
+def test_third_party_hooks_containing_our_words_survive_connect(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    # "webhook stop" and "my-hook stop" are NOT ours — connect/disconnect
+    # must never rewrite them away (substring matching once did).
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": "webhook stop --id 7"}]}],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "~/bin/my-hook stop"}]}
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    stop_commands = [h["hooks"][0]["command"] for h in settings["hooks"]["Stop"]]
+    start_commands = [h["hooks"][0]["command"] for h in settings["hooks"]["SessionStart"]]
+    assert "webhook stop --id 7" in stop_commands
+    assert "~/bin/my-hook stop" in start_commands
+    runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "webhook stop --id 7" in [h["hooks"][0]["command"] for h in settings["hooks"]["Stop"]]
+
+
+def test_partial_install_is_reported_not_healthy(runner: CliRunner, fake_home: Path) -> None:
+    from aisquare.core import agents as agent_core
+
+    # A pre-Stop/Notification-era install: only the two original events.
+    settings_path = fake_home / ".claude" / "settings.json"
+    old = "/some/old/path/aisquare"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": f"{old} hook session-start"}]}
+                    ],
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": f"{old} hook user-prompt-submit"}
+                            ]
+                        }
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert agent_core.hooks_installed("claude-code") is False  # partial ≠ installed
+    runner.invoke(app, ["agents", "connect", "claude-code"])  # the documented fix
+    assert agent_core.hooks_installed("claude-code") is True

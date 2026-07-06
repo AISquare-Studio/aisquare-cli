@@ -69,7 +69,7 @@ def test_remote_task_lifecycle_and_guards(work_dir: Path) -> None:
     team_service.activate()
     mcp_server.task_add("verify login flow", role="debugger")
     picked = json.loads(mcp_server.task_next(role="debugger", claim=True))
-    assert picked["status"] == "doing" and picked["claimed_by"] == "mcp:remote"
+    assert picked["status"] == "doing" and picked["claimed_by"].startswith("mcp:remote:")
     assert (
         mcp_server.task_update(picked["id"], "reopen")
         == "error: reopen requires a note (the feedback)"
@@ -104,3 +104,43 @@ def test_show_token_cli(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["url"].endswith(":8747/mcp") and payload["token"]
+
+
+def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
+    # No activate(): one read-only call must not flip the repo's bus on.
+    result = mcp_server.team_board()
+    assert result.startswith("error:") and "not active" in result
+    from aisquare.core.store import store_session
+    from aisquare.core.teambus import team_project
+
+    with store_session() as store:
+        assert not store.team_active(team_project(work_dir).id)
+
+
+def test_remote_calls_respect_master_switch(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    team_service.activate()
+    monkeypatch.setenv("AISQUARE_TEAM", "0")
+    assert "disabled" in mcp_server.task_add("x")
+
+
+def test_virtual_session_is_scoped_per_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.store import store_session
+    from aisquare.core.teambus import team_project
+
+    ids = []
+    for name in ("repo-a", "repo-b"):
+        repo = tmp_path / name
+        repo.mkdir()
+        monkeypatch.chdir(repo)
+        team_service.activate()
+        mcp_server.note_add(f"hello from {name}")
+        ids.append(mcp_server.client_session_id(team_project(repo).id))
+    assert ids[0] != ids[1]  # one row per project — no phantom pinning
+    with store_session() as store:
+        for session_id, repo_name in zip(ids, ("repo-a", "repo-b"), strict=True):
+            session = store.get_session(session_id)
+            assert session is not None, repo_name

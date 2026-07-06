@@ -53,6 +53,8 @@ def add(
         task, created = team_service.add_task(
             title, key=key, detail=detail, role=role, needs=needs, session_ref=as_session
         )
+    except ValueError as exc:
+        fail(str(exc), error="invalid_needs")
     except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
         _fail_team(exc, as_session)
     if get_state().json_output:
@@ -209,6 +211,8 @@ def reopen(
     """Send a task back to the pool with feedback (verification failed)."""
     try:
         task = team_service.reopen_task(ref, reason=reason, session_ref=as_session)
+    except ValueError as exc:
+        fail(str(exc), error="invalid_state", ref=ref)
     except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="reopened")
@@ -254,9 +258,11 @@ def drop(ref: TaskRef, as_session: SessionRef = None) -> None:
 
 @app.command("release")
 def release(ref: TaskRef, as_session: SessionRef = None) -> None:
-    """Give a claimed task back to the pool."""
+    """Give a claimed (doing) task back to the pool."""
     try:
         task = team_service.release_task(ref, session_ref=as_session)
+    except ValueError as exc:
+        fail(str(exc), error="invalid_state", ref=ref)
     except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="released")

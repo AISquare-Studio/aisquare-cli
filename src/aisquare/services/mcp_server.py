@@ -105,8 +105,11 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
     except LookupError as exc:
         # KeyError (unknown ref) and AmbiguousIdError (short prefix) both
         # subclass LookupError; remote callers get the error contract, not
-        # a raw tool exception.
-        return f"error: {exc.args[0] if isinstance(exc, KeyError) and exc.args else exc}"
+        # a raw tool exception. Keep the "nothing matches …" wording so a
+        # remote agent can self-correct rather than getting a naked ref.
+        if isinstance(exc, KeyError):
+            return f"error: nothing matches {(exc.args[0] if exc.args else exc)!r}"
+        return f"error: {exc}"
     except ValueError as exc:
         return f"error: {exc}"
 
@@ -296,12 +299,15 @@ class _BearerGuard:
 
     def __init__(self, app: Any, token: str) -> None:
         self._app = app
-        self._token = f"Bearer {token}"
+        # Compare raw bytes: ASGI header values are bytes, and str-mode
+        # secrets.compare_digest rejects non-ASCII with a TypeError, which
+        # would turn a garbage Authorization header into a 500 instead of 401.
+        self._token = f"Bearer {token}".encode()
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope.get("type") == "http":
             headers = {key: value for key, value in scope.get("headers") or []}
-            supplied = headers.get(b"authorization", b"").decode("latin-1")
+            supplied = headers.get(b"authorization", b"")
             if not secrets.compare_digest(supplied, self._token):
                 from starlette.responses import JSONResponse
 

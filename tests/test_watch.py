@@ -284,3 +284,77 @@ def test_transcript_line_near_finds_the_moment(tmp_path: Path) -> None:
     late = datetime(2026, 7, 6, 23, 0, 0, tzinfo=UTC)
     assert transcript_line_near(transcript, late) == 6  # past the end → last line
     assert transcript_line_near(tmp_path / "missing.jsonl", at) == 1
+
+
+def test_feed_selection_survives_a_refresh_tick(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual.widgets import DataTable, OptionList
+
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    runner.invoke(app, ["task", "add", "a task row"])
+    runner.invoke(app, ["note", "a feed line to select", "--kind", "decision"])
+
+    async def drive() -> tuple[object, object]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            pilot.app.query_one("#tasks", DataTable).move_cursor(row=0)
+            await pilot.pause()
+            feed = pilot.app.query_one("#feed", OptionList)
+            feed.highlighted = feed.option_count - 1  # select the newest feed line
+            await pilot.pause()
+            chosen = pilot.app._detail_moment
+            pilot.app._refresh_data()  # the async RowHighlighted clobber path
+            await pilot.pause()
+            return chosen, pilot.app._detail_moment
+
+    chosen, after_tick = asyncio.run(drive())
+    assert chosen is not None
+    assert after_tick == chosen  # feed selection preserved across the rebuild
+
+
+def test_watch_does_not_leak_a_project_pin_to_environ(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    import os
+
+    from aisquare.cli import watch as watch_mod
+
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    team_service.activate()
+
+    async def run() -> None:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+    asyncio.run(run())
+    assert "AISQUARE_TEAM_HUB" not in os.environ  # no process-wide leak
+
+
+def test_terminal_cache_flushes_when_a_task_closes(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+
+    async def drive() -> bool:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            pilot.app._terminal_by_task = {"warm": object()}  # a stale cache
+            runner.invoke(app, ["task", "add", "closes soon"])
+            tid = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+            runner.invoke(app, ["task", "done", tid])
+            pilot.app._refresh_data()  # the task_done event arrives on the feed
+            await pilot.pause()
+            return bool(pilot.app._terminal_by_task == {})
+
+    assert asyncio.run(drive())  # a close flushes the attribution cache

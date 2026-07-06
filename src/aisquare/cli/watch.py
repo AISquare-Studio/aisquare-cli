@@ -330,11 +330,16 @@ def _build_app_class(interval: float) -> Any:
             self._prev_states: dict[str, str] = {}
             self._autoscroll = True
             self._select_mode = False
-            self._refreshing = False
             self._show_done = False
+            self._project: Any = None
             self._sessions: dict[str, TeamSession] = {}
             self._all_tasks: list[TeamTask] = []
             self._detail_moment: tuple[str | None, Any] | None = None
+            # The task-row key the user last chose. A programmatic rebuild
+            # restores the cursor to the same key, so RowHighlighted for an
+            # unchanged key is ignored — a synchronous flag can't guard
+            # Textual's async message pump (round-3 finding 1).
+            self._detail_task_key: str | None = None
             self.detail_text = ""
 
         def compose(self) -> ComposeResult:
@@ -382,16 +387,14 @@ def _build_app_class(interval: float) -> Any:
                 _save_theme(theme_name)
 
         def on_mount(self) -> None:
-            import os
-
-            # Resolve the project once and pin it for this process: every
-            # later tick short-circuits the git-subprocess resolution.
+            # Resolve the project once and hold it on the app, passing it to
+            # every board query — a `git rev-parse` per tick otherwise, and
+            # mutating os.environ to pin it leaks process-wide (round-3
+            # finding 3).
             try:
-                from aisquare.core.teambus import team_project
-
-                os.environ.setdefault("AISQUARE_TEAM_HUB", str(team_project(None).root))
+                self._project = team_service.resolve_project(None)
             except Exception:
-                pass
+                self._project = None
             saved = _load_saved_theme()
             if saved and saved in self.available_themes:
                 self.theme = saved
@@ -412,6 +415,7 @@ def _build_app_class(interval: float) -> Any:
                 project, sessions, tasks, events = team_service.board_data(
                     events=400 if self._last_seq == 0 else 200,
                     since_seq=self._last_seq or None,
+                    project=self._project,
                 )
             except team_service.TeamDisabledError:
                 self.query_one("#sessions", Static).update(
@@ -444,32 +448,27 @@ def _build_app_class(interval: float) -> Any:
             """The latest done/dropped event for a task (who closed it, when).
 
             Resolved from the store, not the bounded feed cache — a task
-            closed thousands of events ago still knows who closed it.
+            closed thousands of events ago still knows who closed it. The
+            cache is flushed in ``_append_events`` whenever a new terminal
+            event arrives, so a reopen-and-reclose re-attributes correctly.
             """
             if task_id in self._terminal_by_task:
                 return self._terminal_by_task[task_id]
             try:
-                self._terminal_by_task = team_service.terminal_attribution()
+                self._terminal_by_task = team_service.terminal_attribution(
+                    project=self._project
+                )
             except Exception:
                 return None
             return self._terminal_by_task.get(task_id)
 
         def _refresh_tasks(self, tasks: list[TeamTask]) -> None:
-            self._refreshing = True
-            try:
-                self._refresh_tasks_inner(tasks)
-            finally:
-                self._refreshing = False
-
-        def _refresh_tasks_inner(self, tasks: list[TeamTask]) -> None:
             table = self.query_one("#tasks", DataTable)
             selected = self._cursor_task_id(table)
             table.clear()
             self._tasks_by_id = {}
             if self._show_done:
                 closed = [t for t in tasks if t.status in ("done", "dropped")]
-                if len(closed) != len(self._terminal_by_task):
-                    self._terminal_by_task = {}  # stale — refetch on demand
                 closed.sort(key=lambda t: t.updated_at, reverse=True)
                 table.border_title = f"done archive ({len(closed)}) — d for open tasks"
                 for task in closed:
@@ -564,6 +563,10 @@ def _build_app_class(interval: float) -> Any:
                 self._feed_order.append(event.id)
                 feed.add_option(Option(feed_line(event, self._roles), id=event.id))
                 self._last_seq = max(self._last_seq, event.seq)
+                if event.kind in ("task_done", "task_dropped"):
+                    # A close happened — attribution cache is stale (a
+                    # reopen-and-reclose must re-attribute to the new closer).
+                    self._terminal_by_task = {}
             if self._autoscroll:
                 feed.scroll_end(animate=False)
 
@@ -622,9 +625,14 @@ def _build_app_class(interval: float) -> Any:
             self.query_one("#detailwrap", VerticalScroll).scroll_home(animate=False)
 
         def on_data_table_row_highlighted(self, event: Any) -> None:
-            if self._refreshing:
-                return  # programmatic rebuild, not a user selection
             key = event.row_key.value if event.row_key else None
+            # Every rebuild restores the cursor to the same key and re-posts
+            # RowHighlighted asynchronously; only a genuine change of row is a
+            # user selection. This is robust to Textual's async message pump
+            # where a synchronous "refreshing" flag is not (round-3 finding 1).
+            if key is None or str(key) == self._detail_task_key:
+                return
+            self._detail_task_key = str(key)
             task = self._tasks_by_id.get(str(key))
             if task is None:
                 return

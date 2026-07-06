@@ -178,3 +178,37 @@ def test_serve_respects_master_switch(
     result = runner.invoke(app, ["--json", "serve", "--stdio"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"] in ("team_disabled", "not_a_project")
+
+
+def test_bearer_guard_rejects_non_ascii_header_with_401() -> None:
+    import asyncio
+
+    from aisquare.services.mcp_server import _BearerGuard
+
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request"}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def inner(scope: dict[str, object], receive: object, send: object) -> None:
+        sent.append({"type": "PASSED_THROUGH"})
+
+    guard = _BearerGuard(inner, "the-real-token")
+    scope: dict[str, object] = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer caf\xe9")],
+    }
+    asyncio.run(guard(scope, receive, send))  # non-ASCII byte, used to 500
+
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert starts and starts[0]["status"] == 401  # clean 401, not a TypeError 500
+    assert not any(m.get("type") == "PASSED_THROUGH" for m in sent)
+
+
+def test_unknown_ref_keeps_nothing_matches_wording(work_dir: Path) -> None:
+    team_service.activate()
+    result = mcp_server.task_update("tsk_typo", "done")
+    assert result == "error: nothing matches 'tsk_typo'"  # not a naked ref

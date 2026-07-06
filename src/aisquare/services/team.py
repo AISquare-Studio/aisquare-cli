@@ -125,33 +125,48 @@ def activate(cwd: Path | None = None) -> ProjectInfo:
 
 
 def board_data(
-    cwd: Path | None = None, *, events: int = _BOARD_EVENTS, since_seq: int | None = None
+    cwd: Path | None = None,
+    *,
+    events: int = _BOARD_EVENTS,
+    since_seq: int | None = None,
+    project: ProjectInfo | None = None,
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """Everything the board shows: sessions, tasks and recent events.
 
     ``since_seq`` turns the event fetch incremental (only rows past it) so a
     watch UI polling every few seconds does not rehydrate its whole window.
+    ``project`` lets a long-lived caller resolve identity once and pass it in,
+    sparing a ``git rev-parse`` per call (the watch TUI does this).
     """
     _require_enabled()
     with store_session() as store:
-        project = _project(store, cwd)
+        resolved = project if project is not None else _project(store, cwd)
         if since_seq is None:
-            fetched = store.recent_events(project.id, limit=events)
+            fetched = store.recent_events(resolved.id, limit=events)
         else:
-            fetched = store.events_since(project.id, since_seq, limit=events)
+            fetched = store.events_since(resolved.id, since_seq, limit=events)
         return (
-            project,
-            store.team_sessions(project.id),
-            store.team_tasks(project.id),
+            resolved,
+            store.team_sessions(resolved.id),
+            store.team_tasks(resolved.id),
             fetched,
         )
 
 
-def terminal_attribution(cwd: Path | None = None) -> dict[str, TeamEvent]:
+def resolve_project(cwd: Path | None = None) -> ProjectInfo:
+    """The team project for ``cwd`` (resolved once by long-lived callers)."""
+    _require_enabled()
+    return teambus.team_project(cwd)
+
+
+def terminal_attribution(
+    cwd: Path | None = None, *, project: ProjectInfo | None = None
+) -> dict[str, TeamEvent]:
     """Who closed each task, and when — from the store, not a feed window."""
     _require_enabled()
     with store_session() as store:
-        return store.terminal_events(_project(store, cwd).id)
+        resolved = project if project is not None else _project(store, cwd)
+        return store.terminal_events(resolved.id)
 
 
 def log_events(cwd: Path | None = None, *, limit: int = 30) -> list[TeamEvent]:

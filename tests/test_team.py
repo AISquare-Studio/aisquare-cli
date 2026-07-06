@@ -703,3 +703,23 @@ def test_old_format_mcp_sessions_are_retired_by_v8(work_dir: Path) -> None:
         assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         check.close()
+
+
+def test_terminal_events_returns_the_latest_closer_after_reopen(work_dir: Path) -> None:
+    from aisquare.services import team as team_service
+
+    team_service.activate(work_dir)
+    task, _ = team_service.add_task("re-closed task", cwd=work_dir)
+    team_service.finish_task(task.id, note="first close")
+    team_service.reopen_task(task.id, reason="regressed")
+    team_service.finish_task(task.id, note="second close")
+    from aisquare.core.store import store_session
+    from aisquare.core.teambus import team_project
+
+    with store_session() as store:
+        terminal = store.terminal_events(team_project(work_dir).id)
+    # One entry per task, and it is the LATEST close (highest seq), not the first.
+    assert task.id in terminal
+    latest = terminal[task.id]
+    all_done = [e for e in team_service.log_events(work_dir) if e.kind == "task_done"]
+    assert latest.seq == max(e.seq for e in all_done)

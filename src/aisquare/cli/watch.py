@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -255,6 +256,7 @@ def _build_app_class(interval: float) -> Any:
             ("b", "toggle_board", "board on/off"),
             ("r", "refresh_now", "refresh"),
             ("t", "pick_theme", "themes"),
+            ("s", "screenshot", "screenshot"),
         ]
 
         def __init__(self) -> None:
@@ -280,6 +282,25 @@ def _build_app_class(interval: float) -> Any:
 
         def action_pick_theme(self) -> None:
             self.push_screen(ThemePicker())
+
+        def action_change_theme(self) -> None:
+            # The command palette's "Change theme" lands here — route it to
+            # our stays-open picker instead of textual's pick-and-close one.
+            self.action_pick_theme()
+
+        def action_screenshot(self, filename: str | None = None, path: str | None = None) -> None:
+            """Save an SVG of the board to ~/.aisquare/screenshots (always local —
+            textual's own palette screenshot 'delivers' and can fail in plain
+            terminals)."""
+            try:
+                target = Path(path) if path else paths.aisquare_home() / "screenshots"
+                target.mkdir(parents=True, exist_ok=True)
+                name = filename or f"board-{datetime.now():%Y%m%d-%H%M%S}.svg"
+                file = target / name
+                file.write_text(self.export_screenshot(), encoding="utf-8")
+                self.notify(str(file), title="screenshot saved", timeout=6)
+            except Exception as exc:  # never crash the board over a screenshot
+                self.notify(f"screenshot failed: {exc}", severity="error", timeout=8)
 
         def watch_theme(self, theme_name: str) -> None:
             # Fires on ANY theme change (our picker or the command palette):

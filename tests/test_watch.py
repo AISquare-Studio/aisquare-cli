@@ -127,3 +127,44 @@ def test_theme_picker_stays_open_and_autosaves(
             return str(pilot.app.theme)
 
     assert asyncio.run(relaunch()) == final  # restored on next launch
+
+
+def test_screenshot_key_saves_svg_locally(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+
+    async def snap() -> list[Path]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+        return list((isolated_home / "screenshots").glob("board-*.svg"))
+
+    shots = asyncio.run(snap())
+    assert len(shots) == 1
+    assert "<svg" in shots[0].read_text()[:200]
+
+
+def test_palette_change_theme_opens_our_picker(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+
+    async def via_action() -> str:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # what the command palette's "Change theme" invokes:
+            await pilot.app.run_action("app.change_theme")
+            await pilot.pause()
+            return type(pilot.app.screen).__name__
+
+    assert asyncio.run(via_action()) == "ThemePicker"

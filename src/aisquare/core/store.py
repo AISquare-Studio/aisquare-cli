@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import random
 import re
 import sqlite3
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -1018,18 +1020,31 @@ def _migrate(connection: sqlite3.Connection) -> None:
 
 
 def open_store() -> ContextStore:
-    """Open (creating and migrating if needed) the context store."""
+    """Open (creating and migrating if needed) the context store.
+
+    First opens race: parallel session hooks all arrive at a fresh database
+    together, and the WAL switch + migrations contend for the write lock.
+    ``busy_timeout`` covers most of it, but journal-mode changes can return
+    "database is locked" without consulting the busy handler — so the whole
+    setup phase retries with jitter for up to 15s instead of dying. After
+    the first successful open this loop never iterates.
+    """
     paths.ensure_home()
     connection = sqlite3.connect(str(paths.db_path()))
     connection.row_factory = sqlite3.Row
-    # busy_timeout FIRST: on a fresh database the WAL switch takes a write
-    # lock, and racing first-opens (parallel session hooks) need patience
-    # there just as much as in the migrations that follow.
     connection.execute("PRAGMA busy_timeout = 5000")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA foreign_keys = ON")
-    _migrate(connection)
-    return SqliteStore(connection)
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA foreign_keys = ON")
+            _migrate(connection)
+            return SqliteStore(connection)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                connection.close()
+                raise
+            time.sleep(0.05 + random.random() * 0.1)
 
 
 @contextmanager

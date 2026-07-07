@@ -92,10 +92,13 @@ def brain_embeds(project_id: str) -> bool:
     """Whether the brain's *schema* was created embedding-capable.
 
     gbrain sizes embeddings at create time and records the choice in
-    ``.gbrain/config.json`` (a ``--no-embedding`` brain carries
-    ``"embedding_disabled": true``). This reads the actual schema, so callers
-    never trust the env knob alone — a brain built before the knob was set,
-    or built with it off, is correctly reported as non-embedding.
+    ``.gbrain/config.json``: verified against gbrain 0.42.1.0, a
+    ``--no-embedding`` brain carries ``"embedding_disabled": true`` and an
+    embedding brain carries ``"embedding_model"``/``"embedding_dimensions"``.
+    This reads the actual schema, so callers never trust the env knob alone —
+    a brain built before the knob was set, or with it off, is correctly
+    reported as non-embedding. Anything unreadable or unexpected → False, so
+    recall/doctor degrade safely rather than crash (both never-crash paths).
     """
     config = brain_home(project_id) / ".gbrain" / "config.json"
     if not config.exists():
@@ -103,6 +106,8 @@ def brain_embeds(project_id: str) -> bool:
     try:
         data = json.loads(config.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
         return False
     return not data.get("embedding_disabled", False) and bool(data.get("embedding_model"))
 

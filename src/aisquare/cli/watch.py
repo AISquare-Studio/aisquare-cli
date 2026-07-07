@@ -629,15 +629,12 @@ def _build_app_class(interval: float) -> Any:
             self.query_one("#detail", Static).update(content)
             self.query_one("#detailwrap", VerticalScroll).scroll_home(animate=False)
 
-        def on_data_table_row_highlighted(self, event: Any) -> None:
-            # A rebuild (clear/add_row/move_cursor) posts RowHighlighted
-            # asynchronously regardless of focus; a user only moves the table
-            # cursor while the table is focused. Gating on focus is a
-            # synchronous, timing-independent way to tell the two apart — a
-            # per-key or epoch/settle guard both depend on the async message
-            # pump and let the rebuild storm through (round-3/4 finding 1).
-            if not self.query_one("#tasks", DataTable).has_focus:
-                return
+        def on_data_table_row_selected(self, event: Any) -> None:
+            # Drive the detail pane off RowSelected (click / Enter), NOT
+            # RowHighlighted. A rebuild's clear/add_row/move_cursor posts
+            # RowHighlighted but never RowSelected, so no artifact can touch the
+            # detail pane — this is the timing-independent fix that closes the
+            # selection-clobber across every rebuild path (rounds 2-5).
             key = event.row_key.value if event.row_key else None
             if key is None:
                 return
@@ -662,11 +659,9 @@ def _build_app_class(interval: float) -> Any:
                 detail.append("\npress o to open the transcript at this moment", style="dim")
             self._show_detail(detail)
 
-        def on_option_list_option_highlighted(self, event: Any) -> None:
-            # Same focus gate as the task table: only a user browsing the feed
-            # (feed focused) updates the detail pane, never an append/scroll.
-            if not self.query_one("#feed", OptionList).has_focus:
-                return
+        def on_option_list_option_selected(self, event: Any) -> None:
+            # OptionSelected (click / Enter) only, mirroring the task table:
+            # an append/scroll never posts it, so a feed selection is stable.
             if event.option is not None and event.option.id is not None:
                 stored = self._events_by_id.get(event.option.id)
                 if stored is not None:

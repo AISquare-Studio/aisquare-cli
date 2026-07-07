@@ -155,11 +155,25 @@ feed line for its full detail in the bottom bar.
 #### Long-term memory (gbrain)
 
 Durable events — decisions, results, task outcomes, reopen feedback — are
-distilled into a per-project [gbrain](https://www.npmjs.com/package/gbrain)
-brain by a detached worker (never on the hot path; requires `gbrain` on
-PATH; initialised automatically with embeddings off; silently skipped when
-absent). `aisquare recall "<question>"` searches it; `aisquare team distill`
-drains on demand; `aisquare doctor` reports brain health.
+distilled into a per-project **gbrain** brain by a detached worker (never on
+the hot path; requires the `gbrain` CLI on `PATH`; initialised automatically
+with embeddings off; silently skipped when absent). `aisquare recall
+"<question>"` searches it; `aisquare team distill` drains on demand; `aisquare
+doctor` reports brain health.
+
+> `gbrain` here is the AISquare knowledge-brain CLI (a separate, optional tool),
+> not the unrelated `gbrain` package on public npm. This layer is entirely
+> optional — the bus works without it.
+
+**Embeddings** turn `recall` into semantic (hybrid vector + keyword) search.
+They are **off by default** (no surprise network calls). To enable, export
+`AISQUARE_BRAIN_EMBED=1` and an `OPENAI_API_KEY` before the first distill —
+the embedding schema is fixed **at brain creation time**, so a brain built
+without embeddings must be rebuilt to add them (remove
+`~/.aisquare/projects/<id>/brain`, then `AISQUARE_BRAIN_EMBED=1 aisquare team
+distill --all`). `aisquare doctor` flags a knob-vs-schema mismatch either way.
+`AISQUARE_BRAIN_EMBED_MODEL` overrides the model (default
+`openai:text-embedding-3-large`).
 
 #### Remote agents (MCP)
 
@@ -193,7 +207,9 @@ WSL2 via localhost) or register a stdio server in
 | `AISQUARE_TEAM_HUB` | pin sessions from several repos onto one bus |
 | `AISQUARE_TEAM_DELTA=0` | mute per-prompt teammate deltas for a session |
 | `AISQUARE_TEAM_LEASE_MIN` | claim lease in minutes (default 120) |
-| `AISQUARE_BRAIN=0` / `AISQUARE_BRAIN_EMBED=1` | disable the gbrain layer / embed distilled pages |
+| `AISQUARE_BRAIN=0` | disable the gbrain long-term-memory layer |
+| `AISQUARE_BRAIN_EMBED=1` | embed distilled pages for semantic recall (needs `OPENAI_API_KEY`; set before the first distill — see the constraint above) |
+| `AISQUARE_BRAIN_EMBED_MODEL` | embedding model (default `openai:text-embedding-3-large`) |
 
 The **codebase snapshot** (`project onboard`, or `init`) mirrors the server-side
 [Repomix](https://github.com/yamadashy/repomix) packing for sync-consistency: a

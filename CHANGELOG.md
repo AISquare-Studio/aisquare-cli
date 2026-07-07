@@ -34,9 +34,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Multi-repo executions via `AISQUARE_TEAM_HUB`; worktree-safe project
     identity (`git rev-parse --git-common-dir`); `agents connect --config-dir`
     for parallel `CLAUDE_CONFIG_DIR` installs.
+  - **Semantic recall**: with `AISQUARE_BRAIN_EMBED=1` (and an
+    `OPENAI_API_KEY`) distilled pages are embedded and `recall` uses gbrain's
+    hybrid vector+keyword search, falling back to keyword when unavailable.
+    The embedding schema is fixed at brain-creation time, so the knob must be
+    set before the first distill; `doctor` flags a knob-vs-schema mismatch and
+    points at the rebuild (`team distill --all`).
   - Env knobs (no config gating): `AISQUARE_TEAM`, `AISQUARE_ROLE`,
     `AISQUARE_TEAM_HUB`, `AISQUARE_TEAM_DELTA`, `AISQUARE_TEAM_LEASE_MIN`,
-    `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED`.
+    `AISQUARE_BRAIN`, `AISQUARE_BRAIN_EMBED`, `AISQUARE_BRAIN_EMBED_MODEL`.
 
 ## [0.1.0] - 2026-06-29
 

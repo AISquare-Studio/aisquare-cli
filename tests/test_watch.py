@@ -80,6 +80,7 @@ def test_tui_smoke_click_task_shows_detail(runner: CliRunner, work_dir: Path) ->
             feed = pilot.app.query_one("#feed", OptionList)
             table.focus()
             table.move_cursor(row=1)
+            await pilot.press("enter")  # RowSelected shows the detail
             await pilot.pause()
             return table.row_count, feed.option_count, pilot.app.detail_text
 
@@ -256,8 +257,10 @@ def test_done_archive_view_shows_who_and_when(
             await pilot.pause()
             table = pilot.app.query_one("#tasks", DataTable)
             open_rows = table.row_count
-            table.focus()  # user is on the task table…
-            await pilot.press("d")  # …and flips it to the done archive
+            await pilot.press("d")  # flip to the done archive
+            await pilot.pause()
+            table.focus()
+            await pilot.press("enter")  # select the (row 0) archived task
             await pilot.pause()
             return open_rows, table.row_count, pilot.app.detail_text
 
@@ -308,10 +311,12 @@ def test_feed_selection_survives_a_refresh_tick(
             table = pilot.app.query_one("#tasks", DataTable)
             table.focus()
             table.move_cursor(row=1)  # NOT row 0
+            await pilot.press("enter")  # select the task
             await pilot.pause()
             feed = pilot.app.query_one("#feed", OptionList)
-            feed.focus()  # the user is now browsing the feed
-            feed.highlighted = feed.option_count - 1  # select the newest feed line
+            feed.focus()
+            feed.highlighted = feed.option_count - 1
+            await pilot.press("enter")  # select the feed line
             await pilot.pause()
             chosen = pilot.app._detail_moment
             pilot.app._refresh_data()  # the async RowHighlighted clobber path

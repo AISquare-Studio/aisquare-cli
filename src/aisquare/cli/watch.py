@@ -630,15 +630,40 @@ def _build_app_class(interval: float) -> Any:
             self.query_one("#detailwrap", VerticalScroll).scroll_home(animate=False)
 
         def on_data_table_row_selected(self, event: Any) -> None:
-            # Drive the detail pane off RowSelected (click / Enter), NOT
-            # RowHighlighted. A rebuild's clear/add_row/move_cursor posts
-            # RowHighlighted but never RowSelected, so no artifact can touch the
-            # detail pane — this is the timing-independent fix that closes the
-            # selection-clobber across every rebuild path (rounds 2-5).
+            # Enter (and click-when-cursor-already-there) post RowSelected. A
+            # rebuild's clear/add_row/move_cursor posts RowHighlighted but never
+            # RowSelected, so no artifact can touch the detail pane — the
+            # timing-independent fix that closed the clobber across rounds 2-5.
             key = event.row_key.value if event.row_key else None
+            self._show_task_detail(str(key) if key is not None else None)
+
+        def on_click(self, event: Any) -> None:
+            # DataTable only posts RowSelected when the click lands on the cell
+            # the cursor is ALREADY on, so a first click would move the cursor
+            # but show no detail. A mouse Click is user-only (rebuilds never
+            # post one), so handling it directly restores one-click detail
+            # without reopening the rebuild-artifact door.
+            try:
+                table = self.query_one("#tasks", DataTable)
+                widget, _ = self.get_widget_at(event.screen_x, event.screen_y)
+            except Exception:
+                return
+            if widget is table:
+                self.call_after_refresh(self._show_cursor_task_detail)
+
+        def _show_cursor_task_detail(self) -> None:
+            table = self.query_one("#tasks", DataTable)
+            try:
+                cell = table.coordinate_to_cell_key(table.cursor_coordinate)
+                key = cell.row_key.value
+            except Exception:
+                return
+            self._show_task_detail(str(key) if key is not None else None)
+
+        def _show_task_detail(self, key: str | None) -> None:
             if key is None:
                 return
-            task = self._tasks_by_id.get(str(key))
+            task = self._tasks_by_id.get(key)
             if task is None:
                 return
             detail = _task_detail(task, self._statuses)

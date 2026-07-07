@@ -182,7 +182,8 @@ def _check_brain() -> DoctorCheck:
         return _warn(
             "brain",
             "gbrain not found — team decisions/results are not distilled",
-            "Install it: bun install -g gbrain (or npm install -g gbrain)",
+            "Optional: install the AISquare gbrain CLI to enable long-term memory "
+            "(not the unrelated 'gbrain' on public npm)",
         )
     try:
         project = teambus.team_project()

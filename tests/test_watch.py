@@ -397,3 +397,36 @@ def test_attribution_negative_cache_avoids_refetch_every_tick(
             return calls["n"]
 
     assert asyncio.run(drive()) == 1  # fetched once, negative result cached
+
+
+def test_single_click_shows_task_detail(runner: CliRunner, work_dir: Path) -> None:
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual.widgets import DataTable
+
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    _add(runner, "task one")
+    _add(runner, "task two")
+
+    async def drive() -> tuple[str, str, str]:
+        app_cls = watch_mod._build_app_class(interval=60.0)
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = pilot.app.query_one("#tasks", DataTable)
+            table.focus()
+            table.move_cursor(row=1)  # a first click lands the cursor here…
+            await pilot.pause()
+            cursor_only = pilot.app.detail_text  # …but RowHighlighted shows nothing
+            pilot.app._show_cursor_task_detail()  # what on_click triggers
+            await pilot.pause()
+            after_click = pilot.app.detail_text
+            # a real single mouse click on the table also populates it
+            await pilot.click("#tasks", offset=(5, 3))
+            await pilot.pause()
+            return cursor_only, after_click, pilot.app.detail_text
+
+    cursor_only, after_click, after_mouse = asyncio.run(drive())
+    assert cursor_only == ""  # cursor move alone never touches detail (rounds 2-5)
+    assert "task two" in after_click  # the click handler shows the cursor row
+    assert after_mouse != ""  # a single real click populates the detail bar

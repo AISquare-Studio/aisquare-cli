@@ -400,33 +400,86 @@ def test_attribution_negative_cache_avoids_refetch_every_tick(
 
 
 def test_single_click_shows_task_detail(runner: CliRunner, work_dir: Path) -> None:
+    """Round-7 spec: every detail population must come from pilot mouse/keys.
+
+    (1) cursor parked on row 0, a real click on NON-cursored row 2 shows THAT
+    row's detail; (2) header and blank-area clicks never touch a selected
+    feed detail; (3) refresh ticks never touch it either.
+    """
     pytest.importorskip("textual", reason="the [tui] extra is not installed")
-    from textual.widgets import DataTable
+    from datetime import datetime
+
+    from textual.widgets import OptionList
 
     from aisquare.cli import watch as watch_mod
 
     team_service.activate()
-    _add(runner, "task one")
-    _add(runner, "task two")
+    _add(runner, "alpha task")
+    _add(runner, "beta task")
+    _add(runner, "gamma task")
+    runner.invoke(app, ["note", "the feed line to keep", "--kind", "decision"])
+    tasks = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)
+    gamma = next(t for t in tasks if t["title"] == "gamma task")
+    gamma_updated = datetime.fromisoformat(gamma["updated_at"])
 
-    async def drive() -> tuple[str, str, str]:
+    # Widget-relative rows: y=0 border, y=1 header, y=2 row0 ... => row2 at y=4.
+    async def drive() -> tuple[str, object, str, object, str, object, str, object]:
         app_cls = watch_mod._build_app_class(interval=60.0)
         async with app_cls().run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            table = pilot.app.query_one("#tasks", DataTable)
-            table.focus()
-            table.move_cursor(row=1)  # a first click lands the cursor here…
+            # (1) cursor is parked at row 0 by the initial rebuild; one real
+            # click on row 2 must show row 2's detail.
+            await pilot.click("#tasks", offset=(6, 4))
             await pilot.pause()
-            cursor_only = pilot.app.detail_text  # …but RowHighlighted shows nothing
-            pilot.app._show_cursor_task_detail()  # what on_click triggers
+            clicked_text = pilot.app.detail_text
+            clicked_moment = pilot.app._detail_moment
+            # (2) select a feed line (keys), then click the table header and
+            # the blank area below the rows: the feed detail must survive.
+            feed = pilot.app.query_one("#feed", OptionList)
+            feed.focus()
+            feed.highlighted = feed.option_count - 1
+            await pilot.press("enter")
             await pilot.pause()
-            after_click = pilot.app.detail_text
-            # a real single mouse click on the table also populates it
-            await pilot.click("#tasks", offset=(5, 3))
+            feed_text = pilot.app.detail_text
+            feed_moment = pilot.app._detail_moment
+            await pilot.click("#tasks", offset=(6, 1))  # header
+            await pilot.click("#tasks", offset=(6, 9))  # blank below the rows
             await pilot.pause()
-            return cursor_only, after_click, pilot.app.detail_text
+            after_stray_text = pilot.app.detail_text
+            after_stray_moment = pilot.app._detail_moment
+            # (3) several refresh ticks: still untouched.
+            for _ in range(3):
+                pilot.app._refresh_data()
+                await pilot.pause()
+            return (
+                clicked_text,
+                clicked_moment,
+                feed_text,
+                feed_moment,
+                after_stray_text,
+                after_stray_moment,
+                pilot.app.detail_text,
+                pilot.app._detail_moment,
+            )
 
-    cursor_only, after_click, after_mouse = asyncio.run(drive())
-    assert cursor_only == ""  # cursor move alone never touches detail (rounds 2-5)
-    assert "task two" in after_click  # the click handler shows the cursor row
-    assert after_mouse != ""  # a single real click populates the detail bar
+    (
+        clicked_text,
+        clicked_moment,
+        feed_text,
+        feed_moment,
+        stray_text,
+        stray_moment,
+        final_text,
+        final_moment,
+    ) = asyncio.run(drive())
+    # (1) the click on the non-cursored row showed THAT row, exactly.
+    assert "gamma task" in clicked_text
+    assert "alpha task" not in clicked_text
+    assert clicked_moment == (None, gamma_updated)  # unclaimed todo: claimant None
+    # (2) header + blank clicks left the selected feed detail untouched...
+    assert "the feed line to keep" in feed_text
+    assert stray_text == feed_text
+    assert stray_moment == feed_moment
+    # (3) ...and so did the refresh ticks.
+    assert final_text == feed_text
+    assert final_moment == feed_moment

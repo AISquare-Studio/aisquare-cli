@@ -241,11 +241,59 @@ def _save_theme(name: str) -> None:
 
 def _build_app_class(interval: float) -> Any:
     """Build the Textual app class (a factory so tests can drive it headless)."""
+    from textual import events
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, Vertical, VerticalScroll
+    from textual.coordinate import Coordinate
+    from textual.message import Message
     from textual.screen import ModalScreen
     from textual.widgets import DataTable, Footer, OptionList, Static
     from textual.widgets.option_list import Option
+
+    class PickableTable(DataTable[Text]):
+        """A DataTable that reports real mouse picks on data rows.
+
+        ``DataTable._on_click`` stops the event inside the widget for data
+        cells (textual 8.2.8, ``_data_table.py`` ``_on_click``), so an
+        app-level ``Click`` handler never sees a row click — while the
+        header/blank clicks that DO bubble aren't row picks at all. The only
+        place that sees exactly the right events is the widget's own click
+        path: post ``RowPicked`` keyed off the click's own ``style.meta``
+        (``row >= 0`` — headers are ``row == -1`` and blank space carries no
+        meta; ``out_of_bounds`` clicks past the last column stay accepted
+        for a row cursor, exactly as the widget itself accepts them).
+
+        Deliberately NO ``super()._on_click`` call: textual dispatches
+        ``_on_click`` once per class in the MRO
+        (``message_pump._get_dispatch_methods`` walks ``__mro__``), so
+        ``DataTable._on_click`` runs after this handler anyway. Calling it
+        explicitly would run it twice per click — a double cursor move plus
+        a spurious ``RowSelected`` from the second pass, which finds the
+        cursor already on the clicked cell. Reading the row from the event
+        meta (not the cursor) keeps this correct in either dispatch order.
+
+        Rebuilds never pass through here, so the rounds-2-6 invariant — a
+        rebuild can never touch the detail pane — still holds;
+        ``RowSelected`` stays for Enter.
+        """
+
+        class RowPicked(Message):
+            def __init__(self, row_key: Any) -> None:
+                self.row_key = row_key
+                super().__init__()
+
+        async def _on_click(self, event: events.Click) -> None:
+            meta = event.style.meta
+            row = meta.get("row", -1)
+            if row < 0:  # header click, or blank space with no row meta
+                return
+            if self.cursor_type != "row" and meta.get("out_of_bounds", False):
+                return  # mirror DataTable's own out-of-bounds guard
+            try:
+                key = self.coordinate_to_cell_key(Coordinate(row, 0)).row_key
+            except Exception:  # click raced a rebuild; the row is gone
+                return
+            self.post_message(self.RowPicked(key))
 
     class ThemePicker(ModalScreen[None]):
         """A theme browser that STAYS OPEN: every highlight applies (and
@@ -342,7 +390,7 @@ def _build_app_class(interval: float) -> Any:
             with Horizontal(id="main"):
                 with Vertical(id="board"):
                     yield Static(id="sessions")
-                    yield DataTable[Text](id="tasks", cursor_type="row")
+                    yield PickableTable(id="tasks", cursor_type="row")
                 with Vertical(id="feedpane"):
                     yield OptionList(id="feed")
                     with VerticalScroll(id="feedtext"):
@@ -637,27 +685,12 @@ def _build_app_class(interval: float) -> Any:
             key = event.row_key.value if event.row_key else None
             self._show_task_detail(str(key) if key is not None else None)
 
-        def on_click(self, event: Any) -> None:
-            # DataTable only posts RowSelected when the click lands on the cell
-            # the cursor is ALREADY on, so a first click would move the cursor
-            # but show no detail. A mouse Click is user-only (rebuilds never
-            # post one), so handling it directly restores one-click detail
-            # without reopening the rebuild-artifact door.
-            try:
-                table = self.query_one("#tasks", DataTable)
-                widget, _ = self.get_widget_at(event.screen_x, event.screen_y)
-            except Exception:
-                return
-            if widget is table:
-                self.call_after_refresh(self._show_cursor_task_detail)
-
-        def _show_cursor_task_detail(self) -> None:
-            table = self.query_one("#tasks", DataTable)
-            try:
-                cell = table.coordinate_to_cell_key(table.cursor_coordinate)
-                key = cell.row_key.value
-            except Exception:
-                return
+        def on_pickable_table_row_picked(self, event: Any) -> None:
+            # A real mouse click on a data row (posted from inside the widget's
+            # click path, where DataTable stops the event before it can bubble).
+            # Header/blank clicks never post this, so they can't clobber a
+            # selected feed event — and rebuilds can't reach it at all.
+            key = event.row_key.value if event.row_key else None
             self._show_task_detail(str(key) if key is not None else None)
 
         def _show_task_detail(self, key: str | None) -> None:

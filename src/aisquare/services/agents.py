@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from aisquare.core import agents as agent_core
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
@@ -28,7 +30,7 @@ def status(name: str | None = None) -> list[AgentInfo]:
     return [info]
 
 
-def connect(name: str) -> AgentConnection:
+def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     """Install aisquare's hooks into the agent and ingest its existing context.
 
     Installs SessionStart/UserPromptSubmit hooks (so the agent auto-injects
@@ -36,14 +38,14 @@ def connect(name: str) -> AgentConnection:
     agent's context files (e.g. ``~/.claude/CLAUDE.md``) into the user pool.
     Raises ``KeyError`` for an unknown agent and ``ValueError`` if not installed.
     """
-    info = agent_core.detect(name)
+    info = agent_core.detect(name, config_dir)
     if info is None:
         raise KeyError(name)
     if not info.detected:
         raise ValueError(f"{name} is not installed on this machine")
 
     sections: list[str] = []
-    for path in agent_core.context_files(name):
+    for path in agent_core.context_files(name, config_dir):
         sections.extend(_split_sections(path.read_text(encoding="utf-8")))
 
     added = 0
@@ -56,20 +58,23 @@ def connect(name: str) -> AgentConnection:
             existing.add(text)
             added += 1
 
-    hooks_installed = agent_core.install_hooks(name)
+    hooks_installed = agent_core.install_hooks(name, config_dir)
     agent_core.set_connected(name, True)
     return AgentConnection(name=name, hooks_installed=hooks_installed, imported=added)
 
 
-def disconnect(name: str) -> None:
+def disconnect(name: str, config_dir: Path | None = None) -> bool:
     """Remove aisquare's hooks and mark the agent disconnected (ingested context kept).
 
-    Raises ``KeyError`` for an unknown agent.
+    Returns whether any hooks were actually removed, so the CLI can say
+    "nothing to remove here" instead of a false ✓ when the hooks live in a
+    different config dir. Raises ``KeyError`` for an unknown agent.
     """
-    if agent_core.detect(name) is None:
+    if agent_core.detect(name, config_dir) is None:
         raise KeyError(name)
-    agent_core.remove_hooks(name)
+    removed = agent_core.remove_hooks(name, config_dir)
     agent_core.set_connected(name, False)
+    return removed
 
 
 def _split_sections(text: str) -> list[str]:

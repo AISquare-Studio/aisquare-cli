@@ -9,7 +9,10 @@ known context file) exists. The set of connected agents is persisted in
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +21,13 @@ from aisquare.core import paths
 from aisquare.models import AgentInfo
 
 # Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
-_HOOKS = (("SessionStart", "session-start"), ("UserPromptSubmit", "user-prompt-submit"))
+_HOOKS = (
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("SessionEnd", "session-end"),
+    ("Stop", "stop"),
+    ("Notification", "notification"),
+)
 
 
 @dataclass(frozen=True)
@@ -37,15 +46,32 @@ def _home() -> Path:
     return Path.home()
 
 
-def _specs() -> list[AgentSpec]:
+def _claude_home(config_dir: Path | None = None) -> Path:
+    """Claude Code's config directory.
+
+    Users run parallel Claude installs via ``CLAUDE_CONFIG_DIR`` (e.g. an
+    alias pointing at ``~/.claude4``); hooks must land in the directory the
+    actual ``claude`` command reads. Priority: explicit ``--config-dir``,
+    then ``CLAUDE_CONFIG_DIR``, then ``~/.claude``.
+    """
+    if config_dir is not None:
+        return config_dir.expanduser()
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return _home() / ".claude"
+
+
+def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
     home = _home()
+    claude = _claude_home(config_dir)
     return [
         AgentSpec(
             "claude-code",
             "Claude Code",
-            home / ".claude",
-            (home / ".claude" / "CLAUDE.md",),
-            settings_path=home / ".claude" / "settings.json",
+            claude,
+            (claude / "CLAUDE.md",),
+            settings_path=claude / "settings.json",
         ),
         AgentSpec("cursor", "Cursor", home / ".cursor", ()),
         AgentSpec("codex", "Codex", home / ".codex", ()),
@@ -53,9 +79,21 @@ def _specs() -> list[AgentSpec]:
 
 
 def _aisquare_command() -> str:
-    """Absolute path to the aisquare executable, for use inside hook commands."""
+    """The command hooks should run — an absolute path that works in any shell.
+
+    The running executable wins: whoever installs hooks is the aisquare the
+    hooks should call, even when it was invoked as ``.venv/bin/aisquare``
+    without being on PATH. Falls back to PATH lookup, then to ``python -m
+    aisquare`` via the current interpreter — never to a bare name a hook
+    shell might not resolve.
+    """
+    argv0 = Path(sys.argv[0])
+    if argv0.name in ("aisquare", "asq") and argv0.exists():
+        return shlex.quote(str(argv0.resolve()))
     found = shutil.which("aisquare")
-    return found or "aisquare"
+    if found:
+        return shlex.quote(found)
+    return f"{shlex.quote(sys.executable)} -m aisquare"
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
@@ -68,6 +106,29 @@ def _read_settings(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _is_aisquare_hook_command(command: str) -> bool:
+    """Whether ``command`` is one of aisquare's own hook invocations.
+
+    Deliberately strict: the command must *end* with ``hook <subcommand>``
+    AND the invoked program must be aisquare itself (an ``aisquare``/``asq``
+    executable, or ``python -m aisquare``). A bare-substring match would
+    classify unrelated user hooks like ``webhook stop`` or ``~/bin/my-hook
+    stop`` as ours and silently delete them on connect/disconnect. Parsing
+    uses shlex so aisquare paths containing spaces (quoted at install time)
+    keep matching.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if len(tokens) < 3 or tokens[-2] != "hook":
+        return False
+    if tokens[-1] not in {subcommand for _, subcommand in _HOOKS}:
+        return False
+    program = Path(tokens[0]).name
+    return program in ("aisquare", "asq") or tokens[-4:-2] == ["-m", "aisquare"]
+
+
 def _is_aisquare_group(group: Any) -> bool:
     if not isinstance(group, dict):
         return False
@@ -77,23 +138,21 @@ def _is_aisquare_group(group: Any) -> bool:
     return any(
         isinstance(item, dict)
         and isinstance(item.get("command"), str)
-        and (
-            "hook session-start" in item["command"] or "hook user-prompt-submit" in item["command"]
-        )
+        and _is_aisquare_hook_command(item["command"])
         for item in hooks
     )
 
 
-def install_hooks(name: str) -> bool:
-    """Install aisquare's SessionStart/UserPromptSubmit hooks. False if unsupported."""
-    spec = _spec(name)
+def install_hooks(name: str, config_dir: Path | None = None) -> bool:
+    """Install aisquare's lifecycle hooks. False if the agent is unsupported."""
+    spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return False
     settings = _read_settings(spec.settings_path)
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
-    command = _aisquare_command()
+    command = _aisquare_command()  # already shell-quoted where needed
     for event, subcommand in _HOOKS:
         groups = hooks.get(event)
         kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
@@ -105,9 +164,9 @@ def install_hooks(name: str) -> bool:
     return True
 
 
-def remove_hooks(name: str) -> bool:
+def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     """Remove aisquare's hooks from the agent's settings. True if any were removed."""
-    spec = _spec(name)
+    spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
     settings = _read_settings(spec.settings_path)
@@ -133,21 +192,27 @@ def remove_hooks(name: str) -> bool:
     return removed
 
 
-def hooks_installed(name: str) -> bool:
-    """Whether aisquare's hooks are present in the agent's settings."""
-    spec = _spec(name)
+def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
+    """Whether aisquare's hooks are FULLY installed (every lifecycle event).
+
+    A partial install (e.g. from a version that knew fewer events) returns
+    False so ``doctor`` tells the user to re-run ``agents connect`` — an
+    any-marker check would report healthy while Stop/Notification/SessionEnd
+    silently never fire.
+    """
+    spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
     hooks = _read_settings(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return False
-    return any(
-        _is_aisquare_group(group) for event, _ in _HOOKS for group in (hooks.get(event) or [])
+    return all(
+        any(_is_aisquare_group(group) for group in (hooks.get(event) or [])) for event, _ in _HOOKS
     )
 
 
-def _spec(name: str) -> AgentSpec | None:
-    return next((spec for spec in _specs() if spec.name == name), None)
+def _spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
+    return next((spec for spec in _specs(config_dir) if spec.name == name), None)
 
 
 def _connected_set() -> set[str]:
@@ -184,13 +249,13 @@ def detect_all() -> list[AgentInfo]:
     return [_to_info(spec, connected) for spec in _specs()]
 
 
-def detect(name: str) -> AgentInfo | None:
+def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
     """Detection state for one agent, or ``None`` if the name is unknown."""
-    spec = _spec(name)
+    spec = _spec(name, config_dir)
     return _to_info(spec, _connected_set()) if spec is not None else None
 
 
-def context_files(name: str) -> list[Path]:
+def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
     """Existing context files for an agent (its content, for ingestion)."""
-    spec = _spec(name)
+    spec = _spec(name, config_dir)
     return [path for path in spec.context_files if path.exists()] if spec else []

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
+from aisquare.core.console import stderr_console
 from aisquare.services import agents as agents_service
 
 app = typer.Typer(help="Detect and connect coding agents.", no_args_is_help=True)
@@ -38,11 +40,21 @@ def status(
     emit_agents(agents)
 
 
+ConfigDir = Annotated[
+    Path | None,
+    typer.Option(
+        "--config-dir",
+        help="Claude Code config directory to target (for CLAUDE_CONFIG_DIR "
+        "installs, e.g. ~/.claude4). Default: $CLAUDE_CONFIG_DIR or ~/.claude.",
+    ),
+]
+
+
 @app.command("connect")
-def connect(name: AgentName) -> None:
+def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
     """Connect an agent: install aisquare's hooks and ingest its existing context."""
     try:
-        connection = agents_service.connect(name)
+        connection = agents_service.connect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
     except ValueError as exc:
@@ -51,10 +63,15 @@ def connect(name: AgentName) -> None:
 
 
 @app.command("disconnect")
-def disconnect(name: AgentName) -> None:
+def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
     """Disconnect an agent (its already-imported context is kept)."""
     try:
-        agents_service.disconnect(name)
+        removed = agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    if not removed:
+        stderr_console().print(
+            "note: no aisquare hooks found in that config dir — if you connected "
+            "with --config-dir, disconnect with the same one"
+        )
     emit_disconnected(name)

@@ -24,8 +24,32 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("status",),
     ("doctor",),
     ("log",),
+    ("note",),
+    ("board",),
+    ("recall",),
+    ("serve",),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
+    ("hook", "session-end"),
+    ("hook", "stop"),
+    ("hook", "notification"),
+    *(("team", command) for command in ("on", "status", "focus", "role", "log", "distill")),
+    *(
+        ("task", command)
+        for command in (
+            "add",
+            "list",
+            "show",
+            "claim",
+            "next",
+            "review",
+            "reopen",
+            "done",
+            "block",
+            "drop",
+            "release",
+        )
+    ),
     *(
         (group, command)
         for group in ("context", "ctx")

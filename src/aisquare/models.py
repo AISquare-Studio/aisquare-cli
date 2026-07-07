@@ -136,6 +136,89 @@ class PromptRecord(BaseModel):
     created_at: datetime
 
 
+TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
+"""Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
+
+
+class TeamSession(BaseModel):
+    """One live agent session on the team bus (id = the agent's session id)."""
+
+    id: str
+    project_id: str
+    role: str = "unassigned"
+    label: str | None = None
+    focus: str | None = None
+    """What this session says it is working on right now."""
+    started_at: datetime
+    last_seen_at: datetime
+    ended_at: datetime | None = None
+    cursor: int = 0
+    """Highest team-event ``seq`` already shown to this session (delta position)."""
+    state: str = "working"
+    """Live activity: working (mid-turn), waiting (wants input) or attention."""
+    transcript_path: str | None = None
+    """The session's Claude Code transcript (JSONL), from hook payloads."""
+
+
+class TeamTask(BaseModel):
+    """A shared task on the team bus, idempotent on ``(project_id, key)``."""
+
+    id: str
+    project_id: str
+    key: str
+    """Idempotency key: re-adding the same key returns the existing task."""
+    title: str
+    detail: str | None = None
+    status: TaskStatus = "todo"
+    role: str | None = None
+    """Suggested owner role (planner/coder/runner/...), advisory only."""
+    needs: list[str] = Field(default_factory=list)
+    """Task ids this one depends on; ``task next`` only hands out ready tasks."""
+    claimed_by: str | None = None
+    claim_expires_at: datetime | None = None
+    """Claim lease; an expired lease makes the task claimable again."""
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TeamEvent(BaseModel):
+    """One update on the team pipe: who did what, addressed to whom.
+
+    ``seq`` is the gapless bus cursor (SQLite rowid); deltas are "events with
+    ``seq`` past my cursor, authored by others". Events render as
+    :class:`DataEnvelope` payloads so the team stream stays pipe-shaped.
+    """
+
+    seq: int = 0
+    id: str
+    project_id: str
+    session_id: str | None = None
+    kind: str = "note"
+    text: str
+    task_id: str | None = None
+    to_role: str | None = None
+    created_at: datetime
+
+    def as_envelope(self) -> DataEnvelope:
+        """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``)."""
+        return DataEnvelope(
+            kind=f"team.{self.kind}",
+            scope="project",
+            payload={
+                "seq": self.seq,
+                "id": self.id,
+                "project_id": self.project_id,
+                "session_id": self.session_id,
+                "text": self.text,
+                "task_id": self.task_id,
+                "to_role": self.to_role,
+            },
+            source=self.session_id or "cli",
+            ts=self.created_at,
+        )
+
+
 class Snapshot(BaseModel):
     """A packed snapshot of a project's codebase (Repomix full pack + skeleton)."""
 

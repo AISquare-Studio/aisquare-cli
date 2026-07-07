@@ -1,9 +1,13 @@
 """Runtime handlers for the Claude Code hooks installed by ``agents connect``.
 
 - ``session_start_context`` builds what aisquare injects when a session starts:
-  the curated context block plus a directive pointing Claude at the codebase
-  snapshot and prompt history (route, don't dump).
-- ``capture_prompt`` records how the user prompts, for replay via ``aisquare log``.
+  the curated context block, a directive pointing Claude at the codebase
+  snapshot and prompt history (route, don't dump) — and, when the team bus is
+  active for the project, the team board plus protocol.
+- ``prompt_submitted`` records how the user prompts (``aisquare log``),
+  heartbeats the session on the team bus, and returns the teammate delta to
+  inject (empty when the team has been quiet).
+- ``session_ended`` retires the session from the team bus.
 """
 
 from __future__ import annotations
@@ -14,19 +18,64 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
+from aisquare.services import team as team_service
 
 
-def session_start_context(cwd: Path | None) -> str:
+def session_start_context(
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    source: str | None = None,
+    transcript_path: str | None = None,
+) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
         has_prompts = bool(store.recent_prompts(project.id, limit=1))
     directive = _directive(project.id, has_prompts=has_prompts)
-    if not entries and not directive:
-        return ""
     block = build_block(entries, project) if entries else ""
-    return "\n\n".join(part for part in (directive, block) if part)
+    team_block = (
+        team_service.hook_session_start(session_id, cwd, source, transcript_path=transcript_path)
+        if session_id
+        else ""
+    )
+    return "\n\n".join(part for part in (directive, block, team_block) if part)
+
+
+def prompt_submitted(
+    prompt: str | None,
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    transcript_path: str | None = None,
+) -> str:
+    """Record a submitted prompt; return the team delta to add to context."""
+    if prompt is not None and prompt.strip():
+        capture_prompt(prompt, cwd)
+    if session_id is None:
+        return ""
+    return team_service.hook_prompt_heartbeat(session_id, cwd, transcript_path=transcript_path)
+
+
+def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
+    """Retire the session from the team bus and release its claims."""
+    if session_id is not None:
+        team_service.hook_session_end(session_id, cwd)
+
+
+def turn_stopped(cwd: Path | None, *, session_id: str | None = None) -> None:
+    """Mark the session as waiting for input (its turn just ended)."""
+    if session_id is not None:
+        team_service.hook_stop(session_id, cwd)
+
+
+def needs_attention(
+    cwd: Path | None, *, session_id: str | None = None, message: str | None = None
+) -> None:
+    """Mark the session as needing the user, and put it on the feed."""
+    if session_id is not None:
+        team_service.hook_notification(session_id, cwd, message)
 
 
 def capture_prompt(prompt: str, cwd: Path | None) -> None:

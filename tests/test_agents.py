@@ -125,3 +125,153 @@ def test_disconnect_removes_hooks(runner: CliRunner, fake_home: Path) -> None:
     runner.invoke(app, ["agents", "connect", "claude-code"])
     runner.invoke(app, ["agents", "disconnect", "claude-code"])
     assert _hook_commands(fake_home / ".claude" / "settings.json") == []
+
+
+def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: Path) -> None:
+    # Parallel Claude installs (CLAUDE_CONFIG_DIR aliases, e.g. ~/.claude4)
+    # must receive the hooks in THEIR settings file, not ~/.claude's.
+    alt = fake_home / ".claude4"
+    alt.mkdir()
+    (alt / "CLAUDE.md").write_text("# alt rules\n", encoding="utf-8")
+    result = runner.invoke(app, ["agents", "connect", "claude-code", "--config-dir", str(alt)])
+    assert result.exit_code == 0, result.output
+    settings = json.loads((alt / "settings.json").read_text(encoding="utf-8"))
+    assert set(settings["hooks"]) == {
+        "SessionStart",
+        "UserPromptSubmit",
+        "SessionEnd",
+        "Stop",
+        "Notification",
+    }
+    assert not (fake_home / ".claude" / "settings.json").exists()
+
+    disconnect = runner.invoke(
+        app, ["agents", "disconnect", "claude-code", "--config-dir", str(alt)]
+    )
+    assert disconnect.exit_code == 0
+    settings = json.loads((alt / "settings.json").read_text(encoding="utf-8"))
+    assert "hooks" not in settings
+
+
+def test_claude_config_dir_env_is_honoured(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alt = fake_home / ".claude-env"
+    alt.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(alt))
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert (alt / "settings.json").exists()
+
+
+def test_hook_commands_are_never_a_bare_name(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A bare `aisquare` dies in hook shells with "/bin/sh: aisquare: not found".
+    # 1) The running executable wins, even when PATH knows nothing about it.
+    fake_bin = tmp_path / "somewhere" / "aisquare"
+    fake_bin.parent.mkdir(parents=True)
+    fake_bin.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(fake_bin)])
+    monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _: None)
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert result.exit_code == 0, result.output
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert command == f"{fake_bin.resolve()} hook session-start"
+
+    # 2) With no usable argv0 and nothing on PATH: python -m aisquare, never bare.
+    import sys as real_sys
+
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
+    result = runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert result.exit_code == 0, result.output
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert command == f"{real_sys.executable} -m aisquare hook session-start"
+
+
+def test_third_party_hooks_containing_our_words_survive_connect(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    # "webhook stop" and "my-hook stop" are NOT ours — connect/disconnect
+    # must never rewrite them away (substring matching once did).
+    settings_path = fake_home / ".claude" / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": "webhook stop --id 7"}]}],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "~/bin/my-hook stop"}]}
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    stop_commands = [h["hooks"][0]["command"] for h in settings["hooks"]["Stop"]]
+    start_commands = [h["hooks"][0]["command"] for h in settings["hooks"]["SessionStart"]]
+    assert "webhook stop --id 7" in stop_commands
+    assert "~/bin/my-hook stop" in start_commands
+    runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "webhook stop --id 7" in [h["hooks"][0]["command"] for h in settings["hooks"]["Stop"]]
+
+
+def test_partial_install_is_reported_not_healthy(runner: CliRunner, fake_home: Path) -> None:
+    from aisquare.core import agents as agent_core
+
+    # A pre-Stop/Notification-era install: only the two original events.
+    settings_path = fake_home / ".claude" / "settings.json"
+    old = "/some/old/path/aisquare"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": f"{old} hook session-start"}]}
+                    ],
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": f"{old} hook user-prompt-submit"}
+                            ]
+                        }
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert agent_core.hooks_installed("claude-code") is False  # partial ≠ installed
+    runner.invoke(app, ["agents", "connect", "claude-code"])  # the documented fix
+    assert agent_core.hooks_installed("claude-code") is True
+
+
+def test_spaced_install_path_roundtrips_through_hooks(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from aisquare.core import agents as agent_core
+
+    spaced = tmp_path / "some dir" / "aisquare"
+    spaced.parent.mkdir(parents=True)
+    spaced.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(spaced)])
+    assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
+    assert agent_core.hooks_installed("claude-code") is True  # quoted path matches
+    # Reconnect must not duplicate groups (the matcher recognizes its own).
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert len(settings["hooks"]["SessionStart"]) == 1
+    assert runner.invoke(app, ["agents", "disconnect", "claude-code"]).exit_code == 0
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert "hooks" not in settings  # removable too
+
+
+def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home: Path) -> None:
+    result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
+    assert result.exit_code == 0
+    assert "no aisquare hooks found" in result.output

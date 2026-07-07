@@ -38,11 +38,22 @@ def _cwd(payload: dict[str, Any]) -> Path | None:
     return Path(cwd) if isinstance(cwd, str) and cwd else None
 
 
+def _str(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
 @app.command("session-start")
 def session_start() -> None:
     """Emit aisquare context for a starting session (stdout becomes context)."""
     try:
-        context = hooks_service.session_start_context(_cwd(_payload()))
+        payload = _payload()
+        context = hooks_service.session_start_context(
+            _cwd(payload),
+            session_id=_str(payload, "session_id"),
+            source=_str(payload, "source"),
+            transcript_path=_str(payload, "transcript_path"),
+        )
     except Exception:  # never disrupt the agent
         return
     if context:
@@ -51,11 +62,51 @@ def session_start() -> None:
 
 @app.command("user-prompt-submit")
 def user_prompt_submit() -> None:
-    """Capture the submitted user prompt (no output)."""
+    """Capture the prompt and emit teammate updates (stdout becomes context)."""
     try:
         payload = _payload()
         prompt = payload.get("prompt")
-        if isinstance(prompt, str):
-            hooks_service.capture_prompt(prompt, _cwd(payload))
+        delta = hooks_service.prompt_submitted(
+            prompt if isinstance(prompt, str) else None,
+            _cwd(payload),
+            session_id=_str(payload, "session_id"),
+            transcript_path=_str(payload, "transcript_path"),
+        )
+    except Exception:  # never disrupt the agent
+        return
+    if delta:
+        typer.echo(delta)
+
+
+@app.command("session-end")
+def session_end() -> None:
+    """Mark the session ended on the team bus (no output)."""
+    try:
+        payload = _payload()
+        hooks_service.session_ended(_cwd(payload), session_id=_str(payload, "session_id"))
+    except Exception:  # never disrupt the agent
+        return
+
+
+@app.command("stop")
+def stop() -> None:
+    """Mark the session as waiting for input (turn finished; no output)."""
+    try:
+        payload = _payload()
+        hooks_service.turn_stopped(_cwd(payload), session_id=_str(payload, "session_id"))
+    except Exception:  # never disrupt the agent
+        return
+
+
+@app.command("notification")
+def notification() -> None:
+    """Mark the session as needing attention (no output)."""
+    try:
+        payload = _payload()
+        hooks_service.needs_attention(
+            _cwd(payload),
+            session_id=_str(payload, "session_id"),
+            message=_str(payload, "message"),
+        )
     except Exception:  # never disrupt the agent
         return

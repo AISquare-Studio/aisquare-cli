@@ -17,10 +17,13 @@ removal can propagate when sync lands. Every read filters tombstones out.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import random
 import re
 import sqlite3
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +31,16 @@ from typing import Protocol
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
-from aisquare.models import ContextEntry, Pool, ProjectInfo, PromptRecord
+from aisquare.models import (
+    ContextEntry,
+    Pool,
+    ProjectInfo,
+    PromptRecord,
+    TaskStatus,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
 
 _SCHEMA_V1 = """
 CREATE TABLE entry (
@@ -82,12 +94,137 @@ CREATE TABLE prompt (
 CREATE INDEX prompt_project ON prompt (project_id, created_at);
 """
 
+# v3: the team bus — sessions, shared tasks and the event stream that give
+# parallel agent sessions working memory of each other. ``team_event.seq`` is
+# the AUTOINCREMENT bus cursor: deltas are "rows past my cursor, by others".
+_SCHEMA_V3 = """
+CREATE TABLE team_session (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'unassigned',
+    label         TEXT,
+    focus         TEXT,
+    started_at    TEXT NOT NULL,
+    last_seen_at  TEXT NOT NULL,
+    ended_at      TEXT,
+    cursor        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX team_session_project ON team_session (project_id, last_seen_at);
+
+CREATE TABLE team_task (
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL,
+    key               TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    detail            TEXT,
+    status            TEXT NOT NULL DEFAULT 'todo'
+        CHECK (status IN ('todo', 'doing', 'blocked', 'done', 'dropped')),
+    role              TEXT,
+    claimed_by        TEXT,
+    claim_expires_at  TEXT,
+    created_by        TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    UNIQUE (project_id, key)
+);
+CREATE INDEX team_task_project_status ON team_task (project_id, status);
+
+CREATE TABLE team_event (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          TEXT NOT NULL UNIQUE,
+    project_id  TEXT NOT NULL,
+    session_id  TEXT,
+    kind        TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    task_id     TEXT,
+    to_role     TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX team_event_project_seq ON team_event (project_id, seq);
+"""
+
+# v4: the review stage of the task lifecycle (coder → review → runner verifies)
+# — a CHECK constraint cannot be altered in SQLite, so the table is rebuilt —
+# and team_meta, small durable key/values (e.g. the distiller's watermark).
+_SCHEMA_V4 = """
+DROP INDEX team_task_project_status;
+ALTER TABLE team_task RENAME TO team_task_v3;
+CREATE TABLE team_task (
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL,
+    key               TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    detail            TEXT,
+    status            TEXT NOT NULL DEFAULT 'todo'
+        CHECK (status IN ('todo', 'doing', 'review', 'blocked', 'done', 'dropped')),
+    role              TEXT,
+    claimed_by        TEXT,
+    claim_expires_at  TEXT,
+    created_by        TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    UNIQUE (project_id, key)
+);
+INSERT INTO team_task SELECT * FROM team_task_v3;
+DROP TABLE team_task_v3;
+CREATE INDEX team_task_project_status ON team_task (project_id, status);
+
+CREATE TABLE team_meta (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+"""
+
+# v5: task dependencies — a JSON array of task ids; a todo task is "ready"
+# (and eligible for `task next`) only when everything it needs is resolved.
+_SCHEMA_V5 = """
+ALTER TABLE team_task ADD COLUMN needs TEXT NOT NULL DEFAULT '[]';
+"""
+
+# v6: live session state — working (mid-turn), waiting (turn ended, wants
+# input) or attention (permission request / idle notice) — driven by the
+# UserPromptSubmit / Stop / Notification hooks.
+_SCHEMA_V6 = """
+ALTER TABLE team_session ADD COLUMN state TEXT NOT NULL DEFAULT 'working';
+"""
+
+# v7: where each session's Claude Code transcript lives (from hook payloads) —
+# lets the board jump from a task/event to the conversation that produced it.
+_SCHEMA_V7 = """
+ALTER TABLE team_session ADD COLUMN transcript_path TEXT;
+"""
+
+# v8: retire pre-release single-colon MCP virtual sessions (mcp:<client>);
+# the per-project format (mcp:<client>:<proj>) replaced them and the old rows
+# would otherwise linger as phantom live sessions on the first project served.
+_SCHEMA_V8 = """
+DELETE FROM team_session WHERE id LIKE 'mcp:%' AND substr(id, 5) NOT LIKE '%:%';
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
-_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2)
+_MIGRATIONS = (
+    _SCHEMA_V1,
+    _SCHEMA_V2,
+    _SCHEMA_V3,
+    _SCHEMA_V4,
+    _SCHEMA_V5,
+    _SCHEMA_V6,
+    _SCHEMA_V7,
+    _SCHEMA_V8,
+)
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
+_SESSION_COLUMNS = (
+    "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
+    "transcript_path"
+)
+_TASK_COLUMNS = (
+    "id, project_id, key, title, detail, status, role, needs, "
+    "claimed_by, claim_expires_at, created_by, created_at, updated_at"
+)
+_EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 
 
 class AmbiguousIdError(LookupError):
@@ -125,6 +262,45 @@ class ContextStore(Protocol):
     def recent_prompts(
         self, project_id: str | None = None, *, limit: int = 20
     ) -> list[PromptRecord]: ...
+    def team_active(self, project_id: str) -> bool: ...
+    def upsert_session(self, session: TeamSession) -> TeamSession: ...
+    def get_session(self, session_id: str) -> TeamSession | None: ...
+    def team_sessions(self, project_id: str) -> list[TeamSession]: ...
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        role: str | None = None,
+        label: str | None = None,
+        focus: str | None = None,
+    ) -> TeamSession: ...
+    def touch_session(
+        self, session_id: str, *, cursor: int | None = None, state: str | None = None
+    ) -> None: ...
+    def mark_attention(self, session_id: str) -> bool: ...
+    def end_session(self, session_id: str) -> list[TeamTask]: ...
+    def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
+    def get_task(self, ref: str) -> TeamTask | None: ...
+    def team_tasks(
+        self, project_id: str, *, status: TaskStatus | None = None
+    ) -> list[TeamTask]: ...
+    def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool: ...
+    def renew_leases(self, session_id: str, lease_until: datetime) -> None: ...
+    def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask: ...
+    def release_task(self, task_id: str) -> TeamTask: ...
+    def reopen_task(self, task_id: str) -> TeamTask: ...
+    def next_task(
+        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+    ) -> TeamTask | None: ...
+    def get_meta(self, key: str) -> str | None: ...
+    def set_meta(self, key: str, value: str) -> None: ...
+    def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
+    def events_since(
+        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+    ) -> list[TeamEvent]: ...
+    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def latest_seq(self, project_id: str) -> int: ...
+    def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def close(self) -> None: ...
 
 
@@ -163,6 +339,67 @@ def _row_to_prompt(row: sqlite3.Row) -> PromptRecord:
         source=row["source"],
         created_at=datetime.fromisoformat(row["created_at"]),
     )
+
+
+def _maybe_dt(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def _row_to_session(row: sqlite3.Row) -> TeamSession:
+    return TeamSession(
+        id=row["id"],
+        project_id=row["project_id"],
+        role=row["role"],
+        label=row["label"],
+        focus=row["focus"],
+        started_at=datetime.fromisoformat(row["started_at"]),
+        last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
+        ended_at=_maybe_dt(row["ended_at"]),
+        cursor=row["cursor"],
+        state=row["state"],
+        transcript_path=row["transcript_path"],
+    )
+
+
+def _row_to_task(row: sqlite3.Row) -> TeamTask:
+    return TeamTask(
+        id=row["id"],
+        project_id=row["project_id"],
+        key=row["key"],
+        title=row["title"],
+        detail=row["detail"],
+        status=row["status"],
+        role=row["role"],
+        needs=json.loads(row["needs"]),
+        claimed_by=row["claimed_by"],
+        claim_expires_at=_maybe_dt(row["claim_expires_at"]),
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _row_to_event(row: sqlite3.Row) -> TeamEvent:
+    return TeamEvent(
+        seq=row["seq"],
+        id=row["id"],
+        project_id=row["project_id"],
+        session_id=row["session_id"],
+        kind=row["kind"],
+        text=row["text"],
+        task_id=row["task_id"],
+        to_role=row["to_role"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def unmet_needs(task: TeamTask, statuses: Mapping[str, str]) -> list[str]:
+    """The dependencies of ``task`` that are not resolved yet.
+
+    A need is satisfied once its task is ``done`` or ``dropped``; anything
+    else (including an unknown id) keeps the dependent task waiting.
+    """
+    return [need for need in task.needs if statuses.get(need) not in ("done", "dropped")]
 
 
 def _fts_match(query: str) -> str:
@@ -390,6 +627,425 @@ class SqliteStore:
             ).fetchall()
         return [_row_to_prompt(row) for row in rows]
 
+    # --- team bus ------------------------------------------------------------
+
+    def team_active(self, project_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM team_session WHERE project_id = ? "
+            "UNION SELECT 1 FROM team_task WHERE project_id = ? "
+            "UNION SELECT 1 FROM team_event WHERE project_id = ? LIMIT 1",
+            (project_id, project_id, project_id),
+        ).fetchone()
+        return row is not None
+
+    def upsert_session(self, session: TeamSession) -> TeamSession:
+        """Insert the session, or revive/refresh it if the id is already known."""
+        self._conn.execute(
+            f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET "
+            "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
+            "state = 'working', "
+            "transcript_path = COALESCE(excluded.transcript_path, transcript_path)",
+            (
+                session.id,
+                session.project_id,
+                session.role,
+                session.label,
+                session.focus,
+                session.started_at.isoformat(),
+                session.last_seen_at.isoformat(),
+                session.ended_at.isoformat() if session.ended_at else None,
+                session.cursor,
+                session.state,
+                session.transcript_path,
+            ),
+        )
+        self._conn.commit()
+        stored = self.get_session(session.id)
+        assert stored is not None  # just upserted
+        return stored
+
+    def get_session(self, session_id: str) -> TeamSession | None:
+        row = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?", (session_id,)
+        ).fetchone()
+        if row is not None:
+            return _row_to_session(row)
+        matches = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id GLOB ? LIMIT 2",
+            (_glob_prefix(session_id),),
+        ).fetchall()
+        if len(matches) > 1:
+            raise AmbiguousIdError(session_id)
+        return _row_to_session(matches[0]) if matches else None
+
+    def team_sessions(self, project_id: str) -> list[TeamSession]:
+        rows = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM team_session "
+            "WHERE project_id = ? ORDER BY last_seen_at DESC",
+            (project_id,),
+        ).fetchall()
+        return [_row_to_session(row) for row in rows]
+
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        role: str | None = None,
+        label: str | None = None,
+        focus: str | None = None,
+    ) -> TeamSession:
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        self._conn.execute(
+            "UPDATE team_session SET role = ?, label = ?, focus = ?, last_seen_at = ? WHERE id = ?",
+            (
+                role if role is not None else session.role,
+                label if label is not None else session.label,
+                focus if focus is not None else session.focus,
+                _now_iso(),
+                session.id,
+            ),
+        )
+        self._conn.commit()
+        updated = self.get_session(session.id)
+        assert updated is not None  # just updated
+        return updated
+
+    def touch_session(
+        self, session_id: str, *, cursor: int | None = None, state: str | None = None
+    ) -> None:
+        """Heartbeat: bump ``last_seen_at`` (and advance the cursor / flip state)."""
+        sets, params = ["last_seen_at = ?"], [_now_iso()]
+        if cursor is not None:
+            sets.append("cursor = ?")
+            params.append(str(cursor))
+        if state is not None:
+            sets.append("state = ?")
+            params.append(state)
+        self._conn.execute(
+            f"UPDATE team_session SET {', '.join(sets)} WHERE id = ?",
+            (*params, session_id),
+        )
+        self._conn.commit()
+
+    def mark_attention(self, session_id: str) -> bool:
+        """Flip a session into the attention state, atomically.
+
+        Returns True only for the transition — concurrent Notification hooks
+        (parallel permission prompts happen) must produce exactly one feed
+        event, so the read and the write are one conditional UPDATE.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_session SET state = 'attention', last_seen_at = ? "
+            "WHERE id = ? AND state <> 'attention'",
+            (_now_iso(), session_id),
+        )
+        self._conn.execute(
+            "UPDATE team_session SET last_seen_at = ? WHERE id = ?",
+            (_now_iso(), session_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def end_session(self, session_id: str) -> list[TeamTask]:
+        """Mark the session ended and release its claims; returns released tasks."""
+        released = [
+            _row_to_task(row)
+            for row in self._conn.execute(
+                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE claimed_by = ? AND status = 'doing'",
+                (session_id,),
+            ).fetchall()
+        ]
+        now = _now_iso()
+        self._conn.execute(
+            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+            "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
+            (now, session_id),
+        )
+        self._conn.execute(
+            "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
+            (now, now, session_id),
+        )
+        self._conn.commit()
+        return released
+
+    def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]:
+        """Add a task; a duplicate ``(project_id, key)`` returns the existing one.
+
+        The second element reports whether a new task was created — the
+        idempotency contract for ``task add``.
+        """
+        cursor = self._conn.execute(
+            f"INSERT INTO team_task ({_TASK_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (project_id, key) DO NOTHING",
+            (
+                task.id,
+                task.project_id,
+                task.key,
+                task.title,
+                task.detail,
+                task.status,
+                task.role,
+                json.dumps(task.needs),
+                task.claimed_by,
+                task.claim_expires_at.isoformat() if task.claim_expires_at else None,
+                task.created_by,
+                task.created_at.isoformat(),
+                task.updated_at.isoformat(),
+            ),
+        )
+        created = cursor.rowcount == 1
+        self._conn.commit()
+        row = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? AND key = ?",
+            (task.project_id, task.key),
+        ).fetchone()
+        assert row is not None  # inserted or already present
+        return _row_to_task(row), created
+
+    def get_task(self, ref: str) -> TeamTask | None:
+        row = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id = ?", (ref,)
+        ).fetchone()
+        if row is not None:
+            return _row_to_task(row)
+        matches = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
+            (_glob_prefix(ref),),
+        ).fetchall()
+        if len(matches) > 1:
+            raise AmbiguousIdError(ref)
+        if matches:
+            return _row_to_task(matches[0])
+        # Boards display the id *tail* (the unique random part), so tails
+        # must resolve too: fall back to a suffix match.
+        matches = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE id GLOB ? LIMIT 2",
+            (f"*{_glob_prefix(ref)[:-1]}",),
+        ).fetchall()
+        if len(matches) > 1:
+            raise AmbiguousIdError(ref)
+        return _row_to_task(matches[0]) if matches else None
+
+    def team_tasks(self, project_id: str, *, status: TaskStatus | None = None) -> list[TeamTask]:
+        if status is None:
+            rows = self._conn.execute(
+                f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? ORDER BY id",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"SELECT {_TASK_COLUMNS} FROM team_task "
+                "WHERE project_id = ? AND status = ? ORDER BY id",
+                (project_id, status),
+            ).fetchall()
+        return [_row_to_task(row) for row in rows]
+
+    def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool:
+        """Atomically claim a task; exactly one concurrent claimer wins.
+
+        Claimable: open (``todo``/``blocked``), or ``doing`` with an expired
+        lease (the previous claimant is presumed gone).
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_task SET status = 'doing', claimed_by = ?, "
+            "claim_expires_at = ?, updated_at = ? "
+            "WHERE id = ? AND (status IN ('todo', 'blocked') "
+            "OR (status = 'doing' AND claim_expires_at < ?))",
+            (session_ref, lease_until.isoformat(), _now_iso(), task_id, _now_iso()),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def renew_leases(self, session_id: str, lease_until: datetime) -> None:
+        """Extend the claim lease on everything this session is working on."""
+        self._conn.execute(
+            "UPDATE team_task SET claim_expires_at = ? WHERE claimed_by = ? AND status = 'doing'",
+            (lease_until.isoformat(), session_id),
+        )
+        self._conn.commit()
+
+    def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask:
+        task = self.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if status in ("done", "dropped"):
+            # Terminal: clear the claim so the task never *looks* held —
+            # a lingering claimed_by invites a bogus "release" back to todo.
+            self._conn.execute(
+                "UPDATE team_task SET status = ?, claimed_by = NULL, "
+                "claim_expires_at = NULL, updated_at = ? WHERE id = ?",
+                (status, _now_iso(), task.id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE team_task SET status = ?, updated_at = ? WHERE id = ?",
+                (status, _now_iso(), task.id),
+            )
+        self._conn.commit()
+        updated = self.get_task(task.id)
+        assert updated is not None  # just updated
+        return updated
+
+    def release_task(self, task_id: str) -> TeamTask:
+        """Give a claimed (``doing``) task back to the pool.
+
+        Guarded so a "release" can never resurrect a finished task: raises
+        ``ValueError`` unless the task is currently ``doing``.
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        cursor = self._conn.execute(
+            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+            "claim_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'doing'",
+            (_now_iso(), task.id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise ValueError(f"task {task.id} is {task.status}, not doing — nothing to release")
+        updated = self.get_task(task.id)
+        assert updated is not None  # just updated
+        return updated
+
+    def reopen_task(self, task_id: str) -> TeamTask:
+        """Send a non-todo task back to the pool (verification failed, etc.).
+
+        Unlike ``release_task`` this is the deliberate resurrection path —
+        it accepts ``doing``/``review``/``blocked``/``done`` (but not
+        ``dropped``: discarded work needs an explicit new task).
+        """
+        task = self.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        cursor = self._conn.execute(
+            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+            "claim_expires_at = NULL, updated_at = ? "
+            "WHERE id = ? AND status IN ('doing', 'review', 'blocked', 'done')",
+            (_now_iso(), task.id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise ValueError(
+                f"task {task.id} is {task.status} — reopen a doing/review/blocked/done task"
+            )
+        updated = self.get_task(task.id)
+        assert updated is not None  # just updated
+        return updated
+
+    def next_task(
+        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+    ) -> TeamTask | None:
+        """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
+
+        Tasks without a role hint are available to every role; tasks with one
+        only match sessions of that role (or an unfiltered query). A ``todo``
+        task is ready only when every task it needs is resolved — so loopers
+        never receive work whose prerequisites are still in flight.
+        """
+        clauses = ["project_id = ?", "status = ?"]
+        params: list[str] = [project_id, status]
+        if role is not None:
+            clauses.append("(role IS NULL OR role = ?)")
+            params.append(role)
+        rows = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} ORDER BY id",
+            params,
+        ).fetchall()
+        if not rows:
+            return None
+        statuses = self.task_statuses(project_id)
+        for row in rows:
+            task = _row_to_task(row)
+            if status != "todo" or not unmet_needs(task, statuses):
+                return task
+        return None
+
+    def task_statuses(self, project_id: str) -> dict[str, str]:
+        """Every task's status, for dependency-readiness checks and rendering."""
+        rows = self._conn.execute(
+            "SELECT id, status FROM team_task WHERE project_id = ?", (project_id,)
+        ).fetchall()
+        return {row["id"]: row["status"] for row in rows}
+
+    def get_meta(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM team_meta WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
+
+    def add_team_event(self, event: TeamEvent) -> TeamEvent:
+        cursor = self._conn.execute(
+            "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.id,
+                event.project_id,
+                event.session_id,
+                event.kind,
+                event.text,
+                event.task_id,
+                event.to_role,
+                event.created_at.isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return event.model_copy(update={"seq": cursor.lastrowid})
+
+    def events_since(
+        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+    ) -> list[TeamEvent]:
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event "
+            "WHERE project_id = ? AND seq > ? "
+            "AND (session_id IS NULL OR session_id != ?) "
+            "ORDER BY seq LIMIT ?",
+            (project_id, seq, exclude_session or "", limit),
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]:
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event "
+            "WHERE project_id = ? ORDER BY seq DESC LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+        return [_row_to_event(row) for row in reversed(rows)]
+
+    def latest_seq(self, project_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) FROM team_event WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
+        """The latest done/dropped event per task — archive attribution.
+
+        Queried from the store (not a bounded feed cache) so a task closed
+        thousands of events ago still knows who closed it and when.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE seq IN ("
+            "  SELECT MAX(seq) FROM team_event "
+            "  WHERE project_id = ? AND task_id IS NOT NULL "
+            "  AND kind IN ('task_done', 'task_dropped') GROUP BY task_id"
+            ")",
+            (project_id,),
+        ).fetchall()
+        events = [_row_to_event(row) for row in rows]
+        return {event.task_id: event for event in events if event.task_id is not None}
+
     def close(self) -> None:
         self._conn.close()
 
@@ -401,23 +1057,58 @@ def _glob_prefix(ref: str) -> str:
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
-    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    for index in range(version, len(_MIGRATIONS)):
-        connection.executescript(_MIGRATIONS[index])
-        connection.execute(f"PRAGMA user_version = {index + 1}")
-    connection.commit()
+    """Bring the schema to the current version, safely under concurrency.
+
+    Hooks race: several sessions can open (and try to migrate) the store in
+    the same instant. Each migration runs as ONE ``BEGIN IMMEDIATE``
+    transaction that also bumps ``user_version`` — so a rebuild like v4 can
+    never be observed half-done, and the write lock serialises racers. A
+    loser whose script then fails re-reads the version: if another process
+    advanced it, that's victory by other means; otherwise the error is real.
+    """
+    while True:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version >= len(_MIGRATIONS):
+            return
+        script = _MIGRATIONS[version]
+        try:
+            connection.executescript(
+                f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version + 1};\nCOMMIT;"
+            )
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current <= version:
+                raise  # a genuine migration failure, not a lost race
 
 
 def open_store() -> ContextStore:
-    """Open (creating and migrating if needed) the context store."""
+    """Open (creating and migrating if needed) the context store.
+
+    First opens race: parallel session hooks all arrive at a fresh database
+    together, and the WAL switch + migrations contend for the write lock.
+    ``busy_timeout`` covers most of it, but journal-mode changes can return
+    "database is locked" without consulting the busy handler — so the whole
+    setup phase retries with jitter for up to 15s instead of dying. After
+    the first successful open this loop never iterates.
+    """
     paths.ensure_home()
     connection = sqlite3.connect(str(paths.db_path()))
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA busy_timeout = 5000")
-    connection.execute("PRAGMA foreign_keys = ON")
-    _migrate(connection)
-    return SqliteStore(connection)
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA foreign_keys = ON")
+            _migrate(connection)
+            return SqliteStore(connection)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                connection.close()
+                raise
+            time.sleep(0.05 + random.random() * 0.1)
 
 
 @contextmanager

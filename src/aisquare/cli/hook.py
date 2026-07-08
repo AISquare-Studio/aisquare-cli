@@ -80,7 +80,7 @@ def user_prompt_submit() -> None:
 
 @app.command("session-end")
 def session_end() -> None:
-    """Mark the session ended on the team bus (no output)."""
+    """Mark the session ended on the orchestrator (no output)."""
     try:
         payload = _payload()
         hooks_service.session_ended(_cwd(payload), session_id=_str(payload, "session_id"))

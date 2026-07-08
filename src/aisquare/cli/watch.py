@@ -54,7 +54,7 @@ _KIND_VERB = {
     "join": ("👋", "joined the team"),
     "end": ("🚪", "left the team"),
     "focus": ("🎯", "is focusing on"),
-    "activate": ("⚡", "activated the bus"),
+    "activate": ("⚡", "activated the orchestrator"),
     "task_added": ("📌", "added"),
     "task_claimed": ("🤝", "claimed"),
     "task_review": ("👀", "sent to review"),
@@ -463,10 +463,10 @@ def _build_app_class(interval: float) -> Any:
                 )
             except team_service.TeamDisabledError:
                 self.query_one("#sessions", Static).update(
-                    Text("team bus disabled (AISQUARE_TEAM=0)", style="bold red")
+                    Text("orchestrator disabled (AISQUARE_TEAM=0)", style="bold red")
                 )
                 return
-            except Exception:  # bus briefly unavailable — keep the last frame
+            except Exception:  # store briefly unavailable — keep the last frame
                 return
             self.title = f"aisquare board — {project.root.name or project.id}"
             self._roles = {s.id: s.role for s in sessions}

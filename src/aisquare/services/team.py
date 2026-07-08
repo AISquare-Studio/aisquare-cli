@@ -1,7 +1,7 @@
-"""The team bus: shared working memory for parallel agent sessions.
+"""The agent orchestrator: shared working memory for parallel agent sessions.
 
-One project = one bus. Sessions are registered automatically by the Claude
-Code hooks (``hook_*`` functions below); agents talk to the bus through the
+One project = one board. Sessions are registered automatically by the Claude
+Code hooks (``hook_*`` functions below); agents talk to the orchestrator through the
 ``team``/``task``/``note``/``board`` commands. Every mutation appends a
 :class:`TeamEvent` to the pipe, and each session receives the events it has
 not yet seen as a compact delta on its next prompt.
@@ -17,7 +17,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import brain, teambus
+from aisquare.core import brain, orchestrator
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
@@ -31,10 +31,10 @@ _STALE_AFTER = timedelta(minutes=30)
 
 
 class TeamDisabledError(RuntimeError):
-    """Raised when a team command runs with the bus disabled (AISQUARE_TEAM=0)."""
+    """Raised when a team command runs with the orchestrator disabled (AISQUARE_TEAM=0)."""
 
     def __init__(self) -> None:
-        super().__init__("the team bus is disabled (AISQUARE_TEAM=0)")
+        super().__init__("the agent orchestrator is disabled (AISQUARE_TEAM=0)")
 
 
 class ClaimLostError(RuntimeError):
@@ -56,12 +56,12 @@ def _now() -> datetime:
 
 
 def _require_enabled() -> None:
-    if not teambus.team_enabled():
+    if not orchestrator.team_enabled():
         raise TeamDisabledError()
 
 
 def _project(store: ContextStore, cwd: Path | None) -> ProjectInfo:
-    project = teambus.team_project(cwd)
+    project = orchestrator.team_project(cwd)
     store.ensure_project(project)
     return project
 
@@ -115,12 +115,12 @@ def task_key(title: str) -> str:
 
 
 def activate(cwd: Path | None = None) -> ProjectInfo:
-    """Turn the team bus on for this project (``team on``)."""
+    """Turn the orchestrator on for this project (``team on``)."""
     _require_enabled()
     with store_session() as store:
         project = _project(store, cwd)
         if not store.team_active(project.id):
-            _emit(store, project.id, "activate", "team bus activated")
+            _emit(store, project.id, "activate", "agent orchestrator activated")
         return project
 
 
@@ -156,7 +156,7 @@ def board_data(
 def resolve_project(cwd: Path | None = None) -> ProjectInfo:
     """The team project for ``cwd`` (resolved once by long-lived callers)."""
     _require_enabled()
-    return teambus.team_project(cwd)
+    return orchestrator.team_project(cwd)
 
 
 def terminal_attribution(
@@ -321,7 +321,7 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
         claimant = session.id if session else "cli"
-        lease = _now() + timedelta(minutes=teambus.lease_minutes())
+        lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         if not store.claim_task(task.id, claimant, lease):
             current = store.get_task(task.id)
             assert current is not None  # it existed a moment ago
@@ -427,7 +427,7 @@ def next_task(
         project = _project(store, cwd)
         session = _resolve_session(store, session_ref)
         claimant = session.id if session else "cli"
-        lease = _now() + timedelta(minutes=teambus.lease_minutes())
+        lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         while True:
             task = store.next_task(project.id, role=role, status=status)
             if task is None or not claim:
@@ -500,7 +500,7 @@ def recall(query: str, cwd: Path | None = None) -> str | None:
     and takes a few seconds; subsequent ones are instant.
     """
     _require_enabled()
-    project = teambus.team_project(cwd)
+    project = orchestrator.team_project(cwd)
     with store_session() as store:
         backlog = distill_service.pending(store, project.id)
     if backlog:
@@ -518,17 +518,17 @@ def hook_session_start(
     *,
     transcript_path: str | None = None,
 ) -> str:
-    """Register this session on the bus and return the board injection.
+    """Register this session with the orchestrator and return the board injection.
 
-    Silent (returns ``""``) unless the bus is enabled and this project has
+    Silent (returns ``""``) unless the orchestrator is enabled and this project has
     been activated — or the session was launched with ``AISQUARE_ROLE``,
     which activates it.
     """
-    if not teambus.team_enabled():
+    if not orchestrator.team_enabled():
         return ""
     with store_session() as store:
         project = _project(store, cwd)
-        role = teambus.env_role()
+        role = orchestrator.env_role()
         if not store.team_active(project.id) and role is None:
             return ""
         known = store.get_session(session_id)
@@ -562,17 +562,17 @@ def hook_prompt_heartbeat(
 ) -> str:
     """Heartbeat on prompt submit; returns the teammate delta to inject (or '').
 
-    A session unknown to the bus but prompting inside an *active* project
-    joins right here (the bus may have been activated after it started) and
+    A session unknown to the orchestrator but prompting inside an *active* project
+    joins right here (the orchestrator may have been activated after it started) and
     receives the full board + protocol instead of a delta.
     """
-    if not teambus.team_enabled():
+    if not orchestrator.team_enabled():
         return ""
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
             project = _project(store, cwd)
-            role = teambus.env_role()
+            role = orchestrator.env_role()
             if not store.team_active(project.id) and role is None:
                 return ""
             now = _now()
@@ -594,7 +594,7 @@ def hook_prompt_heartbeat(
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
             )
-        lease = _now() + timedelta(minutes=teambus.lease_minutes())
+        lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
         raw = store.events_since(
             session.project_id,
@@ -604,7 +604,7 @@ def hook_prompt_heartbeat(
         )
         # Attention notices are for the human board, not teammate context.
         events = [event for event in raw if event.kind != "attention"]
-        if not events or not teambus.delta_enabled():
+        if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
             return ""
@@ -621,13 +621,13 @@ def hook_stop(session_id: str, cwd: Path | None) -> None:
     Also renews claim leases — the end of a long agentic turn is exactly when
     a lease is at its oldest.
     """
-    if not teambus.team_enabled():
+    if not orchestrator.team_enabled():
         return
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
             return
-        store.renew_leases(session.id, _now() + timedelta(minutes=teambus.lease_minutes()))
+        store.renew_leases(session.id, _now() + timedelta(minutes=orchestrator.lease_minutes()))
         store.touch_session(session.id, state="waiting")
 
 
@@ -638,7 +638,7 @@ def hook_notification(session_id: str, cwd: Path | None, message: str | None) ->
     Claude re-notifies while parked, and a per-notice event floods the feed
     with lines nobody can act on twice.
     """
-    if not teambus.team_enabled():
+    if not orchestrator.team_enabled():
         return
     with store_session() as store:
         session = store.get_session(session_id)
@@ -656,7 +656,7 @@ def hook_notification(session_id: str, cwd: Path | None, message: str | None) ->
 
 def hook_session_end(session_id: str, cwd: Path | None) -> None:
     """Mark the session ended and release its claims back to the pool."""
-    if not teambus.team_enabled():
+    if not orchestrator.team_enabled():
         return
     with store_session() as store:
         session = store.get_session(session_id)

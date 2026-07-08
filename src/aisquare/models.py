@@ -141,7 +141,7 @@ TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
 
 
 class TeamSession(BaseModel):
-    """One live agent session on the team bus (id = the agent's session id)."""
+    """One live agent session on the orchestrator (id = the agent's session id)."""
 
     id: str
     project_id: str
@@ -161,7 +161,7 @@ class TeamSession(BaseModel):
 
 
 class TeamTask(BaseModel):
-    """A shared task on the team bus, idempotent on ``(project_id, key)``."""
+    """A shared task on the orchestrator, idempotent on ``(project_id, key)``."""
 
     id: str
     project_id: str
@@ -185,7 +185,7 @@ class TeamTask(BaseModel):
 class TeamEvent(BaseModel):
     """One update on the team pipe: who did what, addressed to whom.
 
-    ``seq`` is the gapless bus cursor (SQLite rowid); deltas are "events with
+    ``seq`` is the gapless stream cursor (SQLite rowid); deltas are "events with
     ``seq`` past my cursor, authored by others". Events render as
     :class:`DataEnvelope` payloads so the team stream stays pipe-shaped.
     """

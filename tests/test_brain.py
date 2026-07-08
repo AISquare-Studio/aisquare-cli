@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import brain
-from aisquare.core.teambus import team_project
+from aisquare.core.orchestrator import team_project
 from aisquare.services import distill
 from aisquare.services import team as team_service
 

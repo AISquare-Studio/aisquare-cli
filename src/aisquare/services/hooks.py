@@ -2,12 +2,12 @@
 
 - ``session_start_context`` builds what aisquare injects when a session starts:
   the curated context block, a directive pointing Claude at the codebase
-  snapshot and prompt history (route, don't dump) — and, when the team bus is
+  snapshot and prompt history (route, don't dump) — and, when the orchestrator is
   active for the project, the team board plus protocol.
 - ``prompt_submitted`` records how the user prompts (``aisquare log``),
-  heartbeats the session on the team bus, and returns the teammate delta to
+  heartbeats the session on the orchestrator, and returns the teammate delta to
   inject (empty when the team has been quiet).
-- ``session_ended`` retires the session from the team bus.
+- ``session_ended`` retires the session from the orchestrator.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def prompt_submitted(
 
 
 def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
-    """Retire the session from the team bus and release its claims."""
+    """Retire the session from the orchestrator and release its claims."""
     if session_id is not None:
         team_service.hook_session_end(session_id, cwd)
 

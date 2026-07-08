@@ -10,7 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Team bus** — shared working memory for parallel Claude Code sessions on one
+- **Agent Orchestrator** — shared working memory for parallel Claude Code sessions on one
   problem (planner / coders / runner). Sessions register automatically through
   hooks; each prompt delivers a compact delta of what teammates did. Works with
   a single Claude account (sessions are per-terminal) or several installs.
@@ -30,7 +30,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     outcomes, reopen feedback) distill into a per-project gbrain brain via a
     detached, flock-guarded worker; `recall` searches it. Never on the hot
     path; degrades silently when gbrain is absent.
-  - **`serve`** (`[serve]` extra): the bus as an MCP server (stdio or
+  - **`serve`** (`[serve]` extra): the orchestrator as an MCP server (stdio or
     bearer-token HTTP) so remote Claude clients — e.g. a browser-debugging
     agent in the Claude desktop app — join as attributed virtual sessions.
   - Multi-repo executions via `AISQUARE_TEAM_HUB`; worktree-safe project

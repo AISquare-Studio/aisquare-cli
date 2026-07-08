@@ -1,4 +1,4 @@
-"""The team bus: sessions, idempotent tasks, atomic claims and the event pipe."""
+"""The agent orchestrator: sessions, idempotent tasks, atomic claims and the event pipe."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.ids import new_task_id
+from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
-from aisquare.core.teambus import team_project
 from aisquare.models import TeamSession, TeamTask
 
 PLANNER = "aaaa1111-0000-0000-0000-000000000000"
@@ -434,9 +434,9 @@ def test_team_hub_pins_every_directory_to_one_bus(
 def test_running_session_auto_joins_on_prompt_after_activation(
     runner: CliRunner, work_dir: Path
 ) -> None:
-    # Session starts BEFORE the bus is active: silent, unregistered.
+    # Session starts BEFORE the orchestrator is active: silent, unregistered.
     assert _start(runner, CODER, work_dir).stdout.strip() == ""
-    # The bus activates afterwards (e.g. someone ran `team on`).
+    # The orchestrator activates afterwards (e.g. someone ran `team on`).
     runner.invoke(app, ["team", "on"])
     # Its next prompt registers it and delivers the full board + protocol.
     first = _prompt(runner, CODER, work_dir)
@@ -713,8 +713,8 @@ def test_terminal_events_returns_the_latest_closer_after_reopen(work_dir: Path) 
     team_service.finish_task(task.id, note="first close")
     team_service.reopen_task(task.id, reason="regressed")
     team_service.finish_task(task.id, note="second close")
+    from aisquare.core.orchestrator import team_project
     from aisquare.core.store import store_session
-    from aisquare.core.teambus import team_project
 
     with store_session() as store:
         terminal = store.terminal_events(team_project(work_dir).id)

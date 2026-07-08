@@ -1,4 +1,4 @@
-"""``aisquare team`` — the shared working-memory bus for parallel sessions.
+"""``aisquare team`` — the agent orchestrator for parallel sessions.
 
 Also home of the top-level ``note`` and ``board`` shortcuts (registered by
 ``cli/app.py``) so agents can type the two most frequent verbs directly.
@@ -40,7 +40,7 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
 
 @app.command("on")
 def on() -> None:
-    """Activate the team bus for this project."""
+    """Activate the orchestrator for this project."""
     try:
         project = team_service.activate()
     except TeamDisabledError as exc:
@@ -49,7 +49,7 @@ def on() -> None:
         typer.echo(json.dumps({"activated": project.id, "root": str(project.root)}))
     else:
         stdout_console().print(
-            f"✓ team bus active for {project.root.name or project.id} — "
+            f"✓ agent orchestrator active for {project.root.name or project.id} — "
             "sessions launched here now share tasks and notes"
         )
 
@@ -223,7 +223,7 @@ def board(
         return
     if not sessions and not tasks:
         stdout_console().print(
-            "Team bus is quiet here. Activate with `aisquare team on`, or launch a "
+            "The orchestrator is quiet here. Activate with `aisquare team on`, or launch a "
             "session with AISQUARE_ROLE=planner (coder/runner/…) set."
         )
         return

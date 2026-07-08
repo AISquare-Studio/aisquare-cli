@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
-from aisquare.core import paths, teambus
+from aisquare.core import orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
@@ -186,10 +186,10 @@ def _check_brain() -> DoctorCheck:
             "(not the unrelated 'gbrain' on public npm)",
         )
     try:
-        project = teambus.team_project()
+        project = orchestrator.team_project()
         with store_session() as store:
             if not store.team_active(project.id):
-                return _ok("brain", f"gbrain {version} ready (team bus not active here)")
+                return _ok("brain", f"gbrain {version} ready (orchestrator not active here)")
             lag = distill_service.pending(store, project.id)
     except Exception as exc:  # diagnostics must never crash
         return _warn("brain", f"could not check the brain: {exc}", "Try: aisquare team distill")

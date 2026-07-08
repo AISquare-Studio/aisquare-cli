@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from aisquare.core import brain, teambus
+from aisquare.core import brain, orchestrator
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamEvent
 
@@ -61,7 +61,7 @@ def drain(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
     """
     if not brain.brain_enabled() or brain.gbrain_version() is None:
         return 0
-    project = teambus.team_project(cwd)
+    project = orchestrator.team_project(cwd)
     written = 0
     with brain.drain_lock(project.id) as won:
         if not won:
@@ -97,7 +97,7 @@ def spawn_drain(cwd: Path | None = None, *, root: Path | None = None) -> None:
     if not brain.brain_enabled() or shutil.which("gbrain") is None:
         return
     if root is None:
-        root = teambus.team_project(cwd).root
+        root = orchestrator.team_project(cwd).root
     try:
         subprocess.Popen(
             [sys.executable, "-m", "aisquare", "--quiet", "team", "distill"],

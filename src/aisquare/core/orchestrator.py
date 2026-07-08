@@ -1,6 +1,6 @@
-"""Team-bus plumbing: worktree-safe project identity and the env knobs.
+"""Orchestrator plumbing: worktree-safe project identity and the env knobs.
 
-The team bus must put every checkout of one repository on the same bus —
+The orchestrator must put every checkout of one repository on the same board —
 including git worktrees, whose ``.git`` *file* would otherwise make them their
 own project. Identity therefore resolves through ``git rev-parse
 --git-common-dir`` (the principal repository) and deliberately ignores the
@@ -10,9 +10,9 @@ Behaviour is controlled by environment variables, not config — the feature
 branch is the gate:
 
 - ``AISQUARE_TEAM=0``      — master off switch: hooks and commands no-op.
-- ``AISQUARE_ROLE``        — role for this session (also activates the bus
+- ``AISQUARE_ROLE``        — role for this session (also activates the orchestrator
                              for the project on session start).
-- ``AISQUARE_TEAM_HUB``    — pin every session/command to one bus rooted at
+- ``AISQUARE_TEAM_HUB``    — pin every session/command to one board rooted at
                              this directory (multi-repo executions).
 - ``AISQUARE_TEAM_DELTA=0``— mute the per-prompt teammate delta injection.
 - ``AISQUARE_TEAM_LEASE_MIN`` — claim lease in minutes (default 120; long
@@ -38,7 +38,7 @@ def _flag_on(name: str) -> bool:
 
 
 def team_enabled() -> bool:
-    """Whether the team bus is enabled at all (``AISQUARE_TEAM=0`` disables)."""
+    """Whether the orchestrator is enabled at all (``AISQUARE_TEAM=0`` disables)."""
     return _flag_on("AISQUARE_TEAM")
 
 
@@ -97,8 +97,8 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
 
     ``AISQUARE_TEAM_HUB`` overrides everything: an execution that spans
     several repositories (planner in one, coders and runner in others) sets
-    it to one hub directory so every session shares a single bus. Otherwise
-    worktrees resolve to their principal checkout, so the team shares one bus
+    it to one hub directory so every session shares a single board. Otherwise
+    worktrees resolve to their principal checkout, so the team shares one board
     regardless of which worktree a session sits in.
     """
     hub = os.environ.get("AISQUARE_TEAM_HUB", "").strip()

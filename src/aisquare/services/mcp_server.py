@@ -1,9 +1,9 @@
-"""``aisquare serve`` — the team bus as an MCP server for remote agents.
+"""``aisquare serve`` — the orchestrator as an MCP server for remote agents.
 
 Lets Claude clients that are not local Claude Code sessions (the Claude
 desktop app on the Windows side of WSL2, a browser-debugging agent, another
 machine on the LAN) read the board and file tasks, notes and feedback onto
-the same bus.
+the same board.
 
 Remote callers act through a **virtual session** (``mcp:<client>``), so their
 traffic is attributed on the board and flows into every local session's
@@ -57,17 +57,17 @@ def _client_role() -> str:
 
 
 def _ensure_virtual_session() -> str:
-    """Register (or revive) the virtual session on the bus; returns its id.
+    """Register (or revive) the virtual session with the orchestrator; returns its id.
 
-    Gated like every other bus entry point: the master switch must be on and
+    Gated like every other orchestrator entry point: the master switch must be on and
     the project must already be activated (``aisquare serve`` activates its
     project explicitly at startup). Without the gate, one read-only MCP call
     against a never-opted-in directory would permanently activate it.
     """
     from datetime import UTC, datetime
 
+    from aisquare.core.orchestrator import team_enabled, team_project
     from aisquare.core.store import store_session
-    from aisquare.core.teambus import team_enabled, team_project
 
     if not team_enabled():
         raise TeamDisabledError()
@@ -75,7 +75,7 @@ def _ensure_virtual_session() -> str:
         project = team_project(None)
         if not store.team_active(project.id):
             raise ValueError(
-                f"the team bus is not active for {project.root} — start `aisquare serve` "
+                f"the agent orchestrator is not active for {project.root} — start `aisquare serve` "
                 "from the project (it activates it), or run `aisquare team on` there"
             )
         session_id = client_session_id(project.id)
@@ -99,7 +99,7 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
     try:
         return str(fn(*args, **kwargs))
     except TeamDisabledError:
-        return "error: the team bus is disabled on the host (AISQUARE_TEAM=0)"
+        return "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
     except ClaimLostError as exc:
         return f"error: {exc}"
     except LookupError as exc:
@@ -200,7 +200,7 @@ def task_update(ref: str, action: str, note: str | None = None) -> str:
 def note_add(
     text: str, kind: str = "note", task: str | None = None, to_role: str | None = None
 ) -> str:
-    """Share a note, decision, question or result with every session on the bus."""
+    """Share a note, decision, question or result with every session on the board."""
 
     def run() -> str:
         me = _ensure_virtual_session()
@@ -217,8 +217,8 @@ def team_log(since_seq: int = 0, limit: int = 20) -> str:
 
     def run() -> str:
         _ensure_virtual_session()
+        from aisquare.core.orchestrator import team_project
         from aisquare.core.store import store_session
-        from aisquare.core.teambus import team_project
 
         with store_session() as store:
             project = team_project(None)
@@ -268,7 +268,7 @@ def serve_token() -> str:
 
 
 def build_server() -> FastMCP:
-    """A FastMCP server exposing the team-bus tools."""
+    """A FastMCP server exposing the orchestrator tools."""
     from mcp.server.fastmcp import FastMCP
 
     server = FastMCP(

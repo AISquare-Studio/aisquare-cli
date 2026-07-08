@@ -107,11 +107,11 @@ def test_show_token_cli(runner: CliRunner) -> None:
 
 
 def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
-    # No activate(): one read-only call must not flip the repo's bus on.
+    # No activate(): one read-only call must not flip the repo's orchestrator on.
     result = mcp_server.team_board()
     assert result.startswith("error:") and "not active" in result
+    from aisquare.core.orchestrator import team_project
     from aisquare.core.store import store_session
-    from aisquare.core.teambus import team_project
 
     with store_session() as store:
         assert not store.team_active(team_project(work_dir).id)
@@ -128,8 +128,8 @@ def test_remote_calls_respect_master_switch(
 def test_virtual_session_is_scoped_per_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from aisquare.core.orchestrator import team_project
     from aisquare.core.store import store_session
-    from aisquare.core.teambus import team_project
 
     ids = []
     for name in ("repo-a", "repo-b"):

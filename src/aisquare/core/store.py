@@ -94,9 +94,9 @@ CREATE TABLE prompt (
 CREATE INDEX prompt_project ON prompt (project_id, created_at);
 """
 
-# v3: the team bus — sessions, shared tasks and the event stream that give
+# v3: the orchestrator — sessions, shared tasks and the event stream that give
 # parallel agent sessions working memory of each other. ``team_event.seq`` is
-# the AUTOINCREMENT bus cursor: deltas are "rows past my cursor, by others".
+# the AUTOINCREMENT stream cursor: deltas are "rows past my cursor, by others".
 _SCHEMA_V3 = """
 CREATE TABLE team_session (
     id            TEXT PRIMARY KEY,
@@ -627,7 +627,7 @@ class SqliteStore:
             ).fetchall()
         return [_row_to_prompt(row) for row in rows]
 
-    # --- team bus ------------------------------------------------------------
+    # --- orchestrator ------------------------------------------------------------
 
     def team_active(self, project_id: str) -> bool:
         row = self._conn.execute(
@@ -1089,7 +1089,7 @@ def open_store() -> ContextStore:
     First opens race: parallel session hooks all arrive at a fresh database
     together, and the WAL switch + migrations contend for the write lock.
     ``busy_timeout`` covers most of it, but journal-mode changes can return
-    "database is locked" without consulting the busy handler — so the whole
+    "database is locked" without consulting the orchestratory handler — so the whole
     setup phase retries with jitter for up to 15s instead of dying. After
     the first successful open this loop never iterates.
     """

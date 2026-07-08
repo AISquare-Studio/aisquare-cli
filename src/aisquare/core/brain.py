@@ -12,7 +12,7 @@ post-mortems):
   ``flock`` around every gbrain invocation. Only the distiller and ``recall``
   ever touch a brain — no daemon, no server, no lock to steal.
 - **Never fatal.** A missing gbrain, a failed init or a busy brain degrades
-  to "no long-term memory right now" — it must never break the bus or a
+  to "no long-term memory right now" — it must never break the orchestrator or a
   session. Every function here returns a value instead of raising.
 
 Embeddings are stripped from the environment unless ``AISQUARE_BRAIN_EMBED=1``

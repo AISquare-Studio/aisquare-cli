@@ -23,7 +23,7 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    # The team-bus and brain knobs are read from the ambient env; clear them so
+    # The orchestrator and brain knobs are read from the ambient env; clear them so
     # the suite is hermetic (an embedding user's AISQUARE_BRAIN_EMBED=1 must not
     # change what tests build/assert), each test opting in explicitly instead.
     for knob in (

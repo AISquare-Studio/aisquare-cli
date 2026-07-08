@@ -1,4 +1,4 @@
-"""``aisquare serve`` — expose the team bus to remote agents over MCP."""
+"""``aisquare serve`` — expose the orchestrator to remote agents over MCP."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def serve(
         typer.Option("--show-token", help="Print the HTTP connection details and exit."),
     ] = False,
 ) -> None:
-    """Run the team-bus MCP server so remote Claude clients can join this project."""
+    """Run the orchestrator MCP server so remote Claude clients can join this project."""
     import importlib.util
 
     # mcp_server itself imports lazily, so probe the dependency directly —
@@ -53,7 +53,7 @@ def serve(
     # Starting a server here IS the opt-in for this project: activate it
     # explicitly (and visibly — `team on` semantics, with the pipe event),
     # so remote calls never activate a directory as a side effect.
-    from aisquare.core.teambus import team_project
+    from aisquare.core.orchestrator import team_project
     from aisquare.core.workspace import find_project_root
     from aisquare.services import team as team_service
     from aisquare.services.team import TeamDisabledError
@@ -78,7 +78,9 @@ def serve(
             fail(str(exc), error="team_disabled")
         # stdout is the MCP protocol channel; announce on stderr so the
         # opt-in is never invisible.
-        stderr_console().print(f"aisquare team bus activated for {project.root} (stdio serve)")
+        stderr_console().print(
+            f"aisquare agent orchestrator activated for {project.root} (stdio serve)"
+        )
         mcp_server.run_stdio()
         return
     try:
@@ -86,7 +88,7 @@ def serve(
     except TeamDisabledError as exc:
         fail(str(exc), error="team_disabled")
     stderr_console().print(
-        f"Serving the team bus for {project.root.name or project.id} at "
+        f"Serving the orchestrator for {project.root.name or project.id} at "
         f"http://{bind}:{port}/mcp "
         "(bearer token required — see `aisquare serve --show-token`). Ctrl-C stops."
     )

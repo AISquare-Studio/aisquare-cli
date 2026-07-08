@@ -5,413 +5,307 @@
 [![CI](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Portable memory layer for coding agents.** `aisquare` installs into agents
-like Claude Code and keeps their context — your preferences and each project's
-conventions — persistent across sessions and machines.
+**Memory and orchestration for coding agents.** aisquare gives agents like
+Claude Code two things they don't have out of the box: a **memory** that
+persists across sessions — your preferences, each project's conventions, how
+you actually prompt — and an **orchestration layer** that lets several
+sessions work one problem as a coordinated team, with shared tasks, live
+status, and a board you can watch.
 
-## Quickstart
+It's a single CLI, local-first, backed by one SQLite file. No daemon, no
+account, no cloud dependency. Install it, connect it to Claude Code once, and
+every session after that starts oriented instead of cold.
 
 ```sh
 pipx install aisquare-cli              # or: pip install aisquare-cli
-cd path/to/your/repo
-aisquare init                          # set up ~/.aisquare + snapshot this project
-aisquare agents connect claude-code    # install into Claude Code (optional)
-aisquare doctor                        # optional, recommended — verify setup & deps
+cd your/repo
+aisquare init                          # register the project + snapshot the codebase
+aisquare agents connect claude-code    # wire aisquare into Claude Code
+aisquare doctor                        # verify everything (and how to fix anything)
 ```
 
-Installs two commands, `aisquare` and `asq`. The PyPI package is **`aisquare-cli`**;
-the command stays `aisquare`. `pipx` is recommended (isolated, stable on PATH).
-Requires **Python 3.11+**; optional **Node.js + [repomix](https://github.com/yamadashy/repomix)**
-for codebase snapshots (`aisquare doctor` tells you what's missing).
+That's the whole setup. Requires **Python 3.11+**. The package is
+`aisquare-cli`; the command is `aisquare` (with an `asq` alias). Codebase
+snapshots use [Repomix](https://github.com/yamadashy/repomix) via Node/`npx`
+when available — `aisquare doctor` tells you if it's missing, and nothing
+breaks without it.
 
-> **Status: early.** The full command surface exists and parses arguments.
-> Implemented and backed by a local SQLite store: `init`, `remember`, the full
-> `context` group, `inject`/`why`, the `project` group (incl. a **Repomix
-> codebase snapshot**), `status`/`doctor`, the `config` group, `log`, and the
-> `agents` group — which **installs into Claude Code** (see
-> [Claude Code integration](#claude-code-integration)). The remaining commands
-> (`auth`/cloud, `capture`, `sync`, `connectors`, `policy`) are stubs: each
-> prints `⚠ aisquare <command> is not implemented yet (planned: <tier>)` to
-> stderr and exits `70`. Features land one service module at a time — see
-> [Implementing a feature](#implementing-a-feature-stub--service).
+## What you get
 
-## Implemented
+**Your agent starts every session already oriented.** `agents connect
+claude-code` installs lifecycle hooks into `~/.claude/settings.json` (merged
+carefully — your existing hooks are never touched). From then on, each session
+begins with a directive pointing Claude at a packed snapshot of the codebase
+(structure-only skeleton first, full contents on demand — orders of magnitude
+cheaper than grepping around), your in-scope context entries, and the
+project's prompt history.
+
+**Your agent remembers what you tell it.** `aisquare remember "prefer pytest
+over unittest"` persists across every session and every project. Context
+lives in two pools — `user` (follows you everywhere) and `project` (scoped to
+one repo) — full-text searchable, exportable, and injected consistently.
+
+**Your agents can work as a team.** Launch a planner you talk to, coders that
+pull work from a shared task list, and a runner that verifies — each one a
+plain Claude Code session in its own terminal. aisquare coordinates them:
+atomic task claims, dependencies, a review cycle, per-prompt deltas of what
+teammates did, and a live board TUI for you. One Claude account is enough.
+
+## The memory layer
 
 ```sh
-aisquare init                    # set up ~/.aisquare, register & onboard this project
 aisquare remember "prefer pytest over unittest" --user --tag testing
 aisquare context add "run make check before pushing" --project
-aisquare context list            # user pool + the active project's pool
-aisquare context search pytest   # full-text search (SQLite FTS5)
-aisquare context show a3f2       # by id or unambiguous prefix (git-style)
-aisquare context edit a3f2       # opens the entry in $EDITOR
-aisquare context promote a3f2    # move a project entry into the user pool
-aisquare context remove a3f2     # soft-delete (tombstoned)
-aisquare context export out.md   # export in-scope context (md or --format json)
-aisquare context import notes.md # seed context from Markdown bullets or JSON
-aisquare context preview         # the context block that would be injected
-aisquare inject                  # emit that block (and record the injection)
-aisquare why                     # explain the last injection
-aisquare project list            # registered projects (active one marked *)
-aisquare project switch alpha    # pin the active project (name or id prefix)
-aisquare project onboard         # pack a Repomix snapshot + seed ecosystem facts
-aisquare agents scan             # detect installed agents (Claude Code, …)
-aisquare agents connect claude-code  # install hooks + ingest CLAUDE.md
-aisquare log                     # captured prompt history for this project
-aisquare status                  # health, pools, active project, agents
-aisquare doctor                  # checks deps/install/hooks/snapshot + how to fix each
-aisquare config set default_pool user   # read/write config (get/list/redaction)
-aisquare --json context list     # machine-readable output (any command)
+aisquare context list              # user pool + the active project's pool
+aisquare context search pytest     # full-text search (SQLite FTS5)
+aisquare context show a3f2         # ids are git-style prefix-addressable
+aisquare context edit a3f2         # opens in $EDITOR
+aisquare context promote a3f2      # project entry → user pool
+aisquare context export out.md     # markdown or --format json
+aisquare context import notes.md   # seed from Markdown bullets or JSON
+aisquare context preview           # exactly what agents will be shown
+aisquare inject                    # emit the context block (and record it)
+aisquare why                       # explain the last injection
+aisquare log                       # your captured prompt history, per project
 ```
 
-Context lives in two pools — `user` (global) and `project` — persisted in a
-SQLite database at `~/.aisquare/context.db`. The **active project** is whichever
-you `project switch` to (pinned in `state.json`), else the one containing your
-working directory; everything scopes to it consistently. Entries carry
-sync-ready metadata (`updated_at`, soft-delete tombstones) and time-sortable,
-prefix-addressable ids from day one.
+The **active project** is whichever repo contains your working directory, or
+the one you pin with `aisquare project switch <name>`. Everything —
+context, snapshots, prompt history, team state — scopes to it consistently.
+Worktrees resolve to their principal repository automatically.
 
-## Claude Code integration
+`aisquare project onboard` (also run by `init`) packs the codebase with
+Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
+**full pack** (every file), a **skeleton** (structure + signatures — the
+cheap thing agents read first), and a **per-file index** (char offsets +
+token counts, so an agent can open one file's slice of the pack instead of
+all of it). Re-run with `--refresh` after big changes.
 
-`aisquare agents connect claude-code` makes aisquare an active part of Claude
-Code by writing two hooks into `~/.claude/settings.json` (merged, never
-clobbering your other settings; remove them with `agents disconnect`):
+## Orchestrate a team of agents
 
-- **`SessionStart` → `aisquare hook session-start`** — injects a directive that
-  points Claude at the codebase snapshot (skeleton first, full pack on demand)
-  and the prompt history, plus your in-scope context — so Claude orients without
-  burning tokens grepping for files.
-- **`UserPromptSubmit` → `aisquare hook user-prompt-submit`** — captures how you
-  prompt, so Claude can replay your intent (`aisquare log`).
-
-### Team bus — parallel Claude Code sessions, one shared working memory
-
-Run several Claude Code sessions on one problem — a planner you talk to,
-coders that pick work up, a runner that verifies — and they coordinate
-through a shared bus in the same SQLite store: a live session board, an
-**idempotent** shared task list with **atomic claims** (lease-based, so a
-dead session's claims self-release), task **dependencies**, and an
-append-only event pipe delivered to each session as a compact delta on its
-next prompt. Everything degrades gracefully: repos that never opt in see
-nothing.
-
-#### Quickstart (one Claude account is plenty)
-
-Sessions are per **terminal**, not per account — a single `claude` install
-runs the whole team:
+This is the part that changes how you work. Sessions are per **terminal**,
+not per account — a single `claude` install runs the whole team:
 
 ```sh
-pipx install 'aisquare-cli[tui]'         # or: pip install 'aisquare-cli[tui]'
-aisquare agents connect claude-code      # installs the lifecycle hooks
+pipx install 'aisquare-cli[tui]'         # the live board wants the TUI extra
+aisquare agents connect claude-code
 cd your/repo
 
-AISQUARE_ROLE=planner claude             # terminal 1 — talk to this one
+AISQUARE_ROLE=planner claude             # terminal 1 — you talk to this one
 AISQUARE_ROLE=coder   claude             # terminal 2
-AISQUARE_ROLE=coder   claude             # terminal 3 (as many as you like)
-AISQUARE_ROLE=runner  claude             # terminal 4 — verifies coders' work
+AISQUARE_ROLE=coder   claude             # terminal 3 — as many as you like
+AISQUARE_ROLE=runner  claude             # terminal 4 — verifies the coders' work
 aisquare board -w                        # terminal 5 — you, watching live
 ```
 
-Launching with `AISQUARE_ROLE` activates the bus for that repo and registers
-the session; every session is told its id, its teammates, and its
-**role-specific work cycle** automatically (planner: stock the board; coder:
-`task next --claim` → work → `task review`; runner: verify → `done` /
-`reopen --reason`). Reopen feedback rides the pipe back to whichever coder
-picks the task up next — you never forward anything.
+Launching with `AISQUARE_ROLE` opts the repo in and registers the session.
+Every session is told its id, its teammates, and its **role's work cycle**
+automatically — no standing prompts to paste:
 
-Useful commands (agents learn these from their injected briefing):
+- **planner** — turns your intent into tasks on the shared board
+- **coder** — loops `task next --claim` → work → `task review`
+- **runner** — verifies reviewed work → `task done`, or `task reopen
+  --reason "what failed"` — and the feedback rides back to whichever coder
+  picks the task up next
+
+On every prompt, each session receives a compact delta of what teammates did
+since its last turn. Nothing needs forwarding; the coordination is the
+ambient state of the board.
+
+Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
+and fails open everywhere: the hooks are designed so orchestration can
+never break a Claude session, even when it is broken or absent. Repos
+that never opt in see nothing.
+
+### Tasks: idempotent, atomic, dependency-aware
 
 ```sh
-aisquare task add "wire auth" --role coder     # idempotent — safe to re-emit
-aisquare task add "ship it" --needs tsk_…      # dependency: held until ready
-aisquare task next --role coder --claim --as <id>   # atomic, one winner
+aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit
+aisquare task add "ship it" --needs tsk_01k…      # held until its dependency is done
+aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner
+aisquare task review tsk_01k… --note "how to verify" --as <id>
+aisquare task reopen tsk_01k… --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
-aisquare recall "what did we decide about auth?"    # long-term memory
 ```
 
-Several Claude installs (`CLAUDE_CONFIG_DIR` aliases) give sessions separate
-rate limits — connect each with `aisquare agents connect claude-code
---config-dir ~/.claude2`. For executions spanning several repositories, set
-`AISQUARE_TEAM_HUB=/path/to/hub` in every session so they share one bus;
-git worktrees already share their principal repo's bus automatically.
+Claims are single-`UPDATE` atomic (race-tested), leased (default 120
+minutes), and renewed by the session's own lifecycle hooks — so a dead
+session's claims release themselves and the work gets picked up again.
+`task next` only hands out tasks whose dependencies are done.
 
-#### The live board (`aisquare board -w`)
+### The live board (`aisquare board -w`)
 
-Interactive TUI (with the `[tui]` extra; falls back to a full-screen Rich
-view without it): sessions with live state chips — **▶ working**,
-**⏸ waiting for input**, **🔔 NEEDS YOU** (with a terminal bell) — the open
-tasks, and a bot-style feed of everything the team does. Click any task or
-feed line for its full detail in the bottom bar.
+An interactive [Textual](https://textual.textualize.io/) TUI with the
+`[tui]` extra (full-screen Rich fallback without it): every session with a
+live state chip — **▶ working**, **⏸ waiting for input**, **🔔 NEEDS YOU**
+(with a terminal bell) — the open tasks, and a bot-style feed of everything
+the team does. Click any task or feed line for its full detail.
 
 | Key | Action |
 | --- | --- |
-| `t` | theme browser — stays open, every change applies + autosaves |
+| `d` | flip to the done/dropped archive — when it closed, who closed it |
+| `o` | open the author session's transcript at that exact moment |
+| `t` | theme browser — applies live, autosaves |
 | `a` | toggle feed autoscroll |
-| `v` / `c` | select-text mode (frozen, mouse-selectable feed) / copy selection |
+| `v` / `c` | select-text mode (frozen, mouse-selectable feed) / copy |
 | `s` | save an SVG screenshot to `~/.aisquare/screenshots/` |
-| `b` | show/hide the board pane (auto-hides on narrow terminals) |
+| `b` | show/hide the board pane |
 | `r` / `q` | refresh now / quit |
 
-#### Long-term memory (gbrain)
+### Long-term memory (optional, via gbrain)
 
-Durable events — decisions, results, task outcomes, reopen feedback — are
-distilled into a per-project **gbrain** brain by a detached worker (never on
-the hot path; requires the `gbrain` CLI on `PATH`; initialised automatically
-with embeddings off; silently skipped when absent). `aisquare recall
-"<question>"` searches it; `aisquare team distill` drains on demand; `aisquare
+Durable events — decisions, results, task outcomes, reopen feedback —
+distill into a per-project brain by a detached worker, never on the hot
+path. `aisquare recall "what did we decide about auth?"` searches it across
+sessions and weeks; `aisquare team distill --all` backfills; `aisquare
 doctor` reports brain health.
 
-> `gbrain` here is the AISquare knowledge-brain CLI (a separate, optional tool),
-> not the unrelated `gbrain` package on public npm. This layer is entirely
-> optional — the bus works without it.
+This layer needs the AISquare **gbrain** CLI on `PATH` (a separate,
+optional tool — *not* the unrelated `gbrain` package on public npm) and is
+silently skipped when absent. Everything else works without it.
 
-**Embeddings** turn `recall` into semantic (hybrid vector + keyword) search.
-They are **off by default** (no surprise network calls). To enable, export
-`AISQUARE_BRAIN_EMBED=1` and an `OPENAI_API_KEY` before the first distill —
-the embedding schema is fixed **at brain creation time**, so a brain built
-without embeddings must be rebuilt to add them (remove
-`~/.aisquare/projects/<id>/brain`, then `AISQUARE_BRAIN_EMBED=1 aisquare team
-distill --all`). `aisquare doctor` flags a knob-vs-schema mismatch either way.
-`AISQUARE_BRAIN_EMBED_MODEL` overrides the model (default
-`openai:text-embedding-3-large`).
+**Semantic recall**: embeddings are off by default (no surprise network
+calls). Export `AISQUARE_BRAIN_EMBED=1` plus an `OPENAI_API_KEY` **before
+the first distill** and `recall` becomes hybrid vector + keyword search. The
+embedding schema is fixed at brain creation — to upgrade an existing brain,
+remove `~/.aisquare/projects/<id>/brain` and re-run
+`AISQUARE_BRAIN_EMBED=1 aisquare team distill --all`. `doctor` flags
+knob-vs-schema mismatches in both directions.
 
-#### Remote agents (MCP)
+### Remote agents over MCP (`aisquare serve`)
 
-`aisquare serve` (the `[serve]` extra) exposes the same bus to Claude clients
-that are not local terminal sessions — e.g. a browser-debugging agent in the
-Claude desktop app:
+The same board, tasks, and notes — exposed as an MCP server so Claude
+clients that aren't local terminals can join: a browser-debugging agent in
+the Claude desktop app, for instance. Remote callers act as attributed
+virtual sessions; their tasks and notes hit everyone's board and deltas
+like any teammate's.
 
 ```sh
+pipx install 'aisquare-cli[serve]'
 aisquare serve                   # streamable HTTP on 127.0.0.1:8747, bearer-token auth
 aisquare serve --show-token      # connection details for the client
 aisquare serve --stdio           # stdio transport (Claude Desktop launches it)
 ```
 
-Remote callers act as an attributed virtual session (`mcp:<client>`): their
-tasks and notes hit the board and everyone's deltas like any teammate's. For
-Claude Desktop on Windows + WSL2, either add the HTTP URL (Windows reaches
-WSL2 via localhost) or register a stdio server in
-`claude_desktop_config.json`:
+Running `serve` in a repo is the explicit opt-in for that project (it
+announces itself); the stdio transport refuses to run from directories that
+aren't a project, so a desktop client can't accidentally adopt your home
+directory. Claude Desktop on Windows + WSL2 works either over the HTTP URL
+(Windows reaches WSL2 via localhost) or as a registered stdio server:
 
 ```json
 {"mcpServers": {"aisquare-team": {"command": "wsl", "args": ["-e", "bash", "-lc",
   "cd /path/to/your/repo && aisquare serve --stdio"]}}}
 ```
 
-#### Env knobs
+### Tuning (environment variables)
+
+Orchestration has no config files — a handful of env knobs:
 
 | Variable | Effect |
 | --- | --- |
-| `AISQUARE_ROLE` | role for this session; also activates the bus for the repo |
-| `AISQUARE_TEAM=0` | master off switch (hooks and commands no-op) |
-| `AISQUARE_TEAM_HUB` | pin sessions from several repos onto one bus |
+| `AISQUARE_ROLE` | role for this session; launching with it opts the repo in |
+| `AISQUARE_TEAM=0` | master off switch — hooks and commands no-op |
+| `AISQUARE_TEAM_HUB` | point sessions from several repos at one shared board |
 | `AISQUARE_TEAM_DELTA=0` | mute per-prompt teammate deltas for a session |
-| `AISQUARE_TEAM_LEASE_MIN` | claim lease in minutes (default 120) |
-| `AISQUARE_BRAIN=0` | disable the gbrain long-term-memory layer |
-| `AISQUARE_BRAIN_EMBED=1` | embed distilled pages for semantic recall (needs `OPENAI_API_KEY`; set before the first distill — see the constraint above) |
+| `AISQUARE_TEAM_LEASE_MIN` | task-claim lease in minutes (default 120) |
+| `AISQUARE_BRAIN=0` | disable the long-term-memory layer |
+| `AISQUARE_BRAIN_EMBED=1` | embed distilled pages for semantic recall (needs `OPENAI_API_KEY`; set before the first distill) |
 | `AISQUARE_BRAIN_EMBED_MODEL` | embedding model (default `openai:text-embedding-3-large`) |
+| `AISQUARE_HOME` | relocate the whole `~/.aisquare` tree |
 
-The **codebase snapshot** (`project onboard`, or `init`) mirrors the server-side
-[Repomix](https://github.com/yamadashy/repomix) packing for sync-consistency: a
-full pack (`repomix --style xml`), a skeleton (`--compress`), and a per-file
-index (char offsets + token counts), stored under
-`~/.aisquare/projects/<id>/snapshot/`. Requires Node + repomix on PATH (run via
-`npx` otherwise); if neither is present the snapshot is skipped, not fatal.
+Running several Claude installs for separate rate limits? Connect each
+config dir once: `aisquare agents connect claude-code --config-dir
+~/.claude2`. For executions spanning multiple repositories, set
+`AISQUARE_TEAM_HUB=/path/to/hub` in every session; git worktrees already
+share their principal repo's board automatically.
 
-## Install (development)
+## How it works
 
-```sh
-git clone https://github.com/AISquare-Studio/aisquare-cli && cd aisquare-cli
-python3 -m venv .venv
-source .venv/bin/activate
-make install          # = pip install -e ".[dev]"
-```
+`agents connect claude-code` writes five hooks into Claude Code's
+`settings.json` (merged, never clobbering yours; `agents disconnect`
+removes exactly them):
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev workflow and how to implement a command.
-
-## Quick check
-
-```sh
-aisquare --help
-aisquare --version
-aisquare doctor              # install/deps/integration health
-asq ctx list                 # aliases work too
-```
-
-## Command tree
-
-```
-aisquare
-├── init [path] [--api-key K] [--local] [--agent A]... [--no-onboard] [--reinit] [-y]
-├── status · doctor · inject · sync · why · log · open
-├── remember <text> [--user|--project] [--tag T]...
-├── login · logout · whoami · upgrade · uninstall
-├── auth        status · rotate · token
-├── agents      list · connect <name> · disconnect <name> · scan · status [name]
-├── connectors  list · add <name> · remove <name> · status
-├── context     list · add <text> [--user|--project] [--tag T]... · show <id> · edit <id>
-│   (alias ctx) remove <id> · search <query> · preview · import <file>
-│               export [file] [--format md|json] · promote <id>
-├── project     info · list · switch <name> · link <repo> · onboard [path] [--refresh]
-│   (alias workspace)
-├── team        on · status · focus <text> · role <name> · log · distill
-├── task        add <title> · list · show <id> · next [--role R] [--status S] [--claim]
-│               claim <id> · review <id> · reopen <id> --reason · done <id>
-│               block <id> --reason · drop <id> · release <id>   (all with [--as SESSION])
-├── note <text> [--task T] [--to ROLE] [--kind K] · board · recall <query>
-├── serve       [--stdio | --port N --bind H] [--show-token]
-├── capture     status · pause · resume · start · stop
-├── config      list · get <key> · set <key> <value> · redaction <off|standard|strict>
-├── policy      list
-└── enforce     status · enable · disable
-```
-
-### Global flags
-
-| Flag | Meaning |
+| Hook | What it does |
 | --- | --- |
-| `-V`, `--version` | Print the version and exit |
-| `-v`, `--verbose` | Verbose output |
-| `-q`, `--quiet` | Suppress non-essential output |
-| `--json` | Machine-readable JSON on stdout |
-| `--profile NAME` | Configuration profile to use |
-| `--no-color` | Disable coloured output |
+| `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
+| `UserPromptSubmit` | capture the prompt; deliver the teammate delta; heartbeat |
+| `Stop` | mark the session waiting; renew its task leases |
+| `Notification` | flag **NEEDS YOU** on the board (permission prompts, idle) |
+| `SessionEnd` | release claims, mark the session gone, final distill |
 
-Global flags go **before** the command: `aisquare --json context list`.
-
-### Exit codes
-
-| Code | Meaning |
-| --- | --- |
-| `0` | Success |
-| `2` | Usage error (bad arguments) |
-| `70` | Command not implemented yet |
-
-## Architecture
-
-```
-src/aisquare/
-├── cli/          # THIN Typer layer: one module per command group.
-│   │             # Parses arguments, then calls exactly one service function.
-│   ├── app.py    # root app: global flags, --version, group registration
-│   ├── root.py   # top-level commands (init, status, remember, ...)
-│   ├── common.py # shared parsing helpers (e.g. --user/--project → pool)
-│   └── <group>.py
-├── services/     # SERVICE layer: one module per domain. Real behaviour goes
-│   │             # here. Today every function raises the shared stub.
-│   └── <domain>.py
-├── core/         # shared infrastructure (already real):
-│   ├── paths.py  #   ~/.aisquare layout (override with $AISQUARE_HOME)
-│   ├── config.py #   typed TOML config load/save (Pydantic + tomllib/tomli-w)
-│   ├── store.py  #   SQLite context store (ContextStore protocol + open_store)
-│   ├── ids.py    #   ULID-style, time-sortable, prefix-addressable entry ids
-│   ├── entries.py#   shared ContextEntry factory (add / import / onboard)
-│   ├── workspace.py #  resolve the active project (pin in state.json, else cwd)
-│   ├── injection.py #  assemble the context block + record injections (why)
-│   ├── agents.py #   detect agents + install Claude Code hooks (settings.json)
-│   ├── snapshot.py #  Repomix codebase pack (full + skeleton + index)
-│   ├── editor.py #   launch $EDITOR for `context edit`
-│   ├── state.py  #   runtime state from the global flags
-│   ├── console.py#   Rich console factories honouring --no-color
-│   └── stubs.py  #   stub() — the consistent not-implemented behaviour
-└── models.py     # Pydantic domain models (ContextEntry, DataEnvelope, ...)
-```
-
-Flow: `cli/<group>.py` parses arguments → calls `services/<domain>.py` →
-(today) `core/stubs.py:stub()` prints the not-implemented message and raises
-`typer.Exit(70)`.
-
-**What is real today:** `--help` everywhere, `--version`, global-flag parsing
-into `core/state.py`, the `~/.aisquare/` layout, TOML config load/save, the
-SQLite context store (`core/store.py`), and the commands wired to it — `init`,
-`remember`, the full `context` group (`add`, `list`, `show`, `edit`, `remove`,
-`search`, `promote`, `import`, `export`, `preview`), `inject`, `why`, the
-`project` group (`info`, `list`, `switch`, `link`, `onboard`+snapshot),
-`status`, `doctor`, the `config` group (`list`, `get`, `set`, `redaction`),
-`log`, and the `agents` group (`scan`, `list`, `status`, `connect`+hooks,
-`disconnect`). Everything else is a stub.
-
-### `~/.aisquare/` layout
+Every hook is **fail-open**: any error is swallowed and the session
+continues untouched. State lives in one SQLite database (WAL mode,
+concurrency-tested against racing parallel sessions):
 
 ```
 ~/.aisquare/
-├── config.toml   # typed configuration (core/config.py)
-├── credentials   # API keys / tokens
-├── context.db    # SQLite store: context entries, projects, captured prompts
+├── context.db    # context entries, projects, prompt history, tasks, events, sessions
+├── config.toml   # typed configuration
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
-├── projects/     # per-project data — <id>/snapshot/ (Repomix pack + skeleton + index)
-├── cache/        # disposable cached data (e.g. last_injection.json)
+├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
+├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```
 
-Set `AISQUARE_HOME` to relocate the whole tree (the test suite does this).
+Ids everywhere are time-sortable and prefix-addressable (git-style: any
+unambiguous prefix works). Every command takes a global `--json` flag for
+machine-readable output — global flags go before the command:
+`aisquare --json task list`.
 
-## Implementing a feature (stub → service)
+## Command reference
 
-Each feature is implemented by replacing one `stub(...)` call in one service
-module. The CLI wiring, argument parsing and signatures already exist. Example —
-making `aisquare context add` real:
-
-**1. Implement the service** (`src/aisquare/services/context.py`). Replace the
-stub with real logic; keep the existing signature, it is already final.
-Persisted state goes through the `ContextStore` from `core/store.py`. The
-already-implemented `add_entry` is the worked example:
-
-```python
-def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
-    """Add a context entry to the user or project pool."""
-    resolved: Pool = pool or load_config().default_pool
-    with store_session() as store:
-        project_id: str | None = None
-        if resolved == "project":
-            project = current_project()
-            store.ensure_project(project)
-            project_id = project.id
-        now = datetime.now(tz=UTC)
-        entry = ContextEntry(
-            id=new_entry_id(), pool=resolved, project_id=project_id, text=text,
-            tags=tags, source="cli", created_at=now, updated_at=now,
-        )
-        return store.add(entry)
+```
+aisquare
+├── init [path] [--api-key K] [--local] [--agent A]… [--no-onboard] [--reinit] [-y]
+├── remember <text> [--user|--project] [--tag T]…
+├── context (ctx)   add · list · show · edit · remove · search · preview
+│                   promote · import · export · —  your persistent memory
+├── inject · why · log · status · doctor
+├── project (workspace)  info · list · switch · link · onboard [--refresh]
+├── agents          scan · list · status [name] · connect <name> · disconnect <name>
+│                                                  [--config-dir DIR]
+├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
+├── task            add · list · show · next [--role R] [--status S] [--claim]
+│                   claim · review [--note] · reopen --reason · done [--note]
+│                   block --reason · drop · release        (all with [--as SESSION])
+├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
+├── board [-w] [-i SECONDS] · recall <query>
+├── serve [--stdio | --port N --bind H] [--show-token]
+└── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```
 
-**2. Render in the CLI layer** (`src/aisquare/cli/context.py`). The CLI module
-stays thin: parse, call the service, print. Honour `--json` via the runtime
-state:
+| Global flag | Meaning |
+| --- | --- |
+| `-V` / `--version` | print the version and exit |
+| `--json` | machine-readable JSON on stdout |
+| `-v` / `-q` | verbose / quiet |
+| `--no-color` | disable coloured output |
+| `--profile NAME` | configuration profile |
 
-```python
-@app.command("add")
-def add(text: ..., user: ..., project: ..., tag: ...) -> None:
-    """Add a context entry."""
-    entry = context_service.add_entry(text, pool=resolve_pool(user, project), tags=tag or [])
-    if get_state().json_output:
-        typer.echo(entry.model_dump_json())
-    else:
-        stdout_console().print(f"✓ remembered ({entry.pool}): {entry.text}")
-```
-
-**3. Update the tests.** The walk-based test in `tests/test_stubs.py` asserts
-that every leaf exits with `70`; once a command is real it will fail there —
-add the command to an explicit "implemented" skip-list in that test and write
-real tests for the new behaviour.
-
-Rules of thumb:
-
-- CLI modules never contain behaviour; services never parse CLI arguments.
-- Services return data; the CLI renders it. (`stub()` printing is the one
-  deliberate exception, so all unimplemented commands behave identically.)
-- New shared plumbing goes in `core/`; new domain shapes go in `models.py`.
+You'll spot a few more groups in `--help` — `auth`, `sync`, `connectors`,
+`capture`, `policy` — that's the cloud roadmap (sync across machines,
+managed connectors). Each says so plainly when invoked rather than
+half-working. Follow along in
+[issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
 
 ## Development
 
-| Task | Command |
-| --- | --- |
-| Install (editable + dev tools) | `make install` |
-| Run tests | `make test` |
-| Lint | `make lint` |
-| Type-check | `make typecheck` |
-| Format + autofix | `make fmt` |
-| All CI checks | `make check` |
+```sh
+git clone https://github.com/AISquare-Studio/aisquare-cli && cd aisquare-cli
+python3 -m venv .venv && source .venv/bin/activate
+make install          # editable install + dev tools
+make check            # exactly what CI runs: ruff, format check, mypy strict, pytest
+```
 
-Run a single test: `pytest tests/test_stubs.py -k "context add"`.
+The codebase is a thin Typer CLI over a service layer over one SQLite store
+— `src/aisquare/cli/` parses, `src/aisquare/services/` behaves,
+`src/aisquare/core/` is shared infrastructure. Tests run hermetically
+against a temp `AISQUARE_HOME` (the suite passes even with every aisquare
+env knob set adversarially). See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+workflow.
+
+## License
+
+[MIT](LICENSE)

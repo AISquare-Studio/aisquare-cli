@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import random
 import re
 import sqlite3
@@ -295,6 +296,7 @@ class ContextStore(Protocol):
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
+    def get_event(self, event_id: str) -> TeamEvent | None: ...
     def events_since(
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
     ) -> list[TeamEvent]: ...
@@ -1002,6 +1004,13 @@ class SqliteStore:
         self._conn.commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
 
+    def get_event(self, event_id: str) -> TeamEvent | None:
+        """One event by exact id — the write path's post-commit read-back."""
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE id = ?", (event_id,)
+        ).fetchone()
+        return _row_to_event(row) if row is not None else None
+
     def events_since(
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
     ) -> list[TeamEvent]:
@@ -1056,6 +1065,23 @@ def _glob_prefix(ref: str) -> str:
     return f"{escaped}*"
 
 
+_DEFAULT_BUSY_MS = 5000
+
+
+def _busy_timeout_ms() -> int:
+    """How long a connection waits on a locked store (``AISQUARE_DB_BUSY_MS``).
+
+    Tests wedge the store on purpose and must not sit through the 5s default;
+    anything unset, non-numeric or negative falls back to it.
+    """
+    raw = os.environ.get("AISQUARE_DB_BUSY_MS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_BUSY_MS
+    return value if value >= 0 else _DEFAULT_BUSY_MS
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Bring the schema to the current version, safely under concurrency.
 
@@ -1096,7 +1122,7 @@ def open_store() -> ContextStore:
     paths.ensure_home()
     connection = sqlite3.connect(str(paths.db_path()))
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute(f"PRAGMA busy_timeout = {_busy_timeout_ms()}")
     deadline = time.monotonic() + 15
     while True:
         try:

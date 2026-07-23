@@ -14,6 +14,7 @@ so repos that never opted in never see team output.
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,56 @@ class ClaimLostError(RuntimeError):
         holder = short_id(task.claimed_by) if task.claimed_by else "another session"
         super().__init__(f"task {task.id} is already claimed by {holder}")
         self.task = task
+
+
+class DeliveryUnconfirmedError(RuntimeError):
+    """A committed write could not be read back from a fresh store connection.
+
+    Raised instead of returning success: a ✓ the store cannot corroborate is
+    exactly the lying-success failure (#20) this read-back retires.
+    """
+
+    def __init__(self, ref: str, board_name: str) -> None:
+        super().__init__(
+            f"write {ref} was not confirmed on board {board_name} — "
+            "not reporting success; check `aisquare log` before retrying"
+        )
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """The read-back receipt of one confirmed team-store write.
+
+    ``seq`` is the event's stream position; ``None`` marks a confirmed
+    no-event write (an idempotent ``task add`` that matched an existing row).
+    """
+
+    seq: int | None
+    board_id: str
+    board_name: str
+    warning: str | None = None
+
+    @property
+    def receipt(self) -> str:
+        """The human receipt appended to a ✓ line: where the write proved durable."""
+        if self.seq is None:
+            return f"on {self.board_name}"
+        return f"seq {self.seq} on {self.board_name}"
+
+
+_DELIVERY: ContextVar[Delivery | None] = ContextVar("aisquare_team_delivery", default=None)
+
+
+def last_delivery() -> Delivery | None:
+    """The receipt of the most recent write in this call context (or ``None``).
+
+    Deliberately out-of-band: the CLI and the MCP server both attach receipts
+    to success output, and threading a receipt through every service signature
+    would churn an API surface other RC work is touching in parallel. Each
+    write resets this before doing anything, so a stale receipt can never leak
+    into the next command's output.
+    """
+    return _DELIVERY.get()
 
 
 def short_id(value: str) -> str:
@@ -106,6 +157,71 @@ def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None
     return session
 
 
+@dataclass(frozen=True)
+class _Board:
+    """Where a command delivers, and how to talk about it in receipts."""
+
+    id: str
+    name: str
+    root: Path | None
+    warning: str | None = None
+
+
+def _board_of(store: ContextStore, project_id: str) -> _Board:
+    """The board a known project id names (for task-ref commands)."""
+    project = store.get_project(project_id)
+    name = (project.root.name if project is not None else "") or project_id
+    return _Board(id=project_id, name=name, root=project.root if project is not None else None)
+
+
+def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -> _Board:
+    """The board an attributed command delivers to.
+
+    With ``--as`` the SESSION's registered board wins — a session legitimately
+    works across many worktrees and subdirectories, so cwd is a hint, not an
+    identity (#20's misrouting bug: cwd resolution silently sent writes to a
+    different board than the session's audience). Without a session, cwd
+    resolves the board exactly as before. A cwd that disagrees with the
+    session's board produces a warning, never a reroute.
+    """
+    if session is None:
+        project = _project(store, cwd)
+        return _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+    board = _board_of(store, session.project_id)
+    cwd_board = orchestrator.team_project(cwd)
+    if cwd_board.id == board.id:
+        return board
+    warning = (
+        f"cwd resolves to board {cwd_board.root.name or cwd_board.id}, but session "
+        f"{short_id(session.id)} belongs to {board.name} — delivered to {board.name}"
+    )
+    return _Board(id=board.id, name=board.name, root=board.root, warning=warning)
+
+
+def _confirm_event(event: TeamEvent, board: _Board) -> TeamEvent:
+    """Prove the write landed: re-read the event through a FRESH connection.
+
+    The connection that wrote the row would happily report its own state; a
+    new one sees only what actually committed, on the board it committed to.
+    Returns the stored event (authoritative ``seq``) or raises
+    :class:`DeliveryUnconfirmedError` — callers must not print success first.
+    """
+    with store_session() as store:
+        stored = store.get_event(event.id)
+    if stored is None or stored.project_id != board.id:
+        raise DeliveryUnconfirmedError(event.id, board.name)
+    return stored
+
+
+def _record_delivery(event: TeamEvent, board: _Board) -> TeamEvent:
+    """Confirm ``event`` on ``board`` and publish the receipt for this write."""
+    stored = _confirm_event(event, board)
+    _DELIVERY.set(
+        Delivery(seq=stored.seq, board_id=board.id, board_name=board.name, warning=board.warning)
+    )
+    return stored
+
+
 def task_key(title: str) -> str:
     """Derive the idempotency key for a task: a slug of its title."""
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
@@ -118,11 +234,16 @@ def task_key(title: str) -> str:
 def activate(cwd: Path | None = None) -> ProjectInfo:
     """Turn the orchestrator on for this project (``team on``)."""
     _require_enabled()
+    _DELIVERY.set(None)
     with store_session() as store:
         project = _project(store, cwd)
+        event = None
         if not store.team_active(project.id):
-            _emit(store, project.id, "activate", "agent orchestrator activated")
-        return project
+            event = _emit(store, project.id, "activate", "agent orchestrator activated")
+        board = _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+    if event is not None:
+        _record_delivery(event, board)
+    return project
 
 
 def board_data(
@@ -191,13 +312,16 @@ def set_role(role: str, session_ref: str, cwd: Path | None = None) -> TeamSessio
 def set_focus(text: str, session_ref: str, cwd: Path | None = None) -> TeamSession:
     """Announce what a session is working on right now (``team focus``)."""
     _require_enabled()
+    _DELIVERY.set(None)
     with store_session() as store:
         session = store.get_session(session_ref)
         if session is None:
             raise KeyError(session_ref)
         updated = store.update_session(session.id, focus=text)
-        _emit(store, updated.project_id, "focus", text, session_id=updated.id)
-        return updated
+        event = _emit(store, updated.project_id, "focus", text, session_id=updated.id)
+        board = _board_of(store, updated.project_id)
+    _record_delivery(event, board)
+    return updated
 
 
 def add_note(
@@ -211,9 +335,10 @@ def add_note(
 ) -> TeamEvent:
     """Put a note/decision/question/result on the team pipe."""
     _require_enabled()
+    _DELIVERY.set(None)
     with store_session() as store:
-        project = _project(store, cwd)
         session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
         task_id: str | None = None
         if task_ref is not None:
             task = store.get_task(task_ref)
@@ -222,16 +347,17 @@ def add_note(
             task_id = task.id
         event = _emit(
             store,
-            project.id,
+            board.id,
             kind,
             text,
             session_id=session.id if session else None,
             task_id=task_id,
             to_role=to_role,
         )
+    stored = _record_delivery(event, board)
     if kind in distill_service.DISTILL_KINDS:
-        distill_service.spawn_drain(root=project.root)
-    return event
+        distill_service.spawn_drain(root=board.root)
+    return stored
 
 
 def add_task(
@@ -250,15 +376,16 @@ def add_task(
     next`` will not hand it out until they are resolved.
     """
     _require_enabled()
+    _DELIVERY.set(None)
     with store_session() as store:
-        project = _project(store, cwd)
         session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
         resolved_needs: list[str] = []
         for ref in needs or []:
             needed = store.get_task(ref)
             if needed is None:
                 raise KeyError(ref)
-            if needed.project_id != project.id:
+            if needed.project_id != board.id:
                 # A cross-project need would count as unmet forever (readiness
                 # only sees this project's statuses) — starve, silently.
                 raise ValueError(f"--needs {ref}: that task belongs to another project's board")
@@ -268,7 +395,7 @@ def add_task(
         task, created = store.upsert_task(
             TeamTask(
                 id=new_task_id(),
-                project_id=project.id,
+                project_id=board.id,
                 key=key or task_key(title),
                 title=title,
                 detail=detail,
@@ -279,17 +406,30 @@ def add_task(
                 updated_at=now,
             )
         )
+        event = None
         if created:
-            _emit(
+            event = _emit(
                 store,
-                project.id,
+                board.id,
                 "task_added",
                 task.title,
                 session_id=session.id if session else None,
                 task_id=task.id,
                 to_role=task.role,
             )
+    if event is not None:
+        _record_delivery(event, board)
         return task, created
+    # Idempotent duplicate: nothing new hit the pipe, but the caller still
+    # gets a truthful receipt — the existing row, read back fresh.
+    with store_session() as store:
+        fresh = store.get_task(task.id)
+    if fresh is None or fresh.project_id != board.id:
+        raise DeliveryUnconfirmedError(task.id, board.name)
+    _DELIVERY.set(
+        Delivery(seq=None, board_id=board.id, board_name=board.name, warning=board.warning)
+    )
+    return fresh, created
 
 
 def list_tasks(status: TaskStatus | None = None, cwd: Path | None = None) -> list[TeamTask]:
@@ -316,6 +456,7 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     live lease) and ``KeyError`` when the ref matches nothing.
     """
     _require_enabled()
+    _DELIVERY.set(None)
     with store_session() as store:
         task = store.get_task(ref)
         if task is None:
@@ -329,7 +470,7 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
             raise ClaimLostError(current)
         claimed = store.get_task(task.id)
         assert claimed is not None  # just claimed
-        _emit(
+        event = _emit(
             store,
             claimed.project_id,
             "task_claimed",
@@ -337,7 +478,9 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
             session_id=session.id if session else None,
             task_id=claimed.id,
         )
-        return claimed
+        board = _board_of(store, claimed.project_id)
+    _record_delivery(event, board)
+    return claimed
 
 
 def _finish_task(
@@ -347,7 +490,8 @@ def _finish_task(
     *,
     note: str | None = None,
     session_ref: str | None = None,
-) -> tuple[TeamTask, Path | None]:
+) -> tuple[TeamTask, _Board]:
+    _DELIVERY.set(None)
     with store_session() as store:
         task = store.get_task(ref)
         if task is None:
@@ -355,7 +499,7 @@ def _finish_task(
         session = _resolve_session(store, session_ref)
         updated = store.set_task_status(task.id, status)
         text = updated.title if note is None else f"{updated.title} — {note}"
-        _emit(
+        event = _emit(
             store,
             updated.project_id,
             kind,
@@ -363,22 +507,24 @@ def _finish_task(
             session_id=session.id if session else None,
             task_id=updated.id,
         )
-        return updated, _project_root(store, updated.project_id)
+        board = _board_of(store, updated.project_id)
+    _record_delivery(event, board)
+    return updated, board
 
 
 def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Mark a task done (``task done``)."""
     _require_enabled()
-    task, root = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
-    distill_service.spawn_drain(root=root)
+    task, board = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
+    distill_service.spawn_drain(root=board.root)
     return task
 
 
 def review_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Send a task to review — done coding, awaiting verification (``task review``)."""
     _require_enabled()
-    task, root = _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
-    distill_service.spawn_drain(root=root)
+    task, board = _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
+    distill_service.spawn_drain(root=board.root)
     return task
 
 
@@ -389,13 +535,14 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
     task up next (usually its previous owner's loop) sees the feedback.
     """
     _require_enabled()
+    _DELIVERY.set(None)
     with store_session() as store:
         task = store.get_task(ref)
         if task is None:
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
         reopened = store.reopen_task(task.id)
-        _emit(
+        event = _emit(
             store,
             reopened.project_id,
             "task_reopened",
@@ -403,8 +550,9 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
             session_id=session.id if session else None,
             task_id=reopened.id,
         )
-        root = _project_root(store, reopened.project_id)
-    distill_service.spawn_drain(root=root)
+        board = _board_of(store, reopened.project_id)
+    _record_delivery(event, board)
+    distill_service.spawn_drain(root=board.root)
     return reopened
 
 
@@ -422,21 +570,24 @@ def next_task(
     claimed; a race with another looper simply moves on to the next task.
     """
     _require_enabled()
+    _DELIVERY.set(None)
     if claim and status != "todo":
         raise ValueError("--claim only applies to todo tasks")
     with store_session() as store:
-        project = _project(store, cwd)
         session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
+        event = None
         while True:
-            task = store.next_task(project.id, role=role, status=status)
+            task = store.next_task(board.id, role=role, status=status)
             if task is None or not claim:
-                return task
+                picked = task
+                break
             if store.claim_task(task.id, claimant, lease):
                 claimed = store.get_task(task.id)
                 assert claimed is not None  # just claimed
-                _emit(
+                event = _emit(
                     store,
                     claimed.project_id,
                     "task_claimed",
@@ -444,16 +595,20 @@ def next_task(
                     session_id=session.id if session else None,
                     task_id=claimed.id,
                 )
-                return claimed
+                picked = claimed
+                break
             # Lost the race for this one — the next loop iteration sees the
             # following todo task (the winner's claim moved this one to doing).
+    if event is not None:
+        _record_delivery(event, board)
+    return picked
 
 
 def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> TeamTask:
     """Mark a task blocked, with the reason on the pipe (``task block``)."""
     _require_enabled()
-    task, root = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
-    distill_service.spawn_drain(root=root)
+    task, board = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
+    distill_service.spawn_drain(root=board.root)
     return task
 
 
@@ -467,13 +622,14 @@ def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
 def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Give a claimed task back to the pool (``task release``)."""
     _require_enabled()
+    _DELIVERY.set(None)
     with store_session() as store:
         task = store.get_task(ref)
         if task is None:
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
         released = store.release_task(task.id)
-        _emit(
+        event = _emit(
             store,
             released.project_id,
             "task_released",
@@ -481,7 +637,9 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
             session_id=session.id if session else None,
             task_id=released.id,
         )
-        return released
+        board = _board_of(store, released.project_id)
+    _record_delivery(event, board)
+    return released
 
 
 def distill_now(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
@@ -731,6 +889,7 @@ def prune_sessions(
     is not past the threshold).
     """
     _require_enabled()
+    _DELIVERY.set(None)
     threshold = (
         timedelta(minutes=older_than_minutes) if older_than_minutes is not None else _STALE_AFTER
     )
@@ -769,14 +928,20 @@ def prune_sessions(
                 )
             )
             released_total += released
+        summary = None
         if pruned and not dry_run:
-            _emit(
+            summary = _emit(
                 store,
                 project.id,
                 "sessions_pruned",
                 f"retired {len(pruned)} ghost session(s); released "
                 f"{released_total} orphaned claim(s) back to the pool",
             )
+        board = _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+    if summary is not None:
+        # The summary is the batch's last insert: confirming it confirms the
+        # released-claim events committed before it on the same connection.
+        _record_delivery(summary, board)
     return PruneReport(
         pruned=pruned,
         released_total=released_total,

@@ -7,6 +7,7 @@ Also home of the top-level ``note`` and ``board`` shortcuts (registered by
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Annotated, NoReturn
 
 import typer
@@ -16,7 +17,7 @@ from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import AmbiguousIdError
 from aisquare.services import team as team_service
-from aisquare.services.team import TeamDisabledError
+from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
 app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no_args_is_help=True)
 
@@ -25,6 +26,15 @@ SessionRef = Annotated[
     typer.Option("--as", help="Act as this team session (id prefix, from your board)."),
 ]
 
+# Every failure a store-backed team command can hit, routed through _fail_team.
+STORE_ERRORS = (
+    TeamDisabledError,
+    KeyError,
+    AmbiguousIdError,
+    DeliveryUnconfirmedError,
+    sqlite3.OperationalError,
+)
+
 
 def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
     """Translate service errors into the shared CLI error contract."""
@@ -32,10 +42,41 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         fail(str(exc), error="team_disabled")
     if isinstance(exc, AmbiguousIdError):
         fail(f"'{exc.ref}' is ambiguous — use more characters", error="ambiguous_id", ref=exc.ref)
+    if isinstance(exc, DeliveryUnconfirmedError):
+        fail(str(exc), error="delivery_unconfirmed")
+    if isinstance(exc, sqlite3.OperationalError):
+        # A wedged or contended store must fail loudly, never traceback —
+        # and never print anything a caller could mistake for success.
+        fail(f"context store unavailable ({exc}) — retry shortly", error="store_locked")
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)
         fail(f"nothing matches '{missing}'", error="not_found", ref=missing)
     raise exc
+
+
+def emit_write_warning(delivery: team_service.Delivery | None) -> None:
+    """Surface a board-mismatch warning on stderr (human and ``--json`` runs).
+
+    Plain ``echo``, not the rich console: the warning must never wrap or be
+    reflowed — agents grep their own stderr for it.
+    """
+    if delivery is not None and delivery.warning:
+        typer.echo(f"⚠ {delivery.warning}", err=True)
+
+
+def delivery_fields(delivery: team_service.Delivery | None) -> dict[str, object]:
+    """The top-level JSON fields a confirmed write adds to its payload."""
+    if delivery is None:
+        return {}
+    fields: dict[str, object] = {"delivered": True}
+    if delivery.warning:
+        fields["warning"] = delivery.warning
+    return fields
+
+
+def receipt_suffix(delivery: team_service.Delivery | None) -> str:
+    """The `` · seq N on <board>`` tail of a human ✓ line (empty for reads)."""
+    return f" · {delivery.receipt}" if delivery is not None else ""
 
 
 @app.command("on")
@@ -43,14 +84,17 @@ def on() -> None:
     """Activate the orchestrator for this project."""
     try:
         project = team_service.activate()
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
+    delivery = team_service.last_delivery()
     if get_state().json_output:
-        typer.echo(json.dumps({"activated": project.id, "root": str(project.root)}))
+        payload: dict[str, object] = {"activated": project.id, "root": str(project.root)}
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
         stdout_console().print(
             f"✓ agent orchestrator active for {project.root.name or project.id} — "
-            "sessions launched here now share tasks and notes"
+            f"sessions launched here now share tasks and notes{receipt_suffix(delivery)}"
         )
 
 
@@ -70,13 +114,17 @@ def focus(
         fail("--as <session> is required (your id is on the board)", error="missing_session")
     try:
         session = team_service.set_focus(text, as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, as_session)
+    delivery = team_service.last_delivery()
     if get_state().json_output:
-        typer.echo(session.model_dump_json())
+        payload = session.model_dump(mode="json")
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
         stdout_console().print(
-            f"✓ focus of {team_service.short_id(session.id)}: {text}", markup=False
+            f"✓ focus of {team_service.short_id(session.id)}: {text}{receipt_suffix(delivery)}",
+            markup=False,
         )
 
 
@@ -90,7 +138,7 @@ def role(
         fail("--as <session> is required (your id is on the board)", error="missing_session")
     try:
         session = team_service.set_role(name, as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, as_session)
     if get_state().json_output:
         typer.echo(session.model_dump_json())
@@ -105,7 +153,7 @@ def log(
     """Show the team pipe: recent events from every session."""
     try:
         events = team_service.log_events(limit=limit)
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:
         typer.echo(json.dumps([event.as_envelope().model_dump(mode="json") for event in events]))
@@ -155,27 +203,26 @@ def prune(
     """
     try:
         report = team_service.prune_sessions(older_than, dry_run=dry_run, keep=keep)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, keep)
+    delivery = team_service.last_delivery()
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
+        payload: dict[str, object] = {
+            "dry_run": report.dry_run,
+            "threshold_minutes": report.threshold_minutes,
+            "released_total": report.released_total,
+            "pruned": [
                 {
-                    "dry_run": report.dry_run,
-                    "threshold_minutes": report.threshold_minutes,
-                    "released_total": report.released_total,
-                    "pruned": [
-                        {
-                            "id": p.id,
-                            "role": p.role,
-                            "idle_minutes": p.idle_minutes,
-                            "released": p.released,
-                        }
-                        for p in report.pruned
-                    ],
+                    "id": p.id,
+                    "role": p.role,
+                    "idle_minutes": p.idle_minutes,
+                    "released": p.released,
                 }
-            )
-        )
+                for p in report.pruned
+            ],
+        }
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
         return
     console = stdout_console()
     if not report.pruned:
@@ -210,7 +257,10 @@ def prune(
             if report.released_total
             else ""
         )
-        console.print(f"🧹 retired {count} ghost session{plural}{tail} — board's aligned.")
+        console.print(
+            f"🧹 retired {count} ghost session{plural}{tail} — "
+            f"board's aligned.{receipt_suffix(delivery)}"
+        )
 
 
 @app.command("distill")
@@ -225,7 +275,7 @@ def distill(
     """Push undistilled notes/decisions/outcomes into the project brain now."""
     try:
         count = team_service.distill_now(rescan=rescan)
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:
         typer.echo(json.dumps({"distilled": count}))
@@ -242,7 +292,7 @@ def recall(
     """Search the team's long-term memory (decisions, results, outcomes)."""
     try:
         output = team_service.recall(query)
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if output is None:
         fail(
@@ -274,12 +324,18 @@ def note(
         event = team_service.add_note(
             text, session_ref=as_session, task_ref=task, to_role=to, kind=kind
         )
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, task or as_session)
+    delivery = team_service.last_delivery()
+    emit_write_warning(delivery)
     if get_state().json_output:
-        typer.echo(event.as_envelope().model_dump_json())
+        payload = event.as_envelope().model_dump(mode="json")
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
-        stdout_console().print(f"✓ shared ({event.kind}): {event.text}", markup=False)
+        stdout_console().print(
+            f"✓ shared ({event.kind}): {event.text}{receipt_suffix(delivery)}", markup=False
+        )
 
 
 def board(
@@ -298,7 +354,7 @@ def board(
         return
     try:
         project, sessions, tasks, events = team_service.board_data()
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:
         typer.echo(

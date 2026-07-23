@@ -32,6 +32,7 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_TEAM_HUB",
         "AISQUARE_TEAM_DELTA",
         "AISQUARE_TEAM_LEASE_MIN",
+        "AISQUARE_DB_BUSY_MS",
         "AISQUARE_BRAIN",
         "AISQUARE_BRAIN_EMBED",
         "AISQUARE_BRAIN_EMBED_MODEL",

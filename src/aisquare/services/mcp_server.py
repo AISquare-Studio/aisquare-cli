@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sqlite3
 import stat
 import sys
 import time
@@ -38,7 +39,7 @@ from typing import TYPE_CHECKING, Any, cast
 from aisquare.core import paths
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
-from aisquare.services.team import ClaimLostError, TeamDisabledError
+from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -127,6 +128,13 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         ) from exc
     except ClaimLostError as exc:
         raise _tool_error(f"error: {exc}") from exc
+    except DeliveryUnconfirmedError as exc:
+        # The #20 contract crosses the remote surface too: an unconfirmed
+        # write must reach the agent as the error wording, never a raw
+        # tool exception that reads like an infrastructure hiccup.
+        raise _tool_error(f"error: {exc}") from exc
+    except sqlite3.OperationalError as exc:
+        raise _tool_error(f"error: context store unavailable ({exc}) — retry shortly") from exc
     except LookupError as exc:
         # KeyError (unknown ref) and AmbiguousIdError (short prefix) both
         # subclass LookupError; remote callers get the error contract, not

@@ -16,6 +16,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for that long, so clients killed mid-handshake can no longer strand
   orphaned daemons (#19). Pipe-EOF still exits immediately; HTTP mode is
   unaffected. This retires the `pkill`/`xargs` workarounds from #19.
+- `AISQUARE_DB_BUSY_MS` — busy-timeout knob for the context store (default
+  5000), so tests can wedge the store without waiting out the full timeout.
+
+### Fixed
+
+- **Team writes cannot lie about success (#20).** `--as`-attributed commands
+  (`note`, `task add`, `task next`, …) now deliver to the acting *session's*
+  board — never the cwd's — warning loudly when the two disagree. Every
+  event-emitting write is read back through a fresh store connection before
+  `✓` is printed; the `✓` line carries a receipt (`seq N on <board>`) and
+  `--json` output gains a top-level `delivered: true` (plus `warning` on a
+  board mismatch). Unconfirmed writes exit 1 with `delivery_unconfirmed` (the
+  payload's `ref` names the write), and a locked store maps to a clean
+  `store_locked` error instead of a traceback. A failure can leave a
+  durable-but-unconfirmed write — check `aisquare log` for the reported ref
+  before retrying, or a retried note/claim may duplicate work.
 
 ## [0.2.0] - 2026-07-07
 

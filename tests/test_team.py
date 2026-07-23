@@ -782,6 +782,215 @@ def test_old_format_mcp_sessions_are_retired_by_v8(work_dir: Path) -> None:
         check.close()
 
 
+# --- #20: session-board delivery, read-back receipts, store_locked ---------------
+
+
+def _flat(text: str) -> str:
+    """Console output with all wrapping collapsed, for substring asserts."""
+    return " ".join(text.split())
+
+
+def test_attributed_write_delivers_to_the_session_board_not_cwd(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import team as team_service
+
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # the session's cwd wandered off its board
+
+    result = runner.invoke(app, ["note", "routed home", "--as", "bbbb2222"])
+
+    assert result.exit_code == 0, result.output
+    assert "delivered to" in result.stderr  # the mismatch warning, loudly
+    # The note landed on the SESSION's board, not the cwd board...
+    on_board = team_service.log_events(work_dir)
+    assert any(e.kind == "note" and e.text == "routed home" for e in on_board)
+    assert all(e.text != "routed home" for e in team_service.log_events(elsewhere))
+    # ...so its audience actually receives it on their next prompt.
+    delta = _prompt(runner, PLANNER, work_dir)
+    assert "routed home" in delta.stdout
+
+
+def test_next_task_reads_the_session_board_from_a_foreign_cwd(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "board A work", "--role", "coder", "--as", "bbbb2222"])
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # a looper iterating from another checkout
+    picked = json.loads(
+        runner.invoke(
+            app, ["--json", "task", "next", "--role", "coder", "--claim", "--as", "bbbb2222"]
+        ).stdout
+    )
+    assert picked is not None and picked["title"] == "board A work"  # not an empty read
+    assert picked["delivered"] is True
+
+
+def test_needs_resolve_against_the_session_board_from_a_foreign_cwd(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Direction (a) of the #20 --needs flip: a dependency that lives on the
+    # SESSION's board must be accepted even when cwd resolves elsewhere
+    # (the old cwd-board comparison rejected exactly this).
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "prerequisite on A", "--as", "bbbb2222"])
+    needed = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    result = runner.invoke(
+        app, ["--json", "task", "add", "dependent", "--needs", needed, "--as", "bbbb2222"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["created"] is True and payload["needs"] == [needed]
+
+
+def test_needs_on_the_cwd_board_is_rejected_for_a_foreign_session(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Direction (b): a dependency that lives on the CWD's board while the
+    # acting session belongs elsewhere is cross-board contamination — reject.
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)  # session registered on board A
+    monkeypatch.delenv("AISQUARE_ROLE")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    runner.invoke(app, ["team", "on"])  # board B exists, with its own task
+    runner.invoke(app, ["task", "add", "local to B"])
+    on_b = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    result = runner.invoke(
+        app, ["--json", "task", "add", "dependent", "--needs", on_b, "--as", "bbbb2222"]
+    )
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["error"] == "invalid_needs"
+
+
+def test_json_write_carries_delivered_flag_and_mismatch_warning(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    result = runner.invoke(app, ["--json", "note", "hello", "--as", "bbbb2222"])
+    payload = json.loads(result.stdout)
+    assert payload["delivered"] is True
+    assert "delivered to" in payload["warning"]
+    assert payload["kind"] == "team.note"  # envelope fields unchanged
+    assert payload["payload"]["text"] == "hello"
+
+
+def test_write_receipts_carry_seq_and_board(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+
+    note = runner.invoke(app, ["note", "receipt me", "--as", "bbbb2222"])
+    assert "· seq" in _flat(note.output) and work_dir.name in _flat(note.output)
+
+    added = runner.invoke(app, ["task", "add", "with receipt", "--as", "bbbb2222"])
+    assert added.exit_code == 0 and "· seq" in _flat(added.output)
+    # The idempotent duplicate still confirms the row — a receipt without a seq.
+    dup = runner.invoke(app, ["task", "add", "with receipt", "--as", "bbbb2222"])
+    assert "already tracked" in dup.output and f"· on {work_dir.name}" in _flat(dup.output)
+
+    picked = json.loads(
+        runner.invoke(
+            app, ["--json", "task", "next", "--role", "coder", "--claim", "--as", "bbbb2222"]
+        ).stdout
+    )
+    assert picked["delivered"] is True and picked["status"] == "doing"
+    reviewed = json.loads(
+        runner.invoke(
+            app, ["--json", "task", "review", picked["id"], "--note", "check", "--as", "bbbb2222"]
+        ).stdout
+    )
+    assert reviewed["delivered"] is True
+    # A pure read hands back no receipt and no delivered flag.
+    peeked = json.loads(runner.invoke(app, ["--json", "task", "next", "--status", "review"]).stdout)
+    assert "delivered" not in peeked
+
+
+def test_wedged_store_fails_loudly_with_no_success_marker(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3 as raw
+
+    from aisquare.core import paths
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "50")  # fail in 50ms, not 5s
+    blocker = raw.connect(str(paths.db_path()))
+    try:
+        blocker.execute("BEGIN IMMEDIATE")  # hold the write lock: the store is wedged
+        as_json = runner.invoke(app, ["--json", "note", "did this land?", "--as", "bbbb2222"])
+        assert as_json.exit_code == 1
+        assert "✓" not in as_json.output + as_json.stderr  # NO success marker, anywhere
+        assert json.loads(as_json.stdout)["error"] == "store_locked"
+        human = runner.invoke(app, ["note", "did this land?", "--as", "bbbb2222"])
+        assert human.exit_code == 1
+        assert "✓" not in human.output + human.stderr
+        assert "Traceback" not in human.output + human.stderr
+        # The MAPPED message must be on stderr — a raw OperationalError would
+        # also exit 1 with no ✓ under CliRunner's exception catch, so only
+        # this assert proves the store_locked mapping ran (review, #20).
+        assert "context store unavailable" in _flat(human.stderr)
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+def test_vanished_write_reports_delivery_unconfirmed(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.store import SqliteStore
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    # The pathological case behind #20: the commit "succeeded" but a fresh
+    # connection cannot corroborate the row — success must not be reported.
+    monkeypatch.setattr(SqliteStore, "get_event", lambda self, event_id: None)
+    result = runner.invoke(app, ["--json", "note", "ghost", "--as", "bbbb2222"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "delivery_unconfirmed"
+    assert payload["ref"].startswith("evt_")  # names the write to go verify
+    assert "✓" not in result.output + result.stderr
+
+
+def test_busy_timeout_env_knob(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aisquare.core.store import SqliteStore, open_store
+
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "123")
+    store = open_store()
+    try:
+        assert isinstance(store, SqliteStore)
+        assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 123
+    finally:
+        store.close()
+
+
 def test_terminal_events_returns_the_latest_closer_after_reopen(work_dir: Path) -> None:
     from aisquare.services import team as team_service
 

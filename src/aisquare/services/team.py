@@ -293,12 +293,87 @@ def terminal_attribution(
         return store.terminal_events(resolved.id)
 
 
-def log_events(cwd: Path | None = None, *, limit: int = 30) -> list[TeamEvent]:
-    """The recent team-pipe events for this project, oldest first."""
+def log_events(
+    cwd: Path | None = None,
+    *,
+    limit: int = 30,
+    by: str | None = None,
+    since: datetime | None = None,
+    since_seq: int | None = None,
+    kind: str | None = None,
+    task_ref: str | None = None,
+    session_ref: str | None = None,
+) -> list[TeamEvent]:
+    """The recent team-pipe events for this board, oldest first.
+
+    Filters compose (AND). ``by`` is a session id prefix, resolved like
+    ``--as``; ``session_ref`` routes board resolution through the acting
+    session's row, exactly like attributed writes (#20). ``since`` filters on
+    event time, ``since_seq`` on stream position (cursor semantics, like the
+    MCP ``team_log`` tool).
+    """
     _require_enabled()
     with store_session() as store:
-        project = _project(store, cwd)
-        return store.recent_events(project.id, limit=limit)
+        session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
+        author = _resolve_session(store, by)
+        task_id: str | None = None
+        if task_ref is not None:
+            task = store.get_task(task_ref)
+            if task is None:
+                raise KeyError(task_ref)
+            task_id = task.id
+        if author is None and since is None and since_seq is None and kind is None and not task_id:
+            return store.recent_events(board.id, limit=limit)
+        return store.filtered_events(
+            board.id,
+            session_id=author.id if author is not None else None,
+            since_iso=since.astimezone(UTC).isoformat() if since is not None else None,
+            since_seq=since_seq,
+            kind=kind,
+            task_id=task_id,
+            limit=limit,
+        )
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    """The outcome of a receipt check (``team verify``)."""
+
+    event: TeamEvent | None
+    board_name: str
+    elsewhere: str | None = None
+    line: str | None = None
+
+
+def verify_receipt(
+    receipt: str, *, session_ref: str | None = None, cwd: Path | None = None
+) -> VerifyResult:
+    """Re-prove a write: is the receipt's event on the caller's board?
+
+    ``receipt`` is a stream seq (a number) or an event id (prefix ok) — the
+    two forms every ✓ receipt quotes. Board resolution follows attributed
+    writes (#20): the session's registered board wins over cwd. A receipt
+    that exists on a DIFFERENT board is an honest not-found here, with a
+    hint naming the board that actually holds it.
+    """
+    _require_enabled()
+    with store_session() as store:
+        session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
+        try:
+            seq = int(receipt)
+        except ValueError:
+            seq = None
+        event = store.get_event_by_seq(seq) if seq is not None else store.find_event_by_id(receipt)
+        if event is None:
+            return VerifyResult(event=None, board_name=board.name)
+        if event.project_id != board.id:
+            holder = store.get_project(event.project_id)
+            elsewhere = (holder.root.name if holder is not None else "") or event.project_id
+            return VerifyResult(event=None, board_name=board.name, elsewhere=elsewhere)
+        roles = {s.id: s.role for s in store.team_sessions(board.id)}
+        return VerifyResult(event=event, board_name=board.name, line=event_line(event, roles))
 
 
 def set_role(role: str, session_ref: str, cwd: Path | None = None) -> TeamSession:
@@ -1029,6 +1104,7 @@ def _render_board(
             f"working: `aisquare task claim <id> --as {short_id(me.id)}`; finish with",
             f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
             f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
+            "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
             *_role_cycle(me),
         ]
     lines.append("</aisquare-team>")

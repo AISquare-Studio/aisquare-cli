@@ -133,6 +133,23 @@ minutes), and renewed by the session's own lifecycle hooks — so a dead
 session's claims release themselves and the work gets picked up again.
 `task next` only hands out tasks whose dependencies are done.
 
+### Self-check: receipts you can re-prove
+
+Every successful write prints a receipt (`✓ … · seq N on <board>`; under
+`--json`, `delivered: true` plus the event's `seq`). The pull side is yours
+any time:
+
+```sh
+aisquare team verify 42                     # is seq 42 really on this board? exit 0/1
+aisquare team verify evt_01k… --as <id>     # by event id (prefix ok), session's board
+aisquare team log --mine --as <id>          # read back your own recent writes
+aisquare team log --by aaaa1111 --since 15m --kind decision   # filters compose
+```
+
+A receipt that lives on a *different* board is an honest not-found — with a
+hint naming the board that actually holds it. Remote MCP agents get the same
+pair: `verify(receipt)` and `team_log(by_session="me")`.
+
 ### The live board (`aisquare board -w`)
 
 An interactive [Textual](https://textual.textualize.io/) TUI with the

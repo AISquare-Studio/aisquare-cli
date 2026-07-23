@@ -7,7 +7,9 @@ Also home of the top-level ``note`` and ``board`` shortcuts (registered by
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
 import typer
@@ -148,26 +150,111 @@ def role(
         stdout_console().print(f"✓ {team_service.short_id(session.id)} is now {session.role}")
 
 
+def _parse_since(value: str) -> datetime:
+    """``--since`` accepts a relative span (15m, 2h, 3d) or an ISO timestamp."""
+    span = re.fullmatch(r"(\d+)([smhd])", value.strip())
+    if span:
+        unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[span.group(2)]
+        return datetime.now(tz=UTC) - timedelta(**{unit: int(span.group(1))})
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"{value!r} is neither a span (15m, 2h) nor an ISO timestamp"
+        ) from None
+    # A naive timestamp means the user's local clock.
+    return moment if moment.tzinfo is not None else moment.astimezone()
+
+
 @app.command("log")
 def log(
     limit: Annotated[int, typer.Option("--limit", "-n", help="How many events to show.")] = 30,
+    by: Annotated[
+        str | None, typer.Option("--by", help="Only events by this session (id prefix).")
+    ] = None,
+    mine: Annotated[
+        bool, typer.Option("--mine", help="Only events by the --as session (self-check).")
+    ] = False,
+    since: Annotated[
+        str | None, typer.Option("--since", help="Only events after: 15m, 2h, or an ISO time.")
+    ] = None,
+    since_seq: Annotated[
+        int | None, typer.Option("--since-seq", help="Only events past this seq (cursor).")
+    ] = None,
+    kind: Annotated[
+        str | None, typer.Option("--kind", help="Only this kind (note, decision, task_done, …).")
+    ] = None,
+    task: Annotated[
+        str | None, typer.Option("--task", help="Only events about this task (id prefix).")
+    ] = None,
+    as_session: SessionRef = None,
 ) -> None:
-    """Show the team pipe: recent events from every session."""
+    """Show the team pipe: recent events from every session, filterable."""
+    if mine and by is not None:
+        raise typer.BadParameter("--mine and --by are mutually exclusive")
+    if mine:
+        if as_session is None:
+            fail("--mine needs --as <session> (your id is on the board)", error="missing_session")
+        by = as_session
+    moment = _parse_since(since) if since is not None else None
     try:
-        events = team_service.log_events(limit=limit)
+        events = team_service.log_events(
+            limit=limit,
+            by=by,
+            since=moment,
+            since_seq=since_seq,
+            kind=kind,
+            task_ref=task,
+            session_ref=as_session,
+        )
     except STORE_ERRORS as exc:
-        _fail_team(exc)
+        _fail_team(exc, task or by or as_session)
     if get_state().json_output:
         typer.echo(json.dumps([event.as_envelope().model_dump(mode="json") for event in events]))
         return
     if not events:
-        stdout_console().print("No team events yet.")
+        stdout_console().print("No team events match.")
         return
     console = stdout_console()
     for event in events:
         who = team_service.short_id(event.session_id) if event.session_id else "cli"
         console.print(
             f"{local_time(event.created_at):%H:%M} {who} {event.kind}: {event.text}",
+            markup=False,
+        )
+
+
+@app.command("verify")
+def verify(
+    receipt: Annotated[
+        str, typer.Argument(help="A write receipt: event seq number, or event id (prefix ok).")
+    ],
+    as_session: SessionRef = None,
+) -> None:
+    """Re-check a receipt: prove the write is really on this board.
+
+    The pull side of delivery trust — every ✓ prints ``seq N on <board>``
+    (#20's push side); this re-proves it any time, from any process.
+    """
+    try:
+        result = team_service.verify_receipt(receipt, session_ref=as_session)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, receipt)
+    if result.event is None:
+        aside = f" — it exists on board {result.elsewhere}" if result.elsewhere else ""
+        fail(
+            f"no event matches receipt '{receipt}' on board {result.board_name}{aside}",
+            error="not_found",
+            ref=receipt,
+            hint=result.elsewhere,
+        )
+    if get_state().json_output:
+        payload = result.event.as_envelope().model_dump(mode="json")
+        payload["delivered"] = True
+        typer.echo(json.dumps(payload))
+    else:
+        stdout_console().print(
+            f"✓ delivered · seq {result.event.seq} on {result.board_name}: {result.line}",
             markup=False,
         )
 

@@ -62,7 +62,12 @@ def main_callback(
         bool, typer.Option("--quiet", "-q", help="Suppress non-essential output.")
     ] = False,
     json_output: Annotated[
-        bool, typer.Option("--json", help="Emit machine-readable JSON on stdout.")
+        bool,
+        typer.Option(
+            "--json",
+            help="Emit machine-readable JSON on stdout. Put --json before the "
+            "subcommand to also get usage errors (unknown command/option) as JSON.",
+        ),
     ] = False,
     profile: Annotated[
         str, typer.Option("--profile", help="Configuration profile to use.", metavar="NAME")

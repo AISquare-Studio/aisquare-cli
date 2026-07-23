@@ -68,9 +68,12 @@ def test_abandoned_daemons_exit_at_the_idle_deadline(project: Path) -> None:
 
 
 def test_an_active_client_outlives_many_idle_windows(project: Path) -> None:
-    daemon = _spawn(project, env_extra={"AISQUARE_SERVE_CLOSE_AFTER": "1"})
+    # Deadline 2 (not 1): pings flow every 0.3s, so the margin only breaks if
+    # the TEST process stalls >1.7s between writes — CI-stall headroom per
+    # review, while 4.5s of traffic still spans several deadline windows.
+    daemon = _spawn(project, env_extra={"AISQUARE_SERVE_CLOSE_AFTER": "2"})
     assert daemon.stdin is not None
-    until = time.monotonic() + 3.5  # several 1s deadline windows
+    until = time.monotonic() + 4.5
     request_id = 0
     try:
         while time.monotonic() < until:

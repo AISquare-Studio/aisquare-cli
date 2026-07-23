@@ -202,6 +202,9 @@ An idle stdio server closes itself after 300s without a client message
 (`--close-after`, env `AISQUARE_SERVE_CLOSE_AFTER`) so abandoned daemons
 never linger; persistent clients like the Claude Desktop config above should
 set `AISQUARE_SERVE_CLOSE_AFTER=0` (run forever) in their launch command.
+The clock counts **inbound** messages only — it assumes request/response
+traffic, so a deadline shorter than your slowest tool call would cut a
+client mid-wait (at the 300s default no current tool comes anywhere close).
 
 ### Tuning (environment variables)
 

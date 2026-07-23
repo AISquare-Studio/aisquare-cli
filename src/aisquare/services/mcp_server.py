@@ -31,7 +31,9 @@ import json
 import os
 import secrets
 import stat
-from typing import TYPE_CHECKING, Any
+import sys
+import time
+from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import paths
 from aisquare.models import TaskStatus, TeamSession
@@ -46,6 +48,8 @@ if TYPE_CHECKING:
 
 _TOKEN_KEY = "serve_token"
 DEFAULT_PORT = 8747
+DEFAULT_CLOSE_AFTER = 300
+"""Idle seconds before a stdio server closes itself (0 = run forever)."""
 
 
 def client_session_id(project_id: str) -> str:
@@ -336,9 +340,92 @@ def build_server() -> FastMCP:
     return server
 
 
-def run_stdio() -> None:
-    """Serve over stdio (Claude Desktop launches and owns the process)."""
-    build_server().run(transport="stdio")
+class _StampedStdin:
+    """Async line source over stdin that stamps a clock on every received line.
+
+    Duck-types the one thing ``mcp.server.stdio.stdio_server`` does with its
+    injectable ``stdin`` — ``async for line in stdin`` — so the idle watchdog
+    can measure time since the LAST message the client actually sent.
+    """
+
+    def __init__(self, inner: Any, last_activity: list[float]) -> None:
+        self._inner = inner
+        self._last = last_activity
+
+    def __aiter__(self) -> _StampedStdin:
+        return self
+
+    async def __anext__(self) -> str:
+        line = cast(str, await self._inner.readline())
+        if not line:  # EOF — the immediate-exit path, untouched by the deadline
+            raise StopAsyncIteration
+        self._last[0] = time.monotonic()
+        return line
+
+
+async def _serve_stdio_until_idle(server: FastMCP, close_after: int) -> None:
+    """Run the stdio transport with an idle deadline (#19).
+
+    The deadline counts seconds since the last inbound client message; any
+    protocol traffic (handshake included) resets it. A busy server never
+    exits; an abandoned one — including a client killed mid-handshake with
+    the pipe write end still open, so EOF never comes — always does.
+    """
+    from io import TextIOWrapper
+
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    last_activity = [time.monotonic()]
+    wrapped = anyio.wrap_file(TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace"))
+    stdin = _StampedStdin(wrapped, last_activity)
+
+    async def watchdog() -> None:
+        interval = max(0.2, min(2.0, close_after / 4))
+        while True:
+            await anyio.sleep(interval)
+            if time.monotonic() - last_activity[0] < close_after:
+                continue
+            # stdout is the protocol channel: announce on stderr only. Then
+            # os._exit, deliberately: the pending readline sits in a blocked
+            # (non-daemon) worker thread that a never-EOF pipe can never
+            # unblock — a normal return would hang the interpreter on that
+            # thread's join and reintroduce the orphan this deadline retires.
+            sys.stderr.write(
+                f"aisquare serve --stdio: no client messages for {close_after}s — "
+                "closing (idle deadline; --close-after 0 disables)\n"
+            )
+            sys.stderr.flush()
+            os._exit(0)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(watchdog)
+        # Mirrors FastMCP.run_stdio_async, which offers no seam to inject the
+        # activity-stamping stdin — the public stdio_server(stdin=...) does.
+        async with stdio_server(stdin=cast(Any, stdin)) as (read_stream, write_stream):
+            await server._mcp_server.run(
+                read_stream,
+                write_stream,
+                server._mcp_server.create_initialization_options(),
+            )
+        tg.cancel_scope.cancel()  # EOF: stop the watchdog, exit normally
+
+
+def run_stdio(*, close_after: int = DEFAULT_CLOSE_AFTER) -> None:
+    """Serve over stdio (Claude Desktop launches and owns the process).
+
+    ``close_after`` is the idle deadline in seconds — time since the last
+    client message — after which the server exits 0 on its own (#19).
+    ``0`` disables it for deliberately persistent clients. No process
+    management anywhere: the daemon minds only its own clock.
+    """
+    server = build_server()
+    if close_after <= 0:
+        server.run(transport="stdio")
+        return
+    import anyio
+
+    anyio.run(_serve_stdio_until_idle, server, close_after)
 
 
 class _BearerGuard:

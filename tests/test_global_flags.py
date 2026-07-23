@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,37 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work.mkdir()
     monkeypatch.chdir(work)
     return work
+
+
+@pytest.fixture(autouse=True)
+def deterministic_rendering(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin rendering so output-content asserts are environment-independent.
+
+    GitHub Actions force-enables rich color (typer freezes that off
+    ``GITHUB_ACTIONS`` at import) and renders help at 80 columns — ANSI codes
+    land INSIDE option tokens and shred raw substring asserts. ``NO_COLOR``
+    is read at render time, so it neutralises the forced color wherever the
+    suite runs; the width pins cover consoles that consult them. Wrapping is
+    handled at the assert site (whitespace-collapse), not here, because
+    typer's width constant is frozen at import time.
+    """
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("TERMINAL_WIDTH", "200")
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _plain(text: str) -> str:
+    """Rendered output flattened for content asserts: no ANSI, no wrapping.
+
+    ``NO_COLOR`` alone is not enough — rich keeps non-color attributes
+    (bold/dim) under it, and typer's highlighter styles the leading ``-`` of
+    an option as its own span, so escape codes land INSIDE tokens like
+    ``--json`` on forced-color environments (GitHub Actions).
+    """
+    return " ".join(_ANSI.sub("", text).split())
 
 
 def _declarations(command: Any) -> set[str]:
@@ -59,8 +91,22 @@ def test_no_command_defines_a_colliding_local_param() -> None:
 def test_globals_appear_in_leaf_help(runner: CliRunner) -> None:
     result = runner.invoke(app, ["task", "show", "-h"])
     assert result.exit_code == 0, result.output
+    flat = _plain(result.output)
     for declaration in ("--json", "--verbose", "--quiet", "--no-color", "--profile"):
-        assert declaration in result.output, declaration
+        assert declaration in flat, declaration
+
+
+def test_help_renders_under_forced_color_at_80_cols(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The CI rendering path itself (color on, narrow width) must not crash;
+    # content assertions live in the NO_COLOR test above.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "80")
+    result = runner.invoke(app, ["task", "show", "-h"])
+    assert result.exit_code == 0
+    assert result.output.strip()
 
 
 def test_json_means_the_same_before_and_after_the_subcommand(runner: CliRunner) -> None:

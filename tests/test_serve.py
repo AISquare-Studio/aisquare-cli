@@ -112,7 +112,7 @@ def test_remote_task_lifecycle_and_guards(work_dir: Path) -> None:
     assert "team.task_claimed" in kinds and "team.task_review" in kinds
 
 
-def test_server_exposes_exactly_the_eight_tools() -> None:
+def test_server_exposes_exactly_the_nine_tools() -> None:
     server = mcp_server.build_server()
 
     tools = anyio.run(server.list_tools)
@@ -124,6 +124,7 @@ def test_server_exposes_exactly_the_eight_tools() -> None:
         "note_add",
         "team_log",
         "verify",
+        "signal",
         "recall",
     }
 
@@ -315,3 +316,15 @@ def test_verify_tool_round_trip_and_not_found(work_dir: Path) -> None:
     missing = call_remote("verify", {"receipt": "987654"})
     text = error_text(missing)
     assert text.startswith("error: no event matches receipt")
+
+
+def test_signal_tool_set_read_and_errors(work_dir: Path) -> None:
+    team_service.activate()
+    set_result = mcp_server.signal("fold-ready", "on")
+    assert set_result.startswith("signal fold-ready: on")
+    read_result = mcp_server.signal("fold-ready")
+    assert "fold-ready = on" in read_result
+    missing = call_remote("signal", {"name": "never-set"})
+    assert error_text(missing).startswith("error: no signal named")
+    invalid = call_remote("signal", {"name": "Bad Name", "value": "x"})
+    assert error_text(invalid).startswith("error: signal name")

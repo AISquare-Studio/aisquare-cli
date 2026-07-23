@@ -10,6 +10,10 @@ traffic is attributed on the board and flows into every local session's
 deltas like any teammate's. The tool surface is deliberately small — seven
 tools — because giant MCP surfaces burn context before any work happens.
 
+Failing tools surface as real MCP error results (``isError: true``), never as
+error-prefixed success strings, and the error wording is a contract: remote
+agents self-correct off it, so it must reach them preserved end-to-end.
+
 Transports:
 
 - ``stdio`` — for Claude Desktop launching the server itself (on Windows:
@@ -35,7 +39,10 @@ from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, TeamDisabledError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import CallToolResult, ContentBlock
 
 _TOKEN_KEY = "serve_token"
 DEFAULT_PORT = 8747
@@ -94,24 +101,40 @@ def _ensure_virtual_session() -> str:
     return session_id
 
 
+def _tool_error(message: str) -> Exception:
+    """A ``ToolError`` carrying ``message`` verbatim (``mcp`` imports lazily)."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    return ToolError(message)
+
+
 def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
-    """Run a service call, folding failures into tool-result strings."""
+    """Run a service call; failures become MCP tool errors (``isError: true``).
+
+    The texts are the same stable ``error: …`` wording the tools have always
+    used — remote agents self-correct off it — moved off the success channel
+    onto the protocol's error channel.
+    """
     try:
         return str(fn(*args, **kwargs))
-    except TeamDisabledError:
-        return "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
+    except TeamDisabledError as exc:
+        raise _tool_error(
+            "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
+        ) from exc
     except ClaimLostError as exc:
-        return f"error: {exc}"
+        raise _tool_error(f"error: {exc}") from exc
     except LookupError as exc:
         # KeyError (unknown ref) and AmbiguousIdError (short prefix) both
         # subclass LookupError; remote callers get the error contract, not
         # a raw tool exception. Keep the "nothing matches …" wording so a
         # remote agent can self-correct rather than getting a naked ref.
         if isinstance(exc, KeyError):
-            return f"error: nothing matches {(exc.args[0] if exc.args else exc)!r}"
-        return f"error: {exc}"
+            raise _tool_error(
+                f"error: nothing matches {(exc.args[0] if exc.args else exc)!r}"
+            ) from exc
+        raise _tool_error(f"error: {exc}") from exc
     except ValueError as exc:
-        return f"error: {exc}"
+        raise _tool_error(f"error: {exc}") from exc
 
 
 # --- the seven tools (plain functions; registered on FastMCP below) -----------
@@ -157,7 +180,7 @@ def task_next(role: str | None = None, status: str = "todo", claim: bool = False
 
         statuses = get_args(TaskStatus)
         if status not in statuses:
-            return f"error: status must be one of: {', '.join(statuses)}"
+            raise _tool_error(f"error: status must be one of: {', '.join(statuses)}")
         me = _ensure_virtual_session()
         narrowed: TaskStatus = status  # type: ignore[assignment]
         task = team_service.next_task(role=role, status=narrowed, claim=claim, session_ref=me)
@@ -180,18 +203,18 @@ def task_update(ref: str, action: str, note: str | None = None) -> str:
             task = team_service.review_task(ref, note=note, session_ref=me)
         elif action == "block":
             if not note:
-                return "error: block requires a note (the reason)"
+                raise _tool_error("error: block requires a note (the reason)")
             task = team_service.block_task(ref, reason=note, session_ref=me)
         elif action == "reopen":
             if not note:
-                return "error: reopen requires a note (the feedback)"
+                raise _tool_error("error: reopen requires a note (the feedback)")
             task = team_service.reopen_task(ref, reason=note, session_ref=me)
         elif action == "release":
             task = team_service.release_task(ref, session_ref=me)
         elif action == "drop":
             task = team_service.drop_task(ref, session_ref=me)
         else:
-            return "error: action must be done, review, block, reopen, release or drop"
+            raise _tool_error("error: action must be done, review, block, reopen, release or drop")
         return f"{task.id} is now {task.status}"
 
     return _guard(run)
@@ -207,7 +230,9 @@ def note_add(
         event = team_service.add_note(
             text, session_ref=me, task_ref=task, to_role=to_role, kind=kind
         )
-        return f"shared ({event.kind}) as event seq {event.seq}"
+        # The receipt names the board (project) that recorded the event, so a
+        # remote agent can detect a write that landed somewhere unexpected.
+        return f"shared ({event.kind}) as event seq {event.seq} on board {event.project_id}"
 
     return _guard(run)
 
@@ -269,7 +294,9 @@ def serve_token() -> str:
 
 def build_server() -> FastMCP:
     """A FastMCP server exposing the orchestrator tools."""
+    from mcp import types
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp.exceptions import ToolError
 
     server = FastMCP(
         "aisquare-team",
@@ -282,6 +309,30 @@ def build_server() -> FastMCP:
     )
     for tool in (team_board, task_add, task_next, task_update, note_add, team_log, recall):
         server.add_tool(tool)
+
+    async def call_tool_with_exact_errors(
+        name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any] | CallToolResult:
+        """FastMCP's tool dispatch, minus its message-mangling exception wrap.
+
+        The SDK's ``Tool.run`` folds every exception — ``ToolError`` included —
+        into ``ToolError("Error executing tool <name>: <msg>")``, so the wording
+        a failing tool chose would reach remote agents prefixed and broken.
+        Unwrap our own ``ToolError`` (carried as ``__cause__``) back to its
+        exact message; any other cause is a genuine bug and keeps the SDK's
+        text. Either way the client gets a real error result, not a success.
+        """
+        try:
+            return await server.call_tool(name, arguments)
+        except ToolError as exc:
+            message = str(exc.__cause__) if isinstance(exc.__cause__, ToolError) else str(exc)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=message)], isError=True
+            )
+
+    # Replace the handler FastMCP registered for itself (last registration
+    # wins; validate_input=False matches its own).
+    server._mcp_server.call_tool(validate_input=False)(call_tool_with_exact_errors)
     return server
 
 

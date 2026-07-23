@@ -35,7 +35,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("hook", "notification"),
     *(
         ("team", command)
-        for command in ("on", "status", "focus", "role", "log", "distill", "prune")
+        for command in ("on", "status", "focus", "role", "log", "distill", "prune", "verify")
     ),
     *(
         ("task", command)

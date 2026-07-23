@@ -112,7 +112,7 @@ def test_remote_task_lifecycle_and_guards(work_dir: Path) -> None:
     assert "team.task_claimed" in kinds and "team.task_review" in kinds
 
 
-def test_server_exposes_exactly_the_seven_tools() -> None:
+def test_server_exposes_exactly_the_eight_tools() -> None:
     server = mcp_server.build_server()
 
     tools = anyio.run(server.list_tools)
@@ -123,6 +123,7 @@ def test_server_exposes_exactly_the_seven_tools() -> None:
         "task_update",
         "note_add",
         "team_log",
+        "verify",
         "recall",
     }
 
@@ -294,3 +295,23 @@ def test_guard_maps_the_write_path_failure_types(
     monkeypatch.setattr(SqliteStore, "add_team_event", wedged)
     locked = call_remote("note_add", {"text": "wedged write"})
     assert error_text(locked).startswith("error: context store unavailable")
+
+
+def test_team_log_by_session_me_reads_back_own_writes(work_dir: Path) -> None:
+    team_service.activate()
+    mcp_server.note_add("remote receipt")
+    team_service.add_note("local noise")  # unattributed (cli) — the filter must drop it
+    log = json.loads(mcp_server.team_log(by_session="me"))
+    texts = [event["payload"]["text"] for event in log["events"]]
+    assert "remote receipt" in texts and "local noise" not in texts
+
+
+def test_verify_tool_round_trip_and_not_found(work_dir: Path) -> None:
+    team_service.activate()
+    note = mcp_server.note_add("prove the remote write")
+    seq = note.rsplit("seq ", 1)[1].split(" ", 1)[0]
+    verified = mcp_server.verify(seq)
+    assert verified.startswith("delivered") and "prove the remote write" in verified
+    missing = call_remote("verify", {"receipt": "987654"})
+    text = error_text(missing)
+    assert text.startswith("error: no event matches receipt")

@@ -297,10 +297,23 @@ class ContextStore(Protocol):
     def set_meta(self, key: str, value: str) -> None: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
     def get_event(self, event_id: str) -> TeamEvent | None: ...
+    def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
+    def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
     def events_since(
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
     ) -> list[TeamEvent]: ...
     def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def filtered_events(
+        self,
+        project_id: str,
+        *,
+        session_id: str | None = None,
+        since_iso: str | None = None,
+        since_seq: int | None = None,
+        kind: str | None = None,
+        task_id: str | None = None,
+        limit: int = 30,
+    ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def close(self) -> None: ...
@@ -1010,6 +1023,76 @@ class SqliteStore:
             f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE id = ?", (event_id,)
         ).fetchone()
         return _row_to_event(row) if row is not None else None
+
+    def get_event_by_seq(self, seq: int) -> TeamEvent | None:
+        """One event by stream position (``seq`` is unique across all boards)."""
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE seq = ?", (seq,)
+        ).fetchone()
+        return _row_to_event(row) if row is not None else None
+
+    def find_event_by_id(self, ref: str) -> TeamEvent | None:
+        """One event by id, prefix ok — receipts quote either form.
+
+        Board-agnostic on purpose: ``team verify`` decides whether the match
+        belongs to the caller's board (and hints where it actually lives).
+        """
+        exact = self.get_event(ref)
+        if exact is not None:
+            return exact
+        matches = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE id GLOB ? LIMIT 2",
+            (_glob_prefix(ref),),
+        ).fetchall()
+        if len(matches) > 1:
+            raise AmbiguousIdError(ref)
+        return _row_to_event(matches[0]) if matches else None
+
+    def filtered_events(
+        self,
+        project_id: str,
+        *,
+        session_id: str | None = None,
+        since_iso: str | None = None,
+        since_seq: int | None = None,
+        kind: str | None = None,
+        task_id: str | None = None,
+        limit: int = 30,
+    ) -> list[TeamEvent]:
+        """Matching events for ``team log``'s filters, oldest-first.
+
+        Without ``since_seq`` this is a window: the NEWEST ``limit`` matches.
+        With ``since_seq`` it is a cursor page: the OLDEST ``limit`` matches
+        past that seq, so a client tracking the last seq it saw never skips
+        events (the MCP ``team_log`` contract). Rides the ``(project_id,
+        seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
+        lexicographically (uniform format by construction). ``session_id`` is
+        exact — prefix resolution is the service layer's job.
+        """
+        clauses = ["project_id = ?"]
+        params: list[str | int] = [project_id]
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if since_iso is not None:
+            clauses.append("created_at >= ?")
+            params.append(since_iso)
+        if since_seq is not None:
+            clauses.append("seq > ?")
+            params.append(since_seq)
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        paging = since_seq is not None
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event "
+            f"WHERE {' AND '.join(clauses)} ORDER BY seq {'ASC' if paging else 'DESC'} LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_event(row) for row in (rows if paging else reversed(rows))]
 
     def events_since(
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50

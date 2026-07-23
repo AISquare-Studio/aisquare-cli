@@ -1009,3 +1009,139 @@ def test_terminal_events_returns_the_latest_closer_after_reopen(work_dir: Path) 
     latest = terminal[task.id]
     all_done = [e for e in team_service.log_events(work_dir) if e.kind == "task_done"]
     assert latest.seq == max(e.seq for e in all_done)
+
+
+# --- #22: delivery self-check — log filters + team verify -----------------------
+
+
+def test_note_verify_round_trip(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    note = json.loads(runner.invoke(app, ["--json", "note", "prove me", "--as", "bbbb2222"]).stdout)
+    seq = note["payload"]["seq"]
+
+    by_seq = runner.invoke(app, ["team", "verify", str(seq)])
+    assert by_seq.exit_code == 0, by_seq.output
+    assert "delivered" in _flat(by_seq.output) and "prove me" in _flat(by_seq.output)
+
+    by_prefix = runner.invoke(app, ["--json", "team", "verify", note["payload"]["id"][:12]])
+    payload = json.loads(by_prefix.stdout)
+    assert payload["delivered"] is True and payload["payload"]["seq"] == seq
+
+
+def test_verify_not_found_and_ambiguous(runner: CliRunner, work_dir: Path) -> None:
+    from datetime import UTC, datetime
+
+    from aisquare.models import TeamEvent
+
+    runner.invoke(app, ["team", "on"])
+    missing = runner.invoke(app, ["--json", "team", "verify", "999999"])
+    assert missing.exit_code == 1
+    payload = json.loads(missing.stdout)
+    assert payload["error"] == "not_found" and payload["ref"] == "999999"
+    assert "hint" not in payload  # nothing to point at — a pure miss
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        for suffix in ("one", "two"):
+            store.add_team_event(
+                TeamEvent(
+                    id=f"evt_zz{suffix}",
+                    project_id=project.id,
+                    text=suffix,
+                    created_at=datetime.now(tz=UTC),
+                )
+            )
+    ambiguous = runner.invoke(app, ["--json", "team", "verify", "evt_zz"])
+    assert ambiguous.exit_code == 1
+    assert json.loads(ambiguous.stdout)["error"] == "ambiguous_id"
+
+
+def test_verify_wrong_board_hints_where_the_event_lives(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    note = json.loads(runner.invoke(app, ["--json", "note", "on A", "--as", "bbbb2222"]).stdout)
+    seq = str(note["payload"]["seq"])
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    runner.invoke(app, ["team", "on"])  # the cwd board (B) is a different board
+    wrong = runner.invoke(app, ["--json", "team", "verify", seq])
+    assert wrong.exit_code == 1
+    payload = json.loads(wrong.stdout)
+    assert payload["error"] == "not_found"
+    assert payload["hint"] == work_dir.name  # honest miss, but says who has it
+    human = runner.invoke(app, ["team", "verify", seq])
+    assert f"exists on board {work_dir.name}" in _flat(human.stderr)
+    # With --as, the session's board wins over cwd — the receipt verifies.
+    ok = runner.invoke(app, ["team", "verify", seq, "--as", "bbbb2222"])
+    assert ok.exit_code == 0, ok.output
+
+
+def test_log_filters_compose(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    monkeypatch.setenv("AISQUARE_ROLE", "planner")
+    _start(runner, PLANNER, work_dir)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["note", "from planner", "--as", "aaaa1111"])
+    runner.invoke(app, ["note", "coder note", "--as", "bbbb2222"])
+    runner.invoke(app, ["note", "coder decision", "--kind", "decision", "--as", "bbbb2222"])
+
+    mine = json.loads(
+        runner.invoke(app, ["--json", "team", "log", "--mine", "--as", "bbbb2222"]).stdout
+    )
+    texts = [e["payload"]["text"] for e in mine]
+    assert "coder note" in texts and "from planner" not in texts
+
+    by = json.loads(runner.invoke(app, ["--json", "team", "log", "--by", "aaaa1111"]).stdout)
+    assert [e["payload"]["text"] for e in by] == ["from planner"]
+
+    narrowed = runner.invoke(
+        app, ["--json", "team", "log", "--mine", "--as", "bbbb2222", "--kind", "decision"]
+    )
+    assert [e["payload"]["text"] for e in json.loads(narrowed.stdout)] == ["coder decision"]
+
+    everything = json.loads(runner.invoke(app, ["--json", "team", "log"]).stdout)
+    first_seq = everything[0]["payload"]["seq"]
+    after = json.loads(
+        runner.invoke(app, ["--json", "team", "log", "--since-seq", str(first_seq)]).stdout
+    )
+    assert after and all(e["payload"]["seq"] > first_seq for e in after)
+
+    recent = json.loads(runner.invoke(app, ["--json", "team", "log", "--since", "15m"]).stdout)
+    assert len(recent) >= 3
+    future = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
+    nothing = json.loads(runner.invoke(app, ["--json", "team", "log", "--since", future]).stdout)
+    assert nothing == []
+
+    added = json.loads(
+        runner.invoke(app, ["--json", "task", "add", "filter me", "--as", "bbbb2222"]).stdout
+    )
+    tasked = json.loads(runner.invoke(app, ["--json", "team", "log", "--task", added["id"]]).stdout)
+    assert tasked and all(e["payload"]["task_id"] == added["id"] for e in tasked)
+
+
+def test_log_filter_guardrails(runner: CliRunner, work_dir: Path) -> None:
+    runner.invoke(app, ["team", "on"])
+    bare_mine = runner.invoke(app, ["--json", "team", "log", "--mine"])
+    assert bare_mine.exit_code == 1
+    assert json.loads(bare_mine.stdout)["error"] == "missing_session"
+    both = runner.invoke(app, ["team", "log", "--mine", "--by", "aaaa1111", "--as", "aaaa1111"])
+    assert both.exit_code == 2  # usage error: mutually exclusive
+    garbage = runner.invoke(app, ["team", "log", "--since", "banana"])
+    assert garbage.exit_code == 2  # BadParameter, not a stack trace
+    unknown_author = runner.invoke(app, ["--json", "team", "log", "--by", "ffff9999"])
+    assert unknown_author.exit_code == 1
+    assert json.loads(unknown_author.stdout)["error"] == "not_found"

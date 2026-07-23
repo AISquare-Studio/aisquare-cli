@@ -18,6 +18,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unaffected. This retires the `pkill`/`xargs` workarounds from #19.
 - `AISQUARE_DB_BUSY_MS` — busy-timeout knob for the context store (default
   5000), so tests can wedge the store without waiting out the full timeout.
+- **Delivery self-check (#22)** — the pull side of #20's receipts.
+  `aisquare team verify RECEIPT` re-proves a write by seq or event id
+  (prefix ok): found on your board → the event, exit 0; missing → exit 1
+  (`not_found`, with a `hint` naming the board that holds it when it lives
+  elsewhere). `aisquare team log` grows combinable filters — `--by`,
+  `--mine` (with `--as`), `--since 15m|2h|ISO`, `--since-seq` (cursor
+  semantics), `--kind`, `--task`. MCP parity: `team_log` gains
+  `by_session` (literal `me` supported) and a new eighth `verify` tool.
+  The injected session protocol now points at the receipt → verify loop.
 
 ### Fixed
 

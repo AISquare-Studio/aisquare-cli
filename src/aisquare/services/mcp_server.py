@@ -7,7 +7,7 @@ the same board.
 
 Remote callers act through a **virtual session** (``mcp:<client>``), so their
 traffic is attributed on the board and flows into every local session's
-deltas like any teammate's. The tool surface is deliberately small — seven
+deltas like any teammate's. The tool surface is deliberately small — eight
 tools — because giant MCP surfaces burn context before any work happens.
 
 Failing tools surface as real MCP error results (``isError: true``), never as
@@ -149,7 +149,7 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         raise _tool_error(f"error: {exc}") from exc
 
 
-# --- the seven tools (plain functions; registered on FastMCP below) -----------
+# --- the eight tools (plain functions; registered on FastMCP below) -----------
 
 
 def team_board() -> str:
@@ -249,22 +249,49 @@ def note_add(
     return _guard(run)
 
 
-def team_log(since_seq: int = 0, limit: int = 20) -> str:
-    """Team events after ``since_seq`` (track the returned seq as your cursor)."""
+def team_log(since_seq: int = 0, limit: int = 20, by_session: str | None = None) -> str:
+    """Team events after ``since_seq`` (track the returned seq as your cursor).
+
+    ``by_session`` filters to one author: a session id/prefix, or the literal
+    ``"me"`` for your own virtual session — read back your own recent writes.
+    """
 
     def run() -> str:
-        _ensure_virtual_session()
-        from aisquare.core.orchestrator import team_project
-        from aisquare.core.store import store_session
-
-        with store_session() as store:
-            project = team_project(None)
-            events = store.events_since(project.id, since_seq, limit=limit)
+        me = _ensure_virtual_session()
+        author = me if by_session == "me" else by_session
+        events = team_service.log_events(
+            limit=limit,
+            by=author,
+            since_seq=since_seq,
+            session_ref=me,
+        )
         return json.dumps(
             {
                 "events": [event.as_envelope().model_dump(mode="json") for event in events],
                 "latest_seq": events[-1].seq if events else since_seq,
             }
+        )
+
+    return _guard(run)
+
+
+def verify(receipt: str) -> str:
+    """Re-check a write receipt (a seq number or event id): is it on this board?
+
+    The pull side of delivery trust: every write tool's success names ``seq``
+    and board; this re-proves the write landed, any time.
+    """
+
+    def run() -> str:
+        me = _ensure_virtual_session()
+        result = team_service.verify_receipt(receipt, session_ref=me)
+        if result.event is None:
+            hint = f" — it exists on board {result.elsewhere}" if result.elsewhere else ""
+            raise _tool_error(
+                f"error: no event matches receipt {receipt!r} on board {result.board_name}{hint}"
+            )
+        return (
+            f"delivered · seq {result.event.seq} on board {result.event.project_id}: {result.line}"
         )
 
     return _guard(run)
@@ -316,10 +343,12 @@ def build_server() -> FastMCP:
             "The shared task board and working memory of a team of coding-agent "
             "sessions. Check team_board first; add work with task_add (idempotent); "
             "claim before working (task_next with claim=true); report outcomes with "
-            "task_update and note_add."
+            "task_update and note_add. Every write's success names a seq receipt — "
+            "verify(receipt) re-proves it landed; team_log(by_session='me') reads "
+            "back your own recent writes."
         ),
     )
-    for tool in (team_board, task_add, task_next, task_update, note_add, team_log, recall):
+    for tool in (team_board, task_add, task_next, task_update, note_add, team_log, verify, recall):
         server.add_tool(tool)
 
     async def call_tool_with_exact_errors(

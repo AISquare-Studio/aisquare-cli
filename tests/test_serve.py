@@ -295,7 +295,15 @@ def test_guard_maps_the_write_path_failure_types(
 
     monkeypatch.setattr(SqliteStore, "add_team_event", wedged)
     locked = call_remote("note_add", {"text": "wedged write"})
-    assert error_text(locked).startswith("error: context store unavailable")
+    assert error_text(locked).startswith("error: context store busy")
+
+    def broken(self: SqliteStore, event: object) -> object:
+        raise sqlite3.OperationalError("no such table: team_event")
+
+    monkeypatch.setattr(SqliteStore, "add_team_event", broken)
+    hard = call_remote("note_add", {"text": "broken store"})
+    text = error_text(hard)
+    assert text.startswith("error: context store error") and "no such table" in text
 
 
 def test_team_log_by_session_me_reads_back_own_writes(work_dir: Path) -> None:

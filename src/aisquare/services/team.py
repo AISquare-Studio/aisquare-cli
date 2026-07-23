@@ -80,10 +80,15 @@ class Delivery:
 
     @property
     def receipt(self) -> str:
-        """The human receipt appended to a ✓ line: where the write proved durable."""
+        """The human receipt appended to a ✓ line: where the write proved durable.
+
+        Quotes the board's ``project_id``, not its display name — root
+        directory names collide across checkouts, and a receipt must name
+        its board unambiguously (the ``--json`` envelope always did).
+        """
         if self.seq is None:
-            return f"on {self.board_name}"
-        return f"seq {self.seq} on {self.board_name}"
+            return f"on {self.board_id}"
+        return f"seq {self.seq} on {self.board_id}"
 
 
 _DELIVERY: ContextVar[Delivery | None] = ContextVar("aisquare_team_delivery", default=None)
@@ -96,7 +101,9 @@ def last_delivery() -> Delivery | None:
     to success output, and threading a receipt through every service signature
     would churn an API surface other RC work is touching in parallel. Each
     write resets this before doing anything, so a stale receipt can never leak
-    into the next command's output.
+    into the next command's output. Hook ``_emit``s are exempt from read-back
+    and never set a delivery: hooks print no success marker, so there is no ✓
+    for a receipt to make honest.
     """
     return _DELIVERY.get()
 
@@ -339,9 +346,14 @@ def log_events(
 
 @dataclass(frozen=True)
 class VerifyResult:
-    """The outcome of a receipt check (``team verify``)."""
+    """The outcome of a receipt check (``team verify``).
+
+    ``board_id`` is what receipts quote (#20 hardening: directory names
+    collide across checkouts); ``board_name`` stays for human messages.
+    """
 
     event: TeamEvent | None
+    board_id: str
     board_name: str
     elsewhere: str | None = None
     line: str | None = None
@@ -368,13 +380,17 @@ def verify_receipt(
             seq = None
         event = store.get_event_by_seq(seq) if seq is not None else store.find_event_by_id(receipt)
         if event is None:
-            return VerifyResult(event=None, board_name=board.name)
+            return VerifyResult(event=None, board_id=board.id, board_name=board.name)
         if event.project_id != board.id:
             holder = store.get_project(event.project_id)
             elsewhere = (holder.root.name if holder is not None else "") or event.project_id
-            return VerifyResult(event=None, board_name=board.name, elsewhere=elsewhere)
+            return VerifyResult(
+                event=None, board_id=board.id, board_name=board.name, elsewhere=elsewhere
+            )
         roles = {s.id: s.role for s in store.team_sessions(board.id)}
-        return VerifyResult(event=event, board_name=board.name, line=event_line(event, roles))
+        return VerifyResult(
+            event=event, board_id=board.id, board_name=board.name, line=event_line(event, roles)
+        )
 
 
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -492,6 +508,10 @@ def list_signals(*, session_ref: str | None = None, cwd: Path | None = None) -> 
 def set_role(role: str, session_ref: str, cwd: Path | None = None) -> TeamSession:
     """Set the role of a session (``team role``)."""
     _require_enabled()
+    # A write like any other: reset the delivery state (last_delivery's
+    # invariant) — it stays None because no pipe event is emitted, so the
+    # CLI prints no receipt for it.
+    _DELIVERY.set(None)
     with store_session() as store:
         session = store.get_session(session_ref)
         if session is None:
@@ -534,6 +554,11 @@ def add_note(
             task = store.get_task(task_ref)
             if task is None:
                 raise KeyError(task_ref)
+            if task.project_id != board.id:
+                # Same contamination --needs rejects: a foreign board's task
+                # attached to this board's event would render as a broken
+                # ref for every reader here.
+                raise ValueError(f"--task {task_ref}: that task belongs to another project's board")
             task_id = task.id
         event = _emit(
             store,
@@ -1085,6 +1110,7 @@ def prune_sessions(
     )
     now = _now()
     pruned: list[PrunedSession] = []
+    emitted: list[TeamEvent] = []
     released_total = 0
     with store_session() as store:
         project = _project(store, cwd)
@@ -1101,13 +1127,15 @@ def prune_sessions(
                 released_tasks = store.end_session(session.id)
                 released = len(released_tasks)
                 for task in released_tasks:
-                    _emit(
-                        store,
-                        project.id,
-                        "task_released",
-                        f"{task.title} (session pruned)",
-                        session_id=session.id,
-                        task_id=task.id,
+                    emitted.append(
+                        _emit(
+                            store,
+                            project.id,
+                            "task_released",
+                            f"{task.title} (session pruned)",
+                            session_id=session.id,
+                            task_id=task.id,
+                        )
                     )
             pruned.append(
                 PrunedSession(
@@ -1127,10 +1155,18 @@ def prune_sessions(
                 f"retired {len(pruned)} ghost session(s); released "
                 f"{released_total} orphaned claim(s) back to the pool",
             )
+            emitted.append(summary)
         board = _Board(id=project.id, name=project.root.name or project.id, root=project.root)
     if summary is not None:
-        # The summary is the batch's last insert: confirming it confirms the
-        # released-claim events committed before it on the same connection.
+        # Every event in the batch committed in its OWN transaction, so a
+        # mid-batch death can lose earlier release events while later ones
+        # (and the summary) landed — confirming only the tail would report
+        # "roll-call clean" over missing releases. Read back the whole batch.
+        with store_session() as fresh:
+            for event in emitted:
+                stored = fresh.get_event(event.id)
+                if stored is None or stored.project_id != board.id:
+                    raise DeliveryUnconfirmedError(event.id, board.name)
         _record_delivery(summary, board)
     return PruneReport(
         pruned=pruned,

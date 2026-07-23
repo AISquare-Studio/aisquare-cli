@@ -39,6 +39,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   #20 receipt/read-back contract (`team verify` works on signal seqs).
   MCP: one combined `signal(name, value?)` tool — nine tools total.
 
+### Changed
+
+- **Store-error honesty (#20 hardening).** Write receipts quote the board's
+  `project_id` instead of its directory name (names collide across
+  checkouts). `store_locked` now means genuinely retryable lock/busy
+  contention only; other database failures (no such table, readonly, disk
+  full, corruption) surface as a distinct `store_error` — both carry the
+  real cause in a `detail` field under `--json`, and nothing tracebacks.
+  `note --task` rejects a task from another project's board (the guard
+  `--needs` already had), the store's setup-retry budget scales with
+  `AISQUARE_DB_BUSY_MS` (no more 15s floor on a wedged fresh database), and
+  the knob clamps at SQLite's 32-bit ceiling so oversized values can no
+  longer silently disable the busy handler.
+
 ### Fixed
 
 - Unknown subcommands fail loudly instead of silently (#21): the usage error

@@ -130,6 +130,71 @@ def test_events_since_excludes_own_events(work_dir: Path) -> None:
     assert [event.text for event in events] == ["theirs"]
 
 
+def _put_session(
+    store: Any, sid: str, project_id: str, *, idle_min: int, role: str = "coder"
+) -> None:
+    """Register a session whose last heartbeat was ``idle_min`` minutes ago."""
+    seen = datetime.now(tz=UTC) - timedelta(minutes=idle_min)
+    store.upsert_session(
+        TeamSession(id=sid, project_id=project_id, role=role, started_at=seen, last_seen_at=seen)
+    )
+
+
+def test_prune_retires_ghosts_and_frees_their_claims(work_dir: Path) -> None:
+    from aisquare.services import team as team_service
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _put_session(store, CODER, project.id, idle_min=90)  # ghost (no heartbeat 90m)
+        _put_session(store, PLANNER, project.id, idle_min=1)  # warm
+        task, _ = store.upsert_task(_task(project.id, "orphaned", "orphaned"))
+        lease = datetime.now(tz=UTC) + timedelta(minutes=60)
+        assert store.claim_task(task.id, CODER, lease)  # the ghost holds it (doing)
+
+    report = team_service.prune_sessions()
+
+    assert [entry.id for entry in report.pruned] == [CODER]  # only the ghost
+    assert report.released_total == 1
+    with store_session() as store:
+        assert store.get_session(CODER).ended_at is not None  # ghost retired
+        assert store.get_session(PLANNER).ended_at is None  # warm session spared
+        freed = store.get_task(task.id)
+        assert freed.status == "todo" and freed.claimed_by is None  # claim back in the pool
+
+
+def test_prune_dry_run_reports_without_ending_anything(work_dir: Path) -> None:
+    from aisquare.services import team as team_service
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _put_session(store, CODER, project.id, idle_min=90)
+
+    report = team_service.prune_sessions(dry_run=True)
+
+    assert report.dry_run and [entry.id for entry in report.pruned] == [CODER]
+    with store_session() as store:
+        assert store.get_session(CODER).ended_at is None  # untouched
+
+
+def test_prune_keep_spares_a_session(work_dir: Path) -> None:
+    from aisquare.services import team as team_service
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _put_session(store, CODER, project.id, idle_min=90)
+        _put_session(store, PLANNER, project.id, idle_min=90)
+
+    report = team_service.prune_sessions(keep=PLANNER)
+
+    assert [entry.id for entry in report.pruned] == [CODER]
+    with store_session() as store:
+        assert store.get_session(PLANNER).ended_at is None  # explicitly kept
+        assert store.get_session(CODER).ended_at is not None
+
+
 # --- hooks: activation, board, delta, end --------------------------------------
 
 

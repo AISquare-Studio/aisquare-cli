@@ -14,6 +14,7 @@ so repos that never opted in never see team output.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -677,6 +678,111 @@ def hook_session_end(session_id: str, cwd: Path | None) -> None:
         root = _project_root(store, session.project_id)
     # Safety drain: catch anything a per-command spawn missed this session.
     distill_service.spawn_drain(cwd, root=root)
+
+
+# --- maintenance --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PrunedSession:
+    """One ghost session retired by a prune pass."""
+
+    id: str
+    role: str
+    idle_minutes: int
+    released: int  # its in-flight (doing) claims that went back to the pool
+
+
+@dataclass(frozen=True)
+class PruneReport:
+    """The outcome of a :func:`prune_sessions` pass."""
+
+    pruned: list[PrunedSession]
+    released_total: int
+    threshold_minutes: int
+    dry_run: bool
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.pruned)
+
+
+def prune_sessions(
+    older_than_minutes: int | None = None,
+    *,
+    dry_run: bool = False,
+    keep: str | None = None,
+    cwd: Path | None = None,
+) -> PruneReport:
+    """Retire ghost sessions — live rows with no heartbeat past the threshold.
+
+    A session stays registered until its Claude Code process fires the end
+    hook; a killed loop, a crashed terminal, or an MCP server that never says
+    goodbye lingers on the board as ``(stale)`` indefinitely. This ends those
+    rows so the board reflects who is actually present — and, because
+    :meth:`ContextStore.end_session` returns each ghost's in-flight (``doing``)
+    claims to the pool, it also frees any task stranded under a dead session so
+    a live one can pick it up.
+
+    Data-safe by construction: only session presence and orphaned CLAIMS
+    change; tasks, notes, events and the project brain are untouched.
+    ``dry_run`` reports what would go without ending anything. ``keep`` spares
+    one session (id prefix); a still-warm session is spared automatically (it
+    is not past the threshold).
+    """
+    _require_enabled()
+    threshold = (
+        timedelta(minutes=older_than_minutes) if older_than_minutes is not None else _STALE_AFTER
+    )
+    now = _now()
+    pruned: list[PrunedSession] = []
+    released_total = 0
+    with store_session() as store:
+        project = _project(store, cwd)
+        spare = _resolve_session(store, keep) if keep else None
+        spare_id = spare.id if spare else None
+        for session in store.team_sessions(project.id):
+            if session.ended_at is not None or session.id == spare_id:
+                continue
+            idle = now - session.last_seen_at
+            if idle <= threshold:
+                continue
+            released = 0
+            if not dry_run:
+                released_tasks = store.end_session(session.id)
+                released = len(released_tasks)
+                for task in released_tasks:
+                    _emit(
+                        store,
+                        project.id,
+                        "task_released",
+                        f"{task.title} (session pruned)",
+                        session_id=session.id,
+                        task_id=task.id,
+                    )
+            pruned.append(
+                PrunedSession(
+                    id=session.id,
+                    role=session.role,
+                    idle_minutes=int(idle.total_seconds() // 60),
+                    released=released,
+                )
+            )
+            released_total += released
+        if pruned and not dry_run:
+            _emit(
+                store,
+                project.id,
+                "sessions_pruned",
+                f"retired {len(pruned)} ghost session(s); released "
+                f"{released_total} orphaned claim(s) back to the pool",
+            )
+    return PruneReport(
+        pruned=pruned,
+        released_total=released_total,
+        threshold_minutes=int(threshold.total_seconds() // 60),
+        dry_run=dry_run,
+    )
 
 
 # --- rendering ----------------------------------------------------------------

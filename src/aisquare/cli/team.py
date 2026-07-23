@@ -122,6 +122,97 @@ def log(
         )
 
 
+def _fmt_idle(minutes: int) -> str:
+    """Render an idle span the way the board's ``_age`` does (12m, 3h07m)."""
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+@app.command("prune")
+def prune(
+    older_than: Annotated[
+        int | None,
+        typer.Option(
+            "--older-than",
+            help="Minutes without a heartbeat before a session counts as a ghost "
+            "(default: 30, the board's stale mark).",
+        ),
+    ] = None,
+    keep: Annotated[
+        str | None,
+        typer.Option("--keep", help="Spare this session (id prefix) even if it looks stale."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show who would be retired without touching anything."),
+    ] = False,
+) -> None:
+    """Retire ghost sessions and return their orphaned claims to the pool — a clean roll-call.
+
+    A dead loop or crashed terminal lingers on the board as ``(stale)`` forever.
+    This ends those rows so the board shows who is actually here, and frees any
+    task stranded under them. Data-safe: only presence + orphaned claims change
+    — tasks, notes, events and the project brain are untouched.
+    """
+    try:
+        report = team_service.prune_sessions(older_than, dry_run=dry_run, keep=keep)
+    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+        _fail_team(exc, keep)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "dry_run": report.dry_run,
+                    "threshold_minutes": report.threshold_minutes,
+                    "released_total": report.released_total,
+                    "pruned": [
+                        {
+                            "id": p.id,
+                            "role": p.role,
+                            "idle_minutes": p.idle_minutes,
+                            "released": p.released,
+                        }
+                        for p in report.pruned
+                    ],
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    if not report.pruned:
+        console.print(
+            f"✓ roll-call clean — every live session checked in within "
+            f"{report.threshold_minutes}m. No ghosts to retire."
+        )
+        return
+    for entry in report.pruned:
+        claims = (
+            f", freed {entry.released} claim{'' if entry.released == 1 else 's'}"
+            if entry.released
+            else ""
+        )
+        bullet = "·" if report.dry_run else "✓"
+        console.print(
+            f"  {bullet} {team_service.short_id(entry.id)} ({entry.role}) — "
+            f"dark {_fmt_idle(entry.idle_minutes)}{claims}",
+            markup=False,
+        )
+    count = len(report.pruned)
+    plural = "" if count == 1 else "s"
+    if report.dry_run:
+        console.print(
+            f"— would retire {count} ghost session{plural} (dry run, nothing changed). "
+            "Re-run without --dry-run to clear them."
+        )
+    else:
+        tail = (
+            f" and returned {report.released_total} orphaned "
+            f"claim{'' if report.released_total == 1 else 's'} to the pool"
+            if report.released_total
+            else ""
+        )
+        console.print(f"🧹 retired {count} ghost session{plural}{tail} — board's aligned.")
+
+
 @app.command("distill")
 def distill(
     rescan: Annotated[

@@ -1195,20 +1195,41 @@ def _glob_prefix(ref: str) -> str:
 
 
 _DEFAULT_BUSY_MS = 5000
+_MAX_BUSY_MS = 2**31 - 1  # SQLite's 32-bit atoi wraps anything larger to 0
 
 
 def _busy_timeout_ms() -> int:
     """How long a connection waits on a locked store (``AISQUARE_DB_BUSY_MS``).
 
     Tests wedge the store on purpose and must not sit through the 5s default;
-    anything unset, non-numeric or negative falls back to it.
+    anything unset, non-numeric or negative falls back to it. Values past
+    2**31-1 clamp — SQLite parses the pragma with 32-bit atoi, so 2147483648
+    would wrap to 0 and silently DISABLE the busy handler.
     """
     raw = os.environ.get("AISQUARE_DB_BUSY_MS", "")
     try:
         value = int(raw)
     except ValueError:
         return _DEFAULT_BUSY_MS
-    return value if value >= 0 else _DEFAULT_BUSY_MS
+    if value < 0:
+        return _DEFAULT_BUSY_MS
+    return min(value, _MAX_BUSY_MS)
+
+
+def is_locked_error(exc: sqlite3.Error) -> bool:
+    """True for transient lock/busy conditions worth a short retry.
+
+    Everything else an ``sqlite3.DatabaseError`` carries — no such table,
+    readonly database, disk I/O, corruption — is NOT retryable and must not
+    be dressed up as ``store_locked``.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    text = str(exc).lower()  # pragma: no cover - pre-3.11 fallback
+    return "locked" in text or "busy" in text
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
@@ -1244,15 +1265,19 @@ def open_store() -> ContextStore:
     First opens race: parallel session hooks all arrive at a fresh database
     together, and the WAL switch + migrations contend for the write lock.
     ``busy_timeout`` covers most of it, but journal-mode changes can return
-    "database is locked" without consulting the orchestratory handler — so the whole
-    setup phase retries with jitter for up to 15s instead of dying. After
-    the first successful open this loop never iterates.
+    "database is locked" without consulting the busy handler — so the whole
+    setup phase retries with jitter. The retry budget scales with the
+    ``AISQUARE_DB_BUSY_MS`` knob (3x it; 15s at the default) so a test that
+    wedges a fresh store with knob=50 fails fast instead of sitting out a
+    hardcoded floor. After the first successful open this loop never
+    iterates.
     """
     paths.ensure_home()
     connection = sqlite3.connect(str(paths.db_path()))
     connection.row_factory = sqlite3.Row
-    connection.execute(f"PRAGMA busy_timeout = {_busy_timeout_ms()}")
-    deadline = time.monotonic() + 15
+    busy_ms = _busy_timeout_ms()
+    connection.execute(f"PRAGMA busy_timeout = {busy_ms}")
+    deadline = time.monotonic() + 3 * (busy_ms / 1000)
     while True:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
@@ -1260,7 +1285,7 @@ def open_store() -> ContextStore:
             _migrate(connection)
             return SqliteStore(connection)
         except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+            if not is_locked_error(exc) or time.monotonic() >= deadline:
                 connection.close()
                 raise
             time.sleep(0.05 + random.random() * 0.1)

@@ -346,14 +346,16 @@ def fail(
     error: str,
     ref: str | None = None,
     hint: str | None = None,
+    detail: str | None = None,
     exit_code: int = 1,
 ) -> NoReturn:
     """Report a runtime error and exit.
 
     Mirrors the stub contract: a machine-readable object on stdout under
     ``--json``, a human message on stderr otherwise. ``hint`` carries
-    actionable context (e.g. which board actually holds a receipt) into the
-    JSON payload; the human message weaves it into its own text.
+    actionable context (e.g. which board actually holds a receipt) and
+    ``detail`` the underlying cause (e.g. the real sqlite error text) into
+    the JSON payload; the human message weaves both into its own text.
     """
     if get_state().json_output:
         payload = {"error": error}
@@ -361,6 +363,8 @@ def fail(
             payload["ref"] = ref
         if hint is not None:
             payload["hint"] = hint
+        if detail is not None:
+            payload["detail"] = detail
         typer.echo(json.dumps(payload, separators=(",", ":")))
     else:
         stderr_console().print(f"✗ {message}")

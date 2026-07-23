@@ -17,7 +17,7 @@ import typer
 from aisquare.cli.common import fail, local_time
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
-from aisquare.core.store import AmbiguousIdError
+from aisquare.core.store import AmbiguousIdError, is_locked_error
 from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
@@ -29,12 +29,14 @@ SessionRef = Annotated[
 ]
 
 # Every failure a store-backed team command can hit, routed through _fail_team.
+# DatabaseError covers OperationalError AND the rarer corruption/constraint
+# family — none of them may reach the user as a traceback.
 STORE_ERRORS = (
     TeamDisabledError,
     KeyError,
     AmbiguousIdError,
     DeliveryUnconfirmedError,
-    sqlite3.OperationalError,
+    sqlite3.DatabaseError,
 )
 
 
@@ -48,10 +50,18 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         # ref = the unconfirmed write's id, so an agent knows exactly which
         # event/task to look for in `aisquare log` before retrying.
         fail(str(exc), error="delivery_unconfirmed", ref=exc.ref)
-    if isinstance(exc, sqlite3.OperationalError):
-        # A wedged or contended store must fail loudly, never traceback —
-        # and never print anything a caller could mistake for success.
-        fail(f"context store unavailable ({exc}) — retry shortly", error="store_locked")
+    if isinstance(exc, sqlite3.Error) and is_locked_error(exc):
+        # Transient contention: honest "try again", never a traceback —
+        # and never anything a caller could mistake for success.
+        fail(
+            f"context store busy ({exc}) — retry shortly",
+            error="store_locked",
+            detail=str(exc),
+        )
+    if isinstance(exc, sqlite3.DatabaseError):
+        # NOT retryable (no such table, readonly, disk full, corruption):
+        # a distinct code, with the real cause preserved for --json callers.
+        fail(f"context store error: {exc}", error="store_error", detail=str(exc))
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)
         fail(f"nothing matches '{missing}'", error="not_found", ref=missing)
@@ -496,6 +506,8 @@ def note(
         event = team_service.add_note(
             text, session_ref=as_session, task_ref=task, to_role=to, kind=kind
         )
+    except ValueError as exc:
+        fail(str(exc), error="invalid_task", ref=task)
     except STORE_ERRORS as exc:
         _fail_team(exc, task or as_session)
     delivery = team_service.last_delivery()

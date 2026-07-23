@@ -37,6 +37,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import paths
+from aisquare.core.store import is_locked_error
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
@@ -133,8 +134,12 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         # write must reach the agent as the error wording, never a raw
         # tool exception that reads like an infrastructure hiccup.
         raise _tool_error(f"error: {exc}") from exc
-    except sqlite3.OperationalError as exc:
-        raise _tool_error(f"error: context store unavailable ({exc}) — retry shortly") from exc
+    except sqlite3.DatabaseError as exc:
+        # Same narrowing as the CLI: lock/busy is a retryable condition,
+        # everything else is a real store error with its cause preserved.
+        if is_locked_error(exc):
+            raise _tool_error(f"error: context store busy ({exc}) — retry shortly") from exc
+        raise _tool_error(f"error: context store error: {exc}") from exc
     except LookupError as exc:
         # KeyError (unknown ref) and AmbiguousIdError (short prefix) both
         # subclass LookupError; remote callers get the error contract, not

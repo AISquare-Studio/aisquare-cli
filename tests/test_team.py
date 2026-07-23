@@ -903,14 +903,16 @@ def test_write_receipts_carry_seq_and_board(
     _start(runner, CODER, work_dir)
     monkeypatch.delenv("AISQUARE_ROLE")
 
+    board_id = team_project(work_dir).id
     note = runner.invoke(app, ["note", "receipt me", "--as", "bbbb2222"])
-    assert "· seq" in _flat(note.output) and work_dir.name in _flat(note.output)
+    # The receipt quotes the unambiguous project_id, not the collidable name.
+    assert "· seq" in _flat(note.output) and board_id in _flat(note.output)
 
     added = runner.invoke(app, ["task", "add", "with receipt", "--as", "bbbb2222"])
     assert added.exit_code == 0 and "· seq" in _flat(added.output)
     # The idempotent duplicate still confirms the row — a receipt without a seq.
     dup = runner.invoke(app, ["task", "add", "with receipt", "--as", "bbbb2222"])
-    assert "already tracked" in dup.output and f"· on {work_dir.name}" in _flat(dup.output)
+    assert "already tracked" in dup.output and f"· on {board_id}" in _flat(dup.output)
 
     picked = json.loads(
         runner.invoke(
@@ -946,7 +948,9 @@ def test_wedged_store_fails_loudly_with_no_success_marker(
         as_json = runner.invoke(app, ["--json", "note", "did this land?", "--as", "bbbb2222"])
         assert as_json.exit_code == 1
         assert "✓" not in as_json.output + as_json.stderr  # NO success marker, anywhere
-        assert json.loads(as_json.stdout)["error"] == "store_locked"
+        payload = json.loads(as_json.stdout)
+        assert payload["error"] == "store_locked"
+        assert "locked" in payload["detail"]  # the real cause reaches --json
         human = runner.invoke(app, ["note", "did this land?", "--as", "bbbb2222"])
         assert human.exit_code == 1
         assert "✓" not in human.output + human.stderr
@@ -954,7 +958,7 @@ def test_wedged_store_fails_loudly_with_no_success_marker(
         # The MAPPED message must be on stderr — a raw OperationalError would
         # also exit 1 with no ✓ under CliRunner's exception catch, so only
         # this assert proves the store_locked mapping ran (review, #20).
-        assert "context store unavailable" in _flat(human.stderr)
+        assert "context store busy" in _flat(human.stderr)
     finally:
         blocker.rollback()
         blocker.close()
@@ -1145,3 +1149,155 @@ def test_log_filter_guardrails(runner: CliRunner, work_dir: Path) -> None:
     unknown_author = runner.invoke(app, ["--json", "team", "log", "--by", "ffff9999"])
     assert unknown_author.exit_code == 1
     assert json.loads(unknown_author.stdout)["error"] == "not_found"
+# --- #20 hardening: store-error honesty + guards --------------------------------
+
+
+def test_busy_timeout_fallbacks_and_int32_clamp(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.store import SqliteStore, open_store
+
+    def timeout_of() -> int:
+        store = open_store()
+        try:
+            assert isinstance(store, SqliteStore)
+            value: int = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            return value
+        finally:
+            store.close()
+
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "abc")
+    assert timeout_of() == 5000
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "-5")
+    assert timeout_of() == 5000
+    # SQLite parses the pragma with 32-bit atoi: 2**31 would wrap to 0 and
+    # silently DISABLE the busy handler — the clamp keeps it at the max.
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "2147483648")
+    assert timeout_of() == 2147483647
+
+
+def test_fresh_db_wedge_fails_within_the_knob_budget(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The setup-retry deadline derives from AISQUARE_DB_BUSY_MS (3x), not a
+    # hardcoded 15s floor: knob=50 on a wedged FRESH db must fail fast.
+    import sqlite3 as raw
+    import time as clock
+
+    from aisquare.core import paths
+    from aisquare.core.store import open_store
+
+    monkeypatch.setenv("AISQUARE_DB_BUSY_MS", "50")
+    paths.ensure_home()
+    blocker = raw.connect(str(paths.db_path()))
+    try:
+        blocker.execute("BEGIN IMMEDIATE")  # the WAL switch/migration will starve
+        started = clock.monotonic()
+        with pytest.raises(raw.OperationalError):
+            open_store()
+        elapsed = clock.monotonic() - started
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert elapsed < 5, f"took {elapsed:.1f}s — the hardcoded floor is back"
+
+
+def test_store_error_is_distinct_from_store_locked(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Non-lock database failures must not be dressed up as retryable.
+    import sqlite3 as raw
+
+    from aisquare.core.store import SqliteStore
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+
+    def broken(self: SqliteStore, event: object) -> object:
+        raise raw.OperationalError("attempt to write a readonly database")
+
+    monkeypatch.setattr(SqliteStore, "add_team_event", broken)
+    result = runner.invoke(app, ["--json", "note", "x", "--as", "bbbb2222"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "store_error"
+    assert "readonly" in payload["detail"]  # the real cause reaches --json
+    human = runner.invoke(app, ["note", "x", "--as", "bbbb2222"])
+    assert human.exit_code == 1
+    assert "Traceback" not in human.output + human.stderr
+    assert "context store error" in _flat(human.stderr)
+
+
+def test_note_task_ref_must_live_on_the_target_board(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same cross-board contamination --needs already rejects.
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)  # session on board A
+    monkeypatch.delenv("AISQUARE_ROLE")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    runner.invoke(app, ["team", "on"])  # board B, with its own task
+    runner.invoke(app, ["task", "add", "task on B"])
+    on_b = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    poisoned = runner.invoke(app, ["--json", "note", "poison", "--task", on_b, "--as", "bbbb2222"])
+    assert poisoned.exit_code == 1
+    payload = json.loads(poisoned.stdout)
+    assert payload["error"] == "invalid_task" and payload["ref"] == on_b
+    # Same-board refs still attach fine.
+    monkeypatch.chdir(work_dir)
+    runner.invoke(app, ["task", "add", "task on A", "--as", "bbbb2222"])
+    on_a = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    ok = runner.invoke(app, ["--json", "note", "fine", "--task", on_a, "--as", "bbbb2222"])
+    assert ok.exit_code == 0 and json.loads(ok.stdout)["delivered"] is True
+
+
+def test_receipts_on_team_on_focus_and_prune(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_on = json.loads(runner.invoke(app, ["--json", "team", "on"]).stdout)
+    assert first_on["delivered"] is True  # first activation emits + confirms
+    board_id = first_on["activated"]
+    again = json.loads(runner.invoke(app, ["--json", "team", "on"]).stdout)
+    assert "delivered" not in again  # already active: no event, no receipt
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    focus = runner.invoke(app, ["team", "focus", "receipts", "--as", "bbbb2222"])
+    assert focus.exit_code == 0 and "· seq" in _flat(focus.output)
+    focus_json = json.loads(
+        runner.invoke(app, ["--json", "team", "focus", "again", "--as", "bbbb2222"]).stdout
+    )
+    assert focus_json["delivered"] is True
+
+    with store_session() as store:
+        _put_session(store, PLANNER, board_id, idle_min=90)  # a ghost to retire
+    pruned = runner.invoke(app, ["team", "prune"])
+    assert pruned.exit_code == 0 and "· seq" in _flat(pruned.output)
+    with store_session() as store:
+        _put_session(store, "cccc9999-0000-0000-0000-000000000000", board_id, idle_min=90)
+    pruned_json = json.loads(runner.invoke(app, ["--json", "team", "prune"]).stdout)
+    assert pruned_json["delivered"] is True
+
+
+def test_idempotent_dup_add_reports_delivery_unconfirmed_when_row_vanishes(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.store import SqliteStore
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    first = runner.invoke(app, ["--json", "task", "add", "dup me", "--as", "bbbb2222"])
+    assert json.loads(first.stdout)["delivered"] is True
+    # The dup branch confirms via a fresh get_task read-back — starve it.
+    monkeypatch.setattr(SqliteStore, "get_task", lambda self, ref: None)
+    dup = runner.invoke(app, ["--json", "task", "add", "dup me", "--as", "bbbb2222"])
+    assert dup.exit_code == 1
+    payload = json.loads(dup.stdout)
+    assert payload["error"] == "delivery_unconfirmed"
+    assert payload["ref"].startswith("tsk_")
+    assert "✓" not in dup.output + dup.stderr

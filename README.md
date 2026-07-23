@@ -198,6 +198,11 @@ directory. Claude Desktop on Windows + WSL2 works either over the HTTP URL
   "cd /path/to/your/repo && aisquare serve --stdio"]}}}
 ```
 
+An idle stdio server closes itself after 300s without a client message
+(`--close-after`, env `AISQUARE_SERVE_CLOSE_AFTER`) so abandoned daemons
+never linger; persistent clients like the Claude Desktop config above should
+set `AISQUARE_SERVE_CLOSE_AFTER=0` (run forever) in their launch command.
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:

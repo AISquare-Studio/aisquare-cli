@@ -10,6 +10,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `aisquare team prune` — retire ghost sessions and return their orphaned
   claims to the pool (#18).
+- `aisquare serve --stdio` gains an idle deadline — `--close-after SECONDS`
+  (env `AISQUARE_SERVE_CLOSE_AFTER`, flag wins; default 300; `0` = run
+  forever): the daemon exits 0 on its own once no client message has arrived
+  for that long, so clients killed mid-handshake can no longer strand
+  orphaned daemons (#19). Pipe-EOF still exits immediately; HTTP mode is
+  unaffected. This retires the `pkill`/`xargs` workarounds from #19.
 
 ## [0.2.0] - 2026-07-07
 

@@ -36,6 +36,11 @@ def all_command_paths() -> list[tuple[str, ...]]:
     return [path for path, _ in _iter_nodes(root_command(), ())]
 
 
+def all_nodes() -> list[tuple[tuple[str, ...], Any]]:
+    """Every ``(path, command)`` node: the root, all groups and all leaves."""
+    return list(_iter_nodes(root_command(), ()))
+
+
 def _placeholder(parameter: Any) -> str:
     choices = getattr(parameter.type, "choices", None)
     if choices:

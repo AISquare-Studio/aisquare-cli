@@ -23,9 +23,11 @@ from aisquare.cli import (
     team,
 )
 from aisquare.cli import config as config_cli
+from aisquare.cli.global_flags import GlobalFlagsGroup
 from aisquare.core.state import RuntimeState, set_state
 
 app = typer.Typer(
+    cls=GlobalFlagsGroup,
     help="Portable memory layer for coding agents.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},

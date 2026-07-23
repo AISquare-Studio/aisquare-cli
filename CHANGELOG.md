@@ -11,6 +11,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `aisquare team prune` — retire ghost sessions and return their orphaned
   claims to the pool (#18).
 
+### Fixed
+
+- The global output flags — `--json`, `--verbose`/`-v`, `--quiet`/`-q`,
+  `--no-color` and `--profile NAME` — are accepted anywhere on the command
+  line: before or after the subcommand, on every command including nested
+  groups. Boolean flags OR across positions (duplicates are idempotent);
+  `--profile`'s last occurrence wins. `--version` stays root-only (#24).
+
 ## [0.2.0] - 2026-07-07
 
 ### Added

@@ -264,7 +264,7 @@ def verify(
         typer.echo(json.dumps(payload))
     else:
         stdout_console().print(
-            f"✓ delivered · seq {result.event.seq} on {result.board_name}: {result.line}",
+            f"✓ delivered · seq {result.event.seq} on {result.board_id}: {result.line}",
             markup=False,
         )
 

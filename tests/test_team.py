@@ -1149,6 +1149,8 @@ def test_log_filter_guardrails(runner: CliRunner, work_dir: Path) -> None:
     unknown_author = runner.invoke(app, ["--json", "team", "log", "--by", "ffff9999"])
     assert unknown_author.exit_code == 1
     assert json.loads(unknown_author.stdout)["error"] == "not_found"
+
+
 # --- #20 hardening: store-error honesty + guards --------------------------------
 
 

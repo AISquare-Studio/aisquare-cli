@@ -346,9 +346,14 @@ def log_events(
 
 @dataclass(frozen=True)
 class VerifyResult:
-    """The outcome of a receipt check (``team verify``)."""
+    """The outcome of a receipt check (``team verify``).
+
+    ``board_id`` is what receipts quote (#20 hardening: directory names
+    collide across checkouts); ``board_name`` stays for human messages.
+    """
 
     event: TeamEvent | None
+    board_id: str
     board_name: str
     elsewhere: str | None = None
     line: str | None = None
@@ -375,13 +380,17 @@ def verify_receipt(
             seq = None
         event = store.get_event_by_seq(seq) if seq is not None else store.find_event_by_id(receipt)
         if event is None:
-            return VerifyResult(event=None, board_name=board.name)
+            return VerifyResult(event=None, board_id=board.id, board_name=board.name)
         if event.project_id != board.id:
             holder = store.get_project(event.project_id)
             elsewhere = (holder.root.name if holder is not None else "") or event.project_id
-            return VerifyResult(event=None, board_name=board.name, elsewhere=elsewhere)
+            return VerifyResult(
+                event=None, board_id=board.id, board_name=board.name, elsewhere=elsewhere
+            )
         roles = {s.id: s.role for s in store.team_sessions(board.id)}
-        return VerifyResult(event=event, board_name=board.name, line=event_line(event, roles))
+        return VerifyResult(
+            event=event, board_id=board.id, board_name=board.name, line=event_line(event, roles)
+        )
 
 
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")

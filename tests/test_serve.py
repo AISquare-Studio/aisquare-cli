@@ -270,3 +270,27 @@ def test_unknown_ref_keeps_nothing_matches_wording(work_dir: Path) -> None:
     team_service.activate()
     result = call_remote("task_update", {"ref": "tsk_typo", "action": "done"})
     assert error_text(result) == "error: nothing matches 'tsk_typo'"  # not a naked ref
+
+
+def test_guard_maps_the_write_path_failure_types(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The #20 failure types must reach remote agents as MCP error results
+    # with the error contract's wording, never as raw tool exceptions
+    # (PR #26 review must-fix 2), proven end-to-end through the client.
+    import sqlite3
+
+    from aisquare.core.store import SqliteStore
+
+    team_service.activate()
+    monkeypatch.setattr(SqliteStore, "get_event", lambda self, event_id: None)
+    unconfirmed = call_remote("note_add", {"text": "vanishing write"})
+    text = error_text(unconfirmed)
+    assert text.startswith("error:") and "was not confirmed" in text
+
+    def wedged(self: SqliteStore, event: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "add_team_event", wedged)
+    locked = call_remote("note_add", {"text": "wedged write"})
+    assert error_text(locked).startswith("error: context store unavailable")

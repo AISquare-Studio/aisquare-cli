@@ -836,6 +836,49 @@ def test_next_task_reads_the_session_board_from_a_foreign_cwd(
     assert picked["delivered"] is True
 
 
+def test_needs_resolve_against_the_session_board_from_a_foreign_cwd(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Direction (a) of the #20 --needs flip: a dependency that lives on the
+    # SESSION's board must be accepted even when cwd resolves elsewhere
+    # (the old cwd-board comparison rejected exactly this).
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    runner.invoke(app, ["task", "add", "prerequisite on A", "--as", "bbbb2222"])
+    needed = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    result = runner.invoke(
+        app, ["--json", "task", "add", "dependent", "--needs", needed, "--as", "bbbb2222"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["created"] is True and payload["needs"] == [needed]
+
+
+def test_needs_on_the_cwd_board_is_rejected_for_a_foreign_session(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Direction (b): a dependency that lives on the CWD's board while the
+    # acting session belongs elsewhere is cross-board contamination — reject.
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    _start(runner, CODER, work_dir)  # session registered on board A
+    monkeypatch.delenv("AISQUARE_ROLE")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    runner.invoke(app, ["team", "on"])  # board B exists, with its own task
+    runner.invoke(app, ["task", "add", "local to B"])
+    on_b = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
+    result = runner.invoke(
+        app, ["--json", "task", "add", "dependent", "--needs", on_b, "--as", "bbbb2222"]
+    )
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["error"] == "invalid_needs"
+
+
 def test_json_write_carries_delivered_flag_and_mismatch_warning(
     runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -908,6 +951,10 @@ def test_wedged_store_fails_loudly_with_no_success_marker(
         assert human.exit_code == 1
         assert "✓" not in human.output + human.stderr
         assert "Traceback" not in human.output + human.stderr
+        # The MAPPED message must be on stderr — a raw OperationalError would
+        # also exit 1 with no ✓ under CliRunner's exception catch, so only
+        # this assert proves the store_locked mapping ran (review, #20).
+        assert "context store unavailable" in _flat(human.stderr)
     finally:
         blocker.rollback()
         blocker.close()
@@ -926,7 +973,9 @@ def test_vanished_write_reports_delivery_unconfirmed(
     monkeypatch.setattr(SqliteStore, "get_event", lambda self, event_id: None)
     result = runner.invoke(app, ["--json", "note", "ghost", "--as", "bbbb2222"])
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["error"] == "delivery_unconfirmed"
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "delivery_unconfirmed"
+    assert payload["ref"].startswith("evt_")  # names the write to go verify
     assert "✓" not in result.output + result.stderr
 
 

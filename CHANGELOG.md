@@ -27,8 +27,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   event-emitting write is read back through a fresh store connection before
   `✓` is printed; the `✓` line carries a receipt (`seq N on <board>`) and
   `--json` output gains a top-level `delivered: true` (plus `warning` on a
-  board mismatch). Unconfirmed writes exit 1 with `delivery_unconfirmed`, and
-  a locked store maps to a clean `store_locked` error instead of a traceback.
+  board mismatch). Unconfirmed writes exit 1 with `delivery_unconfirmed` (the
+  payload's `ref` names the write), and a locked store maps to a clean
+  `store_locked` error instead of a traceback. A failure can leave a
+  durable-but-unconfirmed write — check `aisquare log` for the reported ref
+  before retrying, or a retried note/claim may duplicate work.
 
 ## [0.2.0] - 2026-07-07
 

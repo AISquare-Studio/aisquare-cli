@@ -60,6 +60,8 @@ class DeliveryUnconfirmedError(RuntimeError):
             f"write {ref} was not confirmed on board {board_name} — "
             "not reporting success; check `aisquare log` before retrying"
         )
+        self.ref = ref
+        self.board_name = board_name
 
 
 @dataclass(frozen=True)

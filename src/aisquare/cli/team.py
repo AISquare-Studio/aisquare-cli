@@ -43,7 +43,9 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
     if isinstance(exc, AmbiguousIdError):
         fail(f"'{exc.ref}' is ambiguous — use more characters", error="ambiguous_id", ref=exc.ref)
     if isinstance(exc, DeliveryUnconfirmedError):
-        fail(str(exc), error="delivery_unconfirmed")
+        # ref = the unconfirmed write's id, so an agent knows exactly which
+        # event/task to look for in `aisquare log` before retrying.
+        fail(str(exc), error="delivery_unconfirmed", ref=exc.ref)
     if isinstance(exc, sqlite3.OperationalError):
         # A wedged or contended store must fail loudly, never traceback —
         # and never print anything a caller could mistake for success.

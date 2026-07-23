@@ -21,6 +21,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Unknown subcommands fail loudly instead of silently (#21): the usage error
+  now carries a did-you-mean over the failing group's real verbs (root and
+  alias groups included), and when `--json` was parsed before the failure the
+  error arrives as one JSON object on stdout (`unknown_command` with
+  `did_you_mean`, or `usage` for unknown options) with exit code 2 — so a
+  typo can no longer masquerade as an empty result in pipelines. A `--json`
+  trailing the typo falls back to the human path by design; lead with
+  `--json` for guaranteed machine-readable errors.
+
 - **Team writes cannot lie about success (#20).** `--as`-attributed commands
   (`note`, `task add`, `task next`, …) now deliver to the acting *session's*
   board — never the cwd's — warning loudly when the two disagree. Every

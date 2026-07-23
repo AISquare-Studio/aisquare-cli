@@ -1228,7 +1228,9 @@ def is_locked_error(exc: sqlite3.Error) -> bool:
     code = getattr(exc, "sqlite_errorcode", None)
     if code is not None:
         return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-    text = str(exc).lower()  # pragma: no cover - pre-3.11 fallback
+    # Only errors raised BY the sqlite3 module carry sqlite_errorcode;
+    # hand-constructed ones (tests, wrappers) fall back to the message text.
+    text = str(exc).lower()
     return "locked" in text or "busy" in text
 
 

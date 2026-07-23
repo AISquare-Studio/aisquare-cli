@@ -27,6 +27,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   semantics), `--kind`, `--task`. MCP parity: `team_log` gains
   `by_session` (literal `me` supported) and a new eighth `verify` tool.
   The injected session protocol now points at the receipt → verify loop.
+- **First-class signals (#23)** — named board states instead of prose
+  tokens. `aisquare team signal NAME VALUE --as SID` sets (single-token
+  name/value), `team signal NAME` reads (value, set_by, set_at, seq),
+  `team signals` lists; all with `--json`. Every set emits a `signal`-kind
+  event whose payload carries structured `name`/`value`/`prev`/`set_by`
+  fields — watchers filter `team log --kind signal --since-seq N` and key
+  on fields, never text, so "NOT READY" prose can no longer trip a `ready`
+  watcher. State lives in the existing `team_meta` table (no migration),
+  the pipe event and state blob commit atomically, and sets follow the
+  #20 receipt/read-back contract (`team verify` works on signal seqs).
+  MCP: one combined `signal(name, value?)` tool — nine tools total.
 
 ### Fixed
 

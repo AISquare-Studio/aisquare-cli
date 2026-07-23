@@ -7,7 +7,7 @@ the same board.
 
 Remote callers act through a **virtual session** (``mcp:<client>``), so their
 traffic is attributed on the board and flows into every local session's
-deltas like any teammate's. The tool surface is deliberately small — eight
+deltas like any teammate's. The tool surface is deliberately small — nine
 tools — because giant MCP surfaces burn context before any work happens.
 
 Failing tools surface as real MCP error results (``isError: true``), never as
@@ -149,7 +149,7 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         raise _tool_error(f"error: {exc}") from exc
 
 
-# --- the eight tools (plain functions; registered on FastMCP below) -----------
+# --- the nine tools (plain functions; registered on FastMCP below) -----------
 
 
 def team_board() -> str:
@@ -297,6 +297,31 @@ def verify(receipt: str) -> str:
     return _guard(run)
 
 
+def signal(name: str, value: str | None = None) -> str:
+    """Set (value given) or read (no value) a named board state — never free text.
+
+    Sets emit a ``signal`` event whose payload carries structured
+    ``name``/``value``/``prev``/``set_by`` fields; watchers filter
+    ``team_log`` by kind and key on payload fields, so prose like
+    "NOT READY" can never trip a ``ready`` watcher (#23).
+    """
+
+    def run() -> str:
+        me = _ensure_virtual_session()
+        if value is None:
+            state = team_service.read_signal(name, session_ref=me)
+            if state is None:
+                raise _tool_error(f"error: no signal named {name!r} on this board")
+            return (
+                f"{state.name} = {state.value} · set by {state.set_by or 'cli'} · seq {state.seq}"
+            )
+        state, prev = team_service.set_signal(name, value, session_ref=me)
+        was = f" (was {prev})" if prev is not None else ""
+        return f"signal {state.name}: {state.value}{was} · seq {state.seq}"
+
+    return _guard(run)
+
+
 def recall(query: str) -> str:
     """Search the team's long-term memory (distilled decisions and outcomes)."""
 
@@ -345,10 +370,21 @@ def build_server() -> FastMCP:
             "claim before working (task_next with claim=true); report outcomes with "
             "task_update and note_add. Every write's success names a seq receipt — "
             "verify(receipt) re-proves it landed; team_log(by_session='me') reads "
-            "back your own recent writes."
+            "back your own recent writes; signal(name, value?) sets or reads named "
+            "board states with structured events — key on payload fields, not text."
         ),
     )
-    for tool in (team_board, task_add, task_next, task_update, note_add, team_log, verify, recall):
+    for tool in (
+        team_board,
+        task_add,
+        task_next,
+        task_update,
+        note_add,
+        team_log,
+        verify,
+        signal,
+        recall,
+    ):
         server.add_tool(tool)
 
     async def call_tool_with_exact_errors(

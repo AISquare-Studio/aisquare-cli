@@ -259,6 +259,89 @@ def verify(
         )
 
 
+def _signal_json(state: team_service.SignalState) -> dict[str, object]:
+    return {
+        "name": state.name,
+        "value": state.value,
+        "set_by": state.set_by,
+        "seq": state.seq,
+        "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+    }
+
+
+def _signal_line(state: team_service.SignalState) -> str:
+    who = team_service.short_id(state.set_by) if state.set_by else "cli"
+    when = f" at {local_time(state.updated_at):%H:%M}" if state.updated_at else ""
+    return f"{state.name} = {state.value} · set by {who}{when} · seq {state.seq}"
+
+
+@app.command("signal")
+def signal(
+    name: Annotated[str, typer.Argument(help="Signal name (lowercase token, e.g. fold-ready).")],
+    value: Annotated[
+        str | None,
+        typer.Argument(help="New value (single token). Omit to read the current value."),
+    ] = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Set or read a named board state — structured, never substring-matched.
+
+    ``team signal fold-ready on --as <sid>`` sets; ``team signal fold-ready``
+    reads. Every set emits a ``signal`` event whose payload carries
+    ``name``/``value``/``prev``/``set_by`` — watchers key on fields, so a
+    note saying "NOT READY" can never trip a ``ready`` watcher again (#23).
+    """
+    if value is None:
+        try:
+            state = team_service.read_signal(name, session_ref=as_session)
+        except STORE_ERRORS as exc:
+            _fail_team(exc, as_session)
+        if state is None:
+            fail(f"no signal named '{name}' on this board", error="not_found", ref=name)
+        if get_state().json_output:
+            typer.echo(json.dumps(_signal_json(state)))
+        else:
+            stdout_console().print(_signal_line(state), markup=False)
+        return
+    try:
+        state, prev = team_service.set_signal(name, value, session_ref=as_session)
+    except ValueError as exc:
+        fail(str(exc), error="invalid_signal", ref=name)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, as_session)
+    delivery = team_service.last_delivery()
+    emit_write_warning(delivery)
+    if get_state().json_output:
+        payload = _signal_json(state)
+        payload["prev"] = prev
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
+    else:
+        was = f" (was {prev})" if prev is not None else ""
+        stdout_console().print(
+            f"✓ signal {state.name}: {state.value}{was}{receipt_suffix(delivery)}",
+            markup=False,
+        )
+
+
+@app.command("signals")
+def signals(as_session: SessionRef = None) -> None:
+    """List every named board state and who set it."""
+    try:
+        states = team_service.list_signals(session_ref=as_session)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, as_session)
+    if get_state().json_output:
+        typer.echo(json.dumps([_signal_json(state) for state in states]))
+        return
+    if not states:
+        stdout_console().print("No signals set. Set one with: aisquare team signal <name> <value>")
+        return
+    console = stdout_console()
+    for state in states:
+        console.print(_signal_line(state), markup=False)
+
+
 def _fmt_idle(minutes: int) -> str:
     """Render an idle span the way the board's ``_age`` does (12m, 3h07m)."""
     return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"

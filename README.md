@@ -150,6 +150,29 @@ A receipt that lives on a *different* board is an honest not-found — with a
 hint naming the board that actually holds it. Remote MCP agents get the same
 pair: `verify(receipt)` and `team_log(by_session="me")`.
 
+### Signals: named states, never substring matching
+
+Prose is a terrible protocol — a watcher grepping `READY` fires on a note
+saying "NOT READY". Signals are first-class named board states:
+
+```sh
+aisquare team signal fold-ready on --as <id>   # set (single-token name/value)
+aisquare team signal fold-ready                # read: value, who set it, when, seq
+aisquare team signals                          # list all
+aisquare team log --kind signal --since-seq N --json   # a watcher's poll loop
+```
+
+Every set emits a `signal` event whose `--json` payload carries structured
+`name` / `value` / `prev` / `set_by` fields — consumers key on fields, never
+on text, so negations can't false-trigger. Sets follow the write contract
+(receipt + read-back; `team verify <seq>` works on signal receipts), and the
+MCP `signal(name, value?)` tool gives remote agents the same pair.
+
+Still matching free text somewhere? At minimum anchor the pattern
+(`^ready$`), match whole tokens (`\bready\b` misses `NOT READY` only if you
+also reject preceding negations), and treat any hit inside a longer sentence
+as suspect — then switch to signals, which is the whole point of them.
+
 ### The live board (`aisquare board -w`)
 
 An interactive [Textual](https://textual.textualize.io/) TUI with the

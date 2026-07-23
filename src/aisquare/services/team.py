@@ -13,6 +13,7 @@ so repos that never opted in never see team output.
 
 from __future__ import annotations
 
+import json
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -374,6 +375,118 @@ def verify_receipt(
             return VerifyResult(event=None, board_name=board.name, elsewhere=elsewhere)
         roles = {s.id: s.role for s in store.team_sessions(board.id)}
         return VerifyResult(event=event, board_name=board.name, line=event_line(event, roles))
+
+
+_SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_SIGNAL_VALUE = re.compile(r"\S{1,128}")
+
+
+@dataclass(frozen=True)
+class SignalState:
+    """One named board state: the current value, who set it, and when (#23)."""
+
+    name: str
+    value: str
+    set_by: str | None
+    seq: int
+    updated_at: datetime | None
+
+
+def _signal_key(project_id: str, name: str) -> str:
+    return f"signal/{project_id}/{name}"
+
+
+def _signal_state(name: str, blob: str) -> SignalState:
+    data = json.loads(blob)
+    raw_updated = data.get("updated_at")
+    return SignalState(
+        name=name,
+        value=str(data.get("value", "")),
+        set_by=data.get("session_id"),
+        seq=int(data.get("seq", 0)),
+        updated_at=datetime.fromisoformat(raw_updated) if raw_updated else None,
+    )
+
+
+def set_signal(
+    name: str, value: str, *, session_ref: str | None = None, cwd: Path | None = None
+) -> tuple[SignalState, str | None]:
+    """Set a named board state (``team signal NAME VALUE``); returns (state, prev).
+
+    Names and values are single tokens by contract — that is exactly what
+    makes the emitted ``signal`` event's text decodable into structured
+    payload fields with zero substring matching (#23). The pipe event and
+    the current-state blob commit in ONE transaction, then the event is
+    read back per the #20 contract, so ``team verify <seq>`` works on
+    signal receipts like any other write.
+    """
+    _require_enabled()
+    _DELIVERY.set(None)
+    if not _SIGNAL_NAME.fullmatch(name):
+        raise ValueError(
+            f"signal name {name!r} must be a lowercase token "
+            "([a-z0-9._-], starting alphanumeric, max 64)"
+        )
+    if not _SIGNAL_VALUE.fullmatch(value):
+        raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
+    with store_session() as store:
+        session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
+        key = _signal_key(board.id, name)
+        prior = store.get_meta(key)
+        prev = _signal_state(name, prior).value if prior is not None else None
+        text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
+        now = _now()
+        event = store.add_signal_event(
+            TeamEvent(
+                id=new_event_id(),
+                project_id=board.id,
+                session_id=session.id if session else None,
+                kind="signal",
+                text=text,
+                created_at=now,
+            ),
+            key,
+            {
+                "value": value,
+                "session_id": session.id if session else None,
+                "updated_at": now.isoformat(),
+            },
+        )
+    stored = _record_delivery(event, board)
+    state = SignalState(
+        name=name,
+        value=value,
+        set_by=session.id if session else None,
+        seq=stored.seq,
+        updated_at=now,
+    )
+    return state, prev
+
+
+def read_signal(
+    name: str, *, session_ref: str | None = None, cwd: Path | None = None
+) -> SignalState | None:
+    """The current value of one named board state (``team signal NAME``)."""
+    _require_enabled()
+    with store_session() as store:
+        session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
+        blob = store.get_meta(_signal_key(board.id, name))
+        return _signal_state(name, blob) if blob is not None else None
+
+
+def list_signals(*, session_ref: str | None = None, cwd: Path | None = None) -> list[SignalState]:
+    """Every named state on this board (``team signals``), sorted by name."""
+    _require_enabled()
+    with store_session() as store:
+        session = _resolve_session(store, session_ref)
+        board = _board(store, session, cwd)
+        prefix = _signal_key(board.id, "")
+        return [
+            _signal_state(key.removeprefix(prefix), blob)
+            for key, blob in store.list_meta(prefix).items()
+        ]
 
 
 def set_role(role: str, session_ref: str, cwd: Path | None = None) -> TeamSession:

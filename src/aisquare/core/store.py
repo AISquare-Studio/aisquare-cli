@@ -28,7 +28,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
@@ -295,6 +295,10 @@ class ContextStore(Protocol):
     ) -> TeamTask | None: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
+    def list_meta(self, prefix: str) -> dict[str, str]: ...
+    def add_signal_event(
+        self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
+    ) -> TeamEvent: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
     def get_event(self, event_id: str) -> TeamEvent | None: ...
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
@@ -998,6 +1002,48 @@ class SqliteStore:
             (key, value),
         )
         self._conn.commit()
+
+    def list_meta(self, prefix: str) -> dict[str, str]:
+        """Every ``team_meta`` entry under ``prefix``, key → value."""
+        rows = self._conn.execute(
+            "SELECT key, value FROM team_meta WHERE key GLOB ? ORDER BY key",
+            (f"{_glob_prefix(prefix)[:-1]}*",),
+        ).fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def add_signal_event(
+        self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
+    ) -> TeamEvent:
+        """Insert a signal event AND its meta materialization in ONE transaction.
+
+        A signal is two writes — the pipe event (history) and the current-state
+        blob under ``meta_key`` — and a crash between separate commits would
+        leave watchers and readers disagreeing. The event's assigned ``seq``
+        is injected into ``meta_value`` before the blob is stored, so the
+        state row always names the event that produced it.
+        """
+        with self._conn:  # one BEGIN…COMMIT for both statements
+            cursor = self._conn.execute(
+                "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+                "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.id,
+                    event.project_id,
+                    event.session_id,
+                    event.kind,
+                    event.text,
+                    event.task_id,
+                    event.to_role,
+                    event.created_at.isoformat(),
+                ),
+            )
+            stamped = {**meta_value, "seq": cursor.lastrowid}
+            self._conn.execute(
+                "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (meta_key, json.dumps(stamped)),
+            )
+        return event.model_copy(update={"seq": cursor.lastrowid})
 
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         cursor = self._conn.execute(

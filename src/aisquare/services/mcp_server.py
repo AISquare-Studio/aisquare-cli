@@ -10,6 +10,10 @@ traffic is attributed on the board and flows into every local session's
 deltas like any teammate's. The tool surface is deliberately small — seven
 tools — because giant MCP surfaces burn context before any work happens.
 
+Failing tools surface as real MCP error results (``isError: true``), never as
+error-prefixed success strings, and the error wording is a contract: remote
+agents self-correct off it, so it must reach them preserved end-to-end.
+
 Transports:
 
 - ``stdio`` — for Claude Desktop launching the server itself (on Windows:
@@ -27,7 +31,9 @@ import json
 import os
 import secrets
 import stat
-from typing import TYPE_CHECKING, Any
+import sys
+import time
+from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import paths
 from aisquare.models import TaskStatus, TeamSession
@@ -35,10 +41,15 @@ from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, TeamDisabledError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import CallToolResult, ContentBlock
 
 _TOKEN_KEY = "serve_token"
 DEFAULT_PORT = 8747
+DEFAULT_CLOSE_AFTER = 300
+"""Idle seconds before a stdio server closes itself (0 = run forever)."""
 
 
 def client_session_id(project_id: str) -> str:
@@ -94,24 +105,40 @@ def _ensure_virtual_session() -> str:
     return session_id
 
 
+def _tool_error(message: str) -> Exception:
+    """A ``ToolError`` carrying ``message`` verbatim (``mcp`` imports lazily)."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    return ToolError(message)
+
+
 def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
-    """Run a service call, folding failures into tool-result strings."""
+    """Run a service call; failures become MCP tool errors (``isError: true``).
+
+    The texts are the same stable ``error: …`` wording the tools have always
+    used — remote agents self-correct off it — moved off the success channel
+    onto the protocol's error channel.
+    """
     try:
         return str(fn(*args, **kwargs))
-    except TeamDisabledError:
-        return "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
+    except TeamDisabledError as exc:
+        raise _tool_error(
+            "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
+        ) from exc
     except ClaimLostError as exc:
-        return f"error: {exc}"
+        raise _tool_error(f"error: {exc}") from exc
     except LookupError as exc:
         # KeyError (unknown ref) and AmbiguousIdError (short prefix) both
         # subclass LookupError; remote callers get the error contract, not
         # a raw tool exception. Keep the "nothing matches …" wording so a
         # remote agent can self-correct rather than getting a naked ref.
         if isinstance(exc, KeyError):
-            return f"error: nothing matches {(exc.args[0] if exc.args else exc)!r}"
-        return f"error: {exc}"
+            raise _tool_error(
+                f"error: nothing matches {(exc.args[0] if exc.args else exc)!r}"
+            ) from exc
+        raise _tool_error(f"error: {exc}") from exc
     except ValueError as exc:
-        return f"error: {exc}"
+        raise _tool_error(f"error: {exc}") from exc
 
 
 # --- the seven tools (plain functions; registered on FastMCP below) -----------
@@ -157,7 +184,7 @@ def task_next(role: str | None = None, status: str = "todo", claim: bool = False
 
         statuses = get_args(TaskStatus)
         if status not in statuses:
-            return f"error: status must be one of: {', '.join(statuses)}"
+            raise _tool_error(f"error: status must be one of: {', '.join(statuses)}")
         me = _ensure_virtual_session()
         narrowed: TaskStatus = status  # type: ignore[assignment]
         task = team_service.next_task(role=role, status=narrowed, claim=claim, session_ref=me)
@@ -180,18 +207,18 @@ def task_update(ref: str, action: str, note: str | None = None) -> str:
             task = team_service.review_task(ref, note=note, session_ref=me)
         elif action == "block":
             if not note:
-                return "error: block requires a note (the reason)"
+                raise _tool_error("error: block requires a note (the reason)")
             task = team_service.block_task(ref, reason=note, session_ref=me)
         elif action == "reopen":
             if not note:
-                return "error: reopen requires a note (the feedback)"
+                raise _tool_error("error: reopen requires a note (the feedback)")
             task = team_service.reopen_task(ref, reason=note, session_ref=me)
         elif action == "release":
             task = team_service.release_task(ref, session_ref=me)
         elif action == "drop":
             task = team_service.drop_task(ref, session_ref=me)
         else:
-            return "error: action must be done, review, block, reopen, release or drop"
+            raise _tool_error("error: action must be done, review, block, reopen, release or drop")
         return f"{task.id} is now {task.status}"
 
     return _guard(run)
@@ -207,7 +234,9 @@ def note_add(
         event = team_service.add_note(
             text, session_ref=me, task_ref=task, to_role=to_role, kind=kind
         )
-        return f"shared ({event.kind}) as event seq {event.seq}"
+        # The receipt names the board (project) that recorded the event, so a
+        # remote agent can detect a write that landed somewhere unexpected.
+        return f"shared ({event.kind}) as event seq {event.seq} on board {event.project_id}"
 
     return _guard(run)
 
@@ -269,7 +298,9 @@ def serve_token() -> str:
 
 def build_server() -> FastMCP:
     """A FastMCP server exposing the orchestrator tools."""
+    from mcp import types
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp.exceptions import ToolError
 
     server = FastMCP(
         "aisquare-team",
@@ -282,12 +313,119 @@ def build_server() -> FastMCP:
     )
     for tool in (team_board, task_add, task_next, task_update, note_add, team_log, recall):
         server.add_tool(tool)
+
+    async def call_tool_with_exact_errors(
+        name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any] | CallToolResult:
+        """FastMCP's tool dispatch, minus its message-mangling exception wrap.
+
+        The SDK's ``Tool.run`` folds every exception — ``ToolError`` included —
+        into ``ToolError("Error executing tool <name>: <msg>")``, so the wording
+        a failing tool chose would reach remote agents prefixed and broken.
+        Unwrap our own ``ToolError`` (carried as ``__cause__``) back to its
+        exact message; any other cause is a genuine bug and keeps the SDK's
+        text. Either way the client gets a real error result, not a success.
+        """
+        try:
+            return await server.call_tool(name, arguments)
+        except ToolError as exc:
+            message = str(exc.__cause__) if isinstance(exc.__cause__, ToolError) else str(exc)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=message)], isError=True
+            )
+
+    # Replace the handler FastMCP registered for itself (last registration
+    # wins; validate_input=False matches its own).
+    server._mcp_server.call_tool(validate_input=False)(call_tool_with_exact_errors)
     return server
 
 
-def run_stdio() -> None:
-    """Serve over stdio (Claude Desktop launches and owns the process)."""
-    build_server().run(transport="stdio")
+class _StampedStdin:
+    """Async line source over stdin that stamps a clock on every received line.
+
+    Duck-types the one thing ``mcp.server.stdio.stdio_server`` does with its
+    injectable ``stdin`` — ``async for line in stdin`` — so the idle watchdog
+    can measure time since the LAST message the client actually sent.
+    """
+
+    def __init__(self, inner: Any, last_activity: list[float]) -> None:
+        self._inner = inner
+        self._last = last_activity
+
+    def __aiter__(self) -> _StampedStdin:
+        return self
+
+    async def __anext__(self) -> str:
+        line = cast(str, await self._inner.readline())
+        if not line:  # EOF — the immediate-exit path, untouched by the deadline
+            raise StopAsyncIteration
+        self._last[0] = time.monotonic()
+        return line
+
+
+async def _serve_stdio_until_idle(server: FastMCP, close_after: int) -> None:
+    """Run the stdio transport with an idle deadline (#19).
+
+    The deadline counts seconds since the last inbound client message; any
+    protocol traffic (handshake included) resets it. A busy server never
+    exits; an abandoned one — including a client killed mid-handshake with
+    the pipe write end still open, so EOF never comes — always does.
+    """
+    from io import TextIOWrapper
+
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    last_activity = [time.monotonic()]
+    wrapped = anyio.wrap_file(TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace"))
+    stdin = _StampedStdin(wrapped, last_activity)
+
+    async def watchdog() -> None:
+        interval = max(0.2, min(2.0, close_after / 4))
+        while True:
+            await anyio.sleep(interval)
+            if time.monotonic() - last_activity[0] < close_after:
+                continue
+            # stdout is the protocol channel: announce on stderr only. Then
+            # os._exit, deliberately: the pending readline sits in a blocked
+            # (non-daemon) worker thread that a never-EOF pipe can never
+            # unblock — a normal return would hang the interpreter on that
+            # thread's join and reintroduce the orphan this deadline retires.
+            sys.stderr.write(
+                f"aisquare serve --stdio: no client messages for {close_after}s — "
+                "closing (idle deadline; --close-after 0 disables)\n"
+            )
+            sys.stderr.flush()
+            os._exit(0)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(watchdog)
+        # Mirrors FastMCP.run_stdio_async, which offers no seam to inject the
+        # activity-stamping stdin — the public stdio_server(stdin=...) does.
+        async with stdio_server(stdin=cast(Any, stdin)) as (read_stream, write_stream):
+            await server._mcp_server.run(
+                read_stream,
+                write_stream,
+                server._mcp_server.create_initialization_options(),
+            )
+        tg.cancel_scope.cancel()  # EOF: stop the watchdog, exit normally
+
+
+def run_stdio(*, close_after: int = DEFAULT_CLOSE_AFTER) -> None:
+    """Serve over stdio (Claude Desktop launches and owns the process).
+
+    ``close_after`` is the idle deadline in seconds — time since the last
+    client message — after which the server exits 0 on its own (#19).
+    ``0`` disables it for deliberately persistent clients. No process
+    management anywhere: the daemon minds only its own clock.
+    """
+    server = build_server()
+    if close_after <= 0:
+        server.run(transport="stdio")
+        return
+    import anyio
+
+    anyio.run(_serve_stdio_until_idle, server, close_after)
 
 
 class _BearerGuard:

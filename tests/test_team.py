@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core.ids import new_task_id
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamSession, TeamTask
 
 PLANNER = "aaaa1111-0000-0000-0000-000000000000"
@@ -51,6 +51,18 @@ def _task(project_id: str, title: str, key: str) -> TeamTask:
         created_at=now,
         updated_at=now,
     )
+
+
+def _stored_session(store: ContextStore, ref: str) -> TeamSession:
+    session = store.get_session(ref)
+    assert session is not None
+    return session
+
+
+def _stored_task(store: ContextStore, ref: str) -> TeamTask:
+    task = store.get_task(ref)
+    assert task is not None
+    return task
 
 
 # --- store primitives ---------------------------------------------------------
@@ -157,9 +169,9 @@ def test_prune_retires_ghosts_and_frees_their_claims(work_dir: Path) -> None:
     assert [entry.id for entry in report.pruned] == [CODER]  # only the ghost
     assert report.released_total == 1
     with store_session() as store:
-        assert store.get_session(CODER).ended_at is not None  # ghost retired
-        assert store.get_session(PLANNER).ended_at is None  # warm session spared
-        freed = store.get_task(task.id)
+        assert _stored_session(store, CODER).ended_at is not None  # ghost retired
+        assert _stored_session(store, PLANNER).ended_at is None  # warm session spared
+        freed = _stored_task(store, task.id)
         assert freed.status == "todo" and freed.claimed_by is None  # claim back in the pool
 
 
@@ -175,7 +187,7 @@ def test_prune_dry_run_reports_without_ending_anything(work_dir: Path) -> None:
 
     assert report.dry_run and [entry.id for entry in report.pruned] == [CODER]
     with store_session() as store:
-        assert store.get_session(CODER).ended_at is None  # untouched
+        assert _stored_session(store, CODER).ended_at is None  # untouched
 
 
 def test_prune_keep_spares_a_session(work_dir: Path) -> None:
@@ -191,8 +203,8 @@ def test_prune_keep_spares_a_session(work_dir: Path) -> None:
 
     assert [entry.id for entry in report.pruned] == [CODER]
     with store_session() as store:
-        assert store.get_session(PLANNER).ended_at is None  # explicitly kept
-        assert store.get_session(CODER).ended_at is not None
+        assert _stored_session(store, PLANNER).ended_at is None  # explicitly kept
+        assert _stored_session(store, CODER).ended_at is not None
 
 
 # --- hooks: activation, board, delta, end --------------------------------------

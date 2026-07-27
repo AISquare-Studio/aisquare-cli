@@ -137,11 +137,77 @@ if you prefer it, and is what you need when launching an agent other than
 Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:
 
-- **planner** — turns your intent into tasks on the shared board
-- **coder** — loops `task next --claim` → work → `task review`
-- **runner** — verifies reviewed work → `task done`, or `task reopen
-  --reason "what failed"` — and the feedback rides back to whichever coder
-  picks the task up next
+- **planner** — turns your intent into contract-carrying tasks on the shared
+  board (objective, why, acceptance criteria, boundaries)
+- **coder** — loops `task next --claim` → work → `task review`; blocks
+  instead of guessing when a task has no usable contract
+- **runner** — the adversarial verifier: runs the full check the acceptance
+  criteria name, tries to make the change fail, then `task done` with
+  evidence or `task reopen --reason "what failed"` — and the feedback rides
+  back to whichever coder picks the task up next
+- **validator** — gates the assembled deliverable once, before handoff
+  (final accountability review, severity-ordered findings)
+
+### The model harness: each role on the right model
+
+Roles are tiered onto a model *ladder*, strongest first, with availability
+verified and automatic fallback — planner/validator want `fable`
+(enterprise) and fall back to `opus`, then `sonnet`, when the account
+doesn't serve it; coder/runner run on `sonnet`, the measured sweet spot for
+agentic work. Launch a role through the harness and it resolves the ladder
+for you:
+
+```sh
+aisquare team spawn planner            # prints: AISQUARE_ROLE=planner claude --model fable --effort high
+aisquare team spawn coder --exec       # or replace this terminal with the session
+aisquare team harness                  # the whole role→model matrix + how it resolves now
+```
+
+Availability is *probed*, never assumed — `claude --model` silently
+substitutes the default when a known model isn't available to the account,
+so the harness verifies the reply's `modelUsage` before trusting a rung, and
+caches that verdict per account for a day (`--refresh` re-checks after an
+entitlement changes). The probe runs isolated: it never executes the current
+repo's hooks or MCP servers, and never joins the board.
+
+Resolution is fail-open and, deliberately, only *demotes on proof*: a
+genuine substitution walks down the ladder, while an outage, an expired
+login, or an unrecognised reply keeps the requested model and labels the pick
+`[unverified]` rather than quietly downgrading your planner. Nothing here
+ever blocks a launch. Pin a role outright with `AISQUARE_MODEL_<ROLE>`
+(works for custom roles too); disable probes with `AISQUARE_HARNESS_PROBE=0`.
+
+**Effort is dynamic, not frozen.** `high` is the base — the documented default
+for most work — and each role carries a predefined *offset* rather than a
+hardcoded level, so the shape holds wherever you set the base:
+
+| base | planner / coder / runner | validator (+1) |
+| --- | --- | --- |
+| `low` | low | medium |
+| `high` *(default)* | high | xhigh |
+| `xhigh` | xhigh | max |
+
+The offset exists for one reason: the gate has to outrank the work it checks.
+A flat override that dropped everything to `low` would leave the validator
+weaker than the coder whose output it reviews, which is not a gate at all.
+
+The base comes from, in order: `AISQUARE_EFFORT` → `CLAUDE_EFFORT` (what your
+own Claude session is running at, which Claude Code exports) → `high`. So
+raising your session to xhigh raises the fleet you spawn from it, with nothing
+to configure. Override per launch with `aisquare team spawn coder --effort
+xhigh`, or pin one role absolutely with `AISQUARE_EFFORT_<ROLE>` — both skip
+the offset, because you named the level yourself. `ultracode` is accepted and
+ranks as xhigh (it is xhigh plus automatic workflow orchestration). An
+unusable value falls back to the base rather than being passed to the CLI,
+which would silently ignore it. `aisquare team harness` prints the live base
+and every derived level.
+
+Sessions report their model back to the board, which flags any session
+running off its role's ladder (`⚠ off-ladder`). That signal is advisory: the
+model field is optional in Claude Code's hook payload and absent on some
+surfaces (MCP teammates have none), and an in-session `/model` switch isn't
+re-reported — so a missing chip means *not reported*, never *wrong*. Tiering
+is enforced at launch, not policed in the store.
 
 On every prompt, each session receives a compact delta of what teammates did
 since its last turn. Nothing needs forwarding; the coordination is the
@@ -292,6 +358,10 @@ Orchestration has no config files — a handful of env knobs:
 | `AISQUARE_TEAM_HUB` | point sessions from several repos at one shared board |
 | `AISQUARE_TEAM_DELTA=0` | mute per-prompt teammate deltas for a session |
 | `AISQUARE_TEAM_LEASE_MIN` | task-claim lease in minutes (default 120) |
+| `AISQUARE_MODEL_<ROLE>` | pin a role's model outright (skips the harness ladder) |
+| `AISQUARE_EFFORT` | base effort for spawned roles (default `high`, else inherits `CLAUDE_EFFORT`) |
+| `AISQUARE_EFFORT_<ROLE>` | pin one role's effort absolutely (skips the role offset) |
+| `AISQUARE_HARNESS_PROBE=0` | never probe model availability (ladders resolve optimistically) |
 | `AISQUARE_BRAIN=0` | disable the long-term-memory layer |
 | `AISQUARE_BRAIN_EMBED=1` | embed distilled pages for semantic recall (needs `OPENAI_API_KEY`; set before the first distill) |
 | `AISQUARE_BRAIN_EMBED_MODEL` | embedding model (default `openai:text-embedding-3-large`) |
@@ -388,6 +458,8 @@ aisquare
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
+│                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
+│                                 [--effort LEVEL] · harness
 ├── task            add · list · show · next [--role R] [--status S] [--claim]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])

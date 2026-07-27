@@ -36,6 +36,23 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_BRAIN",
         "AISQUARE_BRAIN_EMBED",
         "AISQUARE_BRAIN_EMBED_MODEL",
+        "AISQUARE_HARNESS_PROBE",
+        "AISQUARE_EFFORT",
+        "AISQUARE_EFFORT_PLANNER",
+        "AISQUARE_EFFORT_CODER",
+        "AISQUARE_EFFORT_RUNNER",
+        "AISQUARE_EFFORT_VALIDATOR",
+        "CLAUDE_EFFORT",
+        "AISQUARE_MODEL_PLANNER",
+        "AISQUARE_MODEL_CODER",
+        "AISQUARE_MODEL_RUNNER",
+        "AISQUARE_MODEL_VALIDATOR",
+        "ANTHROPIC_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     ):
         monkeypatch.delenv(knob, raising=False)
     return home
@@ -81,3 +98,13 @@ def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
 def runner() -> CliRunner:
     """A Click test runner for invoking the Typer app."""
     return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def no_model_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable harness availability probes by default so tests never shell out.
+
+    Ladder resolution degrades to "optimistic" (pick the head rung unprobed).
+    Tests that exercise probing override ``harness.probe_model`` with a fake.
+    """
+    monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")

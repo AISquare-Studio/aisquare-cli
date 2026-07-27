@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 from rich.text import Text
 
 from aisquare.cli.common import local_time
-from aisquare.core import paths
+from aisquare.core import harness, paths
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.store import unmet_needs
 from aisquare.models import TeamEvent, TeamSession, TeamTask
@@ -152,6 +152,10 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         # Only meaningful once the board spans several accounts.
         if label and accounts > 1:
             text.append(f"  {label}", style="cyan dim")
+        if session.model:
+            text.append(f"  {session.model}", style="dim cyan")
+            if harness.model_mismatch(session.role, session.model):
+                text.append("  ⚠ off-ladder", style="bold yellow")
         text.append(f"  {minutes}m", style="dim")
         if minutes > 30:
             text.append("  (stale)", style="red dim")

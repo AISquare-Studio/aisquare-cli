@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import brain, orchestrator
+from aisquare.core import brain, harness, orchestrator
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
@@ -966,6 +966,8 @@ def hook_session_start(
     source: str | None,
     *,
     transcript_path: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> str:
     """Register this session with the orchestrator and return the board injection.
 
@@ -984,6 +986,10 @@ def hook_session_start(
         now = _now()
         # Computed before upsert_session(), which overwrites transcript_path.
         collision = _shared_row_banner(known, transcript_path, now)
+        # Self-reported by the payload — validated before it can reach any
+        # other session's injected context.
+        model = harness.clean_model_id(model)
+        effort = harness.clean_effort(effort)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -994,6 +1000,8 @@ def hook_session_start(
                 cursor=store.latest_seq(project.id),
                 transcript_path=transcript_path,
                 account=session_account(transcript_path),
+                model=model,
+                effort=effort,
             )
         )
         if role is not None and known is not None and known.role != role:
@@ -1010,7 +1018,12 @@ def hook_session_start(
 
 
 def hook_prompt_heartbeat(
-    session_id: str, cwd: Path | None, *, transcript_path: str | None = None
+    session_id: str,
+    cwd: Path | None,
+    *,
+    transcript_path: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> str:
     """Heartbeat on prompt submit; returns the teammate delta to inject (or '').
 
@@ -1038,6 +1051,8 @@ def hook_prompt_heartbeat(
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
                     account=session_account(transcript_path),
+                    model=harness.clean_model_id(model),
+                    effort=harness.clean_effort(effort),
                 )
             )
             return _render_board(
@@ -1309,6 +1324,11 @@ def _render_board(
             # Only worth the noise once several accounts are actually in play.
             if label and accounts > 1:
                 parts.append(f"[{label}]")
+            if session.model:
+                parts.append(f"[{session.model}]")
+                mismatch = harness.model_mismatch(session.role, session.model)
+                if mismatch:
+                    parts.append("⚠ off-ladder")
             if session.focus:
                 parts.append(f"— focus: {session.focus}")
             parts.append(f"— {_age(session.last_seen_at, now)} ago")
@@ -1351,30 +1371,12 @@ def _render_board(
 
 
 def _role_cycle(me: TeamSession) -> list[str]:
-    """The standing work cycle for a role — injected so nobody has to paste it."""
-    sid = short_id(me.id)
-    if me.role == "planner":
-        return [
-            "Your standing cycle (planner): keep the board stocked — turn findings and",
-            'requests into `aisquare task add "<title>" --role coder|runner --detail "…"`',
-            "(re-emitting is safe). Record choices:",
-            f'`aisquare note "…" --kind decision --as {sid}`.',
-        ]
-    if me.role == "coder":
-        return [
-            f"Your standing cycle (coder): `aisquare task next --role coder --claim --as {sid}`;",
-            "if nothing is available, tell the user and stop. Otherwise do the work in the",
-            f'task\'s repo, then `aisquare task review <id> --note "<how to verify>" --as {sid}`',
-            "and pick up the next one.",
-        ]
-    if me.role == "runner":
-        return [
-            "Your standing cycle (runner): `aisquare task next --status review`; if nothing,",
-            "tell the user and stop. Otherwise verify the change end-to-end by actually",
-            f'running it, then `aisquare task done <id> --note "verified: …" --as {sid}` or',
-            f'`aisquare task reopen <id> --reason "<what failed + repro>" --as {sid}`. Repeat.',
-        ]
-    return []
+    """The standing work cycle for a role — injected so nobody has to paste it.
+
+    The cycles themselves live in :mod:`aisquare.core.harness` (one source of
+    truth for the whole harness: profiles, ladders, and briefings).
+    """
+    return harness.role_cycle(me.role, short_id(me.id))
 
 
 def event_line(event: TeamEvent, roles: dict[str, str]) -> str:

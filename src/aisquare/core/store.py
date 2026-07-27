@@ -209,6 +209,17 @@ _SCHEMA_V9 = """
 ALTER TABLE team_session ADD COLUMN account TEXT;
 """
 
+# v10: the harness captures which model (and effort) each session actually
+# runs on — from the SessionStart hook payload, where both fields are optional
+# — so the board can flag a session whose model falls outside its role's
+# ladder. (v10, not v9 as authored on the PR branch: the train's v9 is the
+# account column above, and a db that ran either migration must still get the
+# other's columns.)
+_SCHEMA_V10 = """
+ALTER TABLE team_session ADD COLUMN model TEXT;
+ALTER TABLE team_session ADD COLUMN effort TEXT;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -220,6 +231,7 @@ _MIGRATIONS = (
     _SCHEMA_V7,
     _SCHEMA_V8,
     _SCHEMA_V9,
+    _SCHEMA_V10,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -227,7 +239,7 @@ _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, de
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account"
+    "transcript_path, account, model, effort"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -386,6 +398,8 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         state=row["state"],
         transcript_path=row["transcript_path"],
         account=row["account"],
+        model=row["model"],
+        effort=row["effort"],
     )
 
 
@@ -670,12 +684,14 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
-            "account = COALESCE(excluded.account, account)",
+            "account = COALESCE(excluded.account, account), "
+            "model = COALESCE(excluded.model, model), "
+            "effort = COALESCE(excluded.effort, effort)",
             (
                 session.id,
                 session.project_id,
@@ -689,6 +705,8 @@ class SqliteStore:
                 session.state,
                 session.transcript_path,
                 session.account,
+                session.model,
+                session.effort,
             ),
         )
         self._conn.commit()

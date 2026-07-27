@@ -43,6 +43,15 @@ def _str(payload: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _effort_level(payload: dict[str, Any]) -> str | None:
+    """The ``effort.level`` field of a hook payload (an object; optional)."""
+    effort = payload.get("effort")
+    if not isinstance(effort, dict):
+        return None
+    level = effort.get("level")
+    return level if isinstance(level, str) and level else None
+
+
 @app.command("session-start")
 def session_start() -> None:
     """Emit aisquare context for a starting session (stdout becomes context)."""
@@ -53,6 +62,8 @@ def session_start() -> None:
             session_id=_str(payload, "session_id"),
             source=_str(payload, "source"),
             transcript_path=_str(payload, "transcript_path"),
+            model=_str(payload, "model"),
+            effort=_effort_level(payload),
         )
     except Exception:  # never disrupt the agent
         return
@@ -71,6 +82,8 @@ def user_prompt_submit() -> None:
             _cwd(payload),
             session_id=_str(payload, "session_id"),
             transcript_path=_str(payload, "transcript_path"),
+            model=_str(payload, "model"),
+            effort=_effort_level(payload),
         )
     except Exception:  # never disrupt the agent
         return

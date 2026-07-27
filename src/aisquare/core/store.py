@@ -202,6 +202,14 @@ DELETE FROM team_session WHERE id LIKE 'mcp:%' AND substr(id, 5) NOT LIKE '%:%';
 """
 
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
+# v9: the harness captures which model (and effort) each session actually runs
+# on — from the SessionStart hook payload, where both fields are optional — so
+# the board can flag a session whose model falls outside its role's ladder.
+_SCHEMA_V9 = """
+ALTER TABLE team_session ADD COLUMN model TEXT;
+ALTER TABLE team_session ADD COLUMN effort TEXT;
+"""
+
 _MIGRATIONS = (
     _SCHEMA_V1,
     _SCHEMA_V2,
@@ -211,6 +219,7 @@ _MIGRATIONS = (
     _SCHEMA_V6,
     _SCHEMA_V7,
     _SCHEMA_V8,
+    _SCHEMA_V9,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -218,7 +227,7 @@ _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, de
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path"
+    "transcript_path, model, effort"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -358,6 +367,8 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         cursor=row["cursor"],
         state=row["state"],
         transcript_path=row["transcript_path"],
+        model=row["model"],
+        effort=row["effort"],
     )
 
 
@@ -642,11 +653,13 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
-            "transcript_path = COALESCE(excluded.transcript_path, transcript_path)",
+            "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
+            "model = COALESCE(excluded.model, model), "
+            "effort = COALESCE(excluded.effort, effort)",
             (
                 session.id,
                 session.project_id,
@@ -659,6 +672,8 @@ class SqliteStore:
                 session.cursor,
                 session.state,
                 session.transcript_path,
+                session.model,
+                session.effort,
             ),
         )
         self._conn.commit()

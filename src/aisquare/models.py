@@ -158,6 +158,10 @@ class TeamSession(BaseModel):
     """Live activity: working (mid-turn), waiting (wants input) or attention."""
     transcript_path: str | None = None
     """The session's Claude Code transcript (JSONL), from hook payloads."""
+    model: str | None = None
+    """The model id the session reported at start (optional in hook payloads)."""
+    effort: str | None = None
+    """The effort level the session reported at start (optional in hook payloads)."""
 
 
 class TeamTask(BaseModel):

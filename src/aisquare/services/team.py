@@ -511,6 +511,57 @@ def recall(query: str, cwd: Path | None = None) -> str | None:
 # --- hook integration ---------------------------------------------------------
 
 
+def _shared_row_banner(
+    known: TeamSession | None, transcript_path: str | None, now: datetime
+) -> str:
+    """Warn when a SECOND live agent is occupying one session row.
+
+    ``team_session.transcript_path`` is the only per-agent value the row carries,
+    and ``upsert_session`` overwrites it last-writer-wins
+    (``transcript_path = COALESCE(excluded.transcript_path, transcript_path)``).
+    So two agents handed the same ``session_id`` merge into one identity leaving
+    no trace: the board lists one teammate, both agents read the same short id as
+    their own, and every event either writes is stamped with it.
+
+    That is not cosmetic. Attribution becomes unrecoverable -- in one observed
+    shift it sent teammates to the wrong agent three times for follow-up on
+    findings the other had made. And while ``claim_task`` is genuinely atomic (a
+    live lease cannot be stolen), the board renders ``[doing @<id>]``, which the
+    twin reads as "I claimed this" -- so the claim protocol's whole purpose,
+    letting a teammate see a task is taken, stops applying between exactly the two
+    agents that most need separating.
+
+    WARN, NEVER REASSIGN. The CLI cannot know which occupant is "real", and
+    guessing would be worse than reporting. This is the same posture ``_board``
+    already takes on a cwd that disagrees with the session's board: a warning,
+    never a reroute.
+
+    Silent unless BOTH transcripts are known and the row is FRESH. A differing
+    transcript on a stale row is an ordinary resume (same id, new conversation),
+    not a collision, and warning on it would train people to ignore the banner.
+    """
+    if known is None or not transcript_path or not known.transcript_path:
+        return ""
+    if known.transcript_path == transcript_path:
+        return ""
+    if now - known.last_seen_at > _STALE_AFTER:
+        return ""
+    return (
+        "<aisquare-session-collision>\n"
+        f"WARNING: session {short_id(known.id)} is being written by TWO live agents.\n"
+        "This row was last heartbeat from a different transcript, within the freshness\n"
+        "window, so another agent is acting as this same board identity right now.\n"
+        f"  stored : {known.transcript_path}\n"
+        f"  yours  : {transcript_path}\n"
+        "CONSEQUENCES while this holds: notes and task claims from both agents are\n"
+        "recorded under this one id and cannot be told apart afterwards; a task shown\n"
+        "as claimed by you may have been claimed by the other agent. Coordinate in\n"
+        "prose and state which agent you are -- the claim protocol cannot arbitrate\n"
+        "between you. Nothing has been reassigned or rerouted.\n"
+        "</aisquare-session-collision>\n\n"
+    )
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -533,6 +584,8 @@ def hook_session_start(
             return ""
         known = store.get_session(session_id)
         now = _now()
+        # Computed before upsert_session(), which overwrites transcript_path.
+        collision = _shared_row_banner(known, transcript_path, now)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -548,7 +601,7 @@ def hook_session_start(
             session = store.update_session(session.id, role=role)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return _render_board(
+        return collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
@@ -594,6 +647,12 @@ def hook_prompt_heartbeat(
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
             )
+        # Same check as session_start, on the path that actually runs every turn.
+        # It must survive the empty-delta early return below: a collision warning
+        # that only rides along with unrelated teammate traffic would go unseen for
+        # exactly as long as the two agents were quiet, which is when the
+        # interleaved claims do their damage.
+        collision = _shared_row_banner(session, transcript_path, _now())
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
         raw = store.events_since(
@@ -607,12 +666,12 @@ def hook_prompt_heartbeat(
         if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
-            return ""
+            return collision
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
-        return _render_delta(shown, roles, truncated=truncated)
+        return collision + _render_delta(shown, roles, truncated=truncated)
 
 
 def hook_stop(session_id: str, cwd: Path | None) -> None:

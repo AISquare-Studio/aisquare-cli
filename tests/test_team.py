@@ -1303,6 +1303,8 @@ def test_idempotent_dup_add_reports_delivery_unconfirmed_when_row_vanishes(
     assert payload["error"] == "delivery_unconfirmed"
     assert payload["ref"].startswith("tsk_")
     assert "✓" not in dup.output + dup.stderr
+
+
 # --- shared session row (issue #37) -------------------------------------------
 
 
@@ -1382,12 +1384,21 @@ def test_a_stale_row_with_a_new_transcript_is_a_resume_not_a_collision(work_dir:
     with store_session() as store:
         session = store.get_session(sid)
         assert session is not None
-        stale = datetime.now(tz=UTC) - timedelta(minutes=31)
-        # Reaching into the connection to AGE the row is the point of this test.
-        store._conn.execute(
-            "UPDATE team_session SET last_seen_at = ? WHERE id = ?", (stale.isoformat(), sid)
+        # Age the row through the public upsert rather than reaching into the
+        # connection: ON CONFLICT sets last_seen_at from the incoming row, so this
+        # is the supported way to say "this session was last seen long ago".
+        # Same transcript as the original, so the staleness is the only variable.
+        store.upsert_session(
+            TeamSession(
+                id=sid,
+                project_id=session.project_id,
+                role=session.role,
+                started_at=session.started_at,
+                last_seen_at=datetime.now(tz=UTC) - timedelta(minutes=31),
+                cursor=session.cursor,
+                transcript_path="/transcripts/old.jsonl",
+            )
         )
-        store._conn.commit()
 
     resumed = _start_tp(runner, sid, work_dir, "/transcripts/new.jsonl")
     assert "session-collision" not in resumed.output

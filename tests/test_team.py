@@ -1303,3 +1303,107 @@ def test_idempotent_dup_add_reports_delivery_unconfirmed_when_row_vanishes(
     assert payload["error"] == "delivery_unconfirmed"
     assert payload["ref"].startswith("tsk_")
     assert "✓" not in dup.output + dup.stderr
+# --- shared session row (issue #37) -------------------------------------------
+
+
+def _start_tp(runner: CliRunner, session_id: str, work: Path, transcript: str) -> Any:
+    payload = json.dumps(
+        {
+            "cwd": str(work),
+            "session_id": session_id,
+            "source": "startup",
+            "transcript_path": transcript,
+        }
+    )
+    return runner.invoke(app, ["hook", "session-start"], input=payload)
+
+
+def _prompt_tp(runner: CliRunner, session_id: str, work: Path, transcript: str) -> Any:
+    payload = json.dumps(
+        {
+            "cwd": str(work),
+            "session_id": session_id,
+            "prompt": "go",
+            "transcript_path": transcript,
+        }
+    )
+    return runner.invoke(app, ["hook", "user-prompt-submit"], input=payload)
+
+
+def test_two_agents_on_one_session_row_are_warned(work_dir: Path) -> None:
+    """The collision issue #37 was filed for: two live agents, one identity.
+
+    Without this, both agents read the same short id as their own, every event
+    either writes is stamped with it, and attribution is unrecoverable
+    afterwards. transcript_path is the only per-agent value the row carries and
+    upsert_session overwrites it last-writer-wins, so nothing else can tell.
+    """
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "5c7beebf-a5c2-4ae0-a6b4-342f284947cd"
+
+    first = _start_tp(runner, sid, work_dir, "/transcripts/agent-a.jsonl")
+    assert "session-collision" not in first.output, "the first agent has nobody to collide with"
+
+    second = _start_tp(runner, sid, work_dir, "/transcripts/agent-B.jsonl")
+    assert "aisquare-session-collision" in second.output
+    assert "/transcripts/agent-a.jsonl" in second.output, "must name the OTHER transcript"
+    assert "/transcripts/agent-B.jsonl" in second.output, "and this one, so they can be told apart"
+    assert "Nothing has been reassigned" in second.output, "warn, never reroute"
+
+
+def test_the_same_agent_reconnecting_is_not_a_collision(work_dir: Path) -> None:
+    """Same id, same transcript: a /clear or resume, not a second agent.
+
+    A banner here would fire on ordinary restarts and get tuned out, which
+    costs more than the warning is worth.
+    """
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "11111111-2222-3333-4444-555555555555"
+
+    _start_tp(runner, sid, work_dir, "/transcripts/same.jsonl")
+    again = _start_tp(runner, sid, work_dir, "/transcripts/same.jsonl")
+    assert "session-collision" not in again.output
+
+
+def test_a_stale_row_with_a_new_transcript_is_a_resume_not_a_collision(work_dir: Path) -> None:
+    """The false-positive guard, and the reason the check is time-boxed.
+
+    Reusing a session id days later with a fresh conversation is normal. Only a
+    row heartbeat from a DIFFERENT transcript INSIDE the freshness window means
+    another agent is live on it right now.
+    """
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "99999999-8888-7777-6666-555555555555"
+    _start_tp(runner, sid, work_dir, "/transcripts/old.jsonl")
+
+    with store_session() as store:
+        session = store.get_session(sid)
+        assert session is not None
+        stale = datetime.now(tz=UTC) - timedelta(minutes=31)
+        # Reaching into the connection to AGE the row is the point of this test.
+        store._conn.execute(
+            "UPDATE team_session SET last_seen_at = ? WHERE id = ?", (stale.isoformat(), sid)
+        )
+        store._conn.commit()
+
+    resumed = _start_tp(runner, sid, work_dir, "/transcripts/new.jsonl")
+    assert "session-collision" not in resumed.output
+
+
+def test_the_warning_survives_an_empty_teammate_delta(work_dir: Path) -> None:
+    """A heartbeat with no teammate traffic returns "" -- the banner must not go with it.
+
+    The quiet case is exactly when interleaved claims do their damage, so a
+    warning that only rides along with unrelated delta traffic would be missing
+    for as long as it mattered most.
+    """
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "abcdabcd-1111-2222-3333-444444444444"
+    _start_tp(runner, sid, work_dir, "/transcripts/agent-a.jsonl")
+
+    quiet = _prompt_tp(runner, sid, work_dir, "/transcripts/agent-B.jsonl")
+    assert "aisquare-session-collision" in quiet.output

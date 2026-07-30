@@ -30,7 +30,11 @@ dependencies = [
 
 [project.optional-dependencies]
 serve = [
-  "mcp>=1.10",
+  # <2 is load-bearing, not caution: mcp 2.0.0 REMOVED mcp.server.fastmcp,
+  # which services/mcp_server.py imports. An unpinned resolve picks 2.x and
+  # mypy fails with "Cannot find implementation or library stub for module
+  # named mcp.server.fastmcp" -- a red typecheck job on a tree nobody touched.
+  "mcp>=1.10,<2",
 ]
 tui = [
   "textual>=1.0",
@@ -39,7 +43,11 @@ dev = [
   "pytest>=9.1.1",
   "mypy>=1.10",
   "ruff>=0.5",
-  "mcp>=1.10",
+  # <2 is load-bearing, not caution: mcp 2.0.0 REMOVED mcp.server.fastmcp,
+  # which services/mcp_server.py imports. An unpinned resolve picks 2.x and
+  # mypy fails with "Cannot find implementation or library stub for module
+  # named mcp.server.fastmcp" -- a red typecheck job on a tree nobody touched.
+  "mcp>=1.10,<2",
   "textual>=1.0",
 ]
 

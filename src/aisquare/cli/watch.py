@@ -140,6 +140,7 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         text.append("(nobody here yet)", style="dim")
         return text
     now = datetime.now(tz=live[0].last_seen_at.tzinfo)
+    accounts = len({s.account for s in live if s.account})
     for session in live:
         emoji = _ROLE_EMOJI.get(session.role, "🤖")
         style = _ROLE_STYLE.get(session.role, "white")
@@ -147,6 +148,10 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
         text.append(f"{emoji} {session.role}·{team_service.short_id(session.id)}", style=style)
         chip, chip_style = _STATE_CHIP.get(session.state, (session.state, "dim"))
         text.append(f"  {chip}", style=chip_style)
+        label = team_service.account_label(session.account)
+        # Only meaningful once the board spans several accounts.
+        if label and accounts > 1:
+            text.append(f"  {label}", style="cyan dim")
         text.append(f"  {minutes}m", style="dim")
         if minutes > 30:
             text.append("  (stale)", style="red dim")

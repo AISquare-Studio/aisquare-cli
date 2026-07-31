@@ -22,10 +22,9 @@ branch is the gate:
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
-from aisquare.core.workspace import find_project_root, project_id_for
+from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
 from aisquare.models import ProjectInfo
 
 _OFF_VALUES = {"0", "false", "no", "off"}
@@ -63,35 +62,6 @@ def lease_minutes() -> int:
     return value if value > 0 else DEFAULT_LEASE_MINUTES
 
 
-def _git_common_root(start: Path) -> Path | None:
-    """The principal repository root for ``start``, resolving worktrees.
-
-    Returns ``None`` when git is unavailable or ``start`` is not in a work
-    tree — callers fall back to the marker-based project root.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    common = result.stdout.strip()
-    if not common:
-        return None
-    common_dir = Path(common)
-    if not common_dir.is_absolute():
-        common_dir = (start / common_dir).resolve()
-    # <principal>/.git → <principal>; a bare repo's common dir is the repo itself.
-    root = common_dir.parent if common_dir.name == ".git" else common_dir
-    return root.resolve()
-
-
 def team_project(cwd: Path | None = None) -> ProjectInfo:
     """The project this directory's team traffic belongs to.
 
@@ -106,5 +76,5 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
         root = Path(hub).expanduser().resolve()
         return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     start = (cwd or Path.cwd()).resolve()
-    root = _git_common_root(start) or find_project_root(start)
+    root = git_common_root(start) or find_project_root(start)
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

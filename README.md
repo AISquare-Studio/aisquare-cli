@@ -72,7 +72,12 @@ aisquare log                       # your captured prompt history, per project
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
 context, snapshots, prompt history, team state — scopes to it consistently.
-Worktrees resolve to their principal repository automatically.
+
+**Git worktrees resolve to their principal repository**, so several feature
+branches checked out side by side all share one context pool, one snapshot and
+one board. Set a repo's conventions up once and every worktree of it starts
+oriented; identity comes from `git rev-parse --git-common-dir`, not from
+walking up to the nearest marker.
 
 `aisquare project onboard` (also run by `init`) packs the codebase with
 Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
@@ -264,7 +269,21 @@ Orchestration has no config files — a handful of env knobs:
 
 Running several Claude installs for separate rate limits? Connect each
 config dir once: `aisquare agents connect claude-code --config-dir
-~/.claude2`. For executions spanning multiple repositories, set
+~/.claude2`. Each session records **which config dir it runs under**, and the
+board labels sessions with it once more than one account is in play:
+
+```
+sessions:
+  - a1b2c3d4 coder [.claude-account1] — 2m ago
+  - e5f6a7b8 coder [.claude-account2] — 1m ago
+```
+
+So when one account hits its limit you can see exactly which terminals to
+relaunch elsewhere. Because claims are leased and released on `SessionEnd`,
+a killed session hands its task straight back to the pool — relaunching under
+another account picks the work up with full context from the board.
+
+For executions spanning multiple repositories, set
 `AISQUARE_TEAM_HUB=/path/to/hub` in every session; git worktrees already
 share their principal repo's board automatically.
 

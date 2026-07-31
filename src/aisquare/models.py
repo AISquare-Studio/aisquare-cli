@@ -164,6 +164,8 @@ class TeamSession(BaseModel):
     """Live activity: working (mid-turn), waiting (wants input) or attention."""
     transcript_path: str | None = None
     """The session's Claude Code transcript (JSONL), from hook payloads."""
+    account: str | None = None
+    """The agent config dir this session runs under (parallel-account installs)."""
 
 
 class TeamTask(BaseModel):

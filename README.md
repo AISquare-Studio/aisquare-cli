@@ -30,7 +30,20 @@ snapshots use [Repomix](https://github.com/yamadashy/repomix) via Node/`npx`
 when available — `aisquare doctor` tells you if it's missing, and nothing
 breaks without it.
 
-## What you get
+That's the whole setup — you are done. Everything below is reference.
+
+aisquare has **two halves, and they are independent**:
+
+| | What it is | Who it's for |
+| --- | --- | --- |
+| **[Part 1 — Memory](#part-1--memory-start-here)** | Your agent remembers preferences and project conventions, and starts every session oriented. | **Everyone.** Zero extra commands after setup — it just works. |
+| **[Part 2 — Orchestration](#part-2--orchestration-advanced)** | Several agent sessions work one problem as a team, with a shared task board. | Opt-in, per repo. Skip it until you actually want parallel sessions. |
+
+If you only ever read Part 1, you are using aisquare correctly.
+
+---
+
+# Part 1 — Memory (start here)
 
 **Your agent starts every session already oriented.** `agents connect
 claude-code` installs lifecycle hooks into `~/.claude/settings.json` (merged
@@ -45,13 +58,19 @@ over unittest"` persists across every session and every project. Context
 lives in two pools — `user` (follows you everywhere) and `project` (scoped to
 one repo) — full-text searchable, exportable, and injected consistently.
 
-**Your agents can work as a team.** Launch a planner you talk to, coders that
-pull work from a shared task list, and a runner that verifies — each one a
-plain Claude Code session in its own terminal. aisquare coordinates them:
-atomic task claims, dependencies, a review cycle, per-prompt deltas of what
-teammates did, and a live board TUI for you. One Claude account is enough.
+### The five commands that matter
 
-## The memory layer
+```sh
+aisquare remember "prefer pytest over unittest"   # sticks everywhere
+aisquare context add "run make check" --project   # sticks in this repo only
+aisquare context list                             # what's in scope here
+aisquare context search pytest                    # full-text search
+aisquare doctor                                   # is everything wired?
+```
+
+Nothing else in this document is required reading.
+
+## The memory layer in full
 
 ```sh
 aisquare remember "prefer pytest over unittest" --user --tag testing
@@ -81,24 +100,35 @@ cheap thing agents read first), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
 
-## Orchestrate a team of agents
+---
 
-This is the part that changes how you work. Sessions are per **terminal**,
-not per account — a single `claude` install runs the whole team:
+# Part 2 — Orchestration (advanced)
+
+**You do not need this to use aisquare.** Everything above works on its own.
+Read on only when you want several agent sessions working one problem at once.
+
+Sessions are per **terminal**, not per account — a single `claude` install
+runs the whole team:
 
 ```sh
 pipx install 'aisquare-cli[tui]'         # the live board wants the TUI extra
 aisquare agents connect claude-code
 cd your/repo
 
-AISQUARE_ROLE=planner claude             # terminal 1 — you talk to this one
-AISQUARE_ROLE=coder   claude             # terminal 2
-AISQUARE_ROLE=coder   claude             # terminal 3 — as many as you like
-AISQUARE_ROLE=runner  claude             # terminal 4 — verifies the coders' work
+aisquare launch planner                  # terminal 1 — you talk to this one
+aisquare launch coder                    # terminal 2
+aisquare launch coder                    # terminal 3 — as many as you like
+aisquare launch runner                   # terminal 4 — verifies the coders' work
 aisquare board -w                        # terminal 5 — you, watching live
 ```
 
-Launching with `AISQUARE_ROLE` opts the repo in and registers the session.
+`aisquare launch <role>` opts the repo in, registers the session, and hands
+off to `claude` — arguments after the role are forwarded, so `aisquare launch
+coder --model opus` does what it looks like. (The underlying mechanism is the
+`AISQUARE_ROLE` environment variable; `AISQUARE_ROLE=coder claude` still works
+if you prefer it, and is what you need when launching an agent other than
+`claude` without `--command`.)
+
 Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:
 
@@ -272,9 +302,13 @@ aisquare
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
+├── launch <planner|coder|runner> [--command CMD] [… args for the agent]
 ├── serve [--stdio | --port N --bind H] [--show-token]
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```
+
+Everything `aisquare --help` lists is implemented. Roadmap commands are
+registered but hidden until they do something real.
 
 | Global flag | Meaning |
 | --- | --- |
@@ -284,9 +318,13 @@ aisquare
 | `--no-color` | disable coloured output |
 | `--profile NAME` | configuration profile |
 
-You'll spot a few more groups in `--help` — `auth`, `sync`, `connectors`,
-`capture`, `policy` — that's the cloud roadmap (sync across machines,
-managed connectors). Each says so plainly when invoked rather than
+### Roadmap commands
+
+`auth` / `login` / `logout` / `whoami`, `sync`, `connectors`, `capture`,
+`policy` / `enforce`, `open`, `upgrade` and `uninstall` are the cloud roadmap
+(sync across machines, managed connectors). They are **hidden from `--help`**
+so the listed surface is only what actually works, but they still run and
+still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in
 [issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
 

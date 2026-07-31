@@ -141,18 +141,23 @@ def uninstall() -> None:
 
 
 def register(app: typer.Typer) -> None:
-    """Attach the top-level commands to ``app`` in display order."""
+    """Attach the top-level commands to ``app`` in display order.
+
+    Roadmap commands are registered ``hidden=True``: they still run (and still
+    report the not-implemented contract) but stay out of ``--help``, so the
+    listed surface is only what actually works. Un-hide one as it graduates.
+    """
     app.command("init")(init)
     app.command("status")(status)
     app.command("doctor")(doctor)
     app.command("inject")(inject)
     app.command("remember")(remember)
-    app.command("sync")(sync)
+    app.command("sync", hidden=True)(sync)
     app.command("why")(why)
     app.command("log")(log)
-    app.command("open")(open_)
-    app.command("login")(login)
-    app.command("logout")(logout)
-    app.command("whoami")(whoami)
-    app.command("upgrade")(upgrade)
-    app.command("uninstall")(uninstall)
+    app.command("open", hidden=True)(open_)
+    app.command("login", hidden=True)(login)
+    app.command("logout", hidden=True)(logout)
+    app.command("whoami", hidden=True)(whoami)
+    app.command("upgrade", hidden=True)(upgrade)
+    app.command("uninstall", hidden=True)(uninstall)

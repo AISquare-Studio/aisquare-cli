@@ -65,6 +65,18 @@ class DataEnvelope(BaseModel):
     ts: datetime
 
 
+class AgentHookSite(BaseModel):
+    """One config directory aisquare installed an agent's hooks into.
+
+    Parallel agent installs (``CLAUDE_CONFIG_DIR=~/.claude2 claude``, run for
+    separate rate limits) each keep their own ``settings.json``, so "is this
+    agent connected?" has one answer *per directory*, not one per agent.
+    """
+
+    config_dir: Path
+    hooks_installed: bool = False
+
+
 class AgentInfo(BaseModel):
     """A coding agent aisquare knows how to integrate with."""
 
@@ -72,6 +84,8 @@ class AgentInfo(BaseModel):
     detected: bool = False
     config_paths: list[Path] = Field(default_factory=list)
     connected: bool = False
+    sites: list[AgentHookSite] = Field(default_factory=list)
+    """Every config dir this agent was connected in, with that dir's hook health."""
 
 
 class ProjectInfo(BaseModel):

@@ -101,6 +101,39 @@ def test_launch_honours_a_custom_agent_command(
     assert spy["argv"] == ["claude-next"]
 
 
+def test_launch_account_sets_the_config_dir(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], tmp_path: Path
+) -> None:
+    account = tmp_path / ".claude-account1"
+    account.mkdir()
+
+    result = runner.invoke(app, ["launch", "coder", "--account", str(account)])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["CLAUDE_CONFIG_DIR"] == str(account)
+    assert spy["env"]["AISQUARE_ROLE"] == "coder"
+
+
+def test_launch_rejects_a_missing_account_dir(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], tmp_path: Path
+) -> None:
+    # A typo must not silently start a fresh, unauthenticated profile.
+    result = runner.invoke(app, ["launch", "coder", "--account", str(tmp_path / "typo")])
+
+    assert result.exit_code == 1
+    assert "no such config directory" in result.output
+    assert not spy
+
+
+def test_launch_without_account_leaves_the_ambient_config_dir_alone(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/from/the/shell")
+
+    assert runner.invoke(app, ["launch", "coder"]).exit_code == 0
+    assert spy["env"]["CLAUDE_CONFIG_DIR"] == "/from/the/shell"
+
+
 def test_launch_respects_the_master_off_switch(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

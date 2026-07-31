@@ -235,6 +235,7 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     table.add_column("AGENT")
     table.add_column("DETECTED")
     table.add_column("CONNECTED")
+    table.add_column("HOOKS IN")
     table.add_column("CONTEXT")
     for agent in agents:
         context = ", ".join(str(path) for path in agent.config_paths) or "—"
@@ -242,9 +243,27 @@ def emit_agents(agents: list[AgentInfo]) -> None:
             agent.name,
             "yes" if agent.detected else "no",
             "yes" if agent.connected else "no",
+            _hook_sites(agent),
             context,
         )
     stdout_console().print(table)
+
+
+def _hook_sites(agent: AgentInfo) -> str:
+    """One cell summarising where an agent's hooks live and whether they're healthy.
+
+    Parallel installs each own a config dir, so a bare yes/no would hide a dir
+    whose hooks went missing — name the broken ones explicitly.
+    """
+    if not agent.sites:
+        return "—"
+    broken = [site.config_dir for site in agent.sites if not site.hooks_installed]
+    if not broken:
+        if len(agent.sites) == 1:
+            return str(agent.sites[0].config_dir)
+        return f"{len(agent.sites)} dirs, all ok"
+    listed = ", ".join(str(path) for path in broken)
+    return f"{len(agent.sites) - len(broken)}/{len(agent.sites)} ok — missing in {listed}"
 
 
 def emit_connected(connection: AgentConnection) -> None:

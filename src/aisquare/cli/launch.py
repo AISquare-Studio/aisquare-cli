@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -46,11 +47,26 @@ def launch(
         str,
         typer.Option("--command", "-c", help="Agent command to launch.", metavar="CMD"),
     ] = DEFAULT_AGENT,
+    account: Annotated[
+        Path | None,
+        typer.Option(
+            "--account",
+            "-a",
+            help="Claude config directory to run under, e.g. ~/.claude-account1 "
+            "(sets CLAUDE_CONFIG_DIR). Use this for parallel accounts.",
+            metavar="DIR",
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
     Equivalent to ``AISQUARE_ROLE=<role> <command>``, plus role validation and
     an explicit opt-in for the repo. Extra arguments are passed to the agent.
+
+    ``--account`` selects one of several parallel agent installs. People
+    usually reach these through shell aliases (``alias claude1='…'``), which
+    ``--command`` cannot resolve — aliases are not executables — so point at
+    the config directory instead.
     """
     if role not in ROLES:
         fail(
@@ -71,9 +87,21 @@ def launch(
         fail(str(exc), error="team_disabled")
 
     env = {**os.environ, "AISQUARE_ROLE": role}
+    whose = ""
+    if account is not None:
+        resolved = account.expanduser()
+        if not resolved.is_dir():
+            # A typo here would not fail loudly — the agent would just start a
+            # fresh, unauthenticated profile in a directory it creates.
+            fail(
+                f"no such config directory: {resolved}",
+                error="unknown_account",
+            )
+        env["CLAUDE_CONFIG_DIR"] = str(resolved)
+        whose = f" ({resolved.name})"
     argv = [command, *ctx.args]
     stderr_console().print(
-        f"Launching {command} as [bold]{role}[/bold] on the "
+        f"Launching {command}{whose} as [bold]{role}[/bold] on the "
         f"{project.root.name or project.id} board…"
     )
     _exec(binary, argv, env)

@@ -297,10 +297,28 @@ Orchestration has no config files — a handful of env knobs:
 | `AISQUARE_BRAIN_EMBED_MODEL` | embedding model (default `openai:text-embedding-3-large`) |
 | `AISQUARE_HOME` | relocate the whole `~/.aisquare` tree |
 
-Running several Claude installs for separate rate limits? Connect each
-config dir once: `aisquare agents connect claude-code --config-dir
-~/.claude2`. Each session records **which config dir it runs under**, and the
-board labels sessions with it once more than one account is in play:
+### Several accounts, one team
+
+Running parallel Claude installs for separate rate limits? Connect each
+config dir once, then launch roles against them with `--account`:
+
+```sh
+aisquare agents connect claude-code --config-dir ~/.claude-account1
+aisquare agents connect claude-code --config-dir ~/.claude-account2
+
+aisquare launch planner                              # your default account
+aisquare launch coder --account ~/.claude-account1
+aisquare launch coder --account ~/.claude-account2
+```
+
+`--account` sets `CLAUDE_CONFIG_DIR` for the launched session and fails
+loudly on a directory that doesn't exist — a typo would otherwise start a
+fresh, unauthenticated profile. Note that shell aliases (`alias
+claude1='CLAUDE_CONFIG_DIR=… claude'`) can **not** be passed to `--command`:
+aliases aren't executables, so target the config directory instead.
+
+Each session records **which config dir it runs under**, and the board labels
+sessions with it once more than one account is in play:
 
 ```
 sessions:
@@ -312,6 +330,12 @@ So when one account hits its limit you can see exactly which terminals to
 relaunch elsewhere. Because claims are leased and released on `SessionEnd`,
 a killed session hands its task straight back to the pool — relaunching under
 another account picks the work up with full context from the board.
+
+All accounts share one `~/.aisquare` — one context store, one board, one task
+list. Sessions are per **terminal**, not per account, so several accounts
+simply mean several rate-limit pools driving one team. `agents list` and
+`doctor` report every connected directory separately, so a sibling install
+whose hooks went missing is named rather than hidden behind a healthy ✓.
 
 For executions spanning multiple repositories, set
 `AISQUARE_TEAM_HUB=/path/to/hub` in every session; git worktrees already
@@ -369,7 +393,7 @@ aisquare
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
-├── launch <planner|coder|runner> [--command CMD] [… args for the agent]
+├── launch <planner|coder|runner> [--account DIR] [--command CMD] [… agent args]
 ├── serve [--stdio | --port N --bind H] [--show-token]
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```

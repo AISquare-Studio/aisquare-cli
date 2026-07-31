@@ -59,7 +59,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
             added += 1
 
     hooks_installed = agent_core.install_hooks(name, config_dir)
-    agent_core.set_connected(name, True)
+    agent_core.set_connected(name, True, config_dir)
     return AgentConnection(name=name, hooks_installed=hooks_installed, imported=added)
 
 
@@ -73,7 +73,7 @@ def disconnect(name: str, config_dir: Path | None = None) -> bool:
     if agent_core.detect(name, config_dir) is None:
         raise KeyError(name)
     removed = agent_core.remove_hooks(name, config_dir)
-    agent_core.set_connected(name, False)
+    agent_core.set_connected(name, False, config_dir)
     return removed
 
 

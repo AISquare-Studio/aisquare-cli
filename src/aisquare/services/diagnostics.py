@@ -139,17 +139,33 @@ def _check_tiktoken() -> DoctorCheck:
     )
 
 
+_STALE_HOOKS = (
+    "hooks are missing or outdated (older installs lack the Stop/Notification/SessionEnd events)"
+)
+_RECONNECT = "(Re)connect it: aisquare agents connect claude-code"
+
+
 def _check_claude_code() -> DoctorCheck:
     info = agent_core.detect("claude-code")
     if info is None or not info.detected:
         return _ok("claude-code", "Claude Code not detected on this machine")
-    if agent_core.hooks_installed("claude-code"):
-        return _ok("claude-code", "Claude Code connected (all lifecycle hooks installed)")
+    # Every recorded config dir is checked, not just the ambient one: parallel
+    # installs (CLAUDE_CONFIG_DIR=~/.claude2) each own a settings.json, and
+    # checking only one reported a healthy ✓ while another sat unhooked.
+    sites = info.sites
+    if not sites:
+        if agent_core.hooks_installed("claude-code"):
+            return _ok("claude-code", "Claude Code connected (all lifecycle hooks installed)")
+        return _warn("claude-code", f"Claude Code {_STALE_HOOKS}", _RECONNECT)
+    broken = [site.config_dir for site in sites if not site.hooks_installed]
+    if not broken:
+        where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
+        return _ok("claude-code", f"Claude Code connected{where} (all lifecycle hooks installed)")
+    listed = ", ".join(str(path) for path in broken)
     return _warn(
         "claude-code",
-        "Claude Code hooks are missing or outdated (older installs lack the "
-        "Stop/Notification/SessionEnd events)",
-        "(Re)connect it: aisquare agents connect claude-code",
+        f"Claude Code {_STALE_HOOKS} in: {listed}",
+        "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
     )
 
 

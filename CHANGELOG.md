@@ -15,6 +15,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unchanged. Extra arguments are forwarded (`aisquare launch coder --model
   opus`); `--command` launches an agent other than `claude`. The
   `AISQUARE_ROLE` variable still works.
+- `aisquare launch --account <dir>` — run a role under one of several parallel
+  agent installs by pointing at its config directory (sets
+  `CLAUDE_CONFIG_DIR`). Fails on a directory that does not exist, since a typo
+  would otherwise start a fresh unauthenticated profile. Shell aliases like
+  `claude1` cannot be passed to `--command` — aliases are not executables —
+  so `--account` is the supported route for multi-account setups.
+
+### Fixed
+
+- **Parallel agent installs are now tracked per config directory.** The
+  registry recorded a bare agent name, so `agents list` and `doctor` only ever
+  inspected `$CLAUDE_CONFIG_DIR` or `~/.claude`. With several accounts
+  connected, a sibling install whose hooks had been removed still reported a
+  healthy `✓ claude-code: Claude Code connected`. `agents.json` now records
+  every connected directory; `doctor` checks them all and names the ones
+  missing hooks, and `agents list` gains a `HOOKS IN` column. Disconnecting one
+  directory no longer marks the agent disconnected while others remain hooked.
+  Registries in the old format are migrated on read.
 
 ### Changed
 

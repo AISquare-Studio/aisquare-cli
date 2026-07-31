@@ -13,6 +13,7 @@ so repos that never opted in never see team output.
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -103,6 +104,29 @@ def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None
     if session is None:
         raise KeyError(ref)
     return session
+
+
+def session_account(transcript_path: str | None) -> str | None:
+    """Which agent config dir (account) a session runs under, or ``None``.
+
+    Derived from the transcript path in the hook payload
+    (``<config-dir>/projects/<slug>/<session>.jsonl``) rather than from
+    ``CLAUDE_CONFIG_DIR``: the variable only reaches us if the agent happens to
+    export it to hook subprocesses, whereas the transcript path is always in
+    the payload and names the directory unambiguously. Falls back to the
+    variable when the path has an unexpected shape.
+    """
+    if transcript_path:
+        path = Path(transcript_path)
+        # …/<config-dir>/projects/<project-slug>/<session-id>.jsonl
+        if len(path.parents) >= 3 and path.parents[1].name == "projects":
+            return str(path.parents[2])
+    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
+
+
+def account_label(account: str | None) -> str | None:
+    """The short display form of an account: its directory name."""
+    return Path(account).name if account else None
 
 
 def task_key(title: str) -> str:
@@ -542,6 +566,7 @@ def hook_session_start(
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
                 transcript_path=transcript_path,
+                account=session_account(transcript_path),
             )
         )
         if role is not None and known is not None and known.role != role:
@@ -585,6 +610,7 @@ def hook_prompt_heartbeat(
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
+                    account=session_account(transcript_path),
                 )
             )
             return _render_board(
@@ -715,6 +741,7 @@ def _render_board(
             f"project {project.root.name or project.id}."
         )
     live = [s for s in sessions if s.ended_at is None]
+    accounts = len({s.account for s in live if s.account})
     if live:
         lines.append("sessions:")
         for session in live:
@@ -722,6 +749,10 @@ def _render_board(
             parts = [f"  - {short_id(session.id)} {session.role}"]
             if me is not None and session.id == me.id:
                 parts.append("(you)")
+            label = account_label(session.account)
+            # Only worth the noise once several accounts are actually in play.
+            if label and accounts > 1:
+                parts.append(f"[{label}]")
             if session.focus:
                 parts.append(f"— focus: {session.focus}")
             parts.append(f"— {_age(session.last_seen_at, now)} ago")

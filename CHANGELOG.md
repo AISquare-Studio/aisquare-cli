@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Sessions record **which agent config dir (account) they run under**, derived
+  from the transcript path in the hook payload (so it works whether or not the
+  agent exports `CLAUDE_CONFIG_DIR` to hook subprocesses). The board and the
+  `board -w` TUI label sessions with the account name once more than one is in
+  play, making a rate-limited account's terminals identifiable at a glance.
+  Schema v9 adds `team_session.account`.
+
+### Fixed
+
+- **Git worktrees now share their principal repository's context pool.** A
+  linked worktree's `.git` is a *file*, so the marker walk in
+  `workspace.find_project_root` stopped inside the worktree and handed it its
+  own project id — a feature branch checked out beside the repo saw an empty
+  context pool, even though team traffic (which already asked
+  `git rev-parse --git-common-dir`) correctly shared one board. Both paths now
+  use the same git-aware resolution, so several feature branches side by side
+  share one context pool, one snapshot and one board — which is what the README
+  already promised.
+
 ## [0.2.0] - 2026-07-07
 
 ### Added

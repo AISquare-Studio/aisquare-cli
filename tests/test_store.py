@@ -225,7 +225,7 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 8
+    assert version == SCHEMA_VERSION == 9
 
 
 def test_data_persists_across_reopen() -> None:

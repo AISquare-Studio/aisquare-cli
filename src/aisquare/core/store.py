@@ -201,6 +201,13 @@ _SCHEMA_V8 = """
 DELETE FROM team_session WHERE id LIKE 'mcp:%' AND substr(id, 5) NOT LIKE '%:%';
 """
 
+# v9: which agent config dir (account) a session runs under, so a board driven
+# by several parallel installs shows who is on which — and a rate-limited
+# account's sessions can be spotted and relaunched elsewhere.
+_SCHEMA_V9 = """
+ALTER TABLE team_session ADD COLUMN account TEXT;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -211,6 +218,7 @@ _MIGRATIONS = (
     _SCHEMA_V6,
     _SCHEMA_V7,
     _SCHEMA_V8,
+    _SCHEMA_V9,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -218,7 +226,7 @@ _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, de
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path"
+    "transcript_path, account"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -358,6 +366,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         cursor=row["cursor"],
         state=row["state"],
         transcript_path=row["transcript_path"],
+        account=row["account"],
     )
 
 
@@ -642,11 +651,12 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
-            "transcript_path = COALESCE(excluded.transcript_path, transcript_path)",
+            "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
+            "account = COALESCE(excluded.account, account)",
             (
                 session.id,
                 session.project_id,
@@ -659,6 +669,7 @@ class SqliteStore:
                 session.cursor,
                 session.state,
                 session.transcript_path,
+                session.account,
             ),
         )
         self._conn.commit()

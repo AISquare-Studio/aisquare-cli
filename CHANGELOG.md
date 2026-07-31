@@ -44,6 +44,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `board -w` TUI label sessions with the account name once more than one is in
   play, making a rate-limited account's terminals identifiable at a glance.
   Schema v9 adds `team_session.account`.
+- `aisquare launch <planner|coder|runner>` — starts an agent session already
+  attached to the project's team board, replacing the `AISQUARE_ROLE=coder
+  claude` env-var-prefixed launch. Validates the role, opts the repo in
+  explicitly, then `exec`s the agent so signals, job control and the TTY are
+  unchanged. Extra arguments are forwarded (`aisquare launch coder --model
+  opus`); `--command` launches an agent other than `claude`. The
+  `AISQUARE_ROLE` variable still works.
 
 ### Changed
 
@@ -58,6 +65,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AISQUARE_DB_BUSY_MS` (no more 15s floor on a wedged fresh database), and
   the knob clamps at SQLite's 32-bit ceiling so oversized values can no
   longer silently disable the busy handler.
+- Roadmap commands are now **hidden from `--help`**: `auth`, `login`,
+  `logout`, `whoami`, `sync`, `connectors`, `capture`, `policy`, `enforce`,
+  `open`, `upgrade`, `uninstall`. They remain registered and still report the
+  not-implemented contract (exit 70) when invoked — only the listing changes.
+  `aisquare --help` lists only entries that work.
+- The README is split into **Part 1 — Memory (start here)** and **Part 2 —
+  Orchestration (advanced)**, with an explicit note that orchestration is
+  optional, so the light half of the product no longer reads as heavy.
 
 ### Fixed
 
@@ -98,7 +113,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   use the same git-aware resolution, so several feature branches side by side
   share one context pool, one snapshot and one board — which is what the README
   already promised.
-
 ## [0.2.0] - 2026-07-07
 
 ### Added

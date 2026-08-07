@@ -6,8 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
+## [0.4.0rc1] - 2026-08-07
 
+The rc/v2026.08.08 train: everything pending folded into one release —
+PRs #39 + #35 (deps/CI unblockers), #38 (shared-session-row banner,
+fixes #37), #41 (worktree context + session accounts), #40 (surface cut +
+`aisquare launch` + multi-account), #36 (the agent harness), and
+#44 + #45 (config-gated session tracing, wired at `launch` and both
+`spawn` exits). Review fixes were carried on the folds and are called out
+in the bullets; **the rewritten role work-cycles under Changed are a live
+behavior change** for existing planner/coder/runner sessions.
+
+### Added
 - `aisquare team prune` — retire ghost sessions and return their orphaned
   claims to the pool (#18).
 - `aisquare serve --stdio` gains an idle deadline — `--close-after SECONDS`
@@ -82,18 +92,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `team_session.model`/`effort`), and the board and TUI flag a session whose
   model falls outside its role's ladder as `⚠ off-ladder`.
 
-### Fixed
-
-- **Parallel agent installs are now tracked per config directory.** The
-  registry recorded a bare agent name, so `agents list` and `doctor` only ever
-  inspected `$CLAUDE_CONFIG_DIR` or `~/.claude`. With several accounts
-  connected, a sibling install whose hooks had been removed still reported a
-  healthy `✓ claude-code: Claude Code connected`. `agents.json` now records
-  every connected directory; `doctor` checks them all and names the ones
-  missing hooks, and `agents list` gains a `HOOKS IN` column. Disconnecting one
-  directory no longer marks the agent disconnected while others remain hooked.
-  Registries in the old format are migrated on read.
-
 ### Changed
 
 - **Store-error honesty (#20 hardening).** Write receipts quote the board's
@@ -128,6 +126,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Parallel agent installs are now tracked per config directory.** The
+  registry recorded a bare agent name, so `agents list` and `doctor` only ever
+  inspected `$CLAUDE_CONFIG_DIR` or `~/.claude`. With several accounts
+  connected, a sibling install whose hooks had been removed still reported a
+  healthy `✓ claude-code: Claude Code connected`. `agents.json` now records
+  every connected directory; `doctor` checks them all and names the ones
+  missing hooks, and `agents list` gains a `HOOKS IN` column. Disconnecting one
+  directory no longer marks the agent disconnected while others remain hooked.
+  Registries in the old format are migrated on read.
+
 - Unknown subcommands fail loudly instead of silently (#21): the usage error
   now carries a did-you-mean over the failing group's real verbs (root and
   alias groups included), and when `--json` was parsed before the failure the
@@ -149,8 +157,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   durable-but-unconfirmed write — check `aisquare log` for the reported ref
   before retrying, or a retried note/claim may duplicate work.
 
-### Fixed
-
 - The global output flags — `--json`, `--verbose`/`-v`, `--quiet`/`-q`,
   `--no-color` and `--profile NAME` — are accepted anywhere on the command
   line: before or after the subcommand, on every command including nested
@@ -165,6 +171,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   use the same git-aware resolution, so several feature branches side by side
   share one context pool, one snapshot and one board — which is what the README
   already promised.
+
 ## [0.2.0] - 2026-07-07
 
 ### Added

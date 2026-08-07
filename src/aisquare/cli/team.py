@@ -19,9 +19,11 @@ import typer
 
 from aisquare.cli.common import fail, local_time
 from aisquare.core import harness, orchestrator
+from aisquare.core.config import ExplainabilitySettings, load_config
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import AmbiguousIdError, is_locked_error
+from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
@@ -242,6 +244,11 @@ def spawn(
         # sit silent for seconds and read as hung.
         typer.echo("probing model availability (cached 24h; --no-probe skips)…", err=True)
     resolution = harness.resolve_model(role_name, probe=probe, refresh=refresh, effort=effort)
+    try:
+        tracing: ExplainabilitySettings | None = load_config().explainability
+    except Exception as exc:  # fail-open: a broken config costs the trace, never the spawn
+        tracing = None
+        typer.echo(f"explainability: config unreadable ({exc}) — sessions untraced", err=True)
     env_pairs = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
     if resolution is None:
         argv = ["claude"]
@@ -256,6 +263,13 @@ def spawn(
             f"[model {resolution.source} · effort {resolution.effort_source}]{skipped} — {mission}"
         )
     command = " ".join([*env_pairs, shlex.join(argv)])
+    if tracing is not None and tracing.enabled:
+        # Never burn a pipeline id into a printable command: every paste would
+        # reuse the same id and those sessions would merge into one Run. The
+        # eval mints a fresh id per run instead; if tracing is down at run
+        # time, the substitution comes back empty with the reason on stderr
+        # and the session starts untraced — the same fail-open as --exec.
+        command = f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -283,6 +297,12 @@ def spawn(
             fail("claude not found on PATH", error="claude_missing")
         env = dict(os.environ)
         env["AISQUARE_ROLE"] = role_name
+        if tracing is not None and tracing.enabled:
+            # Same seam as ``aisquare launch``: wire_session fails open, so a
+            # dead or wrong proxy costs the trace, never the spawn.
+            wiring = explainability_service.wire_session(tracing, role_name, base_env=env)
+            env.update(wiring.env)
+            typer.echo(f"explainability: {wiring.reason}", err=True)
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)

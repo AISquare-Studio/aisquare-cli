@@ -947,3 +947,99 @@ def test_spawn_refresh_forgets_every_cached_verdict(isolated_home: Path) -> None
 
     assert result.exit_code == 0, result.output
     assert not harness._cache_path().exists(), "spawn --refresh must forget the cache"
+
+
+# ── spawn x explainability wiring ────────────────────────────────────────────
+
+
+def _tracing_enabled(proxy_url: str) -> None:
+    from aisquare.core.config import AppConfig, ExplainabilitySettings, save_config
+
+    save_config(AppConfig(explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url)))
+
+
+def test_spawn_print_default_config_is_unchanged(isolated_home: Path) -> None:
+    """Tracing off (the default) must leave the printed command byte-identical."""
+    runner, app = _cli()
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "explainability" not in payload["command"]
+    assert payload["command"].startswith("AISQUARE_ROLE=coder ")
+
+
+def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
+    """The printed command must mint its pipeline id AT RUN TIME via eval —
+    a fixed id burned into the command would be reused on every paste and
+    merge those sessions into one Run."""
+    _tracing_enabled("http://127.0.0.1:9")
+    runner, app = _cli()
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["command"].startswith(
+        'eval "$(aisquare explainability env coder)"; AISQUARE_ROLE=coder '
+    )
+    assert "X-Pipeline-Id" not in payload["command"]
+
+
+def test_spawn_exec_enabled_wires_the_traced_env(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import explainability as explainability_service
+    from aisquare.services.explainability import SessionWiring
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    _tracing_enabled("http://127.0.0.1:9")
+
+    def fake_wire(settings: object, role: str, **kwargs: object) -> SessionWiring:
+        return SessionWiring(
+            traced=True,
+            reason=f"traced as aisquare-{role} (pipeline p-9)",
+            env={
+                "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+                "ANTHROPIC_CUSTOM_HEADERS": f"X-Agent-Name: aisquare-{role}\nX-Pipeline-Id: p-9",
+            },
+        )
+
+    monkeypatch.setattr(explainability_service, "wire_session", fake_wire)
+    calls: dict[str, object] = {}
+
+    def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
+        calls["env"] = env
+
+    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
+    runner, app = _cli()
+    result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
+    assert result.exit_code == 0, result.output
+    env = calls["env"]
+    assert isinstance(env, dict)
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9"
+    assert "X-Pipeline-Id" in env["ANTHROPIC_CUSTOM_HEADERS"]
+    assert "traced as aisquare-coder" in result.output
+
+
+def test_spawn_exec_dead_proxy_fails_open(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enabled tracing with nothing listening must still spawn — untraced,
+    with the reason on stderr, through the REAL probe path."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    _tracing_enabled("http://127.0.0.1:9")  # discard port — connection refused
+    calls: dict[str, object] = {}
+
+    def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
+        calls["env"] = env
+
+    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
+    runner, app = _cli()
+    result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
+    assert result.exit_code == 0, result.output
+    env = calls["env"]
+    assert isinstance(env, dict)
+    assert "ANTHROPIC_BASE_URL" not in env, "untraced must mean untouched routing"
+    assert "untraced" in result.output

@@ -57,6 +57,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   would otherwise start a fresh unauthenticated profile. Shell aliases like
   `claude1` cannot be passed to `--command` — aliases are not executables —
   so `--account` is the supported route for multi-account setups.
+- **The agent harness** — `aisquare team spawn <role>` resolves each role to
+  the strongest model its ladder serves (probe-verified with a 24h cache;
+  `--refresh` forgets every cached verdict, `--no-probe` trusts the ladder)
+  and an effort level (session base from `AISQUARE_EFFORT`/`CLAUDE_EFFORT`
+  shifted by a per-role offset; `max` and `ultracode` are first-class).
+  `aisquare team harness` prints the whole roster's resolution. Sessions
+  self-report model and effort from the SessionStart payload (schema v10 adds
+  `team_session.model`/`effort`), and the board and TUI flag a session whose
+  model falls outside its role's ladder as `⚠ off-ladder`.
 
 ### Fixed
 
@@ -91,6 +100,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The README is split into **Part 1 — Memory (start here)** and **Part 2 —
   Orchestration (advanced)**, with an explicit note that orchestration is
   optional, so the light half of the product no longer reads as heavy.
+- **The injected role work-cycles are rewritten — a live behavior change for
+  every existing planner/coder/runner session**, picked up on the next prompt
+  with no relaunch: the planner's tasks carry an explicit contract (objective,
+  why, acceptance criteria, boundaries); a **coder blocks instead of
+  guessing** when a claimed task has no usable contract (`task block` with
+  what's missing, rather than inventing scope); a **runner reopens
+  underspecified tasks** with `task reopen --reason` instead of rubber-
+  stamping them; and a new **validator** role gates the assembled deliverable
+  once before handoff. Expect formerly-silent sessions to push back on vague
+  tasks — that is the feature.
 
 ### Fixed
 

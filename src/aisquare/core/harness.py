@@ -297,7 +297,14 @@ def cached_probe(alias: str) -> ProbeResult | None:
     result = _load_cache().get(alias)
     if result is None:
         return None
-    if datetime.now(tz=UTC) - result.checked_at > CACHE_TTL:
+    checked_at = result.checked_at
+    if checked_at.tzinfo is None:
+        # A hand-edited cache file can carry a naive stamp; the subtraction
+        # below would TypeError and block the launch. Read it as UTC — the
+        # worst case is one wasted re-probe, which the disposable cache can
+        # always afford.
+        checked_at = checked_at.replace(tzinfo=UTC)
+    if datetime.now(tz=UTC) - checked_at > CACHE_TTL:
         return None
     return result
 
@@ -585,11 +592,16 @@ def clean_model_id(value: str | None) -> str | None:
 
 
 def clean_effort(value: str | None) -> str | None:
-    """An effort level, restricted to the levels the harness knows."""
+    """An effort level, restricted to the levels the harness knows.
+
+    The allowed set is EFFORT_SCALE plus ``ultracode`` — the harness itself
+    launches sessions at ``max`` and ``ultracode``, so rejecting them here
+    silently dropped the self-report of exactly the sessions it dialled up.
+    """
     if value is None:
         return None
     candidate = value.strip().lower()
-    return candidate if candidate in {"low", "medium", "high", "xhigh"} else None
+    return candidate if candidate in {*EFFORT_SCALE, ULTRACODE} else None
 
 
 def interfering_env() -> list[str]:

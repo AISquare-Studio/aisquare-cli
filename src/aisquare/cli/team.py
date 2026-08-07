@@ -232,6 +232,15 @@ def spawn(
             f"{', '.join([*harness.EFFORT_SCALE, harness.ULTRACODE])}",
             error="bad_effort",
         )
+    if refresh:
+        # Forget EVERY cached verdict, not just the rungs this walk touches:
+        # --refresh promises "re-check after an entitlement change", and an
+        # entitlement change is account-wide, not per-role.
+        harness.clear_probe_cache()
+    if (probe is None and harness.probing_enabled()) or probe:
+        # Probes spawn short agent subprocesses; without this line a spawn can
+        # sit silent for seconds and read as hung.
+        typer.echo("probing model availability (cached 24h; --no-probe skips)…", err=True)
     resolution = harness.resolve_model(role_name, probe=probe, refresh=refresh, effort=effort)
     env_pairs = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
     if resolution is None:

@@ -896,3 +896,54 @@ def test_harness_matrix_reports_the_live_base(
     by_role = {row["role"]: row for row in payload["roles"]}
     assert by_role["coder"]["effort"] == "medium"
     assert by_role["validator"]["effort"] == "high"
+
+
+def test_clean_effort_accepts_every_level_the_harness_itself_launches() -> None:
+    """`max` tops EFFORT_SCALE and `ultracode` is a launchable level — a hook
+    payload reporting either came back None, so the board dropped the effort
+    of exactly the sessions the harness dialled up (#36 review fix 1)."""
+    for level in (*harness.EFFORT_SCALE, harness.ULTRACODE):
+        assert harness.clean_effort(level) == level, level
+    assert harness.clean_effort("turbo") is None
+    assert harness.clean_effort(None) is None
+
+
+def test_cached_probe_survives_a_naive_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hand-edited cache file can carry a naive checked_at; the TTL
+    subtraction then raised TypeError inside resolve_model and blocked the
+    launch. The cache is disposable — degrade, never crash (#36 review fix 2)."""
+    naive = harness.ProbeResult(
+        alias="fable",
+        available=True,
+        resolved_id="claude-fable-5",
+        checked_at=datetime(2026, 8, 7, 3, 0, 0),  # no tzinfo, on purpose
+    )
+    monkeypatch.setattr(harness, "_load_cache", lambda: {"fable": naive})
+
+    verdict = harness.cached_probe("fable")  # TypeError before the guard
+
+    assert verdict is None or verdict.alias == "fable"
+
+
+def test_spawn_refresh_forgets_every_cached_verdict(isolated_home: Path) -> None:
+    """--refresh promises a re-check after an entitlement change; bypassing
+    reads only re-verified the ladder being walked, leaving other roles'
+    stale verdicts in place. It must forget the whole cache (#36 review fix 3
+    — clear_probe_cache was dead code)."""
+    harness._save_cache(
+        {
+            "opus": harness.ProbeResult(
+                alias="opus",
+                available=False,
+                resolved_id=None,
+                checked_at=datetime.now(tz=UTC),
+            )
+        }
+    )
+    assert harness._cache_path().exists()
+
+    runner, app = _cli()
+    result = runner.invoke(app, ["team", "spawn", "coder", "--refresh", "--no-probe"])  # type: ignore[arg-type]
+
+    assert result.exit_code == 0, result.output
+    assert not harness._cache_path().exists(), "spawn --refresh must forget the cache"

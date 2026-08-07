@@ -29,6 +29,20 @@ class RedactionSettings(BaseModel):
     level: RedactionLevel = RedactionLevel.standard
 
 
+class ExplainabilitySettings(BaseModel):
+    """Settings for tracing agent sessions through the explainability proxy.
+
+    ``enabled`` is False until the stg pipeline is verified green for this
+    team — flipping it on is the only opt-in, and every other safeguard
+    (proxy health probe, mode check, pre-existing env detection) fails open:
+    a session always launches, at worst untraced with a warning.
+    """
+
+    enabled: bool = False
+    proxy_url: str = "http://127.0.0.1:9090"
+    agent_name_template: str = "aisquare-{role}"
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -37,6 +51,7 @@ class AppConfig(BaseModel):
     default_pool: Pool = "project"
     capture: CaptureSettings = Field(default_factory=CaptureSettings)
     redaction: RedactionSettings = Field(default_factory=RedactionSettings)
+    explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
 
 
 def load_config(path: Path | None = None) -> AppConfig:

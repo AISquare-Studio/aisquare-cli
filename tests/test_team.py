@@ -1418,3 +1418,16 @@ def test_the_warning_survives_an_empty_teammate_delta(work_dir: Path) -> None:
 
     quiet = _prompt_tp(runner, sid, work_dir, "/transcripts/agent-B.jsonl")
     assert "aisquare-session-collision" in quiet.output
+
+
+def test_the_quiet_board_teaches_launch_not_the_env_var_incantation(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """`aisquare launch coder` replaced the AISQUARE_ROLE=... prefix as the
+    documented way in; an empty board is exactly where newcomers read the hint."""
+    runner.invoke(app, ["team", "on"])
+
+    board = runner.invoke(app, ["board"])
+
+    assert "aisquare launch" in board.output
+    assert "AISQUARE_ROLE=" not in board.output

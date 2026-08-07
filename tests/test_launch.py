@@ -134,6 +134,23 @@ def test_launch_without_account_leaves_the_ambient_config_dir_alone(
     assert spy["env"]["CLAUDE_CONFIG_DIR"] == "/from/the/shell"
 
 
+def test_launch_forwards_the_global_output_flags_to_the_agent(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """Anything after the role belongs to the AGENT — the five global flags too.
+
+    The root group injects --json/--verbose/-v/--quiet/-q/--no-color/--profile
+    into every command (issue #24). On an arg-forwarding command that would let
+    click parse them OUT of the forwarded argv (--profile even eats its value),
+    so the agent silently never sees flags the user typed for it. launch
+    declares ignore_unknown_options — injection must respect that and skip it.
+    """
+    result = runner.invoke(app, ["launch", "coder", "--verbose", "--profile", "p1", "--json", "-q"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--verbose", "--profile", "p1", "--json", "-q"]
+
+
 def test_launch_respects_the_master_off_switch(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

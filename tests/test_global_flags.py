@@ -66,6 +66,12 @@ def _declarations(command: Any) -> set[str]:
 
 def test_every_node_exposes_the_five_globals() -> None:
     for path, command in all_nodes():
+        if getattr(command, "context_settings", {}).get("ignore_unknown_options"):
+            # Arg-forwarding commands (launch) are the documented exception:
+            # flags after them belong to the exec'd program, so the globals
+            # apply only BEFORE the subcommand — injection would parse them
+            # out of the forwarded argv (test_launch pins that behavior).
+            continue
         missing = set(SHARED_FLAG_DECLARATIONS) - _declarations(command)
         assert not missing, f"{' '.join(path) or '<root>'} lacks {sorted(missing)}"
 

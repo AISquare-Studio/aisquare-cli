@@ -368,3 +368,24 @@ def test_a_legacy_registry_still_reports_one_site(runner: CliRunner, fake_home: 
     )
 
     assert _sites(runner) == {str(fake_home / ".claude"): True}
+
+
+def test_doctor_checks_the_ambient_dir_even_when_the_registry_has_sites(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recorded sites healthy + ambient CLAUDE_CONFIG_DIR unhooked -> warn, named.
+
+    The ambient dir is the one a `claude` from THIS shell would actually use.
+    Registry health says nothing about it: with every recorded site hooked,
+    doctor reported a clean bill while the user's next session started
+    unhooked. Ambient must be checked as sites UNION {ambient}, not either-or.
+    """
+    _connect(runner)  # default dir: hooked and recorded
+    ambient = fake_home / ".claude-fresh"
+    ambient.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient))
+
+    doctor = runner.invoke(app, ["doctor"])
+
+    assert str(ambient) in doctor.output, "the unhooked ambient dir must be named"
+    assert "missing" in doctor.output

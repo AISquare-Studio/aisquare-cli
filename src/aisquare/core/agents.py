@@ -192,6 +192,18 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     return removed
 
 
+def ambient_hook_dir(name: str) -> Path | None:
+    """The config dir a session launched from THIS shell would use.
+
+    Resolution mirrors the agent's own: ``CLAUDE_CONFIG_DIR`` when set, the
+    default home otherwise. Health recorded in the registry says nothing about
+    this directory unless it happens to be registered — callers that report on
+    hook health must check it in addition to the recorded sites.
+    """
+    spec = _spec(name)
+    return _hook_dir(spec) if spec is not None else None
+
+
 def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
     """Whether aisquare's hooks are FULLY installed (every lifecycle event).
 

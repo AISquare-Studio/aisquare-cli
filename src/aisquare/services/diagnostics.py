@@ -149,17 +149,20 @@ def _check_claude_code() -> DoctorCheck:
     info = agent_core.detect("claude-code")
     if info is None or not info.detected:
         return _ok("claude-code", "Claude Code not detected on this machine")
-    # Every recorded config dir is checked, not just the ambient one: parallel
-    # installs (CLAUDE_CONFIG_DIR=~/.claude2) each own a settings.json, and
-    # checking only one reported a healthy ✓ while another sat unhooked.
-    sites = info.sites
-    if not sites:
-        if agent_core.hooks_installed("claude-code"):
-            return _ok("claude-code", "Claude Code connected (all lifecycle hooks installed)")
+    # Checked: recorded sites UNION the ambient dir. Parallel installs
+    # (CLAUDE_CONFIG_DIR=~/.claude2) each own a settings.json, so registry
+    # health alone hid unhooked siblings — and site health alone says nothing
+    # about the AMBIENT dir, the one a `claude` from this shell actually
+    # starts from, when it was never registered.
+    health = {site.config_dir: site.hooks_installed for site in info.sites}
+    ambient = agent_core.ambient_hook_dir("claude-code")
+    if ambient is not None and ambient not in health:
+        health[ambient] = agent_core.hooks_installed("claude-code")
+    if not health:
         return _warn("claude-code", f"Claude Code {_STALE_HOOKS}", _RECONNECT)
-    broken = [site.config_dir for site in sites if not site.hooks_installed]
+    broken = [path for path, hooked in health.items() if not hooked]
     if not broken:
-        where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
+        where = f" in {len(health)} config dirs" if len(health) > 1 else ""
         return _ok("claude-code", f"Claude Code connected{where} (all lifecycle hooks installed)")
     listed = ", ".join(str(path) for path in broken)
     return _warn(

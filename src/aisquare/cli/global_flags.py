@@ -163,6 +163,13 @@ def _declared(command: Any) -> set[str]:
 
 
 def _inject(command: Any) -> None:
+    if getattr(command, "context_settings", {}).get("ignore_unknown_options"):
+        # An arg-forwarding command (`launch`): everything after it belongs to
+        # the program it execs. Injecting parseable flags would make click
+        # consume --verbose/--json/-q (and --profile plus its value) OUT of
+        # the forwarded argv. Put the flags before the subcommand instead —
+        # the root callback's canonical five still apply there.
+        return
     declared = _declared(command)
     for option in _shared_options():
         # A node's own definition wins — the root callback's five stay the

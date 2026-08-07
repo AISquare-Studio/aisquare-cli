@@ -554,8 +554,8 @@ def board(
         return
     if not sessions and not tasks:
         stdout_console().print(
-            "The orchestrator is quiet here. Activate with `aisquare team on`, or launch a "
-            "session with AISQUARE_ROLE=planner (coder/runner/…) set."
+            "The orchestrator is quiet here. Activate with `aisquare team on`, or start a "
+            "session with `aisquare launch planner` (coder/runner)."
         )
         return
     stdout_console().print(

@@ -22,7 +22,9 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
+from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -35,6 +37,22 @@ DEFAULT_AGENT = "claude"
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
+
+
+def _forwarded_session_id(args: list[str]) -> str | None:
+    """The agent's own ``--session-id``, when the caller passed one.
+
+    Reusing it as the trace's pipeline id gives the board row and the
+    dashboard Run the same key. We only ever read the forwarded args — never
+    inject flags into them, because ``--command`` may name an agent that does
+    not speak claude's CLI.
+    """
+    for position, arg in enumerate(args):
+        if arg == "--session-id" and position + 1 < len(args):
+            return args[position + 1]
+        if arg.startswith("--session-id="):
+            return arg.split("=", 1)[1]
+    return None
 
 
 def launch(
@@ -99,6 +117,20 @@ def launch(
             )
         env["CLAUDE_CONFIG_DIR"] = str(resolved)
         whose = f" ({resolved.name})"
+    tracing = load_config().explainability
+    if tracing.enabled:
+        # Fail-open by contract: wire_session returns an empty env delta (plus
+        # the reason) rather than raising, so a dead or wrong proxy can only
+        # ever cost the trace, never the launch. Disabled config skips even
+        # this block — the default launch stays byte-identical.
+        wiring = explainability_service.wire_session(
+            tracing,
+            role,
+            session_id=_forwarded_session_id(ctx.args),
+            base_env=env,
+        )
+        env.update(wiring.env)
+        stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
     argv = [command, *ctx.args]
     stderr_console().print(
         f"Launching {command}{whose} as [bold]{role}[/bold] on the "

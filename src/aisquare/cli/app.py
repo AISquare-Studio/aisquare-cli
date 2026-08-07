@@ -14,6 +14,7 @@ from aisquare.cli import (
     connectors,
     context,
     enforce,
+    explainability,
     hook,
     launch,
     policy,
@@ -115,6 +116,9 @@ app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
 app.add_typer(hook.app, name="hook", hidden=True)
+# Hidden while explainability.enabled defaults to off; flips visible with the
+# tracing rollout (prod cutover), same pattern as the roadmap groups above.
+app.add_typer(explainability.app, name="explainability", hidden=True)
 
 
 def main() -> None:

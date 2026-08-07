@@ -179,3 +179,70 @@ def test_probe_reports_a_silent_port() -> None:
     verdict = probe_proxy(url)
     assert verdict.healthy is False
     assert "unreachable" in verdict.reason
+
+
+# ── the CLI surface: aisquare explainability status / env ───────────────────
+
+
+def test_status_reports_disabled_config_and_probe_truth(runner) -> None:  # type: ignore[no-untyped-def]
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(enabled=False, proxy_url="http://127.0.0.1:9")
+        )
+    )
+    from aisquare.cli.app import app as cli_app
+
+    result = runner.invoke(cli_app, ["explainability", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "enabled:  False" in result.output
+    assert "unreachable" in result.output
+
+
+def test_status_exits_nonzero_when_enabled_but_proxy_dead(runner) -> None:  # type: ignore[no-untyped-def]
+    """Enabled + dead proxy is the state where launches silently go untraced —
+    status is the command that must make that loud."""
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(enabled=True, proxy_url="http://127.0.0.1:9")
+        )
+    )
+    from aisquare.cli.app import app as cli_app
+
+    result = runner.invoke(cli_app, ["explainability", "status"])
+
+    assert result.exit_code == 1
+
+
+def test_env_refuses_when_disabled(runner) -> None:  # type: ignore[no-untyped-def]
+    from aisquare.cli.app import app as cli_app
+
+    result = runner.invoke(cli_app, ["explainability", "env", "coder"])
+
+    assert result.exit_code == 1
+    assert "disabled" in result.output
+
+
+def test_env_emits_ansi_c_quoted_exports(runner, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The emitted quoting must carry a REAL newline through eval: plain
+    single quotes deliver backslash-n, the proxy sees one glued header, and
+    the run is silently misattributed."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    from aisquare.cli.app import app as cli_app
+
+    server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
+    try:
+        save_config(AppConfig(explainability=ExplainabilitySettings(enabled=True, proxy_url=url)))
+        result = runner.invoke(
+            cli_app, ["explainability", "env", "coder", "--session-id", "sess-9"]
+        )
+    finally:
+        server.shutdown()
+
+    assert result.exit_code == 0, result.output
+    assert f"export ANTHROPIC_BASE_URL=$'{url}'" in result.output
+    assert (
+        "export ANTHROPIC_CUSTOM_HEADERS="
+        "$'X-Agent-Name: aisquare-coder\\nX-Pipeline-Id: sess-9'" in result.output
+    )

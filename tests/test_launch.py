@@ -160,3 +160,97 @@ def test_launch_respects_the_master_off_switch(
 
     assert result.exit_code == 1
     assert not spy, "the orchestrator is off — nothing should be launched"
+
+
+# ── explainability wiring at the env seam ────────────────────────────────────
+
+
+def _tracing_on(proxy_url: str) -> None:
+    from aisquare.core.config import AppConfig, ExplainabilitySettings, save_config
+
+    save_config(AppConfig(explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url)))
+
+
+def test_launch_default_config_adds_no_tracing(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tracing off (the default) must leave the launch byte-identical: no env
+    delta, no extra output — zero cost to every existing user."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert "ANTHROPIC_BASE_URL" not in spy["env"]
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in spy["env"]
+    assert "explainability" not in result.output
+
+
+def test_launch_enabled_wires_the_traced_env(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.services import explainability as explainability_service
+    from aisquare.services.explainability import SessionWiring
+
+    _tracing_on("http://127.0.0.1:9")
+
+    def fake_wire(settings: Any, role: str, **kwargs: Any) -> SessionWiring:
+        return SessionWiring(
+            traced=True,
+            reason=f"traced as aisquare-{role} (pipeline p-1)",
+            env={
+                "ANTHROPIC_BASE_URL": settings.proxy_url,
+                "ANTHROPIC_CUSTOM_HEADERS": f"X-Agent-Name: aisquare-{role}\nX-Pipeline-Id: p-1",
+            },
+        )
+
+    monkeypatch.setattr(explainability_service, "wire_session", fake_wire)
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9"
+    assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+    assert "traced as aisquare-coder" in result.output
+
+
+def test_launch_with_dead_proxy_still_launches(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-open through the REAL probe: tracing enabled, nothing listening —
+    the launch must proceed untraced instead of breaking or misrouting."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    _tracing_on("http://127.0.0.1:9")  # discard port — connection refused
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["binary"].endswith("/claude"), "the launch must happen regardless"
+    assert "ANTHROPIC_BASE_URL" not in spy["env"]
+    assert "untraced" in result.output
+
+
+def test_launch_reuses_the_forwarded_session_id(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A --session-id the caller passes to the agent becomes the pipeline id —
+    read from the forwarded args, never injected into them."""
+    from aisquare.services import explainability as explainability_service
+    from aisquare.services.explainability import SessionWiring
+
+    _tracing_on("http://127.0.0.1:9")
+    seen: dict[str, Any] = {}
+
+    def fake_wire(settings: Any, role: str, **kwargs: Any) -> SessionWiring:
+        seen.update(kwargs)
+        return SessionWiring(traced=False, reason="stubbed")
+
+    monkeypatch.setattr(explainability_service, "wire_session", fake_wire)
+
+    runner.invoke(app, ["launch", "coder", "--session-id", "sess-7"])
+    assert seen["session_id"] == "sess-7"
+
+    runner.invoke(app, ["launch", "coder", "--session-id=sess-8"])
+    assert seen["session_id"] == "sess-8"

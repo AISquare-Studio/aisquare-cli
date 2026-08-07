@@ -29,6 +29,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("recall",),
     ("launch",),
     ("serve",),
+    ("explainability", "status"),
+    ("explainability", "env"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
     ("hook", "session-end"),

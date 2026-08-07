@@ -694,9 +694,7 @@ def test_concurrent_first_opens_migrate_safely(work_dir: Path) -> None:
     # with three agent sessions gating concurrently; every locked timeout is
     # tolerated ONLY as a minority verdict — the schema asserts below run
     # unconditionally and still demand a fully-migrated, intact database.
-    timeouts = [
-        e for e in errors if isinstance(e, sqlite3.OperationalError) and is_locked_error(e)
-    ]
+    timeouts = [e for e in errors if isinstance(e, sqlite3.OperationalError) and is_locked_error(e)]
     real_errors = [e for e in errors if e not in timeouts]
     assert real_errors == [], real_errors
     assert len(timeouts) < len(threads), "every open timed out — wedged, not merely busy"

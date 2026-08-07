@@ -53,6 +53,11 @@ def git_common_root(start: Path) -> Path | None:
     common_dir = Path(common)
     if not common_dir.is_absolute():
         common_dir = (start / common_dir).resolve()
+    if common_dir.name != ".git" and ".git" in common_dir.parts:
+        # A submodule's common dir is <super>/.git/modules/<name> (deeper when
+        # nested) — git bookkeeping, not anyone's project root. Bail to the
+        # marker walk, which lands on the submodule checkout itself.
+        return None
     # <principal>/.git → <principal>; a bare repo's common dir is the repo itself.
     root = common_dir.parent if common_dir.name == ".git" else common_dir
     return root.resolve()

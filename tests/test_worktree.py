@@ -82,6 +82,54 @@ def test_context_and_team_agree_on_project_identity(
     assert find_project_root(worktree) == team_project(worktree).root
 
 
+@pytest.fixture
+def repo_with_submodule(tmp_path: Path) -> tuple[Path, Path]:
+    """A superproject with a checked-out submodule."""
+    dep = tmp_path / "dep"
+    dep.mkdir()
+    _git("init", "-q", cwd=dep)
+    _git("commit", "-q", "--allow-empty", "-m", "dep init", cwd=dep)
+    superproject = tmp_path / "super"
+    superproject.mkdir()
+    _git("init", "-q", cwd=superproject)
+    _git("commit", "-q", "--allow-empty", "-m", "super init", cwd=superproject)
+    _git(
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(dep),
+        "dep",
+        cwd=superproject,
+    )
+    return superproject, superproject / "dep"
+
+
+def test_a_submodule_is_its_own_project_not_a_git_internal_dir(
+    repo_with_submodule: tuple[Path, Path],
+) -> None:
+    """Inside a submodule, ``--git-common-dir`` names ``<super>/.git/modules/<name>``.
+
+    That is git bookkeeping, not anyone's project root — scoping context there
+    would file everything under a directory nobody works in. The submodule is a
+    repository in its own right (its ``.git`` is a file, like a worktree's, but
+    it is not a worktree of the superproject), so the marker walk must win and
+    make the submodule checkout its own project.
+    """
+    _, sub = repo_with_submodule
+    root = find_project_root(sub)
+    assert ".git" not in root.parts, "a project root must never sit inside a .git dir"
+    assert root == sub.resolve()
+
+
+def test_team_and_context_agree_inside_a_submodule(
+    repo_with_submodule: tuple[Path, Path],
+) -> None:
+    _, sub = repo_with_submodule
+    assert team_project(sub).root == find_project_root(sub)
+
+
 def test_a_plain_repo_is_still_its_own_root(tmp_path: Path) -> None:
     repo = tmp_path / "plain"
     (repo / "src").mkdir(parents=True)

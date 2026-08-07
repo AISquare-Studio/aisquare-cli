@@ -254,3 +254,21 @@ def test_launch_reuses_the_forwarded_session_id(
 
     runner.invoke(app, ["launch", "coder", "--session-id=sess-8"])
     assert seen["session_id"] == "sess-8"
+
+
+def test_launch_survives_a_corrupt_config(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """launch never read the config before tracing arrived; a corrupt
+    config.toml must not become a new way for a launch to die (the zero-
+    breakage bar). Worst allowed outcome: untraced, with a reason."""
+    from aisquare.core import paths
+
+    paths.config_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.config_path().write_text("explainability = [unclosed", encoding="utf-8")
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_ROLE"] == "coder", "the launch must happen regardless"
+    assert "config unreadable" in result.output

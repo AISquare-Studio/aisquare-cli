@@ -57,6 +57,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   would otherwise start a fresh unauthenticated profile. Shell aliases like
   `claude1` cannot be passed to `--command` — aliases are not executables —
   so `--account` is the supported route for multi-account setups.
+- **Config-gated session tracing** (`[explainability]`, default **off**) —
+  with `explainability.enabled = true`, `aisquare launch` wires the session
+  through the AISquare explainability proxy: `ANTHROPIC_BASE_URL` plus the
+  `X-Agent-Name`/`X-Pipeline-Id` identity pair (a forwarded `--session-id`
+  becomes the pipeline id, so board rows and dashboard Runs share a key).
+  Every failure fails **open** — dead or wrong-mode proxy, user-owned
+  `ANTHROPIC_*` vars, template typos, header-unsafe roles, even an unreadable
+  config file cost the trace, never the launch. Hidden
+  `aisquare explainability status|env` commands inspect the wiring; `env`
+  emits `$'…'`-quoted exports so the header newline survives `eval`.
 - **The agent harness** — `aisquare team spawn <role>` resolves each role to
   the strongest model its ladder serves (probe-verified with a 24h cache;
   `--refresh` forgets every cached verdict, `--no-probe` trusts the ladder)

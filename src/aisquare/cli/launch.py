@@ -117,8 +117,16 @@ def launch(
             )
         env["CLAUDE_CONFIG_DIR"] = str(resolved)
         whose = f" ({resolved.name})"
-    tracing = load_config().explainability
-    if tracing.enabled:
+    try:
+        tracing = load_config().explainability
+    except Exception as exc:  # tracing is an observer: a broken config must
+        # cost the trace, never the launch — the same fail-open bar as a dead
+        # proxy. `aisquare doctor` still reports the config error loudly.
+        tracing = None
+        stderr_console().print(
+            f"[dim]explainability: config unreadable ({exc}) — launching untraced[/dim]"
+        )
+    if tracing is not None and tracing.enabled:
         # Fail-open by contract: wire_session returns an empty env delta (plus
         # the reason) rather than raising, so a dead or wrong proxy can only
         # ever cost the trace, never the launch. Disabled config skips even

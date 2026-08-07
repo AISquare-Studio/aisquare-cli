@@ -1043,3 +1043,56 @@ def test_spawn_exec_dead_proxy_fails_open(
     assert isinstance(env, dict)
     assert "ANTHROPIC_BASE_URL" not in env, "untraced must mean untouched routing"
     assert "untraced" in result.output
+
+
+def test_spawn_printed_eval_fails_open_through_a_real_shell(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """THE fail-open-by-construction premise, executed for real.
+
+    The eval prefix is only safe because a refusing `explainability env`
+    writes its reason to STDERR and exits without touching stdout — the
+    substitution then contributes nothing and the agent command still runs.
+    If the refusal ever reached stdout, eval would execute the error text as
+    shell code; in that world the agent may STILL launch (`;` continues past
+    the eval), so the discriminating assert is env's empty stdout, not the
+    launch itself.
+    """
+    import subprocess
+    import sys
+
+    _tracing_enabled("http://127.0.0.1:9")  # discard port: connection refused
+    runner, app = _cli()
+    printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    command = json.loads(printed.output)["command"]
+    assert command.startswith('eval "$(aisquare explainability env coder)"; ')
+
+    venv_bin = Path(sys.executable).parent
+    child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
+
+    # Premise: refusal → stderr only, stdout EMPTY, nonzero exit.
+    refusal = subprocess.run(
+        [str(venv_bin / "aisquare"), "explainability", "env", "coder"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=child_env,
+    )
+    assert refusal.returncode == 1
+    assert refusal.stdout == "", "anything on stdout would be eval'd as shell"
+    assert "untraced" in refusal.stderr
+
+    # End to end: the printed command runs the agent untraced via a real shell.
+    stub = tmp_path / "claude"
+    stub.write_text('#!/bin/sh\necho "ran base=[$ANTHROPIC_BASE_URL]"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    proc = subprocess.run(
+        ["/bin/sh", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=child_env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "ran base=[]" in proc.stdout, "the agent must launch, untraced"
+    assert "command not found" not in proc.stderr

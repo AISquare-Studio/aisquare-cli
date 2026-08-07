@@ -67,6 +67,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   config file cost the trace, never the launch. Hidden
   `aisquare explainability status|env` commands inspect the wiring; `env`
   emits `$'…'`-quoted exports so the header newline survives `eval`.
+  `aisquare team spawn` joins at both exits: `--exec` wires the same env seam
+  as `launch`, and the printed command is prefixed with
+  `eval "$(aisquare explainability env <role>)"` so a **fresh** pipeline id
+  mints per run — an id burned into the printable would be reused on every
+  paste and merge those sessions into one dashboard Run.
 - **The agent harness** — `aisquare team spawn <role>` resolves each role to
   the strongest model its ladder serves (probe-verified with a 24h cache;
   `--refresh` forgets every cached verdict, `--no-probe` trusts the ladder)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -271,3 +272,31 @@ def test_doctor_warns_when_embed_knob_mismatches_the_schema(
     result = runner.invoke(app, ["doctor"])
     assert "created WITHOUT embeddings" in result.output  # doctor surfaces the no-op
     assert "team distill --all" in result.output  # and points to the real fix
+
+
+def test_lock_is_exclusive_across_handles_and_released_after(tmp_path: Path) -> None:
+    """The contract both lock backends must satisfy.
+
+    POSIX locks via ``fcntl.flock`` and Windows via ``msvcrt.locking``; this
+    asserts the behaviour the brain depends on rather than either mechanism,
+    so it runs — and means something — on both.
+    """
+    home = tmp_path / "brain"
+
+    with brain._lock(home, wait_s=0) as first:
+        assert first
+        with brain._lock(home, wait_s=0) as second:
+            assert not second  # a second holder must be refused, not queued
+
+    with brain._lock(home, wait_s=0) as third:
+        assert third  # and the lock is winnable again once released
+
+
+def test_lock_gives_up_after_wait_s_rather_than_hanging(tmp_path: Path) -> None:
+    home = tmp_path / "brain"
+    with brain._lock(home, wait_s=0) as held:
+        assert held
+        started = time.monotonic()
+        with brain._lock(home, wait_s=0.3) as waiter:
+            assert not waiter
+        assert time.monotonic() - started >= 0.3

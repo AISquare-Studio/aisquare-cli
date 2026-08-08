@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -300,3 +301,19 @@ def test_lock_gives_up_after_wait_s_rather_than_hanging(tmp_path: Path) -> None:
         with brain._lock(home, wait_s=0.3) as waiter:
             assert not waiter
         assert time.monotonic() - started >= 0.3
+
+
+def test_gbrain_output_is_decoded_as_utf8(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Same locale-codec trap as the snapshot packer, on the gbrain calls."""
+    seen: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("aisquare.core.brain.shutil.which", lambda _name: "/usr/bin/gbrain")
+    monkeypatch.setattr("aisquare.core.brain.subprocess.run", _capture)
+
+    assert brain._run(tmp_path, ["put"], timeout=5) == "ok\n"
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "replace"

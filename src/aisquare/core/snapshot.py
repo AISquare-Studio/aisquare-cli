@@ -88,6 +88,8 @@ def head_sha(root: Path) -> str | None:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             check=True,
         )
@@ -126,7 +128,14 @@ def _run_repomix(root: Path, *, compress: bool) -> tuple[str, str]:
         if compress:
             argv.insert(len(base), "--compress")
         result = subprocess.run(
-            argv, cwd=root, capture_output=True, text=True, timeout=_PACK_TIMEOUT, check=True
+            argv,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_PACK_TIMEOUT,
+            check=True,
         )
         text = out.read_text(encoding="utf-8") if out.exists() else ""
     return text, result.stdout or ""

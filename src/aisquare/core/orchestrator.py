@@ -74,6 +74,8 @@ def _git_common_root(start: Path) -> Path | None:
             ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
         )

@@ -105,7 +105,13 @@ def gbrain_version() -> str | None:
         return None
     try:
         result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=15, check=False
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -195,6 +201,8 @@ def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int)
             input=stdin,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             env=_env(home),

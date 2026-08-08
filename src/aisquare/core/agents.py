@@ -14,7 +14,7 @@ import shlex
 import shutil
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from aisquare.core import paths
@@ -78,6 +78,51 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
     ]
 
 
+_PROGRAM_NAMES = frozenset({"aisquare", "asq"})
+
+
+def _is_aisquare_program(token: str) -> bool:
+    """Whether ``token`` names the aisquare executable itself.
+
+    On Windows the console scripts are ``aisquare.exe`` / ``asq.EXE``, so the
+    extension is stripped and the comparison is case-insensitive — the bare
+    name never matches there. The Windows form is parsed with an explicit
+    ``PureWindowsPath`` because ``Path`` follows the *running* platform, and
+    backslashes are ordinary filename characters to a ``PosixPath``.
+    """
+    if Path(token).name in _PROGRAM_NAMES:
+        return True
+    if sys.platform != "win32":
+        return False
+    return PureWindowsPath(token).stem.lower() in _PROGRAM_NAMES
+
+
+def _quote(path: str) -> str:
+    """Quote ``path`` for the shell that will run the hook.
+
+    POSIX quoting is wrong on Windows twice over: ``shlex.quote`` treats the
+    ``\\`` in every Windows path as unsafe and wraps the whole thing in single
+    quotes, which ``cmd.exe`` has no syntax for and passes through literally —
+    so the hook fails to run at all. Windows gets double quotes, and only when
+    the path actually needs them.
+    """
+    if sys.platform != "win32":
+        return shlex.quote(path)
+    return f'"{path}"' if " " in path else path
+
+
+def _split_command(command: str) -> list[str]:
+    """Tokenise a hook command the way the shell that runs it would.
+
+    ``shlex`` in POSIX mode treats ``\\`` as an escape character, which eats
+    the separators in a Windows path and leaves an unrecognisable program
+    name, so Windows parses in non-POSIX mode and strips the quotes itself.
+    """
+    if sys.platform != "win32":
+        return shlex.split(command)
+    return [token.strip('"') for token in shlex.split(command, posix=False)]
+
+
 def _aisquare_command() -> str:
     """The command hooks should run — an absolute path that works in any shell.
 
@@ -88,12 +133,12 @@ def _aisquare_command() -> str:
     shell might not resolve.
     """
     argv0 = Path(sys.argv[0])
-    if argv0.name in ("aisquare", "asq") and argv0.exists():
-        return shlex.quote(str(argv0.resolve()))
+    if _is_aisquare_program(argv0.name) and argv0.exists():
+        return _quote(str(argv0.resolve()))
     found = shutil.which("aisquare")
     if found:
-        return shlex.quote(found)
-    return f"{shlex.quote(sys.executable)} -m aisquare"
+        return _quote(found)
+    return f"{_quote(sys.executable)} -m aisquare"
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
@@ -116,17 +161,20 @@ def _is_aisquare_hook_command(command: str) -> bool:
     stop`` as ours and silently delete them on connect/disconnect. Parsing
     uses shlex so aisquare paths containing spaces (quoted at install time)
     keep matching.
+
+    This must stay the exact inverse of :func:`_aisquare_command`: if the two
+    ever disagree, ``connect`` stops recognising its own hooks and appends a
+    duplicate, and ``disconnect`` cannot remove them.
     """
     try:
-        tokens = shlex.split(command)
+        tokens = _split_command(command)
     except ValueError:
         return False
     if len(tokens) < 3 or tokens[-2] != "hook":
         return False
     if tokens[-1] not in {subcommand for _, subcommand in _HOOKS}:
         return False
-    program = Path(tokens[0]).name
-    return program in ("aisquare", "asq") or tokens[-4:-2] == ["-m", "aisquare"]
+    return _is_aisquare_program(tokens[0]) or tokens[-4:-2] == ["-m", "aisquare"]
 
 
 def _is_aisquare_group(group: Any) -> bool:

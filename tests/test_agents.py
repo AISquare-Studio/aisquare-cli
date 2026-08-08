@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import agents
 
 
 @pytest.fixture(autouse=True)
@@ -275,3 +276,82 @@ def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home:
     result = runner.invoke(app, ["agents", "disconnect", "claude-code"])
     assert result.exit_code == 0
     assert "no aisquare hooks found" in result.output
+
+
+def _win32(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend to be Windows, so POSIX CI still covers the Windows paths."""
+    monkeypatch.setattr("aisquare.core.agents.sys.platform", "win32")
+
+
+def test_windows_hook_commands_are_not_posix_quoted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``shlex.quote`` is wrong on Windows: a backslash makes it quote the path.
+
+    ``cmd.exe`` has no single-quote syntax, so it looks for a program whose
+    name literally starts with ``'`` and the hook never runs.
+    """
+    _win32(monkeypatch)
+    exe = r"C:\Python312\Scripts\aisquare.EXE"
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
+    monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: exe)
+
+    command = agents._aisquare_command()
+
+    assert command == exe
+    assert "'" not in command
+
+
+def test_windows_hook_commands_round_trip_through_the_matcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What connect writes, connect and disconnect must recognise again.
+
+    If these two halves disagree, connect stops seeing its own hooks and
+    appends a duplicate on every run, and disconnect can never remove them.
+    """
+    _win32(monkeypatch)
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
+    for exe in (
+        r"C:\Python312\Scripts\aisquare.EXE",
+        r"C:\Program Files\Python312\Scripts\asq.exe",  # a path needing quotes
+    ):
+        monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name, _e=exe: _e)
+        command = f"{agents._aisquare_command()} hook session-start"
+        assert agents._is_aisquare_hook_command(command), command
+
+
+def test_windows_recognises_the_exe_suffixed_console_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """argv0 is ``aisquare.exe`` on Windows, which never matched the bare name."""
+    _win32(monkeypatch)
+    exe = tmp_path / "aisquare.EXE"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", [str(exe)])
+    monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: None)
+
+    assert agents._aisquare_command() == str(exe.resolve())
+
+
+def test_windows_still_ignores_third_party_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Windows matcher must stay as strict as the POSIX one."""
+    _win32(monkeypatch)
+    for command in (
+        r"C:\tools\webhook.exe stop",
+        r"C:\Users\me\bin\my-hook.exe stop",
+        "webhook stop",
+        r"C:\tools\notaisquare.exe hook stop",
+    ):
+        assert not agents._is_aisquare_hook_command(command), command
+
+
+def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The POSIX path must keep quoting exactly as before."""
+    monkeypatch.setattr("aisquare.core.agents.sys.platform", "linux")
+    exe = "/opt/my tools/bin/aisquare"
+    monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
+    monkeypatch.setattr("aisquare.core.agents.shutil.which", lambda _name: exe)
+
+    command = agents._aisquare_command()
+
+    assert command == "'/opt/my tools/bin/aisquare'"
+    assert agents._is_aisquare_hook_command(f"{command} hook stop")

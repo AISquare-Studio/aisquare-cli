@@ -27,6 +27,8 @@ def session_start_context(
     session_id: str | None = None,
     source: str | None = None,
     transcript_path: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
     with store_session() as store:
@@ -36,7 +38,9 @@ def session_start_context(
     directive = _directive(project.id, has_prompts=has_prompts)
     block = build_block(entries, project) if entries else ""
     team_block = (
-        team_service.hook_session_start(session_id, cwd, source, transcript_path=transcript_path)
+        team_service.hook_session_start(
+            session_id, cwd, source, transcript_path=transcript_path, model=model, effort=effort
+        )
         if session_id
         else ""
     )
@@ -49,13 +53,17 @@ def prompt_submitted(
     *,
     session_id: str | None = None,
     transcript_path: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
     if prompt is not None and prompt.strip():
         capture_prompt(prompt, cwd)
     if session_id is None:
         return ""
-    return team_service.hook_prompt_heartbeat(session_id, cwd, transcript_path=transcript_path)
+    return team_service.hook_prompt_heartbeat(
+        session_id, cwd, transcript_path=transcript_path, model=model, effort=effort
+    )
 
 
 def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:

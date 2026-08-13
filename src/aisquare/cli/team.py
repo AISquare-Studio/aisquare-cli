@@ -7,16 +7,25 @@ Also home of the top-level ``note`` and ``board`` shortcuts (registered by
 from __future__ import annotations
 
 import json
+import os
+import re
+import shlex
+import shutil
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
 import typer
 
 from aisquare.cli.common import fail, local_time
+from aisquare.core import harness, orchestrator
+from aisquare.core.config import ExplainabilitySettings, load_config
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
-from aisquare.core.store import AmbiguousIdError
+from aisquare.core.store import AmbiguousIdError, is_locked_error
+from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
-from aisquare.services.team import TeamDisabledError
+from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
 app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no_args_is_help=True)
 
@@ -25,6 +34,17 @@ SessionRef = Annotated[
     typer.Option("--as", help="Act as this team session (id prefix, from your board)."),
 ]
 
+# Every failure a store-backed team command can hit, routed through _fail_team.
+# DatabaseError covers OperationalError AND the rarer corruption/constraint
+# family — none of them may reach the user as a traceback.
+STORE_ERRORS = (
+    TeamDisabledError,
+    KeyError,
+    AmbiguousIdError,
+    DeliveryUnconfirmedError,
+    sqlite3.DatabaseError,
+)
+
 
 def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
     """Translate service errors into the shared CLI error contract."""
@@ -32,10 +52,51 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         fail(str(exc), error="team_disabled")
     if isinstance(exc, AmbiguousIdError):
         fail(f"'{exc.ref}' is ambiguous — use more characters", error="ambiguous_id", ref=exc.ref)
+    if isinstance(exc, DeliveryUnconfirmedError):
+        # ref = the unconfirmed write's id, so an agent knows exactly which
+        # event/task to look for in `aisquare log` before retrying.
+        fail(str(exc), error="delivery_unconfirmed", ref=exc.ref)
+    if isinstance(exc, sqlite3.Error) and is_locked_error(exc):
+        # Transient contention: honest "try again", never a traceback —
+        # and never anything a caller could mistake for success.
+        fail(
+            f"context store busy ({exc}) — retry shortly",
+            error="store_locked",
+            detail=str(exc),
+        )
+    if isinstance(exc, sqlite3.DatabaseError):
+        # NOT retryable (no such table, readonly, disk full, corruption):
+        # a distinct code, with the real cause preserved for --json callers.
+        fail(f"context store error: {exc}", error="store_error", detail=str(exc))
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)
         fail(f"nothing matches '{missing}'", error="not_found", ref=missing)
     raise exc
+
+
+def emit_write_warning(delivery: team_service.Delivery | None) -> None:
+    """Surface a board-mismatch warning on stderr (human and ``--json`` runs).
+
+    Plain ``echo``, not the rich console: the warning must never wrap or be
+    reflowed — agents grep their own stderr for it.
+    """
+    if delivery is not None and delivery.warning:
+        typer.echo(f"⚠ {delivery.warning}", err=True)
+
+
+def delivery_fields(delivery: team_service.Delivery | None) -> dict[str, object]:
+    """The top-level JSON fields a confirmed write adds to its payload."""
+    if delivery is None:
+        return {}
+    fields: dict[str, object] = {"delivered": True}
+    if delivery.warning:
+        fields["warning"] = delivery.warning
+    return fields
+
+
+def receipt_suffix(delivery: team_service.Delivery | None) -> str:
+    """The `` · seq N on <board>`` tail of a human ✓ line (empty for reads)."""
+    return f" · {delivery.receipt}" if delivery is not None else ""
 
 
 @app.command("on")
@@ -43,14 +104,17 @@ def on() -> None:
     """Activate the orchestrator for this project."""
     try:
         project = team_service.activate()
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
+    delivery = team_service.last_delivery()
     if get_state().json_output:
-        typer.echo(json.dumps({"activated": project.id, "root": str(project.root)}))
+        payload: dict[str, object] = {"activated": project.id, "root": str(project.root)}
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
         stdout_console().print(
             f"✓ agent orchestrator active for {project.root.name or project.id} — "
-            "sessions launched here now share tasks and notes"
+            f"sessions launched here now share tasks and notes{receipt_suffix(delivery)}"
         )
 
 
@@ -70,13 +134,17 @@ def focus(
         fail("--as <session> is required (your id is on the board)", error="missing_session")
     try:
         session = team_service.set_focus(text, as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, as_session)
+    delivery = team_service.last_delivery()
     if get_state().json_output:
-        typer.echo(session.model_dump_json())
+        payload = session.model_dump(mode="json")
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
         stdout_console().print(
-            f"✓ focus of {team_service.short_id(session.id)}: {text}", markup=False
+            f"✓ focus of {team_service.short_id(session.id)}: {text}{receipt_suffix(delivery)}",
+            markup=False,
         )
 
 
@@ -90,7 +158,7 @@ def role(
         fail("--as <session> is required (your id is on the board)", error="missing_session")
     try:
         session = team_service.set_role(name, as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, as_session)
     if get_state().json_output:
         typer.echo(session.model_dump_json())
@@ -98,20 +166,254 @@ def role(
         stdout_console().print(f"✓ {team_service.short_id(session.id)} is now {session.role}")
 
 
+def _parse_since(value: str) -> datetime:
+    """``--since`` accepts a relative span (15m, 2h, 3d) or an ISO timestamp."""
+    span = re.fullmatch(r"(\d+)([smhd])", value.strip())
+    if span:
+        unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[span.group(2)]
+        return datetime.now(tz=UTC) - timedelta(**{unit: int(span.group(1))})
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"{value!r} is neither a span (15m, 2h) nor an ISO timestamp"
+        ) from None
+    # A naive timestamp means the user's local clock.
+    return moment if moment.tzinfo is not None else moment.astimezone()
+
+
+@app.command("spawn")
+def spawn(
+    role_name: Annotated[
+        str, typer.Argument(help="Role to launch (planner/coder/runner/validator/…).")
+    ],
+    execute: Annotated[
+        bool,
+        typer.Option(
+            "--exec",
+            help="Replace this process with the launched session (default: print the command).",
+        ),
+    ] = False,
+    probe: Annotated[
+        bool | None,
+        typer.Option(
+            "--probe/--no-probe",
+            help="Verify model availability before picking (paid ~1-token probe, cached 24h). "
+            "Default: probe, unless AISQUARE_HARNESS_PROBE=0.",
+        ),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh",
+            help="Ignore cached availability verdicts (use after an entitlement changes).",
+        ),
+    ] = False,
+    effort: Annotated[
+        str | None,
+        typer.Option(
+            "--effort",
+            help="Effort for this role (low/medium/high/xhigh/max/ultracode). Absolute — "
+            "skips the role offset. Default: the session base (AISQUARE_EFFORT, else "
+            "CLAUDE_EFFORT, else high) shifted by the role's offset.",
+        ),
+    ] = None,
+) -> None:
+    """Resolve a role's model down its ladder and launch (or print) the session.
+
+    The harness picks the strongest available model for the role — e.g. the
+    planner wants fable and falls back to opus, then sonnet, when the account
+    doesn't serve it — and passes the role's effort level. Resolution never
+    blocks a launch: on any doubt it degrades down the ladder.
+    """
+    if not orchestrator.team_enabled():
+        _fail_team(TeamDisabledError())
+    if effort is not None and harness.normalize_effort(effort) is None:
+        fail(
+            f"unknown --effort '{effort}' — use one of: "
+            f"{', '.join([*harness.EFFORT_SCALE, harness.ULTRACODE])}",
+            error="bad_effort",
+        )
+    if refresh:
+        # Forget EVERY cached verdict, not just the rungs this walk touches:
+        # --refresh promises "re-check after an entitlement change", and an
+        # entitlement change is account-wide, not per-role.
+        harness.clear_probe_cache()
+    if (probe is None and harness.probing_enabled()) or probe:
+        # Probes spawn short agent subprocesses; without this line a spawn can
+        # sit silent for seconds and read as hung.
+        typer.echo("probing model availability (cached 24h; --no-probe skips)…", err=True)
+    resolution = harness.resolve_model(role_name, probe=probe, refresh=refresh, effort=effort)
+    try:
+        tracing: ExplainabilitySettings | None = load_config().explainability
+    except Exception as exc:  # fail-open: a broken config costs the trace, never the spawn
+        tracing = None
+        typer.echo(f"explainability: config unreadable ({exc}) — sessions untraced", err=True)
+    env_pairs = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
+    if resolution is None:
+        argv = ["claude"]
+        banner = f"{role_name}: untiered role — launching on the session default model"
+    else:
+        argv = ["claude", "--model", resolution.model, "--effort", resolution.effort]
+        skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
+        profile = harness.ROLE_PROFILES.get(role_name)
+        mission = profile.mission if profile else "pinned by AISQUARE_MODEL override"
+        banner = (
+            f"{role_name}: {resolution.model} @ {resolution.effort} "
+            f"[model {resolution.source} · effort {resolution.effort_source}]{skipped} — {mission}"
+        )
+    command = " ".join([*env_pairs, shlex.join(argv)])
+    if tracing is not None and tracing.enabled:
+        # Never burn a pipeline id into a printable command: every paste would
+        # reuse the same id and those sessions would merge into one Run. The
+        # eval mints a fresh id per run instead; if tracing is down at run
+        # time, the substitution comes back empty with the reason on stderr
+        # and the session starts untraced — the same fail-open as --exec.
+        command = f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "role": role_name,
+                    "model": resolution.model if resolution else None,
+                    "effort": resolution.effort if resolution else None,
+                    "source": resolution.source if resolution else "untiered",
+                    "effort_source": resolution.effort_source if resolution else None,
+                    "skipped": resolution.skipped if resolution else [],
+                    "command": command,
+                }
+            )
+        )
+        if not execute:
+            return
+    else:
+        stdout_console().print(f"✓ {banner}", markup=False)
+        if resolution is not None:
+            caution = harness.effort_warning(resolution.model, resolution.effort)
+            if caution:
+                stdout_console().print(f"  ⚠ {caution}", markup=False)
+    if execute:
+        if shutil.which("claude") is None:
+            fail("claude not found on PATH", error="claude_missing")
+        env = dict(os.environ)
+        env["AISQUARE_ROLE"] = role_name
+        if tracing is not None and tracing.enabled:
+            # Same seam as ``aisquare launch``: wire_session fails open, so a
+            # dead or wrong proxy costs the trace, never the spawn.
+            wiring = explainability_service.wire_session(tracing, role_name, base_env=env)
+            env.update(wiring.env)
+            typer.echo(f"explainability: {wiring.reason}", err=True)
+        os.execvpe(argv[0], argv, env)
+    if not get_state().json_output:
+        stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)
+
+
+@app.command("harness")
+def harness_status() -> None:
+    """Show the role→model matrix and how each ladder resolves right now."""
+    if not orchestrator.team_enabled():
+        _fail_team(TeamDisabledError())
+    rows = []
+    base, base_source = harness.base_effort()
+    for name, profile in harness.ROLE_PROFILES.items():
+        resolution = harness.resolve_model(name, probe=False)
+        assert resolution is not None  # every profiled role resolves
+        pinned = harness.role_model_override(name)
+        rows.append(
+            {
+                "role": name,
+                "ladder": profile.ladder,
+                "effort_offset": profile.effort_offset,
+                "effort": resolution.effort,
+                "effort_source": resolution.effort_source,
+                "resolves_to": pinned or resolution.model,
+                "source": "pinned" if pinned else resolution.source,
+                "mission": profile.mission,
+            }
+        )
+    interference = harness.interfering_env()
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "base_effort": base,
+                    "base_effort_source": base_source,
+                    "roles": rows,
+                    "interfering_env": interference,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    console.print(f"base effort: {base} ({base_source})", markup=False)
+    for name, profile in harness.ROLE_PROFILES.items():
+        resolution = harness.resolve_model(name, probe=False)
+        assert resolution is not None  # every profiled role resolves
+        pinned = harness.role_model_override(name)
+        ladder = "→".join(profile.ladder)
+        offset = f"+{profile.effort_offset}" if profile.effort_offset else " 0"
+        source = "pinned" if pinned else resolution.source
+        console.print(
+            f"{name:<10} {ladder:<20} effort={resolution.effort:<10}({offset}) "
+            f"→ {pinned or resolution.model} [{source}]",
+            markup=False,
+        )
+    if interference:
+        console.print(f"⚠ env overrides model selection: {', '.join(interference)}", markup=False)
+    console.print(
+        "Resolution shown without probing — `aisquare team spawn <role>` verifies live.",
+        markup=False,
+    )
+
+
 @app.command("log")
 def log(
     limit: Annotated[int, typer.Option("--limit", "-n", help="How many events to show.")] = 30,
+    by: Annotated[
+        str | None, typer.Option("--by", help="Only events by this session (id prefix).")
+    ] = None,
+    mine: Annotated[
+        bool, typer.Option("--mine", help="Only events by the --as session (self-check).")
+    ] = False,
+    since: Annotated[
+        str | None, typer.Option("--since", help="Only events after: 15m, 2h, or an ISO time.")
+    ] = None,
+    since_seq: Annotated[
+        int | None, typer.Option("--since-seq", help="Only events past this seq (cursor).")
+    ] = None,
+    kind: Annotated[
+        str | None, typer.Option("--kind", help="Only this kind (note, decision, task_done, …).")
+    ] = None,
+    task: Annotated[
+        str | None, typer.Option("--task", help="Only events about this task (id prefix).")
+    ] = None,
+    as_session: SessionRef = None,
 ) -> None:
-    """Show the team pipe: recent events from every session."""
+    """Show the team pipe: recent events from every session, filterable."""
+    if mine and by is not None:
+        raise typer.BadParameter("--mine and --by are mutually exclusive")
+    if mine:
+        if as_session is None:
+            fail("--mine needs --as <session> (your id is on the board)", error="missing_session")
+        by = as_session
+    moment = _parse_since(since) if since is not None else None
     try:
-        events = team_service.log_events(limit=limit)
-    except TeamDisabledError as exc:
-        _fail_team(exc)
+        events = team_service.log_events(
+            limit=limit,
+            by=by,
+            since=moment,
+            since_seq=since_seq,
+            kind=kind,
+            task_ref=task,
+            session_ref=as_session,
+        )
+    except STORE_ERRORS as exc:
+        _fail_team(exc, task or by or as_session)
     if get_state().json_output:
         typer.echo(json.dumps([event.as_envelope().model_dump(mode="json") for event in events]))
         return
     if not events:
-        stdout_console().print("No team events yet.")
+        stdout_console().print("No team events match.")
         return
     console = stdout_console()
     for event in events:
@@ -119,6 +421,217 @@ def log(
         console.print(
             f"{local_time(event.created_at):%H:%M} {who} {event.kind}: {event.text}",
             markup=False,
+        )
+
+
+@app.command("verify")
+def verify(
+    receipt: Annotated[
+        str, typer.Argument(help="A write receipt: event seq number, or event id (prefix ok).")
+    ],
+    as_session: SessionRef = None,
+) -> None:
+    """Re-check a receipt: prove the write is really on this board.
+
+    The pull side of delivery trust — every ✓ prints ``seq N on <board>``
+    (#20's push side); this re-proves it any time, from any process.
+    """
+    try:
+        result = team_service.verify_receipt(receipt, session_ref=as_session)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, receipt)
+    if result.event is None:
+        aside = f" — it exists on board {result.elsewhere}" if result.elsewhere else ""
+        fail(
+            f"no event matches receipt '{receipt}' on board {result.board_name}{aside}",
+            error="not_found",
+            ref=receipt,
+            hint=result.elsewhere,
+        )
+    if get_state().json_output:
+        payload = result.event.as_envelope().model_dump(mode="json")
+        payload["delivered"] = True
+        typer.echo(json.dumps(payload))
+    else:
+        stdout_console().print(
+            f"✓ delivered · seq {result.event.seq} on {result.board_id}: {result.line}",
+            markup=False,
+        )
+
+
+def _signal_json(state: team_service.SignalState) -> dict[str, object]:
+    return {
+        "name": state.name,
+        "value": state.value,
+        "set_by": state.set_by,
+        "seq": state.seq,
+        "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+    }
+
+
+def _signal_line(state: team_service.SignalState) -> str:
+    who = team_service.short_id(state.set_by) if state.set_by else "cli"
+    when = f" at {local_time(state.updated_at):%H:%M}" if state.updated_at else ""
+    return f"{state.name} = {state.value} · set by {who}{when} · seq {state.seq}"
+
+
+@app.command("signal")
+def signal(
+    name: Annotated[str, typer.Argument(help="Signal name (lowercase token, e.g. fold-ready).")],
+    value: Annotated[
+        str | None,
+        typer.Argument(help="New value (single token). Omit to read the current value."),
+    ] = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Set or read a named board state — structured, never substring-matched.
+
+    ``team signal fold-ready on --as <sid>`` sets; ``team signal fold-ready``
+    reads. Every set emits a ``signal`` event whose payload carries
+    ``name``/``value``/``prev``/``set_by`` — watchers key on fields, so a
+    note saying "NOT READY" can never trip a ``ready`` watcher again (#23).
+    """
+    if value is None:
+        try:
+            state = team_service.read_signal(name, session_ref=as_session)
+        except STORE_ERRORS as exc:
+            _fail_team(exc, as_session)
+        if state is None:
+            fail(f"no signal named '{name}' on this board", error="not_found", ref=name)
+        if get_state().json_output:
+            typer.echo(json.dumps(_signal_json(state)))
+        else:
+            stdout_console().print(_signal_line(state), markup=False)
+        return
+    try:
+        state, prev = team_service.set_signal(name, value, session_ref=as_session)
+    except ValueError as exc:
+        fail(str(exc), error="invalid_signal", ref=name)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, as_session)
+    delivery = team_service.last_delivery()
+    emit_write_warning(delivery)
+    if get_state().json_output:
+        payload = _signal_json(state)
+        payload["prev"] = prev
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
+    else:
+        was = f" (was {prev})" if prev is not None else ""
+        stdout_console().print(
+            f"✓ signal {state.name}: {state.value}{was}{receipt_suffix(delivery)}",
+            markup=False,
+        )
+
+
+@app.command("signals")
+def signals(as_session: SessionRef = None) -> None:
+    """List every named board state and who set it."""
+    try:
+        states = team_service.list_signals(session_ref=as_session)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, as_session)
+    if get_state().json_output:
+        typer.echo(json.dumps([_signal_json(state) for state in states]))
+        return
+    if not states:
+        stdout_console().print("No signals set. Set one with: aisquare team signal <name> <value>")
+        return
+    console = stdout_console()
+    for state in states:
+        console.print(_signal_line(state), markup=False)
+
+
+def _fmt_idle(minutes: int) -> str:
+    """Render an idle span the way the board's ``_age`` does (12m, 3h07m)."""
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+@app.command("prune")
+def prune(
+    older_than: Annotated[
+        int | None,
+        typer.Option(
+            "--older-than",
+            help="Minutes without a heartbeat before a session counts as a ghost "
+            "(default: 30, the board's stale mark).",
+        ),
+    ] = None,
+    keep: Annotated[
+        str | None,
+        typer.Option("--keep", help="Spare this session (id prefix) even if it looks stale."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show who would be retired without touching anything."),
+    ] = False,
+) -> None:
+    """Retire ghost sessions and return their orphaned claims to the pool — a clean roll-call.
+
+    A dead loop or crashed terminal lingers on the board as ``(stale)`` forever.
+    This ends those rows so the board shows who is actually here, and frees any
+    task stranded under them. Data-safe: only presence + orphaned claims change
+    — tasks, notes, events and the project brain are untouched.
+    """
+    try:
+        report = team_service.prune_sessions(older_than, dry_run=dry_run, keep=keep)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, keep)
+    delivery = team_service.last_delivery()
+    if get_state().json_output:
+        payload: dict[str, object] = {
+            "dry_run": report.dry_run,
+            "threshold_minutes": report.threshold_minutes,
+            "released_total": report.released_total,
+            "pruned": [
+                {
+                    "id": p.id,
+                    "role": p.role,
+                    "idle_minutes": p.idle_minutes,
+                    "released": p.released,
+                }
+                for p in report.pruned
+            ],
+        }
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
+        return
+    console = stdout_console()
+    if not report.pruned:
+        console.print(
+            f"✓ roll-call clean — every live session checked in within "
+            f"{report.threshold_minutes}m. No ghosts to retire."
+        )
+        return
+    for entry in report.pruned:
+        claims = (
+            f", freed {entry.released} claim{'' if entry.released == 1 else 's'}"
+            if entry.released
+            else ""
+        )
+        bullet = "·" if report.dry_run else "✓"
+        console.print(
+            f"  {bullet} {team_service.short_id(entry.id)} ({entry.role}) — "
+            f"dark {_fmt_idle(entry.idle_minutes)}{claims}",
+            markup=False,
+        )
+    count = len(report.pruned)
+    plural = "" if count == 1 else "s"
+    if report.dry_run:
+        console.print(
+            f"— would retire {count} ghost session{plural} (dry run, nothing changed). "
+            "Re-run without --dry-run to clear them."
+        )
+    else:
+        tail = (
+            f" and returned {report.released_total} orphaned "
+            f"claim{'' if report.released_total == 1 else 's'} to the pool"
+            if report.released_total
+            else ""
+        )
+        console.print(
+            f"🧹 retired {count} ghost session{plural}{tail} — "
+            f"board's aligned.{receipt_suffix(delivery)}"
         )
 
 
@@ -134,7 +647,7 @@ def distill(
     """Push undistilled notes/decisions/outcomes into the project brain now."""
     try:
         count = team_service.distill_now(rescan=rescan)
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:
         typer.echo(json.dumps({"distilled": count}))
@@ -151,7 +664,7 @@ def recall(
     """Search the team's long-term memory (decisions, results, outcomes)."""
     try:
         output = team_service.recall(query)
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if output is None:
         fail(
@@ -183,12 +696,20 @@ def note(
         event = team_service.add_note(
             text, session_ref=as_session, task_ref=task, to_role=to, kind=kind
         )
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except ValueError as exc:
+        fail(str(exc), error="invalid_task", ref=task)
+    except STORE_ERRORS as exc:
         _fail_team(exc, task or as_session)
+    delivery = team_service.last_delivery()
+    emit_write_warning(delivery)
     if get_state().json_output:
-        typer.echo(event.as_envelope().model_dump_json())
+        payload = event.as_envelope().model_dump(mode="json")
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
-        stdout_console().print(f"✓ shared ({event.kind}): {event.text}", markup=False)
+        stdout_console().print(
+            f"✓ shared ({event.kind}): {event.text}{receipt_suffix(delivery)}", markup=False
+        )
 
 
 def board(
@@ -207,7 +728,7 @@ def board(
         return
     try:
         project, sessions, tasks, events = team_service.board_data()
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:
         typer.echo(
@@ -223,8 +744,8 @@ def board(
         return
     if not sessions and not tasks:
         stdout_console().print(
-            "The orchestrator is quiet here. Activate with `aisquare team on`, or launch a "
-            "session with AISQUARE_ROLE=planner (coder/runner/…) set."
+            "The orchestrator is quiet here. Activate with `aisquare team on`, or start a "
+            "session with `aisquare launch planner` (coder/runner)."
         )
         return
     stdout_console().print(

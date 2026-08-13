@@ -30,7 +30,20 @@ snapshots use [Repomix](https://github.com/yamadashy/repomix) via Node/`npx`
 when available — `aisquare doctor` tells you if it's missing, and nothing
 breaks without it.
 
-## What you get
+That's the whole setup — you are done. Everything below is reference.
+
+aisquare has **two halves, and they are independent**:
+
+| | What it is | Who it's for |
+| --- | --- | --- |
+| **[Part 1 — Memory](#part-1--memory-start-here)** | Your agent remembers preferences and project conventions, and starts every session oriented. | **Everyone.** Zero extra commands after setup — it just works. |
+| **[Part 2 — Orchestration](#part-2--orchestration-advanced)** | Several agent sessions work one problem as a team, with a shared task board. | Opt-in, per repo. Skip it until you actually want parallel sessions. |
+
+If you only ever read Part 1, you are using aisquare correctly.
+
+---
+
+# Part 1 — Memory (start here)
 
 **Your agent starts every session already oriented.** `agents connect
 claude-code` installs lifecycle hooks into `~/.claude/settings.json` (merged
@@ -45,13 +58,19 @@ over unittest"` persists across every session and every project. Context
 lives in two pools — `user` (follows you everywhere) and `project` (scoped to
 one repo) — full-text searchable, exportable, and injected consistently.
 
-**Your agents can work as a team.** Launch a planner you talk to, coders that
-pull work from a shared task list, and a runner that verifies — each one a
-plain Claude Code session in its own terminal. aisquare coordinates them:
-atomic task claims, dependencies, a review cycle, per-prompt deltas of what
-teammates did, and a live board TUI for you. One Claude account is enough.
+### The five commands that matter
 
-## The memory layer
+```sh
+aisquare remember "prefer pytest over unittest"   # sticks everywhere
+aisquare context add "run make check" --project   # sticks in this repo only
+aisquare context list                             # what's in scope here
+aisquare context search pytest                    # full-text search
+aisquare doctor                                   # is everything wired?
+```
+
+Nothing else in this document is required reading.
+
+## The memory layer in full
 
 ```sh
 aisquare remember "prefer pytest over unittest" --user --tag testing
@@ -72,7 +91,12 @@ aisquare log                       # your captured prompt history, per project
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
 context, snapshots, prompt history, team state — scopes to it consistently.
-Worktrees resolve to their principal repository automatically.
+
+**Git worktrees resolve to their principal repository**, so several feature
+branches checked out side by side all share one context pool, one snapshot and
+one board. Set a repo's conventions up once and every worktree of it starts
+oriented; identity comes from `git rev-parse --git-common-dir`, not from
+walking up to the nearest marker.
 
 `aisquare project onboard` (also run by `init`) packs the codebase with
 Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
@@ -81,32 +105,109 @@ cheap thing agents read first), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
 
-## Orchestrate a team of agents
+---
 
-This is the part that changes how you work. Sessions are per **terminal**,
-not per account — a single `claude` install runs the whole team:
+# Part 2 — Orchestration (advanced)
+
+**You do not need this to use aisquare.** Everything above works on its own.
+Read on only when you want several agent sessions working one problem at once.
+
+Sessions are per **terminal**, not per account — a single `claude` install
+runs the whole team:
 
 ```sh
 pipx install 'aisquare-cli[tui]'         # the live board wants the TUI extra
 aisquare agents connect claude-code
 cd your/repo
 
-AISQUARE_ROLE=planner claude             # terminal 1 — you talk to this one
-AISQUARE_ROLE=coder   claude             # terminal 2
-AISQUARE_ROLE=coder   claude             # terminal 3 — as many as you like
-AISQUARE_ROLE=runner  claude             # terminal 4 — verifies the coders' work
+aisquare launch planner                  # terminal 1 — you talk to this one
+aisquare launch coder                    # terminal 2
+aisquare launch coder                    # terminal 3 — as many as you like
+aisquare launch runner                   # terminal 4 — verifies the coders' work
 aisquare board -w                        # terminal 5 — you, watching live
 ```
 
-Launching with `AISQUARE_ROLE` opts the repo in and registers the session.
+`aisquare launch <role>` opts the repo in, registers the session, and hands
+off to `claude` — arguments after the role are forwarded, so `aisquare launch
+coder --model opus` does what it looks like. (The underlying mechanism is the
+`AISQUARE_ROLE` environment variable; `AISQUARE_ROLE=coder claude` still works
+if you prefer it, and is what you need when launching an agent other than
+`claude` without `--command`.)
+
 Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:
 
-- **planner** — turns your intent into tasks on the shared board
-- **coder** — loops `task next --claim` → work → `task review`
-- **runner** — verifies reviewed work → `task done`, or `task reopen
-  --reason "what failed"` — and the feedback rides back to whichever coder
-  picks the task up next
+- **planner** — turns your intent into contract-carrying tasks on the shared
+  board (objective, why, acceptance criteria, boundaries)
+- **coder** — loops `task next --claim` → work → `task review`; blocks
+  instead of guessing when a task has no usable contract
+- **runner** — the adversarial verifier: runs the full check the acceptance
+  criteria name, tries to make the change fail, then `task done` with
+  evidence or `task reopen --reason "what failed"` — and the feedback rides
+  back to whichever coder picks the task up next
+- **validator** — gates the assembled deliverable once, before handoff
+  (final accountability review, severity-ordered findings)
+
+### The model harness: each role on the right model
+
+Roles are tiered onto a model *ladder*, strongest first, with availability
+verified and automatic fallback — planner/validator want `fable`
+(enterprise) and fall back to `opus`, then `sonnet`, when the account
+doesn't serve it; coder/runner run on `sonnet`, the measured sweet spot for
+agentic work. Launch a role through the harness and it resolves the ladder
+for you:
+
+```sh
+aisquare team spawn planner            # prints: AISQUARE_ROLE=planner claude --model fable --effort high
+aisquare team spawn coder --exec       # or replace this terminal with the session
+aisquare team harness                  # the whole role→model matrix + how it resolves now
+```
+
+Availability is *probed*, never assumed — `claude --model` silently
+substitutes the default when a known model isn't available to the account,
+so the harness verifies the reply's `modelUsage` before trusting a rung, and
+caches that verdict per account for a day (`--refresh` re-checks after an
+entitlement changes). The probe runs isolated: it never executes the current
+repo's hooks or MCP servers, and never joins the board.
+
+Resolution is fail-open and, deliberately, only *demotes on proof*: a
+genuine substitution walks down the ladder, while an outage, an expired
+login, or an unrecognised reply keeps the requested model and labels the pick
+`[unverified]` rather than quietly downgrading your planner. Nothing here
+ever blocks a launch. Pin a role outright with `AISQUARE_MODEL_<ROLE>`
+(works for custom roles too); disable probes with `AISQUARE_HARNESS_PROBE=0`.
+
+**Effort is dynamic, not frozen.** `high` is the base — the documented default
+for most work — and each role carries a predefined *offset* rather than a
+hardcoded level, so the shape holds wherever you set the base:
+
+| base | planner / coder / runner | validator (+1) |
+| --- | --- | --- |
+| `low` | low | medium |
+| `high` *(default)* | high | xhigh |
+| `xhigh` | xhigh | max |
+
+The offset exists for one reason: the gate has to outrank the work it checks.
+A flat override that dropped everything to `low` would leave the validator
+weaker than the coder whose output it reviews, which is not a gate at all.
+
+The base comes from, in order: `AISQUARE_EFFORT` → `CLAUDE_EFFORT` (what your
+own Claude session is running at, which Claude Code exports) → `high`. So
+raising your session to xhigh raises the fleet you spawn from it, with nothing
+to configure. Override per launch with `aisquare team spawn coder --effort
+xhigh`, or pin one role absolutely with `AISQUARE_EFFORT_<ROLE>` — both skip
+the offset, because you named the level yourself. `ultracode` is accepted and
+ranks as xhigh (it is xhigh plus automatic workflow orchestration). An
+unusable value falls back to the base rather than being passed to the CLI,
+which would silently ignore it. `aisquare team harness` prints the live base
+and every derived level.
+
+Sessions report their model back to the board, which flags any session
+running off its role's ladder (`⚠ off-ladder`). That signal is advisory: the
+model field is optional in Claude Code's hook payload and absent on some
+surfaces (MCP teammates have none), and an in-session `/model` switch isn't
+re-reported — so a missing chip means *not reported*, never *wrong*. Tiering
+is enforced at launch, not policed in the store.
 
 On every prompt, each session receives a compact delta of what teammates did
 since its last turn. Nothing needs forwarding; the coordination is the
@@ -132,6 +233,46 @@ Claims are single-`UPDATE` atomic (race-tested), leased (default 120
 minutes), and renewed by the session's own lifecycle hooks — so a dead
 session's claims release themselves and the work gets picked up again.
 `task next` only hands out tasks whose dependencies are done.
+
+### Self-check: receipts you can re-prove
+
+Every successful write prints a receipt (`✓ … · seq N on <board>`; under
+`--json`, `delivered: true` plus the event's `seq`). The pull side is yours
+any time:
+
+```sh
+aisquare team verify 42                     # is seq 42 really on this board? exit 0/1
+aisquare team verify evt_01k… --as <id>     # by event id (prefix ok), session's board
+aisquare team log --mine --as <id>          # read back your own recent writes
+aisquare team log --by aaaa1111 --since 15m --kind decision   # filters compose
+```
+
+A receipt that lives on a *different* board is an honest not-found — with a
+hint naming the board that actually holds it. Remote MCP agents get the same
+pair: `verify(receipt)` and `team_log(by_session="me")`.
+
+### Signals: named states, never substring matching
+
+Prose is a terrible protocol — a watcher grepping `READY` fires on a note
+saying "NOT READY". Signals are first-class named board states:
+
+```sh
+aisquare team signal fold-ready on --as <id>   # set (single-token name/value)
+aisquare team signal fold-ready                # read: value, who set it, when, seq
+aisquare team signals                          # list all
+aisquare team log --kind signal --since-seq N --json   # a watcher's poll loop
+```
+
+Every set emits a `signal` event whose `--json` payload carries structured
+`name` / `value` / `prev` / `set_by` fields — consumers key on fields, never
+on text, so negations can't false-trigger. Sets follow the write contract
+(receipt + read-back; `team verify <seq>` works on signal receipts), and the
+MCP `signal(name, value?)` tool gives remote agents the same pair.
+
+Still matching free text somewhere? At minimum anchor the pattern
+(`^ready$`), match whole tokens (`\bready\b` misses `NOT READY` only if you
+also reject preceding negations), and treat any hit inside a longer sentence
+as suspect — then switch to signals, which is the whole point of them.
 
 ### The live board (`aisquare board -w`)
 
@@ -198,6 +339,14 @@ directory. Claude Desktop on Windows + WSL2 works either over the HTTP URL
   "cd /path/to/your/repo && aisquare serve --stdio"]}}}
 ```
 
+An idle stdio server closes itself after 300s without a client message
+(`--close-after`, env `AISQUARE_SERVE_CLOSE_AFTER`) so abandoned daemons
+never linger; persistent clients like the Claude Desktop config above should
+set `AISQUARE_SERVE_CLOSE_AFTER=0` (run forever) in their launch command.
+The clock counts **inbound** messages only — it assumes request/response
+traffic, so a deadline shorter than your slowest tool call would cut a
+client mid-wait (at the 300s default no current tool comes anywhere close).
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:
@@ -209,14 +358,56 @@ Orchestration has no config files — a handful of env knobs:
 | `AISQUARE_TEAM_HUB` | point sessions from several repos at one shared board |
 | `AISQUARE_TEAM_DELTA=0` | mute per-prompt teammate deltas for a session |
 | `AISQUARE_TEAM_LEASE_MIN` | task-claim lease in minutes (default 120) |
+| `AISQUARE_MODEL_<ROLE>` | pin a role's model outright (skips the harness ladder) |
+| `AISQUARE_EFFORT` | base effort for spawned roles (default `high`, else inherits `CLAUDE_EFFORT`) |
+| `AISQUARE_EFFORT_<ROLE>` | pin one role's effort absolutely (skips the role offset) |
+| `AISQUARE_HARNESS_PROBE=0` | never probe model availability (ladders resolve optimistically) |
 | `AISQUARE_BRAIN=0` | disable the long-term-memory layer |
 | `AISQUARE_BRAIN_EMBED=1` | embed distilled pages for semantic recall (needs `OPENAI_API_KEY`; set before the first distill) |
 | `AISQUARE_BRAIN_EMBED_MODEL` | embedding model (default `openai:text-embedding-3-large`) |
 | `AISQUARE_HOME` | relocate the whole `~/.aisquare` tree |
 
-Running several Claude installs for separate rate limits? Connect each
-config dir once: `aisquare agents connect claude-code --config-dir
-~/.claude2`. For executions spanning multiple repositories, set
+### Several accounts, one team
+
+Running parallel Claude installs for separate rate limits? Connect each
+config dir once, then launch roles against them with `--account`:
+
+```sh
+aisquare agents connect claude-code --config-dir ~/.claude-account1
+aisquare agents connect claude-code --config-dir ~/.claude-account2
+
+aisquare launch planner                              # your default account
+aisquare launch coder --account ~/.claude-account1
+aisquare launch coder --account ~/.claude-account2
+```
+
+`--account` sets `CLAUDE_CONFIG_DIR` for the launched session and fails
+loudly on a directory that doesn't exist — a typo would otherwise start a
+fresh, unauthenticated profile. Note that shell aliases (`alias
+claude1='CLAUDE_CONFIG_DIR=… claude'`) can **not** be passed to `--command`:
+aliases aren't executables, so target the config directory instead.
+
+Each session records **which config dir it runs under**, and the board labels
+sessions with it once more than one account is in play:
+
+```
+sessions:
+  - a1b2c3d4 coder [.claude-account1] — 2m ago
+  - e5f6a7b8 coder [.claude-account2] — 1m ago
+```
+
+So when one account hits its limit you can see exactly which terminals to
+relaunch elsewhere. Because claims are leased and released on `SessionEnd`,
+a killed session hands its task straight back to the pool — relaunching under
+another account picks the work up with full context from the board.
+
+All accounts share one `~/.aisquare` — one context store, one board, one task
+list. Sessions are per **terminal**, not per account, so several accounts
+simply mean several rate-limit pools driving one team. `agents list` and
+`doctor` report every connected directory separately, so a sibling install
+whose hooks went missing is named rather than hidden behind a healthy ✓.
+
+For executions spanning multiple repositories, set
 `AISQUARE_TEAM_HUB=/path/to/hub` in every session; git worktrees already
 share their principal repo's board automatically.
 
@@ -267,14 +458,20 @@ aisquare
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
+│                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
+│                                 [--effort LEVEL] · harness
 ├── task            add · list · show · next [--role R] [--status S] [--claim]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
+├── launch <planner|coder|runner> [--account DIR] [--command CMD] [… agent args]
 ├── serve [--stdio | --port N --bind H] [--show-token]
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```
+
+Everything `aisquare --help` lists is implemented. Roadmap commands are
+registered but hidden until they do something real.
 
 | Global flag | Meaning |
 | --- | --- |
@@ -284,9 +481,13 @@ aisquare
 | `--no-color` | disable coloured output |
 | `--profile NAME` | configuration profile |
 
-You'll spot a few more groups in `--help` — `auth`, `sync`, `connectors`,
-`capture`, `policy` — that's the cloud roadmap (sync across machines,
-managed connectors). Each says so plainly when invoked rather than
+### Roadmap commands
+
+`auth` / `login` / `logout` / `whoami`, `sync`, `connectors`, `capture`,
+`policy` / `enforce`, `open`, `upgrade` and `uninstall` are the cloud roadmap
+(sync across machines, managed connectors). They are **hidden from `--help`**
+so the listed surface is only what actually works, but they still run and
+still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in
 [issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
 

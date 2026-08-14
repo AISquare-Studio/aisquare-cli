@@ -58,27 +58,21 @@ class TestPrecedence:
         # resolver only reads `.team.bins`.
         _Cfg = SimpleNamespace(team=SimpleNamespace(bins={ROLE: "claude2"}))
 
-        monkeypatch.setattr(
-            "aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False
-        )
+        monkeypatch.setattr("aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False)
         got = harness.resolve_binary(ROLE)
         assert (got.binary, got.source) == ("claude2", "config")
 
     def test_an_env_var_beats_the_config_map(self, monkeypatch):
         _Cfg = SimpleNamespace(team=SimpleNamespace(bins={ROLE: "from-config"}))
 
-        monkeypatch.setattr(
-            "aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False
-        )
+        monkeypatch.setattr("aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False)
         monkeypatch.setenv(harness._bin_env_var(ROLE), "from-env")
         assert harness.resolve_binary(ROLE).source == "env"
 
     def test_a_role_the_map_does_not_mention_still_gets_the_default(self, monkeypatch):
         _Cfg = SimpleNamespace(team=SimpleNamespace(bins={"planner": "claude2"}))
 
-        monkeypatch.setattr(
-            "aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False
-        )
+        monkeypatch.setattr("aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False)
         got = harness.resolve_binary("runner")
         assert (got.binary, got.source) == ("claude", "default")
 

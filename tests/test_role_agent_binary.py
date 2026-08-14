@@ -24,36 +24,40 @@ ROLE = "coder"
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_bins(monkeypatch):
+def _no_ambient_bins(monkeypatch: pytest.MonkeyPatch) -> None:
     """The developer running the suite may well have these set."""
     for var in (harness._BIN_ENV_GLOBAL, harness._bin_env_var(ROLE)):
         monkeypatch.delenv(var, raising=False)
 
 
 class TestPrecedence:
-    def test_the_default_is_claude(self, monkeypatch):
+    def test_the_default_is_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(harness, "load_config", None, raising=False)
         got = harness.resolve_binary(ROLE)
         assert got.binary == "claude"
         assert got.source == "default"
 
-    def test_a_flag_wins_over_everything(self, monkeypatch):
+    def test_a_flag_wins_over_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(harness._bin_env_var(ROLE), "from-env")
         got = harness.resolve_binary(ROLE, override="from-flag")
         assert (got.binary, got.source) == ("from-flag", "flag")
 
-    def test_a_per_role_env_var_beats_the_global_one(self, monkeypatch):
+    def test_a_per_role_env_var_beats_the_global_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(harness._BIN_ENV_GLOBAL, "everywhere")
         monkeypatch.setenv(harness._bin_env_var(ROLE), "just-this-role")
         got = harness.resolve_binary(ROLE)
         assert (got.binary, got.source) == ("just-this-role", "env")
 
-    def test_the_global_env_var_applies_when_no_role_specific_one_exists(self, monkeypatch):
+    def test_the_global_env_var_applies_when_no_role_specific_one_exists(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv(harness._BIN_ENV_GLOBAL, "everywhere")
         got = harness.resolve_binary(ROLE)
         assert (got.binary, got.source) == ("everywhere", "env:global")
 
-    def test_the_config_map_is_used_when_no_env_says_otherwise(self, monkeypatch):
+    def test_the_config_map_is_used_when_no_env_says_otherwise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # SimpleNamespace stands in for the pydantic config object: the
         # resolver only reads `.team.bins`.
         _Cfg = SimpleNamespace(team=SimpleNamespace(bins={ROLE: "claude2"}))
@@ -62,14 +66,16 @@ class TestPrecedence:
         got = harness.resolve_binary(ROLE)
         assert (got.binary, got.source) == ("claude2", "config")
 
-    def test_an_env_var_beats_the_config_map(self, monkeypatch):
+    def test_an_env_var_beats_the_config_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _Cfg = SimpleNamespace(team=SimpleNamespace(bins={ROLE: "from-config"}))
 
         monkeypatch.setattr("aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False)
         monkeypatch.setenv(harness._bin_env_var(ROLE), "from-env")
         assert harness.resolve_binary(ROLE).source == "env"
 
-    def test_a_role_the_map_does_not_mention_still_gets_the_default(self, monkeypatch):
+    def test_a_role_the_map_does_not_mention_still_gets_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         _Cfg = SimpleNamespace(team=SimpleNamespace(bins={"planner": "claude2"}))
 
         monkeypatch.setattr("aisquare.core.config.load_config", lambda *a, **k: _Cfg, raising=False)
@@ -78,11 +84,13 @@ class TestPrecedence:
 
 
 class TestItFailsOpenOnConfig:
-    def test_an_unreadable_config_costs_the_mapping_never_the_spawn(self, monkeypatch):
+    def test_an_unreadable_config_costs_the_mapping_never_the_spawn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A broken config file must not stop a launch — the same fail-open the
         explainability wiring already uses two lines away in `spawn`."""
 
-        def _boom(*_a, **_k):
+        def _boom(*_a: object, **_k: object) -> None:
             raise OSError("config is a directory")
 
         monkeypatch.setattr("aisquare.core.config.load_config", _boom, raising=False)
@@ -91,16 +99,16 @@ class TestItFailsOpenOnConfig:
 
 
 class TestTheEnvVarName:
-    def test_it_is_derived_from_the_role(self):
+    def test_it_is_derived_from_the_role(self) -> None:
         assert harness._bin_env_var("coder") == "AISQUARE_BIN_CODER"
 
-    def test_non_alphanumerics_become_underscores(self):
+    def test_non_alphanumerics_become_underscores(self) -> None:
         """`code-reviewer` has to reach a var a shell can actually export."""
         assert harness._bin_env_var("code-reviewer") == "AISQUARE_BIN_CODE_REVIEWER"
 
 
 class TestResolutionDoesNotProbePath:
-    def test_it_answers_what_was_asked_for_not_what_exists(self, monkeypatch):
+    def test_it_answers_what_was_asked_for_not_what_exists(self) -> None:
         """Resolution and existence are deliberately separate. If they were
         fused, a missing binary would silently become the default — running the
         WRONG agent under the right role name. The caller checks PATH and

@@ -43,6 +43,19 @@ class ExplainabilitySettings(BaseModel):
     agent_name_template: str = "aisquare-{role}"
 
 
+class TeamSettings(BaseModel):
+    """Per-role launch settings for ``aisquare team``.
+
+    ``bins`` maps a role to the executable that runs its agent, so a person
+    holding several parallel agent installs — ``claude``, ``claude2``, a
+    wrapper script — can put a role on the one they mean without retyping a
+    flag every spawn. Resolution order is flag > env > this map > default;
+    see ``aisquare.core.harness.resolve_binary``.
+    """
+
+    bins: dict[str, str] = Field(default_factory=dict)
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -52,6 +65,7 @@ class AppConfig(BaseModel):
     capture: CaptureSettings = Field(default_factory=CaptureSettings)
     redaction: RedactionSettings = Field(default_factory=RedactionSettings)
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
+    team: TeamSettings = Field(default_factory=TeamSettings)
 
 
 def load_config(path: Path | None = None) -> AppConfig:

@@ -88,15 +88,14 @@ def bind_role(
 
 
 def clear_role_binding(role: str) -> None:
-    """Remove ``role``'s binding, including its legacy ``team.bins`` entry.
+    """Remove ``role``'s binding — bin, env and args — and persist that.
 
-    Both homes are cleared because a `bins` entry surviving a `--clear` would
-    keep steering the role's binary while the operator believed the binding was
-    gone — the kind of leftover that reads as a bug in something else entirely.
+    One map means one pop: `team.profiles` is the only home a role's launch
+    spec has, so a `--clear` cannot leave a second entry behind still steering
+    the binary while the operator believes the binding is gone.
     """
     config = load_config()
     config.team.profiles.pop(role, None)
-    config.team.bins.pop(role, None)
     save_config(config)
 
 

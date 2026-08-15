@@ -10,10 +10,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Per-role LAUNCH PROFILE — the third launch axis, and deliberately the
   dumbest one.** The ladder decides *what* model a role runs on, `--bin` (#52)
   decides *which* executable runs it, and a profile carries *whatever else* the
-  operator wants on the command — verbatim.
+  operator wants on the command — verbatim. Three axes because they change for
+  three different reasons; **one config map**, because they describe one role.
   - `aisquare team bind <role> [--bin CMD] [--env KEY=VALUE ...] [--arg ARG ...]`
     is the one-time setup, with `--unset KEY`, `--clear`, and a bare
-    `aisquare team bind` to print the bindings. Stored under `team.profiles`.
+    `aisquare team bind` to print the bindings. Everything a role launches with
+    is stored under `team.profiles.<role>` — `bin`, `env`, `args`. #52's
+    narrower `team.bins` (role → executable) was a strict subset of
+    `profiles.<role>.bin`, so it is **deleted rather than deprecated**: it
+    reached no release, no config file anywhere holds the key, and a
+    hand-written one still loads because unknown keys are ignored. One map is
+    one place to look, no precedence rule to learn, and nowhere for a `--clear`
+    to leave an entry still steering the role.
   - `aisquare launch <role>` and `aisquare team spawn <role>` carry the binding
     with no flag; `--env KEY=VALUE` (repeatable) adds to or overrides it for a
     single launch. Env merges **per key**, so one variable can be changed

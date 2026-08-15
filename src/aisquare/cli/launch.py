@@ -41,16 +41,15 @@ DEFAULT_AGENT = "claude"
 
 
 def _declared_roles() -> set[str]:
-    """Roles the operator has named in ``team.profiles`` / ``team.bins``.
+    """Roles the operator has named in ``team.profiles``.
 
     Declaring a role in config IS the operator saying it exists, so honouring
     it here keeps one source of truth instead of two lists that drift.
     """
     try:
-        team = load_config().team
+        return set(load_config().team.profiles)
     except Exception:  # fail-open: a broken config must not block a launch
         return set()
-    return set(team.profiles) | set(team.bins)
 
 
 def _role_ok(role: str) -> bool:

@@ -395,11 +395,12 @@ def spawn(
             fail(
                 f"{binary.binary!r} not found on PATH (chosen by: {binary.source}). "
                 # No square brackets in this string: the console renders rich
-                # markup, so "[team.bins]" was being swallowed as a tag and the
-                # third remedy vanished from the message that exists to list
-                # all three.
-                f"Set a different one with --bin, {_bin_env_hint(role_name)}, or the "
-                "team.bins config map.",
+                # markup, so a TOML table name written "[team.profiles]" is
+                # swallowed as a tag and the third remedy vanishes from the
+                # message that exists to list all three. Naming the command
+                # that writes it avoids the problem and is the better hint.
+                f"Set a different one with --bin, {_bin_env_hint(role_name)}, or "
+                f"aisquare team bind {role_name} --bin <command>.",
                 error="agent_binary_missing",
             )
         env = dict(os.environ)
@@ -603,32 +604,21 @@ def _describe(profile: RoleLaunchProfile) -> str:
 def _show_bindings() -> None:
     """Print every role's binding, or how to make one."""
     profiles = settings_service.role_bindings()
-    legacy_bins = load_config().team.bins
     if get_state().json_output:
         typer.echo(
-            json.dumps(
-                {
-                    "profiles": {r: p.model_dump(mode="json") for r, p in profiles.items()},
-                    "bins": legacy_bins,
-                }
-            )
+            json.dumps({"profiles": {r: p.model_dump(mode="json") for r, p in profiles.items()}})
         )
         return
     console = stdout_console()
-    roles = sorted(set(profiles) | set(legacy_bins))
-    if not roles:
+    if not profiles:
         console.print(
             "no role bindings — pin one with: aisquare team bind coder1 "
             "--env CLAUDE_CONFIG_DIR='$HOME/.claude2'",
             markup=False,
         )
         return
-    for name in roles:
-        profile = profiles.get(name)
-        described = _describe(profile) if profile is not None else ""
-        if not described and name in legacy_bins:
-            described = f"bin={legacy_bins[name]}"
-        console.print(f"{name:<12} {described or '(empty)'}", markup=False)
+    for name in sorted(profiles):
+        console.print(f"{name:<12} {_describe(profiles[name]) or '(empty)'}", markup=False)
 
 
 @app.command("log")

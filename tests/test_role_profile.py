@@ -24,7 +24,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
-from aisquare.core import harness
+from aisquare.core import harness, paths
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.services import settings as settings_service
 
@@ -162,32 +162,6 @@ class TestNoPathIsEverInferred:
         # knowing which keys name directories, which this layer must not know.
         _bind(ROLE, env={"CLAUDE_CONFIG_DIR": "/no/such/place"})
         assert harness.resolve_profile(ROLE).env["CLAUDE_CONFIG_DIR"] == "/no/such/place"
-
-
-class TestBinaryFromProfile:
-    def test_a_profile_bin_is_used(self) -> None:
-        _bind(ROLE, bin="claude-wrapper")
-        got = harness.resolve_binary(ROLE)
-        assert (got.binary, got.source) == ("claude-wrapper", "config")
-
-    def test_a_profile_bin_wins_over_the_older_bins_shorthand(self) -> None:
-        # A `bins` entry left behind from an earlier setup must not override the
-        # operator's complete statement about the role.
-        config = load_config()
-        config.team.bins[ROLE] = "stale"
-        config.team.profiles[ROLE] = RoleLaunchProfile(bin="current")
-        save_config(config)
-        assert harness.resolve_binary(ROLE).binary == "current"
-
-    def test_bins_still_works_on_its_own(self) -> None:
-        config = load_config()
-        config.team.bins[ROLE] = "claude2"
-        save_config(config)
-        assert harness.resolve_binary(ROLE).binary == "claude2"
-
-    def test_a_flag_still_beats_the_profile(self) -> None:
-        _bind(ROLE, bin="from-config")
-        assert harness.resolve_binary(ROLE, override="from-flag").source == "flag"
 
 
 class TestLaunchWiring:
@@ -392,19 +366,15 @@ class TestBindingService:
         settings_service.bind_role(ROLE, args=["--model"])
         assert settings_service.bind_role(ROLE, args=["opus"]).args == ["--model", "opus"]
 
-    def test_clear_removes_the_legacy_bins_entry_too(self) -> None:
-        # A `bins` entry surviving a --clear would keep steering the role's
-        # binary while the operator believed the binding was gone.
-        config = load_config()
-        config.team.bins[ROLE] = "leftover"
-        config.team.profiles[ROLE] = RoleLaunchProfile(env={"A": "1"})
-        save_config(config)
+    def test_clear_removes_the_whole_binding(self) -> None:
+        # One map, so a --clear leaves nothing behind that could keep steering
+        # the role. Bound on all three fields to pin that: bin used to live in
+        # a second map that survived the clear.
+        settings_service.bind_role(ROLE, agent_bin="wrapper", env={"A": "1"}, args=["--model"])
 
         settings_service.clear_role_binding(ROLE)
 
-        after = load_config().team
-        assert ROLE not in after.profiles
-        assert ROLE not in after.bins
+        assert ROLE not in load_config().team.profiles
 
 
 class TestUnreadableConfigIsNeverSilent:
@@ -451,3 +421,36 @@ class TestUnreadableConfigIsNeverSilent:
         result = runner.invoke(app, ["team", "spawn", "coder", "--no-probe"])
 
         assert "launching unbound" in result.output
+
+
+class TestAStaleBinsKeyIsInert:
+    """`team.bins` (PR #52) was deleted rather than deprecated — no released
+    version ever had it, so no config can hold one. A hand-written or
+    branch-era file still LOADS (unknown keys are ignored, pinned in
+    tests/test_config.py); these pin that it also has no EFFECT, which is the
+    half a load-test cannot see."""
+
+    @staticmethod
+    def _write_stale(text: str) -> None:
+        target = paths.config_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def test_it_no_longer_steers_the_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(harness._BIN_ENV_GLOBAL, raising=False)
+        monkeypatch.delenv(harness._bin_env_var(ROLE), raising=False)
+        self._write_stale('[team.bins]\ncoder = "claude2"\n')
+        got = harness.resolve_binary(ROLE)
+        assert (got.binary, got.source) == ("claude", "default")
+
+    def test_it_no_longer_declares_a_role(
+        self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+    ) -> None:
+        # The subtle half: `_declared_roles` used to union profiles|bins, so a
+        # role named ONLY in bins was launchable. It must not be now — otherwise
+        # a deleted map keeps quietly widening the role whitelist.
+        self._write_stale('[team.bins]\ndeploybot = "claude2"\n')
+        result = runner.invoke(app, ["launch", "deploybot"])
+        assert result.exit_code == 1, result.output
+        assert "unknown role" in result.output.lower()
+        assert not spy

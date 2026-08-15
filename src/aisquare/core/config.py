@@ -79,13 +79,17 @@ class TeamSettings(BaseModel):
     parallel agent installs, wrapper scripts, proxies, regions, or any other
     knob, without this file learning about any of them.
 
-    ``bins`` is the older, narrower shorthand from #52 for the executable
-    alone; it still works. A role's ``profiles.<role>.bin`` wins over its
-    ``bins`` entry. Full order is flag > env > profile > bins > default; see
+    ONE map on purpose. #52 landed a narrower ``bins`` (role → executable)
+    beside it — a strict subset of ``profiles.<role>.bin``, so two homes for
+    one concept and a precedence rule every reader had to carry. It was
+    deleted rather than deprecated because #52 is unreleased: no config file
+    anywhere holds a ``bins`` key, and a hand-written one still loads, because
+    unknown keys are ignored (see the module docstring).
+
+    Resolution order is flag > env > profile > default; see
     ``aisquare.core.harness.resolve_binary`` and ``resolve_profile``.
     """
 
-    bins: dict[str, str] = Field(default_factory=dict)
     profiles: dict[str, RoleLaunchProfile] = Field(default_factory=dict)
 
 

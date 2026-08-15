@@ -745,7 +745,7 @@ def _team_settings() -> tuple[TeamSettings | None, str | None]:
 
 
 def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolution:
-    """Flag > per-role env > global env > config map > default.
+    """Flag > per-role env > global env > the role's profile > default.
 
     Deliberately does NOT check PATH: resolution answers "what was asked for",
     and the caller reports "it is not there" separately. Fusing them would turn
@@ -764,15 +764,9 @@ def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolutio
     # config and carries it out, and every caller of this function calls that
     # one too — surfacing it in both would print the same warning twice.
     team, _ = _team_settings()
-    # The role's full profile wins over the narrower `bins` shorthand: a profile
-    # is the operator's complete statement about the role, so a `bins` entry
-    # left behind from an earlier setup must not override it.
-    profile = (team.profiles or {}).get(role) if team is not None else None
-    mapped = (profile.bin if profile is not None else None) or (
-        (team.bins or {}).get(role) if team is not None else None
-    )
-    if mapped:
-        return BinaryResolution(binary=mapped, source="config")
+    profile = team.profiles.get(role) if team is not None else None
+    if profile is not None and profile.bin:
+        return BinaryResolution(binary=profile.bin, source="config")
     return BinaryResolution(binary=DEFAULT_AGENT_BINARY, source="default")
 
 

@@ -52,8 +52,10 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -714,6 +716,25 @@ class BinaryResolution(BaseModel):
     source: str  # flag | env | env:global | config | default
 
 
+def _team_settings() -> Any | None:
+    """The ``team`` config section, or ``None`` if the config cannot be read.
+
+    The fail-open is scoped deliberately tight: it covers READING the file — a
+    broken config must cost a mapping, never a launch — and nothing else.
+    Attribute access on the loaded object happens at the call site, outside the
+    guard, so a genuine code bug raises instead of quietly resolving to the
+    default. A resolver that silently answers "default" when it is broken is
+    indistinguishable from one that is working, which is the exact failure this
+    codebase keeps paying for elsewhere.
+    """
+    try:
+        from aisquare.core.config import load_config
+
+        return load_config().team
+    except Exception:
+        return None
+
+
 def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolution:
     """Flag > per-role env > global env > config map > default.
 
@@ -730,144 +751,112 @@ def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolutio
     everywhere = os.environ.get(_BIN_ENV_GLOBAL)
     if everywhere:
         return BinaryResolution(binary=everywhere, source="env:global")
-    try:
-        from aisquare.core.config import load_config
-
-        mapped = (load_config().team.bins or {}).get(role)
-    except Exception:  # fail-open: a broken config costs the mapping, never the spawn
-        mapped = None
+    team = _team_settings()
+    # The role's full profile wins over the narrower `bins` shorthand: a profile
+    # is the operator's complete statement about the role, so a `bins` entry
+    # left behind from an earlier setup must not override it.
+    profile = (team.profiles or {}).get(role) if team is not None else None
+    mapped = (profile.bin if profile is not None else None) or (
+        (team.bins or {}).get(role) if team is not None else None
+    )
     if mapped:
         return BinaryResolution(binary=mapped, source="config")
     return BinaryResolution(binary=DEFAULT_AGENT_BINARY, source="default")
 
 
-# ─── Which ACCOUNT runs a role's agent ───────────────────────────────────────
+# ─── The LAUNCH PROFILE: env and args a role runs with ───────────────────────
 #
-# The third axis, orthogonal to both above: the ladder decides WHAT model the
-# agent runs on, ``resolve_binary`` decides WHICH executable runs it, and this
-# decides WHOSE install it runs under — which credentials, which history, which
-# settings, which MCP servers.
+# The third axis, and deliberately the DUMBEST one. The ladder decides what
+# model a role runs on and ``resolve_binary`` decides which executable runs it;
+# this carries whatever else the operator wants on the command, verbatim.
 #
-# It exists because ``resolve_binary`` cannot serve the common setup. People
-# reach parallel accounts through shell aliases:
+# It is deliberately ignorant. An earlier cut of this understood "accounts" and
+# expanded a name like ``claude2`` into ``~/.claude2`` plus ``~/.cache/claude2``
+# — which is one operator's directory convention baked into a tool that has no
+# business knowing it. Anyone laid out differently could not use the feature at
+# all, and the one person it fit would have it break the day they reorganised.
+#
+# So there is no notion of an account here, and no inferred path. The operator
+# states the env and the args; we expand ``~`` and ``$VAR`` so a value reads
+# exactly like the shell line it replaces, and pass it through. The common case
+# — parallel agent installs reached through aliases —
 #
 #     alias claude2='CLAUDE_CONFIG_DIR="$HOME/.claude2" \
 #                    CLAUDE_CODE_TMPDIR="$HOME/.cache/claude2" command claude'
 #
-# An alias is not an executable, so ``shutil.which("claude2")`` is None and
-# ``--bin claude2`` can only ever fail. The alias is really two env vars around
-# one binary, so that is what we set.
-#
-# BOTH vars, always. Setting CLAUDE_CONFIG_DIR alone gives a session the right
-# credentials and the WRONG scratch directory, silently shared with every other
-# account — parallel sessions then collide in temp while looking correctly
-# isolated, which is the failure mode that is hardest to attribute later.
-
-#: The account used when nothing else says otherwise — the agent's own default
-#: install, i.e. ``~/.claude``.
-DEFAULT_AGENT_ACCOUNT = "claude"
-
-#: Per-role override, e.g. AISQUARE_ACCOUNT_CODER=claude2. Same slug rule as
-#: the binary vars, so ``code-reviewer`` reads AISQUARE_ACCOUNT_CODE_REVIEWER.
-_ACCOUNT_ENV_PREFIX = "AISQUARE_ACCOUNT_"
-
-#: Applies to every role that has no more specific answer.
-_ACCOUNT_ENV_GLOBAL = "AISQUARE_AGENT_ACCOUNT"
+# is then just two env entries the operator writes once per role, and any other
+# knob (a proxy, a region, a wrapper's own vars) works the same way without
+# this file learning a thing about it.
 
 
-def _account_env_var(role: str) -> str:
-    slug = "".join(ch if ch.isalnum() else "_" for ch in role).upper()
-    return f"{_ACCOUNT_ENV_PREFIX}{slug}"
+class LaunchProfile(BaseModel):
+    """What a role adds to its launch: env, extra args, and where each came from."""
+
+    env: dict[str, str] = {}
+    args: list[str] = []
+    #: Per-env-key provenance — ``flag`` or ``config``. Carried for the same
+    #: reason the other two axes carry it: an answer without its source sends
+    #: the reader hunting for who won.
+    env_sources: dict[str, str] = {}
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.env and not self.args
 
 
-class AccountResolution(BaseModel):
-    """Which account a role launches under, and why that one.
+def expand_value(value: str) -> str:
+    """``~`` and ``$VAR`` expansion, so config reads like the shell it replaces.
 
-    ``source`` is carried for the same reason ``BinaryResolution`` carries it:
-    an answer without its provenance sends the reader hunting through four
-    places to learn who won.
+    Order matters: ``$VAR`` first, because ``$HOME/.claude2`` must become a
+    real path before ``~`` expansion would have nothing to do. An undefined
+    ``$VAR`` is left verbatim by ``expandvars`` rather than becoming empty —
+    a silently blank CLAUDE_CONFIG_DIR would start a fresh unauthenticated
+    profile, which is exactly the failure this whole area exists to avoid.
     """
-
-    account: str
-    source: str  # flag | env | env:global | config | default
+    return os.path.expanduser(os.path.expandvars(value))
 
 
-class AccountPaths(BaseModel):
-    """The two directories that together ARE an account."""
+def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
+    """``["K=V", ...]`` -> ``{"K": "V"}``.
 
-    name: str
-    config_dir: Path
-    tmp_dir: Path
-
-
-def account_paths(account: str) -> AccountPaths:
-    """Resolve an account to its config and scratch directories.
-
-    A BARE NAME (``claude2``) is the common case and follows the convention the
-    aliases already use: ``~/.claude2`` for config, ``~/.cache/claude2`` for
-    scratch. A name containing a separator, or starting with ``~`` or ``.``, is
-    taken as an explicit CONFIG PATH instead, and its scratch directory is
-    derived from the directory's own name with any leading dot removed — so an
-    explicit ``~/.claude-work`` still lands on ``~/.cache/claude-work`` rather
-    than silently sharing the default.
+    Splits on the FIRST ``=`` only, so a value may contain more of them. A pair
+    with no ``=`` is a usage error the caller reports; returning it silently
+    dropped would leave the operator convinced they had set something.
     """
-    looks_like_path = "/" in account or account.startswith(("~", "."))
-    if looks_like_path:
-        config_dir = Path(account).expanduser()
-        stem = config_dir.name.lstrip(".") or config_dir.name
-    else:
-        config_dir = Path.home() / f".{account}"
-        stem = account
-    return AccountPaths(
-        name=account,
-        config_dir=config_dir,
-        tmp_dir=Path.home() / ".cache" / stem,
-    )
+    parsed: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise ValueError(f"expected KEY=VALUE, got {pair!r}")
+        parsed[key] = value
+    return parsed
 
 
-def account_env(account: str) -> dict[str, str]:
-    """The env delta that puts a session on ``account``.
+def resolve_profile(
+    role: str,
+    *,
+    env_overrides: dict[str, str] | None = None,
+    extra_args: Sequence[str] | None = None,
+) -> LaunchProfile:
+    """Merge the role's configured profile with this launch's overrides.
 
-    Mirrors the alias exactly — both vars, never one. The scratch directory is
-    created if missing because the agent expects to be able to write there, and
-    a missing tmpdir surfaces much later as an unrelated-looking write error.
-    The CONFIG directory is deliberately NOT created: an absent one means the
-    account was never set up, and inventing it would start a fresh
-    unauthenticated profile that looks like a login failure. Callers check.
+    Env merges PER KEY — a flag can override one variable without discarding
+    the rest of the role's profile, which is what makes a one-off tweak cheap.
+    Args APPEND rather than replace, because the configured ones are the role's
+    standing shape and the caller's are additions to it.
     """
-    paths = account_paths(account)
-    paths.tmp_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "CLAUDE_CONFIG_DIR": str(paths.config_dir),
-        "CLAUDE_CODE_TMPDIR": str(paths.tmp_dir),
-    }
-
-
-def resolve_account(role: str, *, override: str | None = None) -> AccountResolution:
-    """Flag > per-role env > global env > config map > default.
-
-    The same ladder as ``resolve_binary``, and deliberately the same shape: two
-    axes a reader has to hold at once are far easier to trust when they resolve
-    identically. Like that function it does NOT check the filesystem —
-    resolution answers "what was asked for", and the caller reports "it is not
-    there" separately, so a typo can never degrade into a silent launch under
-    the DEFAULT account, which would put a role on the wrong credentials while
-    reporting success.
-    """
-    if override:
-        return AccountResolution(account=override, source="flag")
-    per_role = os.environ.get(_account_env_var(role))
-    if per_role:
-        return AccountResolution(account=per_role, source="env")
-    everywhere = os.environ.get(_ACCOUNT_ENV_GLOBAL)
-    if everywhere:
-        return AccountResolution(account=everywhere, source="env:global")
-    try:
-        from aisquare.core.config import load_config
-
-        mapped = (load_config().team.accounts or {}).get(role)
-    except Exception:  # fail-open: a broken config costs the mapping, never the spawn
-        mapped = None
-    if mapped:
-        return AccountResolution(account=mapped, source="config")
-    return AccountResolution(account=DEFAULT_AGENT_ACCOUNT, source="default")
+    env: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    args: list[str] = []
+    team = _team_settings()
+    profile = (team.profiles or {}).get(role) if team is not None else None
+    if profile is not None:
+        for key, value in (profile.env or {}).items():
+            env[key] = expand_value(value)
+            sources[key] = "config"
+        args.extend(profile.args or [])
+    for key, value in (env_overrides or {}).items():
+        env[key] = expand_value(value)
+        sources[key] = "flag"
+    args.extend(extra_args or [])
+    return LaunchProfile(env=env, args=args, env_sources=sources)

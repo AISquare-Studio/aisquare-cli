@@ -7,36 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Per-role ACCOUNT binding — the third launch axis.** The ladder decides
-  *what* model a role runs on, `--bin` (#52) decides *which* executable runs
-  it, and `--account` now decides *whose install* it runs under: credentials,
-  history, settings, MCP servers.
-  - `aisquare team spawn <role> --account claude2` and
-    `aisquare launch <role> --account claude2`. A **bare name** follows the
-    convention the shell aliases already use — `claude2` resolves to
-    `~/.claude2` for config and `~/.cache/claude2` for scratch — and an
-    explicit path still gets its own derived scratch directory rather than
-    silently sharing the default.
-  - `team.accounts` config map, resolved on the same ladder as `team.bins`:
-    flag > per-role env (`AISQUARE_ACCOUNT_<ROLE>`) > global env
-    (`AISQUARE_AGENT_ACCOUNT`) > config > default.
-  - `aisquare team bind <role> --account <name> [--bin <cmd>]` — the one-time
-    setup, with `--clear` to undo and a bare `aisquare team bind` to print the
-    map. The account directory is verified **at bind time**, where the operator
-    is looking, rather than at launch in another terminal hours later.
-  - `aisquare team harness` and `spawn`'s banner now report the resolved
-    account and its provenance, the same way they report the binary.
-  - Why this exists rather than reusing `--bin`: parallel accounts are reached
-    through shell aliases (`alias claude2='CLAUDE_CONFIG_DIR=… command claude'`),
-    an alias is not an executable, so `shutil.which("claude2")` is `None` and
-    `--bin claude2` can only ever fail.
+- **Per-role LAUNCH PROFILE — the third launch axis, and deliberately the
+  dumbest one.** The ladder decides *what* model a role runs on, `--bin` (#52)
+  decides *which* executable runs it, and a profile carries *whatever else* the
+  operator wants on the command — verbatim.
+  - `aisquare team bind <role> [--bin CMD] [--env KEY=VALUE ...] [--arg ARG ...]`
+    is the one-time setup, with `--unset KEY`, `--clear`, and a bare
+    `aisquare team bind` to print the bindings. Stored under `team.profiles`.
+  - `aisquare launch <role>` and `aisquare team spawn <role>` carry the binding
+    with no flag; `--env KEY=VALUE` (repeatable) adds to or overrides it for a
+    single launch. Env merges **per key**, so one variable can be changed
+    without discarding its siblings; args **append**.
+  - Values may use `~` and `$VAR`, expanded at launch — so one binding follows
+    you across machines with different homes. An undefined `$VAR` is left
+    verbatim rather than blanked, because a silently empty `CLAUDE_CONFIG_DIR`
+    starts a fresh unauthenticated profile that surfaces as a login failure
+    hours later instead of the typo it is.
+  - **Nothing here interprets what you bind.** Parallel agent installs reached
+    through shell aliases are just two env entries; a proxy, a region, or a
+    wrapper's own variables work identically, without the CLI learning about
+    any of them. Reaching these installs via `--bin` cannot work — an alias is
+    not an executable, so `shutil.which("claude2")` is `None`.
+  - `team harness` and `spawn`'s banner report which env keys a role carries
+    and where each came from (keys only — the values are paths and tokens, and
+    a banner is a terminal).
 
 ### Fixed
-- **`launch --account` set `CLAUDE_CONFIG_DIR` but never `CLAUDE_CODE_TMPDIR`.**
-  A session got the right credentials and the *default* scratch directory,
-  silently shared with every other account — which looks correctly isolated
-  right up until two parallel sessions collide in temp. Both vars are now set
-  together, matching what the aliases do.
 - **`team prune` no longer releases a quiet session's in-progress claim (#49).**
   Presence and ownership now retire on different clocks: the session row still
   goes at the threshold (30m), but its `doing` claims are only returned to the
@@ -47,12 +43,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   because a second agent picks up work the first is still doing. Pass
   `--release-claims` to orphan claims at the presence threshold when you know
   the sessions are dead. `ContextStore.end_session` gains `release_claims`.
+- **`save_config` could not write an unset optional field.** TOML has no null,
+  so `tomli_w` raises `TypeError` on `None` rather than writing anything — one
+  optional field left unset made the whole config file unwritable. Now dumped
+  with `exclude_none`, which is also the correct round-trip: the omitted key
+  reloads as the model default.
 - **`aisquare launch` rejected numbered seats.** A crew running `coder1`,
-  `coder2`, … in the same role could not launch them: the role whitelist held
+  `coder2`, … in the same role could not launch: the role whitelist held
   exactly three names. It now accepts a first-class role, a numbered seat of
-  one (`coder1`, `validator2`), or any role declared in the `team.accounts` /
-  `team.bins` maps — while still refusing a typo like `codr`, which was the
-  footgun the whitelist existed to catch.
+  one (`coder1`, `validator2`), or any role bound with `team bind` — while
+  still refusing a typo like `codr`, which was the footgun the whitelist
+  existed to catch.
 
 ## [0.4.0rc1] - 2026-08-07
 

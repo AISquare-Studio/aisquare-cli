@@ -43,29 +43,50 @@ class ExplainabilitySettings(BaseModel):
     agent_name_template: str = "aisquare-{role}"
 
 
+class RoleLaunchProfile(BaseModel):
+    """One role's launch spec, carried verbatim and never interpreted.
+
+    ``bin`` is the executable, ``env`` the variables to set, ``args`` extra
+    arguments appended to the command. Values in ``env`` get ``~`` and ``$VAR``
+    expanded at launch so they read exactly like the shell line they replace::
+
+        [team.profiles.coder1]
+        bin = "claude"
+        args = ["--model", "opus"]
+
+        [team.profiles.coder1.env]
+        CLAUDE_CONFIG_DIR  = "$HOME/.claude2"
+        CLAUDE_CODE_TMPDIR = "$HOME/.cache/claude2"
+
+    Nothing here knows what any of those variables MEAN, which is the point.
+    An earlier cut understood "accounts" and expanded a bare name into a pair
+    of directories — one operator's convention baked into a tool with no
+    business knowing it, unusable by anyone laid out differently and liable to
+    break for its author the day they reorganised. The operator states the
+    spec; we carry it.
+    """
+
+    bin: str | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    args: list[str] = Field(default_factory=list)
+
+
 class TeamSettings(BaseModel):
     """Per-role launch settings for ``aisquare team``.
 
-    ``bins`` maps a role to the executable that runs its agent, so a person
-    holding several parallel agent installs — ``claude``, ``claude2``, a
-    wrapper script — can put a role on the one they mean without retyping a
-    flag every spawn. Resolution order is flag > env > this map > default;
-    see ``aisquare.core.harness.resolve_binary``.
+    ``profiles`` maps a role to its full launch spec — see
+    :class:`RoleLaunchProfile`. This is the general mechanism: it covers
+    parallel agent installs, wrapper scripts, proxies, regions, or any other
+    knob, without this file learning about any of them.
 
-    ``accounts`` maps a role to the ACCOUNT it runs under — the config
-    directory holding its credentials, history, settings and MCP servers.
-    This is the axis most parallel-install setups actually use, because people
-    reach their extra accounts through shell aliases that set
-    ``CLAUDE_CONFIG_DIR``, and an alias is not an executable that ``bins``
-    could ever resolve. Same resolution order; see
-    ``aisquare.core.harness.resolve_account``.
-
-    The two are independent and compose: a role can run a wrapper binary under
-    a specific account, either alone, or neither.
+    ``bins`` is the older, narrower shorthand from #52 for the executable
+    alone; it still works. A role's ``profiles.<role>.bin`` wins over its
+    ``bins`` entry. Full order is flag > env > profile > bins > default; see
+    ``aisquare.core.harness.resolve_binary`` and ``resolve_profile``.
     """
 
     bins: dict[str, str] = Field(default_factory=dict)
-    accounts: dict[str, str] = Field(default_factory=dict)
+    profiles: dict[str, RoleLaunchProfile] = Field(default_factory=dict)
 
 
 class AppConfig(BaseModel):
@@ -97,8 +118,16 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     """Write ``config`` as TOML to ``path`` (default: the standard location).
 
     Parent directories are created on demand. Returns the written path.
+
+    ``exclude_none`` because **TOML has no null**: ``tomli_w`` raises
+    ``TypeError`` on ``None`` rather than writing anything, so an optional
+    field left unset would make the whole file unwritable. Omitting the key is
+    also the correct round-trip — it reloads as the model's default, which is
+    the ``None`` we dropped.
     """
     target = path or paths.config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(tomli_w.dumps(config.model_dump(mode="json")), encoding="utf-8")
+    target.write_text(
+        tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)), encoding="utf-8"
+    )
     return target

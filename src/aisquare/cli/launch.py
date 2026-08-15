@@ -41,7 +41,7 @@ DEFAULT_AGENT = "claude"
 
 
 def _declared_roles() -> set[str]:
-    """Roles the operator has named in ``team.accounts`` / ``team.bins``.
+    """Roles the operator has named in ``team.profiles`` / ``team.bins``.
 
     Declaring a role in config IS the operator saying it exists, so honouring
     it here keeps one source of truth instead of two lists that drift.
@@ -50,7 +50,7 @@ def _declared_roles() -> set[str]:
         team = load_config().team
     except Exception:  # fail-open: a broken config must not block a launch
         return set()
-    return set(team.accounts) | set(team.bins)
+    return set(team.profiles) | set(team.bins)
 
 
 def _role_ok(role: str) -> bool:
@@ -96,15 +96,14 @@ def launch(
         str,
         typer.Option("--command", "-c", help="Agent command to launch.", metavar="CMD"),
     ] = DEFAULT_AGENT,
-    account: Annotated[
-        str | None,
+    env_pairs: Annotated[
+        list[str] | None,
         typer.Option(
-            "--account",
-            "-a",
-            help="Account to run under: a bare name like claude2 (=> ~/.claude2 and "
-            "~/.cache/claude2) or an explicit config-dir path. Falls back to the "
-            "team.accounts map for this role.",
-            metavar="NAME|DIR",
+            "--env",
+            "-e",
+            help="KEY=VALUE to set for this launch (repeatable). Merges per key over "
+            "the role's bound profile.",
+            metavar="KEY=VALUE",
         ),
     ] = None,
 ) -> None:
@@ -113,19 +112,17 @@ def launch(
     Equivalent to ``AISQUARE_ROLE=<role> <command>``, plus role validation and
     an explicit opt-in for the repo. Extra arguments are passed to the agent.
 
-    ``--account`` selects one of several parallel agent installs. People
-    usually reach these through shell aliases (``alias claude1='…'``), which
-    ``--command`` cannot resolve — aliases are not executables — so name the
-    account instead: ``--account claude2`` sets both ``CLAUDE_CONFIG_DIR``
-    (``~/.claude2``) and ``CLAUDE_CODE_TMPDIR`` (``~/.cache/claude2``), which
-    is what the alias does. Omit it and the role's ``team.accounts`` mapping
-    applies, so a role can be pinned to an account once instead of per launch.
+    The role's bound profile (``aisquare team bind``) supplies its binary, env
+    and extra args; ``--env KEY=VALUE`` adds to or overrides that for one
+    launch. Parallel agent installs are reached through shell aliases, which
+    ``--command`` cannot resolve — aliases are not executables — so set the
+    variables the alias sets and keep the ordinary binary.
     """
     if not _role_ok(role):
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), or a role you have "
-            "declared in the team.accounts / team.bins config maps",
+            "bound with `aisquare team bind`",
             error="unknown_role",
         )
     binary = shutil.which(command)
@@ -142,27 +139,16 @@ def launch(
         fail(str(exc), error="team_disabled")
 
     env = {**os.environ, "AISQUARE_ROLE": role}
-    whose = ""
-    # Flag > per-role env > global env > team.accounts > default, the same
-    # ladder ``team spawn`` uses. Resolved even when no flag was passed, so a
-    # role pinned in config launches on its own account without the operator
-    # remembering to say so.
-    acct = harness.resolve_account(role, override=account)
-    if acct.source != "default":
-        resolved = harness.account_paths(acct.account).config_dir
-        if not resolved.is_dir():
-            # A typo here would not fail loudly — the agent would just start a
-            # fresh, unauthenticated profile in a directory it creates.
-            fail(
-                f"no such account config directory: {resolved} "
-                f"(account {acct.account!r} chosen by: {acct.source})",
-                error="unknown_account",
-            )
-        # BOTH vars: config dir alone leaves the session sharing the default
-        # scratch directory with every other account, so parallel sessions
-        # collide in temp while looking correctly isolated.
-        env.update(harness.account_env(acct.account))
-        whose = f" ({acct.account})"
+    # The role's bound spec plus this launch's overrides, carried verbatim.
+    # Resolved even with no flag, so a bound role launches correctly without
+    # the operator remembering to say anything.
+    try:
+        overrides = harness.parse_env_pairs(env_pairs or [])
+    except ValueError as exc:
+        fail(str(exc), error="bad_env_pair")
+    profile = harness.resolve_profile(role, env_overrides=overrides)
+    env.update(profile.env)
+    whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
     try:
         tracing = load_config().explainability
     except Exception as exc:  # tracing is an observer: a broken config must
@@ -185,7 +171,7 @@ def launch(
         )
         env.update(wiring.env)
         stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
-    argv = [command, *ctx.args]
+    argv = [command, *profile.args, *ctx.args]
     stderr_console().print(
         f"Launching {command}{whose} as [bold]{role}[/bold] on the "
         f"{project.root.name or project.id} board…"

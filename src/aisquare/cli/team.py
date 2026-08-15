@@ -19,7 +19,12 @@ import typer
 
 from aisquare.cli.common import fail, local_time
 from aisquare.core import harness, orchestrator
-from aisquare.core.config import ExplainabilitySettings, load_config, save_config
+from aisquare.core.config import (
+    ExplainabilitySettings,
+    RoleLaunchProfile,
+    load_config,
+    save_config,
+)
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import AmbiguousIdError, is_locked_error
@@ -188,9 +193,12 @@ def _bin_env_hint(role: str) -> str:
     return f"{harness._bin_env_var(role)}=<command>"
 
 
-def _account_env_hint(role: str) -> str:
-    """The env var that would pin this role's account, for the same reason."""
-    return f"{harness._account_env_var(role)}=<name>"
+def _parse_env(pairs: list[str]) -> dict[str, str]:
+    """``KEY=VALUE`` pairs from the command line, or a usage error."""
+    try:
+        return harness.parse_env_pairs(pairs)
+    except ValueError as exc:
+        fail(str(exc), error="bad_env_pair")
 
 
 @app.command("spawn")
@@ -208,16 +216,23 @@ def spawn(
             ),
         ),
     ] = None,
-    account: Annotated[
-        str | None,
+    env_pairs: Annotated[
+        list[str] | None,
         typer.Option(
-            "--account",
-            "-a",
-            help=(
-                "Account to run under: a bare name like claude2 (=> ~/.claude2 and "
-                "~/.cache/claude2) or an explicit config-dir path. Overrides the "
-                "per-role map."
-            ),
+            "--env",
+            "-e",
+            help="KEY=VALUE to set for this launch (repeatable). Merges per key over "
+            "the role's configured profile, so one variable can be changed without "
+            "discarding the rest.",
+            metavar="KEY=VALUE",
+        ),
+    ] = None,
+    extra_args: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--arg",
+            help="Extra argument appended to the agent command (repeatable).",
+            metavar="ARG",
         ),
     ] = None,
     execute: Annotated[
@@ -282,7 +297,7 @@ def spawn(
     except Exception as exc:  # fail-open: a broken config costs the trace, never the spawn
         tracing = None
         typer.echo(f"explainability: config unreadable ({exc}) — sessions untraced", err=True)
-    env_pairs = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
+    env_assignments = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
     # WHICH executable, resolved separately from WHICH model — flag > env >
     # config > default (#52). Reported in the banner because a role silently
     # launching on a different install than the operator expects is the same
@@ -292,19 +307,27 @@ def spawn(
     # because they answer different questions and most setups only need this
     # one: parallel accounts are reached through aliases that set
     # CLAUDE_CONFIG_DIR, and an alias is not something --bin could resolve.
-    acct = harness.resolve_account(role_name, override=account)
-    if acct.source != "default":
-        # Put the account vars IN the printed command, not just in --exec's
-        # env. The banner is meant to be pasted, and a printed command that
-        # silently launches under a different account than the one it just
-        # reported is worse than printing nothing.
-        for key, value in harness.account_env(acct.account).items():
-            env_pairs.append(f"{key}={shlex.quote(value)}")
+    launch_profile = harness.resolve_profile(
+        role_name, env_overrides=_parse_env(env_pairs or []), extra_args=extra_args or []
+    )
+    # Put the profile's vars IN the printed command, not just in --exec's env.
+    # The banner is meant to be pasted, and a printed command that silently
+    # launches with different variables than the one it just reported is worse
+    # than printing nothing.
+    for key, value in launch_profile.env.items():
+        env_assignments.append(f"{key}={shlex.quote(value)}")
     if resolution is None:
-        argv = [binary.binary]
+        argv = [binary.binary, *launch_profile.args]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
-        argv = [binary.binary, "--model", resolution.model, "--effort", resolution.effort]
+        argv = [
+            binary.binary,
+            "--model",
+            resolution.model,
+            "--effort",
+            resolution.effort,
+            *launch_profile.args,
+        ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
         profile = harness.ROLE_PROFILES.get(role_name)
         mission = profile.mission if profile else "pinned by AISQUARE_MODEL override"
@@ -314,9 +337,17 @@ def spawn(
         )
     if binary.source != "default":
         banner = f"{banner}  ·  binary {binary.binary} [{binary.source}]"
-    if acct.source != "default":
-        banner = f"{banner}  ·  account {acct.account} [{acct.source}]"
-    command = " ".join([*env_pairs, shlex.join(argv)])
+    if launch_profile.env:
+        # Name the KEYS with their provenance, not the values: values are paths
+        # and tokens, and a banner meant for a terminal should not be where a
+        # credential path first becomes shoulder-readable. The full command
+        # below carries the values for anyone who wants to paste it.
+        shown = ", ".join(
+            f"{key} [{launch_profile.env_sources.get(key, 'config')}]"
+            for key in sorted(launch_profile.env)
+        )
+        banner = f"{banner}  ·  env {shown}"
+    command = " ".join([*env_assignments, shlex.join(argv)])
     if tracing is not None and tracing.enabled:
         # Never burn a pipeline id into a printable command: every paste would
         # reuse the same id and those sessions would merge into one Run. The
@@ -336,9 +367,9 @@ def spawn(
                     "skipped": resolution.skipped if resolution else [],
                     "binary": binary.binary,
                     "binary_source": binary.source,
-                    "account": acct.account,
-                    "account_source": acct.source,
-                    "account_config_dir": str(harness.account_paths(acct.account).config_dir),
+                    "env": launch_profile.env,
+                    "env_sources": launch_profile.env_sources,
+                    "extra_args": launch_profile.args,
                     "command": command,
                 }
             )
@@ -367,24 +398,13 @@ def spawn(
                 "team.bins config map.",
                 error="agent_binary_missing",
             )
-        if acct.source != "default":
-            config_dir = harness.account_paths(acct.account).config_dir
-            if not config_dir.is_dir():
-                # A typo here cannot be allowed to fall through: the agent would
-                # happily create the directory and start a FRESH, UNAUTHENTICATED
-                # profile, which reads as a login failure hours later rather than
-                # as the misspelling it is. Same bar as the missing-binary check.
-                fail(
-                    f"no such account config directory: {config_dir} "
-                    f"(account {acct.account!r} chosen by: {acct.source}). "
-                    f"Set a different one with --account, {_account_env_hint(role_name)}, "
-                    "or the team.accounts config map.",
-                    error="unknown_account",
-                )
         env = dict(os.environ)
         env["AISQUARE_ROLE"] = role_name
-        if acct.source != "default":
-            env.update(harness.account_env(acct.account))
+        # The operator's variables, carried verbatim. We do not validate them:
+        # this layer has no idea what any given key means, and guessing which
+        # ones name a directory that ought to exist is exactly the coupling
+        # this design removes.
+        env.update(launch_profile.env)
         if tracing is not None and tracing.enabled:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
             # dead or wrong proxy costs the trace, never the spawn.
@@ -419,8 +439,8 @@ def harness_status() -> None:
                 "mission": profile.mission,
                 "binary": harness.resolve_binary(name).binary,
                 "binary_source": harness.resolve_binary(name).source,
-                "account": harness.resolve_account(name).account,
-                "account_source": harness.resolve_account(name).source,
+                "env": harness.resolve_profile(name).env,
+                "extra_args": harness.resolve_profile(name).args,
             }
         )
     interference = harness.interfering_env()
@@ -449,11 +469,14 @@ def harness_status() -> None:
         # The matrix showed WHAT each role runs on and hid WHICH executable
         # runs it — half the launch decision, invisible.
         bin_note = "" if binary.source == "default" else f"  bin={binary.binary} [{binary.source}]"
-        acct = harness.resolve_account(name)
-        # ...and hid WHOSE install it runs under, which is the axis a
-        # parallel-account operator actually steers by.
-        if acct.source != "default":
-            bin_note = f"{bin_note}  acct={acct.account} [{acct.source}]"
+        launch_profile = harness.resolve_profile(name)
+        # ...and hid the env the role carries, which is the axis a
+        # parallel-install operator actually steers by. Keys only: the values
+        # are paths and tokens and this is a terminal.
+        if not launch_profile.is_empty:
+            carried = ",".join(sorted(launch_profile.env))
+            extra = f"+{len(launch_profile.args)}args" if launch_profile.args else ""
+            bin_note = f"{bin_note}  env={carried}{extra}"
         console.print(
             f"{name:<10} {ladder:<20} effort={resolution.effort:<10}({offset}) "
             f"→ {pinned or resolution.model} [{source}]{bin_note}",
@@ -471,108 +494,141 @@ def harness_status() -> None:
 def bind(
     role_name: Annotated[
         str | None,
-        typer.Argument(help="Role to pin. Omit to show the current map."),
-    ] = None,
-    account: Annotated[
-        str | None,
-        typer.Option("--account", "-a", help="Account for this role, e.g. claude2."),
+        typer.Argument(help="Role to pin. Omit to show the current bindings."),
     ] = None,
     agent_bin: Annotated[
         str | None,
-        typer.Option("--bin", help="Executable for this role, e.g. a wrapper script."),
+        typer.Option("--bin", help="Executable this role launches, e.g. a wrapper script."),
+    ] = None,
+    env_pairs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--env",
+            "-e",
+            help="KEY=VALUE this role launches with (repeatable). Values may use ~ and "
+            "$VAR, expanded at launch. Merges per key with what is already bound.",
+            metavar="KEY=VALUE",
+        ),
+    ] = None,
+    extra_args: Annotated[
+        list[str] | None,
+        typer.Option("--arg", help="Extra argument this role launches with (repeatable)."),
+    ] = None,
+    unset: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--unset", help="Remove one env key from this role (repeatable).", metavar="KEY"
+        ),
     ] = None,
     clear: Annotated[
         bool,
-        typer.Option("--clear", help="Remove this role's bindings instead of setting them."),
+        typer.Option("--clear", help="Remove this role's binding entirely."),
     ] = False,
 ) -> None:
-    """Pin a role to an account and/or a binary, persistently.
+    """Pin a role's launch spec — binary, env and extra args — persistently.
 
-    The one-time setup behind ``team.accounts`` / ``team.bins``: a crew running
-    several seats on parallel accounts binds each one once, and every later
-    ``aisquare launch <role>`` and ``aisquare team spawn <role>`` picks it up
-    with no flag. Flags and env still win over this map, so a bound role can
-    always be overridden for a single launch.
+    The one-time setup behind ``team.profiles``: bind a seat once, and every
+    later ``aisquare launch <role>`` and ``aisquare team spawn <role>`` carries
+    it with no flag. Flags still win over the binding, so any seat can be
+    changed for a single launch without touching config.
 
-    Called with no role it prints the map, which is the fastest way to answer
-    "which account is this seat actually on".
+    Nothing here interprets what you bind. Parallel agent installs reached
+    through shell aliases are just two env entries::
+
+        aisquare team bind coder1 \\
+          --env CLAUDE_CONFIG_DIR='$HOME/.claude2' \\
+          --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude2'
+
+    ...and a proxy, a region or a wrapper's own variables work identically.
+    Quote values containing ``$`` so your shell does not expand them first —
+    expansion happens at launch, which is what lets one binding follow you
+    across machines with different homes.
+
+    Called with no role it prints the bindings.
     """
     config = load_config()
+    profiles = config.team.profiles
     if role_name is None:
-        roles = sorted(set(config.team.accounts) | set(config.team.bins))
+        roles = sorted(set(profiles) | set(config.team.bins))
         if get_state().json_output:
-            typer.echo(json.dumps({"accounts": config.team.accounts, "bins": config.team.bins}))
+            typer.echo(
+                json.dumps(
+                    {
+                        "profiles": {r: p.model_dump(mode="json") for r, p in profiles.items()},
+                        "bins": config.team.bins,
+                    }
+                )
+            )
             return
         console = stdout_console()
         if not roles:
             console.print(
-                "no role bindings — pin one with: aisquare team bind coder1 --account claude2",
+                "no role bindings — pin one with: aisquare team bind coder1 "
+                "--env CLAUDE_CONFIG_DIR='$HOME/.claude2'",
                 markup=False,
             )
             return
         for name in roles:
+            profile = profiles.get(name)
             parts = []
-            if name in config.team.accounts:
-                acct = config.team.accounts[name]
-                # Show the resolved directory, not just the name: the whole
-                # point of a binding is knowing WHICH install a seat is on, and
-                # a name alone still leaves that one hop away.
-                parts.append(f"account={acct} ({harness.account_paths(acct).config_dir})")
-            if name in config.team.bins:
-                parts.append(f"bin={config.team.bins[name]}")
-            console.print(f"{name:<12} {'  '.join(parts)}", markup=False)
+            binary = (profile.bin if profile else None) or config.team.bins.get(name)
+            if binary:
+                parts.append(f"bin={binary}")
+            if profile is not None:
+                # Values verbatim, NOT expanded: this view is for editing, and
+                # showing the resolved path would hide the `$HOME` that makes
+                # the binding portable. `team harness` shows what it resolves to.
+                parts.extend(f"{key}={value}" for key, value in sorted(profile.env.items()))
+                if profile.args:
+                    parts.append(f"args={shlex.join(profile.args)}")
+            console.print(f"{name:<12} {'  '.join(parts) or '(empty)'}", markup=False)
         return
     if clear:
-        config.team.accounts.pop(role_name, None)
+        profiles.pop(role_name, None)
         config.team.bins.pop(role_name, None)
     else:
-        if account is None and agent_bin is None:
+        if not any((agent_bin, env_pairs, extra_args, unset)):
             fail(
-                "nothing to bind — pass --account, --bin, or --clear",
+                "nothing to bind — pass --bin, --env, --arg, --unset or --clear",
                 error="nothing_to_bind",
             )
-        if account is not None:
-            resolved = harness.account_paths(account).config_dir
-            if not resolved.is_dir():
-                # Verified at BIND time, where the operator is looking, rather
-                # than at launch time in another terminal hours later. A typo
-                # that survives to launch starts a fresh unauthenticated
-                # profile, which reads as a login failure, not as a typo.
-                fail(
-                    f"no such account config directory: {resolved} (from account {account!r})",
-                    error="unknown_account",
-                )
-            config.team.accounts[role_name] = account
+        profile = profiles.setdefault(role_name, RoleLaunchProfile())
         if agent_bin is not None:
-            config.team.bins[role_name] = agent_bin
+            profile.bin = agent_bin
+        # Merge per key rather than replacing the map, so adding a second
+        # variable does not silently drop the first.
+        profile.env.update(_parse_env(env_pairs or []))
+        for key in unset or []:
+            profile.env.pop(key, None)
+        if extra_args:
+            profile.args.extend(extra_args)
     path = save_config(config)
+    bound = profiles.get(role_name)
     if get_state().json_output:
         typer.echo(
             json.dumps(
                 {
                     "role": role_name,
-                    "account": config.team.accounts.get(role_name),
-                    "bin": config.team.bins.get(role_name),
+                    "profile": bound.model_dump(mode="json") if bound else None,
                     "config": str(path),
                 }
             )
         )
         return
     console = stdout_console()
-    if clear:
-        console.print(f"✓ {role_name}: bindings cleared ({path})", markup=False)
+    if clear or bound is None:
+        console.print(f"✓ {role_name}: binding cleared ({path})", markup=False)
         return
     summary = "  ".join(
         part
         for part in (
-            f"account={config.team.accounts[role_name]}"
-            if role_name in config.team.accounts
-            else "",
-            f"bin={config.team.bins[role_name]}" if role_name in config.team.bins else "",
+            f"bin={bound.bin}" if bound.bin else "",
+            " ".join(f"{k}={v}" for k, v in sorted(bound.env.items())),
+            f"args={shlex.join(bound.args)}" if bound.args else "",
         )
         if part
     )
-    console.print(f"✓ {role_name}: {summary} ({path})", markup=False)
+    console.print(f"✓ {role_name}: {summary or '(empty)'} ({path})", markup=False)
 
 
 @app.command("log")

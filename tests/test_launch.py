@@ -101,34 +101,37 @@ def test_launch_honours_a_custom_agent_command(
     assert spy["argv"] == ["claude-next"]
 
 
-def test_launch_account_sets_the_config_dir(
+def test_launch_env_flag_sets_a_variable_for_the_agent(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], tmp_path: Path
 ) -> None:
+    # Parallel installs are reached by setting the variables the shell alias
+    # sets, which is why this takes a variable rather than an "account": the
+    # CLI has no business knowing what any of these keys mean.
     account = tmp_path / ".claude-account1"
     account.mkdir()
 
-    result = runner.invoke(app, ["launch", "coder", "--account", str(account)])
+    result = runner.invoke(app, ["launch", "coder", "--env", f"CLAUDE_CONFIG_DIR={account}"])
 
     assert result.exit_code == 0, result.output
     assert spy["env"]["CLAUDE_CONFIG_DIR"] == str(account)
     assert spy["env"]["AISQUARE_ROLE"] == "coder"
 
 
-def test_launch_rejects_a_missing_account_dir(
+def test_launch_does_not_validate_the_values_it_carries(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], tmp_path: Path
 ) -> None:
-    # A typo must not silently start a fresh, unauthenticated profile.
-    result = runner.invoke(app, ["launch", "coder", "--account", str(tmp_path / "typo")])
+    # Deliberately permissive. Rejecting a non-existent directory would require
+    # knowing WHICH keys name directories -- exactly the coupling this design
+    # removes. The operator owns the values; we carry them.
+    missing = tmp_path / "not-created"
 
-    assert result.exit_code == 1
-    assert "no such account config directory" in result.output
-    # The message names WHICH of flag/env/config chose it, so the reader is not
-    # sent hunting through four places to find who won.
-    assert "chosen by: flag" in result.output
-    assert not spy
+    result = runner.invoke(app, ["launch", "coder", "--env", f"CLAUDE_CONFIG_DIR={missing}"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["CLAUDE_CONFIG_DIR"] == str(missing)
 
 
-def test_launch_without_account_leaves_the_ambient_config_dir_alone(
+def test_launch_without_a_profile_leaves_the_ambient_config_dir_alone(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/from/the/shell")

@@ -147,6 +147,12 @@ def launch(
     except ValueError as exc:
         fail(str(exc), error="bad_env_pair")
     profile = harness.resolve_profile(role, env_overrides=overrides)
+    if profile.notice is not None:
+        # No silent fail-soft: unreadable config means this role launches
+        # UNBOUND — possibly on a different install than the operator believes.
+        stderr_console().print(
+            f"[dim]role bindings: config unreadable ({profile.notice}) — launching unbound[/dim]"
+        )
     env.update(profile.env)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
     try:

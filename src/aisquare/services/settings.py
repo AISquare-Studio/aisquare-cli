@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from aisquare.core.config import AppConfig, load_config, save_config
+from aisquare.core import paths
+from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
 from aisquare.models import RedactionLevel
 
 
@@ -41,6 +44,65 @@ def set_redaction(level: RedactionLevel) -> str:
     config.redaction.level = level
     save_config(config)
     return level.value
+
+
+# ─── Role launch bindings (`aisquare team bind`) ─────────────────────────────
+#
+# Config mutation lives here rather than in `cli/team.py` so the CLI layer stays
+# presentation-only: parse flags, call one function, render the result. The
+# merge rules below are domain decisions, and a decision buried in a command
+# body can only be tested through a CliRunner.
+
+
+def role_bindings() -> dict[str, RoleLaunchProfile]:
+    """Every role's launch binding, keyed by role."""
+    return load_config().team.profiles
+
+
+def bind_role(
+    role: str,
+    *,
+    agent_bin: str | None = None,
+    env: dict[str, str] | None = None,
+    unset: Sequence[str] = (),
+    args: Sequence[str] = (),
+) -> RoleLaunchProfile:
+    """Merge a launch binding into ``role`` and persist it.
+
+    Env merges **per key** and args **append**, so a second call adds to the
+    binding rather than replacing it — otherwise setting a second variable
+    would silently drop the first, and the operator would not find out until a
+    launch came up on the wrong install. ``unset`` is applied after the merge,
+    which makes "replace this one key" a single call.
+    """
+    config = load_config()
+    profile = config.team.profiles.setdefault(role, RoleLaunchProfile())
+    if agent_bin is not None:
+        profile.bin = agent_bin
+    profile.env.update(env or {})
+    for key in unset:
+        profile.env.pop(key, None)
+    profile.args.extend(args)
+    save_config(config)
+    return profile
+
+
+def clear_role_binding(role: str) -> None:
+    """Remove ``role``'s binding, including its legacy ``team.bins`` entry.
+
+    Both homes are cleared because a `bins` entry surviving a `--clear` would
+    keep steering the role's binary while the operator believed the binding was
+    gone — the kind of leftover that reads as a bug in something else entirely.
+    """
+    config = load_config()
+    config.team.profiles.pop(role, None)
+    config.team.bins.pop(role, None)
+    save_config(config)
+
+
+def config_path() -> Path:
+    """Where bindings are persisted — shown so the operator can hand-edit."""
+    return paths.config_path()
 
 
 def _navigate(data: dict[str, Any], key: str) -> Any:

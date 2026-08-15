@@ -55,11 +55,14 @@ import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from aisquare.core.paths import aisquare_home
+
+if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
+    from aisquare.core.config import TeamSettings
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 PROBE_TIMEOUT_SECONDS = 150
@@ -716,23 +719,29 @@ class BinaryResolution(BaseModel):
     source: str  # flag | env | env:global | config | default
 
 
-def _team_settings() -> Any | None:
-    """The ``team`` config section, or ``None`` if the config cannot be read.
+def _team_settings() -> tuple[TeamSettings | None, str | None]:
+    """The ``team`` config section, plus a reason if it could not be read.
 
     The fail-open is scoped deliberately tight: it covers READING the file — a
     broken config must cost a mapping, never a launch — and nothing else.
     Attribute access on the loaded object happens at the call site, outside the
     guard, so a genuine code bug raises instead of quietly resolving to the
     default. A resolver that silently answers "default" when it is broken is
-    indistinguishable from one that is working, which is the exact failure this
-    codebase keeps paying for elsewhere.
+    indistinguishable from one that is working.
+
+    **The reason is RETURNED, never printed here.** No silent fail-soft is a
+    standing rule, but ``core`` has no business writing to a terminal, so the
+    caller surfaces it (``resolve_profile`` carries it out on the profile and
+    the CLI echoes it once). The message names the exception CLASS and text and
+    never a config VALUE — a config that fails to parse is exactly where a
+    half-written secret is most likely to be sitting.
     """
     try:
         from aisquare.core.config import load_config
 
-        return load_config().team
-    except Exception:
-        return None
+        return load_config().team, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolution:
@@ -751,7 +760,10 @@ def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolutio
     everywhere = os.environ.get(_BIN_ENV_GLOBAL)
     if everywhere:
         return BinaryResolution(binary=everywhere, source="env:global")
-    team = _team_settings()
+    # The reason is dropped HERE on purpose: `resolve_profile` reads the same
+    # config and carries it out, and every caller of this function calls that
+    # one too — surfacing it in both would print the same warning twice.
+    team, _ = _team_settings()
     # The role's full profile wins over the narrower `bins` shorthand: a profile
     # is the operator's complete statement about the role, so a `bins` entry
     # left behind from an earlier setup must not override it.
@@ -798,6 +810,11 @@ class LaunchProfile(BaseModel):
     #: reason the other two axes carry it: an answer without its source sends
     #: the reader hunting for who won.
     env_sources: dict[str, str] = {}
+    #: Why the configured bindings could not be read, when they could not be.
+    #: A launch still proceeds unbound — but silently proceeding would put a
+    #: seat on the DEFAULT install while reporting success, so the caller MUST
+    #: surface this. See the no-silent-fail-soft rule.
+    notice: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -848,7 +865,7 @@ def resolve_profile(
     env: dict[str, str] = {}
     sources: dict[str, str] = {}
     args: list[str] = []
-    team = _team_settings()
+    team, unreadable = _team_settings()
     profile = (team.profiles or {}).get(role) if team is not None else None
     if profile is not None:
         for key, value in (profile.env or {}).items():
@@ -859,4 +876,4 @@ def resolve_profile(
         env[key] = expand_value(value)
         sources[key] = "flag"
     args.extend(extra_args or [])
-    return LaunchProfile(env=env, args=args, env_sources=sources)
+    return LaunchProfile(env=env, args=args, env_sources=sources, notice=unreadable)

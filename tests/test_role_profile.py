@@ -26,6 +26,7 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import harness
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
+from aisquare.services import settings as settings_service
 
 ROLE = "coder"
 
@@ -361,3 +362,92 @@ class TestBind:
         assert "coder1" in result.output
         # Unexpanded, because this view is for editing.
         assert "$HOME/.claude2" in result.output
+
+
+class TestBindingService:
+    """The merge rules, tested WITHOUT a CliRunner.
+
+    This is the payoff of keeping the CLI presentation-only: these are domain
+    decisions, and a decision buried in a command body can only be reached
+    through an invoked process, which is slower and fails for more reasons than
+    the one under test.
+    """
+
+    def test_bind_merges_env_per_key(self) -> None:
+        settings_service.bind_role(ROLE, env={"A": "1"})
+        profile = settings_service.bind_role(ROLE, env={"B": "2"})
+        assert profile.env == {"A": "1", "B": "2"}
+
+    def test_bind_overwrites_a_key_it_is_given_again(self) -> None:
+        settings_service.bind_role(ROLE, env={"A": "1"})
+        assert settings_service.bind_role(ROLE, env={"A": "2"}).env == {"A": "2"}
+
+    def test_unset_is_applied_after_the_merge(self) -> None:
+        # So "replace this one key" is a single call rather than two.
+        settings_service.bind_role(ROLE, env={"A": "1", "B": "2"})
+        profile = settings_service.bind_role(ROLE, env={"C": "3"}, unset=["A"])
+        assert profile.env == {"B": "2", "C": "3"}
+
+    def test_args_append(self) -> None:
+        settings_service.bind_role(ROLE, args=["--model"])
+        assert settings_service.bind_role(ROLE, args=["opus"]).args == ["--model", "opus"]
+
+    def test_clear_removes_the_legacy_bins_entry_too(self) -> None:
+        # A `bins` entry surviving a --clear would keep steering the role's
+        # binary while the operator believed the binding was gone.
+        config = load_config()
+        config.team.bins[ROLE] = "leftover"
+        config.team.profiles[ROLE] = RoleLaunchProfile(env={"A": "1"})
+        save_config(config)
+
+        settings_service.clear_role_binding(ROLE)
+
+        after = load_config().team
+        assert ROLE not in after.profiles
+        assert ROLE not in after.bins
+
+
+class TestUnreadableConfigIsNeverSilent:
+    """No silent fail-soft: an unreadable config means the role launches
+    UNBOUND — possibly on a different install than the operator believes — so
+    it must be said out loud, not merely survived."""
+
+    @staticmethod
+    def _break_config(monkeypatch: pytest.MonkeyPatch) -> None:
+        def explode(*_args: object, **_kwargs: object) -> None:
+            raise OSError("config is a directory")
+
+        monkeypatch.setattr("aisquare.core.config.load_config", explode)
+
+    def test_the_profile_carries_the_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._break_config(monkeypatch)
+        profile = harness.resolve_profile(ROLE)
+        assert profile.is_empty
+        assert profile.notice is not None
+        # The exception CLASS, so the reader can tell a missing file from a
+        # parse error without opening anything.
+        assert "OSError" in profile.notice
+
+    def test_launch_says_so_on_stderr(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        spy: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._break_config(monkeypatch)
+        result = runner.invoke(app, ["launch", "coder"])
+
+        # Fail-OPEN: the launch still happens. Fail-SILENT: it must not.
+        assert result.exit_code == 0, result.output
+        assert spy
+        assert "launching unbound" in result.output
+
+    def test_spawn_says_so_on_stderr(
+        self, runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._break_config(monkeypatch)
+        monkeypatch.setenv("AISQUARE_TEAM", "1")
+        result = runner.invoke(app, ["team", "spawn", "coder", "--no-probe"])
+
+        assert "launching unbound" in result.output

@@ -19,16 +19,12 @@ import typer
 
 from aisquare.cli.common import fail, local_time
 from aisquare.core import harness, orchestrator
-from aisquare.core.config import (
-    ExplainabilitySettings,
-    RoleLaunchProfile,
-    load_config,
-    save_config,
-)
+from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import AmbiguousIdError, is_locked_error
 from aisquare.services import explainability as explainability_service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
@@ -310,6 +306,14 @@ def spawn(
     launch_profile = harness.resolve_profile(
         role_name, env_overrides=_parse_env(env_pairs or []), extra_args=extra_args or []
     )
+    if launch_profile.notice is not None:
+        # No silent fail-soft: an unreadable config means this role launches
+        # UNBOUND, i.e. possibly on a different install than the operator
+        # believes. Proceeding quietly would report success for the wrong thing.
+        typer.echo(
+            f"role bindings: config unreadable ({launch_profile.notice}) — launching unbound",
+            err=True,
+        )
     # Put the profile's vars IN the printed command, not just in --exec's env.
     # The banner is meant to be pasted, and a printed command that silently
     # launches with different variables than the one it just reported is worse
@@ -546,64 +550,26 @@ def bind(
 
     Called with no role it prints the bindings.
     """
-    config = load_config()
-    profiles = config.team.profiles
     if role_name is None:
-        roles = sorted(set(profiles) | set(config.team.bins))
-        if get_state().json_output:
-            typer.echo(
-                json.dumps(
-                    {
-                        "profiles": {r: p.model_dump(mode="json") for r, p in profiles.items()},
-                        "bins": config.team.bins,
-                    }
-                )
-            )
-            return
-        console = stdout_console()
-        if not roles:
-            console.print(
-                "no role bindings — pin one with: aisquare team bind coder1 "
-                "--env CLAUDE_CONFIG_DIR='$HOME/.claude2'",
-                markup=False,
-            )
-            return
-        for name in roles:
-            profile = profiles.get(name)
-            parts = []
-            binary = (profile.bin if profile else None) or config.team.bins.get(name)
-            if binary:
-                parts.append(f"bin={binary}")
-            if profile is not None:
-                # Values verbatim, NOT expanded: this view is for editing, and
-                # showing the resolved path would hide the `$HOME` that makes
-                # the binding portable. `team harness` shows what it resolves to.
-                parts.extend(f"{key}={value}" for key, value in sorted(profile.env.items()))
-                if profile.args:
-                    parts.append(f"args={shlex.join(profile.args)}")
-            console.print(f"{name:<12} {'  '.join(parts) or '(empty)'}", markup=False)
+        _show_bindings()
         return
     if clear:
-        profiles.pop(role_name, None)
-        config.team.bins.pop(role_name, None)
+        settings_service.clear_role_binding(role_name)
+        bound = None
     else:
         if not any((agent_bin, env_pairs, extra_args, unset)):
             fail(
                 "nothing to bind — pass --bin, --env, --arg, --unset or --clear",
                 error="nothing_to_bind",
             )
-        profile = profiles.setdefault(role_name, RoleLaunchProfile())
-        if agent_bin is not None:
-            profile.bin = agent_bin
-        # Merge per key rather than replacing the map, so adding a second
-        # variable does not silently drop the first.
-        profile.env.update(_parse_env(env_pairs or []))
-        for key in unset or []:
-            profile.env.pop(key, None)
-        if extra_args:
-            profile.args.extend(extra_args)
-    path = save_config(config)
-    bound = profiles.get(role_name)
+        bound = settings_service.bind_role(
+            role_name,
+            agent_bin=agent_bin,
+            env=_parse_env(env_pairs or []),
+            unset=unset or [],
+            args=extra_args or [],
+        )
+    path = settings_service.config_path()
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -616,19 +582,53 @@ def bind(
         )
         return
     console = stdout_console()
-    if clear or bound is None:
+    if bound is None:
         console.print(f"✓ {role_name}: binding cleared ({path})", markup=False)
         return
-    summary = "  ".join(
-        part
-        for part in (
-            f"bin={bound.bin}" if bound.bin else "",
-            " ".join(f"{k}={v}" for k, v in sorted(bound.env.items())),
-            f"args={shlex.join(bound.args)}" if bound.args else "",
+    console.print(f"✓ {role_name}: {_describe(bound) or '(empty)'} ({path})", markup=False)
+
+
+def _describe(profile: RoleLaunchProfile) -> str:
+    """One line for a binding. Values are shown VERBATIM, not expanded — this
+    view is for editing, and resolving `$HOME` here would hide the very thing
+    that makes a binding portable. `team harness` shows what it resolves to."""
+    parts = [
+        f"bin={profile.bin}" if profile.bin else "",
+        "  ".join(f"{key}={value}" for key, value in sorted(profile.env.items())),
+        f"args={shlex.join(profile.args)}" if profile.args else "",
+    ]
+    return "  ".join(part for part in parts if part)
+
+
+def _show_bindings() -> None:
+    """Print every role's binding, or how to make one."""
+    profiles = settings_service.role_bindings()
+    legacy_bins = load_config().team.bins
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "profiles": {r: p.model_dump(mode="json") for r, p in profiles.items()},
+                    "bins": legacy_bins,
+                }
+            )
         )
-        if part
-    )
-    console.print(f"✓ {role_name}: {summary or '(empty)'} ({path})", markup=False)
+        return
+    console = stdout_console()
+    roles = sorted(set(profiles) | set(legacy_bins))
+    if not roles:
+        console.print(
+            "no role bindings — pin one with: aisquare team bind coder1 "
+            "--env CLAUDE_CONFIG_DIR='$HOME/.claude2'",
+            markup=False,
+        )
+        return
+    for name in roles:
+        profile = profiles.get(name)
+        described = _describe(profile) if profile is not None else ""
+        if not described and name in legacy_bins:
+            described = f"bin={legacy_bins[name]}"
+        console.print(f"{name:<12} {described or '(empty)'}", markup=False)
 
 
 @app.command("log")

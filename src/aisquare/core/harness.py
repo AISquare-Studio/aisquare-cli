@@ -52,12 +52,17 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from aisquare.core.paths import aisquare_home
+
+if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
+    from aisquare.core.config import TeamSettings
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 PROBE_TIMEOUT_SECONDS = 150
@@ -714,8 +719,33 @@ class BinaryResolution(BaseModel):
     source: str  # flag | env | env:global | config | default
 
 
+def _team_settings() -> tuple[TeamSettings | None, str | None]:
+    """The ``team`` config section, plus a reason if it could not be read.
+
+    The fail-open is scoped deliberately tight: it covers READING the file — a
+    broken config must cost a mapping, never a launch — and nothing else.
+    Attribute access on the loaded object happens at the call site, outside the
+    guard, so a genuine code bug raises instead of quietly resolving to the
+    default. A resolver that silently answers "default" when it is broken is
+    indistinguishable from one that is working.
+
+    **The reason is RETURNED, never printed here.** No silent fail-soft is a
+    standing rule, but ``core`` has no business writing to a terminal, so the
+    caller surfaces it (``resolve_profile`` carries it out on the profile and
+    the CLI echoes it once). The message names the exception CLASS and text and
+    never a config VALUE — a config that fails to parse is exactly where a
+    half-written secret is most likely to be sitting.
+    """
+    try:
+        from aisquare.core.config import load_config
+
+        return load_config().team, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolution:
-    """Flag > per-role env > global env > config map > default.
+    """Flag > per-role env > global env > the role's profile > default.
 
     Deliberately does NOT check PATH: resolution answers "what was asked for",
     and the caller reports "it is not there" separately. Fusing them would turn
@@ -730,12 +760,114 @@ def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolutio
     everywhere = os.environ.get(_BIN_ENV_GLOBAL)
     if everywhere:
         return BinaryResolution(binary=everywhere, source="env:global")
-    try:
-        from aisquare.core.config import load_config
-
-        mapped = (load_config().team.bins or {}).get(role)
-    except Exception:  # fail-open: a broken config costs the mapping, never the spawn
-        mapped = None
-    if mapped:
-        return BinaryResolution(binary=mapped, source="config")
+    # The reason is dropped HERE on purpose: `resolve_profile` reads the same
+    # config and carries it out, and every caller of this function calls that
+    # one too — surfacing it in both would print the same warning twice.
+    team, _ = _team_settings()
+    profile = team.profiles.get(role) if team is not None else None
+    if profile is not None and profile.bin:
+        return BinaryResolution(binary=profile.bin, source="config")
     return BinaryResolution(binary=DEFAULT_AGENT_BINARY, source="default")
+
+
+# ─── The LAUNCH PROFILE: env and args a role runs with ───────────────────────
+#
+# The third axis, and deliberately the DUMBEST one. The ladder decides what
+# model a role runs on and ``resolve_binary`` decides which executable runs it;
+# this carries whatever else the operator wants on the command, verbatim.
+#
+# It is deliberately ignorant. An earlier cut of this understood "accounts" and
+# expanded a name like ``claude2`` into ``~/.claude2`` plus ``~/.cache/claude2``
+# — which is one operator's directory convention baked into a tool that has no
+# business knowing it. Anyone laid out differently could not use the feature at
+# all, and the one person it fit would have it break the day they reorganised.
+#
+# So there is no notion of an account here, and no inferred path. The operator
+# states the env and the args; we expand ``~`` and ``$VAR`` so a value reads
+# exactly like the shell line it replaces, and pass it through. The common case
+# — parallel agent installs reached through aliases —
+#
+#     alias claude2='CLAUDE_CONFIG_DIR="$HOME/.claude2" \
+#                    CLAUDE_CODE_TMPDIR="$HOME/.cache/claude2" command claude'
+#
+# is then just two env entries the operator writes once per role, and any other
+# knob (a proxy, a region, a wrapper's own vars) works the same way without
+# this file learning a thing about it.
+
+
+class LaunchProfile(BaseModel):
+    """What a role adds to its launch: env, extra args, and where each came from."""
+
+    env: dict[str, str] = {}
+    args: list[str] = []
+    #: Per-env-key provenance — ``flag`` or ``config``. Carried for the same
+    #: reason the other two axes carry it: an answer without its source sends
+    #: the reader hunting for who won.
+    env_sources: dict[str, str] = {}
+    #: Why the configured bindings could not be read, when they could not be.
+    #: A launch still proceeds unbound — but silently proceeding would put a
+    #: seat on the DEFAULT install while reporting success, so the caller MUST
+    #: surface this. See the no-silent-fail-soft rule.
+    notice: str | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.env and not self.args
+
+
+def expand_value(value: str) -> str:
+    """``~`` and ``$VAR`` expansion, so config reads like the shell it replaces.
+
+    Order matters: ``$VAR`` first, because ``$HOME/.claude2`` must become a
+    real path before ``~`` expansion would have nothing to do. An undefined
+    ``$VAR`` is left verbatim by ``expandvars`` rather than becoming empty —
+    a silently blank CLAUDE_CONFIG_DIR would start a fresh unauthenticated
+    profile, which is exactly the failure this whole area exists to avoid.
+    """
+    return os.path.expanduser(os.path.expandvars(value))
+
+
+def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
+    """``["K=V", ...]`` -> ``{"K": "V"}``.
+
+    Splits on the FIRST ``=`` only, so a value may contain more of them. A pair
+    with no ``=`` is a usage error the caller reports; returning it silently
+    dropped would leave the operator convinced they had set something.
+    """
+    parsed: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise ValueError(f"expected KEY=VALUE, got {pair!r}")
+        parsed[key] = value
+    return parsed
+
+
+def resolve_profile(
+    role: str,
+    *,
+    env_overrides: dict[str, str] | None = None,
+    extra_args: Sequence[str] | None = None,
+) -> LaunchProfile:
+    """Merge the role's configured profile with this launch's overrides.
+
+    Env merges PER KEY — a flag can override one variable without discarding
+    the rest of the role's profile, which is what makes a one-off tweak cheap.
+    Args APPEND rather than replace, because the configured ones are the role's
+    standing shape and the caller's are additions to it.
+    """
+    env: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    args: list[str] = []
+    team, unreadable = _team_settings()
+    profile = (team.profiles or {}).get(role) if team is not None else None
+    if profile is not None:
+        for key, value in (profile.env or {}).items():
+            env[key] = expand_value(value)
+            sources[key] = "config"
+        args.extend(profile.args or [])
+    for key, value in (env_overrides or {}).items():
+        env[key] = expand_value(value)
+        sources[key] = "flag"
+    args.extend(extra_args or [])
+    return LaunchProfile(env=env, args=args, env_sources=sources, notice=unreadable)

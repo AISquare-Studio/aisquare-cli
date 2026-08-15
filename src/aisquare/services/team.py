@@ -33,6 +33,21 @@ _BOARD_TASKS = 8
 _BOARD_EVENTS = 5
 _STALE_AFTER = timedelta(minutes=30)
 
+#: How long a session must be silent before its IN-PROGRESS CLAIMS are returned
+#: to the pool — deliberately far longer than ``_STALE_AFTER`` (#49).
+#:
+#: Retiring presence and orphaning work are different decisions with different
+#: costs. For an AGENT, thirty minutes of silence is not idleness; it is one
+#: long tool call — a multi-PR review, a build, a fan-out of subagents — and
+#: nothing on the board distinguishes that from a crashed terminal. Retiring
+#: presence too eagerly is self-healing: the next heartbeat re-registers the
+#: session. Releasing a claim too eagerly is not: a second agent picks up work
+#: the first is still doing, and both push.
+#:
+#: So presence goes at ``_STALE_AFTER`` and claims wait for this. A caller that
+#: genuinely knows the session is dead passes ``release_claims=True``.
+_CLAIM_ORPHAN_AFTER = timedelta(hours=4)
+
 
 class TeamDisabledError(RuntimeError):
     """Raised when a team command runs with the orchestrator disabled (AISQUARE_TEAM=0)."""
@@ -1185,6 +1200,7 @@ def prune_sessions(
     *,
     dry_run: bool = False,
     keep: str | None = None,
+    release_claims: bool = False,
     cwd: Path | None = None,
 ) -> PruneReport:
     """Retire ghost sessions — live rows with no heartbeat past the threshold.
@@ -1192,10 +1208,15 @@ def prune_sessions(
     A session stays registered until its Claude Code process fires the end
     hook; a killed loop, a crashed terminal, or an MCP server that never says
     goodbye lingers on the board as ``(stale)`` indefinitely. This ends those
-    rows so the board reflects who is actually present — and, because
-    :meth:`ContextStore.end_session` returns each ghost's in-flight (``doing``)
-    claims to the pool, it also frees any task stranded under a dead session so
-    a live one can pick it up.
+    rows so the board reflects who is actually present.
+
+    **Presence and claims are retired on different clocks (#49).** The row goes
+    at ``threshold``; a session's in-progress CLAIMS are only returned to the
+    pool once it has been silent for ``_CLAIM_ORPHAN_AFTER`` — because for an
+    agent, thirty minutes of silence is usually one long tool call, and a claim
+    released under a working agent hands its lane to a second one. Passing
+    ``release_claims=True`` orphans claims at the presence threshold instead,
+    for callers that know the sessions are dead.
 
     Data-safe by construction: only session presence and orphaned CLAIMS
     change; tasks, notes, events and the project brain are untouched.
@@ -1208,6 +1229,11 @@ def prune_sessions(
     threshold = (
         timedelta(minutes=older_than_minutes) if older_than_minutes is not None else _STALE_AFTER
     )
+    # Claims wait for the longer clock unless the caller asserts these sessions
+    # are dead. `max` rather than a bare constant so an explicit --older-than
+    # ABOVE the claim clock still governs: the operator saying "six hours"
+    # should not have claims released at four.
+    claim_threshold = threshold if release_claims else max(_CLAIM_ORPHAN_AFTER, threshold)
     now = _now()
     pruned: list[PrunedSession] = []
     emitted: list[TeamEvent] = []
@@ -1222,21 +1248,26 @@ def prune_sessions(
             idle = now - session.last_seen_at
             if idle <= threshold:
                 continue
+            orphan_claims = idle > claim_threshold
             released = 0
             if not dry_run:
-                released_tasks = store.end_session(session.id)
-                released = len(released_tasks)
-                for task in released_tasks:
-                    emitted.append(
-                        _emit(
-                            store,
-                            project.id,
-                            "task_released",
-                            f"{task.title} (session pruned)",
-                            session_id=session.id,
-                            task_id=task.id,
+                released_tasks = store.end_session(session.id, release_claims=orphan_claims)
+                # end_session reports what it FOUND claimed either way, so only
+                # count them as released when they actually were — otherwise
+                # the summary claims to have freed work that is still held.
+                released = len(released_tasks) if orphan_claims else 0
+                if orphan_claims:
+                    for task in released_tasks:
+                        emitted.append(
+                            _emit(
+                                store,
+                                project.id,
+                                "task_released",
+                                f"{task.title} (session pruned)",
+                                session_id=session.id,
+                                task_id=task.id,
+                            )
                         )
-                    )
             pruned.append(
                 PrunedSession(
                     id=session.id,

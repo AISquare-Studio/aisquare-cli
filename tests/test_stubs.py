@@ -51,6 +51,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "signals",
             "spawn",
             "harness",
+            "bind",
         )
     ),
     *(

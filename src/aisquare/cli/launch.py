@@ -15,13 +15,14 @@ Anything after the role is forwarded untouched: ``aisquare launch coder
 from __future__ import annotations
 
 import os
+import re
 import shutil
-from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.services import explainability as explainability_service
@@ -31,7 +32,36 @@ from aisquare.services.team import TeamDisabledError
 ROLES = ("planner", "coder", "runner")
 """Roles with a standing work cycle the orchestrator injects on every prompt."""
 
+#: A numbered SEAT of a first-class role — ``coder1``, ``coder2``. Crews run
+#: several agents in the same role and need to tell them apart on the board;
+#: the work cycle is the role's, so the number is an identity, not a new role.
+_SEAT = re.compile(rf"^({'|'.join(ROLES)}|validator)\d+$")
+
 DEFAULT_AGENT = "claude"
+
+
+def _declared_roles() -> set[str]:
+    """Roles the operator has named in ``team.profiles``.
+
+    Declaring a role in config IS the operator saying it exists, so honouring
+    it here keeps one source of truth instead of two lists that drift.
+    """
+    try:
+        return set(load_config().team.profiles)
+    except Exception:  # fail-open: a broken config must not block a launch
+        return set()
+
+
+def _role_ok(role: str) -> bool:
+    """First-class role, a numbered seat of one, or declared in config.
+
+    The whitelist earns its keep by catching typos — ``codr`` silently
+    producing an unattached session was the original footgun — so this stays a
+    check rather than becoming free-form. It just stops rejecting the two
+    shapes real crews use: numbered seats, and roles the operator has already
+    written down.
+    """
+    return role in ROLES or bool(_SEAT.match(role)) or role in _declared_roles()
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -65,14 +95,14 @@ def launch(
         str,
         typer.Option("--command", "-c", help="Agent command to launch.", metavar="CMD"),
     ] = DEFAULT_AGENT,
-    account: Annotated[
-        Path | None,
+    env_pairs: Annotated[
+        list[str] | None,
         typer.Option(
-            "--account",
-            "-a",
-            help="Claude config directory to run under, e.g. ~/.claude-account1 "
-            "(sets CLAUDE_CONFIG_DIR). Use this for parallel accounts.",
-            metavar="DIR",
+            "--env",
+            "-e",
+            help="KEY=VALUE to set for this launch (repeatable). Merges per key over "
+            "the role's bound profile.",
+            metavar="KEY=VALUE",
         ),
     ] = None,
 ) -> None:
@@ -81,14 +111,17 @@ def launch(
     Equivalent to ``AISQUARE_ROLE=<role> <command>``, plus role validation and
     an explicit opt-in for the repo. Extra arguments are passed to the agent.
 
-    ``--account`` selects one of several parallel agent installs. People
-    usually reach these through shell aliases (``alias claude1='…'``), which
-    ``--command`` cannot resolve — aliases are not executables — so point at
-    the config directory instead.
+    The role's bound profile (``aisquare team bind``) supplies its binary, env
+    and extra args; ``--env KEY=VALUE`` adds to or overrides that for one
+    launch. Parallel agent installs are reached through shell aliases, which
+    ``--command`` cannot resolve — aliases are not executables — so set the
+    variables the alias sets and keep the ordinary binary.
     """
-    if role not in ROLES:
+    if not _role_ok(role):
         fail(
-            f"unknown role {role!r} — expected one of: {', '.join(ROLES)}",
+            f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
+            "a numbered seat of one (coder1, coder2), or a role you have "
+            "bound with `aisquare team bind`",
             error="unknown_role",
         )
     binary = shutil.which(command)
@@ -105,18 +138,22 @@ def launch(
         fail(str(exc), error="team_disabled")
 
     env = {**os.environ, "AISQUARE_ROLE": role}
-    whose = ""
-    if account is not None:
-        resolved = account.expanduser()
-        if not resolved.is_dir():
-            # A typo here would not fail loudly — the agent would just start a
-            # fresh, unauthenticated profile in a directory it creates.
-            fail(
-                f"no such config directory: {resolved}",
-                error="unknown_account",
-            )
-        env["CLAUDE_CONFIG_DIR"] = str(resolved)
-        whose = f" ({resolved.name})"
+    # The role's bound spec plus this launch's overrides, carried verbatim.
+    # Resolved even with no flag, so a bound role launches correctly without
+    # the operator remembering to say anything.
+    try:
+        overrides = harness.parse_env_pairs(env_pairs or [])
+    except ValueError as exc:
+        fail(str(exc), error="bad_env_pair")
+    profile = harness.resolve_profile(role, env_overrides=overrides)
+    if profile.notice is not None:
+        # No silent fail-soft: unreadable config means this role launches
+        # UNBOUND — possibly on a different install than the operator believes.
+        stderr_console().print(
+            f"[dim]role bindings: config unreadable ({profile.notice}) — launching unbound[/dim]"
+        )
+    env.update(profile.env)
+    whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
     try:
         tracing = load_config().explainability
     except Exception as exc:  # tracing is an observer: a broken config must
@@ -139,7 +176,7 @@ def launch(
         )
         env.update(wiring.env)
         stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
-    argv = [command, *ctx.args]
+    argv = [command, *profile.args, *ctx.args]
     stderr_console().print(
         f"Launching {command}{whose} as [bold]{role}[/bold] on the "
         f"{project.root.name or project.id} board…"

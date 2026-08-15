@@ -152,13 +152,14 @@ def _put_session(
     )
 
 
-def test_prune_retires_ghosts_and_frees_their_claims(work_dir: Path) -> None:
+def test_prune_retires_ghosts_and_frees_long_dead_claims(work_dir: Path) -> None:
     from aisquare.services import team as team_service
 
     project = team_project(work_dir)
     with store_session() as store:
         store.ensure_project(project)
-        _put_session(store, CODER, project.id, idle_min=90)  # ghost (no heartbeat 90m)
+        # Past the CLAIM clock (4h), not merely past the presence clock (30m).
+        _put_session(store, CODER, project.id, idle_min=5 * 60)
         _put_session(store, PLANNER, project.id, idle_min=1)  # warm
         task, _ = store.upsert_task(_task(project.id, "orphaned", "orphaned"))
         lease = datetime.now(tz=UTC) + timedelta(minutes=60)
@@ -173,6 +174,55 @@ def test_prune_retires_ghosts_and_frees_their_claims(work_dir: Path) -> None:
         assert _stored_session(store, PLANNER).ended_at is None  # warm session spared
         freed = _stored_task(store, task.id)
         assert freed.status == "todo" and freed.claimed_by is None  # claim back in the pool
+
+
+def test_prune_retires_a_quiet_session_but_keeps_its_claim(work_dir: Path) -> None:
+    """#49 — presence and ownership retire on different clocks.
+
+    For an agent, thirty minutes of silence is not idleness; it is one long
+    tool call — a multi-PR review, a build, a fan-out of subagents. Retiring
+    presence too eagerly is self-healing (the next heartbeat re-registers the
+    session); releasing its claim is not, because a second agent then picks up
+    work the first is still doing and both push.
+    """
+    from aisquare.services import team as team_service
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _put_session(store, CODER, project.id, idle_min=90)  # quiet, not dead
+        task, _ = store.upsert_task(_task(project.id, "mid-flight", "mid-flight"))
+        lease = datetime.now(tz=UTC) + timedelta(minutes=60)
+        assert store.claim_task(task.id, CODER, lease)
+
+    report = team_service.prune_sessions()
+
+    assert [entry.id for entry in report.pruned] == [CODER]  # presence still goes
+    assert report.released_total == 0  # ...but the lane does NOT
+    with store_session() as store:
+        assert _stored_session(store, CODER).ended_at is not None
+        held = _stored_task(store, task.id)
+        assert held.status == "doing" and held.claimed_by == CODER
+
+
+def test_prune_release_claims_orphans_at_the_presence_threshold(work_dir: Path) -> None:
+    """The opt-in for a caller that KNOWS the sessions are dead."""
+    from aisquare.services import team as team_service
+
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _put_session(store, CODER, project.id, idle_min=90)
+        task, _ = store.upsert_task(_task(project.id, "orphaned", "orphaned"))
+        lease = datetime.now(tz=UTC) + timedelta(minutes=60)
+        assert store.claim_task(task.id, CODER, lease)
+
+    report = team_service.prune_sessions(release_claims=True)
+
+    assert report.released_total == 1
+    with store_session() as store:
+        freed = _stored_task(store, task.id)
+        assert freed.status == "todo" and freed.claimed_by is None
 
 
 def test_prune_dry_run_reports_without_ending_anything(work_dir: Path) -> None:

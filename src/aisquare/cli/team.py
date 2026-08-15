@@ -19,7 +19,7 @@ import typer
 
 from aisquare.cli.common import fail, local_time
 from aisquare.core import harness, orchestrator
-from aisquare.core.config import ExplainabilitySettings, load_config
+from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import AmbiguousIdError, is_locked_error
@@ -188,6 +188,11 @@ def _bin_env_hint(role: str) -> str:
     return f"{harness._bin_env_var(role)}=<command>"
 
 
+def _account_env_hint(role: str) -> str:
+    """The env var that would pin this role's account, for the same reason."""
+    return f"{harness._account_env_var(role)}=<name>"
+
+
 @app.command("spawn")
 def spawn(
     role_name: Annotated[
@@ -200,6 +205,18 @@ def spawn(
             help=(
                 "Executable that runs the agent (e.g. claude2). Overrides the per-role "
                 "map; see `aisquare team harness` for what each role resolves to."
+            ),
+        ),
+    ] = None,
+    account: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            "-a",
+            help=(
+                "Account to run under: a bare name like claude2 (=> ~/.claude2 and "
+                "~/.cache/claude2) or an explicit config-dir path. Overrides the "
+                "per-role map."
             ),
         ),
     ] = None,
@@ -271,6 +288,18 @@ def spawn(
     # launching on a different install than the operator expects is the same
     # class of surprise as a silent model swap.
     binary = harness.resolve_binary(role_name, override=agent_bin)
+    # WHOSE install, resolved on the same ladder as the binary. Kept separate
+    # because they answer different questions and most setups only need this
+    # one: parallel accounts are reached through aliases that set
+    # CLAUDE_CONFIG_DIR, and an alias is not something --bin could resolve.
+    acct = harness.resolve_account(role_name, override=account)
+    if acct.source != "default":
+        # Put the account vars IN the printed command, not just in --exec's
+        # env. The banner is meant to be pasted, and a printed command that
+        # silently launches under a different account than the one it just
+        # reported is worse than printing nothing.
+        for key, value in harness.account_env(acct.account).items():
+            env_pairs.append(f"{key}={shlex.quote(value)}")
     if resolution is None:
         argv = [binary.binary]
         banner = f"{role_name}: untiered role — launching on the session default model"
@@ -285,6 +314,8 @@ def spawn(
         )
     if binary.source != "default":
         banner = f"{banner}  ·  binary {binary.binary} [{binary.source}]"
+    if acct.source != "default":
+        banner = f"{banner}  ·  account {acct.account} [{acct.source}]"
     command = " ".join([*env_pairs, shlex.join(argv)])
     if tracing is not None and tracing.enabled:
         # Never burn a pipeline id into a printable command: every paste would
@@ -305,6 +336,9 @@ def spawn(
                     "skipped": resolution.skipped if resolution else [],
                     "binary": binary.binary,
                     "binary_source": binary.source,
+                    "account": acct.account,
+                    "account_source": acct.source,
+                    "account_config_dir": str(harness.account_paths(acct.account).config_dir),
                     "command": command,
                 }
             )
@@ -333,8 +367,24 @@ def spawn(
                 "team.bins config map.",
                 error="agent_binary_missing",
             )
+        if acct.source != "default":
+            config_dir = harness.account_paths(acct.account).config_dir
+            if not config_dir.is_dir():
+                # A typo here cannot be allowed to fall through: the agent would
+                # happily create the directory and start a FRESH, UNAUTHENTICATED
+                # profile, which reads as a login failure hours later rather than
+                # as the misspelling it is. Same bar as the missing-binary check.
+                fail(
+                    f"no such account config directory: {config_dir} "
+                    f"(account {acct.account!r} chosen by: {acct.source}). "
+                    f"Set a different one with --account, {_account_env_hint(role_name)}, "
+                    "or the team.accounts config map.",
+                    error="unknown_account",
+                )
         env = dict(os.environ)
         env["AISQUARE_ROLE"] = role_name
+        if acct.source != "default":
+            env.update(harness.account_env(acct.account))
         if tracing is not None and tracing.enabled:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
             # dead or wrong proxy costs the trace, never the spawn.
@@ -369,6 +419,8 @@ def harness_status() -> None:
                 "mission": profile.mission,
                 "binary": harness.resolve_binary(name).binary,
                 "binary_source": harness.resolve_binary(name).source,
+                "account": harness.resolve_account(name).account,
+                "account_source": harness.resolve_account(name).source,
             }
         )
     interference = harness.interfering_env()
@@ -397,6 +449,11 @@ def harness_status() -> None:
         # The matrix showed WHAT each role runs on and hid WHICH executable
         # runs it — half the launch decision, invisible.
         bin_note = "" if binary.source == "default" else f"  bin={binary.binary} [{binary.source}]"
+        acct = harness.resolve_account(name)
+        # ...and hid WHOSE install it runs under, which is the axis a
+        # parallel-account operator actually steers by.
+        if acct.source != "default":
+            bin_note = f"{bin_note}  acct={acct.account} [{acct.source}]"
         console.print(
             f"{name:<10} {ladder:<20} effort={resolution.effort:<10}({offset}) "
             f"→ {pinned or resolution.model} [{source}]{bin_note}",
@@ -408,6 +465,114 @@ def harness_status() -> None:
         "Resolution shown without probing — `aisquare team spawn <role>` verifies live.",
         markup=False,
     )
+
+
+@app.command("bind")
+def bind(
+    role_name: Annotated[
+        str | None,
+        typer.Argument(help="Role to pin. Omit to show the current map."),
+    ] = None,
+    account: Annotated[
+        str | None,
+        typer.Option("--account", "-a", help="Account for this role, e.g. claude2."),
+    ] = None,
+    agent_bin: Annotated[
+        str | None,
+        typer.Option("--bin", help="Executable for this role, e.g. a wrapper script."),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", help="Remove this role's bindings instead of setting them."),
+    ] = False,
+) -> None:
+    """Pin a role to an account and/or a binary, persistently.
+
+    The one-time setup behind ``team.accounts`` / ``team.bins``: a crew running
+    several seats on parallel accounts binds each one once, and every later
+    ``aisquare launch <role>`` and ``aisquare team spawn <role>`` picks it up
+    with no flag. Flags and env still win over this map, so a bound role can
+    always be overridden for a single launch.
+
+    Called with no role it prints the map, which is the fastest way to answer
+    "which account is this seat actually on".
+    """
+    config = load_config()
+    if role_name is None:
+        roles = sorted(set(config.team.accounts) | set(config.team.bins))
+        if get_state().json_output:
+            typer.echo(json.dumps({"accounts": config.team.accounts, "bins": config.team.bins}))
+            return
+        console = stdout_console()
+        if not roles:
+            console.print(
+                "no role bindings — pin one with: aisquare team bind coder1 --account claude2",
+                markup=False,
+            )
+            return
+        for name in roles:
+            parts = []
+            if name in config.team.accounts:
+                acct = config.team.accounts[name]
+                # Show the resolved directory, not just the name: the whole
+                # point of a binding is knowing WHICH install a seat is on, and
+                # a name alone still leaves that one hop away.
+                parts.append(f"account={acct} ({harness.account_paths(acct).config_dir})")
+            if name in config.team.bins:
+                parts.append(f"bin={config.team.bins[name]}")
+            console.print(f"{name:<12} {'  '.join(parts)}", markup=False)
+        return
+    if clear:
+        config.team.accounts.pop(role_name, None)
+        config.team.bins.pop(role_name, None)
+    else:
+        if account is None and agent_bin is None:
+            fail(
+                "nothing to bind — pass --account, --bin, or --clear",
+                error="nothing_to_bind",
+            )
+        if account is not None:
+            resolved = harness.account_paths(account).config_dir
+            if not resolved.is_dir():
+                # Verified at BIND time, where the operator is looking, rather
+                # than at launch time in another terminal hours later. A typo
+                # that survives to launch starts a fresh unauthenticated
+                # profile, which reads as a login failure, not as a typo.
+                fail(
+                    f"no such account config directory: {resolved} (from account {account!r})",
+                    error="unknown_account",
+                )
+            config.team.accounts[role_name] = account
+        if agent_bin is not None:
+            config.team.bins[role_name] = agent_bin
+    path = save_config(config)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "role": role_name,
+                    "account": config.team.accounts.get(role_name),
+                    "bin": config.team.bins.get(role_name),
+                    "config": str(path),
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    if clear:
+        console.print(f"✓ {role_name}: bindings cleared ({path})", markup=False)
+        return
+    summary = "  ".join(
+        part
+        for part in (
+            f"account={config.team.accounts[role_name]}"
+            if role_name in config.team.accounts
+            else "",
+            f"bin={config.team.bins[role_name]}" if role_name in config.team.bins else "",
+        )
+        if part
+    )
+    console.print(f"✓ {role_name}: {summary} ({path})", markup=False)
 
 
 @app.command("log")
@@ -609,16 +774,33 @@ def prune(
         bool,
         typer.Option("--dry-run", help="Show who would be retired without touching anything."),
     ] = False,
+    release_claims: Annotated[
+        bool,
+        typer.Option(
+            "--release-claims",
+            help="Also return in-progress claims to the pool at the presence threshold. "
+            "Only for sessions you know are dead — by default claims wait 4h, because "
+            "30 minutes of agent silence is usually one long tool call.",
+        ),
+    ] = False,
 ) -> None:
-    """Retire ghost sessions and return their orphaned claims to the pool — a clean roll-call.
+    """Retire ghost sessions — a clean roll-call.
 
     A dead loop or crashed terminal lingers on the board as ``(stale)`` forever.
-    This ends those rows so the board shows who is actually here, and frees any
-    task stranded under them. Data-safe: only presence + orphaned claims change
-    — tasks, notes, events and the project brain are untouched.
+    This ends those rows so the board shows who is actually here.
+
+    **Presence and claims retire on different clocks.** The row goes at the
+    threshold (30m); a session's in-progress CLAIMS are only freed after 4h of
+    silence, because for an agent thirty minutes of silence is usually one long
+    tool call, and a claim released under a working agent hands its lane to a
+    second one. ``--release-claims`` frees them at the presence threshold when
+    you know the sessions are dead. Data-safe either way: only presence +
+    orphaned claims change — tasks, notes, events and the brain are untouched.
     """
     try:
-        report = team_service.prune_sessions(older_than, dry_run=dry_run, keep=keep)
+        report = team_service.prune_sessions(
+            older_than, dry_run=dry_run, keep=keep, release_claims=release_claims
+        )
     except STORE_ERRORS as exc:
         _fail_team(exc, keep)
     delivery = team_service.last_delivery()

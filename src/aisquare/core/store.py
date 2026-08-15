@@ -299,7 +299,7 @@ class ContextStore(Protocol):
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
     def mark_attention(self, session_id: str) -> bool: ...
-    def end_session(self, session_id: str) -> list[TeamTask]: ...
+    def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
     def get_task(self, ref: str) -> TeamTask | None: ...
     def team_tasks(
@@ -798,8 +798,18 @@ class SqliteStore:
         self._conn.commit()
         return cursor.rowcount == 1
 
-    def end_session(self, session_id: str) -> list[TeamTask]:
-        """Mark the session ended and release its claims; returns released tasks."""
+    def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]:
+        """Mark the session ended; optionally release its claims.
+
+        ``release_claims=False`` retires only the session's PRESENCE and leaves
+        its ``doing`` tasks claimed. The two effects are separable because they
+        have very different costs when the caller is wrong: a wrongly retired
+        presence row is repaired by the session's next heartbeat, while a
+        wrongly released claim hands live work to a second agent and nothing
+        repairs it. Callers that cannot PROVE the session is dead pass False.
+        The return value still lists the tasks that WOULD have been released,
+        so the caller can report them either way.
+        """
         released = [
             _row_to_task(row)
             for row in self._conn.execute(
@@ -808,11 +818,12 @@ class SqliteStore:
             ).fetchall()
         ]
         now = _now_iso()
-        self._conn.execute(
-            "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
-            "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
-            (now, session_id),
-        )
+        if release_claims:
+            self._conn.execute(
+                "UPDATE team_task SET status = 'todo', claimed_by = NULL, "
+                "claim_expires_at = NULL, updated_at = ? WHERE claimed_by = ? AND status = 'doing'",
+                (now, session_id),
+            )
         self._conn.execute(
             "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
             (now, now, session_id),

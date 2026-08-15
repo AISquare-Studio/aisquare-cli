@@ -739,3 +739,135 @@ def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolutio
     if mapped:
         return BinaryResolution(binary=mapped, source="config")
     return BinaryResolution(binary=DEFAULT_AGENT_BINARY, source="default")
+
+
+# ─── Which ACCOUNT runs a role's agent ───────────────────────────────────────
+#
+# The third axis, orthogonal to both above: the ladder decides WHAT model the
+# agent runs on, ``resolve_binary`` decides WHICH executable runs it, and this
+# decides WHOSE install it runs under — which credentials, which history, which
+# settings, which MCP servers.
+#
+# It exists because ``resolve_binary`` cannot serve the common setup. People
+# reach parallel accounts through shell aliases:
+#
+#     alias claude2='CLAUDE_CONFIG_DIR="$HOME/.claude2" \
+#                    CLAUDE_CODE_TMPDIR="$HOME/.cache/claude2" command claude'
+#
+# An alias is not an executable, so ``shutil.which("claude2")`` is None and
+# ``--bin claude2`` can only ever fail. The alias is really two env vars around
+# one binary, so that is what we set.
+#
+# BOTH vars, always. Setting CLAUDE_CONFIG_DIR alone gives a session the right
+# credentials and the WRONG scratch directory, silently shared with every other
+# account — parallel sessions then collide in temp while looking correctly
+# isolated, which is the failure mode that is hardest to attribute later.
+
+#: The account used when nothing else says otherwise — the agent's own default
+#: install, i.e. ``~/.claude``.
+DEFAULT_AGENT_ACCOUNT = "claude"
+
+#: Per-role override, e.g. AISQUARE_ACCOUNT_CODER=claude2. Same slug rule as
+#: the binary vars, so ``code-reviewer`` reads AISQUARE_ACCOUNT_CODE_REVIEWER.
+_ACCOUNT_ENV_PREFIX = "AISQUARE_ACCOUNT_"
+
+#: Applies to every role that has no more specific answer.
+_ACCOUNT_ENV_GLOBAL = "AISQUARE_AGENT_ACCOUNT"
+
+
+def _account_env_var(role: str) -> str:
+    slug = "".join(ch if ch.isalnum() else "_" for ch in role).upper()
+    return f"{_ACCOUNT_ENV_PREFIX}{slug}"
+
+
+class AccountResolution(BaseModel):
+    """Which account a role launches under, and why that one.
+
+    ``source`` is carried for the same reason ``BinaryResolution`` carries it:
+    an answer without its provenance sends the reader hunting through four
+    places to learn who won.
+    """
+
+    account: str
+    source: str  # flag | env | env:global | config | default
+
+
+class AccountPaths(BaseModel):
+    """The two directories that together ARE an account."""
+
+    name: str
+    config_dir: Path
+    tmp_dir: Path
+
+
+def account_paths(account: str) -> AccountPaths:
+    """Resolve an account to its config and scratch directories.
+
+    A BARE NAME (``claude2``) is the common case and follows the convention the
+    aliases already use: ``~/.claude2`` for config, ``~/.cache/claude2`` for
+    scratch. A name containing a separator, or starting with ``~`` or ``.``, is
+    taken as an explicit CONFIG PATH instead, and its scratch directory is
+    derived from the directory's own name with any leading dot removed — so an
+    explicit ``~/.claude-work`` still lands on ``~/.cache/claude-work`` rather
+    than silently sharing the default.
+    """
+    looks_like_path = "/" in account or account.startswith(("~", "."))
+    if looks_like_path:
+        config_dir = Path(account).expanduser()
+        stem = config_dir.name.lstrip(".") or config_dir.name
+    else:
+        config_dir = Path.home() / f".{account}"
+        stem = account
+    return AccountPaths(
+        name=account,
+        config_dir=config_dir,
+        tmp_dir=Path.home() / ".cache" / stem,
+    )
+
+
+def account_env(account: str) -> dict[str, str]:
+    """The env delta that puts a session on ``account``.
+
+    Mirrors the alias exactly — both vars, never one. The scratch directory is
+    created if missing because the agent expects to be able to write there, and
+    a missing tmpdir surfaces much later as an unrelated-looking write error.
+    The CONFIG directory is deliberately NOT created: an absent one means the
+    account was never set up, and inventing it would start a fresh
+    unauthenticated profile that looks like a login failure. Callers check.
+    """
+    paths = account_paths(account)
+    paths.tmp_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "CLAUDE_CONFIG_DIR": str(paths.config_dir),
+        "CLAUDE_CODE_TMPDIR": str(paths.tmp_dir),
+    }
+
+
+def resolve_account(role: str, *, override: str | None = None) -> AccountResolution:
+    """Flag > per-role env > global env > config map > default.
+
+    The same ladder as ``resolve_binary``, and deliberately the same shape: two
+    axes a reader has to hold at once are far easier to trust when they resolve
+    identically. Like that function it does NOT check the filesystem —
+    resolution answers "what was asked for", and the caller reports "it is not
+    there" separately, so a typo can never degrade into a silent launch under
+    the DEFAULT account, which would put a role on the wrong credentials while
+    reporting success.
+    """
+    if override:
+        return AccountResolution(account=override, source="flag")
+    per_role = os.environ.get(_account_env_var(role))
+    if per_role:
+        return AccountResolution(account=per_role, source="env")
+    everywhere = os.environ.get(_ACCOUNT_ENV_GLOBAL)
+    if everywhere:
+        return AccountResolution(account=everywhere, source="env:global")
+    try:
+        from aisquare.core.config import load_config
+
+        mapped = (load_config().team.accounts or {}).get(role)
+    except Exception:  # fail-open: a broken config costs the mapping, never the spawn
+        mapped = None
+    if mapped:
+        return AccountResolution(account=mapped, source="config")
+    return AccountResolution(account=DEFAULT_AGENT_ACCOUNT, source="default")

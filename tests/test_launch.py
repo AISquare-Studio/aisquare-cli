@@ -121,7 +121,10 @@ def test_launch_rejects_a_missing_account_dir(
     result = runner.invoke(app, ["launch", "coder", "--account", str(tmp_path / "typo")])
 
     assert result.exit_code == 1
-    assert "no such config directory" in result.output
+    assert "no such account config directory" in result.output
+    # The message names WHICH of flag/env/config chose it, so the reader is not
+    # sent hunting through four places to find who won.
+    assert "chosen by: flag" in result.output
     assert not spy
 
 

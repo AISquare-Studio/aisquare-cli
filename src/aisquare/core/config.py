@@ -51,9 +51,21 @@ class TeamSettings(BaseModel):
     wrapper script — can put a role on the one they mean without retyping a
     flag every spawn. Resolution order is flag > env > this map > default;
     see ``aisquare.core.harness.resolve_binary``.
+
+    ``accounts`` maps a role to the ACCOUNT it runs under — the config
+    directory holding its credentials, history, settings and MCP servers.
+    This is the axis most parallel-install setups actually use, because people
+    reach their extra accounts through shell aliases that set
+    ``CLAUDE_CONFIG_DIR``, and an alias is not an executable that ``bins``
+    could ever resolve. Same resolution order; see
+    ``aisquare.core.harness.resolve_account``.
+
+    The two are independent and compose: a role can run a wrapper binary under
+    a specific account, either alone, or neither.
     """
 
     bins: dict[str, str] = Field(default_factory=dict)
+    accounts: dict[str, str] = Field(default_factory=dict)
 
 
 class AppConfig(BaseModel):

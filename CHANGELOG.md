@@ -6,6 +6,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Per-role ACCOUNT binding — the third launch axis.** The ladder decides
+  *what* model a role runs on, `--bin` (#52) decides *which* executable runs
+  it, and `--account` now decides *whose install* it runs under: credentials,
+  history, settings, MCP servers.
+  - `aisquare team spawn <role> --account claude2` and
+    `aisquare launch <role> --account claude2`. A **bare name** follows the
+    convention the shell aliases already use — `claude2` resolves to
+    `~/.claude2` for config and `~/.cache/claude2` for scratch — and an
+    explicit path still gets its own derived scratch directory rather than
+    silently sharing the default.
+  - `team.accounts` config map, resolved on the same ladder as `team.bins`:
+    flag > per-role env (`AISQUARE_ACCOUNT_<ROLE>`) > global env
+    (`AISQUARE_AGENT_ACCOUNT`) > config > default.
+  - `aisquare team bind <role> --account <name> [--bin <cmd>]` — the one-time
+    setup, with `--clear` to undo and a bare `aisquare team bind` to print the
+    map. The account directory is verified **at bind time**, where the operator
+    is looking, rather than at launch in another terminal hours later.
+  - `aisquare team harness` and `spawn`'s banner now report the resolved
+    account and its provenance, the same way they report the binary.
+  - Why this exists rather than reusing `--bin`: parallel accounts are reached
+    through shell aliases (`alias claude2='CLAUDE_CONFIG_DIR=… command claude'`),
+    an alias is not an executable, so `shutil.which("claude2")` is `None` and
+    `--bin claude2` can only ever fail.
+
+### Fixed
+- **`launch --account` set `CLAUDE_CONFIG_DIR` but never `CLAUDE_CODE_TMPDIR`.**
+  A session got the right credentials and the *default* scratch directory,
+  silently shared with every other account — which looks correctly isolated
+  right up until two parallel sessions collide in temp. Both vars are now set
+  together, matching what the aliases do.
+- **`team prune` no longer releases a quiet session's in-progress claim (#49).**
+  Presence and ownership now retire on different clocks: the session row still
+  goes at the threshold (30m), but its `doing` claims are only returned to the
+  pool after 4h of silence. For an agent, thirty minutes of silence is not
+  idleness — it is one long tool call, and nothing on the board distinguishes
+  that from a crashed terminal. Retiring presence early is self-healing (the
+  next heartbeat re-registers the session); releasing a claim early is not,
+  because a second agent picks up work the first is still doing. Pass
+  `--release-claims` to orphan claims at the presence threshold when you know
+  the sessions are dead. `ContextStore.end_session` gains `release_claims`.
+- **`aisquare launch` rejected numbered seats.** A crew running `coder1`,
+  `coder2`, … in the same role could not launch them: the role whitelist held
+  exactly three names. It now accepts a first-class role, a numbered seat of
+  one (`coder1`, `validator2`), or any role declared in the `team.accounts` /
+  `team.bins` maps — while still refusing a typo like `codr`, which was the
+  footgun the whitelist existed to catch.
+
 ## [0.4.0rc1] - 2026-08-07
 
 The rc/v2026.08.08 train: everything pending folded into one release —

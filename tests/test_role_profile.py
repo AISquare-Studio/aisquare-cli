@@ -454,3 +454,64 @@ class TestAStaleBinsKeyIsInert:
         assert result.exit_code == 1, result.output
         assert "unknown role" in result.output.lower()
         assert not spy
+
+
+class TestLaunchHonoursTheBoundBinary:
+    """`launch` used to read --command alone and ignore the binding entirely.
+
+    Worse than not supporting it: the docstring promised the profile supplied
+    the binary, so a role bound to a wrapper silently started the DEFAULT agent
+    under the right role name and exited 0 — success reported for the wrong
+    program. `team spawn` honoured the binding correctly the whole time, so the
+    two entry points disagreed about what a binding meant.
+    """
+
+    def test_a_bound_bin_is_what_gets_executed(
+        self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+    ) -> None:
+        _bind("coder", bin="claude-wrapper")
+        result = runner.invoke(app, ["launch", "coder"])
+
+        assert result.exit_code == 0, result.output
+        assert spy["argv"][0] == "claude-wrapper"
+        assert spy["binary"] == "/usr/local/bin/claude-wrapper"
+
+    def test_command_flag_still_overrides_the_binding(
+        self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+    ) -> None:
+        _bind("coder", bin="from-config")
+        result = runner.invoke(app, ["launch", "coder", "--command", "from-flag"])
+
+        assert result.exit_code == 0, result.output
+        assert spy["argv"][0] == "from-flag"
+
+    def test_an_unbound_role_still_launches_the_default(
+        self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+    ) -> None:
+        # The no-binding path must stay byte-identical to what it always was.
+        result = runner.invoke(app, ["launch", "coder"])
+
+        assert result.exit_code == 0, result.output
+        assert spy["argv"] == ["claude"]
+
+    def test_a_missing_binary_names_who_chose_it(
+        self, runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A bare "not on your PATH" sends the reader hunting through flag, env
+        # and config to work out which of them picked the thing that is absent.
+        _bind("coder", bin="nowhere-to-be-found")
+        monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+        result = runner.invoke(app, ["launch", "coder"])
+
+        assert result.exit_code == 1
+        assert "nowhere-to-be-found" in result.output
+        assert "chosen by: config" in result.output
+
+    def test_spawn_and_launch_agree_on_the_binary(
+        self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+    ) -> None:
+        # The invariant the defect broke: two entry points, one answer.
+        _bind("coder", bin="claude-wrapper")
+        assert harness.resolve_binary("coder").binary == "claude-wrapper"
+        runner.invoke(app, ["launch", "coder"])
+        assert spy["argv"][0] == harness.resolve_binary("coder").binary

@@ -92,9 +92,15 @@ def launch(
         typer.Argument(help=f"Team role for this session: {', '.join(ROLES)}."),
     ],
     command: Annotated[
-        str,
-        typer.Option("--command", "-c", help="Agent command to launch.", metavar="CMD"),
-    ] = DEFAULT_AGENT,
+        str | None,
+        typer.Option(
+            "--command",
+            "-c",
+            help="Agent command to launch. Overrides the role's bound `bin`; "
+            f"defaults to that, then to `{DEFAULT_AGENT}`.",
+            metavar="CMD",
+        ),
+    ] = None,
     env_pairs: Annotated[
         list[str] | None,
         typer.Option(
@@ -112,9 +118,11 @@ def launch(
     an explicit opt-in for the repo. Extra arguments are passed to the agent.
 
     The role's bound profile (``aisquare team bind``) supplies its binary, env
-    and extra args; ``--env KEY=VALUE`` adds to or overrides that for one
-    launch. Parallel agent installs are reached through shell aliases, which
-    ``--command`` cannot resolve — aliases are not executables — so set the
+    and extra args. ``--command`` overrides the binary and ``--env KEY=VALUE``
+    adds to or overrides the environment, both for one launch only.
+
+    Parallel agent installs are usually reached through shell aliases, which
+    ``--command`` cannot resolve — an alias is not an executable — so bind the
     variables the alias sets and keep the ordinary binary.
     """
     if not _role_ok(role):
@@ -124,10 +132,19 @@ def launch(
             "bound with `aisquare team bind`",
             error="unknown_role",
         )
-    binary = shutil.which(command)
+    # Resolve WHICH executable on the same ladder `team spawn` uses, so a role
+    # bound to a wrapper launches on it here too. This used to read `--command`
+    # alone and ignore the binding entirely, which is worse than not supporting
+    # it: the docstring promised the profile supplied the binary, so `launch`
+    # silently started the DEFAULT agent under the right role name and exited 0.
+    resolution = harness.resolve_binary(role, override=command)
+    binary = shutil.which(resolution.binary)
     if binary is None:
+        # Name the candidate AND who chose it — a bare "not on your PATH" sends
+        # the reader hunting through flag, env and config to learn which won.
         fail(
-            f"{command!r} is not on your PATH — install it, or pass --command",
+            f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) "
+            "— install it, pass --command, or change the role's binding",
             error="agent_not_found",
         )
     # A role launch is the opt-in for this repo (same contract the hooks use),
@@ -176,9 +193,9 @@ def launch(
         )
         env.update(wiring.env)
         stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
-    argv = [command, *profile.args, *ctx.args]
+    argv = [resolution.binary, *profile.args, *ctx.args]
     stderr_console().print(
-        f"Launching {command}{whose} as [bold]{role}[/bold] on the "
+        f"Launching {resolution.binary}{whose} as [bold]{role}[/bold] on the "
         f"{project.root.name or project.id} board…"
     )
     _exec(binary, argv, env)

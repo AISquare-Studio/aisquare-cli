@@ -34,7 +34,7 @@ serve = [
   # which services/mcp_server.py imports. An unpinned resolve picks 2.x and
   # mypy fails with "Cannot find implementation or library stub for module
   # named mcp.server.fastmcp" -- a red typecheck job on a tree nobody touched.
-  "mcp>=1.10,<2",
+  "mcp>=1.10,<3",
 ]
 tui = [
   "textual>=1.0",
@@ -47,7 +47,7 @@ dev = [
   # which services/mcp_server.py imports. An unpinned resolve picks 2.x and
   # mypy fails with "Cannot find implementation or library stub for module
   # named mcp.server.fastmcp" -- a red typecheck job on a tree nobody touched.
-  "mcp>=1.10,<2",
+  "mcp>=1.10,<3",
   "textual>=1.0",
 ]
 

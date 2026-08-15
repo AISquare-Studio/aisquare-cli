@@ -677,3 +677,65 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             "with findings severity-ordered (critical|major|minor|nit) and evidence per finding.",
         ]
     return []
+
+
+# ─── Which BINARY runs a role's agent ────────────────────────────────────────
+#
+# Orthogonal to the model ladder above: that decides WHAT the agent runs on,
+# this decides WHICH executable runs it. People hold several parallel installs
+# — `claude`, `claude2`, a wrapper script — and want a role pinned to one
+# without retyping a flag on every spawn (#52).
+
+#: The executable used when nothing else says otherwise.
+DEFAULT_AGENT_BINARY = "claude"
+
+#: Per-role override, e.g. AISQUARE_BIN_CODER=claude2. Role names are upper-cased
+#: and non-alphanumerics become underscores, so `code-reviewer` reads
+#: AISQUARE_BIN_CODE_REVIEWER.
+_BIN_ENV_PREFIX = "AISQUARE_BIN_"
+
+#: Applies to every role that has no more specific answer.
+_BIN_ENV_GLOBAL = "AISQUARE_AGENT_BIN"
+
+
+def _bin_env_var(role: str) -> str:
+    slug = "".join(ch if ch.isalnum() else "_" for ch in role).upper()
+    return f"{_BIN_ENV_PREFIX}{slug}"
+
+
+class BinaryResolution(BaseModel):
+    """Which executable a role launches on, and why that one.
+
+    ``source`` is carried because a matrix that shows the answer without its
+    provenance sends the reader hunting through four places to find who won.
+    """
+
+    binary: str
+    source: str  # flag | env | env:global | config | default
+
+
+def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolution:
+    """Flag > per-role env > global env > config map > default.
+
+    Deliberately does NOT check PATH: resolution answers "what was asked for",
+    and the caller reports "it is not there" separately. Fusing them would turn
+    a missing binary into a silent fall-back to the default, which runs the
+    WRONG AGENT under the right role name — worse than not launching.
+    """
+    if override:
+        return BinaryResolution(binary=override, source="flag")
+    per_role = os.environ.get(_bin_env_var(role))
+    if per_role:
+        return BinaryResolution(binary=per_role, source="env")
+    everywhere = os.environ.get(_BIN_ENV_GLOBAL)
+    if everywhere:
+        return BinaryResolution(binary=everywhere, source="env:global")
+    try:
+        from aisquare.core.config import load_config
+
+        mapped = (load_config().team.bins or {}).get(role)
+    except Exception:  # fail-open: a broken config costs the mapping, never the spawn
+        mapped = None
+    if mapped:
+        return BinaryResolution(binary=mapped, source="config")
+    return BinaryResolution(binary=DEFAULT_AGENT_BINARY, source="default")

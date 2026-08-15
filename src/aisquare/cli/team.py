@@ -182,11 +182,27 @@ def _parse_since(value: str) -> datetime:
     return moment if moment.tzinfo is not None else moment.astimezone()
 
 
+def _bin_env_hint(role: str) -> str:
+    """The env var that would pin this role's binary — shown in the failure so
+    the fix is readable where the problem is."""
+    return f"{harness._bin_env_var(role)}=<command>"
+
+
 @app.command("spawn")
 def spawn(
     role_name: Annotated[
         str, typer.Argument(help="Role to launch (planner/coder/runner/validator/…).")
     ],
+    agent_bin: Annotated[
+        str | None,
+        typer.Option(
+            "--bin",
+            help=(
+                "Executable that runs the agent (e.g. claude2). Overrides the per-role "
+                "map; see `aisquare team harness` for what each role resolves to."
+            ),
+        ),
+    ] = None,
     execute: Annotated[
         bool,
         typer.Option(
@@ -250,11 +266,16 @@ def spawn(
         tracing = None
         typer.echo(f"explainability: config unreadable ({exc}) — sessions untraced", err=True)
     env_pairs = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
+    # WHICH executable, resolved separately from WHICH model — flag > env >
+    # config > default (#52). Reported in the banner because a role silently
+    # launching on a different install than the operator expects is the same
+    # class of surprise as a silent model swap.
+    binary = harness.resolve_binary(role_name, override=agent_bin)
     if resolution is None:
-        argv = ["claude"]
+        argv = [binary.binary]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
-        argv = ["claude", "--model", resolution.model, "--effort", resolution.effort]
+        argv = [binary.binary, "--model", resolution.model, "--effort", resolution.effort]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
         profile = harness.ROLE_PROFILES.get(role_name)
         mission = profile.mission if profile else "pinned by AISQUARE_MODEL override"
@@ -262,6 +283,8 @@ def spawn(
             f"{role_name}: {resolution.model} @ {resolution.effort} "
             f"[model {resolution.source} · effort {resolution.effort_source}]{skipped} — {mission}"
         )
+    if binary.source != "default":
+        banner = f"{banner}  ·  binary {binary.binary} [{binary.source}]"
     command = " ".join([*env_pairs, shlex.join(argv)])
     if tracing is not None and tracing.enabled:
         # Never burn a pipeline id into a printable command: every paste would
@@ -280,6 +303,8 @@ def spawn(
                     "source": resolution.source if resolution else "untiered",
                     "effort_source": resolution.effort_source if resolution else None,
                     "skipped": resolution.skipped if resolution else [],
+                    "binary": binary.binary,
+                    "binary_source": binary.source,
                     "command": command,
                 }
             )
@@ -293,8 +318,21 @@ def spawn(
             if caution:
                 stdout_console().print(f"  ⚠ {caution}", markup=False)
     if execute:
-        if shutil.which("claude") is None:
-            fail("claude not found on PATH", error="claude_missing")
+        if shutil.which(binary.binary) is None:
+            # Names the candidate AND where it came from: a bare "not found"
+            # sends the reader hunting through flag, env and config to learn
+            # which of them chose it. Never falls back to the default — that
+            # would run the WRONG agent under the right role name.
+            fail(
+                f"{binary.binary!r} not found on PATH (chosen by: {binary.source}). "
+                # No square brackets in this string: the console renders rich
+                # markup, so "[team.bins]" was being swallowed as a tag and the
+                # third remedy vanished from the message that exists to list
+                # all three.
+                f"Set a different one with --bin, {_bin_env_hint(role_name)}, or the "
+                "team.bins config map.",
+                error="agent_binary_missing",
+            )
         env = dict(os.environ)
         env["AISQUARE_ROLE"] = role_name
         if tracing is not None and tracing.enabled:
@@ -329,6 +367,8 @@ def harness_status() -> None:
                 "resolves_to": pinned or resolution.model,
                 "source": "pinned" if pinned else resolution.source,
                 "mission": profile.mission,
+                "binary": harness.resolve_binary(name).binary,
+                "binary_source": harness.resolve_binary(name).source,
             }
         )
     interference = harness.interfering_env()
@@ -353,9 +393,13 @@ def harness_status() -> None:
         ladder = "→".join(profile.ladder)
         offset = f"+{profile.effort_offset}" if profile.effort_offset else " 0"
         source = "pinned" if pinned else resolution.source
+        binary = harness.resolve_binary(name)
+        # The matrix showed WHAT each role runs on and hid WHICH executable
+        # runs it — half the launch decision, invisible.
+        bin_note = "" if binary.source == "default" else f"  bin={binary.binary} [{binary.source}]"
         console.print(
             f"{name:<10} {ladder:<20} effort={resolution.effort:<10}({offset}) "
-            f"→ {pinned or resolution.model} [{source}]",
+            f"→ {pinned or resolution.model} [{source}]{bin_note}",
             markup=False,
         )
     if interference:

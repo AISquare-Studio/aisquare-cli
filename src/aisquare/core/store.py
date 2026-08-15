@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import random
 import re
 import sqlite3
@@ -27,7 +28,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
@@ -201,6 +202,24 @@ _SCHEMA_V8 = """
 DELETE FROM team_session WHERE id LIKE 'mcp:%' AND substr(id, 5) NOT LIKE '%:%';
 """
 
+# v9: which agent config dir (account) a session runs under, so a board driven
+# by several parallel installs shows who is on which — and a rate-limited
+# account's sessions can be spotted and relaunched elsewhere.
+_SCHEMA_V9 = """
+ALTER TABLE team_session ADD COLUMN account TEXT;
+"""
+
+# v10: the harness captures which model (and effort) each session actually
+# runs on — from the SessionStart hook payload, where both fields are optional
+# — so the board can flag a session whose model falls outside its role's
+# ladder. (v10, not v9 as authored on the PR branch: the train's v9 is the
+# account column above, and a db that ran either migration must still get the
+# other's columns.)
+_SCHEMA_V10 = """
+ALTER TABLE team_session ADD COLUMN model TEXT;
+ALTER TABLE team_session ADD COLUMN effort TEXT;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -211,6 +230,8 @@ _MIGRATIONS = (
     _SCHEMA_V6,
     _SCHEMA_V7,
     _SCHEMA_V8,
+    _SCHEMA_V9,
+    _SCHEMA_V10,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -218,7 +239,7 @@ _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, de
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path"
+    "transcript_path, account, model, effort"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -294,11 +315,29 @@ class ContextStore(Protocol):
     ) -> TeamTask | None: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
+    def list_meta(self, prefix: str) -> dict[str, str]: ...
+    def add_signal_event(
+        self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
+    ) -> TeamEvent: ...
     def add_team_event(self, event: TeamEvent) -> TeamEvent: ...
+    def get_event(self, event_id: str) -> TeamEvent | None: ...
+    def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
+    def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
     def events_since(
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
     ) -> list[TeamEvent]: ...
     def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def filtered_events(
+        self,
+        project_id: str,
+        *,
+        session_id: str | None = None,
+        since_iso: str | None = None,
+        since_seq: int | None = None,
+        kind: str | None = None,
+        task_id: str | None = None,
+        limit: int = 30,
+    ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
     def close(self) -> None: ...
@@ -358,6 +397,9 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         cursor=row["cursor"],
         state=row["state"],
         transcript_path=row["transcript_path"],
+        account=row["account"],
+        model=row["model"],
+        effort=row["effort"],
     )
 
 
@@ -642,11 +684,14 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
-            "transcript_path = COALESCE(excluded.transcript_path, transcript_path)",
+            "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
+            "account = COALESCE(excluded.account, account), "
+            "model = COALESCE(excluded.model, model), "
+            "effort = COALESCE(excluded.effort, effort)",
             (
                 session.id,
                 session.project_id,
@@ -659,6 +704,9 @@ class SqliteStore:
                 session.cursor,
                 session.state,
                 session.transcript_path,
+                session.account,
+                session.model,
+                session.effort,
             ),
         )
         self._conn.commit()
@@ -984,6 +1032,48 @@ class SqliteStore:
         )
         self._conn.commit()
 
+    def list_meta(self, prefix: str) -> dict[str, str]:
+        """Every ``team_meta`` entry under ``prefix``, key → value."""
+        rows = self._conn.execute(
+            "SELECT key, value FROM team_meta WHERE key GLOB ? ORDER BY key",
+            (f"{_glob_prefix(prefix)[:-1]}*",),
+        ).fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def add_signal_event(
+        self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
+    ) -> TeamEvent:
+        """Insert a signal event AND its meta materialization in ONE transaction.
+
+        A signal is two writes — the pipe event (history) and the current-state
+        blob under ``meta_key`` — and a crash between separate commits would
+        leave watchers and readers disagreeing. The event's assigned ``seq``
+        is injected into ``meta_value`` before the blob is stored, so the
+        state row always names the event that produced it.
+        """
+        with self._conn:  # one BEGIN…COMMIT for both statements
+            cursor = self._conn.execute(
+                "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+                "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.id,
+                    event.project_id,
+                    event.session_id,
+                    event.kind,
+                    event.text,
+                    event.task_id,
+                    event.to_role,
+                    event.created_at.isoformat(),
+                ),
+            )
+            stamped = {**meta_value, "seq": cursor.lastrowid}
+            self._conn.execute(
+                "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (meta_key, json.dumps(stamped)),
+            )
+        return event.model_copy(update={"seq": cursor.lastrowid})
+
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         cursor = self._conn.execute(
             "INSERT INTO team_event (id, project_id, session_id, kind, text, "
@@ -1001,6 +1091,83 @@ class SqliteStore:
         )
         self._conn.commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
+
+    def get_event(self, event_id: str) -> TeamEvent | None:
+        """One event by exact id — the write path's post-commit read-back."""
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE id = ?", (event_id,)
+        ).fetchone()
+        return _row_to_event(row) if row is not None else None
+
+    def get_event_by_seq(self, seq: int) -> TeamEvent | None:
+        """One event by stream position (``seq`` is unique across all boards)."""
+        row = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE seq = ?", (seq,)
+        ).fetchone()
+        return _row_to_event(row) if row is not None else None
+
+    def find_event_by_id(self, ref: str) -> TeamEvent | None:
+        """One event by id, prefix ok — receipts quote either form.
+
+        Board-agnostic on purpose: ``team verify`` decides whether the match
+        belongs to the caller's board (and hints where it actually lives).
+        """
+        exact = self.get_event(ref)
+        if exact is not None:
+            return exact
+        matches = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event WHERE id GLOB ? LIMIT 2",
+            (_glob_prefix(ref),),
+        ).fetchall()
+        if len(matches) > 1:
+            raise AmbiguousIdError(ref)
+        return _row_to_event(matches[0]) if matches else None
+
+    def filtered_events(
+        self,
+        project_id: str,
+        *,
+        session_id: str | None = None,
+        since_iso: str | None = None,
+        since_seq: int | None = None,
+        kind: str | None = None,
+        task_id: str | None = None,
+        limit: int = 30,
+    ) -> list[TeamEvent]:
+        """Matching events for ``team log``'s filters, oldest-first.
+
+        Without ``since_seq`` this is a window: the NEWEST ``limit`` matches.
+        With ``since_seq`` it is a cursor page: the OLDEST ``limit`` matches
+        past that seq, so a client tracking the last seq it saw never skips
+        events (the MCP ``team_log`` contract). Rides the ``(project_id,
+        seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
+        lexicographically (uniform format by construction). ``session_id`` is
+        exact — prefix resolution is the service layer's job.
+        """
+        clauses = ["project_id = ?"]
+        params: list[str | int] = [project_id]
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if since_iso is not None:
+            clauses.append("created_at >= ?")
+            params.append(since_iso)
+        if since_seq is not None:
+            clauses.append("seq > ?")
+            params.append(since_seq)
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        paging = since_seq is not None
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM team_event "
+            f"WHERE {' AND '.join(clauses)} ORDER BY seq {'ASC' if paging else 'DESC'} LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_event(row) for row in (rows if paging else reversed(rows))]
 
     def events_since(
         self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
@@ -1056,6 +1223,46 @@ def _glob_prefix(ref: str) -> str:
     return f"{escaped}*"
 
 
+_DEFAULT_BUSY_MS = 5000
+_MAX_BUSY_MS = 2**31 - 1  # SQLite's 32-bit atoi wraps anything larger to 0
+
+
+def _busy_timeout_ms() -> int:
+    """How long a connection waits on a locked store (``AISQUARE_DB_BUSY_MS``).
+
+    Tests wedge the store on purpose and must not sit through the 5s default;
+    anything unset, non-numeric or negative falls back to it. Values past
+    2**31-1 clamp — SQLite parses the pragma with 32-bit atoi, so 2147483648
+    would wrap to 0 and silently DISABLE the busy handler.
+    """
+    raw = os.environ.get("AISQUARE_DB_BUSY_MS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_BUSY_MS
+    if value < 0:
+        return _DEFAULT_BUSY_MS
+    return min(value, _MAX_BUSY_MS)
+
+
+def is_locked_error(exc: sqlite3.Error) -> bool:
+    """True for transient lock/busy conditions worth a short retry.
+
+    Everything else an ``sqlite3.DatabaseError`` carries — no such table,
+    readonly database, disk I/O, corruption — is NOT retryable and must not
+    be dressed up as ``store_locked``.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    # Only errors raised BY the sqlite3 module carry sqlite_errorcode;
+    # hand-constructed ones (tests, wrappers) fall back to the message text.
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Bring the schema to the current version, safely under concurrency.
 
@@ -1089,15 +1296,19 @@ def open_store() -> ContextStore:
     First opens race: parallel session hooks all arrive at a fresh database
     together, and the WAL switch + migrations contend for the write lock.
     ``busy_timeout`` covers most of it, but journal-mode changes can return
-    "database is locked" without consulting the orchestratory handler — so the whole
-    setup phase retries with jitter for up to 15s instead of dying. After
-    the first successful open this loop never iterates.
+    "database is locked" without consulting the busy handler — so the whole
+    setup phase retries with jitter. The retry budget scales with the
+    ``AISQUARE_DB_BUSY_MS`` knob (3x it; 15s at the default) so a test that
+    wedges a fresh store with knob=50 fails fast instead of sitting out a
+    hardcoded floor. After the first successful open this loop never
+    iterates.
     """
     paths.ensure_home()
     connection = sqlite3.connect(str(paths.db_path()))
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 5000")
-    deadline = time.monotonic() + 15
+    busy_ms = _busy_timeout_ms()
+    connection.execute(f"PRAGMA busy_timeout = {busy_ms}")
+    deadline = time.monotonic() + 3 * (busy_ms / 1000)
     while True:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
@@ -1105,7 +1316,7 @@ def open_store() -> ContextStore:
             _migrate(connection)
             return SqliteStore(connection)
         except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+            if not is_locked_error(exc) or time.monotonic() >= deadline:
                 connection.close()
                 raise
             time.sleep(0.05 + random.random() * 0.1)

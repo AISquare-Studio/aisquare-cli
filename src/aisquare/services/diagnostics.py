@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
-from aisquare.core import orchestrator, paths
+from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
@@ -53,6 +53,7 @@ def doctor() -> list[DoctorCheck]:
         _check_claude_code(),
         _check_snapshot(),
         _check_brain(),
+        _check_harness(),
     ]
 
 
@@ -139,17 +140,36 @@ def _check_tiktoken() -> DoctorCheck:
     )
 
 
+_STALE_HOOKS = (
+    "hooks are missing or outdated (older installs lack the Stop/Notification/SessionEnd events)"
+)
+_RECONNECT = "(Re)connect it: aisquare agents connect claude-code"
+
+
 def _check_claude_code() -> DoctorCheck:
     info = agent_core.detect("claude-code")
     if info is None or not info.detected:
         return _ok("claude-code", "Claude Code not detected on this machine")
-    if agent_core.hooks_installed("claude-code"):
-        return _ok("claude-code", "Claude Code connected (all lifecycle hooks installed)")
+    # Checked: recorded sites UNION the ambient dir. Parallel installs
+    # (CLAUDE_CONFIG_DIR=~/.claude2) each own a settings.json, so registry
+    # health alone hid unhooked siblings — and site health alone says nothing
+    # about the AMBIENT dir, the one a `claude` from this shell actually
+    # starts from, when it was never registered.
+    health = {site.config_dir: site.hooks_installed for site in info.sites}
+    ambient = agent_core.ambient_hook_dir("claude-code")
+    if ambient is not None and ambient not in health:
+        health[ambient] = agent_core.hooks_installed("claude-code")
+    if not health:
+        return _warn("claude-code", f"Claude Code {_STALE_HOOKS}", _RECONNECT)
+    broken = [path for path, hooked in health.items() if not hooked]
+    if not broken:
+        where = f" in {len(health)} config dirs" if len(health) > 1 else ""
+        return _ok("claude-code", f"Claude Code connected{where} (all lifecycle hooks installed)")
+    listed = ", ".join(str(path) for path in broken)
     return _warn(
         "claude-code",
-        "Claude Code hooks are missing or outdated (older installs lack the "
-        "Stop/Notification/SessionEnd events)",
-        "(Re)connect it: aisquare agents connect claude-code",
+        f"Claude Code {_STALE_HOOKS} in: {listed}",
+        "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
     )
 
 
@@ -250,3 +270,56 @@ def show_log(limit: int = 20) -> list[PromptRecord]:
 def open_home() -> None:
     """Open the aisquare home directory or web dashboard."""
     stub("open")
+
+
+def _check_harness() -> DoctorCheck:
+    """Role→model harness health: env interference, mismatched live sessions, cache.
+
+    Read-only and offline by design (doctor makes no network calls): ladder
+    availability comes from the probe cache; live verification is
+    ``aisquare team spawn <role>``. Warns, never fails — a stale cache or an
+    off-ladder session is advice, not breakage.
+    """
+    name = "agent harness"
+    try:
+        # Not-applicable = ok: a repo that never opted into the orchestrator must
+        # see nothing from the harness, not even an env-hygiene warning.
+        if not orchestrator.team_enabled():
+            return _ok(name, "orchestrator disabled")
+        with store_session() as store:
+            project = orchestrator.team_project(None)
+            if not store.team_active(project.id):
+                return _ok(name, "not activated for this project")
+            live = [s for s in store.team_sessions(project.id) if s.ended_at is None]
+        interference = harness.interfering_env()
+        mismatches: list[str] = []
+        for session in live:
+            complaint = harness.model_mismatch(session.role, session.model)
+            if complaint:
+                mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
+        problems: list[str] = []
+        if interference:
+            problems.append(f"env overrides model selection: {', '.join(interference)}")
+        if mismatches:
+            problems.append("off-ladder sessions: " + "; ".join(mismatches))
+        if problems:
+            return _warn(
+                name,
+                " — ".join(problems),
+                "unset the interfering env vars and relaunch off-ladder roles with "
+                "`aisquare team spawn <role>`",
+            )
+        fable = harness.cached_probe("fable")
+        if fable is not None and not fable.available:
+            return _warn(
+                name,
+                f"fable probed unavailable ({fable.reason}) — top-tier roles fall back to opus",
+                "expected on non-enterprise accounts; re-check with "
+                "`aisquare team spawn planner --refresh`",
+            )
+        detail = "role ladders clean"
+        if fable is not None and fable.resolved_id:
+            detail = f"role ladders clean; fable available ({fable.resolved_id})"
+        return _ok(name, detail)
+    except Exception:  # diagnostics must never crash
+        return _ok(name, "not evaluated")

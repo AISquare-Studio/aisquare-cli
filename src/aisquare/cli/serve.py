@@ -31,6 +31,17 @@ def serve(
         bool,
         typer.Option("--show-token", help="Print the HTTP connection details and exit."),
     ] = False,
+    close_after: Annotated[
+        int,
+        typer.Option(
+            "--close-after",
+            min=0,
+            envvar="AISQUARE_SERVE_CLOSE_AFTER",
+            help="stdio only: exit after this many seconds without a client message "
+            "(default 300; 0 = run forever — set it for persistent clients like "
+            "Claude Desktop). HTTP mode ignores it.",
+        ),
+    ] = 300,
 ) -> None:
     """Run the orchestrator MCP server so remote Claude clients can join this project."""
     import importlib.util
@@ -53,10 +64,10 @@ def serve(
     # Starting a server here IS the opt-in for this project: activate it
     # explicitly (and visibly — `team on` semantics, with the pipe event),
     # so remote calls never activate a directory as a side effect.
+    from aisquare.cli.team import STORE_ERRORS, _fail_team
     from aisquare.core.orchestrator import team_project
     from aisquare.core.workspace import find_project_root
     from aisquare.services import team as team_service
-    from aisquare.services.team import TeamDisabledError
 
     if stdio:
         # Claude Desktop launches stdio servers from wherever it likes
@@ -74,19 +85,22 @@ def serve(
             )
         try:
             project = team_service.activate()
-        except TeamDisabledError as exc:
-            fail(str(exc), error="team_disabled")
+        except STORE_ERRORS as exc:
+            # team_disabled, but also a wedged store or a failed activation
+            # read-back — serve must exit with the error contract, never a
+            # traceback (#20 review).
+            _fail_team(exc)
         # stdout is the MCP protocol channel; announce on stderr so the
         # opt-in is never invisible.
         stderr_console().print(
             f"aisquare agent orchestrator activated for {project.root} (stdio serve)"
         )
-        mcp_server.run_stdio()
+        mcp_server.run_stdio(close_after=close_after)
         return
     try:
         project = team_service.activate()
-    except TeamDisabledError as exc:
-        fail(str(exc), error="team_disabled")
+    except STORE_ERRORS as exc:
+        _fail_team(exc)
     stderr_console().print(
         f"Serving the orchestrator for {project.root.name or project.id} at "
         f"http://{bind}:{port}/mcp "

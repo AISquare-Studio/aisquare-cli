@@ -18,7 +18,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from aisquare.core import paths
-from aisquare.models import AgentInfo
+from aisquare.models import AgentHookSite, AgentInfo
 
 # Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
 _HOOKS = (
@@ -240,6 +240,18 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     return removed
 
 
+def ambient_hook_dir(name: str) -> Path | None:
+    """The config dir a session launched from THIS shell would use.
+
+    Resolution mirrors the agent's own: ``CLAUDE_CONFIG_DIR`` when set, the
+    default home otherwise. Health recorded in the registry says nothing about
+    this directory unless it happens to be registered — callers that report on
+    hook health must check it in addition to the recorded sites.
+    """
+    spec = _spec(name)
+    return _hook_dir(spec) if spec is not None else None
+
+
 def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
     """Whether aisquare's hooks are FULLY installed (every lifecycle event).
 
@@ -263,44 +275,117 @@ def _spec(name: str, config_dir: Path | None = None) -> AgentSpec | None:
     return next((spec for spec in _specs(config_dir) if spec.name == name), None)
 
 
-def _connected_set() -> set[str]:
+def _registry() -> dict[str, Any]:
+    """The raw agent registry, or ``{}`` when absent or unreadable."""
     path = paths.agents_registry_path()
     if not path.exists():
-        return set()
-    connected = json.loads(path.read_text(encoding="utf-8")).get("connected", [])
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _connected_set(registry: dict[str, Any] | None = None) -> set[str]:
+    connected = (registry if registry is not None else _registry()).get("connected", [])
     return set(connected) if isinstance(connected, list) else set()
 
 
-def set_connected(name: str, connected: bool) -> None:
-    """Record (or clear) an agent's connected state in the registry."""
+def _hook_dir(spec: AgentSpec) -> Path:
+    """The directory this spec's hooks live in (its settings file's parent)."""
+    return spec.settings_path.parent if spec.settings_path is not None else spec.home
+
+
+def connected_dirs(name: str, registry: dict[str, Any] | None = None) -> list[Path]:
+    """Every config dir ``name`` was connected in, in the order they were added.
+
+    Registries written before multi-directory tracking recorded only a bare
+    agent name, which meant "connected in the default directory" — migrate
+    that reading on the fly so an old install still reports one site rather
+    than none.
+    """
+    resolved = registry if registry is not None else _registry()
+    raw = resolved.get("connections")
+    dirs = raw.get(name) if isinstance(raw, dict) else None
+    if isinstance(dirs, list):
+        return [Path(item) for item in dirs if isinstance(item, str)]
+    spec = _spec(name)
+    if name in _connected_set(resolved) and spec is not None:
+        return [_hook_dir(spec)]
+    return []
+
+
+def set_connected(name: str, connected: bool, config_dir: Path | None = None) -> None:
+    """Record (or clear) an agent's connected state for one config directory.
+
+    Connecting the same agent in several directories accumulates sites;
+    disconnecting removes only the targeted one, and the agent stops counting
+    as connected once its last site is gone.
+    """
     paths.ensure_home()
-    current = _connected_set()
-    current.add(name) if connected else current.discard(name)
+    registry = _registry()
+    names = _connected_set(registry)
+    sites = {agent: connected_dirs(agent, registry) for agent in {*names, name}}
+
+    spec = _spec(name, config_dir)
+    target = _hook_dir(spec) if spec is not None else None
+    current = sites.get(name, [])
+    if connected:
+        if target is not None and target not in current:
+            current.append(target)
+        names.add(name)
+    else:
+        current = [path for path in current if path != target]
+        if not current:
+            names.discard(name)
+    sites[name] = current
+
     paths.agents_registry_path().write_text(
-        json.dumps({"connected": sorted(current)}, indent=2) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                # `connected` stays for compatibility with readers (and older
+                # aisquare versions) that only know the boolean form.
+                "connected": sorted(names),
+                "connections": {
+                    agent: [str(path) for path in dirs] for agent, dirs in sorted(sites.items())
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
-def _to_info(spec: AgentSpec, connected: set[str]) -> AgentInfo:
+def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
     existing = [path for path in spec.context_files if path.exists()]
+    sites = [
+        AgentHookSite(
+            config_dir=directory,
+            hooks_installed=hooks_installed(spec.name, directory),
+        )
+        for directory in connected_dirs(spec.name, registry)
+    ]
     return AgentInfo(
         name=spec.name,
         detected=spec.home.exists() or bool(existing),
         config_paths=existing,
-        connected=spec.name in connected,
+        connected=spec.name in _connected_set(registry),
+        sites=sites,
     )
 
 
 def detect_all() -> list[AgentInfo]:
     """Detection state for every agent aisquare knows about."""
-    connected = _connected_set()
-    return [_to_info(spec, connected) for spec in _specs()]
+    registry = _registry()
+    return [_to_info(spec, registry) for spec in _specs()]
 
 
 def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
     """Detection state for one agent, or ``None`` if the name is unknown."""
     spec = _spec(name, config_dir)
-    return _to_info(spec, _connected_set()) if spec is not None else None
+    return _to_info(spec, _registry()) if spec is not None else None
 
 
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:

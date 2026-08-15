@@ -7,12 +7,18 @@ from day one.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+_SIGNAL_TEXT = re.compile(r"^([a-z0-9][a-z0-9._-]*): (\S+)(?: \(was (\S+)\))?$")
+"""The anchored serialization of a signal event's text: ``name: value`` with
+an optional `` (was prev)`` tail. Names and values are validated single
+tokens at set time, so the decode is exact — never substring matching."""
 
 Pool = Literal["user", "project"]
 """Where context lives: the global user pool or the current project pool."""
@@ -59,6 +65,18 @@ class DataEnvelope(BaseModel):
     ts: datetime
 
 
+class AgentHookSite(BaseModel):
+    """One config directory aisquare installed an agent's hooks into.
+
+    Parallel agent installs (``CLAUDE_CONFIG_DIR=~/.claude2 claude``, run for
+    separate rate limits) each keep their own ``settings.json``, so "is this
+    agent connected?" has one answer *per directory*, not one per agent.
+    """
+
+    config_dir: Path
+    hooks_installed: bool = False
+
+
 class AgentInfo(BaseModel):
     """A coding agent aisquare knows how to integrate with."""
 
@@ -66,6 +84,8 @@ class AgentInfo(BaseModel):
     detected: bool = False
     config_paths: list[Path] = Field(default_factory=list)
     connected: bool = False
+    sites: list[AgentHookSite] = Field(default_factory=list)
+    """Every config dir this agent was connected in, with that dir's hook health."""
 
 
 class ProjectInfo(BaseModel):
@@ -158,6 +178,12 @@ class TeamSession(BaseModel):
     """Live activity: working (mid-turn), waiting (wants input) or attention."""
     transcript_path: str | None = None
     """The session's Claude Code transcript (JSONL), from hook payloads."""
+    account: str | None = None
+    """The agent config dir this session runs under (parallel-account installs)."""
+    model: str | None = None
+    """The model id the session reported at start (optional in hook payloads)."""
+    effort: str | None = None
+    """The effort level the session reported at start (optional in hook payloads)."""
 
 
 class TeamTask(BaseModel):
@@ -201,19 +227,37 @@ class TeamEvent(BaseModel):
     created_at: datetime
 
     def as_envelope(self) -> DataEnvelope:
-        """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``)."""
+        """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``).
+
+        ``signal`` events additionally carry structured ``name``/``value``/
+        ``prev``/``set_by`` payload fields (#23) so consumers key on fields,
+        never on free text — decoded from the event's own anchored text
+        format, which token validation at set time makes unambiguous.
+        """
+        payload: dict[str, object | None] = {
+            "seq": self.seq,
+            "id": self.id,
+            "project_id": self.project_id,
+            "session_id": self.session_id,
+            "text": self.text,
+            "task_id": self.task_id,
+            "to_role": self.to_role,
+        }
+        if self.kind == "signal":
+            decoded = _SIGNAL_TEXT.match(self.text)
+            if decoded:
+                payload.update(
+                    {
+                        "name": decoded.group(1),
+                        "value": decoded.group(2),
+                        "prev": decoded.group(3),
+                        "set_by": self.session_id,
+                    }
+                )
         return DataEnvelope(
             kind=f"team.{self.kind}",
             scope="project",
-            payload={
-                "seq": self.seq,
-                "id": self.id,
-                "project_id": self.project_id,
-                "session_id": self.session_id,
-                "text": self.text,
-                "task_id": self.task_id,
-                "to_role": self.to_role,
-            },
+            payload=payload,
             source=self.session_id or "cli",
             ts=self.created_at,
         )

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 from aisquare.core import paths
@@ -22,13 +23,61 @@ _ROOT_MARKERS = (".git", ".hg", ".aisquare")
 _PIN_KEY = "active_project_id"
 
 
-def find_project_root(start: Path) -> Path:
-    """Return the nearest ancestor of ``start`` that looks like a project root.
+def git_common_root(start: Path) -> Path | None:
+    """The principal repository root for ``start``, resolving git worktrees.
 
-    Falls back to ``start`` itself when no marker is found, so every directory
-    resolves to *some* project.
+    A linked worktree's ``.git`` is a *file* pointing at the principal
+    repository, so a plain marker walk stops inside the worktree and treats it
+    as its own project. ``--git-common-dir`` names the shared directory
+    instead, which is what makes every checkout of one repository resolve to a
+    single project.
+
+    Returns ``None`` when git is unavailable or ``start`` is not in a work
+    tree, leaving callers on the marker-based fallback.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    common = result.stdout.strip()
+    if not common:
+        return None
+    common_dir = Path(common)
+    if not common_dir.is_absolute():
+        common_dir = (start / common_dir).resolve()
+    if common_dir.name != ".git" and ".git" in common_dir.parts:
+        # A submodule's common dir is <super>/.git/modules/<name> (deeper when
+        # nested) — git bookkeeping, not anyone's project root. Bail to the
+        # marker walk, which lands on the submodule checkout itself.
+        return None
+    # <principal>/.git → <principal>; a bare repo's common dir is the repo itself.
+    root = common_dir.parent if common_dir.name == ".git" else common_dir
+    return root.resolve()
+
+
+def find_project_root(start: Path) -> Path:
+    """Return the project root for ``start``, resolving git worktrees.
+
+    Git is asked first so that every worktree of a repository resolves to the
+    principal checkout — a feature branch in ``../wt-auth`` shares the parent
+    repo's context pool instead of starting empty. Falls back to the nearest
+    ancestor carrying a project marker, then to ``start`` itself, so every
+    directory resolves to *some* project.
     """
     start = start.resolve()
+    common = git_common_root(start)
+    if common is not None:
+        return common
     for directory in (start, *start.parents):
         if any((directory / marker).exists() for marker in _ROOT_MARKERS):
             return directory

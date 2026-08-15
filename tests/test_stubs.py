@@ -27,13 +27,32 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("note",),
     ("board",),
     ("recall",),
+    ("launch",),
     ("serve",),
+    ("explainability", "status"),
+    ("explainability", "env"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),
-    *(("team", command) for command in ("on", "status", "focus", "role", "log", "distill")),
+    *(
+        ("team", command)
+        for command in (
+            "on",
+            "status",
+            "focus",
+            "role",
+            "log",
+            "distill",
+            "prune",
+            "verify",
+            "signal",
+            "signals",
+            "spawn",
+            "harness",
+        )
+    ),
     *(
         ("task", command)
         for command in (

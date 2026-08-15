@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -12,6 +13,10 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 
 pytest.importorskip("mcp", reason="the [serve] extra is not installed")
+
+import anyio
+from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.types import CallToolResult, TextContent
 
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
@@ -23,6 +28,26 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work.mkdir()
     monkeypatch.chdir(work)
     return work
+
+
+def call_remote(tool: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
+    """Call one tool end-to-end through an in-memory MCP client session."""
+
+    async def go() -> CallToolResult:
+        async with create_connected_server_and_client_session(
+            mcp_server.build_server()._mcp_server
+        ) as client:
+            return await client.call_tool(tool, arguments or {})
+
+    return anyio.run(go)
+
+
+def error_text(result: CallToolResult) -> str:
+    """The message of an MCP error result (asserting ``isError`` on the way)."""
+    assert result.isError, f"expected an MCP error result, got success: {result.content!r}"
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
 
 
 def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path) -> None:
@@ -51,6 +76,9 @@ def test_remote_tools_act_as_an_attributed_virtual_session(
     runner.invoke(app, ["hook", "session-start"], input=payload)
     note = mcp_server.note_add("repro: happens on Windows Chrome only", kind="result")
     assert note.startswith("shared (result)")
+    from aisquare.core.orchestrator import team_project
+
+    assert f"on board {team_project(work_dir).id}" in note  # the receipt names the board
     delta = runner.invoke(
         app,
         ["hook", "user-prompt-submit"],
@@ -70,22 +98,22 @@ def test_remote_task_lifecycle_and_guards(work_dir: Path) -> None:
     mcp_server.task_add("verify login flow", role="debugger")
     picked = json.loads(mcp_server.task_next(role="debugger", claim=True))
     assert picked["status"] == "doing" and picked["claimed_by"].startswith("mcp:remote:")
-    assert (
-        mcp_server.task_update(picked["id"], "reopen")
-        == "error: reopen requires a note (the feedback)"
-    )
+    reopen = call_remote("task_update", {"ref": picked["id"], "action": "reopen"})
+    assert error_text(reopen) == "error: reopen requires a note (the feedback)"
+    block = call_remote("task_update", {"ref": picked["id"], "action": "block"})
+    assert error_text(block) == "error: block requires a note (the reason)"
     moved = mcp_server.task_update(picked["id"], "review", note="ready to verify")
     assert moved.endswith("is now review")
-    assert mcp_server.task_update(picked["id"], "bogus").startswith("error: action must be")
+    bogus = call_remote("task_update", {"ref": picked["id"], "action": "bogus"})
+    assert error_text(bogus) == "error: action must be done, review, block, reopen, release or drop"
     log = json.loads(mcp_server.team_log())
     assert log["latest_seq"] > 0
     kinds = {event["kind"] for event in log["events"]}
     assert "team.task_claimed" in kinds and "team.task_review" in kinds
 
 
-def test_server_exposes_exactly_the_seven_tools() -> None:
+def test_server_exposes_exactly_the_nine_tools() -> None:
     server = mcp_server.build_server()
-    import anyio
 
     tools = anyio.run(server.list_tools)
     assert {tool.name for tool in tools} == {
@@ -95,6 +123,8 @@ def test_server_exposes_exactly_the_seven_tools() -> None:
         "task_update",
         "note_add",
         "team_log",
+        "verify",
+        "signal",
         "recall",
     }
 
@@ -108,8 +138,9 @@ def test_show_token_cli(runner: CliRunner) -> None:
 
 def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
     # No activate(): one read-only call must not flip the repo's orchestrator on.
-    result = mcp_server.team_board()
-    assert result.startswith("error:") and "not active" in result
+    result = call_remote("team_board")
+    text = error_text(result)
+    assert text.startswith("error:") and "not active" in text
     from aisquare.core.orchestrator import team_project
     from aisquare.core.store import store_session
 
@@ -120,9 +151,34 @@ def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
 def test_remote_calls_respect_master_switch(
     work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Every tool's failure must be an MCP error result with the exact wording.
     team_service.activate()
     monkeypatch.setenv("AISQUARE_TEAM", "0")
-    assert "disabled" in mcp_server.task_add("x")
+    calls: list[tuple[str, dict[str, Any]]] = [
+        ("team_board", {}),
+        ("task_add", {"title": "x"}),
+        ("task_next", {}),
+        ("task_update", {"ref": "tsk_x", "action": "done"}),
+        ("note_add", {"text": "x"}),
+        ("team_log", {}),
+        ("recall", {"query": "x"}),
+    ]
+    for tool, arguments in calls:
+        result = call_remote(tool, arguments)
+        assert (
+            error_text(result)
+            == "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
+        ), tool
+
+
+def test_remote_success_results_stay_plain_tool_results(work_dir: Path) -> None:
+    # The wording-preserving handler must leave the success path untouched.
+    team_service.activate()
+    result = call_remote("task_add", {"title": "wire auth flow"})
+    assert not result.isError
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    assert block.text.startswith("created: tsk_")
 
 
 def test_virtual_session_is_scoped_per_project(
@@ -148,15 +204,19 @@ def test_virtual_session_is_scoped_per_project(
 
 def test_task_next_rejects_bad_status(work_dir: Path) -> None:
     team_service.activate()
-    assert mcp_server.task_next(status="reviwe").startswith("error: status must be")
+    result = call_remote("task_next", {"status": "reviwe"})
+    assert error_text(result) == (
+        "error: status must be one of: todo, doing, review, blocked, done, dropped"
+    )
 
 
 def test_guard_reports_ambiguous_refs_cleanly(work_dir: Path) -> None:
     team_service.activate()
     mcp_server.task_add("alpha")
     mcp_server.task_add("beta")
-    result = mcp_server.task_update("tsk_", "done")
-    assert result.startswith("error:") and "ambiguous" in result
+    result = call_remote("task_update", {"ref": "tsk_", "action": "done"})
+    text = error_text(result)
+    assert text.startswith("error:") and "ambiguous" in text
 
 
 def test_stdio_serve_refuses_markerless_directories(
@@ -210,5 +270,69 @@ def test_bearer_guard_rejects_non_ascii_header_with_401() -> None:
 
 def test_unknown_ref_keeps_nothing_matches_wording(work_dir: Path) -> None:
     team_service.activate()
-    result = mcp_server.task_update("tsk_typo", "done")
-    assert result == "error: nothing matches 'tsk_typo'"  # not a naked ref
+    result = call_remote("task_update", {"ref": "tsk_typo", "action": "done"})
+    assert error_text(result) == "error: nothing matches 'tsk_typo'"  # not a naked ref
+
+
+def test_guard_maps_the_write_path_failure_types(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The #20 failure types must reach remote agents as MCP error results
+    # with the error contract's wording, never as raw tool exceptions
+    # (PR #26 review must-fix 2), proven end-to-end through the client.
+    import sqlite3
+
+    from aisquare.core.store import SqliteStore
+
+    team_service.activate()
+    monkeypatch.setattr(SqliteStore, "get_event", lambda self, event_id: None)
+    unconfirmed = call_remote("note_add", {"text": "vanishing write"})
+    text = error_text(unconfirmed)
+    assert text.startswith("error:") and "was not confirmed" in text
+
+    def wedged(self: SqliteStore, event: object) -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "add_team_event", wedged)
+    locked = call_remote("note_add", {"text": "wedged write"})
+    assert error_text(locked).startswith("error: context store busy")
+
+    def broken(self: SqliteStore, event: object) -> object:
+        raise sqlite3.OperationalError("no such table: team_event")
+
+    monkeypatch.setattr(SqliteStore, "add_team_event", broken)
+    hard = call_remote("note_add", {"text": "broken store"})
+    text = error_text(hard)
+    assert text.startswith("error: context store error") and "no such table" in text
+
+
+def test_team_log_by_session_me_reads_back_own_writes(work_dir: Path) -> None:
+    team_service.activate()
+    mcp_server.note_add("remote receipt")
+    team_service.add_note("local noise")  # unattributed (cli) — the filter must drop it
+    log = json.loads(mcp_server.team_log(by_session="me"))
+    texts = [event["payload"]["text"] for event in log["events"]]
+    assert "remote receipt" in texts and "local noise" not in texts
+
+
+def test_verify_tool_round_trip_and_not_found(work_dir: Path) -> None:
+    team_service.activate()
+    note = mcp_server.note_add("prove the remote write")
+    seq = note.rsplit("seq ", 1)[1].split(" ", 1)[0]
+    verified = mcp_server.verify(seq)
+    assert verified.startswith("delivered") and "prove the remote write" in verified
+    missing = call_remote("verify", {"receipt": "987654"})
+    text = error_text(missing)
+    assert text.startswith("error: no event matches receipt")
+
+
+def test_signal_tool_set_read_and_errors(work_dir: Path) -> None:
+    team_service.activate()
+    set_result = mcp_server.signal("fold-ready", "on")
+    assert set_result.startswith("signal fold-ready: on")
+    read_result = mcp_server.signal("fold-ready")
+    assert "fold-ready = on" in read_result
+    missing = call_remote("signal", {"name": "never-set"})
+    assert error_text(missing).startswith("error: no signal named")
+    invalid = call_remote("signal", {"name": "Bad Name", "value": "x"})
+    assert error_text(invalid).startswith("error: signal name")

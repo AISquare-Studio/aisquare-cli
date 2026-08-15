@@ -9,13 +9,19 @@ import typer
 from rich.table import Table
 
 from aisquare.cli.common import fail, local_time
-from aisquare.cli.team import SessionRef, _fail_team
+from aisquare.cli.team import (
+    STORE_ERRORS,
+    SessionRef,
+    _fail_team,
+    delivery_fields,
+    emit_write_warning,
+    receipt_suffix,
+)
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
-from aisquare.core.store import AmbiguousIdError
 from aisquare.models import TaskStatus, TeamTask
 from aisquare.services import team as team_service
-from aisquare.services.team import ClaimLostError, TeamDisabledError
+from aisquare.services.team import ClaimLostError
 
 _STATUSES: tuple[str, ...] = get_args(TaskStatus)
 _STATUS_HELP = ", ".join(_STATUSES)
@@ -28,10 +34,22 @@ TaskRef = Annotated[str, typer.Argument(help="Task id (prefix ok).")]
 
 
 def _emit_task(task: TeamTask, *, verb: str) -> None:
+    """Render a task verb line, carrying the write receipt when one exists.
+
+    Reads (``task next`` without ``--claim``) leave no delivery behind, so
+    their output stays receipt-free and, under ``--json``, unchanged.
+    """
+    delivery = team_service.last_delivery()
+    emit_write_warning(delivery)
     if get_state().json_output:
-        typer.echo(task.model_dump_json())
+        payload = task.model_dump(mode="json")
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
-        stdout_console().print(f"✓ {verb}: {task.id} [{task.status}] {task.title}", markup=False)
+        stdout_console().print(
+            f"✓ {verb}: {task.id} [{task.status}] {task.title}{receipt_suffix(delivery)}",
+            markup=False,
+        )
 
 
 @app.command("add")
@@ -62,13 +80,17 @@ def add(
         # The session resolves first in add_task, so a KeyError here names a
         # --needs ref — blame it, not the (valid) --as session.
         _fail_team(exc, str(exc.args[0]) if exc.args else None)
-    except (TeamDisabledError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, as_session)
+    delivery = team_service.last_delivery()
+    emit_write_warning(delivery)
     if get_state().json_output:
-        typer.echo(json.dumps({"created": created, **task.model_dump(mode="json")}))
+        payload = {"created": created, **task.model_dump(mode="json")}
+        payload.update(delivery_fields(delivery))
+        typer.echo(json.dumps(payload))
     else:
         verb = "added" if created else "already tracked (idempotent)"
-        stdout_console().print(f"✓ {verb}: {task.id} {task.title}")
+        stdout_console().print(f"✓ {verb}: {task.id} {task.title}{receipt_suffix(delivery)}")
 
 
 @app.command("list")
@@ -84,7 +106,7 @@ def list_(
     narrowed: TaskStatus | None = status  # type: ignore[assignment]
     try:
         tasks = team_service.list_tasks(narrowed)
-    except TeamDisabledError as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc)
     if get_state().json_output:
         typer.echo(json.dumps([task.model_dump(mode="json") for task in tasks]))
@@ -114,7 +136,7 @@ def show(ref: TaskRef) -> None:
     """Show one task in full."""
     try:
         task = team_service.show_task(ref)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     if get_state().json_output:
         typer.echo(task.model_dump_json())
@@ -147,7 +169,7 @@ def claim(ref: TaskRef, as_session: SessionRef = None) -> None:
         task = team_service.claim_task(ref, session_ref=as_session)
     except ClaimLostError as exc:
         fail(str(exc), error="claim_lost", ref=exc.task.id)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="claimed")
 
@@ -175,7 +197,7 @@ def next_(
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, as_session)
     if task is None:
         if get_state().json_output:
@@ -197,7 +219,7 @@ def review(
     """Send a task to review, ready for the runner to verify."""
     try:
         task = team_service.review_task(ref, note=note, session_ref=as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="sent to review")
 
@@ -213,7 +235,7 @@ def reopen(
         task = team_service.reopen_task(ref, reason=reason, session_ref=as_session)
     except ValueError as exc:
         fail(str(exc), error="invalid_state", ref=ref)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="reopened")
 
@@ -227,7 +249,7 @@ def done(
     """Mark a task done (optionally sharing the outcome)."""
     try:
         task = team_service.finish_task(ref, note=note, session_ref=as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="done")
 
@@ -241,7 +263,7 @@ def block(
     """Mark a task blocked, telling the team why."""
     try:
         task = team_service.block_task(ref, reason=reason, session_ref=as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="blocked")
 
@@ -251,7 +273,7 @@ def drop(ref: TaskRef, as_session: SessionRef = None) -> None:
     """Drop a task that is no longer worth doing."""
     try:
         task = team_service.drop_task(ref, session_ref=as_session)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="dropped")
 
@@ -263,6 +285,6 @@ def release(ref: TaskRef, as_session: SessionRef = None) -> None:
         task = team_service.release_task(ref, session_ref=as_session)
     except ValueError as exc:
         fail(str(exc), error="invalid_state", ref=ref)
-    except (TeamDisabledError, KeyError, AmbiguousIdError) as exc:
+    except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="released")

@@ -278,6 +278,123 @@ def test_disconnect_warns_when_nothing_was_removed(runner: CliRunner, fake_home:
     assert "no aisquare hooks found" in result.output
 
 
+# --- parallel installs: one agent, several config dirs -----------------------
+
+
+def _connect(runner: CliRunner, config_dir: Path | None = None) -> Any:
+    argv = ["agents", "connect", "claude-code"]
+    if config_dir is not None:
+        argv += ["--config-dir", str(config_dir)]
+    return runner.invoke(app, argv)
+
+
+def _sites(runner: CliRunner) -> dict[str, bool]:
+    listed = runner.invoke(app, ["--json", "agents", "list"])
+    agents = {agent["name"]: agent for agent in _json(listed.stdout)}
+    return {site["config_dir"]: site["hooks_installed"] for site in agents["claude-code"]["sites"]}
+
+
+def test_every_connected_config_dir_is_tracked(runner: CliRunner, fake_home: Path) -> None:
+    alt = fake_home / ".claude-account1"
+    alt.mkdir()
+    _connect(runner)
+    _connect(runner, alt)
+
+    sites = _sites(runner)
+    assert sites == {str(fake_home / ".claude"): True, str(alt): True}
+
+
+def test_a_broken_sibling_config_dir_is_reported(runner: CliRunner, fake_home: Path) -> None:
+    # The bug this guards: doctor checked only the ambient dir, so a sibling
+    # install whose hooks had been removed still reported a healthy ✓.
+    alt = fake_home / ".claude-account1"
+    alt.mkdir()
+    _connect(runner)
+    _connect(runner, alt)
+    settings = alt / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data.pop("hooks")
+    settings.write_text(json.dumps(data), encoding="utf-8")
+
+    assert _sites(runner) == {str(fake_home / ".claude"): True, str(alt): False}
+
+    doctor = runner.invoke(app, ["doctor"])
+    assert "claude-code" in doctor.output
+    assert str(alt) in doctor.output, "doctor must name the unhooked directory"
+
+
+def test_doctor_is_green_when_every_dir_is_hooked(runner: CliRunner, fake_home: Path) -> None:
+    alt = fake_home / ".claude-account1"
+    alt.mkdir()
+    _connect(runner)
+    _connect(runner, alt)
+
+    doctor = runner.invoke(app, ["doctor"])
+    assert "2 config dirs" in doctor.output
+
+
+def test_disconnecting_one_dir_keeps_the_others(runner: CliRunner, fake_home: Path) -> None:
+    alt = fake_home / ".claude-account1"
+    alt.mkdir()
+    _connect(runner)
+    _connect(runner, alt)
+
+    runner.invoke(app, ["agents", "disconnect", "claude-code", "--config-dir", str(alt)])
+
+    assert _sites(runner) == {str(fake_home / ".claude"): True}
+    listed = runner.invoke(app, ["--json", "agents", "list"])
+    agents = {agent["name"]: agent for agent in _json(listed.stdout)}
+    assert agents["claude-code"]["connected"] is True, "the default dir is still connected"
+
+
+def test_disconnecting_the_last_dir_marks_the_agent_disconnected(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    _connect(runner)
+    runner.invoke(app, ["agents", "disconnect", "claude-code"])
+
+    listed = runner.invoke(app, ["--json", "agents", "list"])
+    agents = {agent["name"]: agent for agent in _json(listed.stdout)}
+    assert agents["claude-code"]["connected"] is False
+    assert agents["claude-code"]["sites"] == []
+
+
+def test_a_legacy_registry_still_reports_one_site(runner: CliRunner, fake_home: Path) -> None:
+    # Registries written before multi-dir tracking held only a bare name.
+    from aisquare.core import paths
+
+    _connect(runner)
+    paths.agents_registry_path().write_text(
+        json.dumps({"connected": ["claude-code"]}), encoding="utf-8"
+    )
+
+    assert _sites(runner) == {str(fake_home / ".claude"): True}
+
+
+def test_doctor_checks_the_ambient_dir_even_when_the_registry_has_sites(
+    runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recorded sites healthy + ambient CLAUDE_CONFIG_DIR unhooked -> warn, named.
+
+    The ambient dir is the one a `claude` from THIS shell would actually use.
+    Registry health says nothing about it: with every recorded site hooked,
+    doctor reported a clean bill while the user's next session started
+    unhooked. Ambient must be checked as sites UNION {ambient}, not either-or.
+    """
+    _connect(runner)  # default dir: hooked and recorded
+    ambient = fake_home / ".claude-fresh"
+    ambient.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient))
+
+    doctor = runner.invoke(app, ["doctor"])
+
+    assert str(ambient) in doctor.output, "the unhooked ambient dir must be named"
+    assert "missing" in doctor.output
+
+
+# --- Windows: hook commands the native shell can actually run ----------------
+
+
 def _win32(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend to be Windows, so POSIX CI still covers the Windows paths."""
     monkeypatch.setattr("aisquare.core.agents.sys.platform", "win32")

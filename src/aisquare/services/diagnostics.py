@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import sys
+from importlib import metadata
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
@@ -85,6 +87,7 @@ def doctor(*, live: bool = False, target: str | None = None) -> list[DoctorCheck
     return [
         _check_python(),
         _check_install(),
+        _check_provenance(),
         _check_home(),
         _check_home_filesystem(),
         _check_config(),
@@ -132,6 +135,49 @@ def _check_install() -> DoctorCheck:
             "For stable Claude Code hooks, install globally: pipx install aisquare",
         )
     return _ok("install", f"aisquare at {binary}")
+
+
+def _check_provenance() -> DoctorCheck:
+    """Which SOURCE the installed build came from, not just which binary runs.
+
+    ``--version`` cannot answer this: a build from this checkout and a build
+    from a sibling worktree both report the same version string, which is how a
+    stale install survived on this machine for a whole shift while five separate
+    mechanisms were blamed for "which build am I running". pip records the answer
+    in ``direct_url.json`` for anything installed from a path, and nothing was
+    reading it.
+
+    A DETECTOR: it reports so an operator can decide, and it never fails a
+    machine. The one case worth a warning is a source directory that no longer
+    exists — the install cannot be verified against it, cannot be reinstalled
+    from it, and is by definition not the tree anyone is working in.
+    """
+    try:
+        record = metadata.distribution("aisquare-cli").read_text("direct_url.json")
+    except Exception:
+        return _ok("provenance", "install source not recorded")
+    if not record:
+        return _ok("provenance", "installed from a package index")
+    try:
+        parsed = json.loads(record)
+        url = str(parsed.get("url", ""))
+        editable = bool(parsed.get("dir_info", {}).get("editable"))
+    except (ValueError, AttributeError):
+        return _ok("provenance", "install source not readable")
+    if not url.startswith("file://"):
+        return _ok("provenance", f"installed from {url}")
+
+    source = Path(url[len("file://") :])
+    kind = "editable" if editable else "non-editable"
+    if not source.exists():
+        return _warn(
+            "provenance",
+            f"installed ({kind}) from {source}, WHICH NO LONGER EXISTS",
+            "This build cannot be checked against its source or reinstalled from "
+            "it, and it is not the tree you are working in. Reinstall from the "
+            "repo by absolute path: python3 -m pip install '/path/to/aisquare-cli[dev]'",
+        )
+    return _ok("provenance", f"installed ({kind}) from {source}")
 
 
 def _check_home() -> DoctorCheck:

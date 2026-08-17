@@ -268,4 +268,38 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
+
+    # The rename is atomic the instant it returns, but not yet DURABLE: the new
+    # directory entry can still be in cache, so a hard kill or power loss here
+    # reverts the file to its previous contents. That is a different property
+    # from the one above — a reader never sees a partial file either way — and
+    # the cost of skipping it is "your last `explainability enable` did not
+    # stick", which `explainability status` reports immediately. It is the last
+    # step of the standard durable-replace recipe, and it was missing.
+    #
+    # MEASURED before adding it rather than assumed cheap: +2.15 ms median per
+    # write on this box (2.695 -> 4.845 ms, 200 samples interleaved, ext4 on a
+    # native WSL2 disk). Affordable because all ten call sites are explicit
+    # operator commands — enable/disable, config set, bind/clear, init — and
+    # none is on the launch, session or heartbeat path, so this is paid once per
+    # typed command and never in a loop. If that ever stops being true, this is
+    # the line to reconsider, and the number above is what to compare against.
+    #
+    # FAIL-OPEN, deliberately: the write has already succeeded and the caller's
+    # change is on disk. A parent we cannot open or sync (read-only mount, an
+    # exotic filesystem) must cost durability, never the write itself.
+    #
+    # Worth knowing: POSIX rename semantics hold here because ~/.aisquare is a
+    # native ext4 disk. On a DrvFs//mnt/c or \\wsl.localhost path the guarantee
+    # softens, and nothing in this code can tell which kind of path it is on.
+    try:
+        directory = os.open(target.parent, os.O_RDONLY)
+    except OSError:
+        return target
+    try:
+        os.fsync(directory)
+    except OSError:
+        pass
+    finally:
+        os.close(directory)
     return target

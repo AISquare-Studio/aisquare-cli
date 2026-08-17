@@ -100,6 +100,32 @@ The failure needs a *fresh* store, so a machine that has ever run `aisquare` is
 not exposed. Full characterisation, reproduction and the open root-cause
 hypothesis are in `docs/store-migration-race.md`.
 
+### If this very command fails, you are in the case §0b exists for
+
+**[verified-train]** A wedged store does not produce a tidy error. `aisquare
+status` prints **about sixty lines of Python stack trace** ending in
+`DatabaseError: file is not a database` and exits 1 — against six lines and exit
+0 on a healthy store. **The CLI has not exploded; recognise this and keep
+going.** Nine other read-only commands do the same thing on a damaged store
+(`log`, `inject`, `context list`, `project list/info`, `workspace list/info`);
+they all die in one place, `open_store`, and a fix is in flight.
+
+Recovery, **[verified-train]** end to end — `rm` then re-warm, then confirm:
+
+```bash
+cp ~/.aisquare/context.db ~/.aisquare/context.db.wedged   # keep it; see below
+rm ~/.aisquare/context.db
+aisquare status >/dev/null                                # ONE process, alone
+aisquare doctor | grep database                           # expect: ✓ readable
+```
+
+> ⚠️ **This empties the board.** `context.db` holds every team session, task and
+> note — the whole history. After the delete, `aisquare board` reports an empty
+> orchestrator, **[verified-train]**. That is the price of the recovery and
+> there is no partial version of it, which is why the copy above is the first
+> step rather than an afterthought. Nothing about explainability lives in this
+> file: your config, targets and key are untouched.
+
 ---
 
 ## 1. Bind the agent names to a studio — **the real blocker** (5 min)

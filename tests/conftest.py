@@ -21,7 +21,7 @@ from aisquare.core.state import reset_state
 SRC = Path(__file__).resolve().parents[1] / "src"
 
 
-def _foreign_package_reason(module_file: Path, src: Path) -> str | None:
+def _foreign_package_reason(module_file: str | Path | None, src: Path) -> str | None:
     """Why this run is not judging `src`, or None when it is.
 
     With the src layout, a pytest from a sibling interpreter resolves
@@ -38,11 +38,36 @@ def _foreign_package_reason(module_file: Path, src: Path) -> str | None:
     property — but `pytest tests/test_config.py` reported **5 passed** against
     the stale package, because that file does not select the guard. A subset run
     is what everyone types while iterating, so that is the hole this closes.
+
+    ``module_file`` is ``aisquare.__file__``, which is ``None`` when the package
+    resolved as a PEP 420 NAMESPACE package rather than a real one. @9bbc8ed7
+    spotted that `Path(None)` raises, which in a session-start hook means pytest
+    dies with a raw TypeError traceback — the least explanatory failure in the
+    repo, produced by the one function whose whole job is to explain a failure.
+    They could not construct a route to it; it is constructible, and the route is
+    worth knowing. PEP 420 only forms a namespace package when NO regular
+    ``aisquare/__init__.py`` exists anywhere on ``sys.path``, so an editable
+    checkout can never reach it — the real package always wins, verified by
+    putting a bare ``aisquare/`` directory FIRST on the path and watching
+    ``__file__`` still resolve to ``src``. It takes no real package on the path
+    at all, plus a namespace tree supplying the two modules this file imports at
+    module level. Reproduced under ``python -S`` with exactly that: ``__file__``
+    is None, these imports succeed, and the hook raises.
     """
-    if module_file.is_relative_to(src):
+    if module_file is None:
+        return (
+            "aisquare has no __file__, which means it resolved as a namespace "
+            "package rather than a real one: there is no aisquare/__init__.py "
+            f"anywhere on sys.path, and something is supplying its submodules.\n"
+            f"This run cannot be grading {src}. Install the checkout — "
+            'python3 -m venv .venv && ./.venv/bin/python -m pip install -e ".[dev]" '
+            "— and check sys.path for a stray directory named aisquare."
+        )
+    resolved = Path(module_file).resolve()
+    if resolved.is_relative_to(src):
         return None
     return (
-        f"aisquare imported from {module_file}, not from {src}.\n"
+        f"aisquare imported from {resolved}, not from {src}.\n"
         "This run would grade an installed copy rather than this checkout, so "
         "both a pass and a failure would be meaningless.\n"
         "Fix: create the venv and install into it — python3 -m venv .venv && "
@@ -57,16 +82,11 @@ def _foreign_package_reason(module_file: Path, src: Path) -> str | None:
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Refuse to grade the wrong tree, before a single test runs.
 
-    ``__file__ or ""`` matches the convention already in the tree (see
-    ``services/explainability.py``'s ``_package_root``): a namespace package
-    has ``__file__ = None``, and ``Path(None)`` raises ``TypeError``. Nobody
-    could construct a realistic route to that state for ``aisquare`` — the SDK
-    we actually collide with ships a real ``__init__.py`` — but this hook runs
-    before EVERY pytest invocation in the repo, and its entire purpose is to
-    replace a confusing failure with an explanatory one. Dying in a traceback
-    would be the one outcome it exists to prevent.
+    The raw ``__file__`` is handed over unresolved on purpose: it can be None,
+    and the checker is where that is handled and tested. Resolving here would put
+    the one unguarded conversion outside everything that tests it.
     """
-    reason = _foreign_package_reason(Path(aisquare.__file__ or "").resolve(), SRC)
+    reason = _foreign_package_reason(aisquare.__file__, SRC)
     if reason is not None:
         pytest.exit(reason, returncode=4)
 

@@ -20,6 +20,22 @@ Last updated at train head `adb28b8` · 1146 tests · gate green.
    current head. Until it runs, `aisquare` on `PATH` is the pyenv build and
    `resolve_binary` reports 0.
 
+   **And it is not only about what you gain by running it.** Once you *have*
+   configured explainability, three commands run from a shell that still
+   resolves to the stale binary silently strip that configuration: `team bind`,
+   `config set`, and `init --reinit`. They exit **0** with no warning — measured
+   — because the stale build's config model has only three explainability
+   fields, so it drops `target`, `roles`, `ship`, `gateway_url` and the whole
+   `[explainability.targets]` table on every write. The three keys a stale
+   `config set` will *accept* are exactly the three that *survive*, which is why
+   nothing looks wrong afterwards.
+   The cutover itself cannot be half-done this way — `explainability enable`
+   does not exist on the stale build and exits 2 — so the danger is entirely
+   *after* you configure. Step 1 closes the whole class.
+   Two tells that need no comparison: `doctor` reports where the running build
+   came from, and a build that prints **no** provenance line predates that check
+   and is therefore older than this train.
+
 2. **Governance is the one real blocker, and it is not a config edit.**
    No agent name resolves to a studio. Fixing it needs *both* an agent→studio
    binding *and* a credential class we do not hold. Measured: `GET /v1/studios`

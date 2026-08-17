@@ -136,6 +136,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **Our own install advice could brick an editable checkout.** On a normal
+  install `aisquare-cli[explainability]` is safe: both distributions land in one
+  site-packages directory, their subpackages merge, and only the top-level
+  `__init__.py` collides — which the CLI survives. An EDITABLE install differs
+  in kind: the editable hook is a `.pth` line appending the checkout's `src/` to
+  `sys.path`, and site-packages is searched FIRST, so the SDK's real `aisquare/`
+  package does not merge with the checkout — it shadows it, and every command
+  dies with `ModuleNotFoundError: No module named 'aisquare.cli'`.
+  - Measured in all three directions: reinstalling editable does **not** recover
+    it, only `pip uninstall aisquare` does, and a non-editable install with the
+    extra is unaffected.
+  - The advice now depends on the install shape. An editable checkout is told
+    what would happen, the exact symptom to search for, and the one command that
+    recovers it. This is the only moment the warning can be delivered — once the
+    extra is in, the CLI cannot start, so no check of ours would ever run to
+    explain it.
 - **The two explainability lanes could point at different deployments, and
   `status` reported the wrong one.** The proxy lane resolves a target —
   `enable --target prod --gateway-url … --key-env PROD_KEY` — and `status` and

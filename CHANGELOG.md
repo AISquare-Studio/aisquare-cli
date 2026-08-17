@@ -94,6 +94,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what leaves the machine.
 
 ### Fixed
+- **A pruned-but-alive session stayed invisible while its write path kept
+  working** (#47). A live session whose wakeup cadence stretched past the stale
+  threshold got retired by `team prune` — and then never came back, because
+  only `SessionStart` cleared `ended_at` while every subsequent proof of life
+  (prompt heartbeat, end of turn, permission prompt) went through writes that
+  did not. Meanwhile its notes landed with verifiable receipts, `team role`
+  succeeded and its claims held, so `board`, `team status`, `watch` and
+  `doctor` — all of which read liveness as `ended_at IS NULL` — showed nothing
+  while the session worked on. Operators read row-absence as death: on the
+  board that filed this, one healthy session was pruned on a cadence artifact
+  and then presumed dead a second time *because* the severed row masked its own
+  recovery. `end_session` had documented the repair all along ("a wrongly
+  retired presence row is repaired by the session's next heartbeat"); now it
+  happens. A heartbeat is evidence and prune's retirement was an inference from
+  silence, so the evidence wins — and the restore keeps the row's role, label
+  and focus rather than letting a planner rejoin as `unassigned`. Nothing
+  resurrects on its own: a session that really ended stays ended, and prune
+  still retires a row that has genuinely gone quiet.
 - **The tracing exports were bash-only, and silently misattributed every
   session started from `/bin/sh`.** `aisquare explainability env` quoted with
   bash's `$'…'`, which dash — `/bin/sh` on Debian and Ubuntu — does not treat

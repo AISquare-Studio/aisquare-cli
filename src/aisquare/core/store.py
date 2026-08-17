@@ -765,8 +765,22 @@ class SqliteStore:
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None:
-        """Heartbeat: bump ``last_seen_at`` (and advance the cursor / flip state)."""
-        sets, params = ["last_seen_at = ?"], [_now_iso()]
+        """Heartbeat: bump ``last_seen_at``, un-retire the row, advance cursor/state.
+
+        ``ended_at = NULL`` is the repair :meth:`end_session` already promises in
+        its own docstring, and until #47 nothing performed it: ``upsert_session``
+        clears the field, but it only runs at ``SessionStart``, while every
+        subsequent proof of life arrives here. A session retired on a cadence
+        artifact therefore kept working — notes delivered with verifiable
+        receipts, roles set, claims held — while being invisible to ``board``,
+        ``team status``, ``watch`` and ``doctor``, every one of which reads
+        liveness as ``ended_at IS NULL``. Operators read row-absence as death.
+
+        A heartbeat is EVIDENCE; prune's retirement was an inference from
+        silence. The evidence wins. Nothing resurrects on its own — only a
+        signal from the session itself reaches this method.
+        """
+        sets, params = ["last_seen_at = ?", "ended_at = NULL"], [_now_iso()]
         if cursor is not None:
             sets.append("cursor = ?")
             params.append(str(cursor))
@@ -785,6 +799,12 @@ class SqliteStore:
         Returns True only for the transition — concurrent Notification hooks
         (parallel permission prompts happen) must produce exactly one feed
         event, so the read and the write are one conditional UPDATE.
+
+        The unconditional second statement carries the un-retirement (#47), not
+        the first: a session already parked in ``attention`` must still have a
+        wrongly retired row repaired, and the first statement deliberately does
+        not match it. A session waiting on a permission prompt is the most alive
+        it ever is, and the one a human is most likely hunting for on the board.
         """
         cursor = self._conn.execute(
             "UPDATE team_session SET state = 'attention', last_seen_at = ? "
@@ -792,7 +812,7 @@ class SqliteStore:
             (_now_iso(), session_id),
         )
         self._conn.execute(
-            "UPDATE team_session SET last_seen_at = ? WHERE id = ?",
+            "UPDATE team_session SET last_seen_at = ?, ended_at = NULL WHERE id = ?",
             (_now_iso(), session_id),
         )
         self._conn.commit()

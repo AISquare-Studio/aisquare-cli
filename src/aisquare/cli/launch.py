@@ -145,6 +145,18 @@ def launch(
         project = team_service.activate()
     except TeamDisabledError as exc:
         fail(str(exc), error="team_disabled")
+    except Exception as exc:  # the board is an observer too: an unreadable
+        # context.db must cost the board ROW, never the launch — the same
+        # fail-open bar as the config read above and as a dead proxy below.
+        # Measured before this existed: a corrupt store raised
+        # sqlite3.DatabaseError straight through this call, the agent was never
+        # handed control, and the operator got a stack trace. "You turned team
+        # off" stays a refusal; "your database is damaged" must not be one.
+        project = None
+        stderr_console().print(
+            f"board: context.db unreadable ({exc}) — launching without a board row",
+            style="dim",
+        )
 
     env = {**os.environ, "AISQUARE_ROLE": role}
     # The role's bound spec plus this launch's overrides, carried verbatim.
@@ -248,7 +260,9 @@ def launch(
         Text.assemble(
             f"Launching {resolution.binary}{whose} as ",
             (role, "bold"),
-            f" on the {project.root.name or project.id} board…",
+            f" on the {project.root.name or project.id} board…"
+            if project is not None
+            else " with no board row (context.db unreadable)…",
         )
     )
     _exec(binary, argv, env)

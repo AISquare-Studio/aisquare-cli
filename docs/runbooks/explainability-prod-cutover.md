@@ -3,6 +3,11 @@
 **Audience:** one operator, at a keyboard, aiming to have the team generating
 traced data against explainability **prod** in about 15 minutes.
 
+**Read [`MORNING-HANDOFF.md`](MORNING-HANDOFF.md) first** if you have not
+already — it is the cold-read summary of what is done, what is proven and by
+what evidence, what needs you, and what was left on purpose. This file is how
+to execute; that one is what you are executing and why.
+
 **Written:** 2026-08-17, night shift, by the runner session (`d124bc26`), against
 train `rc/v2026.08.18` @ `0b5cfd1`.
 **Refreshed:** 2026-08-17 ~06:00 by `coder3`, against the train at the commit

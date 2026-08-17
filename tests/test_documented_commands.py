@@ -34,6 +34,7 @@ from __future__ import annotations
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
 import pytest
 import typer
@@ -69,6 +70,22 @@ class Invocation:
 
     def __repr__(self) -> str:  # pragma: no cover - test identifiers only
         return f"{self.where} {self.text[:60]}"
+
+
+def _subcommands(node: Any) -> dict[str, Any]:
+    """A node's children, empty for a leaf.
+
+    Typed as Any on purpose, and the reason is worth writing down: typer returns
+    its own VENDORED click, so `get_command(app)` is a
+    `typer._click.core.Command` and not the `click.core.Command` that `import
+    click` names. mypy rejects passing one where the other is expected, and
+    `isinstance(get_command(app), click.Group)` is False at runtime for the same
+    reason — which is misleading enough that a walk over the tree should not
+    depend on either name. `.commands` is also absent from the static type even
+    when the object is a Group, so the attribute is reached through getattr.
+    """
+    children: dict[str, Any] = getattr(node, "commands", {}) or {}
+    return children
 
 
 def _shell_lines(markdown: str) -> list[tuple[int, str]]:
@@ -237,6 +254,93 @@ def test_the_document_list_has_not_gone_stale() -> None:
         "these documents show commands but are not covered by this guard: "
         f"{unlisted} — add them to DOCUMENTED"
     )
+
+
+def _tree_lines(markdown: str) -> list[tuple[int, str]]:
+    """Lines of a fenced block that draws the command tree.
+
+    The tree is fenced with a BARE ``` and so cannot be found by its info
+    string; it is identified by content. It is not the only bare block — the
+    ~/.aisquare directory layout is drawn the same way — so a block counts only
+    when one of its branches names a real top-level command.
+    """
+    lines = markdown.splitlines()
+    blocks: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] | None = None
+    for index, line in enumerate(lines):
+        if FENCE.match(line):
+            if current is None:
+                current = []
+            else:
+                blocks.append(current)
+                current = None
+            continue
+        if current is not None:
+            current.append((index + 1, line))
+    commands = set(_subcommands(get_command(app)))
+    kept: list[tuple[int, str]] = []
+    for block in blocks:
+        heads = {
+            match.group(1)
+            for _number, text in block
+            if (match := re.match(r"^[├└]──\s+([a-z][a-z0-9-]*)", text.strip()))
+        }
+        if heads & commands:
+            kept.extend(block)
+    return kept
+
+
+def _flags_under(command_name: str | None) -> set[str]:
+    """Long options legal on a command or any of its subcommands, plus root's."""
+    root = get_command(app)
+    nodes = [root]
+    if command_name is not None:
+        command = _subcommands(root).get(command_name)
+        if command is None:
+            return set()
+        nodes = [command, *_subcommands(command).values()]
+    legal = {
+        opt
+        for node in nodes
+        for param in node.params
+        for opt in (*param.opts, *param.secondary_opts)
+        if opt.startswith("--")
+    }
+    return legal | {o for p in root.params for o in p.opts if o.startswith("--")}
+
+
+def test_the_command_tree_has_no_deleted_flags() -> None:
+    """The README's reference tree is not copy-pasteable, and was still wrong.
+
+    `launch <planner|coder|runner> [--account DIR]` named a flag deleted a train
+    earlier. The fenced-code guard above cannot see it: tree lines start with a
+    box-drawing character, not with `aisquare`.
+
+    Attribution is deliberately loose — a tree line names several subcommands at
+    once, so a flag counts as valid anywhere under its top-level command. That
+    is still enough to catch a flag that exists nowhere, which is the defect.
+    """
+    text = (REPO / "README.md").read_text(encoding="utf-8")
+    lines = _tree_lines(text)
+    assert lines, "no command tree found in the README — this guard is not looking at anything"
+
+    stale: list[str] = []
+    checked = 0
+    current: str | None = None
+    for number, line in lines:
+        head = re.match(r"^[├└]──\s+([a-z][a-z0-9-]*)", line.strip())
+        if head:
+            current = head.group(1)
+        legal = _flags_under(current)
+        for flag in re.findall(r"--[a-z][a-z0-9-]*", line):
+            checked += 1
+            if flag not in legal:
+                stale.append(
+                    f"README.md:{number}  {flag} is not under `{current}`  | {line.strip()}"
+                )
+
+    assert checked >= 20, f"only {checked} flags found in the tree — the parser broke"
+    assert not stale, "the command tree documents flags that do not exist:\n  " + "\n  ".join(stale)
 
 
 def test_typer_is_the_instrument_not_the_help_renderer() -> None:

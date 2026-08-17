@@ -68,6 +68,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from aisquare.core import insights, outbox, paths
@@ -267,6 +268,22 @@ def join_records(path: Path | None = None) -> list[dict[str, object]]:
     return records
 
 
+def _usable_base_url(value: str) -> bool:
+    """Whether ``value`` is something an agent can actually use as a base URL.
+
+    Deliberately shallow — a scheme the agent speaks and a host to speak it to,
+    and nothing about whether anyone is listening, which is the probe's job.
+    It exists for one reason: to stop a value the AGENT cannot parse from
+    reaching its environment, because that failure mode is not a lost trace,
+    it is a dead session.
+    """
+    try:
+        parsed = urlparse(value.strip())
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
 def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> ProxyProbe:
     """Check that ``proxy_url`` is the claude_code explainability proxy.
 
@@ -319,14 +336,45 @@ def wire_session(
             traced=False, reason=f"role {role!r} is not header-safe — launching untraced"
         )
 
+    # The one value here that can cost a LAUNCH rather than a trace. The agent
+    # parses ANTHROPIC_BASE_URL before it can report anything, so a malformed
+    # one does not degrade to untraced — it dies at its first request with
+    # "API Error: Invalid URL" and exit 1, before a byte reaches the proxy.
+    # Checked ahead of the probe, whose "unreachable" would blame the network
+    # for what is a typo in config. Refused, never repaired: a value we
+    # invented is a value nobody configured, and the operator would never
+    # learn theirs was wrong.
+    if not _usable_base_url(settings.proxy_url):
+        return SessionWiring(
+            traced=False,
+            reason=f"explainability.proxy_url {settings.proxy_url!r} is not an "
+            "http(s) URL — launching untraced",
+        )
+
+    # Ordered AFTER the value check on purpose: this one is about the
+    # operator's routing, and we judge only what WE would set. A base_env the
+    # user owns makes us stand down whatever it contains — policing their URL
+    # is not ours to do.
     if base_env:
         taken = [name for name in RESERVED_ENV_VARS if base_env.get(name)]
         if taken:
-            return SessionWiring(
-                traced=False,
-                reason=f"{' and '.join(taken)} already set — not overriding your "
-                "routing, launching untraced",
+            reason = (
+                f"{' and '.join(taken)} already set — not overriding your "
+                "routing, launching untraced"
             )
+            # Standing down is not the same as saying nothing. If the value we
+            # are deferring to cannot be parsed as a URL, this launch is about
+            # to die with "API Error: Invalid URL" and exit 1 — and the operator
+            # will have no idea why, because the failure surfaces from the agent
+            # long after the shell that set it. Naming it is the ONLY thing we
+            # can do here that is not overriding their routing.
+            ambient = base_env.get("ANTHROPIC_BASE_URL")
+            if ambient and not _usable_base_url(ambient):
+                reason += (
+                    f" — WARNING: {ambient!r} is not an http(s) URL, so the agent "
+                    "will fail to start; unset or correct it"
+                )
+            return SessionWiring(traced=False, reason=reason)
 
     try:
         agent_name = settings.agent_name_template.format(role=role)

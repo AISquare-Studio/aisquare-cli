@@ -131,6 +131,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *in-process* and inherit their session's environment verbatim, so they
   collapse into the parent's identity. Process is the identity boundary, and
   no launcher change can move it.
+- **A proxy URL the agent cannot parse is now refused before it can reach
+  one.** `ANTHROPIC_BASE_URL` is the one value in this wiring that costs a
+  *launch* rather than a trace: the agent parses it before it can report
+  anything, so a malformed one dies at the first request with `API Error:
+  Invalid URL` and exit 1. `wire_session` now checks the value it is about to
+  set — scheme and host, nothing about reachability, which is still the
+  probe's job — and launches untraced with the reason instead. The check is
+  deliberately independent of the probe: the probe *happened* to reject an
+  unparseable URL as "unreachable", which is both a misleading message (it
+  blames the network for a typo in config) and an accident a caller with its
+  own `prober` sails straight past. Refused, never repaired — a value we
+  invented is a value nobody configured.
+- **A corrupt `ANTHROPIC_BASE_URL` already in your environment is now named
+  before it kills the launch.** That one is *not* ours to remove — overriding
+  the operator's routing is forbidden, and we cannot know it is wrong for them
+  — so we still stand down. But the agent is about to fail with a message that
+  points nowhere near the cause, so the stand-down now says which value it
+  deferred to and that it will not work. Stale shells from before the quoting
+  fix are exactly this case.
 - **The tracing exports were bash-only, and silently misattributed every
   session started from `/bin/sh`.** `aisquare explainability env` quoted with
   bash's `$'…'`, which dash — `/bin/sh` on Debian and Ubuntu — does not treat

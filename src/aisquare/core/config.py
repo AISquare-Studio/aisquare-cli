@@ -6,6 +6,7 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 
 from __future__ import annotations
 
+import errno
 import os
 import tomllib
 from pathlib import Path
@@ -252,14 +253,22 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     **A BROKEN link is followed too, and its missing directories are created.**
     Measured: a link at a path four levels deep that does not exist yet produces
     all four directories plus the file, exit 0, and the link then resolves. That
-    is what makes a dangling link work rather than fail, and a dangling link is a
-    user stating where their config should live — but it means this function can
-    create directories at a location NOBODY NAMED IN THE COMMAND, including on
-    another filesystem entirely. Two consequences worth knowing before relying on
-    it: a later ``git clone`` into that path fails with "already exists and is not
-    an empty directory"; and if the link points at a mounted Windows drive, the
-    directories are created there. ``aisquare doctor`` reports a symlinked config
-    and flags a missing target, so the state is visible before a write happens.
+    is what makes a dangling link work rather than fail — but FOLLOWING A LINK
+    AND CREATING WHAT IT POINTS AT ARE TWO DECISIONS, and only the first is ours
+    to take from a link. Following honours intent the user stated; materialising
+    a tree they never created invents it, at a location no command named and
+    possibly on another filesystem — a broken link into a mounted Windows drive
+    would have this function create directories there, silently.
+
+    So a link whose target DIRECTORY is missing raises instead, naming that
+    directory and the remedies. A link into a directory that EXISTS is written
+    normally: after a fresh clone only the file is missing, nothing is invented,
+    and that case keeps working. ``aisquare doctor`` flags a missing target, so
+    the state is visible before a write meets it.
+
+    This restriction applies ONLY when a link was followed. An ordinary first
+    write still creates ``~/.aisquare`` — that path never involved a pointer to
+    somewhere else.
 
     Returns the path the CALLER asked for, not the resolved one: commands echo it
     back to an operator, and where the bytes physically land is not their concern.
@@ -268,6 +277,21 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
 
     written = Path(os.path.realpath(target))
+    if written != target and not written.parent.exists():
+        # A link was followed and its destination directory is not there. Create
+        # it and we would be inventing a tree at a path no command named; the
+        # only honest thing left is to say so. The state is already broken from
+        # the user's point of view — their link does not resolve — so nothing
+        # that works today stops working, which is what makes this refusal
+        # affordable on a seam that must not gain failures.
+        raise FileNotFoundError(
+            errno.ENOENT,
+            f"{target} is a symlink to {written}, but its directory "
+            f"{written.parent} does not exist. Following the link is deliberate; "
+            f"creating a directory tree there is not. Clone or create "
+            f"{written.parent}, or repoint the link.",
+            str(written.parent),
+        )
     written.parent.mkdir(parents=True, exist_ok=True)
 
     dumped = config.model_dump(mode="json", exclude_none=True)

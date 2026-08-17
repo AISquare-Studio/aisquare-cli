@@ -5,18 +5,29 @@ tracing; these commands cover everything else: ``status`` answers "would a
 session launched right now be traced, and if not, why" without launching one,
 and ``env`` emits the same env delta as shell exports so a terminal (or a
 script) can join a session the launcher does not manage.
+
+``env``'s output is quoted for POSIX ``sh``, not for bash. It is composed into
+printed spawn commands that people paste anywhere and that CI runs through
+``/bin/sh`` — and on Debian and Ubuntu that is dash, where bash's ``$'…'``
+form is not special at all: the value arrives with a literal ``$`` in front
+and a literal backslash-n where the header separator should be. The proxy then
+reads one glued header, never sees ``X-Pipeline-Id``, and files the run under
+its default identity. POSIX single quotes carry a real newline in every shell,
+which is the only reason ``shlex.quote`` is used here rather than something
+prettier.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 from typing import Annotated
 
 import typer
 
 from aisquare.cli.common import fail
 from aisquare.core.config import load_config
-from aisquare.services.explainability import probe_proxy, wire_session
+from aisquare.services.explainability import SESSION_ID_ENV_VAR, probe_proxy, wire_session
 
 app = typer.Typer(
     help="Session tracing through the explainability proxy.",
@@ -57,6 +68,12 @@ def env(
     Use as ``eval "$(aisquare explainability env coder)"``. Unlike the
     launcher, this refuses loudly (exit 1) when the session would not be
     traced — a human asked for tracing explicitly, so silence would lie.
+
+    ``AISQUARE_SESSION_ID`` is exported alongside the header pair so the
+    command that follows can start the agent ON that id
+    (``claude --session-id "$AISQUARE_SESSION_ID"``) and have its board row
+    join the Run. Exported rather than printed as a comment because the
+    output's only job is to be eval'd.
     """
     wiring = wire_session(
         load_config().explainability,
@@ -66,17 +83,8 @@ def env(
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")
-    for key, value in wiring.env.items():
-        typer.echo(f"export {key}={_ansi_c_quoted(value)}")
-
-
-def _ansi_c_quoted(value: str) -> str:
-    """``$'…'`` so the newline between header pairs survives ``eval``.
-
-    Plain single quotes would carry a literal backslash-n; the proxy then sees
-    one glued header, ``X-Pipeline-Id`` never arrives, and the run is silently
-    recorded under the proxy's default identity — the exact misattribution
-    this command exists to prevent.
-    """
-    escaped = value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
-    return f"$'{escaped}'"
+    exports = dict(wiring.env)
+    if wiring.pipeline_id:
+        exports[SESSION_ID_ENV_VAR] = wiring.pipeline_id
+    for key, value in exports.items():
+        typer.echo(f"export {key}={shlex.quote(value)}")

@@ -303,10 +303,16 @@ def test_missing_extra_buffers_with_the_safe_install_line(monkeypatch: pytest.Mo
     report = service.ship_once()
 
     assert report.deferred == 1
-    assert "aisquare-cli[explainability]" in report.reason, (
-        "the advice must install through OUR extra; a bare `pip install "
-        "aisquare[explainability]` is the order that overwrites our __init__"
-    )
+    # The invariant is what the advice must never be, not one exact string: a
+    # bare `pip install aisquare[explainability]` is the order that overwrites
+    # our __init__. Which SAFE advice appears depends on the install shape —
+    # this suite runs from an editable checkout, where the extra shadows us
+    # outright and the correct advice is not to install it here at all (see
+    # test_editable_install_hint). Both shapes are asserted through the same
+    # seam so neither can regress into recommending the bare form.
+    assert "pip install aisquare[explainability]" not in report.reason
+    assert "aisquare-cli[explainability]" in service.install_hint(editable=False)
+    assert "editable" in service.install_hint(editable=True).lower()
     assert len(outbox.pending()) == 1
 
 

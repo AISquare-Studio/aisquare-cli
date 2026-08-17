@@ -406,7 +406,7 @@ def wire_session(
     *,
     session_id: str | None = None,
     base_env: dict[str, str] | None = None,
-    prober: Callable[[str], ProxyProbe] = probe_proxy,
+    prober: Callable[[str], ProxyProbe] | None = None,
 ) -> SessionWiring:
     """Build the env delta that traces one session, or explain why not.
 
@@ -414,7 +414,15 @@ def wire_session(
     agent session id so board rows and dashboard Runs share a key; otherwise a
     fresh UUID keeps concurrent sessions from merging into one Run. ``base_env``
     is consulted (never mutated) for vars the user already owns.
+
+    ``prober`` resolves HERE rather than as a default argument. A default binds
+    the function object at def time, so patching ``probe_proxy`` on this module
+    could not reach it — and all three production callers pass nothing, so a
+    test driving one of them through the CLI would have got the real network
+    prober and passed by agreeing with reality instead of verifying anything.
+    Passing ``prober=`` explicitly still wins.
     """
+    ask = prober or probe_proxy
     if not settings.enabled:
         return SessionWiring(traced=False, reason="explainability is disabled (config default)")
 
@@ -477,7 +485,7 @@ def wire_session(
             reason=f"agent name {agent_name!r} is not header-safe — launching untraced",
         )
 
-    verdict = prober(settings.proxy_url)
+    verdict = ask(settings.proxy_url)
     if not verdict.healthy:
         return SessionWiring(traced=False, reason=f"{verdict.reason} — launching untraced")
 

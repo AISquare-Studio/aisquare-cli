@@ -1,4 +1,10 @@
-"""Shared fixtures: isolated home directory, fresh runtime state, CLI runner."""
+"""Shared fixtures: isolated home directory, fresh runtime state, CLI runner.
+
+Also the session-start check that this run is judging THIS tree — see
+``_foreign_package_reason``. It lives here rather than in a test file because a
+test only runs when it is selected, and the invocation that gets this wrong is
+the narrow one nobody selects it with.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +14,51 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import aisquare
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+
+
+def _foreign_package_reason(module_file: Path, src: Path) -> str | None:
+    """Why this run is not judging `src`, or None when it is.
+
+    With the src layout, a pytest from a sibling interpreter resolves
+    ``aisquare`` out of that interpreter's site-packages, so the suite grades a
+    stale snapshot while appearing to grade the checkout. Both directions of
+    that lie have now cost this project time: a false RED on 2026-08-07, when
+    tests for new code failed against an old install; and a false GREEN, when a
+    run against an installed copy passed and was reported as a gate.
+
+    Measured on 2026-08-17 at 8fafdd4, in a fresh worktree with no ``.venv``:
+    `PATH=$PWD/.venv/bin:$PATH` expands to a directory that does not exist, so
+    PATH falls through to the pyenv shim. The FULL suite still fails loudly —
+    17 collection errors, and `tests/test_packaging.py` asserts this same
+    property — but `pytest tests/test_config.py` reported **5 passed** against
+    the stale package, because that file does not select the guard. A subset run
+    is what everyone types while iterating, so that is the hole this closes.
+    """
+    if module_file.is_relative_to(src):
+        return None
+    return (
+        f"aisquare imported from {module_file}, not from {src}.\n"
+        "This run would grade an installed copy rather than this checkout, so "
+        "both a pass and a failure would be meaningless.\n"
+        "Fix: create the venv and install into it — python3 -m venv .venv && "
+        './.venv/bin/python -m pip install -e ".[dev]" — then run '
+        "PATH=$PWD/.venv/bin:$PATH make check.\n"
+        "Note that PATH=$PWD/.venv/bin:$PATH is NOT enough on its own: if "
+        ".venv does not exist yet, that prefix is a non-existent directory and "
+        "PATH falls through to whatever python comes next."
+    )
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Refuse to grade the wrong tree, before a single test runs."""
+    reason = _foreign_package_reason(Path(aisquare.__file__).resolve(), SRC)
+    if reason is not None:
+        pytest.exit(reason, returncode=4)
 
 
 @pytest.fixture(autouse=True)

@@ -74,6 +74,22 @@ class ExplainabilitySettings(BaseModel):
     The selector is deliberately NOT called "profile": ``aisquare --profile``
     already means the top-level config profile, and one word for two unrelated
     selectors is how an operator points production traffic at staging.
+    Two independent lanes share this section, and either may run without the
+    other. ``enabled`` governs the PROXY lane: model traffic from a launched
+    agent, routed via ``ANTHROPIC_BASE_URL``. ``ship`` governs the CLIENT lane:
+    the insights the CLI itself holds — human prompts and board events — which
+    no proxy can see because they never touch the model API. They meet at the
+    gateway, in one Run per session, because both key on the board session id.
+
+    ``ship`` is the single predicate on the primary path, so it carries the
+    whole "is this configured" question: it is only ever written True once a
+    gateway URL and a usable key both exist. No key or no config therefore
+    means nothing is captured at all — not captured-then-discarded.
+
+    The key itself is NOT here. ``config.toml`` is a readable settings file
+    people paste into issues; a workspace credential lives in
+    ``~/.aisquare/explainability-key`` at mode 600, or in
+    ``EXPLAINABILITY_API_KEY``.
     """
 
     enabled: bool = False
@@ -82,6 +98,8 @@ class ExplainabilitySettings(BaseModel):
     target: str = "stg"
     roles: list[str] = Field(default_factory=lambda: ["planner", "coder", "runner"])
     targets: dict[str, ExplainabilityTarget] = Field(default_factory=dict)
+    ship: bool = False
+    gateway_url: str = ""
 
 
 class RoleLaunchProfile(BaseModel):

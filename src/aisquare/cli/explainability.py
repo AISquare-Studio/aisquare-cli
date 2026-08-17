@@ -32,7 +32,13 @@ import typer
 from aisquare.cli.common import fail
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.services import explainability_ops as ops
-from aisquare.services.explainability import SESSION_ID_ENV_VAR, probe_proxy, wire_session
+from aisquare.services.explainability import (
+    SESSION_ID_ENV_VAR,
+    probe_proxy,
+    ship_once,
+    shipping_state,
+    wire_session,
+)
 
 app = typer.Typer(
     help="Session tracing through the explainability proxy.",
@@ -62,6 +68,9 @@ def status(
     typer.echo(f"identity: {target.agent_name_template}")
     typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
     typer.echo(f"probe:    {'healthy' if verdict.healthy else verdict.reason}")
+    state = shipping_state()
+    typer.echo(f"shipping: {state.reason}")
+    typer.echo(f"spool:    {state.queued} queued, {state.sent} sent, {state.dead} dead-letter")
     if settings.enabled and not verdict.healthy:
         raise typer.Exit(code=1)
 
@@ -198,6 +207,26 @@ def register(
         typer.echo(f"  {agent_name}: {suffix}")
     if not published:
         typer.echo("  (the workspace returned no publication ids; re-run after it syncs)")
+
+
+@app.command()
+def ship(
+    limit: Annotated[int, typer.Option("--limit", help="Most records to drain in one pass.")] = 500,
+) -> None:
+    """Drain buffered insights to the gateway (prompts, notes, task events).
+
+    This is the only place the CLI talks to the gateway. It is deliberately a
+    separate command and a separate process: the capture seams buffer, this
+    delivers, and a gateway that is down therefore costs a delay rather than a
+    prompt. Exits non-zero only when records were dead-lettered — a deferral is
+    the design working, not a failure.
+    """
+    report = ship_once(limit=limit)
+    typer.echo(report.reason)
+    if report.runs:
+        typer.echo(f"runs: {', '.join(report.runs)}")
+    if report.dead:
+        raise typer.Exit(code=1)
 
 
 @app.command()

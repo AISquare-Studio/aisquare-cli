@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated
 
 import typer
@@ -27,6 +26,7 @@ from aisquare.cli import (
 from aisquare.cli import config as config_cli
 from aisquare.cli.global_flags import GlobalFlagsGroup
 from aisquare.core.state import RuntimeState, set_state
+from aisquare.core.version import __version__
 
 app = typer.Typer(
     cls=GlobalFlagsGroup,
@@ -37,28 +37,10 @@ app = typer.Typer(
 )
 
 
-def _installed_version() -> str:
-    """Our version from distribution metadata, never off the package root.
-
-    ``aisquare/__init__.py`` still exports ``__version__`` for library callers,
-    but the CLI must not depend on it: the Explainability SDK publishes as
-    distribution ``aisquare`` and ships a REGULAR package of the same name, so
-    it lands in the same ``site-packages/aisquare/`` directory. Installing it
-    overwrites our ``__init__.py`` with the SDK's; uninstalling it deletes the
-    shared file. Either way ``from aisquare import __version__`` raises and
-    every command dies at import — a bricked CLI, from a routine
-    ``pip install``. The dist-info metadata read here survives both.
-    """
-    try:
-        return version("aisquare-cli")
-    except PackageNotFoundError:  # pragma: no cover - only from a raw checkout
-        return "0.0.0+uninstalled"
-
-
 def _print_version(value: bool) -> None:
     """Eager callback for ``--version``."""
     if value:
-        typer.echo(f"aisquare {_installed_version()}")
+        typer.echo(f"aisquare {__version__}")
         raise typer.Exit()
 
 

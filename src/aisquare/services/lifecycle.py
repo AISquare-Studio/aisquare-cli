@@ -11,6 +11,7 @@ from aisquare.core.stubs import stub
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
 from aisquare.services import agents as agents_service
+from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
 
 
@@ -23,6 +24,7 @@ def initialize(
     onboard: bool,
     reinit: bool,
     assume_yes: bool,
+    explainability: bool | None = None,
 ) -> SetupReport:
     """Set up ``~/.aisquare``, register & snapshot the project, and connect agents.
 
@@ -53,6 +55,8 @@ def initialize(
             "No API key given — running local-only; re-run with --api-key to connect later."
         )
 
+    notes.extend(_explainability_step(explainability))
+
     onboarded = 0
     if onboard:
         report = project_service.onboard(path, refresh=False)
@@ -81,6 +85,46 @@ def initialize(
         onboarded=onboarded,
         notes=notes,
     )
+
+
+def _explainability_step(decision: bool | None) -> list[str]:
+    """The optional explainability step: offer it, take it, or leave no trace.
+
+    Three outcomes, and the middle one is the important one:
+
+    * ``True``  — the user opted in; configure and say what will be captured.
+    * ``None``  — not asked or not answered. Mention the step exists, if and
+      only if it could actually be accepted here, and change nothing.
+    * ``False`` — declined. Say nothing, do nothing. #50's first acceptance
+      clause is that declining leaves ZERO behavioural change, and a decline
+      that still wrote a config key or printed a nag would not be zero.
+
+    Never raises: a machine with a broken gateway config must still finish
+    ``init``.
+    """
+    if decision is False:
+        return []
+    try:
+        offer = explainability_service.shipping_offer()
+    except Exception:  # setup must not die of an optional step
+        return []
+    if decision is None:
+        if not offer.available:
+            return []
+        return [
+            "Explainability: this machine can ship "
+            f"{explainability_service.ShippingOffer.CAPTURES} to {offer.gateway_url}. "
+            "Off until you ask for it: aisquare init --explainability"
+        ]
+    if not offer.available:
+        return [f"Explainability not configured — {offer.reason}"]
+    state = explainability_service.configure_shipping()
+    if not state.configured:
+        return [f"Explainability not configured — {state.reason}"]
+    return [
+        f"Explainability on: shipping {explainability_service.ShippingOffer.CAPTURES} "
+        f"to {state.gateway_url}. Drain with: aisquare explainability ship"
+    ]
 
 
 def upgrade() -> None:

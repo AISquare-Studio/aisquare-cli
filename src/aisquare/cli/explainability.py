@@ -70,7 +70,7 @@ def status(
     # nothing to dial, and reporting a refused connection to a default address
     # the operator never chose reads as a broken machine when nothing is wrong.
     proxy = ops.proxy_state(target, on=settings.enabled)
-    state = shipping_state()
+    state = shipping_state(target_name)
     level = config.redaction.level
     if get_state().json_output:
         typer.echo(
@@ -88,6 +88,7 @@ def status(
                     "probe": proxy.summary,
                     "redaction": str(level),
                     "shipping": {
+                        "gateway": state.gateway_url,
                         "reason": state.reason,
                         "queued": state.queued,
                         "sent": state.sent,

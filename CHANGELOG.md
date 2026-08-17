@@ -136,6 +136,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **The two explainability lanes could point at different deployments, and
+  `status` reported the wrong one.** The proxy lane resolves a target —
+  `enable --target prod --gateway-url … --key-env PROD_KEY` — and `status` and
+  `doctor` report what it resolves to. The client lane (the spool and
+  `explainability ship`) did not: it read the top-level `gateway_url` and a
+  hardcoded `EXPLAINABILITY_API_KEY`, ignoring the active target.
+  - That splits at the moment it costs most. Configure shipping while a staging
+    shell is sourced — which is what the cutover runbook has you do — then
+    switch the proxy lane to prod: model traffic goes to prod, CLI insights keep
+    going to staging, and `status` prints the prod gateway because the line a
+    human reads resolves the target. Both halves look healthy and nobody is
+    told.
+  - Shipping now resolves through the active target, so one switch moves both
+    lanes. The key comes from the variable the target NAMES; a differently
+    named key in the shell no longer satisfies it, because shipping prod
+    sessions with a staging key is worse than not shipping them — it refuses
+    and says which variable it wanted.
+  - **Every "on" state now names the destination**: `shipping: on →
+    https://prod.example — …`, and `--json` carries `shipping.gateway`. Counts
+    alone cannot reveal a split brain — "2 sent" reads identically whichever
+    gateway it went to — and the state that matters most mid-cutover is
+    "buffering", not the happy one.
+  - A machine that never made a target is unaffected: the top-level
+    `gateway_url` and the stored key file remain the fallback.
 - **Concurrent first opens of a fresh store could corrupt the migration,
   permanently.** Several sessions launching together onto a machine that has
   never run aisquare could raise a NON-transient `duplicate column name:

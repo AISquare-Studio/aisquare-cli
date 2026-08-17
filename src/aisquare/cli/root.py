@@ -47,7 +47,12 @@ def init(
         bool, typer.Option("--no-onboard", help="Skip project onboarding after setup.")
     ] = False,
     reinit: Annotated[
-        bool, typer.Option("--reinit", help="Re-run setup even if already initialised.")
+        bool,
+        typer.Option(
+            "--reinit",
+            help="Re-run setup, resetting config.toml to defaults. Discards role "
+            "bindings made with team bind.",
+        ),
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Answer yes to every prompt.")] = False,
     explainability: Annotated[

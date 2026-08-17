@@ -16,6 +16,7 @@ from aisquare.cli.common import (
     emit_prompts,
     emit_setup,
     emit_status,
+    expected_config_write_errors,
     resolve_pool,
 )
 from aisquare.models import CheckStatus
@@ -65,16 +66,17 @@ def init(
     ] = None,
 ) -> None:
     """Set up aisquare on this machine and connect your agents."""
-    report = lifecycle_service.initialize(
-        path,
-        api_key=api_key,
-        local=local,
-        agents=agent or [],
-        onboard=not no_onboard,
-        reinit=reinit,
-        assume_yes=yes,
-        explainability=_explainability_decision(explainability),
-    )
+    with expected_config_write_errors():
+        report = lifecycle_service.initialize(
+            path,
+            api_key=api_key,
+            local=local,
+            agents=agent or [],
+            onboard=not no_onboard,
+            reinit=reinit,
+            assume_yes=yes,
+            explainability=_explainability_decision(explainability),
+        )
     emit_setup(report)
 
 

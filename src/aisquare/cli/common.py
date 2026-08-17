@@ -420,6 +420,18 @@ def expected_config_write_errors() -> Iterator[None]:
             hint=f"write permission is needed on {directory}",
             detail=exc.strerror or str(exc),
         )
+    except FileNotFoundError as exc:
+        # ``save_config`` raises this deliberately when a followed symlink's
+        # directory is missing: following a link is honouring stated intent,
+        # materialising a tree the user never created would be inventing it.
+        # Its message already names the missing directory and both remedies, so
+        # this ROUTES the message rather than rewriting it — a second wording
+        # would drift from the one the tests over there pin.
+        fail(
+            exc.strerror or str(exc),
+            error="config_target_missing",
+            hint=f"create {exc.filename} or repoint the link" if exc.filename else None,
+        )
 
 
 def fail(

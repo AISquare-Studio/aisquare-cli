@@ -554,7 +554,7 @@ def checks(
     results = [switch, _check_sdk(on=touched, live=live)]
     results.append(_check_config(target, on=on))
     results.append(_check_redaction(_redaction_level(), shipping=resolved_settings.ship))
-    results.append(_check_proxy(target, on=on))
+    results.append(_check_proxy(target, on=on, live=live))
     if live:
         results.extend(_live_checks(target, on=on))
     return results
@@ -730,7 +730,11 @@ _PROXY_FIX = (
 
 
 def proxy_state(
-    target: ResolvedTarget, *, on: bool, prober: Callable[[str], ProxyProbe] = probe_proxy
+    target: ResolvedTarget,
+    *,
+    on: bool,
+    live: bool = False,
+    prober: Callable[[str], ProxyProbe] | None = None,
 ) -> ProxyState:
     """Describe the proxy lane truthfully for a machine in ANY of its states.
 
@@ -748,8 +752,12 @@ def proxy_state(
       still succeed (they never block on this) but they go UNTRACED, silently,
       which is the whole failure this lane exists to prevent.
     """
+    # Resolved here rather than bound as a default argument, so a test (or a
+    # caller) can substitute a prober by patching this module.
+    ask = prober or probe_proxy
     if not on:
         if target.proxy_source == "default":
+            # Never dialled, --live or not: nobody asked about this address.
             return ProxyState(
                 summary=(
                     f"not configured — the default {target.proxy_url} is not consulted "
@@ -758,12 +766,38 @@ def proxy_state(
                 healthy=False,
                 problem=False,
             )
+        if not live:
+            return ProxyState(
+                summary=f"not consulted while tracing is off ({target.proxy_url})",
+                healthy=False,
+                problem=False,
+            )
+        # --live means "make the calls", and this is the one an operator
+        # mid-cutover actually wants: they started a proxy and want to know it
+        # answers BEFORE flipping tracing on. Still never a failure — nothing
+        # is being traced, so nothing is broken either way — but the answer
+        # carries what it means, because a fact without its consequence is a
+        # fact to guess at.
+        verdict = ask(target.proxy_url)
+        if verdict.healthy:
+            return ProxyState(
+                summary=(
+                    f"answered at {target.proxy_url}, but tracing is off — nothing is "
+                    "being traced yet (turn it on: aisquare explainability enable)"
+                ),
+                healthy=True,
+                problem=False,
+            )
         return ProxyState(
-            summary=f"not consulted while tracing is off ({target.proxy_url})",
+            summary=(
+                f"{verdict.reason} — nothing is untraced yet because tracing is off, "
+                "but it will be the moment you enable it"
+            ),
             healthy=False,
             problem=False,
+            remediation=_PROXY_FIX,
         )
-    verdict = prober(target.proxy_url)
+    verdict = ask(target.proxy_url)
     if verdict.healthy:
         return ProxyState(
             summary=f"claude_code proxy healthy at {target.proxy_url}",
@@ -778,7 +812,7 @@ def proxy_state(
     )
 
 
-def _check_proxy(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
+def _check_proxy(target: ResolvedTarget, *, on: bool, live: bool = False) -> DoctorCheck:
     """The session-tracing lane: is the local proxy the one we expect?
 
     Loopback and 1.5s worst case, so it stays inside the "doctor does not make
@@ -787,7 +821,7 @@ def _check_proxy(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
     so the two surfaces cannot describe one machine differently.
     """
     name = "explainability proxy"
-    state = proxy_state(target, on=on)
+    state = proxy_state(target, on=on, live=live)
     if state.problem:
         return _fail(name, state.summary, state.remediation)
     return _ok(name, state.summary)

@@ -123,6 +123,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **`aisquare doctor --live` now probes a proxy you configured, even with
+  tracing off.** With tracing off nothing probes the proxy, which is right for
+  the default case and wrong for the flag whose entire meaning is "make the
+  network calls": mid-cutover there was no way to confirm the proxy you just
+  started answers *before* enabling tracing. Under `--live` it is probed and
+  reported informationally — **never as a failure**, because nothing is being
+  traced so nothing is broken — and each answer carries what it means rather
+  than only what happened. An **unconfigured** default is still never dialled,
+  `--live` or not: nobody asked about that address, and a test forbids the
+  socket. Plain `doctor`, plain `status` and the tracing-on red path are
+  unchanged in every state.
 - **Rich was deleting bracketed text out of everything the CLI printed.** Rich
   reads `[...]` as a style tag and removes it, and almost every line this CLI
   prints interpolates data it does not control — paths, git refs, role names,

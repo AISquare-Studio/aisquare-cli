@@ -25,12 +25,20 @@ Scope, stated rather than implied:
 - A line is split on `&&`, `||` and `;`, so the second half of the runbook's
   `which aisquare && aisquare --version` preflight is parsed. Requiring the LINE
   to start with `aisquare` had silently dropped it.
+- A BLOCKQUOTED fence is a fence. `> ```bash` styles an aside; the fence still
+  says "this is a script", and the runbook puts real operator commands in them.
+  Inline code inside a blockquote stays invisible — that is inline code, not a
+  fenced block, which is why CONTRIBUTING.md's must-not-run `pip install` is
+  still correctly unseen.
+- An invocation by ABSOLUTE PATH is an invocation: a cron wrapper's
+  `exec /usr/local/bin/aisquare …` is extracted and normalised. A path with no
+  word after it — `~/.config/aisquare/prod.env` — is still a path.
 - A command nested inside `eval "$(...)"` is still not extracted. The runbook
   has one. It is not left silent: EVERY fenced line mentioning `aisquare` that
   is not resolved must match a stated reason in `_NOT_AN_INVOCATION`, so a skip
   is a recorded decision and a new invocation in an unrecognised shape FAILS
   rather than joining an invisible pile. Census on the runbook at the time of
-  writing: 38 mentions = 11 resolved + 27 classified + 0 unaccounted.
+  writing: 40 mentions = 12 resolved + 28 classified + 0 unaccounted.
 - A flag's VALUE is not validated, only its existence. `--target prod` proves
   nothing about whether a target named prod is configured.
 - A word left over at a GROUP is a subcommand that does not exist; a word left
@@ -93,7 +101,7 @@ DOCUMENTED = (
     "docs/runbooks/explainability-prod-cutover.md",
 )
 
-FENCE = re.compile(r"^\s*```+\s*([A-Za-z0-9_-]*)\s*$")
+FENCE = re.compile(r"^\s*(?:>\s*)*```+\s*([A-Za-z0-9_-]*)\s*$")
 SHELL_LANGUAGES = {"", "sh", "bash", "shell", "console", "zsh"}
 
 # Used only by the bite-checks below: a name the CLI must never have.
@@ -172,6 +180,28 @@ def _shell_lines(markdown: str) -> list[tuple[int, str]]:
 #: Shell operators that end one command and begin another on the same line.
 _SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
 
+#: `aisquare`, or any path ending in it, at the head of a segment. The optional
+#: `exec` is there because a cron wrapper's real line is
+#: `exec /usr/local/bin/aisquare explainability ship --strict` — cron has no
+#: useful PATH, so the absolute path is the correct thing to document and
+#: `exec` is how a wrapper hands the process over. `aisquare-runner` and
+#: `.../aisquare/file.env` do not match: the name must be followed by a space
+#: or the end of the segment.
+_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?aisquare(?=\s|$)")
+
+
+def _as_invocation(segment: str) -> str | None:
+    """The command as typed, normalised to start with `aisquare`, or None.
+
+    Normalising means the rest of this file needs no knowledge of how the
+    command was reached — `_split` drops the first token either way.
+    """
+    text = segment.strip()
+    match = _INVOCATION_HEAD.match(text)
+    if match is None:
+        return None
+    return "aisquare" + text[match.end() :]
+
 
 def _from_text(document: str, markdown: str) -> list[Invocation]:
     """Every `aisquare …` command in a fenced block, including after `&&`.
@@ -185,8 +215,9 @@ def _from_text(document: str, markdown: str) -> list[Invocation]:
     found: list[Invocation] = []
     for number, text in _shell_lines(markdown):
         for segment in _SEQUENCERS.split(text):
-            if re.match(r"^aisquare(\s|$)", segment.strip()):
-                found.append(Invocation(document, number, segment.strip()))
+            invocation = _as_invocation(segment)
+            if invocation is not None:
+                found.append(Invocation(document, number, invocation))
     return found
 
 
@@ -658,7 +689,10 @@ def test_typer_is_the_instrument_not_the_help_renderer() -> None:
 #: quietly — a silent skip makes this file read as covering everything while
 #: covering less, which is worse than not having it.
 _NOT_AN_INVOCATION = (
-    ("a path segment, not a command word", re.compile(r"[/\w-]/aisquare|aisquare[/-]")),
+    # `…/aisquare` with a WORD after it is an invocation by absolute path, not a
+    # path. Without the lookahead this reason silently swallowed a cron
+    # wrapper's `exec /usr/local/bin/aisquare explainability ship --strict`.
+    ("a path segment, not a command word", re.compile(r"[/\w-]/aisquare(?!\s+\S)|aisquare[/-]")),
     ("a dotted Python module path", re.compile(r"aisquare\.\w")),
     ("a comment", re.compile(r"^\s*#")),
     ("nested in a command substitution the extractor cannot see into", re.compile(r"\$\(")),
@@ -678,7 +712,7 @@ _NOT_AN_INVOCATION = (
 CENSUS = {
     "README.md": (55, 5),
     "docs/explainability-tracing-boundary.md": (2, 0),
-    "docs/runbooks/explainability-prod-cutover.md": (11, 27),
+    "docs/runbooks/explainability-prod-cutover.md": (12, 28),
 }
 
 
@@ -687,7 +721,7 @@ def test_every_aisquare_mention_is_classified(document: str) -> None:
     """A skip must be a decision, not an omission.
 
     Measured at the time of writing — resolved + classified + 0 unaccounted:
-    README 60 = 55 + 5, tracing-boundary 2 = 2 + 0, cutover runbook 38 = 11 + 27
+    README 60 = 55 + 5, tracing-boundary 2 = 2 + 0, cutover runbook 40 = 12 + 28
     (paths, dotted module paths, sample output, a pip requirement and one nested
     `eval $(…)`). Nothing asserted that, so a NEW invocation written in a shape
     the extractor cannot see would join the skip set and this file would keep
@@ -842,4 +876,116 @@ def test_the_split_brain_line_is_actually_covered() -> None:
     assert ("explainability", "status") in resolved, (
         "the runbook's --json split-brain check is not being resolved as "
         f"`explainability status`; resolved chains were {sorted(resolved)}"
+    )
+
+
+def test_a_blockquoted_fence_is_still_a_fence() -> None:
+    """@dfd9a883 found this by writing an artifact the guard could not see.
+
+    The runbook uses `> ```bash` for asides that carry REAL commands — line 512
+    is `aisquare --json explainability status | jq -c .shipping`, a check an
+    operator runs. FENCE required the backticks at the start of the line, so the
+    open never matched, `inside` never flipped, and the whole block was prose.
+
+    The give-away that this was half-built rather than declined: `_shell_lines`
+    ALREADY strips a `> ` marker per line, with a comment naming the exact
+    `> ```bash` shape. Line handling existed; fence detection did not.
+
+    Ruling, since it was handed to me: A BLOCKQUOTED FENCE IS A FENCE. The
+    blockquote styles an aside; the fence still says "this is a script". Inline
+    code inside a blockquote — CONTRIBUTING.md's `pip install` that must NOT be
+    run — stays invisible, because that is inline code, not a fenced block, and
+    the convention that separates them is unchanged.
+    """
+    markdown = "\n".join(
+        [
+            "Some prose.",
+            "",
+            "> ```bash",
+            "> aisquare --json explainability status | jq -c .shipping",
+            "> ```",
+            "",
+        ]
+    )
+
+    found = _from_text("doc.md", markdown)
+
+    # The pipeline stays in the stored text: a single `|` is not a sequencer, so
+    # the segment is the whole line, and `_split` drops the tail later. Asserting
+    # the trimmed form here would be asserting `_split`'s job in `_from_text`'s
+    # test — which is how the first version of this assertion was wrong.
+    expected = "aisquare --json explainability status | jq -c .shipping"
+    assert [invocation.text for invocation in found] == [expected], (
+        f"a blockquoted fence was read as prose: {found}"
+    )
+    chain, _legal, dangling = _walk(_split(found[0].text)[0])
+    assert chain == ["explainability", "status"] and dangling is None
+
+
+def test_the_runbooks_own_blockquoted_command_is_seen() -> None:
+    """Against the real file, not a hand-built string.
+
+    A synthetic markdown fixture proves the parser; only the document proves the
+    coverage. This is the invocation that was invisible on the train.
+    """
+    runbook = "docs/runbooks/explainability-prod-cutover.md"
+    text = (REPO / runbook).read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    # Keyed on the BLOCKQUOTE, not on the command: `explainability status` also
+    # appears in an ordinary fence, so asserting the chain resolved would have
+    # passed with this whole feature reverted. Asked instead: is any extracted
+    # invocation sitting on a line that starts with a quote marker?
+    quoted = [
+        inv for inv in _from_text(runbook, text) if lines[inv.line - 1].lstrip().startswith(">")
+    ]
+
+    assert quoted, (
+        "no invocation was extracted from a blockquoted fence, though the runbook "
+        "has one — the coverage this test exists for is absent"
+    )
+    for invocation in quoted:
+        chain, _legal, dangling = _walk(_split(invocation.text)[0])
+        assert chain and dangling is None, f"{invocation.where} did not resolve: {invocation.text}"
+
+
+def test_an_invocation_by_absolute_path_is_not_dismissed_as_a_path() -> None:
+    """The second blind spot, and this one was WORSE than not matching.
+
+    A cron wrapper runs `exec /usr/local/bin/aisquare explainability ship
+    --strict` — an absolute path because cron has no useful PATH. The extractor
+    did not match it, which alone would be a stated boundary. But the census
+    then CLASSIFIED it as "a path segment, not a command word" and skipped it
+    silently, so the one mechanism meant to make skips visible was hiding it.
+
+    A path segment has no space after `aisquare`; an invocation does. That is
+    the whole distinction and it is enough.
+    """
+    invocations = _from_text(
+        "doc.md",
+        "```bash\nexec /usr/local/bin/aisquare explainability ship --strict\n```\n",
+    )
+
+    assert invocations, "an absolute-path invocation was not extracted"
+    chain, _legal, dangling = _walk(_split(invocations[0].text)[0])
+    assert chain == ["explainability", "ship"] and dangling is None, (
+        f"resolved to {chain}, dangling {dangling!r}"
+    )
+
+
+def test_a_real_path_is_still_read_as_a_path() -> None:
+    """The boundary the fix must not cross.
+
+    The runbook's §2 writes `/home/work/.config/aisquare/explainability-prod.env`.
+    Nothing follows `aisquare` there but a slash, so it stays a path and stays
+    classified — widening the invocation rule must not turn every configured
+    file path into a command the guard tries to resolve.
+    """
+    line = "install -m 600 /dev/null /home/work/.config/aisquare/explainability-prod.env"
+
+    assert not _from_text("doc.md", f"```bash\n{line}\n```\n"), (
+        "a filesystem path was extracted as a command"
+    )
+    assert any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION), (
+        "the path stopped being classified, so it would now fail the census"
     )

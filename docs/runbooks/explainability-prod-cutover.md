@@ -181,12 +181,45 @@ writes traces, cannot read or rebind. Rotation is new key → deploy → revoke 
 
 ## 3. Start the proxy (2 min)
 
+**Which build.** Pin **`aisquare>=1.1.0`**. Overnight receipts were collected
+against a local checkout of branch `f9/suppress-cc-shell-run` @ `bb88bb5`, and
+that raised a fair question: is the evidence reproducible from anything you can
+install? It is. `1.1.0` is on PyPI and carries the junk-run suppression —
+`_has_valid_correlation` in `claude_proxy.py` is **byte-identical** to the
+checkout's. `1.0.6` and `1.0.7` do **not** have it, and on those the junk-run
+behaviour returns silently as extra Runs in the dataset.
+
 ```bash
 set -a; source /home/work/.config/aisquare/explainability-prod.env; set +a
 export AISQUARE_PROXY_PORT=9190
-cd /home/work/work/AISquare-Explainability-SDK
-./.venv/bin/python -m aisquare.explainability.claude_proxy
+python -m pip install 'aisquare>=1.1.0'
+python -m aisquare.explainability.claude_proxy
 ```
+
+**[verified-train]** Confirm the running proxy really has it — from the process
+itself, so it answers for the build that is actually serving rather than for
+whatever you last installed:
+
+```bash
+# the proxy's own interpreter, found by argv TOKEN (not `pgrep -f`, which
+# matches any shell that merely mentions the string — including this one)
+PID=$(python - <<'EOF'
+import pathlib
+for e in pathlib.Path("/proc").iterdir():
+    if e.name.isdigit():
+        try: argv=[a.decode() for a in (e/"cmdline").read_bytes().split(b"\0") if a]
+        except OSError: continue
+        if "aisquare.explainability.claude_proxy" in argv: print(e.name); break
+EOF
+)
+sudo -n true 2>/dev/null && EXE=$(readlink -f /proc/$PID/exe) || EXE=python
+$EXE -c "import importlib.util as u; src=open(u.find_spec('aisquare.explainability.claude_proxy').origin).read(); print('junk-run suppression:', 'IN FORCE' if '_has_valid_correlation' in src else 'MISSING')"
+# IN FORCE   -> good
+# MISSING    -> you are on <1.1.0; extra Runs will appear in the dataset
+```
+
+Verified to discriminate: the live proxy reports `IN FORCE`; the same check run
+against a fresh `aisquare==1.0.6` reports `MISSING`.
 
 **[verified-stg]** Health check — run it yourself, do not assume:
 
@@ -228,49 +261,65 @@ aisquare config set explainability.enabled true
 aisquare explainability status; echo "exit=$?"
 ```
 
-Green looks exactly like this:
+Green looks like this — **[verified-train]**, captured from the built binary
+with tracing on and the proxy up. It has grown since this runbook was first
+written; if you are comparing line-for-line, compare against this:
 
 ```
 enabled:  True
+target:   stg
+gateway:  https://…                     <- your prod value
+key:      $EXPLAINABILITY_API_KEY is set
 proxy:    http://127.0.0.1:9190
 identity: aisquare-{role}
-probe:    healthy
+agents:   aisquare-planner, aisquare-coder, aisquare-runner
+probe:    claude_code proxy healthy at http://127.0.0.1:9190
+shipping: off — nothing is captured (aisquare init --explainability to turn it on)
+spool:    0 queued, 0 sent, 0 dead-letter
+redaction: standard — credentials are removed from insights leaving this machine (paths and hostnames are kept); local capture keeps what you typed
 exit=0
 ```
+
+The two lines that depend on YOUR environment are `gateway` and `key`; the
+sandbox run that produced this had neither set and showed `(unset)` and `is NOT
+set`. Everything else is what a correctly wired machine prints.
 
 `status` exits non-zero **only** when tracing is enabled *and* the probe fails —
 the precise state in which launches would silently fall back to untraced. That
 is what makes it the right single check.
 
-> **[verified-train]** `status` ignores the global `--json` flag (it prints the
-> same human text), so do not script against it expecting JSON. `aisquare --json
-> explainability env <role>` *does* emit JSON. Filed against the #51 lane.
+> **[verified-train]** `status` honours `--json` now (it used to print human
+> text under the flag). `aisquare --json explainability status` returns a real
+> payload — `enabled`, `target`, `gateway`/`gateway_source`, `key_env`/`key_set`
+> (never the key itself), `proxy`, `identity`, `agents`, `probe`, `shipping`,
+> `spool`, `redaction` — so the cutover can be scripted rather than eyeballed.
 
 Then make one real traced call and watch the proxy log:
 
 ```bash
-# BASH ONLY — see the warning immediately below. Do not run this under sh/dash.
+# Shell-agnostic since the POSIX-quoting fix — bash, zsh, sh and dash all work.
 eval "$(aisquare explainability env runner --session-id "$SESSION_ID")"
 claude -p "reply with the word OK and nothing else"
 ```
 
-> ⚠️ **[verified-train] The `eval` line is bash-only, and under a POSIX shell it
-> does not degrade — it kills the launch.** `explainability env` emits bash
-> `$'…'` quoting. Under `dash` the `$` is taken literally, so you get
-> `ANTHROPIC_BASE_URL=$http://127.0.0.1:9190` and a header string with a literal
-> `\n`. Measured, same command in each shell:
+> ✅ **[verified-train] FIXED — this `eval` is shell-agnostic now.** It used to
+> be bash-only: `explainability env` emitted `$'…'` quoting, and under `dash`
+> the `$` was taken literally, so the launch died with `API Error: Invalid URL`
+> and exit 1 instead of degrading to untraced. That was a fail-open violation
+> and it is gone — the emitter uses POSIX single-quoting, which carries a real
+> newline in every shell. Re-measured on the current train, under `/bin/sh`
+> (which is `dash` here):
 >
 > ```
-> bash: BASE=[http://127.0.0.1:9190]   -> exit=0, proxy logs "pipeline-session: opened pipeline_id=bashtest"
-> dash: BASE=[$http://127.0.0.1:9190]  -> "API Error: Invalid URL", exit=1, NOTHING reaches the proxy
+> BASE=[http://127.0.0.1:9190]
+> HDR=[X-Agent-Name: aisquare-runner
+> X-Pipeline-Id: dashcheck]      exit=0
 > ```
 >
-> **`/bin/sh` is `dash` on this box**, so this also bites Makefile recipes,
-> systemd units, CI steps, cron, and Python `subprocess(..., shell=True)`. If you
-> need a traced session from any of those, set the two variables explicitly in
-> `bash` rather than `eval`-ing the exports under `sh`. Tracked with the
-> correlation-spine lane; until it lands, keep the `eval` in an interactive bash
-> shell.
+> So Makefile recipes, systemd units, CI steps, cron and
+> `subprocess(..., shell=True)` are all fine. Kept as a note rather than
+> deleted because anyone on an **older build** still has the old behaviour, and
+> the symptom is worth recognising.
 
 **Pass `--session-id`.** **[verified-train]** Without it the pipeline id is a
 fresh random UUID on every invocation — two consecutive calls produced
@@ -321,7 +370,7 @@ fully healthy run):
 | ingest returning anything other than `202` | traces are not landing |
 | `409 no_agent_identity` | the agent name is not registered — §1a |
 | `probe: proxy unreachable` with `enabled: True` | launches are silently untraced — §3 |
-| `API Error: Invalid URL` with `exit=1` | you ran the §5 `eval` under `sh`/`dash` — rerun it in bash |
+| `API Error: Invalid URL` with `exit=1` | you are on a build older than the POSIX-quoting fix, **or** an `ANTHROPIC_BASE_URL` in your own environment is malformed — the CLI now names it on stderr just above the failure |
 
 ### Known limitation to state out loud before anyone reads a dashboard
 
@@ -378,16 +427,30 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 1. **[blocker]** No agent name resolves to a studio on staging (§1). Prod will
    behave identically unless 1a–1d are done in that order. Until then runs are
    ungoverned — traced, but enforcing nothing.
-2. `EXPLAINABILITY_STUDIO_ID=21` in the staging env file is a publication id and
-   should be removed or corrected; it is the direct cause of the 403s.
+2. `EXPLAINABILITY_STUDIO_ID=21` should still be removed or corrected — but it
+   is **not** the cause of the 403s, and correcting it alone will not fix
+   governance. Measured: `GET /v1/studios` with the workspace key SUCCEEDS and
+   lists 16 studios (144–169); `21` is not among them and `169` is. Yet **every**
+   studio-scoped call 403s for **all sixteen**, `169` included, and unsetting the
+   pin changes nothing. The workspace key simply cannot make studio-scoped calls.
+   Governance needs a credential class we do not hold, not a config edit.
 3. `explainability status` does not honour `--json` — filed against #51.
 4. `POST /v1/agents/register-roster` was **not** executed by me against staging.
    It mutates shared state and I left that call to a human.
 5. Prod gateway URL and key are **[unverified-prod]** throughout. Every
    *mechanism* here is verified against staging; the prod *values* are not.
-6. **[blocker-adjacent]** `explainability env` emits bash-only `$'…'` exports.
-   Under `sh`/`dash` the launch hard-fails with `API Error: Invalid URL` and
-   exit 1 instead of degrading to untraced — a fail-open violation, since
-   `/bin/sh` is `dash` here and that covers Make, systemd, CI, cron and Python
-   `shell=True`. Confirmed with receipts; fix belongs to the correlation-spine
-   lane. Until then §5's `eval` is interactive-bash-only.
+6. **[CLOSED]** `explainability env` emitted bash-only `$'…'` exports and the
+   launch hard-failed under `sh`/`dash`. Fixed on the train (POSIX
+   single-quoting) and re-verified under `dash`: `BASE=[http://…]`, a real
+   newline in the header pair, `exit=0`. §5 is shell-agnostic now.
+7. **[CLOSED]** The proxy build is pinned. `aisquare>=1.1.0` is released and
+   carries the junk-run suppression — `_has_valid_correlation` is byte-identical
+   to the `bb88bb5` checkout the overnight receipts used, so that evidence is
+   reproducible from PyPI and nobody needs the unreleased branch. `1.0.6`/`1.0.7`
+   do **not** have it. §3 carries a check that reads the *running* proxy and was
+   verified to discriminate (live proxy `IN FORCE`, fresh `1.0.6` `MISSING`).
+   Two caveats: neither SDK PR #362 nor #363 is on `origin/main` (which is at
+   #433), so the fix reached the release by some other route — treat the
+   RELEASE, not the PR, as the thing to depend on. And **#363 is gateway-side**
+   (`gateway/rml/assumption_mining.py`), not shipped by pip at all, so no
+   client install can carry it; it is a gateway deploy gate.

@@ -41,6 +41,45 @@ CI (`.github/workflows/ci.yml`) runs lint, format-check, mypy and pytest on
 Python 3.11–3.13, plus a packaging job that builds the wheel and smoke-tests the
 `aisquare` / `asq` console scripts. All jobs must pass before a PR can merge.
 
+### Proving a test can fail
+
+Many guards in this suite are written to catch something specific, so the useful
+question is not "does it pass" but "can it fail". The usual method is to break
+the thing on purpose, watch the test go red, and restore. **That method has a
+trap, and it is silent.**
+
+Python caches compiled bytecode — including pytest's rewritten test modules —
+and decides the cache is fresh by comparing the source's **modification time in
+whole seconds and its size in bytes**. A mutation that changes neither is
+invisible: the old bytecode runs and the file on disk is not the code under
+test. Measured on this repo:
+
+```sh
+# a test asserting "AAA" == "AAA", edited to "AAA" == "BBB" and re-run
+# within the same second
+1 passed          # the failing assertion never ran
+rm -rf __pycache__
+1 failed          # same file, correct result
+```
+
+Same-size edits are more common than they sound: swapping two names of equal
+length, reordering a tuple, changing a digit, transposing two arguments. Both
+directions hurt — a restore that does not take leaves the mutation live, and a
+mutation that does not take reports a false green, which is the worse one
+because you then report a defect that is not there.
+
+Two habits, and they cover different moments:
+
+- **Prevent it.** `find . -name __pycache__ -type d -prune -exec rm -rf {} +`
+  between the mutation and the measurement.
+- **Detect it.** Assert *which* test fails, not that something failed. A proof
+  whose expected outcome is one bit cannot distinguish "the mutation is wrong"
+  from "the mutation never ran"; naming the expected failure makes a stale run
+  visible, including in a proof you already wrote up.
+
+Mutations to Markdown, JSON or any non-imported file are structurally immune —
+there is no bytecode to go stale.
+
 ## Implementing a feature (stub → service)
 
 Most commands are still stubs that exit `70`. Each one becomes real by replacing

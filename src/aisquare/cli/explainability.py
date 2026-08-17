@@ -298,6 +298,13 @@ def register(
 @app.command()
 def ship(
     limit: Annotated[int, typer.Option("--limit", help="Most records to drain in one pass.")] = 500,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Exit non-zero when this run could not ship at all — for timers.",
+        ),
+    ] = False,
 ) -> None:
     """Drain buffered insights to the gateway (prompts, notes, task events).
 
@@ -312,6 +319,16 @@ def ship(
     if report.runs:
         typer.echo(f"runs: {', '.join(report.runs)}")
     if report.dead:
+        raise typer.Exit(code=1)
+    # Opt-in, because the quiet default is doctrine: no key or config means
+    # nothing captured and nothing logged as an error, and a non-zero default
+    # would mail every operator who deliberately does not ship. A TIMER wants
+    # the opposite — cron discards stdout by convention, so exit 0 is the only
+    # thing it reads, and a blocked run reporting healthy forever is how the
+    # insight lane goes silently missing while the proxy lane looks perfect.
+    # Fires on BLOCKED only: a deferral is retried by the next tick, and
+    # shouting about a transient outage teaches the operator to ignore the mail.
+    if strict and report.blocked:
         raise typer.Exit(code=1)
 
 

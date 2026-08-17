@@ -40,6 +40,18 @@ A session joins the trace by carrying two variables in its process environment:
 - `ANTHROPIC_CUSTOM_HEADERS` — carries `X-Agent-Name` (the studio identity) and
   `X-Pipeline-Id` (the Run key)
 
+Those two names are **reserved**. If a launch finds either already set it
+stands down and runs the session untraced rather than seize routing you own,
+with the reason on stderr. That is deliberate — but note where such a value can
+come from. `aisquare team bind <role> --env ANTHROPIC_BASE_URL=…` writes the
+binding into `config.toml`, so unlike a variable exported in one shell it
+survives every shell and applies to **every** launch of that role until it is
+unbound. One line of config can leave a seat permanently untraced, with a
+single dim line per launch as the only signal. Bind whatever else a seat needs
+— `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` are the per-seat idiom and do
+not touch tracing — and point sessions at a proxy with
+`aisquare explainability enable --proxy-url …` instead.
+
 An in-process agent — a Claude Code Task subagent, a Workflow step — is not a
 new process. It inherits that environment verbatim, byte for byte, because it
 *is* the same process. There is no point at which a different identity could be

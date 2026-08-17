@@ -539,12 +539,18 @@ INSTALL_HINT = 'pip install --upgrade "aisquare-cli[explainability]"'
 #: ...and what to say instead on an EDITABLE install, where that command does
 #: not merge the two packages, it SHADOWS ours: the SDK's real `aisquare/`
 #: package in site-packages wins wholesale and every command dies at import.
-#: Measured on BOTH editable shapes pip produces — the `.pth` line that appends
-#: the checkout's src/ to sys.path, and the import-hook form
-#: (`_editable_impl_*.py`, hatchling's `dev-mode-exact`) — and both are bricked
-#: identically, so this is a property of editable installs rather than of one
-#: packaging style. Also measured: reinstalling editable does NOT recover it,
-#: only uninstalling the SDK does, and a non-editable install is unaffected.
+#: The discriminator is whether the editable hook maps SUBMODULES or only the
+#: top level, and it was worth measuring rather than assuming. Every editable
+#: form leaves the top-level `aisquare` resolving to site-packages, because the
+#: hooks install after PathFinder; what differs is whether anything still
+#: answers for `aisquare.cli`. Measured on both shapes THIS project can produce
+#: — the default `.pth` path append, and hatchling's `dev-mode-exact`, whose
+#: `editables` redirector maps the top level ALONE — and both are bricked. A
+#: setuptools finder built from a per-submodule package-dir mapping keeps its
+#: submodules and survives (measured by coder3 on a synthetic package), so the
+#: warning is conservative for that shape rather than wrong. Also measured:
+#: reinstalling editable does NOT recover it, only uninstalling the SDK does,
+#: and a non-editable install is unaffected.
 #:
 #: This is the only moment the warning can be delivered. Once the extra is in,
 #: the CLI cannot start, so no check of ours will ever run to explain it.

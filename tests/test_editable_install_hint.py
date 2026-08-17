@@ -12,12 +12,14 @@ checkout — it SHADOWS it wholesale, and every command dies with:
 
     ModuleNotFoundError: No module named 'aisquare.cli'
 
-Measured on BOTH editable shapes pip produces — the `.pth` path line and the
-import-hook form (`_editable_impl_*.py`, hatchling's `dev-mode-exact`) — and
-both are bricked identically, so this is a property of editable installs rather
-than of one packaging style. Also measured: reinstalling editable does NOT
-recover it; only `pip uninstall aisquare` does; and a non-editable install with
-the extra is still fine.
+Measured on both shapes THIS project can produce — the default `.pth` path
+append and hatchling's `dev-mode-exact` — and both are bricked. The
+discriminator is whether the editable hook maps SUBMODULES or only the top
+level: every form loses the top-level `aisquare` to site-packages, and only a
+hook that also answers for `aisquare.cli` survives. Hatchling's redirector maps
+the top level alone, so it does not. Also measured: reinstalling editable does
+NOT recover it; only `pip uninstall aisquare` does; and a non-editable install
+with the extra is still fine.
 
 The CLI is dead at that point, so no doctor check can report it — the only
 useful moment is BEFORE, while we are still the ones printing the advice.
@@ -75,9 +77,13 @@ def test_detection_does_not_depend_on_the_editable_packaging_style() -> None:
 
     Verified against a real import-hook install (hatchling `dev-mode-exact`,
     which writes `_editable_impl_*.py` plus a `.pth` that imports it) as well as
-    the default `.pth` path form: both report editable, and both are shadowed by
-    the extra identically. Asking WHERE the package resolves from — rather than
-    HOW the install is wired — is what makes the detector indifferent to that.
+    the default `.pth` path form. Detection holds for both, and structurally so:
+    the whole point of an editable install is that ``__file__`` points at the
+    source, whichever mechanism gets you there. That is why the detector asks
+    WHERE the package resolves from rather than HOW the install is wired — the
+    one level that is indifferent to a difference which does matter elsewhere,
+    since those two shapes are bricked by the extra and a submodule-mapping
+    setuptools finder is not.
     """
     assert "site-packages" not in service._package_root()
     assert service.running_editable() is True

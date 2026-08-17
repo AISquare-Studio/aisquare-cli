@@ -18,6 +18,7 @@ too, so ``aisquare context list`` was mangling remembered text, and every
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import re
@@ -178,6 +179,38 @@ def test_json_mode_is_untouched(runner: CliRunner) -> None:
     assert json.loads(result.output)["initialized"] in (True, False)
 
 
+def _console_constructions(tree: ast.AST) -> list[int]:
+    """Line numbers of bare ``Console(...)`` calls in one parsed module."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Console"
+    ]
+
+
+def test_the_console_matcher_recognises_a_rogue_console() -> None:
+    """A positive control, because a FLOOR cannot catch a blind PREDICATE.
+
+    Last cycle both AST sweeps in this file gained a yield floor, which catches
+    "walked nothing". It does not catch "walked everything and recognised
+    nothing" — measured: changing the matcher's `Console` to `ConsoleXX` leaves
+    all 63 modules walked, so the floor is satisfied, and the suite reports
+    12 passed. The offender list is empty for the same reason it is empty on a
+    clean tree.
+
+    So the matcher is fed a construction it MUST flag. Same code path as the
+    sweep, two inputs — which is the shape `_style_tags` already uses below and
+    the one `test_spawn_seams` uses for its visitor.
+    """
+    rogue = ast.parse("from rich.console import Console\nc = Console(width=80)\n")
+    clean = ast.parse("from aisquare.core.console import stdout_console\nc = stdout_console()\n")
+
+    assert _console_constructions(rogue) == [2], "the matcher no longer sees a bare Console(...)"
+    assert _console_constructions(clean) == [], "the matcher fires on the sanctioned factory"
+
+
 def test_no_module_builds_its_own_console() -> None:
     """The safe default only holds while the factories are the only way in.
 
@@ -186,8 +219,6 @@ def test_no_module_builds_its_own_console() -> None:
     "Console" appears in prose throughout this package, and a guard that fires
     on a docstring is a guard people learn to silence.
     """
-    import ast
-
     package = Path(__file__).resolve().parents[1] / "src" / "aisquare"
     factory = package / "core" / "console.py"
     offenders: list[str] = []
@@ -198,11 +229,7 @@ def test_no_module_builds_its_own_console() -> None:
         visited.add(module.relative_to(package).as_posix())
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
         offenders += [
-            f"{module.relative_to(package)}:{node.lineno}"
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "Console"
+            f"{module.relative_to(package)}:{line}" for line in _console_constructions(tree)
         ]
 
     # An AST walk that visits nothing collects no offenders, so `assert not
@@ -273,6 +300,56 @@ def test_the_detector_tells_styling_apart_from_data() -> None:
         assert not _style_tags(data), data
 
 
+def _tagged_render_calls(tree: ast.AST) -> tuple[list[tuple[int, list[str]]], int]:
+    """(render calls carrying style tags, render calls inspected) for one module."""
+    tagged: list[tuple[int, list[str]]] = []
+    inspected = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in {"print", "add_row", "add_column"}:
+            continue
+        inspected += 1
+        literals: list[str] = []
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                literals.append(arg.value)
+            elif isinstance(arg, ast.JoinedStr):
+                literals += [
+                    value.value
+                    for value in arg.values
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                ]
+        for literal in literals:
+            tags = _style_tags(literal)
+            if tags:
+                tagged.append((node.lineno, tags))
+    return tagged, inspected
+
+
+def test_the_render_matcher_recognises_a_tag_in_a_print() -> None:
+    """Positive control for the other matcher, same reason as the one above.
+
+    The floor asserts 144 render calls were inspected; it says nothing about
+    whether inspecting them means anything. This feeds the matcher a print it
+    MUST flag and one it must not, including the f-string form, because the two
+    sites that actually recurred in cli/launch.py were f-strings.
+    """
+    bad = ast.parse('console.print("[dim]hint[/dim]")\n')
+    bad_fstring = ast.parse('console.print(f"as [bold]{role}[/bold]")\n')
+    good = ast.parse('console.print("path is /home/me/[archive]", style="dim")\n')
+
+    tagged, inspected = _tagged_render_calls(bad)
+    assert inspected == 1 and tagged, "the matcher no longer sees a tag in a print"
+
+    tagged_f, _ = _tagged_render_calls(bad_fstring)
+    assert tagged_f, "the matcher no longer reads f-string literals"
+
+    tagged_ok, inspected_ok = _tagged_render_calls(good)
+    assert inspected_ok == 1, "the control's own call was not inspected"
+    assert not tagged_ok, "bracketed DATA must not be flagged — that is the whole distinction"
+
+
 def test_no_print_argument_carries_a_style_tag() -> None:
     """The other half of the class, and the half that actually recurred.
 
@@ -289,33 +366,25 @@ def test_no_print_argument_carries_a_style_tag() -> None:
     of which render identically whether markup is on or off, and therefore
     survive any fold order.
     """
-    import ast
-
     package = Path(__file__).resolve().parents[1] / "src" / "aisquare"
     offenders: list[str] = []
     inspected = 0
     for module in sorted(package.rglob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr not in {"print", "add_row", "add_column"}:
-                continue
-            inspected += 1
-            literals: list[str] = []
-            for arg in node.args:
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    literals.append(arg.value)
-                elif isinstance(arg, ast.JoinedStr):
-                    literals += [
-                        value.value
-                        for value in arg.values
-                        if isinstance(value, ast.Constant) and isinstance(value.value, str)
-                    ]
-            for literal in literals:
-                tags = _style_tags(literal)
-                if tags:
-                    offenders.append(f"{module.relative_to(package)}:{node.lineno} {tags}")
+        tagged, seen = _tagged_render_calls(tree)
+        inspected += seen
+        offenders += [f"{module.relative_to(package)}:{line} {tags}" for line, tags in tagged]
+
+    # The sibling guard above got this assertion last cycle and this one did not,
+    # which is the same half-a-sweep the shift keeps catching. Measured on this
+    # very walk: 144 render calls inspected healthy, 0 when the package path is
+    # wrong, and `assert not offenders` passed BOTH times. `_style_tags` proves
+    # its own yield through a positive control, but nothing proved the AST walk
+    # that feeds it visited anything.
+    assert inspected >= 80, (
+        f"only {inspected} render calls inspected under {package} — this sweep "
+        "proves nothing about print sites it never reached"
+    )
 
     # The sibling guard above got this assertion last cycle and this one did not,
     # which is the same half-a-sweep the shift keeps catching. Measured on this

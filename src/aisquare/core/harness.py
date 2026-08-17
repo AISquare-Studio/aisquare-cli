@@ -386,6 +386,8 @@ def probe_model(alias: str) -> ProbeResult:
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=PROBE_TIMEOUT_SECONDS,
             check=False,
             stdin=subprocess.DEVNULL,

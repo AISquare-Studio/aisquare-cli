@@ -429,6 +429,32 @@ def test_probe_child_keeps_a_relocated_home(monkeypatch: pytest.MonkeyPatch) -> 
     assert "AISQUARE_HOME" in env  # a relocated tree stays relocated
 
 
+def test_probe_output_is_decoded_as_utf8_not_the_locale_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe reads the agent's reply as UTF-8, whatever the locale is.
+
+    ``subprocess`` with ``text=True`` and no explicit encoding decodes using
+    the locale codec — the ANSI codepage (cp1252) on Windows. The agent speaks
+    UTF-8, so a single non-ASCII byte in its reply raised UnicodeDecodeError
+    out of ``subprocess.run``. That is a ``ValueError``, not an ``OSError``, so
+    it sailed past the ``(OSError, TimeoutExpired)`` guard below and crashed
+    the probe outright instead of demoting to an inconclusive result.
+    """
+    seen: dict[str, object] = {}
+
+    def _capture(argv: list[str], **kwargs: object) -> _Completed:
+        seen["kwargs"] = kwargs
+        return _Completed(0, json.dumps({"modelUsage": {"claude-fable-5": {}}}))
+
+    monkeypatch.setattr("aisquare.core.harness.subprocess.run", _capture)
+    harness.probe_model("fable")
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
+
+
 def test_inconclusive_probes_are_never_cached(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

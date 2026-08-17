@@ -183,3 +183,82 @@ def test_a_plain_file_config_is_unchanged_by_all_of_this(tmp_path: Path) -> None
     assert not target.is_symlink()
     assert load_config(target).explainability.gateway_url == CHANGED
     assert sorted(p.name for p in tmp_path.iterdir()) == ["config.toml"], "temp file left behind"
+
+
+def test_a_first_write_still_creates_a_missing_aisquare_home(tmp_path: Path) -> None:
+    """THE regression that matters most, pinned before anything else.
+
+    ``mkdir(parents=True)`` is load-bearing for the first write a machine ever
+    does. Restricting directory creation must not touch the path that has
+    nothing to do with symlinks.
+    """
+    target = tmp_path / "never" / "existed" / "config.toml"
+
+    save_config(AppConfig(), target)
+
+    assert load_config(target).profile == "default"
+
+
+def test_a_link_into_an_existing_directory_still_writes_there(tmp_path: Path) -> None:
+    """The "cloned my dotfiles, config not written yet" case.
+
+    The directory is there and only the FILE is missing, which is the ordinary
+    state after a fresh clone. Nothing is invented: the file lands where the
+    link says and no directory is created.
+    """
+    home = tmp_path / "home"
+    dotfiles = tmp_path / "dotfiles"
+    home.mkdir()
+    dotfiles.mkdir()
+    link = home / "config.toml"
+    link.symlink_to(dotfiles / "config.toml")
+    before = {path for path in tmp_path.rglob("*")}
+
+    save_config(_changed(), link)
+
+    assert link.is_symlink()
+    assert CHANGED in (dotfiles / "config.toml").read_text(encoding="utf-8")
+    created = {path for path in tmp_path.rglob("*")} - before
+    assert all(path.is_file() for path in created), f"a directory was invented: {created}"
+
+
+def test_a_link_into_a_missing_directory_refuses_to_invent_it(tmp_path: Path) -> None:
+    """The decision: follow the link, do not materialise what it points at.
+
+    Against the current behaviour this FAILS — the whole tree is created, exit 0.
+    A broken link pointing at a mounted Windows drive would have the CLI create
+    directories there, silently, from a command that named none of it. Following
+    a link honours stated intent; materialising a tree the user never created
+    invents it.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    missing = tmp_path / "not" / "cloned" / "yet"
+    link = home / "config.toml"
+    link.symlink_to(missing / "config.toml")
+
+    with pytest.raises(OSError) as caught:
+        save_config(_changed(), link)
+
+    assert not missing.exists(), "the directory tree was created anyway"
+    assert not (tmp_path / "not").exists(), "a partial tree was left behind"
+    assert link.is_symlink(), "the failed write severed the link"
+
+    message = str(caught.value)
+    assert str(missing) in message, f"the missing directory is not named: {message}"
+    assert "symlink" in message, "nothing explains why another path is involved"
+    assert caught.value.errno is not None, "errno was dropped"
+
+
+def test_the_refusal_says_what_to_do_about_it(tmp_path: Path) -> None:
+    """A refusal that does not name the remedy just relocates the confusion."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").symlink_to(tmp_path / "gone" / "config.toml")
+
+    with pytest.raises(OSError) as caught:
+        save_config(_changed(), home / "config.toml")
+
+    message = str(caught.value).lower()
+    assert "clone" in message or "create" in message, "no remedy offered"
+    assert "link" in message, "the user is not told the link is an option to change"

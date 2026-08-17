@@ -201,7 +201,16 @@ def _config_file_kind() -> str:
     config = paths.config_path()
     try:
         if config.is_symlink():
-            return f"symlink -> {os.path.realpath(config)}"
+            destination = os.path.realpath(config)
+            if not os.path.exists(destination):
+                # A dangling link is the one shape that makes a write reach
+                # outside anything the operator named: save_config follows the
+                # link and CREATES the missing directories at the target —
+                # measured at four levels deep, and on a mounted Windows drive
+                # if that is where the link points. Saying so before the write
+                # is the whole value of this line.
+                return f"symlink -> {destination} (TARGET MISSING)"
+            return f"symlink -> {destination}"
         if config.is_file():
             return "regular file"
         return "not created yet"

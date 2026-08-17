@@ -191,9 +191,11 @@ def test_no_module_builds_its_own_console() -> None:
     package = Path(__file__).resolve().parents[1] / "src" / "aisquare"
     factory = package / "core" / "console.py"
     offenders: list[str] = []
+    visited: set[str] = set()
     for module in sorted(package.rglob("*.py")):
         if module == factory:
             continue
+        visited.add(module.relative_to(package).as_posix())
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
         offenders += [
             f"{module.relative_to(package)}:{node.lineno}"
@@ -202,6 +204,20 @@ def test_no_module_builds_its_own_console() -> None:
             and isinstance(node.func, ast.Name)
             and node.func.id == "Console"
         ]
+
+    # An AST walk that visits nothing collects no offenders, so `assert not
+    # offenders` passes identically whether the package is clean or the glob is
+    # pointed at a directory that does not exist. Measured on this very sweep:
+    # visited=63 offenders=0 healthy, visited=0 offenders=0 blinded, test green
+    # both times. A guard that certifies a blind checker is worse than no guard,
+    # so the yield is asserted before the finding is trusted. Landmarks as well
+    # as a floor, because a count alone accepts the wrong tree.
+    assert len(visited) >= 40, (
+        f"only {len(visited)} modules walked under {package} — this sweep proves "
+        "nothing about a package it did not read"
+    )
+    for landmark in ("cli/app.py", "cli/common.py"):
+        assert landmark in visited, f"{landmark} was not walked; {package} may have moved"
 
     assert not offenders, (
         f"Console built outside core/console.py at {offenders} — it inherits Rich's "

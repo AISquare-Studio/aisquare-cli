@@ -36,11 +36,28 @@ something is.
    nothing looks wrong afterwards.
    The cutover itself cannot be half-done this way — `explainability enable`
    does not exist on the stale build and exits 2 — so the danger is entirely
-   *after* you configure. Step 1 closes the whole class, and that half is
-   measured too rather than assumed: at the train head, `config set` on an
-   unrelated key preserved all five top-level `[explainability]` keys **and**
-   the `[explainability.targets]` table (with a control confirming the write
-   actually landed — the first run of that check silently wrote nothing).
+   *after* you configure.
+
+   **Step 1 does NOT close the whole class, and an earlier version of this file
+   said it did.** Measured command by command at the train head, because
+   generalising from one of the three was exactly the mistake:
+
+   - `config set` on an unrelated key — **safe**. All five top-level
+     `[explainability]` keys and the `[explainability.targets]` table survive.
+   - `init --reinit` — **destroys it, at head, not just on a stale build.**
+     `enabled` goes `true` → `false`, a top-level key is dropped, and the
+     **whole `[explainability.targets]` table disappears**. Exit **0**, no
+     warning. It calls `save_config(AppConfig())` unconditionally, and a fresh
+     default config is not a merge. Preserving *unknown* keys — which we do —
+     cannot help here, because these are *known* keys being written at their
+     defaults.
+   - `team bind` — **unmeasured at head.** Two attempts failed before writing
+     anything (a usage error, then exit 1), and "the config was unchanged"
+     after a command that never wrote is not evidence. Treat it as unknown.
+
+   So after you configure explainability: **do not run `init --reinit`**. If you
+   must, re-run §1/§2 afterwards and verify with §5b's `jq -r
+   .shipping.gateway`, because nothing will tell you the targets table is gone.
    Two tells that need no comparison: `doctor` reports where the running build
    came from, and a build that prints **no** provenance line predates that check
    and is therefore older than this train.

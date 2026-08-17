@@ -99,7 +99,19 @@ DOCUMENTED = (
     "README.md",
     "docs/explainability-tracing-boundary.md",
     "docs/runbooks/explainability-prod-cutover.md",
+    # Found by widening the staleness sweep past root-plus-`docs/`. The template
+    # asks a reporter to run `aisquare doctor` and paste the output, so by this
+    # guard's own rule — commands meant to be RUN get the document listed — it
+    # belongs here. Trivially stable today; listed because the resolution rule
+    # is the rule, not because this command is likely to drift.
+    ".github/ISSUE_TEMPLATE/bug_report.md",
 )
+
+#: Directories the staleness sweep never enters. Everything else under the repo
+#: is swept, because "which directories hold documentation" is precisely the
+#: judgement that was wrong before: `.github/ISSUE_TEMPLATE` holds a page that
+#: asks a user to run a command and sat outside a root-plus-docs sweep.
+_SWEEP_EXCLUDES = frozenset({".venv", ".git", "node_modules", "site-packages", "build", "dist"})
 
 FENCE = re.compile(r"^\s*(?:>\s*)*```+\s*([A-Za-z0-9_-]*)\s*$")
 SHELL_LANGUAGES = {"", "sh", "bash", "shell", "console", "zsh"}
@@ -461,24 +473,20 @@ def test_the_guard_bites_at_the_end_of_every_document() -> None:
 def test_the_document_list_has_not_gone_stale() -> None:
     """A new .md full of commands must not silently escape this guard.
 
-    Repo-root pages are swept as well as `docs/`, because that is where the
-    coverage edge actually sits: CONTRIBUTING.md now carries a command in its
-    text, and until this sweep reached the root, a root page that gained a
-    fenced command would simply have been unguarded with nothing saying so.
-    Measured at 22cf599 — of CHANGELOG, CODE_OF_CONDUCT, CONTRIBUTING, README
-    and SECURITY, only README has fenced commands (55), so widening the sweep
-    pulls in nothing today. It is a detector for tomorrow, not a change of scope.
+    THE WHOLE REPOSITORY IS SWEPT, not a guessed list of documentation
+    directories. Root-plus-`docs/` was that guess and it was wrong:
+    `.github/ISSUE_TEMPLATE/bug_report.md` asks a user to run `aisquare doctor`
+    and sat outside it, so the mechanism whose only job is "a new .md must not
+    silently escape" could not see a whole directory.
+
+    IT ALSO ASKS THE EXTRACTOR RATHER THAN REIMPLEMENTING IT. This used to match
+    `^aisquare` itself — the rule from before absolute paths, `exec`, sequencers
+    and blockquoted fences were handled — so a page whose commands all looked
+    like `exec /usr/local/bin/aisquare …` read as containing none, and would
+    have escaped while the detector reported everything covered. Two copies of
+    one rule, and the copy went stale; there is one now.
     """
-    unlisted: list[str] = []
-    for path in [*sorted(REPO.glob("*.md")), *sorted((REPO / "docs").rglob("*.md"))]:
-        relative = path.relative_to(REPO).as_posix()
-        if relative in DOCUMENTED:
-            continue
-        if any(
-            re.match(r"^aisquare(\s|$)", text)
-            for _number, text in _shell_lines(path.read_text(encoding="utf-8"))
-        ):
-            unlisted.append(relative)
+    unlisted = _staleness_sweep(REPO)
     assert not unlisted, (
         f"these documents show commands in a fenced block but are not covered by "
         f"this guard: {unlisted}.\n"
@@ -710,6 +718,7 @@ _NOT_AN_INVOCATION = (
 #: Resolved / classified counts measured per document, so a collapse in either
 #: number is visible instead of averaging out across the three.
 CENSUS = {
+    ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "README.md": (55, 5),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (12, 28),
@@ -988,4 +997,65 @@ def test_a_real_path_is_still_read_as_a_path() -> None:
     )
     assert any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION), (
         "the path stopped being classified, so it would now fail the census"
+    )
+
+
+def _staleness_sweep(root: Path) -> list[str]:
+    """The documents the staleness detector would flag under `root`."""
+    unlisted: list[str] = []
+    for path in sorted(root.rglob("*.md")):
+        if any(part in _SWEEP_EXCLUDES for part in path.parts):
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative in DOCUMENTED:
+            continue
+        if _from_text(relative, path.read_text(encoding="utf-8")):
+            unlisted.append(relative)
+    return unlisted
+
+
+def test_the_staleness_detector_sweeps_where_documents_actually_live(tmp_path: Path) -> None:
+    """The detector that catches an unguarded page had a smaller universe than
+    the guard it protects.
+
+    It swept the repo root and `docs/` only. `.github/ISSUE_TEMPLATE/` holds a
+    page that asks a user to run a command, and it sat outside the sweep — so
+    the mechanism whose entire job is "a new .md must not silently escape"
+    could not see a whole directory. Same shape as the census blind spot
+    @dfd9a883 ruled on, one level further out: there the SKIPS were invisible,
+    here a DIRECTORY was.
+    """
+    (tmp_path / ".github" / "ISSUE_TEMPLATE").mkdir(parents=True)
+    (tmp_path / ".github" / "ISSUE_TEMPLATE" / "bug.md").write_text(
+        "Run this and paste it:\n\n```sh\naisquare doctor\n```\n", encoding="utf-8"
+    )
+
+    assert ".github/ISSUE_TEMPLATE/bug.md" in _staleness_sweep(tmp_path), (
+        "a page under .github showing a command is invisible to the detector"
+    )
+
+
+def test_the_staleness_detector_uses_the_same_rule_as_the_extractor(tmp_path: Path) -> None:
+    """It had its own copy of the extraction rule, and the copy went stale.
+
+    The detector asked `^aisquare` of each fenced line — the rule this file used
+    BEFORE absolute paths, `exec`, sequencers and blockquoted fences were
+    handled. So a new page whose commands are all
+    `exec /usr/local/bin/aisquare …` — the shape of the cron wrapper §5b now
+    ships — would have been reported as containing no commands at all, and
+    escaped coverage while the detector said everything was listed.
+
+    Two implementations of one rule is the defect; the fix is that there is now
+    one, and this test fails if a second ever appears.
+    """
+    page = tmp_path / "docs" / "timers.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "> ```bash\n> exec /usr/local/bin/aisquare explainability ship --strict\n> ```\n",
+        encoding="utf-8",
+    )
+
+    assert "docs/timers.md" in _staleness_sweep(tmp_path), (
+        "a page whose only commands use an absolute path inside a blockquoted "
+        "fence is invisible to the detector, though the extractor reads both"
     )

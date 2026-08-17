@@ -293,6 +293,7 @@ def test_no_print_argument_carries_a_style_tag() -> None:
 
     package = Path(__file__).resolve().parents[1] / "src" / "aisquare"
     offenders: list[str] = []
+    inspected = 0
     for module in sorted(package.rglob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
         for node in ast.walk(tree):
@@ -300,6 +301,7 @@ def test_no_print_argument_carries_a_style_tag() -> None:
                 continue
             if node.func.attr not in {"print", "add_row", "add_column"}:
                 continue
+            inspected += 1
             literals: list[str] = []
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
@@ -314,6 +316,17 @@ def test_no_print_argument_carries_a_style_tag() -> None:
                 tags = _style_tags(literal)
                 if tags:
                     offenders.append(f"{module.relative_to(package)}:{node.lineno} {tags}")
+
+    # The sibling guard above got this assertion last cycle and this one did not,
+    # which is the same half-a-sweep the shift keeps catching. Measured on this
+    # very walk: 144 render calls inspected healthy, 0 when the package path is
+    # wrong, and `assert not offenders` passed BOTH times. `_style_tags` proves
+    # its own yield through a positive control, but nothing proved the AST walk
+    # that feeds it visited anything.
+    assert inspected >= 80, (
+        f"only {inspected} render calls inspected under {package} — this sweep "
+        "proves nothing about print sites it never reached"
+    )
 
     assert not offenders, (
         f"style tags written into a render call at {offenders} — the consoles do not "

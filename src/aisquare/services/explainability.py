@@ -35,6 +35,17 @@ Append-only and never read by the launcher, so it cannot slow a launch down or
 grow into shared state; ``joined: false`` rows are kept deliberately, because
 "this Run has no board row and here is why" is the fact an operator needs.
 
+THE BOUNDARY. Because both variables live in the PROCESS environment, the unit
+of attribution is the process — a Run is a process, not an agent. An in-process
+agent (a Claude Code Task subagent, a Workflow step) inherits that environment
+verbatim because it *is* the same process, so it cannot carry a different
+identity and the proxy correctly records one Run. Per-role and per-session
+numbers are real; per-subagent numbers do not exist, and a query that appears
+to return one is reading root-level spans and attributing them to whichever
+subagent the reader assumed. Whoever designs an experiment on this data needs
+that before they design it, so it is written for them in
+``docs/explainability-tracing-boundary.md`` rather than only here.
+
 Everything here fails open by design. Tracing is an observer — the moment it
 would break a launch (proxy down, wrong proxy mode, an ANTHROPIC_* var the
 user already owns, a config typo, an unwritable join log) we launch the

@@ -92,6 +92,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     exists to support.
   - The `init` consent line now names the level, so whoever says yes learns
     what leaves the machine.
+- **The tracing boundary, written down before anyone measures against it**
+  (`docs/explainability-tracing-boundary.md`). A Run is a **process**, not an
+  agent: identity rides in process-level environment (`ANTHROPIC_BASE_URL` +
+  `ANTHROPIC_CUSTOM_HEADERS`), so an in-process Claude Code Task subagent or
+  Workflow step inherits the parent's identity verbatim and cannot carry its
+  own. Per-role and per-session numbers are real and verified against staging;
+  per-subagent numbers **do not exist**, and a query that appears to return one
+  is reading root-level spans and attributing them to whichever subagent the
+  reader assumed — a plausible number rather than an error, which is why this
+  is a data-correctness note and not a docs nicety. Task fan-out is countable
+  (`Tool:Agent` spans); a Workflow's is not recoverable at all. Separation
+  needs a separate **process**, which is exactly what `aisquare launch` and
+  `aisquare team spawn` give you. A test pins the page's mechanical claim
+  against the code, so it cannot rot quietly.
 
 ### Fixed
 - **Model probes, gbrain and the detached distiller inherited the launching

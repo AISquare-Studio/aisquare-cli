@@ -11,6 +11,7 @@ verdict, not a unit test's.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from dataclasses import dataclass, field
@@ -490,3 +491,93 @@ def test_fake_sdk_module_shape_matches_what_the_service_calls() -> None:
         "flush",
     ):
         assert hasattr(module, name)
+
+
+# --- the two lanes converge on ONE Run, even when the launch could not be joined ---
+
+
+def test_the_run_key_env_var_matches_the_launcher() -> None:
+    """core.insights duplicates the name to stay off the heavy import path."""
+    assert insights.RUN_KEY_ENV_VAR == service.SESSION_ID_ENV_VAR
+
+
+def test_insights_captured_inside_a_traced_session_key_on_its_pipeline_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launcher already decided which Run this process lives in; agree.
+
+    On an unjoinable launch (wrapper binary, --resume, --continue) the pipeline
+    id is NOT the board session id. Keying on the board id there would file our
+    prompts in a second Run while the model traffic went to the first.
+    """
+    _configure()
+    monkeypatch.setenv(insights.RUN_KEY_ENV_VAR, "minted-pipeline-id")
+
+    insights.record_prompt("inside a traced session", session_id="board-session-id")
+
+    record = json.loads(outbox.pending()[0].read_text(encoding="utf-8"))
+    assert record["run_key"] == "minted-pipeline-id"
+    assert record["session_id"] == "board-session-id", (
+        "the board id must still travel — it is how the span joins back to the row"
+    )
+
+
+def test_an_unjoined_session_ships_into_the_proxys_run(
+    sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure()
+    monkeypatch.setenv(insights.RUN_KEY_ENV_VAR, "minted-pipeline-id")
+    insights.record_prompt("p", session_id="board-session-id")
+    monkeypatch.delenv(insights.RUN_KEY_ENV_VAR)
+
+    service.ship_once()
+
+    assert sdk.runs[0].run_id == "minted-pipeline-id"
+
+
+def test_identity_still_comes_from_the_board_role_when_the_keys_differ(
+    sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A role lookup by pipeline id would miss and mis-file a planner's Run."""
+    _configure()
+    with store_session() as store:
+        project = active_project(store)
+        now = datetime.now(tz=UTC)
+        store.upsert_session(
+            TeamSession(
+                id="board-planner",
+                project_id=project.id,
+                role="planner",
+                started_at=now,
+                last_seen_at=now,
+            )
+        )
+    monkeypatch.setenv(insights.RUN_KEY_ENV_VAR, "minted-pipeline-id")
+    insights.record_prompt("p", session_id="board-planner")
+    monkeypatch.delenv(insights.RUN_KEY_ENV_VAR)
+
+    service.ship_once()
+
+    assert sdk.runs[0].run_id == "minted-pipeline-id"
+    assert sdk.runs[0].agent_name == "aisquare-planner"
+
+
+def test_outside_a_traced_session_the_board_id_is_still_the_run_key(sdk: FakeSDK) -> None:
+    _configure()
+    insights.record_prompt("p", session_id="board-only")
+
+    service.ship_once()
+
+    assert sdk.runs[0].run_id == "board-only"
+
+
+def test_a_spool_from_an_older_cli_still_ships(sdk: FakeSDK) -> None:
+    """An upgrade mid-shift must not orphan whatever was already buffered."""
+    _configure()
+    outbox.enqueue({"v": 1, "kind": "prompt", "session_id": "old-session", "text": "t"})
+
+    report = service.ship_once()
+
+    assert report.sent == 1
+    assert report.dead == 0
+    assert sdk.runs[0].run_id == "old-session"

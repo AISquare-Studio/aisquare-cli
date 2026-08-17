@@ -23,6 +23,7 @@ only the outbound copy is scrubbed.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from functools import lru_cache
 
@@ -33,7 +34,26 @@ from aisquare.models import RedactionLevel
 
 #: Records carry a schema version so a sweeper from a different release can
 #: recognise a spool it does not understand instead of mis-shipping it.
-RECORD_VERSION = 1
+RECORD_VERSION = 2
+
+#: The Run this process's model traffic is already going to, exported by the
+#: launcher alongside the proxy headers. It is the ``X-Pipeline-Id`` the proxy
+#: sends, so keying our spans on it is what puts the two lanes in ONE Run.
+#:
+#: Usually it equals the board session id and the distinction is invisible. It
+#: does not when the launch could not be joined — a wrapper binary, ``--resume``,
+#: ``--continue`` — where the launcher mints a pipeline id it cannot pin to the
+#: agent's own session id. Keying on the board id there would file our insights
+#: in a Run of their own while the model traffic went somewhere else: two Runs
+#: for one session, which is the fragmentation the doctrine forbids. The board
+#: ids still travel inside each record, so a span joins back to its row either
+#: way.
+#:
+#: The name is duplicated from ``services.explainability.SESSION_ID_ENV_VAR``
+#: rather than imported: that module pulls urllib and the store, and this one
+#: runs on the primary path. ``test_the_run_key_env_var_matches_the_launcher``
+#: fails if the two ever drift.
+RUN_KEY_ENV_VAR = "AISQUARE_SESSION_ID"
 
 #: Longest text we spool per record. A pasted stack trace or a whole file in a
 #: prompt is not an insight, it is a payload — and the gateway charges for it.
@@ -75,6 +95,18 @@ def shipping_enabled() -> bool:
 def reset_cache() -> None:
     """Forget the cached settings (tests, and ``init`` right after it writes)."""
     _config.cache_clear()
+
+
+def run_key(session_id: str | None) -> str | None:
+    """The Run these insights belong in — the launcher's answer, then ours.
+
+    Read from the ambient environment rather than passed in, because the
+    processes that capture (a hook fire, an ``aisquare note``) are children of
+    the traced session and inherit its wiring. Whoever launched them already
+    decided which Run their model traffic joins; agreeing with that decision is
+    the whole job. See :data:`RUN_KEY_ENV_VAR`.
+    """
+    return os.environ.get(RUN_KEY_ENV_VAR, "").strip() or session_id
 
 
 def record_prompt(
@@ -150,7 +182,10 @@ def _spool(
             "v": RECORD_VERSION,
             "kind": kind,
             "at": datetime.now(tz=UTC).isoformat(),
+            # _outbound clips AND scrubs; the fix that added run_key predates
+            # redaction landing, so this is both halves, not a choice between.
             "text": _outbound(text),
+            "run_key": run_key(session_id),
             "event_id": event_id,
             "session_id": session_id,
             "project_id": project_id,

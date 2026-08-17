@@ -580,20 +580,24 @@ def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> Shi
     dead = 0
     runs: list[str] = []
     for run_key, paths_for_run in _group_by_session(batch).items():
-        agent_name = _agent_name_for(settings, run_key)
         claimed: list[tuple[Path, dict[str, object]]] = []
         for path in paths_for_run:
             handle = outbox.claim(path)
             if handle is None:  # another sweeper got there first
                 continue
             record = outbox.load(handle)
-            if record is None or record.get("v") != insights.RECORD_VERSION:
+            if record is None or record.get("v") not in _READABLE_RECORD_VERSIONS:
                 outbox.mark_dead(handle, "unreadable or unsupported record")
                 dead += 1
                 continue
             claimed.append((handle, record))
         if not claimed:
             continue
+        # Identity comes from the BOARD session, not from the run key: on a
+        # launch that could not be joined those differ, and a role looked up by
+        # pipeline id would miss and file a planner's Run under the generic
+        # identity. The board id travels in the record for exactly this.
+        agent_name = _agent_name_for(settings, _board_session_of(claimed))
         try:
             with sdk.AgentRunTracer(agent_name=agent_name, run_id=run_key) as run:
                 run.set_input(f"aisquare-cli session {run_key}")
@@ -644,12 +648,18 @@ def _emit_span(sdk: Any, record: dict[str, object]) -> None:
 
 
 def _group_by_session(batch: list[Path]) -> dict[str, list[Path]]:
-    """Bucket spooled records by the Run they belong to, order preserved."""
+    """Bucket spooled records by the Run they belong to, order preserved.
+
+    ``run_key`` is the pipeline id the capturing process was already living
+    under and is the Run's identity; the board ``session_id`` is the fallback
+    for records captured outside a traced session, and for spool files written
+    by an older CLI that predates the key.
+    """
     grouped: dict[str, list[Path]] = {}
     for path in batch:
-        record = outbox.load(path)
-        run_key = str((record or {}).get("session_id") or "") or UNATTRIBUTED_RUN
-        grouped.setdefault(run_key, []).append(path)
+        record = outbox.load(path) or {}
+        key = str(record.get("run_key") or record.get("session_id") or "") or UNATTRIBUTED_RUN
+        grouped.setdefault(key, []).append(path)
     return grouped
 
 
@@ -658,8 +668,23 @@ def _group_by_session(batch: list[Path]) -> dict[str, list[Path]]:
 #: Runs is exactly the fragmentation the run doctrine forbids.
 UNATTRIBUTED_RUN = "aisquare-cli-unattributed"
 
+#: Spool schemas this sweeper can replay. A record from a NEWER CLI is
+#: dead-lettered rather than guessed at — shipping a span whose fields you have
+#: mis-read is worse than not shipping it, because it looks delivered. Older
+#: schemas stay readable: an upgrade mid-shift must not orphan a full queue.
+_READABLE_RECORD_VERSIONS = frozenset(range(1, insights.RECORD_VERSION + 1))
 
-def _agent_name_for(settings: ExplainabilitySettings, run_key: str) -> str:
+
+def _board_session_of(claimed: list[tuple[Path, dict[str, object]]]) -> str:
+    """The board session id these records came from, or the unattributed bucket."""
+    for _, record in claimed:
+        session_id = str(record.get("session_id") or "")
+        if session_id:
+            return session_id
+    return UNATTRIBUTED_RUN
+
+
+def _agent_name_for(settings: ExplainabilitySettings, session_id: str) -> str:
     """The registered identity this Run is attributed to.
 
     Resolved from the session's board role, so a planner's Run is not a coder's
@@ -668,10 +693,10 @@ def _agent_name_for(settings: ExplainabilitySettings, run_key: str) -> str:
     primary path, which is the entire reason it exists.
     """
     role = "cli"
-    if run_key != UNATTRIBUTED_RUN:
+    if session_id != UNATTRIBUTED_RUN:
         try:
             with store_session() as store:
-                session = store.get_session(run_key)
+                session = store.get_session(session_id)
             if session is not None and session.role:
                 role = session.role
         except Exception:  # an unknown role still ships, as "cli"

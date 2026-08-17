@@ -475,7 +475,7 @@ session = one Run only if every seam passes it.
 
 ---
 
-## 5b. Deliver the CLI's own insights (2 min)
+## 5b. Deliver the CLI's own insights — **once to set up, then forever** (2 min)
 
 Model traffic flows through the proxy on its own. The CLI's **insights** —
 prompts, notes, task events — do not: they **spool to disk** on the primary
@@ -483,9 +483,40 @@ path and leave only when you drain them. Skip this and half the integration is
 silent while everything looks healthy.
 
 ```bash
-aisquare init --explainability      # turn capture on (once)
-aisquare explainability ship        # drain the spool
+aisquare init --explainability      # turn capture on — ONCE
+aisquare explainability ship        # drain the spool — RECURRING, see below
 ```
+
+> ⚠️ **`ship` is a recurring obligation, not a cutover step.** This is the one
+> instruction in this document whose tense matters. Nothing drains the spool
+> automatically — the only caller of the shipping path anywhere in the CLI is
+> this command, deliberately, because the primary path is not allowed to do
+> network I/O. So an operator who runs the cutover exactly as written ships the
+> insights captured before 08:05 **and then never again**: every prompt, note
+> and task event after that sits on disk while the proxy lane keeps working
+> perfectly. Model traffic flows, `status` is green, Runs appear — and clause
+> two of the north star is true only of the first few minutes.
+>
+> **Run it on a timer** (cron every few minutes is enough) or at the end of
+> every session. Then watch the drift:
+>
+> ```bash
+> aisquare --json explainability status | jq -r '.shipping, .spool'
+> ```
+>
+> **[verified-train]** `status` shows `on → <gateway> — N buffered` when there
+> is a backlog and `nothing buffered` when there is not, so a growing N is the
+> signal that draining has stopped. That counter is the saving grace: the
+> failure is invisible in every other surface but obvious here.
+>
+> Two details that bite a scripted drain:
+> - `--limit` defaults to **500** records per pass. A backlog larger than that
+>   needs repeated runs, or one run with a bigger `--limit` — a single
+>   `ship` is not automatically "catch up".
+> - `ship` exits non-zero **only when records were dead-lettered**. A deferral
+>   is the design working, not a failure, so do not alarm on a delay — and
+>   equally, **exit 0 does not mean the spool is empty**. Read the counter, not
+>   the exit code.
 
 **[verified-train]** Run by me with capture off, verbatim: `shipping is not
 configured — nothing to do`, exit 0 — it declines cleanly rather than
@@ -653,7 +684,7 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 | 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable` |
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |
 | 5 Green | `doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable` |
-| 5b Insights | `.shipping.gateway` equals your prod URL, and `spool:` counts move after `ship` | `aisquare init --no-explainability` (spool kept) |
+| 5b Insights | `.shipping.gateway` equals your prod URL; `spool:` counts move after `ship` **and keep moving** — a growing `N buffered` means draining stopped | `aisquare init --no-explainability` (spool kept) |
 
 ---
 

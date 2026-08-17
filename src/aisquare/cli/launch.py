@@ -26,6 +26,7 @@ import shutil
 from typing import Annotated
 
 import typer
+from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import harness
@@ -157,7 +158,8 @@ def launch(
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
         stderr_console().print(
-            f"[dim]role bindings: config unreadable ({profile.notice}) — launching unbound[/dim]"
+            f"role bindings: config unreadable ({profile.notice}) — launching unbound",
+            style="dim",
         )
     env.update(profile.env)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
@@ -168,7 +170,8 @@ def launch(
         # proxy. `aisquare doctor` still reports the config error loudly.
         tracing = None
         stderr_console().print(
-            f"[dim]explainability: config unreadable ({exc}) — launching untraced[/dim]"
+            f"explainability: config unreadable ({exc}) — launching untraced",
+            style="dim",
         )
     #: Appended to the agent's argv, and empty unless a trace actually happened.
     pinned_id: list[str] = []
@@ -190,7 +193,7 @@ def launch(
             base_env=env,
         )
         env.update(wiring.env)
-        stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
+        stderr_console().print(f"explainability: {wiring.reason}", style="dim")
         if wiring.traced:
             # Only pin the id on a launch that is REALLY traced. An untraced
             # launch has no Run to join, so touching its argv would be pure
@@ -205,7 +208,8 @@ def launch(
                 env[explainability_service.SESSION_ID_ENV_VAR] = wiring.pipeline_id
             if identity.note:
                 stderr_console().print(
-                    f"[dim]explainability: {identity.note} — Run not joined to a board row[/dim]"
+                    f"explainability: {identity.note} — Run not joined to a board row",
+                    style="dim",
                 )
             unwritten = explainability_service.record_join(
                 session_id=identity.session_id,
@@ -214,11 +218,18 @@ def launch(
                 role=role,
             )
             if unwritten:
-                stderr_console().print(f"[dim]explainability: {unwritten}[/dim]")
+                stderr_console().print(f"explainability: {unwritten}", style="dim")
     argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
+    # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
+    # styles a single token instead of the whole line, and it interpolates a
+    # role name, a binary path and a project name. A Text carries its styling
+    # as structure, so the parser never sees the data at all.
     stderr_console().print(
-        f"Launching {resolution.binary}{whose} as [bold]{role}[/bold] on the "
-        f"{project.root.name or project.id} board…"
+        Text.assemble(
+            f"Launching {resolution.binary}{whose} as ",
+            (role, "bold"),
+            f" on the {project.root.name or project.id} board…",
+        )
     )
     _exec(binary, argv, env)
 

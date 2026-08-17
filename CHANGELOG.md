@@ -108,6 +108,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   against the code, so it cannot rot quietly.
 
 ### Fixed
+- **Rich was deleting bracketed text out of everything the CLI printed.** Rich
+  reads `[...]` as a style tag and removes it, and almost every line this CLI
+  prints interpolates data it does not control — paths, git refs, role names,
+  config values, binary names, URLs, remembered context text. Two independent
+  lanes hit it the same night from different directions: the serve hint reached
+  users as `pip install 'aisquare-cli'` with the extra name gone, and the
+  doctor's detail column ate the SDK's `[present]` so a configured key read
+  exactly like a missing one. Neither raised — both printed a confident wrong
+  answer, which is worse.
+  - Fixed once, at the console factories, so the safe behaviour is what the
+    next call site inherits rather than something ninety of them each have to
+    remember. An AST scan counted **87 render sites carrying interpolated
+    data**; all are covered by construction. It reaches Rich **tables** too,
+    which parse cell text the same way — `aisquare context list` was mangling
+    remembered entries.
+  - **Deliberate styling is untouched.** `style=` arguments, `Column(style=…)`,
+    `header_style` and `rich.text.Text` all bypass the markup parser. The six
+    sites that styled text with inline tags now carry that styling structurally
+    instead, so the data never reaches a parser — and a test asserts a styled
+    line is still styled, on the ANSI Rich actually emits.
+  - A test walks the package AST and fails if a `Console` is built outside the
+    factories, because that is the one way the default gets bypassed.
 - **Model probes, gbrain and the detached distiller inherited the launching
   session's tracing identity.** Identity is process-level — it rides in
   `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` — and a child gets the

@@ -283,18 +283,18 @@ def _check_home_filesystem() -> DoctorCheck:
     shape = _config_file_kind()
     kind = filesystem_of(home)
     if kind is None:
-        return _ok("filesystem", f"{home} — filesystem not determined; config is a {shape}")
+        return _ok("filesystem", f"{home} — filesystem not determined; config: {shape}")
     if kind in _TRANSLATED_FILESYSTEMS:
         return _warn(
             "filesystem",
-            f"{home} is on {kind}, where atomic config writes are unverified (config is a {shape})",
+            f"{home} is on {kind}, where atomic config writes are unverified (config: {shape})",
             "Config writes rely on os.replace being atomic. That holds on a local "
             "disk and has never been measured through a translation layer. If two "
             "sessions may write config at once, point AISQUARE_HOME at a native "
             "filesystem.",
         )
     if kind in _NATIVE_FILESYSTEMS:
-        return _ok("filesystem", f"{home} on {kind}, config is a {shape} — atomic writes hold")
+        return _ok("filesystem", f"{home} on {kind}, config: {shape} — atomic writes hold")
     return _ok("filesystem", f"{home} on {kind} ({shape}) — atomicity unmeasured here")
 
 

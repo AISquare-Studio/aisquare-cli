@@ -225,3 +225,48 @@ def test_a_live_symlink_is_not_flagged_as_missing(
 
     assert "symlink" in detail
     assert "TARGET MISSING" not in detail
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected"),
+    [("regular file", "config: regular file"), ("not created yet", "config: not created yet")],
+)
+def test_every_shape_reads_as_a_sentence(
+    monkeypatch: pytest.MonkeyPatch, shape: str, expected: str
+) -> None:
+    """The third shape made the line ungrammatical, and it is the first-run one.
+
+    The detail interpolated "config is a {shape}", which reads correctly for
+    "regular file" and "symlink -> …" and produces "config is a not created yet"
+    for the third — the state a FRESH machine is in, so the only one a first-time
+    operator is guaranteed to see. @9bbc8ed7 found it and declined to fix wording
+    on someone else's line mid-shift, which was the right call and is why it
+    reached me rather than being changed quietly.
+
+    Parametrised over the shapes rather than asserting one, because the defect
+    was that two of three read correctly — a single-case test would have passed
+    on the wording that was already fine.
+    """
+    monkeypatch.setattr(diagnostics, "_config_file_kind", lambda: shape)
+    monkeypatch.setattr(diagnostics, "filesystem_of", lambda path, *_: "ext4")
+
+    detail = diagnostics._check_home_filesystem().detail
+
+    assert expected in detail
+    assert "config is a" not in detail, "the ungrammatical form is back"
+
+
+def test_the_warn_branch_reads_as_a_sentence_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Four call sites interpolate the shape; three were fixed by one pattern.
+
+    The fourth is the translated-filesystem warning, whose wording differs
+    enough that a search-and-replace over the other three left it behind — which
+    is exactly how a partial fix survives review.
+    """
+    monkeypatch.setattr(diagnostics, "_config_file_kind", lambda: "not created yet")
+    monkeypatch.setattr(diagnostics, "filesystem_of", lambda path, *_: "9p")
+
+    check = diagnostics._check_home_filesystem()
+
+    assert check.status is CheckStatus.warn
+    assert "config is a" not in check.detail, "the warn branch kept the old wording"

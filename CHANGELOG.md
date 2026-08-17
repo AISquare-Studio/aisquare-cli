@@ -66,6 +66,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `~/.aisquare/explainability/joins.jsonl` — session id, agent name,
     pipeline id, started at — so board events can be joined to Runs without
     dashboard access. Unwritable log ⇒ a warning, never a failed launch.
+- **`config.redaction.level` finally does something, and what it does is keep
+  a pasted credential off the network.** The setting has existed since the
+  first release with nothing reading it — so `strict` changed no behaviour
+  anywhere, which is worse than having no setting, because an operator who set
+  it believed they were protected. It is now honoured on the explainability
+  shipping path: prompts and board events are scrubbed on their way into the
+  spool, before anything is written to a file whose purpose is to be uploaded.
+  - `off` ships as typed. `standard` (the default) removes credentials — vendor
+    token shapes (`sk-`, `ghp_`, `glpat-`, `xox*-`, `AKIA`, `AIza`), JWTs, PEM
+    private-key blocks, `Authorization`/`Bearer` values, `NAME=value` where the
+    name says secret, and `user:pass@host` in a URL. `strict` adds identity:
+    email addresses, and `/home/<user>` → `~`.
+  - `standard` deliberately keeps file paths, hostnames and ports. A pasted key
+    is an incident; a path is the substance of an engineering prompt, and
+    redacting those by default would gut the dataset in exchange for a risk
+    nobody has articulated. An over-match is a sentence the dataset cannot
+    learn from, so a test pins that ordinary prose comes back byte-identical.
+  - An assignment keeps its key name (`EXPLAINABILITY_API_KEY=[redacted]`), and
+    every removal is marked — a silent scrub is indistinguishable from a user
+    who typed nothing.
+  - **Local capture is untouched.** `aisquare log` and the board row keep
+    exactly what was typed; this is about what crosses the network, and
+    rewriting someone's own history would make it useless for the debugging it
+    exists to support.
+  - The `init` consent line now names the level, so whoever says yes learns
+    what leaves the machine.
 
 ### Fixed
 - **The tracing exports were bash-only, and silently misattributed every

@@ -695,10 +695,14 @@ class ShippingOffer:
 
     #: One line, shown before anyone opts in. #50 asks for this explicitly:
     #: a person must be able to read what leaves their machine BEFORE they
-    #: agree to it, not discover it in a dashboard afterwards.
+    #: agree to it, not discover it in a dashboard afterwards. It names the
+    #: redaction level rather than promising safety, because the level is the
+    #: thing they can change and "we redact secrets" is a claim no pattern list
+    #: can honestly make.
     CAPTURES = (
         "your prompts, board notes, task claims and session events "
-        "(no file contents, no model traffic)"
+        "(no file contents, no model traffic), credentials redacted at "
+        "config.redaction.level"
     )
 
 

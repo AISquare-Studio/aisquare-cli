@@ -89,6 +89,16 @@ something is.
    write to a `/mnt` (Windows) path? A 9p/DrvFs filesystem measurement is
    parked on it. Nothing is broken by leaving it parked.
 
+6. **Not a blocker, but the one thing you must set up and then keep:** install
+   the shipping timer from §5b. Nothing drains the insight spool by itself, so
+   without it you deliver whatever was captured before you finish and then
+   nothing, forever, while model traffic keeps flowing and `status` reads green.
+   Use `ship --strict` in the timer — plain `ship` exits **0** with no key, which
+   is right for an interactive run and is exactly why a naive cron line reports
+   success for as long as you leave it there. Details in "What is done and
+   folded"; it is listed *here* too because a recurring obligation described only
+   under "done" gets read as done.
+
 ---
 
 ## The one thing to eyeball, stated precisely

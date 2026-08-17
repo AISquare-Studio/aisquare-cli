@@ -180,7 +180,24 @@ def test_tracing_vars_agree_with_the_wiring_that_sets_them() -> None:
         explainability, "_RESERVED_ENV_VARS", ()
     )
     assert reserved, "neither spelling found — the wiring's reserved tuple was renamed again"
-    assert set(TRACING_ENV_VARS) == set(reserved)
+
+    # Compared as SEQUENCES, not sets. The set form was verified to bite on a
+    # CONTENT difference — adding a third name to one list fails this test — but
+    # it accepted a REORDER silently, measured.
+    #
+    # And order turned out NOT to be cosmetic, which I only learned by breaking
+    # it: reordering this tuple also fails
+    # test_harness.py::test_spawn_print_enabled_composes_a_fresh_eval, because
+    # cli/team.py joins these names into `unset …` inside a shell snippet the CLI
+    # PRINTS for a human to eval. The order is user-visible text, not just an
+    # iteration order, so two lists that disagree about it disagree about output.
+    assert tuple(TRACING_ENV_VARS) == tuple(reserved), (
+        "core.spawn.TRACING_ENV_VARS and services.explainability.RESERVED_ENV_VARS "
+        f"have drifted: {tuple(TRACING_ENV_VARS)} vs {tuple(reserved)}. They are the "
+        "same list kept twice because core must not import services — a name in one "
+        "and not the other means a seam stands down on a variable nothing strips, or "
+        "a subprocess inherits one nothing stands down for."
+    )
 
 
 # ── the strip itself ─────────────────────────────────────────────────────────

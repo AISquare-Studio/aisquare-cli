@@ -438,7 +438,10 @@ is what makes it the right single check.
 > text under the flag). `aisquare --json explainability status` returns a real
 > payload — `enabled`, `target`, `gateway`/`gateway_source`, `key_env`/`key_set`
 > (never the key itself), `proxy`, `identity`, `agents`, `probe`, `shipping`,
-> `spool`, `redaction` — so the cutover can be scripted rather than eyeballed.
+> `redaction` — so the cutover can be scripted rather than eyeballed. The spool
+> counters live **inside** `.shipping`, not under a top-level `.spool`. That key
+> list is now asserted against the real payload in both directions by
+> `tests/test_runbook_json_paths.py`, so it cannot drift unnoticed again.
 
 Then make one real traced call and watch the proxy log:
 
@@ -501,8 +504,16 @@ aisquare explainability ship        # drain the spool — RECURRING, see below
 > every session. Then watch the drift:
 >
 > ```bash
-> aisquare --json explainability status | jq -r '.shipping, .spool'
+> aisquare --json explainability status | jq -c .shipping
 > ```
+>
+> That object carries `queued`, `sent` and `dead` — the same three numbers the
+> human `spool:` line renders. Until this revision the command above read
+> `jq -r '.shipping, .spool'`, and there has never been a top-level `.spool`:
+> `jq -r` answers a missing key with the bare word `null` and **exits 0**, so in
+> a cron it reads as output rather than as a mistake. Every jq path on this page
+> is now asserted against the real payload by
+> `tests/test_runbook_json_paths.py`.
 >
 > **[verified-train]** `status` shows `on → <gateway> — N buffered` when there
 > is a backlog and `nothing buffered` when there is not, so a growing N is the
@@ -703,8 +714,10 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 3. **[CLOSED]** `explainability status` honours `--json`. It used to print
    human text under the flag; it now returns a real payload — `enabled`,
    `target`, `gateway`/`gateway_source`, `key_env`/`key_set` (never the key
-   itself), `proxy`, `identity`, `agents`, `probe`, `shipping`, `spool`,
-   `redaction`. This matters more than it looks: §5b's split-brain assertion
+   itself), `proxy`, `identity`, `agents`, `probe`, `shipping`,
+   `redaction` — the spool counters are inside `.shipping`, and this list once
+   claimed a top-level `.spool` that never existed.
+   This matters more than it looks: §5b's split-brain assertion
    (`jq -r .shipping.gateway`) depends on it, and reading this item as still
    open would talk you out of the one check that can catch two lanes pointing
    at different deployments.

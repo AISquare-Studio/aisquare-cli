@@ -669,9 +669,22 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
    studio-scoped call 403s for **all sixteen**, `169` included, and unsetting the
    pin changes nothing. The workspace key simply cannot make studio-scoped calls.
    Governance needs a credential class we do not hold, not a config edit.
-3. `explainability status` does not honour `--json` — filed against #51.
-4. `POST /v1/agents/register-roster` was **not** executed by me against staging.
-   It mutates shared state and I left that call to a human.
+3. **[CLOSED]** `explainability status` honours `--json`. It used to print
+   human text under the flag; it now returns a real payload — `enabled`,
+   `target`, `gateway`/`gateway_source`, `key_env`/`key_set` (never the key
+   itself), `proxy`, `identity`, `agents`, `probe`, `shipping`, `spool`,
+   `redaction`. This matters more than it looks: §5b's split-brain assertion
+   (`jq -r .shipping.gateway`) depends on it, and reading this item as still
+   open would talk you out of the one check that can catch two lanes pointing
+   at different deployments.
+4. `POST /v1/agents/register-roster` was **not** executed by the author of this
+   runbook — it mutates shared state and they left that call to a human. **But
+   do not read that as "nobody ran it".** It HAS since been run against
+   staging: `aisquare-planner`, `aisquare-coder` and `aisquare-runner` all
+   returned `publication_id 169`, idempotent on a second run. So the names
+   exist on the workspace default. If you had staged anything against those
+   names, verify it rather than assume it — and note this is staging only, so
+   §4b is still a real step for prod.
 5. Prod gateway URL and key are **[unverified-prod]** throughout. Every
    *mechanism* here is verified against staging; the prod *values* are not.
 6. **[CLOSED]** `explainability env` emitted bash-only `$'…'` exports and the

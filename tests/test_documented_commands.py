@@ -28,6 +28,20 @@ Scope, stated rather than implied:
 - A flag's VALUE is not validated, only its existence. `--target prod` proves
   nothing about whether a target named prod is configured.
 
+A FENCED BLOCK IS A SCRIPT; INLINE CODE IS A REFERENCE. That is the convention
+this guard already enforces by construction, and @9bbc8ed7 was right that it
+needed saying before it mattered rather than after: a checker cannot tell "type
+this" from "never type this", so a counter-example inside a fenced block would be
+validated as an instruction — and worse, when it failed, the obvious fix would be
+to make the bad command VALID, which is the guard corrupting the document it
+guards. There are zero counter-examples in the listed documents today (measured
+at 22cf599), so no opt-out marker is added; a flag with no user is the
+speculative structure this repo's principles forbid. What is added instead is
+that every failure message names both resolutions, so the guard cannot push
+anyone toward the wrong one. CONTRIBUTING.md's `pip install
+'aisquare-cli[explainability]'` — a command that must NOT be run — is inline code
+inside a blockquote, which is exactly right and is why it is invisible here.
+
 DIRECTION IS A DECISION, NOT AN ACCIDENT — @9bbc8ed7 was right to ask, since the
 sibling guard `test_runbook_json_paths` is deliberately BIDIRECTIONAL and this
 one is deliberately not. This guard asserts documented -> exists and never
@@ -255,7 +269,14 @@ def test_every_documented_subcommand_exists(documented: list[Invocation]) -> Non
         chain, _flags = _resolve(words)
         if not chain:
             unknown.append(f"{invocation.where}  {invocation.text}")
-    assert not unknown, "documented commands that do not exist:\n  " + "\n  ".join(unknown)
+    assert not unknown, (
+        "documented commands that do not exist:\n  "
+        + "\n  ".join(unknown)
+        + "\n\nUsually the document is stale and the command should be corrected. "
+        "If one of these is a COUNTER-EXAMPLE — shown so a reader avoids typing "
+        "it — do NOT make it valid to satisfy this test: move it out of the "
+        "fenced block into inline code. A fenced block reads as a script."
+    )
 
 
 def test_every_documented_flag_exists(documented: list[Invocation]) -> None:
@@ -270,7 +291,12 @@ def test_every_documented_flag_exists(documented: list[Invocation]) -> None:
                     f"{invocation.where}  `aisquare {' '.join(chain) or '<root>'}` "
                     f"has no {flag}\n      {invocation.text}"
                 )
-    assert not missing, "documented flags that do not exist:\n  " + "\n  ".join(missing)
+    assert not missing, (
+        "documented flags that do not exist:\n  "
+        + "\n  ".join(missing)
+        + "\n\nSame caution as above: if the line is a counter-example, move it to "
+        "inline code rather than making the flag real."
+    )
 
 
 def test_the_guard_bites_at_the_end_of_every_document() -> None:
@@ -305,9 +331,18 @@ def test_the_guard_bites_at_the_end_of_every_document() -> None:
 
 
 def test_the_document_list_has_not_gone_stale() -> None:
-    """A new .md full of commands must not silently escape this guard."""
+    """A new .md full of commands must not silently escape this guard.
+
+    Repo-root pages are swept as well as `docs/`, because that is where the
+    coverage edge actually sits: CONTRIBUTING.md now carries a command in its
+    text, and until this sweep reached the root, a root page that gained a
+    fenced command would simply have been unguarded with nothing saying so.
+    Measured at 22cf599 — of CHANGELOG, CODE_OF_CONDUCT, CONTRIBUTING, README
+    and SECURITY, only README has fenced commands (55), so widening the sweep
+    pulls in nothing today. It is a detector for tomorrow, not a change of scope.
+    """
     unlisted: list[str] = []
-    for path in [REPO / "README.md", *sorted((REPO / "docs").rglob("*.md"))]:
+    for path in [*sorted(REPO.glob("*.md")), *sorted((REPO / "docs").rglob("*.md"))]:
         relative = path.relative_to(REPO).as_posix()
         if relative in DOCUMENTED:
             continue
@@ -317,8 +352,14 @@ def test_the_document_list_has_not_gone_stale() -> None:
         ):
             unlisted.append(relative)
     assert not unlisted, (
-        "these documents show commands but are not covered by this guard: "
-        f"{unlisted} — add them to DOCUMENTED"
+        f"these documents show commands in a fenced block but are not covered by "
+        f"this guard: {unlisted}.\n"
+        "Two ways to resolve this, and they are not interchangeable:\n"
+        "  - the commands are meant to be RUN -> add the document to DOCUMENTED\n"
+        "  - a command is a COUNTER-EXAMPLE, shown so a reader avoids it -> keep "
+        "it out of a fenced block (inline code reads as a reference, a fenced "
+        "block reads as a script), because listing the document would make this "
+        "guard demand that the command be valid"
     )
 
 
@@ -390,6 +431,35 @@ def _stale_tree_flags(text: str) -> tuple[list[str], int]:
             if flag not in legal:
                 stale.append(f"line {number}  {flag} is not under `{current}`  | {line.strip()}")
     return stale, checked
+
+
+def test_inline_code_is_not_read_as_an_instruction() -> None:
+    """The convention, pinned on the case that motivated it.
+
+    CONTRIBUTING.md warns a contributor not to install the explainability extra
+    into an editable checkout, and states the command so they recognise it. That
+    command must stay invisible to this guard: it is a reference, not a step.
+    Asserted on the real page rather than a fixture, because the thing that could
+    break is someone later moving that line into a ```sh block — which would
+    turn a warning into a script and, once the document were listed, make this
+    guard demand the command be runnable.
+    """
+    contributing = REPO / "CONTRIBUTING.md"
+    text = contributing.read_text(encoding="utf-8")
+    assert "aisquare-cli[explainability]" in text, (
+        "CONTRIBUTING no longer names the extra — if the warning moved, this "
+        "pin needs to move with it rather than being deleted"
+    )
+
+    fenced = [command for _number, command in _shell_lines(text)]
+    assert not any("aisquare-cli[explainability]" in command for command in fenced), (
+        "the do-not-run command is now inside a fenced block, where it reads as "
+        "a step rather than a warning"
+    )
+    assert not _from_text("CONTRIBUTING.md", text), (
+        "CONTRIBUTING gained fenced aisquare commands; decide whether they are "
+        "instructions (add the page to DOCUMENTED) or warnings (unfence them)"
+    )
 
 
 def test_the_command_tree_has_no_deleted_flags() -> None:

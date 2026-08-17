@@ -210,47 +210,6 @@ def test_no_module_builds_its_own_console() -> None:
     )
 
 
-def test_no_print_argument_carries_a_markup_tag() -> None:
-    """With markup off, a leftover ``[dim]…[/dim]`` prints the TAG at the user.
-
-    This is not hypothetical and it is not a one-off. The sweep that turned
-    markup off was cut before the nested-tracing lane landed, and that lane
-    added two ``[dim]`` prints on the launch path — so the very first fold after
-    the sweep reopened the defect in a file the sweep had already cleaned. The
-    two lanes could not have seen each other; a guard can.
-
-    Styling belongs in ``style=``, ``Column(style=)`` or ``Text``, all of which
-    bypass the parser. AST rather than grep so that prose and comments
-    explaining the convention (there are several, deliberately) do not fire it.
-    """
-    import ast
-
-    package = Path(__file__).resolve().parents[1] / "src" / "aisquare"
-    tag = re.compile(r"\[/?(?:dim|bold|italic|underline|red|green|yellow|blue|cyan|magenta)\b")
-    offenders: list[str] = []
-    for module in sorted(package.rglob("*.py")):
-        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-                continue
-            if node.func.attr not in {"print", "add_row", "add_column"}:
-                continue
-            for piece in ast.walk(node):
-                literal = getattr(piece, "value", None)
-                if (
-                    isinstance(piece, ast.Constant)
-                    and isinstance(literal, str)
-                    and tag.search(literal)
-                ):
-                    offenders.append(f"{module.relative_to(package)}:{piece.lineno}")
-
-    assert not offenders, (
-        f"Rich markup tag inside a print at {offenders} — the consoles run "
-        "markup=False, so that tag reaches the user as literal text. Use "
-        "style=, Column(style=) or Text instead."
-    )
-
-
 #: A Rich style tag written into a print argument. ``[/anything]`` is a closing
 #: tag and unambiguous; an opening ``[word]`` counts only when Rich itself can
 #: resolve ``word`` as a style. That distinction is the whole precision of this

@@ -69,6 +69,14 @@ def _rebinding_aliases(tree: ast.AST, imported: dict[str, str]) -> dict[str, str
     Still invisible: an attribute, a dict entry, a closure, anything built at run
     time. Over-approximating stays the safe direction, so a clean result remains
     trustworthy.
+
+    And it is free here, which is a measurement rather than a hope: resolution
+    is per MODULE rather than per scope, so two same-named locals in different
+    functions would be conflated — but on this tree, closure size is **16 with
+    the resolution and 16 without, adding no spurious members** (@9bbc8ed7,
+    2026-08-17). The number lives here rather than in the note that produced it
+    because the next person to widen this analysis needs to know what the last
+    widening cost, and a note scrolls.
     """
     bindings: dict[str, str] = {}
     for node in ast.walk(tree):

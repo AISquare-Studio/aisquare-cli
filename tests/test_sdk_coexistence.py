@@ -113,6 +113,41 @@ def test_the_module_sweep_actually_finds_modules() -> None:
         )
 
 
+def _top_level_reads(tree: ast.AST) -> list[int]:
+    """Lines importing a NAME out of the top-level ``aisquare`` package."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "aisquare" and node.level == 0
+    ]
+
+
+def test_the_import_matcher_recognises_the_fatal_shape() -> None:
+    """Positive control: the yield floor above cannot catch a blind PREDICATE.
+
+    `test_the_module_sweep_actually_finds_modules` proves the parametrize source
+    is populated — "walked nothing" is covered. It says nothing about whether the
+    matcher still recognises anything, and a matcher that recognises nothing
+    produces an empty offender list exactly like a clean package does. Measured
+    on the sibling guard in test_console_markup: blinding the predicate while
+    leaving the walk intact left every module visited and the suite green.
+
+    The fatal shape and the safe shapes are both asserted, because the whole
+    value of this guard is telling them apart: `from aisquare import X` dies when
+    the SDK owns that ``__init__``, while submodule imports resolve through
+    ``__path__`` and are fine.
+    """
+    fatal = ast.parse("from aisquare import __version__\n")
+    submodule = ast.parse("from aisquare.core.version import __version__\n")
+    relative = ast.parse("from . import version\n")
+    plain = ast.parse("import aisquare\n")
+
+    assert _top_level_reads(fatal) == [1], "the matcher no longer sees `from aisquare import X`"
+    assert _top_level_reads(submodule) == [], "submodule imports must not be flagged"
+    assert _top_level_reads(relative) == [], "a relative import is level>0, not the fatal shape"
+    assert _top_level_reads(plain) == [], "`import aisquare` binds no name out of __init__"
+
+
 @pytest.mark.parametrize("module", _package_modules(), ids=lambda p: str(p.name))
 def test_no_module_reads_a_name_out_of_the_top_level_package(module: Path) -> None:
     """``from aisquare import X`` is the one import shape the pairing cannot survive.
@@ -121,11 +156,7 @@ def test_no_module_reads_a_name_out_of_the_top_level_package(module: Path) -> No
     resolve through ``__path__``, which every candidate top-level provides.
     """
     tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
-    offenders = [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module == "aisquare" and node.level == 0
-    ]
+    offenders = _top_level_reads(tree)
     assert not offenders, (
         f"{module.relative_to(SRC)} reads a name out of the top-level 'aisquare' package "
         f"at line(s) {offenders}. The explainability SDK overwrites that __init__.py, so "

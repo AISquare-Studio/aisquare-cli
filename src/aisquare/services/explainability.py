@@ -79,6 +79,16 @@ from aisquare.core.store import store_session
 #: they are routing Anthropic traffic deliberately (custom gateway, another
 #: observability layer) — clobbering it would silently redirect or untrace
 #: THEIR setup, so we stand down instead.
+#:
+#: THIS LIST EXISTS TWICE. ``core.spawn.TRACING_ENV_VARS`` holds the same names,
+#: kept separate because ``core`` must not import ``services``; that copy is what
+#: ``untraced_env`` strips so an excluded subprocess cannot inherit an identity.
+#: ADD A VARIABLE HERE AND IT MUST GO THERE TOO — otherwise a seam stands down
+#: on a name nothing strips, or a probe inherits a name nothing stands down for.
+#: ``tests/test_spawn_seams.py`` fails if the two diverge. The pointer is
+#: repeated here rather than only in ``core.spawn`` because a new tracing
+#: variable is added on THIS side first, and the reader who needs the warning is
+#: the one who never opens the other file.
 RESERVED_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 
 #: The proxy /health contract this wiring was verified against: any service or

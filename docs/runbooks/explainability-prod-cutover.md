@@ -249,9 +249,28 @@ is what makes it the right single check.
 Then make one real traced call and watch the proxy log:
 
 ```bash
+# BASH ONLY — see the warning immediately below. Do not run this under sh/dash.
 eval "$(aisquare explainability env runner --session-id "$SESSION_ID")"
 claude -p "reply with the word OK and nothing else"
 ```
+
+> ⚠️ **[verified-train] The `eval` line is bash-only, and under a POSIX shell it
+> does not degrade — it kills the launch.** `explainability env` emits bash
+> `$'…'` quoting. Under `dash` the `$` is taken literally, so you get
+> `ANTHROPIC_BASE_URL=$http://127.0.0.1:9190` and a header string with a literal
+> `\n`. Measured, same command in each shell:
+>
+> ```
+> bash: BASE=[http://127.0.0.1:9190]   -> exit=0, proxy logs "pipeline-session: opened pipeline_id=bashtest"
+> dash: BASE=[$http://127.0.0.1:9190]  -> "API Error: Invalid URL", exit=1, NOTHING reaches the proxy
+> ```
+>
+> **`/bin/sh` is `dash` on this box**, so this also bites Makefile recipes,
+> systemd units, CI steps, cron, and Python `subprocess(..., shell=True)`. If you
+> need a traced session from any of those, set the two variables explicitly in
+> `bash` rather than `eval`-ing the exports under `sh`. Tracked with the
+> correlation-spine lane; until it lands, keep the `eval` in an interactive bash
+> shell.
 
 **Pass `--session-id`.** **[verified-train]** Without it the pipeline id is a
 fresh random UUID on every invocation — two consecutive calls produced
@@ -302,6 +321,7 @@ fully healthy run):
 | ingest returning anything other than `202` | traces are not landing |
 | `409 no_agent_identity` | the agent name is not registered — §1a |
 | `probe: proxy unreachable` with `enabled: True` | launches are silently untraced — §3 |
+| `API Error: Invalid URL` with `exit=1` | you ran the §5 `eval` under `sh`/`dash` — rerun it in bash |
 
 ### Known limitation to state out loud before anyone reads a dashboard
 
@@ -365,3 +385,9 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
    It mutates shared state and I left that call to a human.
 5. Prod gateway URL and key are **[unverified-prod]** throughout. Every
    *mechanism* here is verified against staging; the prod *values* are not.
+6. **[blocker-adjacent]** `explainability env` emits bash-only `$'…'` exports.
+   Under `sh`/`dash` the launch hard-fails with `API Error: Invalid URL` and
+   exit 1 instead of degrading to untraced — a fail-open violation, since
+   `/bin/sh` is `dash` here and that covers Make, systemd, CI, cron and Python
+   `shell=True`. Confirmed with receipts; fix belongs to the correlation-spine
+   lane. Until then §5's `eval` is interactive-bash-only.

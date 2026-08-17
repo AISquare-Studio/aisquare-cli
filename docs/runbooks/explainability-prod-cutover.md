@@ -55,6 +55,37 @@ Expect `1` or more. `0` means you are running a stale install — reinstall.
 
 ---
 
+## 0b. Warm the store before you launch the crew (10 seconds)
+
+**[verified-train]** If `~/.aisquare` does not exist yet — a new machine, a new
+operator account — run **one** `aisquare` command by itself before starting
+several sessions at once:
+
+```bash
+aisquare status >/dev/null    # creates and migrates ~/.aisquare/context.db
+```
+
+**Why.** Several sessions opening a *brand-new* store simultaneously can race
+its migration and fail with `store_error: duplicate column name: account`. That
+database is then permanently wedged for that migration — it is not a transient
+error you can retry past. One command first does the whole migration alone, and
+everything after it opens a store that needs no migrating.
+
+**[verified-train]** Measured on the train, both directions:
+
+```
+fresh home + one command  -> user_version 10, journal_mode wal, integrity_check ok
+then 8 concurrent opens   -> 8/8 exit 0
+12 concurrent FIRST opens on a fresh store, no artificial load
+                          -> {"error":"store_error","detail":"duplicate column name: account"}
+```
+
+The failure needs a *fresh* store, so a machine that has ever run `aisquare` is
+not exposed. Full characterisation, reproduction and the open root-cause
+hypothesis are in `docs/store-migration-race.md`.
+
+---
+
 ## 1. Bind the agent names to a studio — **the real blocker** (5 min)
 
 Do this **first**. Everything else can be green while this is broken, and you
@@ -564,6 +595,7 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 | Step | Verify | Rollback |
 |---|---|---|
 | 0 Preflight | `grep -c resolve_binary …/cli/launch.py` ≥ 1 | reinstall previous version |
+| 0b Warm store | `PRAGMA user_version` on `~/.aisquare/context.db` is non-zero | none — the migration is forward-only |
 | 1a Roster | response lists each agent + `publication_id` | re-register; registration is idempotent by name |
 | 1b/1c Binding | `/v1/routing/resolve` returns a `studio_id` | unbind in the studio UI |
 | 1d Rule book | no `FAIL_OPEN` warning on a traced call | detach the rule book in the UI |

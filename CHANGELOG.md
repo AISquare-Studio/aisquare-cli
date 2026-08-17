@@ -145,6 +145,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     line is still styled, on the ANSI Rich actually emits.
   - A test walks the package AST and fails if a `Console` is built outside the
     factories, because that is the one way the default gets bypassed.
+- **A machine that never configured tracing reported a failure it did not
+  have.** `aisquare explainability status` printed `probe: proxy unreachable at
+  http://127.0.0.1:9090/health: <urlopen error [Errno 111] Connection refused>`
+  on a stock install. Nothing was wrong with that machine: the shipped default
+  points at loopback and nothing is listening, which is exactly right for an
+  install that has never asked for tracing. But it read as broken, and the
+  first thing anyone does with a line like that is go debug a proxy that was
+  never meant to exist yet.
+  - The line now distinguishes **not configured** (informational — the default
+    is not consulted while tracing is off) from **configured and down**
+    (unmistakably red, and still carrying its remediation, because launches
+    keep working while silently going untraced). A cold `status` also stops
+    dialling the default address at all: nothing to probe means nothing to wait
+    for.
+  - `status` and `doctor` now render **one sentence from one function**. They
+    had already drifted — doctor knew to stay quiet while tracing was off and
+    status did not — so the same machine read green in one surface and broken
+    in the other.
+  - The default `proxy_url` is unchanged and the exit-code rule is unchanged:
+    non-zero only when tracing is on and the proxy would not take a session.
+    The default being unreachable was never the bug; the wording was.
 - **Model probes, gbrain and the detached distiller inherited the launching
   session's tracing identity.** Identity is process-level — it rides in
   `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` — and a child gets the

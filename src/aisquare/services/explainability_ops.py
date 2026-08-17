@@ -53,7 +53,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
-from aisquare.services.explainability import probe_proxy
+from aisquare.services.explainability import ProxyProbe, probe_proxy
 
 #: Distribution that provides the SDK, and the console script it installs. The
 #: script is the collision-free way to reach it: it runs in whatever
@@ -100,6 +100,7 @@ class ResolvedTarget:
     api_key_env: str
     api_key: str | None
     proxy_url: str
+    proxy_source: str  # "config" | "default" — the default is unreachable ON PURPOSE
     agent_name_template: str
     studio_id: str
     roles: tuple[str, ...]
@@ -157,6 +158,7 @@ def resolve_target(
         api_key_env=target.api_key_env,
         api_key=environ.get(target.api_key_env) or None,
         proxy_url=target.proxy_url or settings.proxy_url,
+        proxy_source=_proxy_source(settings, target),
         agent_name_template=target.agent_name_template or settings.agent_name_template,
         studio_id=target.studio_id,
         roles=tuple(roles),
@@ -692,24 +694,103 @@ def _check_redaction(level: RedactionLevel, *, shipping: bool) -> DoctorCheck:
     return _ok("explainability redaction", detail)
 
 
+def _proxy_source(settings: ExplainabilitySettings, target: ExplainabilityTarget) -> str:
+    """Whether anyone CHOSE this proxy URL, or it is the untouched default.
+
+    Compared against the model's declared default rather than a literal, so the
+    two cannot drift apart the day someone edits the config schema.
+    """
+    if target.proxy_url:
+        return "config"
+    default = ExplainabilitySettings.model_fields["proxy_url"].default
+    return "config" if settings.proxy_url != default else "default"
+
+
+@dataclass(frozen=True)
+class ProxyState:
+    """What to say about the tracing proxy, and whether it is a problem.
+
+    ONE description for ``status`` and ``doctor``, because they were already
+    drifting: doctor knew to stay quiet while tracing was off and status did
+    not, so a cold machine read green in one surface and broken in the other.
+    """
+
+    summary: str
+    healthy: bool
+    problem: bool
+    remediation: str = ""
+
+
+#: Remediation for a proxy that was configured and is not answering. Shared so
+#: the two surfaces cannot offer different advice for the same state.
+_PROXY_FIX = (
+    "Start the SDK's claude_code proxy, or point explainability.proxy_url at a "
+    "running one: aisquare explainability enable --proxy-url <url>"
+)
+
+
+def proxy_state(
+    target: ResolvedTarget, *, on: bool, prober: Callable[[str], ProxyProbe] = probe_proxy
+) -> ProxyState:
+    """Describe the proxy lane truthfully for a machine in ANY of its states.
+
+    Three states, and only the last is red:
+
+    * nobody configured a proxy and tracing is off — the shipped default points
+      at loopback and nothing is listening, which is CORRECT for an install
+      that has never asked for tracing. Saying "unreachable" here sends an
+      operator to debug a proxy that was never meant to exist yet. Not probed
+      at all: dialling an address the operator never chose spends their time on
+      a question nobody asked.
+    * a proxy is configured but tracing is off — nothing is being traced, so
+      nothing can be broken. Informational.
+    * tracing is ON and the proxy does not answer — genuinely red: launches
+      still succeed (they never block on this) but they go UNTRACED, silently,
+      which is the whole failure this lane exists to prevent.
+    """
+    if not on:
+        if target.proxy_source == "default":
+            return ProxyState(
+                summary=(
+                    f"not configured — the default {target.proxy_url} is not consulted "
+                    "while tracing is off"
+                ),
+                healthy=False,
+                problem=False,
+            )
+        return ProxyState(
+            summary=f"not consulted while tracing is off ({target.proxy_url})",
+            healthy=False,
+            problem=False,
+        )
+    verdict = prober(target.proxy_url)
+    if verdict.healthy:
+        return ProxyState(
+            summary=f"claude_code proxy healthy at {target.proxy_url}",
+            healthy=True,
+            problem=False,
+        )
+    return ProxyState(
+        summary=f"{verdict.reason} — sessions launch UNTRACED (they never block on this)",
+        healthy=False,
+        problem=True,
+        remediation=_PROXY_FIX,
+    )
+
+
 def _check_proxy(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
     """The session-tracing lane: is the local proxy the one we expect?
 
     Loopback and 1.5s worst case, so it stays inside the "doctor does not make
     network calls" spirit — and when tracing is off it is not consulted at all.
+    The sentence comes from :func:`proxy_state`, which ``status`` also renders,
+    so the two surfaces cannot describe one machine differently.
     """
     name = "explainability proxy"
-    if not on:
-        return _ok(name, f"not consulted while tracing is off ({target.proxy_url})")
-    verdict = probe_proxy(target.proxy_url)
-    if verdict.healthy:
-        return _ok(name, f"claude_code proxy healthy at {target.proxy_url}")
-    return _fail(
-        name,
-        f"{verdict.reason} — sessions launch UNTRACED (they never block on this)",
-        "Start the SDK's claude_code proxy, or point explainability.proxy_url at a "
-        "running one: aisquare explainability enable --proxy-url <url>",
-    )
+    state = proxy_state(target, on=on)
+    if state.problem:
+        return _fail(name, state.summary, state.remediation)
+    return _ok(name, state.summary)
 
 
 def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:

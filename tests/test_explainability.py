@@ -480,6 +480,18 @@ def test_probe_reports_a_silent_port() -> None:
 
 
 def test_status_reports_disabled_config_and_probe_truth(runner) -> None:  # type: ignore[no-untyped-def]
+    """With tracing off, the truth is that the proxy is not consulted.
+
+    This assertion USED to be ``"unreachable" in output``, which was true of the
+    probe but not of the machine: with tracing off nothing is traced, so an
+    unanswered proxy costs nothing and reporting a connection refusal sent
+    operators to debug something that was working as intended. status now says
+    the same thing doctor has always said in this state, from the same sentence
+    (``explainability_ops.proxy_state``), so the two surfaces cannot describe
+    one machine differently. The red case moved nowhere — see
+    ``test_status_exits_nonzero_when_enabled_but_proxy_dead`` below and
+    ``tests/test_proxy_state_wording.py``.
+    """
     save_config(
         AppConfig(
             explainability=ExplainabilitySettings(enabled=False, proxy_url="http://127.0.0.1:9")
@@ -491,7 +503,8 @@ def test_status_reports_disabled_config_and_probe_truth(runner) -> None:  # type
 
     assert result.exit_code == 0, result.output
     assert "enabled:  False" in result.output
-    assert "unreachable" in result.output
+    assert "not consulted while tracing is off" in result.output
+    assert "http://127.0.0.1:9" in result.output
 
 
 def test_status_exits_nonzero_when_enabled_but_proxy_dead(runner) -> None:  # type: ignore[no-untyped-def]

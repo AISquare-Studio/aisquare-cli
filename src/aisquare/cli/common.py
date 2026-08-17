@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -431,6 +432,22 @@ def expected_config_write_errors() -> Iterator[None]:
             exc.strerror or str(exc),
             error="config_target_missing",
             hint=f"create {exc.filename} or repoint the link" if exc.filename else None,
+        )
+    except OSError as exc:
+        # EROFS belongs with the two above by the same test: it is a consequence
+        # of WHERE THE OPERATOR POINTED THE CONFIG, and a one-line message can
+        # name the fix. ENOSPC and EIO are the machine breaking underneath a
+        # correct choice — tidying those into a ✗ would understate a condition
+        # that is probably breaking other things too, so they keep the traceback
+        # that is the honest signal. Re-raised explicitly rather than caught by
+        # class, because EROFS has no dedicated exception type.
+        if exc.errno != errno.EROFS:
+            raise
+        where = Path(exc.filename).parent if exc.filename else paths.config_path().parent
+        fail(
+            f"cannot write the config: {where} is on a read-only filesystem",
+            error="config_filesystem_read_only",
+            hint=f"remount {where} read-write, or point AISQUARE_HOME elsewhere",
         )
 
 

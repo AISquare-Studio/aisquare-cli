@@ -18,6 +18,7 @@ from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
 from aisquare.models import CheckStatus, DoctorCheck, InjectionRecord, PromptRecord, StatusReport
 from aisquare.services import distill as distill_service
+from aisquare.services import explainability_ops
 
 
 def status() -> StatusReport:
@@ -40,8 +41,13 @@ def status() -> StatusReport:
     return report
 
 
-def doctor() -> list[DoctorCheck]:
-    """Run health checks over the install, dependencies and integration."""
+def doctor(*, live: bool = False, target: str | None = None) -> list[DoctorCheck]:
+    """Run health checks over the install, dependencies and integration.
+
+    ``live`` opts into the checks that leave this machine (today: the
+    explainability gateway round-trip). Everything else stays offline, so a
+    plain ``aisquare doctor`` still answers on a train.
+    """
     return [
         _check_python(),
         _check_install(),
@@ -54,6 +60,7 @@ def doctor() -> list[DoctorCheck]:
         _check_snapshot(),
         _check_brain(),
         _check_harness(),
+        *explainability_ops.checks(live=live, target_name=target),
     ]
 
 

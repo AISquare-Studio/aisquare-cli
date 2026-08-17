@@ -21,6 +21,7 @@ from aisquare.models import CheckStatus
 from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
+from aisquare.services import explainability_ops
 from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import sync as sync_service
 
@@ -66,9 +67,34 @@ def status() -> None:
     emit_status(diagnostics_service.status())
 
 
-def doctor() -> None:
+def doctor(
+    live: Annotated[
+        bool,
+        typer.Option(
+            "--live",
+            help="Also run the checks that leave this machine (explainability "
+            "gateway reachability, key acceptance, a real span round-trip).",
+        ),
+    ] = False,
+    fix: Annotated[
+        bool,
+        typer.Option("--fix", help="Repair what can be repaired, then re-check."),
+    ] = False,
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Explainability deployment to check, e.g. stg or prod."),
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
+    ] = False,
+) -> None:
     """Run diagnostics and suggest fixes for common problems."""
-    checks = diagnostics_service.doctor()
+    if fix:
+        for action in explainability_ops.apply_fixes(
+            target=target, assume_yes=yes, confirm=typer.confirm
+        ):
+            typer.echo(f"fix: {action}")
+    checks = diagnostics_service.doctor(live=live, target=target)
     emit_doctor(checks)
     if any(check.status is CheckStatus.fail for check in checks):
         raise typer.Exit(1)

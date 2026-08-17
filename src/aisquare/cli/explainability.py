@@ -23,6 +23,7 @@ newline included, in every shell.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 from typing import Annotated
@@ -31,6 +32,7 @@ import typer
 
 from aisquare.cli.common import fail
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
+from aisquare.core.state import get_state
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import (
     probe_proxy,
@@ -56,21 +58,59 @@ def status(
 
     Exits non-zero only when tracing is enabled but the proxy probe fails —
     the state where launches would silently fall back to untraced.
+
+    Honours ``--json``, because this is the command a cutover gets scripted
+    against: without it every check in the runbook is a grep against prose,
+    and prose is the part most likely to be reworded.
     """
-    settings = load_config().explainability
+    config = load_config()
+    settings = config.explainability
     target = ops.resolve_target(settings, target_name)
     verdict = probe_proxy(target.proxy_url)
-    typer.echo(f"enabled:  {settings.enabled}")
-    typer.echo(f"target:   {target.name}")
-    typer.echo(f"gateway:  {target.gateway_url or '(unset)'} [{target.gateway_source}]")
-    typer.echo(f"key:      ${target.api_key_env} {'is set' if target.api_key else 'is NOT set'}")
-    typer.echo(f"proxy:    {target.proxy_url}")
-    typer.echo(f"identity: {target.agent_name_template}")
-    typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
-    typer.echo(f"probe:    {'healthy' if verdict.healthy else verdict.reason}")
     state = shipping_state()
-    typer.echo(f"shipping: {state.reason}")
-    typer.echo(f"spool:    {state.queued} queued, {state.sent} sent, {state.dead} dead-letter")
+    level = config.redaction.level
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "enabled": settings.enabled,
+                    "target": target.name,
+                    "gateway": target.gateway_url,
+                    "gateway_source": target.gateway_source,
+                    "key_env": target.api_key_env,
+                    "key_set": bool(target.api_key),
+                    "proxy": target.proxy_url,
+                    "identity": target.agent_name_template,
+                    "agents": list(target.agent_names),
+                    "probe": "healthy" if verdict.healthy else verdict.reason,
+                    "redaction": str(level),
+                    "shipping": {
+                        "reason": state.reason,
+                        "queued": state.queued,
+                        "sent": state.sent,
+                        "dead": state.dead,
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
+    else:
+        typer.echo(f"enabled:  {settings.enabled}")
+        typer.echo(f"target:   {target.name}")
+        typer.echo(f"gateway:  {target.gateway_url or '(unset)'} [{target.gateway_source}]")
+        typer.echo(
+            f"key:      ${target.api_key_env} {'is set' if target.api_key else 'is NOT set'}"
+        )
+        typer.echo(f"proxy:    {target.proxy_url}")
+        typer.echo(f"identity: {target.agent_name_template}")
+        typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
+        typer.echo(f"probe:    {'healthy' if verdict.healthy else verdict.reason}")
+        typer.echo(f"shipping: {state.reason}")
+        typer.echo(f"spool:    {state.queued} queued, {state.sent} sent, {state.dead} dead-letter")
+        # Directly under the spool counts on purpose: "how much am I sending"
+        # and "what is in it" are one question, and an operator who reads the
+        # first without the second is the person this line exists for.
+        typer.echo(f"redaction: {ops.redaction_summary(level)}")
     if settings.enabled and not verdict.healthy:
         raise typer.Exit(code=1)
 

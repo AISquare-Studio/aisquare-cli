@@ -52,7 +52,7 @@ from aisquare.core.config import (
     load_config,
     save_config,
 )
-from aisquare.models import CheckStatus, DoctorCheck
+from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
 from aisquare.services.explainability import probe_proxy
 
 #: Distribution that provides the SDK, and the console script it installs. The
@@ -551,6 +551,7 @@ def checks(
 
     results = [switch, _check_sdk(on=touched, live=live)]
     results.append(_check_config(target, on=on))
+    results.append(_check_redaction(_redaction_level(), shipping=resolved_settings.ship))
     results.append(_check_proxy(target, on=on))
     if live:
         results.extend(_live_checks(target, on=on))
@@ -638,6 +639,57 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
         f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
         f"key from ${target.api_key_env}, identities: {identities}",
     )
+
+
+#: One sentence per level, written for someone about to point this at prod.
+#: Each says what LEAVES and, where it matters, what does not — the two are
+#: easy to blur and expensive to blur, because a reader who thinks their local
+#: history is scrubbed goes hunting for prompts that are sitting right there.
+_REDACTION_SUMMARY = {
+    RedactionLevel.off: (
+        "off — insights leave this machine exactly as typed; local capture is unchanged"
+    ),
+    RedactionLevel.standard: (
+        "standard — credentials are removed from insights leaving this machine "
+        "(paths and hostnames are kept); local capture keeps what you typed"
+    ),
+    RedactionLevel.strict: (
+        "strict — credentials plus identity (emails, home paths) are removed from "
+        "insights leaving this machine; local capture keeps what you typed"
+    ),
+}
+
+
+def _redaction_level() -> RedactionLevel:
+    """The configured level, defaulting rather than raising — doctor must not crash."""
+    try:
+        return load_config().redaction.level
+    except Exception:
+        return RedactionLevel.standard
+
+
+def redaction_summary(level: RedactionLevel) -> str:
+    """What the active redaction level means, in one line, for status and doctor.
+
+    ONE string for both surfaces so they cannot drift into saying different
+    things about the same setting — which is the failure mode that made this
+    setting untrustworthy in the first place.
+    """
+    return _REDACTION_SUMMARY.get(level, f"{level} — unrecognised level, nothing is guaranteed")
+
+
+def _check_redaction(level: RedactionLevel, *, shipping: bool) -> DoctorCheck:
+    """State the level. Never a failure: it is a setting, not a health condition.
+
+    ``off`` is somebody's decision and doctor does not overrule decisions — it
+    makes them visible. The severity that WOULD be wrong here is `fail`, which
+    reads as "your machine is broken" for a machine doing exactly what it was
+    told. What an operator needs at 08:00 is the sentence, not the colour.
+    """
+    detail = redaction_summary(level)
+    if not shipping:
+        detail += " (nothing is being shipped yet)"
+    return _ok("explainability redaction", detail)
 
 
 def _check_proxy(target: ResolvedTarget, *, on: bool) -> DoctorCheck:

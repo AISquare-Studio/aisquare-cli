@@ -106,6 +106,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   needs a separate **process**, which is exactly what `aisquare launch` and
   `aisquare team spawn` give you. A test pins the page's mechanical claim
   against the code, so it cannot rot quietly.
+  - **`aisquare explainability status` and `doctor` state the active level**,
+    status directly under the spool counts — "how much am I sending" and "what
+    is in it" are one question. Both surfaces render the same sentence from one
+    source so they cannot drift, and both say plainly that the scrub applies to
+    what LEAVES: local capture keeps what you typed. `off` renders as the
+    setting it is, never as a failed check — doctor makes decisions visible, it
+    does not overrule them. The setting spent its whole life being read by
+    nothing, so being able to SEE it is what makes it trustworthy.
+- **`aisquare explainability status` honours `--json`.** It printed human text
+  under `--json` while `team status` and `explainability env` both returned
+  real JSON — and this is the command a cutover gets scripted against, so every
+  check in the runbook was a grep against prose. The payload carries every
+  field the human view shows; `key` splits into `key_env`/`key_set` (never the
+  key itself) and the spool counts nest under `shipping` as numbers. A test
+  compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
 - **Model probes, gbrain and the detached distiller inherited the launching

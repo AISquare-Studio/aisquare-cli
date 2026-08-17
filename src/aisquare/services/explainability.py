@@ -801,6 +801,13 @@ class ShipReport:
     dead: int = 0
     runs: tuple[str, ...] = ()
     reason: str = ""
+    #: This run could not ship AND the next one cannot either until a human
+    #: changes something — shipping off, no gateway, no key, no extra. Distinct
+    #: from a DEFERRAL, where the gateway is simply unreachable and the next
+    #: tick retries. A timer needs that distinction: one is worth waking someone
+    #: for, the other is the design working. Set here rather than inferred from
+    #: ``reason`` so no caller has to match on message text.
+    blocked: bool = False
 
     @property
     def ok(self) -> bool:
@@ -822,10 +829,10 @@ def ship_once(limit: int = 500) -> ShipReport:
     """
     settings = load_config().explainability
     if not settings.ship:
-        return ShipReport(reason="shipping is not configured — nothing to do")
+        return ShipReport(reason="shipping is not configured — nothing to do", blocked=True)
     gateway_url, key_env, target_key = _active_deployment()
     if not gateway_url:
-        return ShipReport(reason=f"no gateway URL configured ({GATEWAY_ENV_VAR})")
+        return ShipReport(reason=f"no gateway URL configured ({GATEWAY_ENV_VAR})", blocked=True)
     # The active target's key, then the key file. Never another deployment's:
     # shipping prod sessions with a staging key is worse than not shipping.
     api_key = target_key
@@ -833,12 +840,13 @@ def ship_once(limit: int = 500) -> ShipReport:
         where = f"set ${key_env}"
         if key_env == KEY_ENV_VAR:
             where += f" or write {key_path()}"
-        return ShipReport(reason=f"no workspace key — {where}")
+        return ShipReport(reason=f"no workspace key — {where}", blocked=True)
     if not sdk_available():
         pending = len(outbox.pending())
         return ShipReport(
             deferred=pending,
             reason=f"explainability extra not installed, {pending} buffered — {install_hint()}",
+            blocked=True,
         )
 
     outbox.reclaim_stale()

@@ -505,8 +505,57 @@ aisquare explainability ship        # drain the spool — RECURRING, see below
 > perfectly. Model traffic flows, `status` is green, Runs appear — and clause
 > two of the north star is true only of the first few minutes.
 >
-> **Run it on a timer** (cron every few minutes is enough) or at the end of
-> every session. Then watch the drift:
+
+**Run it on a timer** — and the obvious crontab line ships nothing, forever,
+while reporting success. Three facts combine: cron has almost no environment,
+so the key is not in scope; `ship` **exits 0 when it cannot ship** (correct —
+"no key means nothing logged as an error"); and crontab lines are written with
+output discarded. **[verified-train]** measured under `env -i`, which is how
+cron runs, not a login shell:
+
+```text
+aisquare explainability ship            exit=0   ← what cron reads today
+aisquare explainability ship --strict   exit=1   ← what cron reads now
+```
+
+So use `--strict` in a timer: it exits non-zero when the run could not ship at
+all — shipping off, no gateway, no key, or the extra missing — while a
+**deferral** (gateway unreachable) stays quiet, because the next tick is the
+retry and mail about a transient outage is mail you learn to ignore.
+
+**A wrapper script, not a bare crontab line**, because the key must come from
+the env file and never from the crontab, and because a script is something you
+can run once by hand to check. Save as `~/.aisquare/ship-insights.sh`,
+`chmod +x`:
+
+```bash
+#!/bin/sh
+set -a
+. "$HOME/.config/aisquare/explainability-stg.env"   # your env file; 0600
+set +a
+exec /usr/local/bin/aisquare explainability ship --strict
+```
+
+`set -a` matters: without it the file's values are shell variables, not
+environment variables, and the CLI never sees them. Use the **absolute** path
+to `aisquare` — cron's `PATH` will not find it. Then:
+
+```bash
+*/5 * * * * $HOME/.aisquare/ship-insights.sh
+```
+
+No `>/dev/null`: a non-zero exit is the entire signal, and cron mails you the
+reason.
+
+Check it before trusting it, with the key in scope exactly as the wrapper puts
+it there. A `0` means it really shipped; anything else prints why:
+
+```bash
+aisquare explainability ship --strict
+env -i sh -c "$HOME/.aisquare/ship-insights.sh"; echo "exit=$?"
+```
+
+> Then watch the drift:
 >
 > ```bash
 > aisquare --json explainability status | jq -c .shipping

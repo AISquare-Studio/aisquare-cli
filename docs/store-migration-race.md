@@ -1,39 +1,104 @@
 # The migration race on a fresh store
 
-**Status: reproduced and characterised, NOT fixed.** This page exists so the fix
-starts from evidence instead of from a fresh hour of guessing. Everything below
-was measured; where a hypothesis was falsified it is recorded as falsified,
-because the falsified ones are the expensive part.
+**Status: found, characterised, fixed.** This page is kept because the route to
+the cause ran through two plausible wrong answers, and the wrong answers are the
+expensive part to rediscover.
 
-## What happens
+## What happened
 
-Several sessions opening a **fresh** store at the same instant — which is the
-shape of a morning where a crew launches together — can raise a **non-transient**
-`sqlite3.OperationalError` out of `core.store._migrate`:
+Several sessions opening a **fresh** store at the same instant — which is what a
+crew launching together onto a new machine looks like — could raise a
+**non-transient** `sqlite3.OperationalError` out of `core.store._migrate`:
 
 ```
 OperationalError('duplicate column name: account')
-OperationalError('duplicate column name: model')
 ```
 
-This is not a lock timeout. `open_store` promises a bounded wait and then a
-clean `database is locked`; this is neither, and
-`tests/test_team.py::test_concurrent_first_opens_migrate_safely` fails it
-correctly via `assert real_errors == []`.
+Not a lock timeout. `open_store` promises a bounded wait and then a clean
+`database is locked`; this was neither. And the damage was **permanent**: the
+column existed while `user_version` still read 8, so every later attempt at
+migration 8 failed on that database forever.
 
-## Reproducing it
+## The cause
 
-Two minutes, and it does not need luck — it needs the box to be **oversubscribed**,
-so run it while something else is burning the CPUs:
+Time-of-check / time-of-use. `_migrate` read `PRAGMA user_version`, chose
+`_MIGRATIONS[version]`, and only then started the transaction. Between the read
+and the `BEGIN IMMEDIATE`, another opener could advance the schema — so this one
+applied an **old migration to a newer database**.
+
+Instrumenting the loser branch made it legible. Reading the version from an
+*independent* connection at the moment of failure:
+
+| error | migration index run | version, same connection | version, fresh connection |
+|---|---|---|---|
+| `duplicate column name: account` | 8 | 8 | 8 |
+| `duplicate column name: model` | **9** | **8** | **8** |
+
+The second row is the one that names the bug: it ran migration index 9, so it
+had read 9 — and both connections then agreed the database was at 8. A thread
+was acting on a version that was no longer true.
+
+## The fix
+
+Take the write lock first, re-read the version **under** it, then apply. The
+window closes because there is no longer a moment between deciding and acting.
+
+`executescript` cannot be used for the transactional part — it issues an
+implicit `COMMIT` **before** running its script, which releases a lock taken
+beforehand. Statements are split with `sqlite3.complete_statement`, SQLite's own
+tokenizer, so a semicolon inside a string or a `CREATE TRIGGER … BEGIN … END`
+body does not split a statement. A test compares the schema built by the split
+path against the schema `executescript` built, object for object including SQL:
+29 objects, identical.
+
+## Hypotheses that were wrong
+
+Both were plausible, both were measured, both were wrong.
+
+**"`executescript` breaks the transaction."** It does not. A mid-script failure
+inside `BEGIN IMMEDIATE; … COMMIT;` leaves the transaction open, `ROLLBACK`
+succeeds, and the earlier `ALTER TABLE` **is** rolled back. A second connection
+attempting `BEGIN IMMEDIATE` against a held write lock is properly blocked. The
+transaction machinery was always correct — the *ordering* around it was not.
+
+**"The connections disagree about journal mode."** The evidence fit: DDL visible
+while a version bump was not, and a version that appeared to move backwards, is
+exactly what a connection reading the main file instead of the WAL would
+produce. Measured at the moment of failure, the failing connection and an
+independent one both reported `journal_mode = wal` **and** the same
+`user_version`. Everyone agreed on the state; the disagreement was about *time*,
+not about the file.
+
+## Testing it
+
+Reproducing the original failure needs concurrency **and** luck — measured, it
+fires in 0–2 of 15 twelve-way races depending on what else the box is doing. A
+test that raced would therefore be the load-sensitive kind this suite has
+already had to repair twice: asserting about the machine while appearing to
+assert about itself.
+
+So the guard asserts the **invariant** instead, deterministically, using
+SQLite's trace callback on a real first open: after every write lock, the
+version is re-read before any DDL runs. Pre-fix the order was `READ, BEGIN,
+DDL`; post-fix it is `BEGIN, READ, DDL`. Verified red against the pre-fix form
+and green after — a guard that has only ever passed proves nothing.
+
+The concurrent-open test that remains is honest about being a smoke test: it
+covers that the common path still ends somewhere valid, and does not claim to
+guard the fix.
+
+## Reproducing the original, if you ever need to
+
+Needs openers, not unusual load. Twelve is enough, and a fresh `AISQUARE_HOME`
+per attempt is essential — the bug is specifically about the FIRST open.
 
 ```bash
-# 48 CPU hogs on a 16-core box, then:
 AISQUARE_DB_BUSY_MS=50 python - <<'PY'
 import os, tempfile, threading
 from aisquare.core.store import store_session
-for _ in range(40):                       # ~30-60 races is enough
+for _ in range(15):
     os.environ["AISQUARE_HOME"] = tempfile.mkdtemp()
-    barrier = threading.Barrier(6)
+    barrier = threading.Barrier(12)
     def opener():
         barrier.wait()
         try:
@@ -41,77 +106,17 @@ for _ in range(40):                       # ~30-60 races is enough
                 store.entries("user")
         except Exception as exc:
             print(type(exc).__name__, exc)
-    threads = [threading.Thread(target=opener) for _ in range(6)]
+    threads = [threading.Thread(target=opener) for _ in range(12)]
     for t in threads: t.start()
     for t in threads: t.join()
 PY
 ```
 
-Observed rate: **57 non-transient failures across 60 races** (55 `account`, 2
-`model`); a second run gave 51. Idle, it does not reproduce at all.
-
-## What is actually going wrong
-
-`_migrate` reads `PRAGMA user_version`, picks `_MIGRATIONS[version]`, and applies
-it in one `BEGIN IMMEDIATE` transaction that also bumps the version. A loser
-whose script fails re-reads the version: if someone else advanced it, that is
-victory by other means; otherwise the error is real and it raises.
-
-Instrumenting the loser branch (517 observations over 60 races) shows the
-swallow path works — losers that read version 0 and re-read 4, 5 or 6 correctly
-conclude they lost a race. The **escapes** are the interesting ones, and reading
-the version from an *independent* connection at the moment of failure is what
-makes them legible:
-
-| error | migration index run | version, same connection | version, fresh connection | script |
-|---|---|---|---|---|
-| `duplicate column name: account` | 8 | 8 | 8 | `ALTER TABLE team_session ADD COLUMN account TEXT` |
-| `duplicate column name: model` | **9** | **8** | **8** | `ALTER TABLE team_session ADD COLUMN model TEXT; …` |
-
-Two facts, and the second is the one to design against:
-
-1. **A migration's DDL is visible while its version bump is not.** At version 8
-   the `account` column already exists, so every subsequent attempt at
-   migration 8 fails forever on the same database.
-2. **The version goes BACKWARDS.** The second row ran migration index 9, which
-   means it read version 9 at the top of the loop — and after the failure both
-   its own connection and a brand-new one report 8. A version regression is not
-   something an atomic bump-inside-the-transaction can produce on its own.
-
-Together those say the two connections are not looking at the same database
-state: one is reading content the other has already superseded.
-
-## Hypotheses, including the falsified ones
-
-**FALSIFIED — "`executescript` breaks the transaction."** Measured directly: a
-mid-script failure inside `BEGIN IMMEDIATE; … COMMIT;` leaves the transaction
-open, `ROLLBACK` succeeds, and the earlier `ALTER TABLE` **is** rolled back
-(`PRAGMA table_info` shows the column gone). A second connection attempting
-`BEGIN IMMEDIATE` against a held write lock is blocked with `database is
-locked`. The transaction machinery in `_migrate` does what its docstring says.
-
-**FALSIFIED — "take `BEGIN IMMEDIATE` first, then re-read the version under the
-lock."** The obvious atomicity fix. It makes things **much worse**: 297 escapes
-and new failure kinds (`table entry already exists`, `no such index:
-team_task_project_status`). Cause: `sqlite3.executescript()` performs an
-implicit `COMMIT` **before** running its script, which releases the lock you
-just took. Anyone reaching for this fix should stop here.
-
-**OPEN, and where the evidence points — the journal-mode switch.** `open_store`
-runs `PRAGMA journal_mode = WAL` before `_migrate`, in a retry loop, on
-connections opened at different moments. A connection that has not observed the
-switch reads the main database file rather than the WAL, which would explain
-both facts above at once: checkpointed DDL visible in the main file, a version
-bump still living in the WAL, and therefore a version that appears to go
-backwards between connections. **This has not been proven.** It is the next
-thing to test, not a conclusion.
-
-## What must not be done to make it go away
+## What must not be done, if it ever comes back
 
 - Do not catch `duplicate column name` and continue. The column existing at the
-  wrong version is the symptom of two connections disagreeing about the
-  database; swallowing it leaves that disagreement in place for every later
-  migration, and the next one to land will not be idempotent.
-- Do not relax `assert real_errors == []` in the race test. That assertion is
-  what surfaced this, and it is the only thing standing between this defect and
-  a silent one.
+  wrong version is a symptom of a thread acting on stale information; swallowing
+  it leaves that in place for every later migration.
+- Do not relax `assert real_errors == []` in the concurrent-open tests. That
+  assertion is what surfaced this, and it is the only thing standing between a
+  defect like it and a silent one.

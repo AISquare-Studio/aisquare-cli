@@ -27,6 +27,22 @@ Scope, stated rather than implied:
   hand instead.
 - A flag's VALUE is not validated, only its existence. `--target prod` proves
   nothing about whether a target named prod is configured.
+
+DIRECTION IS A DECISION, NOT AN ACCIDENT — @9bbc8ed7 was right to ask, since the
+sibling guard `test_runbook_json_paths` is deliberately BIDIRECTIONAL and this
+one is deliberately not. This guard asserts documented -> exists and never
+exists -> documented, because the two cases fail differently: a WRONG entry
+costs a failed command on the primary path, while a MISSING entry costs only
+discoverability. The runbook case is bidirectional because a payload key the
+page never mentions is a surface an operator cannot know to read; a CLI command
+absent from a README is normal.
+
+It is also load-bearing that this stays one-directional right now. `team prune`,
+`signal`, `signals` and `verify` all exist and are absent from the command tree;
+@dfd9a883 ruled at 10:30 that they stay out until the next train, since a
+handed-off train should not take a README restructure. A bidirectional assertion
+here would fail on exactly those four and force the widening that was declined —
+a test enforcing a decision the owner explicitly deferred.
 """
 
 from __future__ import annotations
@@ -54,6 +70,9 @@ DOCUMENTED = (
 
 FENCE = re.compile(r"^\s*```+\s*([A-Za-z0-9_-]*)\s*$")
 SHELL_LANGUAGES = {"", "sh", "bash", "shell", "console", "zsh"}
+
+# Used only by the bite-checks below: a name the CLI must never have.
+BOGUS = "definitelynotacommand"
 
 
 class Invocation:
@@ -125,15 +144,21 @@ def _shell_lines(markdown: str) -> list[tuple[int, str]]:
     return collected
 
 
+def _from_text(document: str, markdown: str) -> list[Invocation]:
+    return [
+        Invocation(document, number, text)
+        for number, text in _shell_lines(markdown)
+        if re.match(r"^aisquare(\s|$)", text)
+    ]
+
+
 def _invocations() -> list[Invocation]:
     found: list[Invocation] = []
     for name in DOCUMENTED:
         path = REPO / name
         if not path.exists():
             continue
-        for number, text in _shell_lines(path.read_text(encoding="utf-8")):
-            if re.match(r"^aisquare(\s|$)", text):
-                found.append(Invocation(name, number, text))
+        found.extend(_from_text(name, path.read_text(encoding="utf-8")))
     return found
 
 
@@ -193,11 +218,21 @@ def documented() -> list[Invocation]:
 
 
 def test_the_extractor_found_the_documented_commands(documented: list[Invocation]) -> None:
-    """Guard the guard: a parser that matches nothing would pass every assertion."""
+    """Guard the guard: a parser that matches nothing would pass every assertion.
+
+    EVERY listed document must be represented, not just the busy ones. An earlier
+    version named only the README and the runbook, which left a hole @9bbc8ed7
+    measured: a fence-state inversion that swallowed the tracing-boundary page
+    whole would still have passed, because nothing asserted that page yields
+    anything. Yields today are 55 / 2 / 10.
+    """
     assert len(documented) >= 30, f"only {len(documented)} invocations found — parser broke"
     by_document = {invocation.document for invocation in documented}
-    assert "README.md" in by_document
-    assert "docs/runbooks/explainability-prod-cutover.md" in by_document
+    for name in DOCUMENTED:
+        assert name in by_document, (
+            f"{name} yielded no commands — either it lost them all, or the fence "
+            "state inverted and the whole document is being skipped silently"
+        )
 
 
 def test_no_documented_command_uses_prose(documented: list[Invocation]) -> None:
@@ -236,6 +271,37 @@ def test_every_documented_flag_exists(documented: list[Invocation]) -> None:
                     f"has no {flag}\n      {invocation.text}"
                 )
     assert not missing, "documented flags that do not exist:\n  " + "\n  ".join(missing)
+
+
+def test_the_guard_bites_at_the_end_of_every_document() -> None:
+    """@9bbc8ed7's bite-check, made permanent and per-document.
+
+    Appending at EOF is the load-bearing detail. A mid-document fence inversion
+    corrupts the running state, so a block at the very end parses only if the
+    state stayed balanced through the WHOLE file. That is the failure this
+    guard's own history earned: it once passed green over a README containing a
+    deleted flag because the state inverted early and never recovered.
+
+    Checked by hand it proves the parser for one commit. Checked here it proves
+    it for every commit, in every listed document, including the ones too short
+    to notice going quiet.
+    """
+    for name in DOCUMENTED:
+        text = (REPO / name).read_text(encoding="utf-8")
+        spiked = f"{text}\n```sh\naisquare {BOGUS} --nosuchflag\n```\n"
+
+        found = [i for i in _from_text(name, spiked) if BOGUS in i.text]
+        assert found, (
+            f"a command appended to the END of {name} was not extracted — the "
+            "fence state does not stay balanced through this document, so some "
+            "region of it is being skipped silently"
+        )
+
+        words, used = _split(found[0].text)
+        chain, legal = _resolve(words)
+        assert not chain, f"{BOGUS!r} resolved as a real command"
+        assert "--nosuchflag" not in legal
+        assert used == ["--nosuchflag"], f"the flag was not extracted from {found[0].text!r}"
 
 
 def test_the_document_list_has_not_gone_stale() -> None:
@@ -309,6 +375,23 @@ def _flags_under(command_name: str | None) -> set[str]:
     return legal | {o for p in root.params for o in p.opts if o.startswith("--")}
 
 
+def _stale_tree_flags(text: str) -> tuple[list[str], int]:
+    """(stale flag reports, flags examined) for a document's command tree."""
+    stale: list[str] = []
+    checked = 0
+    current: str | None = None
+    for number, line in _tree_lines(text):
+        head = re.match(r"^[├└]──\s+([a-z][a-z0-9-]*)", line.strip())
+        if head:
+            current = head.group(1)
+        legal = _flags_under(current)
+        for flag in re.findall(r"--[a-z][a-z0-9-]*", line):
+            checked += 1
+            if flag not in legal:
+                stale.append(f"line {number}  {flag} is not under `{current}`  | {line.strip()}")
+    return stale, checked
+
+
 def test_the_command_tree_has_no_deleted_flags() -> None:
     """The README's reference tree is not copy-pasteable, and was still wrong.
 
@@ -321,26 +404,30 @@ def test_the_command_tree_has_no_deleted_flags() -> None:
     is still enough to catch a flag that exists nowhere, which is the defect.
     """
     text = (REPO / "README.md").read_text(encoding="utf-8")
-    lines = _tree_lines(text)
-    assert lines, "no command tree found in the README — this guard is not looking at anything"
+    assert _tree_lines(text), "no command tree in the README — this guard sees nothing"
 
-    stale: list[str] = []
-    checked = 0
-    current: str | None = None
-    for number, line in lines:
-        head = re.match(r"^[├└]──\s+([a-z][a-z0-9-]*)", line.strip())
-        if head:
-            current = head.group(1)
-        legal = _flags_under(current)
-        for flag in re.findall(r"--[a-z][a-z0-9-]*", line):
-            checked += 1
-            if flag not in legal:
-                stale.append(
-                    f"README.md:{number}  {flag} is not under `{current}`  | {line.strip()}"
-                )
+    stale, checked = _stale_tree_flags(text)
 
     assert checked >= 20, f"only {checked} flags found in the tree — the parser broke"
     assert not stale, "the command tree documents flags that do not exist:\n  " + "\n  ".join(stale)
+
+
+def test_the_tree_guard_bites_on_a_flag_that_does_not_exist() -> None:
+    """Prove it can fail, on the document it actually guards.
+
+    Verified by hand once against the pre-fix README, where it named
+    `--account not under launch`. Doing it here means the ability to bite is
+    re-earned on every commit rather than resting on one afternoon's check.
+    """
+    text = (REPO / "README.md").read_text(encoding="utf-8")
+    spiked = text.replace("├── serve ", "├── serve [--nosuchflag] ", 1)
+    assert spiked != text, "the anchor line moved — this bite-check is not spiking anything"
+
+    stale, _checked = _stale_tree_flags(spiked)
+
+    assert any("--nosuchflag" in report for report in stale), (
+        "a bogus flag added to the command tree went unreported"
+    )
 
 
 def test_typer_is_the_instrument_not_the_help_renderer() -> None:

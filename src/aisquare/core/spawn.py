@@ -48,6 +48,10 @@ narrowing their environment would be change without a reason:
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
+  * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
+    script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
+    diagnose the machine it is running on.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -126,6 +130,16 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
+    ),
+    "aisquare/services/explainability_ops.py::install_sdk": Seam(
+        EXCLUDED, "`pip install` — reaches PyPI, never the model API"
+    ),
+    "aisquare/services/explainability_ops.py::sdk_doctor": Seam(
+        EXCLUDED,
+        "the SDK's own `explainability-doctor` console script. Deliberately NOT "
+        "stripped: it talks to the GATEWAY, not the model API, and it needs the "
+        "EXPLAINABILITY_* environment to answer at all — stripping would make "
+        "the diagnostic lie about the machine it is diagnosing",
     ),
 }
 

@@ -60,10 +60,15 @@ def spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def _tracing_on(monkeypatch: pytest.MonkeyPatch, proxy_url: str = "http://127.0.0.1:9") -> None:
     """Enable tracing and fake ONLY the network probe.
 
-    The real ``wire_session`` still runs — identity planning, header building,
-    the reserved-var guard — because that logic is what these tests are about.
-    Only the socket is replaced, since ``prober`` is bound as a default
-    argument and cannot be reached by patching the module attribute.
+    The real ``wire_session`` runs — identity planning, header building, the
+    reserved-var guard — because that logic is what these tests are about. Only
+    the socket is replaced.
+
+    This used to swap out ``wire_session`` itself with a wrapper that injected
+    a fake prober, because ``prober`` was a default argument and a module-level
+    patch could not reach it. It resolves at call time now, so the probe is
+    replaced directly and the function under test is no longer a stand-in for
+    itself.
     """
     from aisquare.services import explainability as explainability_service
     from aisquare.services.explainability import ProxyProbe
@@ -72,12 +77,9 @@ def _tracing_on(monkeypatch: pytest.MonkeyPatch, proxy_url: str = "http://127.0.
     config.explainability = ExplainabilitySettings(enabled=True, proxy_url=proxy_url)
     save_config(config)
 
-    real_wire = explainability_service.wire_session
-
-    def wire_with_a_healthy_proxy(settings: Any, role: str, **kwargs: Any) -> Any:
-        return real_wire(settings, role, prober=lambda _url: ProxyProbe(True, "test"), **kwargs)
-
-    monkeypatch.setattr(explainability_service, "wire_session", wire_with_a_healthy_proxy)
+    monkeypatch.setattr(
+        explainability_service, "probe_proxy", lambda _url: ProxyProbe(True, "test")
+    )
 
 
 def _bind(role: str, **kwargs: Any) -> None:

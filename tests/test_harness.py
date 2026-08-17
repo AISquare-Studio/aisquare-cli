@@ -1010,8 +1010,8 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["command"].startswith(
-        'if [ -n "${AISQUARE_SESSION_ID:-}" ]; then unset AISQUARE_SESSION_ID '
-        "ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS; fi; "
+        'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset AISQUARE_PIPELINE_ID '
+        "AISQUARE_TRACE_AGENT_NAME ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS; fi; "
         'eval "$(aisquare explainability env coder)"; AISQUARE_ROLE=coder '
     )
     assert "X-Pipeline-Id" not in payload["command"]
@@ -1031,7 +1031,7 @@ def test_spawn_printed_command_takes_its_session_id_from_the_shell(
     runner, app = _cli()
     result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     command = json.loads(result.output)["command"]
-    assert command.endswith("${AISQUARE_SESSION_ID:+--session-id $AISQUARE_SESSION_ID}")
+    assert command.endswith("${AISQUARE_PIPELINE_ID:+--session-id $AISQUARE_PIPELINE_ID}")
     assert not re.search(r"--session-id\s+[0-9a-f-]{36}", command), "no id may be burned in"
 
 
@@ -1056,6 +1056,7 @@ def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
     id in argv is the id in ``X-Pipeline-Id``, and the join is written down."""
     import uuid
 
+    from aisquare.services import hooks
     from aisquare.services.explainability import join_records
     from tests.proxy_stub import healthy_proxy
 
@@ -1083,10 +1084,20 @@ def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
     env = calls["env"]
     assert isinstance(env, dict)
     assert f"X-Pipeline-Id: {started_on}" in env["ANTHROPIC_CUSTOM_HEADERS"]
+    assert env["AISQUARE_PIPELINE_ID"] == started_on
+    assert env["AISQUARE_TRACE_AGENT_NAME"] == "aisquare-coder"
+
+    # The join is closed one process later, by the hook inside the agent that
+    # env belongs to — the only place the board session id exists.
+    assert join_records() == [], "the spawn records nothing; the hook does"
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", env["AISQUARE_PIPELINE_ID"])
+    monkeypatch.setenv("AISQUARE_TRACE_AGENT_NAME", env["AISQUARE_TRACE_AGENT_NAME"])
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    assert hooks.record_trace_join(started_on) is None
     (record,) = join_records()
     assert record["session_id"] == started_on
+    assert record["pipeline_id"] == started_on
     assert record["role"] == "coder"
-    assert record["joined"] is True
 
 
 def test_spawn_exec_untraced_argv_is_never_pinned(

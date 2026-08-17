@@ -49,11 +49,11 @@ RECORD_VERSION = 2
 #: ids still travel inside each record, so a span joins back to its row either
 #: way.
 #:
-#: The name is duplicated from ``services.explainability.SESSION_ID_ENV_VAR``
+#: The name is duplicated from ``services.explainability.PIPELINE_ID_ENV_VAR``
 #: rather than imported: that module pulls urllib and the store, and this one
 #: runs on the primary path. ``test_the_run_key_env_var_matches_the_launcher``
 #: fails if the two ever drift.
-RUN_KEY_ENV_VAR = "AISQUARE_SESSION_ID"
+RUN_KEY_ENV_VAR = "AISQUARE_PIPELINE_ID"
 
 #: Longest text we spool per record. A pasted stack trace or a whole file in a
 #: prompt is not an insight, it is a payload — and the gateway charges for it.

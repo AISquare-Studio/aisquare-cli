@@ -150,6 +150,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   points nowhere near the cause, so the stand-down now says which value it
   deferred to and that it will not work. Stale shells from before the quoting
   fix are exactly this case.
+- **The launcher was about to write a variable the SDK routes on.** Our
+  identity marker was called `AISQUARE_AGENT_NAME` — which the Explainability
+  SDK already reads as the registered routing identity, and which operators
+  set in their own env file. This module even had a constant for it already,
+  beside the gateway URL and the API key. Setting it from the launcher would
+  have silently overridden the operator's routing, the exact thing the
+  reserved-var guard refuses to do for `ANTHROPIC_*`. The marker is now
+  `AISQUARE_TRACE_AGENT_NAME`, unambiguously ours, and a test pins that the
+  two are different and that the SDK's variable is never written.
+- **The run-key marker is named for what it holds.**
+  `AISQUARE_SESSION_ID` became `AISQUARE_PIPELINE_ID`. The old name is what
+  let a careful reader key spans on it as though it were the board's session
+  id — which it is not on any launch that could not be pinned, so those spans
+  opened a second Run beside the model traffic. Renamed in the same commit as
+  `core.insights.RUN_KEY_ENV_VAR`, which duplicates it to stay off the heavy
+  import path; the drift test between them guarantees the pair moves together.
+- **Every agent below the first was launching under its PARENT's identity.**
+  A traced session's environment carries the wiring that traced it, so
+  `aisquare launch` run from inside one hit the "not overriding your routing"
+  guard, reported *untraced* — and then handed the child the parent's
+  `X-Pipeline-Id` anyway, because standing down leaves the inherited variables
+  in place. So the child was not untraced at all: its traffic was filed into
+  the parent's Run under the parent's role. That is the whole shape of the
+  morning's collective-intelligence work — agents spawning agents — and it
+  would have produced one Run wearing one identity for an entire tree.
+  A parent's identity is now disowned before the child wires its own, at both
+  launch seams. Only ever *ours*: a gateway the operator exported has no
+  marker beside it, is not ours, and still makes us stand down untouched.
+- **A role bound to a wrapper is now joined, not just traced.** The
+  session→Run join moved off the launcher and onto the hook that runs *inside*
+  the agent — the one place that holds both halves, since Claude Code hands it
+  the board session id and the launcher left the pipeline id in the
+  environment. It needs nothing from the binary, so a wrapper that has never
+  heard of `--session-id` joins exactly like the default agent. Pinning the id
+  with `--session-id` survives as a strict extra for the one program verified
+  to accept it, narrowed from "anything named claude*" to exactly `claude`,
+  because since #57 an unknown flag can be a dead launch and the hook seam
+  already guarantees the join. One row per session, both halves always real.
+- **`aisquare launch` ignored the active target's overrides.**
+  `explainability enable --target prod --proxy-url …` writes per target, and
+  the wiring only ever read the top level — so a launch silently used the
+  wrong proxy while reporting success, which is worse than config that is
+  plainly absent. Both launch seams now fold the active target down first, and
+  a broken target definition costs the override rather than the launch.
 - **The tracing exports were bash-only, and silently misattributed every
   session started from `/bin/sh`.** `aisquare explainability env` quoted with
   bash's `$'…'`, which dash — `/bin/sh` on Debian and Ubuntu — does not treat

@@ -33,10 +33,10 @@ from aisquare.cli.common import fail
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import (
-    SESSION_ID_ENV_VAR,
     probe_proxy,
     ship_once,
     shipping_state,
+    trace_marker,
     wire_session,
 )
 
@@ -247,9 +247,9 @@ def env(
     launcher, this refuses loudly (exit 1) when the session would not be
     traced — a human asked for tracing explicitly, so silence would lie.
 
-    ``AISQUARE_SESSION_ID`` is exported alongside the header pair so the
+    ``AISQUARE_PIPELINE_ID`` is exported alongside the header pair so the
     command that follows can start the agent ON that id
-    (``claude --session-id "$AISQUARE_SESSION_ID"``) and have its board row
+    (``claude --session-id "$AISQUARE_PIPELINE_ID"``) and have its board row
     join the Run. Exported rather than printed as a comment because the
     output's only job is to be eval'd.
     """
@@ -266,6 +266,6 @@ def env(
         # Marks the ANTHROPIC_* beside it as OURS, so a second paste in the
         # same terminal clears our leftovers instead of silently inheriting
         # this session's pipeline id and merging two sessions into one Run.
-        exports[SESSION_ID_ENV_VAR] = wiring.pipeline_id
+        exports.update(trace_marker(wiring))
     for key, value in exports.items():
         typer.echo(f"export {key}={shlex.quote(value)}")

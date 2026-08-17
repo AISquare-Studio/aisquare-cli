@@ -24,6 +24,7 @@ from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import AmbiguousIdError, is_locked_error
 from aisquare.services import explainability as explainability_service
+from aisquare.services import explainability_ops
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
@@ -38,8 +39,8 @@ app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no
 #: one. Deliberately unquoted: the value is a UUID, so word splitting produces
 #: exactly the two words intended, and ``sh``/``bash``/``zsh`` agree on it.
 _SESSION_ID_SUBSTITUTION = (
-    f"${{{explainability_service.SESSION_ID_ENV_VAR}:+"
-    f"--session-id ${explainability_service.SESSION_ID_ENV_VAR}}}"
+    f"${{{explainability_service.PIPELINE_ID_ENV_VAR}:+"
+    f"--session-id ${explainability_service.PIPELINE_ID_ENV_VAR}}}"
 )
 
 #: Clears the PREVIOUS paste's tracing out of this shell, and only ever the
@@ -52,13 +53,14 @@ _SESSION_ID_SUBSTITUTION = (
 #: ``X-Pipeline-Id`` and merges into its Run. Observed, not theorised: two
 #: pastes, one Run.
 #:
-#: ``AISQUARE_SESSION_ID`` is the discriminator, because nothing but our own
+#: ``AISQUARE_PIPELINE_ID`` is the discriminator, because nothing but our own
 #: wiring sets it. Present ⇒ the ANTHROPIC_* beside it are ours to clear.
 #: Absent ⇒ they are the operator's real gateway and stay untouched, so the
 #: "not overriding your routing" guard keeps working exactly as before.
 _CLEAR_PREVIOUS_TRACE = (
-    f'if [ -n "${{{explainability_service.SESSION_ID_ENV_VAR}:-}}" ]; then '
-    f"unset {explainability_service.SESSION_ID_ENV_VAR} "
+    f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
+    f"unset {explainability_service.PIPELINE_ID_ENV_VAR} "
+    f"{explainability_service.TRACE_AGENT_NAME_ENV_VAR} "
     f"{' '.join(explainability_service.RESERVED_ENV_VARS)}; fi"
 )
 
@@ -458,11 +460,26 @@ def spawn(
             # planned from the args this spawn will really run with — a role
             # whose profile already carries --session-id or --resume owns its
             # own id and must not be handed a second one.
+            # Disown a parent's identity before wiring, for the reason spelled
+            # out in `aisquare launch`: a spawn from inside a traced session
+            # would otherwise inherit that session's Run, or be stood down and
+            # launch untraced. The operator's own gateway carries no marker,
+            # so it survives this untouched.
+            parent_run = explainability_service.disown_inherited_trace(env)
+            if parent_run:
+                typer.echo(
+                    f"explainability: spawned from a session traced as {parent_run} — "
+                    "this one takes its own identity",
+                    err=True,
+                )
             identity = explainability_service.plan_session_identity(
                 binary.binary, launch_profile.args
             )
             wiring = explainability_service.wire_session(
-                tracing, role_name, session_id=identity.session_id, base_env=env
+                explainability_ops.effective_settings(tracing),
+                role_name,
+                session_id=identity.session_id,
+                base_env=env,
             )
             env.update(wiring.env)
             typer.echo(f"explainability: {wiring.reason}", err=True)
@@ -473,22 +490,10 @@ def spawn(
                 argv = [*argv, *identity.inject_args]
                 # Same marker `aisquare launch` sets: it tells a spawn command
                 # run from INSIDE this session that the ANTHROPIC_* it can see
-                # are ours to clear, not the operator's own gateway.
-                if wiring.pipeline_id:
-                    env[explainability_service.SESSION_ID_ENV_VAR] = wiring.pipeline_id
-                if identity.note:
-                    typer.echo(
-                        f"explainability: {identity.note} — Run not joined to a board row",
-                        err=True,
-                    )
-                unwritten = explainability_service.record_join(
-                    session_id=identity.session_id,
-                    agent_name=wiring.agent_name or "",
-                    pipeline_id=wiring.pipeline_id or "",
-                    role=role_name,
-                )
-                if unwritten:
-                    typer.echo(f"explainability: {unwritten}", err=True)
+                # are ours to clear, not the operator's own gateway — and it
+                # is what the hook inside the agent reads to record the join.
+                env.update(explainability_service.trace_marker(wiring))
+
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)

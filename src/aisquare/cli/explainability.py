@@ -200,6 +200,7 @@ def env(
         str | None,
         typer.Option("--session-id", help="Key the Run to this session id."),
     ] = None,
+    target_name: Annotated[str | None, _TARGET_OPTION] = None,
 ) -> None:
     """Print shell exports that trace the next agent run from this terminal.
 
@@ -208,7 +209,7 @@ def env(
     traced — a human asked for tracing explicitly, so silence would lie.
     """
     wiring = wire_session(
-        load_config().explainability,
+        ops.effective_settings(load_config().explainability, target_name),
         role,
         session_id=session_id,
         base_env=dict(os.environ),
@@ -216,16 +217,24 @@ def env(
     if not wiring.traced:
         fail(wiring.reason, error="untraced")
     for key, value in wiring.env.items():
-        typer.echo(f"export {key}={_ansi_c_quoted(value)}")
+        typer.echo(f"export {key}={_posix_quoted(value)}")
 
 
-def _ansi_c_quoted(value: str) -> str:
-    """``$'…'`` so the newline between header pairs survives ``eval``.
+def _posix_quoted(value: str) -> str:
+    """Single-quote for ``eval`` in *any* POSIX shell, newline included.
 
-    Plain single quotes would carry a literal backslash-n; the proxy then sees
-    one glued header, ``X-Pipeline-Id`` never arrives, and the run is silently
-    recorded under the proxy's default identity — the exact misattribution
-    this command exists to prevent.
+    The previous form was ``$'…'``, which is a bashism. Under ``/bin/sh``
+    (dash on Debian and Ubuntu, and therefore every Makefile recipe, systemd
+    unit, cron line, CI step and ``subprocess(shell=True)``) the ``$`` is not
+    syntax — it is data. Measured: ``ANTHROPIC_BASE_URL`` came out as
+    ``$http://127.0.0.1:9190`` and the agent died with ``API Error: Invalid
+    URL``, exit 1, nothing reaching the proxy. That is tracing costing a
+    LAUNCH, which the fail-open doctrine forbids outright.
+
+    Single quotes make every byte literal — including the real newline between
+    the two header pairs, which POSIX allows inside them — so the only thing
+    needing care is a single quote itself: close, escape, reopen. That also
+    makes the emitted line injection-proof, since ``$(…)`` and backticks are
+    just characters in there.
     """
-    escaped = value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
-    return f"$'{escaped}'"
+    return "'" + value.replace("'", "'\\''") + "'"

@@ -223,10 +223,14 @@ def test_env_refuses_when_disabled(runner) -> None:  # type: ignore[no-untyped-d
     assert "disabled" in result.output
 
 
-def test_env_emits_ansi_c_quoted_exports(runner, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The emitted quoting must carry a REAL newline through eval: plain
-    single quotes deliver backslash-n, the proxy sees one glued header, and
-    the run is silently misattributed."""
+def test_env_emits_posix_quoted_exports(runner, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The emitted quoting must carry a REAL newline through eval — a glued
+    header means X-Pipeline-Id never arrives and the run is misattributed.
+
+    Text only; ``tests/test_explainability_env.py`` evaluates the same output
+    in every installed shell, which is the half that counts. The previous
+    ``$'…'`` form satisfied an assertion shaped exactly like this one while
+    corrupting every value it emitted under /bin/sh."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     from aisquare.cli.app import app as cli_app
@@ -241,8 +245,8 @@ def test_env_emits_ansi_c_quoted_exports(runner, monkeypatch) -> None:  # type: 
         server.shutdown()
 
     assert result.exit_code == 0, result.output
-    assert f"export ANTHROPIC_BASE_URL=$'{url}'" in result.output
+    assert f"export ANTHROPIC_BASE_URL='{url}'" in result.output
     assert (
         "export ANTHROPIC_CUSTOM_HEADERS="
-        "$'X-Agent-Name: aisquare-coder\\nX-Pipeline-Id: sess-9'" in result.output
+        "'X-Agent-Name: aisquare-coder\nX-Pipeline-Id: sess-9'" in result.output
     )

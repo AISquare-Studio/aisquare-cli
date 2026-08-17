@@ -163,6 +163,29 @@ def resolve_target(
     )
 
 
+def effective_settings(
+    settings: ExplainabilitySettings,
+    name: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> ExplainabilitySettings:
+    """``settings`` with the active target's overrides folded into the top level.
+
+    The session-wiring path (``wire_session``) reads ``proxy_url`` and
+    ``agent_name_template`` off the settings object directly, and knows nothing
+    about targets. Without this fold, ``enable --target prod --proxy-url …``
+    would write a value that every launch then ignored — config that looks
+    applied and is not, which is worse than config that is missing.
+    """
+    target = resolve_target(settings, name, env=env)
+    return settings.model_copy(
+        update={
+            "proxy_url": target.proxy_url,
+            "agent_name_template": target.agent_name_template,
+        }
+    )
+
+
 # ── the SDK, at arm's length ─────────────────────────────────────────────────
 
 

@@ -239,6 +239,56 @@ def test_launch_with_dead_proxy_still_launches(
     assert "untraced" in result.output
 
 
+def test_launch_survives_a_base_url_the_agent_could_not_parse(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launch-blocking case, through the real launch path.
+
+    A corrupt ``proxy_url`` used to reach the agent's environment untouched,
+    and the agent — which parses that variable before it can report anything —
+    died with "API Error: Invalid URL" and exit 1. Tracing cost a LAUNCH,
+    which the doctrine forbids outright. The value now has the same fail-open
+    the ``/health`` probe has always had: refuse it, say why, launch untraced.
+    """
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    _tracing_on("$http://127.0.0.1:9190")  # the exact shape dash produced
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude"], "the launch must be the one you would have got anyway"
+    assert "ANTHROPIC_BASE_URL" not in spy["env"], "a value we refused may not reach the agent"
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in spy["env"]
+    assert "proxy_url" in result.output and "untraced" in result.output
+
+
+def test_spawn_exec_survives_a_base_url_the_agent_could_not_parse(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard lives in the wiring, not in one command — so the other seam
+    that sets the variable inherits it without needing its own check."""
+    import os
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    _tracing_on("$http://127.0.0.1:9190")
+    seen: dict[str, Any] = {}
+
+    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.cli.team.os.execvpe",
+        lambda file, argv, env: seen.update(argv=argv, env=env),
+    )
+
+    result = runner.invoke(app, ["team", "spawn", "coder", "--exec", "--no-probe"])
+
+    assert result.exit_code == 0, result.output
+    assert "ANTHROPIC_BASE_URL" not in seen["env"]
+    assert os.environ.get("ANTHROPIC_BASE_URL") is None
+    assert "proxy_url" in result.output
+
+
 def test_launch_starts_the_agent_on_the_id_it_traces_under(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

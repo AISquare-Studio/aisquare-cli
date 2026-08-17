@@ -267,6 +267,79 @@ def test_user_owned_anthropic_vars_are_never_clobbered() -> None:
     assert base == {"ANTHROPIC_BASE_URL": "https://my-own-gateway.example"}
 
 
+def test_a_base_url_we_cannot_use_costs_the_trace_not_the_launch() -> None:
+    """``ANTHROPIC_BASE_URL`` is the one value here that costs a LAUNCH.
+
+    The agent parses it before it can report anything, so a malformed one does
+    not degrade to untraced — it dies at the first request with "API Error:
+    Invalid URL" and exit 1 (runner receipt, under dash). Every other failure
+    in this module already fails open; this makes the value itself do the same.
+    """
+    for bad in ("", "   ", "127.0.0.1:9190", "$http://127.0.0.1:9190", "file:///tmp/x", "http://"):
+        wiring = wire_session(_settings(proxy_url=bad), "coder", prober=_healthy)
+        assert wiring.traced is False, bad
+        assert wiring.env == {}, bad
+        assert "proxy_url" in wiring.reason, bad
+
+
+def test_the_check_refuses_the_value_rather_than_repairing_it() -> None:
+    """No silent rewriting. "$http://…" is one keystroke from usable and we
+    could strip it — but a value we invented is a value nobody configured, and
+    the operator would never learn their config was wrong."""
+    wiring = wire_session(_settings(proxy_url="$http://127.0.0.1:9190"), "coder", prober=_healthy)
+    assert "$http://127.0.0.1:9190" in wiring.reason, "the reason names what was rejected"
+    assert wiring.env == {}
+
+
+def test_a_usable_base_url_still_traces_normally() -> None:
+    """The guard must not become a new way to lose a trace. Shapes an operator
+    legitimately configures all still pass."""
+    for good in (
+        "http://127.0.0.1:9190",
+        "https://proxy.example.com",
+        "http://localhost:9190/",
+        "https://proxy.example.com:8443/base",
+    ):
+        wiring = wire_session(_settings(proxy_url=good), "coder", prober=_healthy)
+        assert wiring.traced is True, good
+        assert wiring.env["ANTHROPIC_BASE_URL"] == good, good
+
+
+def test_the_operators_own_routing_is_judged_by_them_not_by_us() -> None:
+    """We validate what WE would set, and never police what they set. Their
+    var makes us stand down — the reason is the stand-down, not a verdict on
+    our config."""
+    base = {"ANTHROPIC_BASE_URL": "https://my-own-gateway.example"}
+    wiring = wire_session(_settings(), "coder", base_env=base, prober=_healthy)
+    assert wiring.traced is False
+    assert wiring.env == {}
+    assert "already set" in wiring.reason
+    assert "proxy_url" not in wiring.reason
+    assert "WARNING" not in wiring.reason, "a usable value of theirs is not our business"
+
+
+def test_an_unusable_value_of_theirs_is_named_but_never_overridden() -> None:
+    """The vector that actually kills launches, and the most we may do about it.
+
+    A corrupt ANTHROPIC_BASE_URL already in the environment — a stale shell
+    from before the emitter fix, a wrapper, a typo — is not ours to remove:
+    overriding the operator's routing is forbidden, and we cannot know it is
+    wrong FOR THEM. But the agent is about to die with "API Error: Invalid
+    URL" and exit 1, and nothing in that message points at the cause. Saying
+    so costs nothing, changes nothing, and is the difference between a
+    two-minute fix and an hour.
+    """
+    base = {"ANTHROPIC_BASE_URL": "$http://127.0.0.1:9190"}
+    wiring = wire_session(_settings(), "coder", base_env=base, prober=_healthy)
+
+    assert wiring.traced is False
+    assert wiring.env == {}, "we still stand down — nothing is overridden"
+    assert "already set" in wiring.reason
+    assert "WARNING" in wiring.reason
+    assert "$http://127.0.0.1:9190" in wiring.reason, "name the value, so it can be found"
+    assert base == {"ANTHROPIC_BASE_URL": "$http://127.0.0.1:9190"}, "and never mutated"
+
+
 def test_bad_agent_name_template_fails_open() -> None:
     wiring = wire_session(_settings(agent_name_template="aisquare-{rol}"), "coder", prober=_healthy)
     assert wiring.traced is False

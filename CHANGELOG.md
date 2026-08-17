@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`docs/planner-findings-loop.md` — the find→fix loop, and the one thing
+  that blocks it.** The write half is done: a traced session opens a Run keyed
+  by an id the board also knows, so a finding can be traced back to the
+  session, the role and the task that was open at the time. The read half needs
+  a read-scoped credential, and the page makes that a five-minute unblock
+  rather than a morning of discovery — it carries the falsified hypotheses (the
+  403 is not about which studio is pinned), the exact env names to add, the
+  gateway routes confirmed to exist, and the loop step to paste into the
+  planner's prompt. The loop is driven from our own `joins.jsonl` rather than
+  by polling the gateway, because `runs` has no `since` and we already know
+  every Run we started. A test pins the page's field table against what
+  `record_join` actually writes, in both directions, and is verified to fail
+  when a row is renamed.
 - **Per-role LAUNCH PROFILE — the third launch axis, and deliberately the
   dumbest one.** The ladder decides *what* model a role runs on, `--bin` (#52)
   decides *which* executable runs it, and a profile carries *whatever else* the

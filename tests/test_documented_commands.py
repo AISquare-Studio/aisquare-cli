@@ -22,11 +22,21 @@ Scope, stated rather than implied:
 
 - Only fenced code blocks are read. Prose is excluded on purpose — "aisquare has
   two halves" is a sentence, and a guard that flags sentences gets switched off.
-- Only the command that starts a line is parsed. A command nested inside
-  `eval "$(...)"` is not extracted; the runbook has one, and it was checked by
-  hand instead.
+- A line is split on `&&`, `||` and `;`, so the second half of the runbook's
+  `which aisquare && aisquare --version` preflight is parsed. Requiring the LINE
+  to start with `aisquare` had silently dropped it.
+- A command nested inside `eval "$(...)"` is still not extracted. The runbook
+  has one. It is not left silent: EVERY fenced line mentioning `aisquare` that
+  is not resolved must match a stated reason in `_NOT_AN_INVOCATION`, so a skip
+  is a recorded decision and a new invocation in an unrecognised shape FAILS
+  rather than joining an invisible pile. Census on the runbook at the time of
+  writing: 38 mentions = 11 resolved + 27 classified + 0 unaccounted.
 - A flag's VALUE is not validated, only its existence. `--target prod` proves
   nothing about whether a target named prod is configured.
+- A word left over at a GROUP is a subcommand that does not exist; a word left
+  over at a LEAF is an argument and stays silent. Before that distinction the
+  check only fired when the FIRST word failed, so `explainability statuss`
+  passed — a renamed subcommand, which is the likeliest drift after a flag.
 
 A FENCED BLOCK IS A SCRIPT; INLINE CODE IS A REFERENCE. That is the convention
 this guard already enforces by construction, and @9bbc8ed7 was right that it
@@ -158,12 +168,25 @@ def _shell_lines(markdown: str) -> list[tuple[int, str]]:
     return collected
 
 
+#: Shell operators that end one command and begin another on the same line.
+_SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
+
+
 def _from_text(document: str, markdown: str) -> list[Invocation]:
-    return [
-        Invocation(document, number, text)
-        for number, text in _shell_lines(markdown)
-        if re.match(r"^aisquare(\s|$)", text)
-    ]
+    """Every `aisquare …` command in a fenced block, including after `&&`.
+
+    Requiring the LINE to start with `aisquare` missed real commands: the
+    runbook's §0 preflight is `which aisquare && aisquare --version`, and its
+    second half is an invocation Jatin runs. Splitting on shell sequencers finds
+    it; a command nested inside `$(…)` still does not, which is accounted for by
+    the skip audit below rather than left silent.
+    """
+    found: list[Invocation] = []
+    for number, text in _shell_lines(markdown):
+        for segment in _SEQUENCERS.split(text):
+            if re.match(r"^aisquare(\s|$)", segment.strip()):
+                found.append(Invocation(document, number, segment.strip()))
+    return found
 
 
 def _invocations() -> list[Invocation]:
@@ -203,26 +226,41 @@ def _split(command: str) -> tuple[list[str], list[str]]:
     return words, flags
 
 
-def _resolve(words: list[str]) -> tuple[list[str], set[str]]:
+def _walk(words: list[str]) -> tuple[list[str], set[str], str | None]:
     """Walk the real command tree as far as the words go.
 
-    Returns the chain that resolved and every long flag legal on it, including
-    the options inherited from each parent. Stops at the first word that is not
-    a subcommand — that word is an argument (`task claim <id>`, `launch coder`).
+    Returns the chain that resolved, every long flag legal on it (including the
+    options inherited from each parent), and a DANGLING word if the walk stopped
+    somewhere a word could only have been a subcommand.
+
+    Telling an argument from a misspelt subcommand is the whole difficulty, and
+    the tree answers it: a group dispatches to children and takes no positional
+    of its own, so a leftover word at a GROUP is a subcommand that does not
+    exist. A leftover word at a leaf is an argument — `task claim <id>`,
+    `launch coder` — and must stay silent.
     """
     node = get_command(app)
     chain: list[str] = []
     flags = {opt for param in node.params for opt in param.opts if opt.startswith("--")}
-    for word in words:
+    for index, word in enumerate(words):
         children = getattr(node, "commands", None)
-        if not children or word not in children:
-            break
+        if not children:
+            return chain, flags, None  # a leaf; the rest are arguments
+        if word not in children:
+            return chain, flags, word  # a group, so this had to be a subcommand
         node = children[word]
         chain.append(word)
         flags |= {opt for param in node.params for opt in param.opts if opt.startswith("--")}
         flags |= {
             opt for param in node.params for opt in param.secondary_opts if opt.startswith("--")
         }
+        del index
+    return chain, flags, None
+
+
+def _resolve(words: list[str]) -> tuple[list[str], set[str]]:
+    """The chain and its legal flags. One walk backs both views of it."""
+    chain, flags, _dangling = _walk(words)
     return chain, flags
 
 
@@ -267,9 +305,14 @@ def _unknown_commands(invocations: list[Invocation]) -> list[str]:
         words, _ = _split(invocation.text)
         if not words:
             continue  # bare `aisquare`, or only flags
-        chain, _flags = _resolve(words)
+        chain, _flags, dangling = _walk(words)
         if not chain:
             unknown.append(f"{invocation.where}  {invocation.text}")
+        elif dangling is not None:
+            unknown.append(
+                f"{invocation.where}  `aisquare {' '.join(chain)}` has no subcommand "
+                f"{dangling!r}\n      {invocation.text}"
+            )
     return unknown
 
 
@@ -560,3 +603,116 @@ def test_typer_is_the_instrument_not_the_help_renderer() -> None:
     _chain, flags = _resolve(["launch"])
     assert "--command" in flags and "--env" in flags
     assert "--verbose" in flags, "parent options must be inherited into the legal set"
+
+
+#: Ways a fenced line can mention "aisquare" without being a command to run.
+#: Each entry is a REASON, so an unclassified mention fails rather than passing
+#: quietly — a silent skip makes this file read as covering everything while
+#: covering less, which is worse than not having it.
+_NOT_AN_INVOCATION = (
+    ("a path segment, not a command word", re.compile(r"[/\w-]/aisquare|aisquare[/-]")),
+    ("a dotted Python module path", re.compile(r"aisquare\.\w")),
+    ("a comment", re.compile(r"^\s*#")),
+    ("nested in a command substitution the extractor cannot see into", re.compile(r"\$\(")),
+    # `key: value` is how every status/doctor block in this runbook prints. Those
+    # blocks quote real commands ("next: aisquare doctor --live") as SAMPLE
+    # OUTPUT — drift there is a stale transcript, which is a doc bug, not a
+    # broken command Jatin runs.
+    ("a `key: value` line of sample CLI output", re.compile(r"^\s*[\w. -]+:\s")),
+    ("a prose line inside an output block", re.compile(r"^\s*[→✓✗•]")),
+    ("a URL", re.compile(r"https?://")),
+    ("a pip requirement — the package name, not the command", re.compile(r"pip\s+install")),
+)
+
+
+def test_every_aisquare_mention_in_the_runbook_is_classified() -> None:
+    """A skip must be a decision, not an omission.
+
+    Measured: the cutover runbook mentions `aisquare` on fenced lines that split
+    into 11 resolvable commands and 19 non-commands — paths, log samples, HTTP
+    lines, a python -c import and one nested `eval $(…)`. Nothing asserted that,
+    so a NEW invocation written in a shape the extractor cannot see would join
+    the skip set and this file would keep reporting green over a runbook line
+    nobody checks.
+
+    Every mention must therefore match a stated reason for not being a command.
+    An unclassified one fails and names the line — which is the case where
+    somebody has written a real invocation the extractor cannot see.
+    """
+    runbook = "docs/runbooks/explainability-prod-cutover.md"
+    text = (REPO / runbook).read_text(encoding="utf-8")
+    extracted = {invocation.line for invocation in _from_text(runbook, text)}
+
+    unexplained: list[str] = []
+    classified = 0
+    for number, line in _shell_lines(text):
+        if "aisquare" not in line or number in extracted:
+            continue
+        if any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION):
+            classified += 1
+            continue
+        unexplained.append(f"{runbook}:{number}  {line}")
+
+    assert len(extracted) >= 10, f"only {len(extracted)} runbook commands extracted — parser broke"
+    assert classified >= 15, (
+        f"only {classified} mentions classified (19 at the time of writing) — the "
+        "reason patterns have stopped matching, so this audit is asserting over a "
+        "set it no longer inspects"
+    )
+    assert not unexplained, (
+        "these runbook lines mention aisquare, are not resolved as commands, and "
+        "match no stated reason for being skipped:\n  " + "\n  ".join(unexplained) + "\n"
+        "If one is a real invocation, the extractor cannot see its shape and is "
+        "reporting green over a line Jatin will run. If it is not, add a reason "
+        "to _NOT_AN_INVOCATION so the skip is recorded rather than silent."
+    )
+
+
+def test_a_renamed_subcommand_is_caught_below_the_top_level() -> None:
+    """THE hole this task was filed against, and it survived the first fix.
+
+    The check used to be `if not chain` — it only fired when the FIRST word
+    failed. `aisquare explainability statuss` resolved `explainability`, left
+    `statuss` dangling, and passed: a leftover word was assumed to be an
+    argument. Measured by doctoring the runbook's real line 407 and watching the
+    suite stay green.
+
+    That is the likeliest drift after a renamed flag. Every runbook command but
+    two is `aisquare <group> <subcommand>`, so a fold that renames a subcommand
+    was exactly the case the guard could not see.
+    """
+    unknown = _unknown_commands([Invocation("doc.md", 407, "aisquare explainability statuss")])
+
+    assert unknown, "a misspelt depth-2 subcommand resolved as an argument"
+    assert "statuss" in unknown[0] and "doc.md:407" in unknown[0]
+
+
+def test_a_positional_argument_is_not_read_as_a_misspelt_subcommand() -> None:
+    """The other half, and the reason the rule is group-versus-leaf.
+
+    `task claim <id>` and `launch <role>` end in a word that is NOT a
+    subcommand and must stay silent. A check that flagged every leftover word
+    would fail on the board commands in the README — noise that would get the
+    whole guard deleted rather than fixed.
+    """
+    for command in ("aisquare task claim tsk_01abc", "aisquare launch coder1"):
+        assert not _unknown_commands([Invocation("doc.md", 1, command)]), (
+            f"{command!r} was reported — a positional argument is being read as a subcommand"
+        )
+
+
+def test_the_runbook_is_treated_as_a_contract_in_the_failure_message() -> None:
+    """A flag-renamer must learn WHERE the dependency is, not just that one exists.
+
+    The person who breaks this is renaming a flag with no idea a document
+    depends on it, so the failure has to name the document and say it is
+    executed rather than illustrative.
+    """
+    unknown = _unknown_commands(
+        [Invocation("docs/runbooks/explainability-prod-cutover.md", 42, "aisquare notacommand")]
+    )
+
+    assert unknown and "explainability-prod-cutover.md:42" in unknown[0], (
+        "the failure must name the document and the line, because that is the "
+        "only way the flag-renamer finds what depends on them"
+    )

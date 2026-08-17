@@ -9,7 +9,6 @@ from typing import NoReturn
 
 import tomli_w
 import typer
-from rich.markup import escape
 from rich.table import Table
 
 from aisquare.core.config import AppConfig
@@ -357,20 +356,26 @@ _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fai
 def emit_doctor(checks: list[DoctorCheck]) -> None:
     """Render diagnostic check results, with a fix hint for anything not OK.
 
-    Details and fixes are escaped because they are DATA, not markup: a check
-    may carry text from a subprocess or another tool, and Rich reads anything
-    in square brackets as a style tag and prints nothing. Observed live — the
-    SDK doctor reports a configured key as ``[present]``, which rendered as an
-    empty detail and read exactly like a missing key.
+    Details and fixes are DATA, not markup: a check may carry text from a
+    subprocess or another tool, and Rich reads anything in square brackets as a
+    style tag and prints nothing. Observed live — the SDK doctor reports a
+    configured key as ``[present]``, which rendered as an empty detail and read
+    exactly like a missing key.
+
+    They are no longer run through ``rich.markup.escape``. The output consoles
+    stopped parsing markup at all (see :mod:`aisquare.core.console`), and
+    escaping for a parser that is switched off prints the backslash it was
+    meant to hide. The protection moved down a layer; the reason for it did not
+    change.
     """
     if get_state().json_output:
         typer.echo(json.dumps([check.model_dump(mode="json") for check in checks]))
         return
     console = stdout_console()
     for check in checks:
-        console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {escape(check.detail)}")
+        console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {check.detail}")
         if check.fix and check.status is not CheckStatus.ok:
-            console.print(f"    → {escape(check.fix)}")
+            console.print(f"    → {check.fix}")
 
 
 def fail(

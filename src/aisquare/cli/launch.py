@@ -26,6 +26,7 @@ import shutil
 from typing import Annotated
 
 import typer
+from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import harness
@@ -158,7 +159,8 @@ def launch(
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
         stderr_console().print(
-            f"[dim]role bindings: config unreadable ({profile.notice}) — launching unbound[/dim]"
+            f"role bindings: config unreadable ({profile.notice}) — launching unbound",
+            style="dim",
         )
     env.update(profile.env)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
@@ -169,7 +171,8 @@ def launch(
         # proxy. `aisquare doctor` still reports the config error loudly.
         tracing = None
         stderr_console().print(
-            f"[dim]explainability: config unreadable ({exc}) — launching untraced[/dim]"
+            f"explainability: config unreadable ({exc}) — launching untraced",
+            style="dim",
         )
     #: Appended to the agent's argv, and empty unless a trace actually happened.
     pinned_id: list[str] = []
@@ -193,8 +196,9 @@ def launch(
         parent_run = explainability_service.disown_inherited_trace(env)
         if parent_run:
             stderr_console().print(
-                f"[dim]explainability: launched from a session traced as {parent_run} — "
-                "this one takes its own identity[/dim]"
+                f"explainability: launched from a session traced as {parent_run} — "
+                "this one takes its own identity",
+                style="dim",
             )
         identity = explainability_service.plan_session_identity(resolution.binary, ctx.args)
         # The ACTIVE target's overrides folded onto the settings the wiring
@@ -208,8 +212,9 @@ def launch(
             # target definition costs the OVERRIDE, never the launch.
             effective = tracing
             stderr_console().print(
-                f"[dim]explainability: target overrides unreadable ({exc}) — "
-                "using the top-level settings[/dim]"
+                f"explainability: target overrides unreadable ({exc}) — "
+                "using the top-level settings",
+                style="dim",
             )
         wiring = explainability_service.wire_session(
             effective,
@@ -218,7 +223,7 @@ def launch(
             base_env=env,
         )
         env.update(wiring.env)
-        stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
+        stderr_console().print(f"explainability: {wiring.reason}", style="dim")
         if wiring.traced:
             # Only pin the id on a launch that is REALLY traced. An untraced
             # launch has no Run to join, so touching its argv would be pure
@@ -235,9 +240,16 @@ def launch(
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
     argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
+    # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
+    # styles a single token instead of the whole line, and it interpolates a
+    # role name, a binary path and a project name. A Text carries its styling
+    # as structure, so the parser never sees the data at all.
     stderr_console().print(
-        f"Launching {resolution.binary}{whose} as [bold]{role}[/bold] on the "
-        f"{project.root.name or project.id} board…"
+        Text.assemble(
+            f"Launching {resolution.binary}{whose} as ",
+            (role, "bold"),
+            f" on the {project.root.name or project.id} board…",
+        )
     )
     _exec(binary, argv, env)
 

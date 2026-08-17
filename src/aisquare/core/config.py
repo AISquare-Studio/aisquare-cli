@@ -230,14 +230,33 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     """
     target = path or paths.config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Symlinks are followed on purpose. ``os.replace`` below swaps the NAME it is
+    # given, so pointed at a symlink it would replace the LINK with a regular
+    # file — the plain ``write_text`` this used to be wrote THROUGH the link
+    # instead. Symlinking a dotfile into a version-controlled directory is a
+    # mainstream pattern, and severing it is silent in the way that matters: the
+    # tracked file keeps its old contents, ``git status`` shows nothing, and the
+    # next machine sync restores settings that stopped being live.
+    #
+    # Resolving costs nothing that matters. The temp file is still created in the
+    # target's own directory — now the REAL one — so temp and target still share
+    # a filesystem and the replace stays atomic.
+    #
+    # The RETURN VALUE stays the path the caller asked for, because that is what
+    # commands echo back to an operator; where the bytes physically land is our
+    # business, not theirs.
+    written = Path(os.path.realpath(target))
+    written.parent.mkdir(parents=True, exist_ok=True)
+
     dumped = config.model_dump(mode="json", exclude_none=True)
-    if target.exists():
+    if written.exists():
         # Keys this build has never heard of belong to whoever wrote them; see
         # _keep_unknown. Reading fails open on purpose — a config we cannot parse
         # is exactly the state a write is most likely trying to repair, and
         # refusing to write would strand the operator with the broken file.
         try:
-            with target.open("rb") as handle:
+            with written.open("rb") as handle:
                 dumped = _keep_unknown(tomllib.load(handle), dumped, config)
         except (OSError, tomllib.TOMLDecodeError):
             pass
@@ -258,13 +277,13 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     # it is removed on any failure rather than left next to the file an operator
     # reads. ``fsync`` before the rename so a crash cannot publish a file whose
     # contents never reached the disk.
-    temp = target.parent / f".{target.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp"
+    temp = written.parent / f".{written.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp"
     try:
         with temp.open("w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, target)
+        os.replace(temp, written)
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
@@ -293,7 +312,7 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     # native ext4 disk. On a DrvFs//mnt/c or \\wsl.localhost path the guarantee
     # softens, and nothing in this code can tell which kind of path it is on.
     try:
-        directory = os.open(target.parent, os.O_RDONLY)
+        directory = os.open(written.parent, os.O_RDONLY)
     except OSError:
         return target
     try:

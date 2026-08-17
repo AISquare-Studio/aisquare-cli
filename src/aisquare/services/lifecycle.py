@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
 from aisquare.core.config import (
     AppConfig,
@@ -102,9 +103,10 @@ def initialize(
         # nothing downstream reports a missing targets table.
         notes.append(f"reset discarded the configured explainability section ({discarded})")
     if api_key:
-        credentials = paths.credentials_path()
-        credentials.write_text(api_key, encoding="utf-8")
-        credentials.chmod(0o600)
+        # Merged rather than replaced: `serve` keeps its bearer token in the same
+        # file, and a whole-file write erased it (and, in the other order, this
+        # key). One helper owns the format so the two cannot diverge again.
+        credentials_store.store(**{credentials_store.API_KEY: api_key})
         notes.append("Stored API key in ~/.aisquare/credentials.")
     elif not local:
         notes.append(

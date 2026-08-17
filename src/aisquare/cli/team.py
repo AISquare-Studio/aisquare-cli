@@ -22,7 +22,13 @@ from aisquare.core import harness, orchestrator
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
-from aisquare.core.store import AmbiguousIdError, is_locked_error
+from aisquare.core.store import (
+    AmbiguousIdError,
+    StoreUnopenable,
+    damaged_store_message,
+    damaged_store_recovery,
+    is_locked_error,
+)
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import settings as settings_service
@@ -99,9 +105,19 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
             error="store_locked",
             detail=str(exc),
         )
+    if isinstance(exc, StoreUnopenable):
+        # Legible since it was written, and a dead end until now: "context
+        # store error: file is not a database" named no file and no next step.
+        # Same sentence doctor prints, from one function.
+        fail(
+            damaged_store_message(exc),
+            error="store_unopenable",
+            hint=damaged_store_recovery(),
+            detail=str(exc),
+        )
     if isinstance(exc, sqlite3.DatabaseError):
-        # NOT retryable (no such table, readonly, disk full, corruption):
-        # a distinct code, with the real cause preserved for --json callers.
+        # NOT retryable (no such table, readonly, disk full): a distinct code,
+        # with the real cause preserved for --json callers.
         fail(f"context store error: {exc}", error="store_error", detail=str(exc))
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)

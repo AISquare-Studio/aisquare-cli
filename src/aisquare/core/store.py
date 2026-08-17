@@ -1295,6 +1295,61 @@ def is_locked_error(exc: sqlite3.Error) -> bool:
     return "locked" in text or "busy" in text
 
 
+class StoreUnopenable(sqlite3.DatabaseError):
+    """The store could not be opened at all — whatever the cause.
+
+    Subclasses ``sqlite3.DatabaseError`` deliberately: every existing catcher
+    (``_fail_team``'s ``STORE_ERRORS``, diagnostics' bare ``except``) keeps
+    working unchanged, while the one boundary that wants to translate it can
+    name it precisely.
+
+    Raised ONLY from ``open_store``'s setup phase, which is what makes it safe
+    to act on: at that point nothing in the file is reachable by this CLI, so
+    recommending the operator move it aside costs them no history they still
+    had. A ``DatabaseError`` from a later query is a different animal and is
+    left alone — it may be a bug in our SQL against a perfectly good store.
+
+    A lock timeout is NOT wrapped: it stays an ``OperationalError`` so
+    ``is_locked_error`` still routes it to "store busy — retry shortly", which
+    is transient and must never be dressed up as damage.
+    """
+
+
+def damaged_store_recovery() -> str:
+    """The one recovery for a corrupt store, worded once and shared.
+
+    ``doctor`` prints this as its remediation and every command that hits a
+    corrupt store prints it as its error, because the defect this replaces was
+    precisely that those were two different sentences and only one of them
+    worked: doctor said "Re-initialise: aisquare init", and ``aisquare init``
+    crashed on the same corrupt file without repairing it.
+
+    MOVED, not deleted, and not repaired. ``context.db`` holds the board's
+    whole history; a diagnostic that destroys it is unrecoverable, so the
+    operator performs the move and the broken file stays on disk for whoever
+    wants to look at it. What the move costs is named here rather than left to
+    be discovered afterwards.
+    """
+    db = paths.db_path()
+    return (
+        f"Move it aside and re-create: mv {db} {db}.broken && aisquare init "
+        f"— the board history in it is lost; config.toml and credentials are untouched"
+    )
+
+
+def damaged_store_message(exc: sqlite3.Error) -> str:
+    """The whole operator-facing sentence for a corrupt store: what and how.
+
+    Built here rather than at each boundary because there are three of them —
+    ``init``/``status`` via ``expected_store_errors`` and every team command
+    via ``_fail_team`` — and three copies of a sentence is how doctor's
+    remediation drifted from a working one in the first place.
+    """
+    return (
+        f"the context store cannot be opened: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
+    )
+
+
 def _statements(script: str) -> Iterator[str]:
     """Split a migration script into statements, using SQLite's own parser.
 
@@ -1410,10 +1465,20 @@ def open_store() -> ContextStore:
             _migrate(connection)
             return SqliteStore(connection)
         except sqlite3.OperationalError as exc:
-            if not is_locked_error(exc) or time.monotonic() >= deadline:
-                connection.close()
-                raise
-            time.sleep(0.05 + random.random() * 0.1)
+            if is_locked_error(exc):
+                if time.monotonic() >= deadline:
+                    connection.close()
+                    raise  # transient: keeps its type, and its "retry shortly"
+                time.sleep(0.05 + random.random() * 0.1)
+                continue
+            connection.close()
+            raise StoreUnopenable(str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            # Corruption (SQLITE_NOTADB) and a store wedged mid-migration both
+            # land here. Measured before this existed: 59-75 lines of traceback
+            # from ELEVEN commands, because they all die in this one place.
+            connection.close()
+            raise StoreUnopenable(str(exc)) from exc
 
 
 @contextmanager

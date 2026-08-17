@@ -2,14 +2,19 @@
 
 ``context.db`` can wedge — that is why the cutover runbook has a §0b at all,
 and why it has a wedge-recovery step. What nobody had measured is what the
-CLI DOES when it is wedged. Measured at 5200357 against a corrupt store, FOURTEEN commands let a
-``DatabaseError: file is not a database`` escape, which reaches the operator as
-a Rich-rendered Python traceback with source frames:
+CLI DOES when it is wedged. Measured at 5200357 against a corrupt store,
+FOURTEEN commands let a ``DatabaseError: file is not a database`` escape, which
+reached the operator as a Rich-rendered Python traceback with source frames:
 
     status  log  inject  init
     context list  context export  context preview
     ctx list  ctx export  ctx preview
     project list  project info  workspace list  workspace info
+
+They are all legible now — ``open_store`` raises ``StoreUnopenable`` and the
+root group translates it in one place, which is what emptied ``STILL_RAISES``
+below. The list above is the measurement that chose that seam, kept because it
+is what makes an empty ratchet mean something.
 
 A hand-run shell sweep of "read-only sounding" leaf names found nine of these.
 The count is fourteen because the sweep filtered on names it guessed were
@@ -83,28 +88,16 @@ CORRUPT = b"this is not a sqlite database, and open_store must say so in words"
 #:   * a command listed here that STOPS raising also fails the guard, naming
 #:     itself, so the list cannot outlive the defect it describes.
 #:
-#: Every one of these dies in the same frame — ``core.store.open_store`` at
-#: ``PRAGMA journal_mode = WAL``. One legible boundary there empties this list
-#: in a single change, which is the measurement handed to
-#: tsk_01m08ygythttzm2y9hc53qehkt rather than a fix taken out of its hands:
-#: `init` and `doctor`'s remediation are that task's to word, and wording them
-#: from here would be deciding someone else's claim for them.
-STILL_RAISES = {
-    "context export",
-    "context list",
-    "context preview",
-    "ctx export",
-    "ctx list",
-    "ctx preview",
-    "init",
-    "inject",
-    "log",
-    "project info",
-    "project list",
-    "status",
-    "workspace info",
-    "workspace list",
-}
+#: Every one of them died in the same frame — ``core.store.open_store`` at
+#: ``PRAGMA journal_mode = WAL`` — and that is exactly how it was fixed: one
+#: boundary, not fourteen. The prediction in this comment held.
+#: EMPTIED by tsk_01m08ygythttzm2y9hc53qehkt, in the single change this comment
+#: predicted: ``open_store`` now raises ``StoreUnopenable`` and the root group
+#: translates it once, so all fourteen report in one line instead of raising.
+#: Kept rather than deleted — an empty ratchet is the strongest form of this
+#: guard: every command in the tree is now held to the property, and the next
+#: instance has nowhere to be listed.
+STILL_RAISES: set[str] = set()
 
 
 def _leaves() -> list[list[str]]:
@@ -224,18 +217,17 @@ def test_the_ratchet_names_only_commands_that_exist() -> None:
 
 
 @pytest.mark.usefixtures("damaged_store")
-def test_they_all_fail_in_the_same_place() -> None:
-    """The measurement that tells whoever fixes this where the boundary belongs.
+def test_the_class_is_closed_at_one_boundary() -> None:
+    """This measured fourteen commands sharing one frame, so a fixer would know
+    a single boundary could close the class. It could, and it did.
 
-    Fourteen commands, one frame. If this ever stops holding, the class has
-    become several classes and a single legible boundary would no longer close
-    it — which is exactly the thing a fixer needs to know BEFORE choosing where
-    to put the fix, not after.
+    Now it holds the other direction: NOTHING escapes. If a command starts
+    raising again, ``frames`` is non-empty and this names the frame it escaped
+    from — which says immediately whether the seam regressed or whether a new
+    code path opens the store somewhere else.
     """
     frames: set[str] = set()
     for chain in _invoked():
-        if " ".join(chain) not in STILL_RAISES:
-            continue
         raised = _raises_unhandled(chain)
         if raised is None:
             continue
@@ -245,7 +237,8 @@ def test_they_all_fail_in_the_same_place() -> None:
         if traceback is not None:
             frames.add(traceback.tb_frame.f_code.co_name)
 
-    assert frames == {"open_store"}, (
-        f"the raising commands no longer share one boundary: {sorted(frames)}. "
-        "A single legible error at open_store no longer closes the class."
+    assert frames == set(), (
+        f"a damaged store is escaping again, from: {sorted(frames)}. "
+        "The seam is core.store.open_store raising StoreUnopenable and the root "
+        "group translating it; a frame here means one of the two stopped."
     )

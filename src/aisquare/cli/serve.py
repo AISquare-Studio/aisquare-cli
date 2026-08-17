@@ -15,6 +15,60 @@ from aisquare.core.state import get_state
 
 _INSTALL_HINT = "pip install 'aisquare-cli[serve]' (or: pipx inject aisquare-cli mcp)"
 
+#: The module ``services.mcp_server.build_server`` actually imports. Probing the
+#: DISTRIBUTION instead (``find_spec("mcp")``) is not enough: mcp 2.0.0 ships a
+#: package called ``mcp`` that no longer contains this module, so the
+#: distribution check passes and the user gets a raw ModuleNotFoundError from
+#: deep inside the server instead of the CLI's error contract. A test pins this
+#: name against the import in mcp_server.py so the two cannot drift.
+REQUIRED_MODULE = "mcp.server.fastmcp"
+
+
+def _find_spec(name: str) -> object | None:
+    """Indirection so the dependency state can be exercised in tests.
+
+    Patching ``importlib.util.find_spec`` itself would sabotage every other
+    import for the duration of the test, including pytest's own.
+    """
+    import importlib.util
+
+    return importlib.util.find_spec(name)
+
+
+def _dependency_error() -> str | None:
+    """Why the MCP server cannot start here, or ``None`` when it can.
+
+    Two failures that need two different fixes: the extra is missing (install
+    it), or the installed ``mcp`` is a major that deleted what we import
+    (pin it back). Telling someone to install a package they already have is
+    worse than saying nothing, so they are reported separately.
+    """
+    try:
+        if _find_spec(REQUIRED_MODULE) is not None:
+            return None
+    except (ImportError, ValueError):
+        # find_spec on a dotted name imports its parents first, so an absent
+        # `mcp` raises here rather than returning None. That IS the
+        # extra-not-installed case, and it falls through to the check below.
+        pass
+    if _find_spec("mcp") is None:
+        return f"the serve extra is not installed — {_INSTALL_HINT}"
+    return (
+        f"the installed mcp package has no {REQUIRED_MODULE}{_installed_mcp()} — "
+        "aisquare needs mcp>=1.10,<2, which is where that module lives. "
+        "Pin it back: pip install 'mcp>=1.10,<2'"
+    )
+
+
+def _installed_mcp() -> str:
+    """``" (mcp 2.0.0)"`` when the version is knowable, else nothing."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return f" (mcp {version('mcp')})"
+    except PackageNotFoundError:  # importable but not an installed distribution
+        return ""
+
 
 def serve(
     stdio: Annotated[
@@ -44,12 +98,11 @@ def serve(
     ] = 300,
 ) -> None:
     """Run the orchestrator MCP server so remote Claude clients can join this project."""
-    import importlib.util
-
     # mcp_server itself imports lazily, so probe the dependency directly —
     # a bare `import` succeeds without the extra and dies later mid-request.
-    if importlib.util.find_spec("mcp") is None:
-        fail(f"the serve extra is not installed — {_INSTALL_HINT}", error="serve_not_installed")
+    problem = _dependency_error()
+    if problem is not None:
+        fail(problem, error="serve_not_installed")
     from aisquare.services import mcp_server
 
     if show_token:

@@ -400,5 +400,11 @@ def fail(
             payload["detail"] = detail
         typer.echo(json.dumps(payload, separators=(",", ":")))
     else:
-        stderr_console().print(f"✗ {message}")
+        # markup=False because an error message is DATA, not a template. Rich
+        # reads `[...]` as a style tag and deletes it silently, which rendered
+        # the serve hint as `pip install 'aisquare-cli'` — the extra name, the
+        # one actionable token in the sentence, gone. Every other fail message
+        # interpolates user-controlled text (paths, refs, role names, config
+        # values), so this was a class of silent mangling, not one bad string.
+        stderr_console().print(f"✗ {message}", markup=False)
     raise typer.Exit(exit_code)

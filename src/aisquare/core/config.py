@@ -6,9 +6,11 @@ stubbed. Unknown keys in the file are ignored so old configs keep loading.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import tomli_w
 from pydantic import BaseModel, Field
@@ -190,7 +192,31 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     """
     target = path or paths.config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)), encoding="utf-8"
-    )
+    payload = tomli_w.dumps(config.model_dump(mode="json", exclude_none=True))
+
+    # Written BESIDE the target and renamed over it, never into the target
+    # itself. ``os.replace`` is atomic within a filesystem, so a concurrent
+    # reader sees either the whole old file or the whole new one; writing in
+    # place truncates first, and anyone reading in that window gets a partial
+    # TOML document. Not theoretical on a multi-seat machine — several sessions
+    # reach this function, and the caller that suffers most is the QUIETEST one:
+    # ``cli/launch.py`` treats an unreadable config as "launching untraced" by
+    # design, so a torn write costs tracing silently instead of raising.
+    #
+    # The temp file is a SIBLING because ``os.replace`` is only atomic within
+    # one filesystem — a name under /tmp would reintroduce a copy step. It
+    # carries pid plus a random suffix so two writers cannot collide on it, and
+    # it is removed on any failure rather than left next to the file an operator
+    # reads. ``fsync`` before the rename so a crash cannot publish a file whose
+    # contents never reached the disk.
+    temp = target.parent / f".{target.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp"
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
     return target

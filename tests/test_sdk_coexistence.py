@@ -81,6 +81,38 @@ def _package_modules() -> list[Path]:
     return sorted(p for p in PACKAGE.rglob("*.py") if p.name != "__init__.py")
 
 
+def test_the_module_sweep_actually_finds_modules() -> None:
+    """Guard the guard, and here the vacuous case is a SKIP rather than a pass.
+
+    The sweep below is a `parametrize` over `_package_modules()`. If that list is
+    ever empty — `PACKAGE` renamed, the layout moved, a glob typo — pytest does
+    not fail: it emits ONE SKIPPED test for the empty parameter set and exits 0.
+    Measured: 60 cases become `1 skipped`, and one skip inside a thousand-test
+    suite is invisible in a summary everyone reads as a pass count.
+
+    That matters more here than for most guards, because the parametrized sweep
+    below is the thing actually holding the SDK-collision invariant. Losing it
+    silently would leave `aisquare-cli[explainability]` a self-destruct button
+    with a green suite over it.
+
+    Landmarks as well as a floor: a count alone passes if the glob is pointed at
+    the wrong tree and happens to find enough files there.
+    """
+    modules = _package_modules()
+
+    assert len(modules) >= 40, (
+        f"the module sweep found only {len(modules)} files under {PACKAGE} — it is "
+        "the parameter source for the collision guard below, and an empty or "
+        "truncated list makes that guard skip rather than fail"
+    )
+    found = {path.relative_to(PACKAGE).as_posix() for path in modules}
+    for landmark in ("cli/app.py", "core/version.py"):
+        assert landmark in found, (
+            f"{landmark} is missing from the sweep, so it is not walking this "
+            f"package — {PACKAGE} may have moved"
+        )
+
+
 @pytest.mark.parametrize("module", _package_modules(), ids=lambda p: str(p.name))
 def test_no_module_reads_a_name_out_of_the_top_level_package(module: Path) -> None:
     """``from aisquare import X`` is the one import shape the pairing cannot survive.

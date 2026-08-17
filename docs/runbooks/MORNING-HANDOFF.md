@@ -242,3 +242,7 @@ behind it:
   and again in wedge recovery — do not "fix" it. (The *migrate* half is
   unpinned; it also cannot fire at this cutover, because this RC adds no
   migration — `_MIGRATIONS` has ten entries on `main@ce6bc46` and ten here.)
+  **If that store is ever wedged, stop and fix it before anything else** — the
+  recovery is in §0b of the runbook, measured end to end, and it **empties the
+  board**: every session, task and note. Nothing about explainability lives in
+  that file, so your config, targets and key survive it.

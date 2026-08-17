@@ -55,8 +55,18 @@ def _foreign_package_reason(module_file: Path, src: Path) -> str | None:
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Refuse to grade the wrong tree, before a single test runs."""
-    reason = _foreign_package_reason(Path(aisquare.__file__).resolve(), SRC)
+    """Refuse to grade the wrong tree, before a single test runs.
+
+    ``__file__ or ""`` matches the convention already in the tree (see
+    ``services/explainability.py``'s ``_package_root``): a namespace package
+    has ``__file__ = None``, and ``Path(None)`` raises ``TypeError``. Nobody
+    could construct a realistic route to that state for ``aisquare`` — the SDK
+    we actually collide with ships a real ``__init__.py`` — but this hook runs
+    before EVERY pytest invocation in the repo, and its entire purpose is to
+    replace a confusing failure with an explanatory one. Dying in a traceback
+    would be the one outcome it exists to prevent.
+    """
+    reason = _foreign_package_reason(Path(aisquare.__file__ or "").resolve(), SRC)
     if reason is not None:
         pytest.exit(reason, returncode=4)
 

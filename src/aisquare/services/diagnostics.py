@@ -308,7 +308,27 @@ def _check_config() -> DoctorCheck:
     return _ok("config", "config.toml is valid")
 
 
+def _uncreated_home(name: str) -> DoctorCheck | None:
+    """``None`` when the store can be opened without bringing a home into being.
+
+    ``store_session`` calls ``ensure_home``, so a check that opens the store on
+    a machine with no home CREATES the thing the ``home`` check is at that
+    moment reporting as missing — and makes the next run exit 0 for no reason
+    but that this one ran. Diagnosis must not be a side effect.
+
+    Reported at ok status because ``home`` owns that verdict and already fails:
+    a second failure here would send an operator to look at the database when
+    the answer is that nothing has been set up yet.
+    """
+    if paths.aisquare_home().exists():
+        return None
+    return _ok(name, "not created yet — set it up: aisquare init")
+
+
 def _check_database() -> DoctorCheck:
+    absent = _uncreated_home("database")
+    if absent is not None:
+        return absent
     try:
         with store_session() as store:
             count = len(store.entries("user"))
@@ -373,6 +393,9 @@ def _check_claude_code() -> DoctorCheck:
 
 
 def _check_snapshot() -> DoctorCheck:
+    absent = _uncreated_home("snapshot")
+    if absent is not None:
+        return absent
     try:
         with store_session() as store:
             project = active_project(store)
@@ -394,6 +417,9 @@ def _check_snapshot() -> DoctorCheck:
 
 def _check_brain() -> DoctorCheck:
     """The team's long-term memory: gbrain presence, brain state, distill lag."""
+    absent = _uncreated_home("brain")
+    if absent is not None:
+        return absent
     if not brain_core.brain_enabled():
         return _ok("brain", "brain layer disabled (AISQUARE_BRAIN=0)")
     version = brain_core.gbrain_version()
@@ -479,6 +505,9 @@ def _check_harness() -> DoctorCheck:
     ``aisquare team spawn <role>``. Warns, never fails — a stale cache or an
     off-ladder session is advice, not breakage.
     """
+    absent = _uncreated_home("harness")
+    if absent is not None:
+        return absent
     name = "agent harness"
     try:
         # Not-applicable = ok: a repo that never opted into the orchestrator must

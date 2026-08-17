@@ -30,7 +30,7 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import expected_config_write_errors, fail
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.services import explainability_ops as ops
@@ -186,7 +186,8 @@ def enable(
         settings.targets[name] = target
 
     settings.enabled = True
-    save_config(config)
+    with expected_config_write_errors():
+        save_config(config)
 
     resolved = ops.resolve_target(settings, name)
     typer.echo(f"✓ tracing enabled for target '{resolved.name}'")
@@ -204,7 +205,8 @@ def disable() -> None:
     """Turn session tracing off for this machine (targets are kept)."""
     config = load_config()
     config.explainability.enabled = False
-    save_config(config)
+    with expected_config_write_errors():
+        save_config(config)
     typer.echo("✓ tracing disabled — sessions launch untraced, targets left in place")
 
 

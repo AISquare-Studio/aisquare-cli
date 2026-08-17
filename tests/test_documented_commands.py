@@ -625,23 +625,37 @@ _NOT_AN_INVOCATION = (
 )
 
 
-def test_every_aisquare_mention_in_the_runbook_is_classified() -> None:
+#: Resolved / classified counts measured per document, so a collapse in either
+#: number is visible instead of averaging out across the three.
+CENSUS = {
+    "README.md": (55, 5),
+    "docs/explainability-tracing-boundary.md": (2, 0),
+    "docs/runbooks/explainability-prod-cutover.md": (11, 27),
+}
+
+
+@pytest.mark.parametrize("document", DOCUMENTED)
+def test_every_aisquare_mention_is_classified(document: str) -> None:
     """A skip must be a decision, not an omission.
 
-    Measured: the cutover runbook mentions `aisquare` on fenced lines that split
-    into 11 resolvable commands and 19 non-commands — paths, log samples, HTTP
-    lines, a python -c import and one nested `eval $(…)`. Nothing asserted that,
-    so a NEW invocation written in a shape the extractor cannot see would join
-    the skip set and this file would keep reporting green over a runbook line
-    nobody checks.
+    Measured at the time of writing — resolved + classified + 0 unaccounted:
+    README 60 = 55 + 5, tracing-boundary 2 = 2 + 0, cutover runbook 38 = 11 + 27
+    (paths, dotted module paths, sample output, a pip requirement and one nested
+    `eval $(…)`). Nothing asserted that, so a NEW invocation written in a shape
+    the extractor cannot see would join the skip set and this file would keep
+    reporting green over a line nobody checks.
 
     Every mention must therefore match a stated reason for not being a command.
-    An unclassified one fails and names the line — which is the case where
-    somebody has written a real invocation the extractor cannot see.
+    An unclassified one fails and names the line — which is exactly the case
+    where somebody has written a real invocation the extractor cannot see.
+
+    Run over ALL THREE documents rather than the runbook alone. The runbook is
+    where the silent skips were found, but the README is the page that grows,
+    and scoping an audit to the document whose defect prompted it is how the
+    next instance goes unnoticed.
     """
-    runbook = "docs/runbooks/explainability-prod-cutover.md"
-    text = (REPO / runbook).read_text(encoding="utf-8")
-    extracted = {invocation.line for invocation in _from_text(runbook, text)}
+    text = (REPO / document).read_text(encoding="utf-8")
+    extracted = {invocation.line for invocation in _from_text(document, text)}
 
     unexplained: list[str] = []
     classified = 0
@@ -651,16 +665,20 @@ def test_every_aisquare_mention_in_the_runbook_is_classified() -> None:
         if any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION):
             classified += 1
             continue
-        unexplained.append(f"{runbook}:{number}  {line}")
+        unexplained.append(f"{document}:{number}  {line}")
 
-    assert len(extracted) >= 10, f"only {len(extracted)} runbook commands extracted — parser broke"
-    assert classified >= 15, (
-        f"only {classified} mentions classified (19 at the time of writing) — the "
-        "reason patterns have stopped matching, so this audit is asserting over a "
-        "set it no longer inspects"
+    was_resolved, was_classified = CENSUS[document]
+    assert len(extracted) >= was_resolved * 0.8, (
+        f"{document}: only {len(extracted)} commands extracted, was {was_resolved} "
+        "— the parser lost lines it used to read"
+    )
+    assert classified >= was_classified * 0.6, (
+        f"{document}: only {classified} mentions classified, was {was_classified} "
+        "— the reason patterns have stopped matching, so this audit is asserting "
+        "over a set it no longer inspects"
     )
     assert not unexplained, (
-        "these runbook lines mention aisquare, are not resolved as commands, and "
+        "these lines mention aisquare, are not resolved as commands, and "
         "match no stated reason for being skipped:\n  " + "\n  ".join(unexplained) + "\n"
         "If one is a real invocation, the extractor cannot see its shape and is "
         "reporting green over a line Jatin will run. If it is not, add a reason "

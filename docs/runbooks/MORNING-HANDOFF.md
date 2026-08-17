@@ -38,9 +38,11 @@ something is.
    does not exist on the stale build and exits 2 — so the danger is entirely
    *after* you configure.
 
-   **Step 1 does NOT close the whole class, and an earlier version of this file
-   said it did.** Measured command by command at the train head, because
-   generalising from one of the three was exactly the mistake:
+   **Same three commands, two different builds, two different verdicts — do not
+   read the paragraph above as a statement about the train.** Step 1 closes the
+   stale-build case entirely. At the train head the picture is different, and it
+   is now measured command by command, because generalising from one of the three
+   is a mistake two of us made in opposite directions:
 
    - `config set` on an unrelated key — **safe**. All five top-level
      `[explainability]` keys and the `[explainability.targets]` table survive.

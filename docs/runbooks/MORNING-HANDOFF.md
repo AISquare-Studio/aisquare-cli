@@ -116,7 +116,15 @@ Two lanes, both wired end to end:
   that variable is built *only on the healthy path*, so a rejected proxy is
   never routed to.
 - **Client lane** (#50) — CLI insights spooled, then shipped by
-  `explainability ship`.
+  `explainability ship`. **Nothing drains that spool automatically**, by design,
+  and this is the one thing here that needs you *after* the cutover rather than
+  during it: `ship` runs once, so without a timer you deliver the insights
+  captured before you finish and then none ever again — while model traffic
+  flows and `status` reads green, because the proxy lane is unaffected. §5b now
+  carries a wrapper script and a cron line; use `ship --strict` in a timer,
+  which exits non-zero when a run could not ship at all. The plain command
+  exits **0** when it has no key, which is correct for an interactive run and
+  is why a naive crontab line reports success forever.
 
 The correlation spine: one id in four places — launcher mint → `--session-id`
 argv → `X-Pipeline-Id` header → `AISQUARE_PIPELINE_ID` marker → board row via

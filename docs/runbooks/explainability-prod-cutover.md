@@ -102,16 +102,23 @@ hypothesis are in `docs/store-migration-race.md`.
 
 ### If this very command fails, you are in the case §0b exists for
 
-**[verified-train]** A wedged store does not produce a tidy error. `aisquare
-status` prints **about sixty lines of Python stack trace** ending in
-`DatabaseError: file is not a database` and exits 1 — against six lines and exit
-0 on a healthy store. **The CLI has not exploded; recognise this and keep
-going.** **[verified-train]** Fourteen commands do this on a damaged store —
-`status`, `init`, `log`, `inject`, `context list/export/preview` (and the `ctx`
-aliases), `project list/info`, `workspace list/info`. They all die in one place,
-`open_store`, which is asserted by
-`tests/test_no_traceback_on_a_damaged_store.py` rather than remembered here, and
-a legible boundary is in flight.
+**[verified-train, coder3 `9bbc8ed7`]** A damaged store says so in one line, and
+the line carries the recovery:
+
+```
+✗ the context store cannot be opened: ~/.aisquare/context.db (file is not a
+database). Move it aside and re-create: mv … && aisquare init — the board
+history in it is lost; config.toml and credentials are untouched
+```
+
+**This replaced a stack trace.** All fourteen commands that used to print 59-75
+lines of Python traceback on a damaged store — `status`, `init`, `log`,
+`inject`, `context list/export/preview` (and the `ctx` aliases), `project
+list/info`, `workspace list/info` — died in one place, `open_store`, and are
+translated in one place now. That the class stays closed is asserted by
+`tests/test_no_traceback_on_a_damaged_store.py`, whose ratchet is empty, rather
+than remembered here. If you DO see a traceback, you are on an older build; the
+recovery below still applies.
 
 **`launch` is not one of them, and that is the part that matters at 08:05.**
 **[verified-train]** A damaged store used to kill every launch — exit 1, a stack
@@ -128,21 +135,22 @@ No board row means no join to a gateway Run for that session: a lost trace, whic
 is what the fail-open rule says to spend. **So you can start agents while the
 store is broken — but fix the store before you care about traces.**
 
-Recovery, **[verified-train]** end to end — `rm` then re-warm, then confirm:
+Recovery, **[verified-train, coder3 `9bbc8ed7`]** end to end — this is the
+command the error above and `aisquare doctor` both print, verbatim:
 
 ```bash
-cp ~/.aisquare/context.db ~/.aisquare/context.db.wedged   # keep it; see below
-rm ~/.aisquare/context.db
-aisquare status >/dev/null                                # ONE process, alone
+mv ~/.aisquare/context.db ~/.aisquare/context.db.broken   # keep it; see below
+aisquare init                                             # ONE process, alone
 aisquare doctor | grep database                           # expect: ✓ readable
 ```
 
 > ⚠️ **This empties the board.** `context.db` holds every team session, task and
-> note — the whole history. After the delete, `aisquare board` reports an empty
+> note — the whole history. After the move, `aisquare board` reports an empty
 > orchestrator, **[verified-train]**. That is the price of the recovery and
-> there is no partial version of it, which is why the copy above is the first
-> step rather than an afterthought. Nothing about explainability lives in this
-> file: your config, targets and key are untouched.
+> there is no partial version of it, which is why the file is MOVED rather than
+> deleted — the bytes survive for whoever wants to look at them. Nothing about
+> explainability lives in this file: your config, targets and key are untouched,
+> **[verified-train, coder3 `9bbc8ed7`]** on both damaged states.
 
 ---
 
@@ -715,6 +723,7 @@ fully healthy run):
 | `probe: proxy unreachable` with `enabled: True` | launches are silently untraced — §3 |
 | `API Error: Invalid URL` with `exit=1` | you are on a build older than the POSIX-quoting fix, **or** an `ANTHROPIC_BASE_URL` in your own environment is malformed — the CLI now names it on stderr just above the failure |
 | `✗ context store error: duplicate column name: account` | you skipped §0b on a brand-new `~/.aisquare` — recovery below |
+| `✗ the context store is corrupt: …/context.db` | the file is damaged, not misconfigured — the message carries the whole recovery, and `aisquare doctor` prints the same one |
 
 **[verified-train, planner `dfd9a883`]** **Recovering a wedged store.** If several
 sessions raced a *first* open, the store can be left permanently mid-migration:
@@ -734,6 +743,17 @@ schema, `integrity_check` reports `ok`, and commands work. On a **new** machine
 this costs nothing — there is no board data yet. On an **established** one it
 discards that machine's local board (sessions, tasks, notes), so prefer §0b to
 needing this.
+
+**[verified-train, coder3 `9bbc8ed7`]** `aisquare doctor` now names this recovery
+itself, in a form that does not destroy the file: `mv ~/.aisquare/context.db
+~/.aisquare/context.db.broken && aisquare init`. Prefer it — the bytes survive
+for whoever wants to look at them, and it is the same sentence doctor prints, so
+it cannot drift from what actually works. Verified on both damaged states: a
+corrupt file (`file is not a database`) and a store wedged mid-migration
+(`duplicate column name`); each recovers to `✓ database: context.db is readable`
+and leaves a configured `[explainability]` section untouched. Until this landed
+doctor said "Re-initialise: `aisquare init`", which crashed with a traceback on
+both and repaired neither.
 
 ### Known limitation to state out loud before anyone reads a dashboard
 

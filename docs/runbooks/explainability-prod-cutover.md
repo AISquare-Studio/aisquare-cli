@@ -5,6 +5,13 @@ traced data against explainability **prod** in about 15 minutes.
 
 **Written:** 2026-08-17, night shift, by the runner session (`d124bc26`), against
 train `rc/v2026.08.18` @ `0b5cfd1`.
+**Refreshed:** 2026-08-17 ~06:00 by `coder3`, against the train at the commit
+this file ships with. The original was 49 commits stale and predated every
+command purpose-built for this cutover — `explainability enable`, `register`,
+`ship`, `disable`, and `doctor --live` — so following it produced a cutover with
+no registered identities and no insight delivery, while every step appeared to
+succeed. Steps I re-executed carry my markers; where I could not execute
+something I say so and name who did.
 
 **How to read the evidence markers.** Every step is marked, and the markers are
 load-bearing — they tell you which steps I actually executed and which ones you
@@ -163,9 +170,21 @@ Contents (values from the prod workspace — Settings → Studios → API keys):
 EXPLAINABILITY_GATEWAY_URL=https://<prod-explainability-host>
 EXPLAINABILITY_API_KEY=<prod ingest:write workspace key>
 EXPLAINABILITY_AGENTS=aisquare-planner,aisquare-coder,aisquare-runner
-AISQUARE_AGENT_NAME=aisquare-runner
 # EXPLAINABILITY_STUDIO_ID intentionally NOT set — see §1e.
 ```
+
+> ⚠️ **[verified-train] Do NOT put `AISQUARE_AGENT_NAME` in this file.** An
+> earlier version of this runbook set it to `aisquare-runner`. That variable is
+> the **SDK's routing identity**, not ours — the CLI only ever reads it and
+> never writes it — and it is SDK-wide: `doctor --live` reports it as the
+> default identity that stamps rootless spans. Pin it to a role in a shared env
+> file and every session that sources the file routes as that role, which is
+> exactly the misattribution the whole correlation spine exists to prevent.
+> Leave it unset and let each launch carry its own identity.
+>
+> The CLI's own markers are `AISQUARE_PIPELINE_ID` and
+> `AISQUARE_TRACE_AGENT_NAME`. They are internal, the launcher sets them per
+> session, and neither belongs in an operator env file.
 
 Load it **per shell**, never globally:
 
@@ -240,20 +259,105 @@ Silence is the failure mode. Check `/health` yourself.
 
 ---
 
-## 4. Turn tracing on for the team (2 min)
+## 4. Turn tracing on — ONE command (2 min)
 
-**[verified-train]** Default is off, and `proxy_url` defaults to
-`http://127.0.0.1:9090` — set it explicitly or `status` reads red for the wrong
-reason.
+**[verified-train]** This replaces the two `aisquare config set` calls an
+earlier version of this runbook used. Those still work, but they cannot set a
+target, and everything downstream (`register`, `doctor --live`, `ship`) is
+target-aware.
 
 ```bash
-aisquare config set explainability.proxy_url http://127.0.0.1:9190
-aisquare config set explainability.enabled true
+aisquare explainability enable --target prod \
+  --gateway-url "$EXPLAINABILITY_GATEWAY_URL" \
+  --key-env EXPLAINABILITY_API_KEY \
+  --proxy-url http://127.0.0.1:9190
 ```
+
+Run by me against staging, output verbatim (prod values will differ):
+
+```
+✓ tracing enabled for target 'stg'
+  gateway:  https://stg-explainability-api.aisquare.studio
+  key from: $EXPLAINABILITY_API_KEY (set)
+  proxy:    http://127.0.0.1:9190
+  agents:   aisquare-planner, aisquare-coder, aisquare-runner
+  next:     aisquare doctor --live
+```
+
+**`--key-env` names the VARIABLE, never the key.** The key itself is never
+written to config; the config records which env var to read. Nothing here can
+leak a credential into a file people paste into tickets.
+
+Default `proxy_url` is `http://127.0.0.1:9090` — always pass `--proxy-url`, and
+never 9090 on this box (§3).
+
+**Rollback:** `aisquare explainability disable` (§7).
+
+---
+
+## 4b. Register the agent identities — **without this, spans are rejected** (2 min)
+
+The earlier runbook had no registration step at all. That is the omission that
+breaks a cutover while every other step reports success: unregistered names are
+refused by the gateway with **409 `no_agent_identity`**, so traces leave the
+machine and land nowhere.
+
+```bash
+aisquare explainability register --target prod
+```
+
+Prints each agent name with its `publication_id`, and is **idempotent** — a
+second run returns the same ids rather than creating duplicates.
+
+> **[verified-stg by coder1, NOT re-run by me]** Against staging this returned
+> `aisquare-planner` / `aisquare-coder` / `aisquare-runner`, all
+> `publication_id 169`, idempotent on a second run. I did **not** execute it
+> myself: it mutates shared workspace state, and the standing rule this shift
+> has held is that mutations wait for a human. The command's flags
+> (`--target`, repeatable `--role`) I did verify. Auth shape is handled for you
+> — `X-API-KEY`, never `Authorization`; a fronting layer 401s the whole call if
+> you send the latter.
+
+**Rollback:** none needed — registration is additive and idempotent. If a name
+is wrong, register the correct one; the wrong one simply goes unused.
 
 ---
 
 ## 5. The one command that proves it green (1 min)
+
+**[verified-stg]** `doctor --live` is the real round-trip — gateway ready, key
+accepted, a test span actually ingested — not a ping. Run it, and read the
+`ingest` line:
+
+```bash
+aisquare doctor --live
+```
+
+Run by me against staging, the explainability section verbatim:
+
+```
+✓ explainability: tracing on, target 'stg' via config
+✓ explainability sdk: SDK present (console script)
+✓ explainability config: target 'stg' -> https://…  (config), key from $EXPLAINABILITY_API_KEY, identities: aisquare-planner, aisquare-coder, aisquare-runner
+✓ explainability redaction: standard — credentials are removed from insights leaving this machine …
+✓ explainability proxy: claude_code proxy healthy at http://127.0.0.1:9190
+✓ explainability gateway: https://…/ready — HTTP 200
+✓ explainability ingest: test span accepted as 'aisquare-planner' (HTTP 202)
+⚠ explainability governance: traces land, but runs stay UNGOVERNED until a rule book is attached to the studio (an ingest key cannot verify this from here)
+    → Attach a rule book to the studio in the dashboard, then re-run aisquare doctor --live
+✓ sdk:gateway_live: Alive        ✓ sdk:gateway_ready: Ready
+```
+
+**`ingest: test span accepted … (HTTP 202)` is the line that matters.** It is
+the only one that proves the key, the gateway and the identity all work
+together. The `governance ⚠` is expected until §1 is done and is not a failure
+of this step.
+
+One caveat on `sdk:sdk_version`: that reports the SDK **the CLI** imports, which
+is not necessarily the build the **proxy** runs (§3 pins that separately and
+gives its own check).
+
+Quick read afterwards, without the network:
 
 **[verified-train]**
 
@@ -329,6 +433,46 @@ session = one Run only if every seam passes it.
 
 ---
 
+## 5b. Deliver the CLI's own insights (2 min)
+
+Model traffic flows through the proxy on its own. The CLI's **insights** —
+prompts, notes, task events — do not: they **spool to disk** on the primary
+path and leave only when you drain them. Skip this and half the integration is
+silent while everything looks healthy.
+
+```bash
+aisquare init --explainability      # turn capture on (once)
+aisquare explainability ship        # drain the spool
+```
+
+**[verified-train]** Run by me with capture off, verbatim: `shipping is not
+configured — nothing to do`, exit 0 — it declines cleanly rather than
+pretending.
+
+> ⚠️ **[verified-train] `init --explainability` needs the extra installed.** On
+> a CLI without it the step declines with `Explainability not configured —
+> explainability extra not installed`, and `ship` then reports `shipping is not
+> configured` forever. Install `pip install 'aisquare-cli[explainability]'`
+> first. A plain install traces model traffic and ships nothing, which is the
+> silent half-cutover this step exists to prevent.
+>
+> **[verified-train]** Installing the extra over a NORMAL install is safe — I
+> installed the CLI, then the SDK, and `aisquare --version` still answered. It
+> is **not** safe over an `-e/--editable` developer checkout: the SDK's real
+> `aisquare/` directory shadows the editable path hook and `aisquare.cli`
+> disappears. That is a developer-machine hazard, not yours, but do not run the
+> cutover from an editable checkout.
+
+**What `sent` means, and it is not what it sounds like:** handed to the SDK's
+durable inbox, **not acknowledged by the gateway**. A green `sent` count with a
+dead gateway is a correct report of a local handoff. Only a Run visible in the
+Studio proves delivery.
+
+**Rollback:** `aisquare init --no-explainability` stops capture. The spool is
+left on disk, not deleted, so nothing already captured is lost.
+
+---
+
 ## 6. What healthy looks like, and what is just noise
 
 **A healthy run, in the proxy log** (**[verified-stg]**):
@@ -395,13 +539,21 @@ are none.
 One line. Returns every session to untraced, changes nothing else:
 
 ```bash
-aisquare config set explainability.enabled false
+aisquare explainability disable
 ```
 
-**[verified-train]** After this, `aisquare explainability env <role>` exits `1`
-with `✗ explainability is disabled (config default)` and emits no exports, so
-every session launches untraced. Re-enabling with `true` restores `probe:
-healthy`. Reversible in both directions, no other behaviour change.
+**[verified-train]** Run by me, output verbatim:
+
+```
+✓ tracing disabled — sessions launch untraced, targets left in place
+```
+
+Targets are **kept**, so re-enabling is `aisquare explainability enable --target
+prod` with no arguments to retype. After disabling, `status` reads `enabled:
+False` while still showing the target and gateway, and
+`aisquare explainability env <role>` exits `1` and emits no exports — so every
+session launches untraced. Reversible in both directions, no other behaviour
+change.
 
 To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 
@@ -417,8 +569,11 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 | 1d Rule book | no `FAIL_OPEN` warning on a traced call | detach the rule book in the UI |
 | 2 Secrets | `stat -c %a <env file>` → `600` | `rm` the file |
 | 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` | `Ctrl-C` (never port 9090) |
-| 4 Config | `aisquare explainability status` shows your URL | `aisquare config set explainability.enabled false` |
-| 5 Green | `status` → `probe: healthy`, `exit=0` | as above |
+| 3 Proxy build | the §3 check prints `IN FORCE` | reinstall `aisquare>=1.1.0` |
+| 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable` |
+| 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |
+| 5 Green | `doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable` |
+| 5b Insights | `status` → `shipping:` on, `spool:` counts move after `ship` | `aisquare init --no-explainability` (spool kept) |
 
 ---
 

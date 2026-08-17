@@ -32,6 +32,7 @@ from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.services import explainability as explainability_service
+from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -182,9 +183,36 @@ def launch(
         # Passing the flag here would hand `None` to os.path.basename (a crash,
         # i.e. tracing costing a launch) and would ask "does claude accept
         # --session-id?" about a role bound to a wrapper that does not.
+        # Agents spawn agents, and a traced parent's environment carries the
+        # wiring that traced it. Keeping it hands this child the PARENT's Run;
+        # standing down on it — what happened before this line existed —
+        # dropped every agent below the first off the trace entirely. So ours
+        # is disowned and the child wires its own. A gateway the operator set
+        # up has no marker beside it, is not ours, and still makes us stand
+        # down at the reserved-var guard exactly as before.
+        parent_run = explainability_service.disown_inherited_trace(env)
+        if parent_run:
+            stderr_console().print(
+                f"[dim]explainability: launched from a session traced as {parent_run} — "
+                "this one takes its own identity[/dim]"
+            )
         identity = explainability_service.plan_session_identity(resolution.binary, ctx.args)
+        # The ACTIVE target's overrides folded onto the settings the wiring
+        # reads. `explainability enable --target prod --proxy-url …` writes
+        # them per target, and wire_session only ever looks at the top level —
+        # so without this fold a launch silently uses the wrong proxy while
+        # reporting success, which is worse than config that is simply absent.
+        try:
+            effective = explainability_ops.effective_settings(tracing)
+        except Exception as exc:  # same bar as everything else here: a broken
+            # target definition costs the OVERRIDE, never the launch.
+            effective = tracing
+            stderr_console().print(
+                f"[dim]explainability: target overrides unreadable ({exc}) — "
+                "using the top-level settings[/dim]"
+            )
         wiring = explainability_service.wire_session(
-            tracing,
+            effective,
             role,
             session_id=identity.session_id,
             base_env=env,
@@ -201,20 +229,11 @@ def launch(
             # operator's own gateway, which is what lets a spawn command run
             # from inside this session clear them and take its own identity
             # instead of silently inheriting this one's Run.
-            if wiring.pipeline_id:
-                env[explainability_service.SESSION_ID_ENV_VAR] = wiring.pipeline_id
-            if identity.note:
-                stderr_console().print(
-                    f"[dim]explainability: {identity.note} — Run not joined to a board row[/dim]"
-                )
-            unwritten = explainability_service.record_join(
-                session_id=identity.session_id,
-                agent_name=wiring.agent_name or "",
-                pipeline_id=wiring.pipeline_id or "",
-                role=role,
-            )
-            if unwritten:
-                stderr_console().print(f"[dim]explainability: {unwritten}[/dim]")
+            # Carried INTO the agent, because the hook that runs inside it is
+            # the only place that knows the board session id. That seam records
+            # the join for EVERY binary, wrapper or not — which is why nothing
+            # here needs to write one, and why an unpinnable launch still joins.
+            env.update(explainability_service.trace_marker(wiring))
     argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
     stderr_console().print(
         f"Launching {resolution.binary}{whose} as [bold]{role}[/bold] on the "

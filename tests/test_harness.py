@@ -1030,6 +1030,7 @@ def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
     id in argv is the id in ``X-Pipeline-Id``, and the join is written down."""
     import uuid
 
+    from aisquare.services import hooks
     from aisquare.services.explainability import join_records
     from tests.proxy_stub import healthy_proxy
 
@@ -1057,10 +1058,20 @@ def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
     env = calls["env"]
     assert isinstance(env, dict)
     assert f"X-Pipeline-Id: {started_on}" in env["ANTHROPIC_CUSTOM_HEADERS"]
+    assert env["AISQUARE_SESSION_ID"] == started_on
+    assert env["AISQUARE_AGENT_NAME"] == "aisquare-coder"
+
+    # The join is closed one process later, by the hook inside the agent that
+    # env belongs to — the only place the board session id exists.
+    assert join_records() == [], "the spawn records nothing; the hook does"
+    monkeypatch.setenv("AISQUARE_SESSION_ID", env["AISQUARE_SESSION_ID"])
+    monkeypatch.setenv("AISQUARE_AGENT_NAME", env["AISQUARE_AGENT_NAME"])
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    assert hooks.record_trace_join(started_on) is None
     (record,) = join_records()
     assert record["session_id"] == started_on
+    assert record["pipeline_id"] == started_on
     assert record["role"] == "coder"
-    assert record["joined"] is True
 
 
 def test_spawn_exec_untraced_argv_is_never_pinned(

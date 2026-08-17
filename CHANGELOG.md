@@ -94,6 +94,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what leaves the machine.
 
 ### Fixed
+- **Every agent below the first was launching under its PARENT's identity.**
+  A traced session's environment carries the wiring that traced it, so
+  `aisquare launch` run from inside one hit the "not overriding your routing"
+  guard, reported *untraced* — and then handed the child the parent's
+  `X-Pipeline-Id` anyway, because standing down leaves the inherited variables
+  in place. So the child was not untraced at all: its traffic was filed into
+  the parent's Run under the parent's role. That is the whole shape of the
+  morning's collective-intelligence work — agents spawning agents — and it
+  would have produced one Run wearing one identity for an entire tree.
+  A parent's identity is now disowned before the child wires its own, at both
+  launch seams. Only ever *ours*: a gateway the operator exported has no
+  marker beside it, is not ours, and still makes us stand down untouched.
+- **A role bound to a wrapper is now joined, not just traced.** The
+  session→Run join moved off the launcher and onto the hook that runs *inside*
+  the agent — the one place that holds both halves, since Claude Code hands it
+  the board session id and the launcher left the pipeline id in the
+  environment. It needs nothing from the binary, so a wrapper that has never
+  heard of `--session-id` joins exactly like the default agent. Pinning the id
+  with `--session-id` survives as a strict extra for the one program verified
+  to accept it, narrowed from "anything named claude*" to exactly `claude`,
+  because since #57 an unknown flag can be a dead launch and the hook seam
+  already guarantees the join. One row per session, both halves always real.
+- **`aisquare launch` ignored the active target's overrides.**
+  `explainability enable --target prod --proxy-url …` writes per target, and
+  the wiring only ever read the top level — so a launch silently used the
+  wrong proxy while reporting success, which is worse than config that is
+  plainly absent. Both launch seams now fold the active target down first, and
+  a broken target definition costs the override rather than the launch.
 - **The tracing exports were bash-only, and silently misattributed every
   session started from `/bin/sh`.** `aisquare explainability env` quoted with
   bash's `$'…'`, which dash — `/bin/sh` on Debian and Ubuntu — does not treat

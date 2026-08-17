@@ -51,7 +51,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,13 +81,13 @@ _SAFE_ROLE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _PROBE_TIMEOUT_SECONDS = 1.5
 
-#: Agents whose CLI is known to accept ``--session-id <uuid>``: the claude
-#: binary and the parallel installs people name after it (``claude2``,
-#: ``claude-next``). Matched on the BASENAME, so an absolute path works too.
-#: Anything else launches with the agent's own id and traces unjoined — a
-#: flag an agent does not understand is a dead launch, and no trace is worth
-#: that. Rename a wrapper to something not starting with "claude" to opt out.
-_SESSION_ID_AGENT = re.compile(r"^claude[0-9A-Za-z._-]*$")
+#: The ONE program verified to accept ``--session-id <uuid>`` (Claude Code
+#: 2.1.233). Matched on the basename, so an absolute path counts and nothing
+#: else does — not ``claude2``, not a wrapper merely NAMED after claude. Since
+#: #57 a role can be bound to any executable, and an unknown flag kills the
+#: launch; every other binary joins through the hook seam instead, which needs
+#: no flag at all, so the narrow match costs nothing but a nicety.
+_SESSION_ID_AGENT = "claude"
 
 #: Flags whose presence means the caller (or the human) already owns the
 #: session id, so we must read it rather than choose one.
@@ -101,9 +101,18 @@ _CONTINUE_FLAGS = ("--continue", "-c")
 _PIN_ENV_VAR = "AISQUARE_PIN_SESSION_ID"
 _OFF_VALUES = {"0", "false", "no", "off"}
 
-#: Variable ``aisquare explainability env`` exports alongside the header pair,
-#: so a shell command can pass the same id to the agent it is about to run.
+#: The run key the launcher chose, exported alongside the header pair by
+#: ``aisquare launch``, ``team spawn --exec`` and ``explainability env``. Two
+#: jobs, and both matter: a shell command can pass the same id to the agent it
+#: is about to run, and its PRESENCE marks the ``ANTHROPIC_*`` beside it as
+#: OURS. Nothing else sets it, so "marker present" is the only reliable way to
+#: tell our own wiring apart from a gateway the operator exported themselves —
+#: which is what makes disowning safe.
 SESSION_ID_ENV_VAR = "AISQUARE_SESSION_ID"
+
+#: The identity that wiring ran under, carried beside the run key so a process
+#: downstream of the launcher can record the join without re-reading config.
+AGENT_NAME_ENV_VAR = "AISQUARE_AGENT_NAME"
 
 
 @dataclass(frozen=True)
@@ -157,11 +166,71 @@ def _flag_value(args: Sequence[str], flag: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def disown_inherited_trace(env: MutableMapping[str, str]) -> str | None:
+    """Drop OUR tracing identity from ``env``; return the run it belonged to.
+
+    A traced agent's environment carries the wiring that traced it, and every
+    process it starts inherits that. For an ordinary child (a probe, a git
+    call) the answer is to strip it — see ``core.spawn``. For a child that is
+    itself an agent the answer is different: it should be traced, just not as
+    its parent. Leaving the inherited pair in place gives it the parent's
+    ``X-Pipeline-Id`` and merges two sessions into one Run; leaving it in place
+    *and* standing down on the reserved-var guard — what happened before this
+    existed — drops every agent below the first off the trace entirely.
+
+    So the parent's identity is removed and the caller wires a fresh one. Only
+    ever OUR identity: without :data:`SESSION_ID_ENV_VAR` beside them the
+    ``ANTHROPIC_*`` are a gateway the operator set up, and those are theirs to
+    keep — the caller then stands down exactly as it always did.
+
+    ``None`` when there was nothing of ours to disown, which is every ordinary
+    launch.
+    """
+    parent_run = (env.get(SESSION_ID_ENV_VAR) or "").strip()
+    if not parent_run or not any(env.get(name) for name in RESERVED_ENV_VARS):
+        return None
+    for name in (*RESERVED_ENV_VARS, SESSION_ID_ENV_VAR, AGENT_NAME_ENV_VAR):
+        env.pop(name, None)
+    return parent_run
+
+
+def trace_marker(wiring: SessionWiring) -> dict[str, str]:
+    """The env a traced agent carries beyond the headers themselves.
+
+    Two consumers. A spawn command run from inside the agent reads it to tell
+    our wiring apart from the operator's own gateway, and the hook running
+    inside the agent reads it to record the session→Run join — the only place
+    that knows BOTH the pipeline id (from here) and the board session id (from
+    Claude Code). Empty for an untraced launch: a stale marker would have the
+    agent's hook write down a join that is not true, which is worse than no
+    record because it reads as evidence.
+    """
+    if not wiring.traced or not wiring.pipeline_id:
+        return {}
+    marker = {SESSION_ID_ENV_VAR: wiring.pipeline_id}
+    if wiring.agent_name:
+        marker[AGENT_NAME_ENV_VAR] = wiring.agent_name
+    return marker
+
+
+def traced_by(env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
+    """``(pipeline_id, agent_name)`` this process was launched to trace.
+
+    ``None`` when it was not — which is every ordinary session, so a caller on
+    the hook path leaves after one lookup.
+    """
+    source = os.environ if env is None else env
+    pipeline_id = (source.get(SESSION_ID_ENV_VAR) or "").strip()
+    if not pipeline_id:
+        return None
+    return pipeline_id, (source.get(AGENT_NAME_ENV_VAR) or "").strip()
+
+
 def accepts_session_id(binary: str) -> bool:
     """Whether ``binary`` is one we may hand ``--session-id`` to."""
     if os.environ.get(_PIN_ENV_VAR, "").strip().lower() in _OFF_VALUES:
         return False
-    return bool(_SESSION_ID_AGENT.match(os.path.basename(binary)))
+    return os.path.basename(binary) == _SESSION_ID_AGENT
 
 
 def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
@@ -193,7 +262,7 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
             return SessionIdentity(None, note=f"{flag} resumes a session chosen at run time")
     if not accepts_session_id(binary):
         return SessionIdentity(
-            None, note=f"{os.path.basename(binary)!r} is not known to accept {_SESSION_ID_FLAG}"
+            None, note=f"{os.path.basename(binary)!r} is not {_SESSION_ID_AGENT}"
         )
     session_id = str(uuid.uuid4())
     return SessionIdentity(session_id, inject_args=(_SESSION_ID_FLAG, session_id))
@@ -201,26 +270,31 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
 
 def record_join(
     *,
-    session_id: str | None,
-    agent_name: str,
+    session_id: str,
     pipeline_id: str,
-    role: str,
+    agent_name: str = "",
+    role: str | None = None,
     cwd: str | None = None,
     now: datetime | None = None,
 ) -> str | None:
-    """Append this launch to the join log; return why it could not be written.
+    """Append one board-session-to-Run mapping; return why it could not be.
 
-    Returns ``None`` on success and a reason otherwise — never raises. The log
-    is a convenience for joining board rows to Runs without dashboard access,
-    which makes it strictly less important than the launch it describes.
+    Written from the hook running INSIDE the agent, which is the only place
+    that holds both halves: Claude Code hands it the real session id — the id
+    the board row uses — and the launcher left the pipeline id in the
+    environment. No flag and no binary-specific knowledge, so a role bound to
+    a wrapper joins exactly like the default agent does.
+
+    Returns ``None`` on success and a reason otherwise — never raises. Rows are
+    observations, not state: a session seen twice (a ``/clear``, a resume)
+    appends twice, and readers dedupe on ``(session_id, pipeline_id)``. That
+    keeps this a single append with nothing to read first.
     """
-    stamped = (now or datetime.now(UTC)).isoformat(timespec="seconds")
     record = {
-        "started_at": stamped,
+        "started_at": (now or datetime.now(UTC)).isoformat(timespec="seconds"),
         "session_id": session_id,
-        "agent_name": agent_name,
         "pipeline_id": pipeline_id,
-        "joined": session_id is not None and session_id == pipeline_id,
+        "agent_name": agent_name,
         "role": role,
         "cwd": cwd if cwd is not None else os.getcwd(),
     }

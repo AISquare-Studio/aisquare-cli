@@ -22,10 +22,13 @@ from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
 from aisquare.services.explainability import (
     ProxyProbe,
+    disown_inherited_trace,
     join_records,
     plan_session_identity,
     probe_proxy,
     record_join,
+    trace_marker,
+    traced_by,
     wire_session,
 )
 
@@ -166,16 +169,22 @@ def test_plan_leaves_a_run_time_session_choice_unjoined() -> None:
         assert plan.note, args
 
 
-def test_plan_only_hands_the_flag_to_agents_that_speak_it() -> None:
-    """A flag the agent does not understand is a dead launch, and no trace is
-    worth that. Parallel installs named after claude are still claude."""
-    for binary in ("claude", "claude2", "claude-next", "/usr/local/bin/claude"):
+def test_plan_hands_the_flag_to_claude_and_to_nothing_else() -> None:
+    """Only the ONE program verified to accept it.
+
+    Since #57 a role can be bound to any executable, and an unknown flag is a
+    dead launch — so this match is deliberately narrow. ``claude2`` and a
+    wrapper merely NAMED after claude lose nothing by it: the hook seam joins
+    them without a flag, so all the narrow match costs is the nicety of the
+    two ids being identical rather than merely joined.
+    """
+    for binary in ("claude", "/usr/local/bin/claude"):
         assert plan_session_identity(binary, []).inject_args, binary
-    for binary in ("aider", "cursor-agent", "/opt/tools/gpt-cli"):
+    for binary in ("claude2", "claude-next", "aider", "/opt/tools/wrapper"):
         plan = plan_session_identity(binary, [])
         assert plan.inject_args == (), binary
         assert plan.session_id is None, binary
-        assert "--session-id" in plan.note, binary
+        assert plan.note, binary
 
 
 def test_pinning_can_be_turned_off_for_the_launch_it_breaks(
@@ -192,54 +201,87 @@ def test_pinning_can_be_turned_off_for_the_launch_it_breaks(
 # ── the join record: board rows to Runs, without dashboard access ────────────
 
 
-def test_record_join_appends_one_line_per_launch(isolated_home: Path) -> None:
-    assert (
-        record_join(session_id="s-1", agent_name="aisquare-coder", pipeline_id="s-1", role="coder")
-        is None
-    )
+def test_record_join_appends_one_line_per_session(isolated_home: Path) -> None:
+    """Both halves are always real now — the hook writes this, and it holds the
+    board session id and the pipeline id at the same moment. There is no
+    "unjoined row" case left to represent."""
     assert (
         record_join(
-            session_id="s-2", agent_name="aisquare-runner", pipeline_id="s-2", role="runner"
+            session_id="board-1", pipeline_id="run-1", agent_name="aisquare-coder", role="coder"
         )
         is None
     )
+    assert record_join(session_id="board-2", pipeline_id="run-2") is None
 
     records = join_records()
-    assert [r["session_id"] for r in records] == ["s-1", "s-2"]
+    assert [r["session_id"] for r in records] == ["board-1", "board-2"]
+    assert records[0]["pipeline_id"] == "run-1"
     assert records[0]["agent_name"] == "aisquare-coder"
-    assert records[0]["pipeline_id"] == "s-1"
-    assert records[0]["joined"] is True
     assert records[0]["role"] == "coder"
     assert records[0]["started_at"]
     assert paths.explainability_joins_path().exists()
 
 
-def test_record_join_marks_a_run_with_no_board_row(isolated_home: Path) -> None:
-    """An unjoinable Run is recorded, not dropped: "this Run has no board row"
-    is exactly what an operator reconciling the two datasets needs to know."""
-    record_join(session_id=None, agent_name="aisquare-coder", pipeline_id="p-3", role="coder")
-    (record,) = join_records()
-    assert record["session_id"] is None
-    assert record["pipeline_id"] == "p-3"
-    assert record["joined"] is False
+def test_the_marker_is_what_carries_the_run_into_the_agent() -> None:
+    wiring = wire_session(_settings(), "coder", session_id="sess-1", prober=_healthy)
+    assert trace_marker(wiring) == {
+        "AISQUARE_SESSION_ID": "sess-1",
+        "AISQUARE_AGENT_NAME": "aisquare-coder",
+    }
+    assert trace_marker(wire_session(_settings(), "coder", prober=_dead)) == {}, (
+        "a stale marker would have the agent's hook record a join that is not true"
+    )
+
+
+def test_traced_by_reads_the_marker_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AISQUARE_SESSION_ID", raising=False)
+    assert traced_by() is None, "an ordinary session leaves after one lookup"
+
+    monkeypatch.setenv("AISQUARE_SESSION_ID", "run-7")
+    monkeypatch.setenv("AISQUARE_AGENT_NAME", "aisquare-coder")
+    assert traced_by() == ("run-7", "aisquare-coder")
+
+    monkeypatch.setenv("AISQUARE_SESSION_ID", "   ")
+    assert traced_by() is None, "a blank marker is not a Run"
+
+
+def test_disowning_takes_only_what_is_ours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole safety of nested tracing rests on this discrimination."""
+    ours = {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:9190",
+        "ANTHROPIC_CUSTOM_HEADERS": "X-Pipeline-Id: parent",
+        "AISQUARE_SESSION_ID": "parent",
+        "AISQUARE_AGENT_NAME": "aisquare-planner",
+        "KEEP": "1",
+    }
+    assert disown_inherited_trace(ours) == "parent"
+    assert ours == {"KEEP": "1"}
+
+    theirs = {"ANTHROPIC_BASE_URL": "https://my-own-gateway.example", "KEEP": "1"}
+    assert disown_inherited_trace(theirs) is None
+    assert theirs == {"ANTHROPIC_BASE_URL": "https://my-own-gateway.example", "KEEP": "1"}
+
+    nothing = {"KEEP": "1"}
+    assert disown_inherited_trace(nothing) is None
+    assert nothing == {"KEEP": "1"}
 
 
 def test_record_join_fails_open_when_it_cannot_be_written(isolated_home: Path) -> None:
-    """The log is a convenience; the launch it describes is not."""
+    """The log is a convenience; the session it annotates is not."""
     blocker = paths.explainability_dir()
     blocker.parent.mkdir(parents=True, exist_ok=True)
     blocker.write_text("not a directory", encoding="utf-8")
 
-    reason = record_join(session_id="s-4", agent_name="a", pipeline_id="s-4", role="coder")
+    reason = record_join(session_id="board-4", pipeline_id="run-4")
 
     assert reason is not None and "join record" in reason
 
 
 def test_join_records_survive_a_half_written_line(isolated_home: Path) -> None:
-    record_join(session_id="s-5", agent_name="a", pipeline_id="s-5", role="coder")
+    record_join(session_id="s-5", pipeline_id="s-5")
     with paths.explainability_joins_path().open("a", encoding="utf-8") as handle:
         handle.write('{"session_id": "s-6", trunca\n')
-    record_join(session_id="s-7", agent_name="a", pipeline_id="s-7", role="coder")
+    record_join(session_id="s-7", pipeline_id="s-7")
 
     assert [r["session_id"] for r in join_records()] == ["s-5", "s-7"]
 

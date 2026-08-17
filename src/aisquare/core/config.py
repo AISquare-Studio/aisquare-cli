@@ -227,25 +227,34 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     field left unset would make the whole file unwritable. Omitting the key is
     also the correct round-trip — it reloads as the model's default, which is
     the ``None`` we dropped.
+
+    **The write is atomic and follows symlinks.** Both are properties callers
+    depend on, and both were previously discovered rather than read, which is why
+    they are stated here rather than only commented at the code:
+
+    - The new content goes to a temp file beside the destination and arrives by
+      ``os.replace``, so a concurrent reader sees the whole old file or the whole
+      new one, never a partial document. The parent directory is flushed after
+      the rename so the change survives a hard kill.
+    - If ``path`` is a SYMLINK, the file it points at is written and the link is
+      preserved. ``os.replace`` swaps the NAME it is given, so without resolving
+      it would replace the link with a regular file — and severing a dotfiles
+      link is silent in the way that costs most: the tracked file keeps its old
+      contents, ``git status`` shows nothing, and the next machine sync restores
+      settings that stopped being live.
+
+    Following the link means a write needs permission on the REAL file's
+    directory. When it does not have it, this raises and the error names the
+    resolved path — not the link the caller passed — because otherwise a
+    permission error points at a directory that is perfectly writable. Nothing
+    is modified on that path: the link and the original file both survive.
+
+    Returns the path the CALLER asked for, not the resolved one: commands echo it
+    back to an operator, and where the bytes physically land is not their concern.
     """
     target = path or paths.config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # Symlinks are followed on purpose. ``os.replace`` below swaps the NAME it is
-    # given, so pointed at a symlink it would replace the LINK with a regular
-    # file — the plain ``write_text`` this used to be wrote THROUGH the link
-    # instead. Symlinking a dotfile into a version-controlled directory is a
-    # mainstream pattern, and severing it is silent in the way that matters: the
-    # tracked file keeps its old contents, ``git status`` shows nothing, and the
-    # next machine sync restores settings that stopped being live.
-    #
-    # Resolving costs nothing that matters. The temp file is still created in the
-    # target's own directory — now the REAL one — so temp and target still share
-    # a filesystem and the replace stays atomic.
-    #
-    # The RETURN VALUE stays the path the caller asked for, because that is what
-    # commands echo back to an operator; where the bytes physically land is our
-    # business, not theirs.
     written = Path(os.path.realpath(target))
     written.parent.mkdir(parents=True, exist_ok=True)
 
@@ -284,6 +293,24 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, written)
+    except OSError as exc:
+        temp.unlink(missing_ok=True)
+        if written == target:
+            raise
+        # A symlink was followed, so the path that failed is NOT the one the
+        # caller passed. Unqualified, the operator reads "permission denied" and
+        # goes looking at a directory that is perfectly writable — we would have
+        # swapped a silent sever for a confusing error and lost either way. The
+        # class and errno are preserved so callers matching on either still work.
+        detail = (
+            f"{exc.strerror or exc} — {target} is a symlink, so the config is "
+            f"written through it and this needs write permission on "
+            f"{written.parent}, not on the link"
+        )
+        try:
+            raise type(exc)(exc.errno, detail, str(written)) from exc
+        except TypeError:  # an OSError subclass with an unusual signature
+            raise OSError(exc.errno, detail, str(written)) from exc
     except BaseException:
         temp.unlink(missing_ok=True)
         raise

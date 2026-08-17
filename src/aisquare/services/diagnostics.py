@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -186,6 +187,28 @@ def filesystem_of(path: Path, mountinfo: Path = _MOUNTINFO) -> str | None:
         return None
 
 
+def _config_file_kind() -> str:
+    """How config.toml exists: a plain file, a symlink and where to, or absent.
+
+    Offered by @9bbc8ed7 into this same line rather than as a separate check, and
+    it belongs here for the reason the filesystem does: it is invisible, chosen by
+    the user, and it changes how a write behaves. Since save_config follows links,
+    this is also the line that tells an operator their dotfiles link IS being
+    honoured — the fact is only reassuring once it is visible.
+
+    Never raises; a path we cannot stat is reported as unknown.
+    """
+    config = paths.config_path()
+    try:
+        if config.is_symlink():
+            return f"symlink -> {os.path.realpath(config)}"
+        if config.is_file():
+            return "regular file"
+        return "not created yet"
+    except OSError:
+        return "unreadable"
+
+
 def _check_home_filesystem() -> DoctorCheck:
     """Say out loud which filesystem the config lives on.
 
@@ -202,21 +225,22 @@ def _check_home_filesystem() -> DoctorCheck:
     project has been careful not to write into its own tools.
     """
     home = paths.aisquare_home()
+    shape = _config_file_kind()
     kind = filesystem_of(home)
     if kind is None:
-        return _ok("filesystem", f"{home} — filesystem not determined")
+        return _ok("filesystem", f"{home} — filesystem not determined; config is a {shape}")
     if kind in _TRANSLATED_FILESYSTEMS:
         return _warn(
             "filesystem",
-            f"{home} is on {kind}, where atomic config writes are unverified",
+            f"{home} is on {kind}, where atomic config writes are unverified (config is a {shape})",
             "Config writes rely on os.replace being atomic. That holds on a local "
             "disk and has never been measured through a translation layer. If two "
             "sessions may write config at once, point AISQUARE_HOME at a native "
             "filesystem.",
         )
     if kind in _NATIVE_FILESYSTEMS:
-        return _ok("filesystem", f"{home} on {kind} — atomic config writes hold here")
-    return _ok("filesystem", f"{home} on {kind} — atomicity unmeasured for this filesystem")
+        return _ok("filesystem", f"{home} on {kind}, config is a {shape} — atomic writes hold")
+    return _ok("filesystem", f"{home} on {kind} ({shape}) — atomicity unmeasured here")
 
 
 def _check_config() -> DoctorCheck:

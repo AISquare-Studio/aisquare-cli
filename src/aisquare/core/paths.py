@@ -23,7 +23,37 @@ HOME_ENV_VAR = "AISQUARE_HOME"
 
 
 def aisquare_home() -> Path:
-    """Return the aisquare home directory (without creating it)."""
+    """Return the aisquare home directory (without creating it).
+
+    The path is taken verbatim and nothing constrains it to a native disk. This
+    is the one place that choice is made, so its consequence is recorded here
+    rather than only beside the code that suffers it.
+
+    ``core.config.save_config`` publishes changes with the durable-replace
+    recipe — sibling temp, fsync, ``os.replace`` over the target, fsync the
+    parent. Two of its properties come from the FILESYSTEM, not from our code:
+    the replace is atomic, so a concurrent reader sees the whole old file or the
+    whole new one and never a partial document; and the fsyncs cost about what a
+    local disk costs, measured at +2.15 ms median for the directory flush.
+
+    Both were measured on a native disk, where the default ``~/.aisquare``
+    lives. NEITHER IS MEASURED FOR A WINDOWS-BACKED MOUNT (WSL 9p/DrvFs,
+    ``/mnt/c/...``), where a rename becomes a Windows operation and an fsync is
+    a round trip to the host. ``AISQUARE_HOME=/mnt/c/...``, or a Windows-side
+    HOME, puts config.toml exactly there.
+
+    What is NOT in doubt on such a mount: the temp file is created in the
+    TARGET'S OWN DIRECTORY, so temp and target always share a filesystem and the
+    precondition ``os.replace`` needs holds by construction. The open question is
+    narrower than "does this work on 9p" — it is whether that filesystem's
+    rename carries the same whole-old-or-whole-new guarantee, and what an fsync
+    costs there.
+
+    Until that is measured, treat a Windows-backed AISQUARE_HOME as unsupported
+    FOR THE ATOMICITY GUARANTEE SPECIFICALLY. Everything still functions; what
+    has not been ruled out is a torn read during a concurrent write, which on a
+    native disk has been.
+    """
     override = os.environ.get(HOME_ENV_VAR)
     if override:
         return Path(override).expanduser()

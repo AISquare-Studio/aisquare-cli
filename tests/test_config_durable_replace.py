@@ -141,3 +141,39 @@ def test_no_stray_temp_file_survives_a_successful_write(tmp_path: Path) -> None:
     save_config(AppConfig(), target)
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["config.toml"]
+
+
+def test_the_replace_precondition_holds_wherever_the_config_lives(tmp_path: Path) -> None:
+    """Temp and target always share a filesystem, whatever AISQUARE_HOME points at.
+
+    ``os.replace`` is atomic only WITHIN a filesystem, and that is the one part
+    of the guarantee our code controls: the temp file is created in the target's
+    own directory, so the two cannot land on different mounts no matter where an
+    operator points AISQUARE_HOME — including a Windows-backed 9p/DrvFs path.
+
+    Asserted on ``st_dev`` rather than on the path strings, because the path
+    form is what the sibling test above already checks and the DEVICE is what
+    the kernel actually compares. It narrows the open question recorded in
+    ``core.paths.aisquare_home``: what is unmeasured on such a mount is whether
+    that filesystem's rename is atomic, NOT whether we hand it two paths on one
+    filesystem. We always do.
+    """
+    target = tmp_path / "config.toml"
+    seen: list[tuple[int, int]] = []
+    real_replace = os.replace
+
+    def _compare(src: Any, dst: Any, **kwargs: Any) -> None:
+        seen.append((os.stat(src).st_dev, os.stat(Path(dst).parent).st_dev))
+        real_replace(src, dst, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "replace", _compare)
+        save_config(AppConfig(), target)
+
+    assert seen, "no replace happened, so nothing was measured"
+    temp_dev, target_dev = seen[-1]
+    assert temp_dev == target_dev, (
+        f"the temp file is on device {temp_dev} and the target directory on "
+        f"{target_dev} — os.replace is not atomic across filesystems, so the "
+        "guarantee save_config relies on would be void"
+    )

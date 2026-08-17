@@ -6,7 +6,7 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_config, emit_config_value, fail
+from aisquare.cli.common import emit_config, emit_config_value, expected_config_write_errors, fail
 from aisquare.models import RedactionLevel
 from aisquare.services import settings as settings_service
 
@@ -38,7 +38,8 @@ def set_(
 ) -> None:
     """Set a configuration value and save it."""
     try:
-        stored = settings_service.set_value(key, value)
+        with expected_config_write_errors():
+            stored = settings_service.set_value(key, value)
     except KeyError:
         fail(f"unknown config key: {key}", error="unknown_key", ref=key)
     except ValueError as exc:

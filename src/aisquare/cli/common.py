@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
@@ -11,6 +13,7 @@ import tomli_w
 import typer
 from rich.table import Table
 
+from aisquare.core import paths
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -376,6 +379,47 @@ def emit_doctor(checks: list[DoctorCheck]) -> None:
         console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {check.detail}")
         if check.fix and check.status is not CheckStatus.ok:
             console.print(f"    → {check.fix}")
+
+
+@contextmanager
+def expected_config_write_errors() -> Iterator[None]:
+    """Route a foreseeable "config is not writable" failure through ``fail``.
+
+    ``PermissionError`` out of ``save_config`` is not a crash: it is the
+    operator's filesystem saying no, and this CLI already has a convention for
+    that — one ``✗`` line and exit 1. Without this it arrived as 56 lines of
+    Rich traceback with the useful sentence at the bottom, which is the shape
+    operators skip past.
+
+    Deliberately NOT a catch in ``main()``. A global handler would tidy
+    UNEXPECTED OSErrors the same way, and an unexpected OSError is a bug where a
+    traceback is the correct output — burying one costs whoever debugs it later
+    far more than a buried message costs an operator now. So only the commands
+    that KNOW this failure is foreseeable translate it, and only
+    ``PermissionError``: every other OSError keeps its traceback.
+
+    ``hint`` and ``detail`` reach the JSON payload; the human surface prints the
+    message alone, so the directory that actually needs permission is named
+    there rather than left to the hint.
+    """
+    try:
+        yield
+    except PermissionError as exc:
+        config = paths.config_path()
+        resolved = Path(exc.filename) if exc.filename else None
+        directory = resolved.parent if resolved is not None else config.parent
+        through = (
+            f" (a symlink to {resolved})"
+            if resolved is not None and resolved != config and resolved.name == config.name
+            else ""
+        )
+        fail(
+            f"cannot write the config at {config}{through}: "
+            f"write permission is needed on {directory}",
+            error="config_not_writable",
+            hint=f"write permission is needed on {directory}",
+            detail=exc.strerror or str(exc),
+        )
 
 
 def fail(

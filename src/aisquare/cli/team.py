@@ -17,7 +17,7 @@ from typing import Annotated, NoReturn
 
 import typer
 
-from aisquare.cli.common import fail, local_time
+from aisquare.cli.common import expected_config_write_errors, fail, local_time
 from aisquare.core import harness, orchestrator
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
@@ -633,7 +633,8 @@ def bind(
         _show_bindings()
         return
     if clear:
-        settings_service.clear_role_binding(role_name)
+        with expected_config_write_errors():
+            settings_service.clear_role_binding(role_name)
         bound = None
     else:
         if not any((agent_bin, env_pairs, extra_args, unset)):
@@ -641,13 +642,14 @@ def bind(
                 "nothing to bind — pass --bin, --env, --arg, --unset or --clear",
                 error="nothing_to_bind",
             )
-        bound = settings_service.bind_role(
-            role_name,
-            agent_bin=agent_bin,
-            env=_parse_env(env_pairs or []),
-            unset=unset or [],
-            args=extra_args or [],
-        )
+        with expected_config_write_errors():
+            bound = settings_service.bind_role(
+                role_name,
+                agent_bin=agent_bin,
+                env=_parse_env(env_pairs or []),
+                unset=unset or [],
+                args=extra_args or [],
+            )
     path = settings_service.config_path()
     if get_state().json_output:
         typer.echo(

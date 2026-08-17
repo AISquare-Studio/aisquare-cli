@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
+from aisquare.services.explainability import join_records
 
 
 @pytest.fixture
@@ -236,6 +238,204 @@ def test_launch_with_dead_proxy_still_launches(
     assert spy["binary"].endswith("/claude"), "the launch must happen regardless"
     assert "ANTHROPIC_BASE_URL" not in spy["env"]
     assert "untraced" in result.output
+
+
+def _join_seen_by_the_agent(
+    monkeypatch: pytest.MonkeyPatch, agent_env: dict[str, str], session_id: str
+) -> list[dict[str, object]]:
+    """Run the join hook the way the launched agent would, and read the log.
+
+    The launcher hands the agent an environment and is then replaced by it, so
+    the join is closed one process later — by ``aisquare hook session-start``
+    running INSIDE the agent, which is the only place the board session id
+    exists. Reproducing that here means adopting the env the launcher built.
+    """
+    from aisquare.services import explainability as explainability_service
+    from aisquare.services import hooks
+
+    for name in (
+        explainability_service.PIPELINE_ID_ENV_VAR,
+        explainability_service.AGENT_NAME_ENV_VAR,
+    ):
+        monkeypatch.delenv(name, raising=False)
+        if name in agent_env:
+            monkeypatch.setenv(name, agent_env[name])
+    assert hooks.record_trace_join(session_id) is None
+    return join_records()
+
+
+def test_launch_starts_the_agent_on_the_id_it_traces_under(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE correlation spine, through the real wiring: the id the agent is
+    STARTED on is the id in ``X-Pipeline-Id``.
+
+    The board keys a session by the id the agent reports to the SessionStart
+    hook, so those two being equal is the only thing that lets a board row and
+    a gateway Run be joined. Asserted end to end (real probe, real wiring)
+    because it is a property of the chain, not of any one function in it.
+    """
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    with healthy_proxy() as proxy_url:
+        _tracing_on(proxy_url)
+        result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    argv = spy["argv"]
+    assert "--session-id" in argv, "a traced launch on claude must name its session"
+    started_on = argv[argv.index("--session-id") + 1]
+    uuid.UUID(started_on)  # claude accepts nothing else
+    assert f"X-Pipeline-Id: {started_on}" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+    # The marker travels too, so the agent's own hook can close the join even
+    # here — the strict path and the general path agree on the same id.
+    assert spy["env"]["AISQUARE_PIPELINE_ID"] == started_on
+    assert spy["env"]["AISQUARE_AGENT_NAME"] == "aisquare-coder"
+
+    # The hook, running inside that agent with that env, writes the join down.
+    assert join_records() == [], "the launcher records nothing; the hook does"
+    (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], started_on)
+    assert record["session_id"] == started_on
+    assert record["pipeline_id"] == started_on
+    assert record["agent_name"] == "aisquare-coder"
+
+
+def test_two_launches_are_started_on_different_ids(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two agents on one session id merge into a single board row AND a single
+    Run — the failure both halves of this design exist to prevent."""
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    ids = []
+    with healthy_proxy() as proxy_url:
+        _tracing_on(proxy_url)
+        for _ in range(2):
+            assert runner.invoke(app, ["launch", "coder"]).exit_code == 0
+            argv = spy["argv"]
+            ids.append(argv[argv.index("--session-id") + 1])
+
+    assert ids[0] != ids[1]
+
+
+def test_a_role_bound_to_a_wrapper_launches_traced_and_still_joins(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE case the naive fix breaks, and the reason the join lives in the env.
+
+    Since #57 a role can be bound to any executable. Handing that executable
+    ``--session-id`` would kill the launch, so nothing is added to its argv —
+    and it still joins, because the pipeline id travels in the ENVIRONMENT and
+    the hook that closes the join runs inside the agent, not out here.
+    """
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings, save_config
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    with healthy_proxy() as proxy_url:
+        from aisquare.core.config import ExplainabilitySettings
+
+        save_config(
+            AppConfig(
+                explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url),
+                team=TeamSettings(profiles={"coder": RoleLaunchProfile(bin="my-wrapper")}),
+            )
+        )
+        result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["my-wrapper"], "no flag may reach a binary we did not resolve"
+    assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
+
+    keyed_by = spy["env"]["AISQUARE_PIPELINE_ID"]
+    (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "board-session-42")
+    assert record["session_id"] == "board-session-42"
+    assert record["pipeline_id"] == keyed_by
+    assert record["agent_name"] == "aisquare-coder"
+
+
+def test_launch_does_not_pin_an_id_it_cannot_own(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--continue resumes a session chosen at run time, so we cannot name it in
+    advance. It still traces and still joins — the strict half is what is lost,
+    not the correlation."""
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    with healthy_proxy() as proxy_url:
+        _tracing_on(proxy_url)
+        result = runner.invoke(app, ["launch", "coder", "--continue"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--continue"]
+    assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+    (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "the-resumed-session")
+    assert record["session_id"] == "the-resumed-session"
+    assert record["pipeline_id"] == spy["env"]["AISQUARE_PIPELINE_ID"]
+
+
+def test_untraced_launch_is_never_handed_a_session_id(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-open means the fallback is the launch you would have got anyway —
+    argv included. An id pinned onto an untraced launch buys no correlation
+    and spends real risk."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    _tracing_on("http://127.0.0.1:9")  # discard port — connection refused
+
+    result = runner.invoke(app, ["launch", "coder", "--model", "opus"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--model", "opus"]
+    assert "untraced" in result.output
+
+
+def test_a_session_starts_normally_when_the_join_cannot_be_written(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The join log is a convenience; the session it annotates is the product.
+
+    Asserted at the hook seam, because that is where the write now happens and
+    a raising observer there would break every session start, not just a
+    launch. The failure is REPORTED to the caller and swallowed by it — the
+    session start must not grow a new way to fail.
+    """
+    from aisquare.core import paths
+    from aisquare.services import hooks
+
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "run-9")
+    monkeypatch.setenv("AISQUARE_AGENT_NAME", "aisquare-coder")
+    paths.explainability_dir().parent.mkdir(parents=True, exist_ok=True)
+    paths.explainability_dir().write_text("in the way", encoding="utf-8")
+
+    reason = hooks.record_trace_join("board-9")
+    assert reason is not None and "join record not written" in reason
+
+    # And the context the hook exists to emit is produced regardless.
+    hooks.session_start_context(work_dir, session_id="board-9", source="startup")
+
+
+def test_an_untraced_session_writes_no_join_at_all(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every ordinary session takes this path. It must cost two dict lookups
+    and leave nothing behind — no file, no directory, no evidence of a Run
+    that does not exist."""
+    from aisquare.core import paths
+    from aisquare.services import hooks
+
+    monkeypatch.delenv("AISQUARE_PIPELINE_ID", raising=False)
+
+    assert hooks.record_trace_join("board-10") is None
+    assert not paths.explainability_joins_path().exists()
 
 
 def test_launch_reuses_the_forwarded_session_id(

@@ -8,17 +8,57 @@
   heartbeats the session on the orchestrator, and returns the teammate delta to
   inject (empty when the team has been quiet).
 - ``session_ended`` retires the session from the orchestrator.
+
+``session_start`` is also where the explainability join is closed. It is the
+one place that holds BOTH halves of the correlation spine — Claude Code hands
+it the session id the board row uses, and a traced launcher left the pipeline
+id in this process's environment — and it needs nothing from the binary that
+was launched, which is why a role bound to a wrapper joins exactly like the
+default agent does.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
+from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
+
+
+def record_trace_join(session_id: str | None) -> str | None:
+    """Pair this session's board id with the Run its launcher opened for it.
+
+    Returns the reason it could not be written, or ``None`` — including when
+    there was nothing to write, which is the ordinary case: an untraced
+    session carries no marker and leaves after two dict lookups.
+
+    Deliberately silent about failures rather than loud. Every other
+    fail-open in the tracing path can print to stderr because a human is
+    watching a launch; this one runs inside the agent, where stderr is the
+    hook's own channel and noise there is a cost paid on every single session
+    start. The unwritten join is recoverable — the Run still carries the
+    agent name — so it is not worth spending that.
+    """
+    if not session_id:
+        return None
+    try:
+        marker = explainability_service.traced_by()
+        if marker is None:
+            return None
+        pipeline_id, agent_name = marker
+        return explainability_service.record_join(
+            session_id=session_id,
+            pipeline_id=pipeline_id,
+            agent_name=agent_name,
+            role=os.environ.get("AISQUARE_ROLE") or None,
+        )
+    except Exception as exc:  # an observer may never disrupt a session start
+        return f"join record not written ({exc})"
 
 
 def session_start_context(
@@ -31,6 +71,7 @@ def session_start_context(
     effort: str | None = None,
 ) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
+    record_trace_join(session_id)
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)

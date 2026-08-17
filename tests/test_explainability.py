@@ -11,12 +11,25 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
+from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
-from aisquare.services.explainability import ProxyProbe, probe_proxy, wire_session
+from aisquare.services.explainability import (
+    ProxyProbe,
+    join_records,
+    plan_session_identity,
+    probe_proxy,
+    record_join,
+    trace_marker,
+    traced_by,
+    wire_session,
+)
 
 
 def _settings(**overrides: object) -> ExplainabilitySettings:
@@ -108,6 +121,151 @@ def test_two_launches_never_share_a_pipeline_id() -> None:
     assert first.pipeline_id != second.pipeline_id
 
 
+# ── the correlation spine: which id keys the Run ─────────────────────────────
+
+
+def test_plan_mints_an_id_and_tells_the_agent_to_use_it() -> None:
+    """The strict half: when the binary IS claude we can make the two ids
+    identical instead of merely joinable, which costs the reader a lookup."""
+    plan = plan_session_identity("claude", [])
+    assert plan.session_id is not None
+    assert plan.inject_args == ("--session-id", plan.session_id)
+    assert plan.note == ""
+    uuid.UUID(plan.session_id)  # claude's --session-id takes a uuid, nothing else
+
+
+def test_plan_never_mints_the_same_id_twice() -> None:
+    first = plan_session_identity("claude", [])
+    second = plan_session_identity("claude", [])
+    assert first.session_id != second.session_id
+
+
+def test_plan_reads_a_session_id_the_caller_already_chose() -> None:
+    """Both spellings, and no second --session-id on the command line: two of
+    them is a launch error, and the caller's id is already the board's."""
+    for args in (["--session-id", "sess-7"], ["--session-id=sess-7"]):
+        plan = plan_session_identity("claude", args)
+        assert plan.session_id == "sess-7"
+        assert plan.inject_args == ()
+
+
+def test_plan_reads_the_session_being_resumed() -> None:
+    plan = plan_session_identity("claude", ["--resume", "sess-9", "--model", "opus"])
+    assert plan.session_id == "sess-9"
+    assert plan.inject_args == ()
+
+
+def test_plan_leaves_a_run_time_session_choice_unjoined() -> None:
+    """--continue and a bare --resume name a session that does not exist yet.
+    Minting an id anyway would put a SECOND identity on a row the resumed
+    session already owns; no join is the safe answer, and it is said out loud.
+    """
+    for args in (["--continue"], ["-c"], ["--resume"], ["-r", "--model", "opus"]):
+        plan = plan_session_identity("claude", args)
+        assert plan.session_id is None, args
+        assert plan.inject_args == (), args
+        assert plan.note, args
+
+
+def test_plan_hands_the_flag_to_claude_and_to_nothing_else() -> None:
+    """Only the ONE program verified to accept it. Since #57 a role can be
+    bound to any executable, and an unknown flag is a dead launch — so this
+    match stays narrow on purpose. ``claude2`` and friends lose nothing: the
+    hook seam joins them without a flag."""
+    for binary in ("claude", "/usr/local/bin/claude"):
+        assert plan_session_identity(binary, []).inject_args, binary
+    for binary in ("claude2", "claude-next", "aider", "/opt/tools/wrapper"):
+        plan = plan_session_identity(binary, [])
+        assert plan.inject_args == (), binary
+        assert plan.session_id is None, binary
+        assert plan.note, binary
+
+
+def test_pinning_can_be_turned_off_for_the_launch_it_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An escape hatch that costs the strict half, never a launch — and never
+    the join either, which the hook seam still closes."""
+    monkeypatch.setenv("AISQUARE_PIN_SESSION_ID", "0")
+    plan = plan_session_identity("claude", [])
+    assert plan.inject_args == ()
+    assert plan.session_id is None
+
+
+# ── the marker: what a traced agent carries so its own hook can join ─────────
+
+
+def test_trace_marker_carries_the_run_into_the_agent() -> None:
+    wiring = wire_session(_settings(), "coder", session_id="sess-1", prober=_healthy)
+    assert trace_marker(wiring) == {
+        "AISQUARE_PIPELINE_ID": "sess-1",
+        "AISQUARE_AGENT_NAME": "aisquare-coder",
+    }
+
+
+def test_trace_marker_is_empty_for_an_untraced_launch() -> None:
+    """A stale marker would make the agent's hook record a join that is not
+    true — worse than no record, because it reads as evidence."""
+    assert trace_marker(wire_session(_settings(), "coder", prober=_dead)) == {}
+
+
+def test_traced_by_reads_the_marker_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AISQUARE_PIPELINE_ID", raising=False)
+    assert traced_by() is None, "an ordinary session leaves after two lookups"
+
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "run-7")
+    monkeypatch.setenv("AISQUARE_AGENT_NAME", "aisquare-coder")
+    assert traced_by() == ("run-7", "aisquare-coder")
+
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "   ")
+    assert traced_by() is None, "a blank marker is not a Run"
+
+
+# ── the join record: board rows to Runs, without dashboard access ────────────
+
+
+def test_record_join_appends_one_line_per_session(isolated_home: Path) -> None:
+    assert (
+        record_join(
+            session_id="board-1", pipeline_id="run-1", agent_name="aisquare-coder", role="coder"
+        )
+        is None
+    )
+    assert record_join(session_id="board-2", pipeline_id="run-2") is None
+
+    records = join_records()
+    assert [r["session_id"] for r in records] == ["board-1", "board-2"]
+    assert records[0]["pipeline_id"] == "run-1"
+    assert records[0]["agent_name"] == "aisquare-coder"
+    assert records[0]["role"] == "coder"
+    assert records[0]["started_at"]
+    assert paths.explainability_joins_path().exists()
+
+
+def test_record_join_fails_open_when_it_cannot_be_written(isolated_home: Path) -> None:
+    """The log is a convenience; the session it describes is not."""
+    blocker = paths.explainability_dir()
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    reason = record_join(session_id="board-4", pipeline_id="run-4")
+
+    assert reason is not None and "join record" in reason
+
+
+def test_join_records_survive_a_half_written_line(isolated_home: Path) -> None:
+    record_join(session_id="board-5", pipeline_id="run-5")
+    with paths.explainability_joins_path().open("a", encoding="utf-8") as handle:
+        handle.write('{"session_id": "board-6", trunca\n')
+    record_join(session_id="board-7", pipeline_id="run-7")
+
+    assert [r["session_id"] for r in join_records()] == ["board-5", "board-7"]
+
+
+def test_join_records_is_empty_before_anything_is_launched(isolated_home: Path) -> None:
+    assert join_records() == []
+
+
 # ── fail-open, in every direction ────────────────────────────────────────────
 
 
@@ -125,6 +283,22 @@ def test_user_owned_anthropic_vars_are_never_clobbered() -> None:
     assert wiring.env == {}
     assert "ANTHROPIC_BASE_URL" in wiring.reason
     assert base == {"ANTHROPIC_BASE_URL": "https://my-own-gateway.example"}
+
+
+def test_an_unusable_proxy_url_never_reaches_the_agent() -> None:
+    """The one value here that costs a LAUNCH rather than a trace.
+
+    ``ANTHROPIC_BASE_URL`` is parsed by the agent before it can report
+    anything, so a malformed one does not degrade to untraced — the session
+    dies at its first request with "API Error: Invalid URL" and a non-zero
+    exit (observed on the shift). Caught before the probe, because the probe's
+    message would blame the network for a typo in config.
+    """
+    for bad in ("", "   ", "127.0.0.1:9190", "$http://127.0.0.1:9190", "file:///tmp/x", "http://"):
+        wiring = wire_session(_settings(proxy_url=bad), "coder", prober=_healthy)
+        assert wiring.traced is False, bad
+        assert wiring.env == {}, bad
+        assert "proxy_url" in wiring.reason, bad
 
 
 def test_bad_agent_name_template_fails_open() -> None:
@@ -223,10 +397,20 @@ def test_env_refuses_when_disabled(runner) -> None:  # type: ignore[no-untyped-d
     assert "disabled" in result.output
 
 
-def test_env_emits_ansi_c_quoted_exports(runner, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The emitted quoting must carry a REAL newline through eval: plain
-    single quotes deliver backslash-n, the proxy sees one glued header, and
-    the run is silently misattributed."""
+def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The header pair must reach the agent with a REAL newline in ANY shell.
+
+    This output is eval'd wherever it is pasted, and printed spawn commands
+    get run through ``/bin/sh`` — which on Debian and Ubuntu is dash. Bash's
+    ``$'…'`` form means nothing there: the value arrives with a literal ``$``
+    in front and a literal backslash-n where the separator should be, so the
+    proxy reads ONE glued header, never sees ``X-Pipeline-Id``, and files the
+    run under its default identity. That is the exact misattribution this
+    command exists to prevent, which is why the assertion is the round trip
+    through a real shell and not the quoting style.
+    """
+    import subprocess
+
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     from aisquare.cli.app import app as cli_app
@@ -241,8 +425,17 @@ def test_env_emits_ansi_c_quoted_exports(runner, monkeypatch) -> None:  # type: 
         server.shutdown()
 
     assert result.exit_code == 0, result.output
-    assert f"export ANTHROPIC_BASE_URL=$'{url}'" in result.output
-    assert (
-        "export ANTHROPIC_CUSTOM_HEADERS="
-        "$'X-Agent-Name: aisquare-coder\\nX-Pipeline-Id: sess-9'" in result.output
+    read_back = (
+        'printf "%s" "$ANTHROPIC_BASE_URL|$ANTHROPIC_CUSTOM_HEADERS'
+        '|$AISQUARE_PIPELINE_ID|$AISQUARE_AGENT_NAME"'
+    )
+    echoed = subprocess.run(
+        ["/bin/sh", "-c", f"{result.output}\n{read_back}"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert echoed.returncode == 0, echoed.stderr
+    assert echoed.stdout == (
+        f"{url}|X-Agent-Name: aisquare-coder\nX-Pipeline-Id: sess-9|sess-9|aisquare-coder"
     )

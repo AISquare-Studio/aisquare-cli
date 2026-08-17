@@ -39,8 +39,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `team harness` and `spawn`'s banner report which env keys a role carries
     and where each came from (keys only — the values are paths and tokens, and
     a banner is a terminal).
+- **The correlation spine: a board session row is joinable to its gateway
+  Run.** Tracing already sent an `X-Pipeline-Id`, but it was a random UUID —
+  so a Run and the board row for the very same session had nothing in common,
+  and the two datasets could not be joined at all. The board's key is the
+  agent's own session id, which only the agent knows, so the join is made in
+  two halves that meet inside it:
+  - The **launcher** mints the pipeline id, wires the headers, and leaves the
+    id in the child's environment (`AISQUARE_PIPELINE_ID`,
+    `AISQUARE_AGENT_NAME`). Env is binary-agnostic, which is the whole point:
+    a role bound to a wrapper (#57) joins exactly like the default agent, and
+    no executable is ever handed a flag it might not understand.
+  - The **hook** inside the agent reads that id back, pairs it with the
+    session id Claude Code hands it — the very id the board row uses — and
+    appends the mapping to `~/.aisquare/explainability/joins.jsonl`. So board
+    events can be joined to Runs without dashboard access.
+  - Covers `aisquare launch`, `aisquare team spawn --exec`, the printed
+    `team spawn` command, and `eval "$(aisquare explainability env <role>)"`
+    in a terminal you wired by hand.
+  - **A strict extra on top:** when the *resolved* binary is literally
+    `claude` and the caller named no session of their own, the launcher also
+    passes `--session-id <pipeline id>`, so the two ids are identical rather
+    than merely joinable. It gives up easily and says why — `--continue`, a
+    bare `--resume`, any other binary, or `AISQUARE_PIN_SESSION_ID=0` — because
+    the hook seam has already guaranteed the join. With tracing off (the
+    default) the argv is byte-identical to before.
+  - An unwritable join log costs a record, never a session.
 
 ### Fixed
+- **The tracing exports were bash-only, and silently misattributed every
+  session started from `/bin/sh`.** `aisquare explainability env` quoted with
+  bash's `$'…'`, which dash — `/bin/sh` on Debian and Ubuntu — does not treat
+  as special: the value arrived with a literal `$` in front and a literal
+  backslash-n where the header separator belongs. The proxy then read one
+  glued header, never saw `X-Pipeline-Id`, and filed the run under its default
+  identity — the exact misattribution that command exists to prevent. Now
+  POSIX single-quoted, which carries a real newline in `sh`, `bash` and `zsh`
+  alike. The old test pinned the *quoting syntax*, so it passed while the
+  premise was false; it now pins the round trip through a real `/bin/sh`.
+- **Two spawn commands pasted into one terminal merged into a single Run.**
+  The first `eval` exports `ANTHROPIC_*` into the shell, so the second one
+  correctly refused to clobber what looks like the operator's own routing —
+  and the second agent inherited the first's `X-Pipeline-Id` verbatim. Two
+  sessions, one Run, silently; and this is the up-arrow flow, run every time
+  an agent exits. The printed command now clears the previous paste's tracing
+  first, keyed on a marker only our own wiring sets, so a real operator
+  gateway still stops the trace exactly as before.
 - **`team prune` no longer releases a quiet session's in-progress claim (#49).**
   Presence and ownership now retire on different clocks: the session row still
   goes at the threshold (30m), but its `doing` claims are only returned to the

@@ -7,6 +7,7 @@ Layout:
     ├── context.db      # SQLite store: context entries and projects (see core.store)
     ├── agents.json     # registry of detected and connected agents
     ├── cache/          # disposable cached data
+    ├── explainability/ # session→Run join records (see services.explainability)
     └── log/            # capture and diagnostic logs
 
 Set ``AISQUARE_HOME`` to relocate the whole tree (tests rely on this).
@@ -72,6 +73,21 @@ def credentials_path() -> Path:
 def agents_registry_path() -> Path:
     """Path of the agents registry (detected and connected agents)."""
     return aisquare_home() / "agents.json"
+
+
+def explainability_dir() -> Path:
+    """Directory for explainability artefacts written by the launcher."""
+    return aisquare_home() / "explainability"
+
+
+def explainability_joins_path() -> Path:
+    """Path of the session→Run join log (JSON Lines, append-only).
+
+    Deliberately NOT under ``cache/``: this is the only local copy of the key
+    that joins board rows to gateway Runs, and ``cache/`` is documented as
+    disposable.
+    """
+    return explainability_dir() / "joins.jsonl"
 
 
 def ensure_home() -> Path:

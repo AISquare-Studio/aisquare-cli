@@ -546,6 +546,26 @@ fully healthy run):
 | `409 no_agent_identity` | the agent name is not registered — §1a |
 | `probe: proxy unreachable` with `enabled: True` | launches are silently untraced — §3 |
 | `API Error: Invalid URL` with `exit=1` | you are on a build older than the POSIX-quoting fix, **or** an `ANTHROPIC_BASE_URL` in your own environment is malformed — the CLI now names it on stderr just above the failure |
+| `✗ context store error: duplicate column name: account` | you skipped §0b on a brand-new `~/.aisquare` — recovery below |
+
+**[verified-train, planner `dfd9a883`]** **Recovering a wedged store.** If several
+sessions raced a *first* open, the store can be left permanently mid-migration:
+the DDL applied but its version bump did not, so every later attempt at that
+migration fails again — this does not heal on retry and it takes every
+`aisquare` command with it (`exit 1`). Characterisation is in
+`docs/store-migration-race.md`; §0b prevents it. To recover:
+
+```bash
+rm ~/.aisquare/context.db          # or $AISQUARE_HOME/context.db
+aisquare status > /dev/null        # ONE process, alone — this re-migrates
+```
+
+Verified by wedging a store to the failing state and back: before, `team status`
+exits 1 with the message above; after, `PRAGMA user_version` reports the current
+schema, `integrity_check` reports `ok`, and commands work. On a **new** machine
+this costs nothing — there is no board data yet. On an **established** one it
+discards that machine's local board (sessions, tasks, notes), so prefer §0b to
+needing this.
 
 ### Known limitation to state out loud before anyone reads a dashboard
 

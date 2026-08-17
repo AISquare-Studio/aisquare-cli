@@ -71,6 +71,7 @@ a test enforcing a decision the owner explicitly deferred.
 
 from __future__ import annotations
 
+import functools
 import re
 import shlex
 from pathlib import Path
@@ -199,30 +200,77 @@ def _invocations() -> list[Invocation]:
     return found
 
 
+@functools.lru_cache(maxsize=1)
+def _root() -> Any:
+    """The built command tree.
+
+    Cached because `_split` now consults it per token: rebuilding the Typer app
+    into click for every documented line took this file from 15s to 50s, and a
+    gate three sessions run on a loop should not pay that for a tree that cannot
+    change mid-run.
+    """
+    return get_command(app)
+
+
+def _takes_a_value(nodes: list[Any], flag: str) -> bool | None:
+    """Does this option consume the next token? None when nothing declares it.
+
+    Searched from the deepest resolved node outwards, because a subcommand may
+    legitimately redefine a name its parent also uses.
+    """
+    for node in reversed(nodes):
+        for param in node.params:
+            if flag in param.opts or flag in getattr(param, "secondary_opts", []):
+                return not getattr(param, "is_flag", False)
+    return None
+
+
 def _split(command: str) -> tuple[list[str], list[str]]:
-    """(bare words in order, long flags). Pipelines and comments are dropped."""
+    """(bare words in order, long flags). Pipelines and comments are dropped.
+
+    ARITY COMES FROM THE COMMAND TREE, NOT FROM THE TEXT. This used to assume
+    every `--flag` without `=` takes a value, which made a BOOLEAN flag swallow
+    the word after it: `aisquare --json explainability status` parsed as
+    ['status'] — a real root command, so it resolved, and the guard reported
+    green having checked something else entirely. Exactly one documented
+    invocation was affected and it was the worst available one: §5b's
+    split-brain check, which is also the single command the morning handoff
+    quotes.
+
+    An option nothing declares is assumed to take NO value. The two mistakes are
+    not symmetric: assuming a value eats a subcommand and validates the wrong
+    command silently, while assuming none leaves a stray word that `_walk`
+    treats as a positional and ignores. An undeclared flag is separately
+    reported by the stale-flag test, so it never passes unnoticed either way.
+    """
     command = command.split("#", 1)[0]
     for terminator in ("|", "&&", ";", ">"):
         command = command.split(terminator, 1)[0]
     try:
-        tokens = shlex.split(command.strip())
+        tokens = shlex.split(command.strip())[1:]  # drop "aisquare"
     except ValueError:
         return [], []
+
+    node = _root()
+    resolved: list[Any] = [node]
     words: list[str] = []
     flags: list[str] = []
-    skip_value = False
-    for token in tokens[1:]:  # drop "aisquare"
-        if token.startswith("--"):
-            flags.append(token.split("=", 1)[0])
-            skip_value = "=" not in token
-            continue
-        if token.startswith("-"):
-            skip_value = True
-            continue
-        if skip_value:
-            skip_value = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token.startswith("-") and token != "-":
+            name = token.split("=", 1)[0]
+            if token.startswith("--"):
+                flags.append(name)
+            if "=" not in token and _takes_a_value(resolved, name):
+                index += 1  # the next token is this option's value
             continue
         words.append(token)
+        children = _subcommands(node)
+        if token in children:
+            node = children[token]
+            resolved.append(node)
     return words, flags
 
 
@@ -239,7 +287,7 @@ def _walk(words: list[str]) -> tuple[list[str], set[str], str | None]:
     exist. A leftover word at a leaf is an argument — `task claim <id>`,
     `launch coder` — and must stay silent.
     """
-    node = get_command(app)
+    node = _root()
     chain: list[str] = []
     flags = {opt for param in node.params for opt in param.opts if opt.startswith("--")}
     for index, word in enumerate(words):
@@ -733,4 +781,65 @@ def test_the_runbook_is_treated_as_a_contract_in_the_failure_message() -> None:
     assert unknown and "explainability-prod-cutover.md:42" in unknown[0], (
         "the failure must name the document and the line, because that is the "
         "only way the flag-renamer finds what depends on them"
+    )
+
+
+def test_a_boolean_flag_before_a_subcommand_does_not_eat_it() -> None:
+    """The guard was checking a DIFFERENT, EXISTING command and passing.
+
+    `_split` assumed every `--flag` without `=` takes a value, so a boolean
+    global flag swallowed the word after it. `aisquare --json explainability
+    status` parsed as words ['status'] — which resolves, because `status` is a
+    real root command — so the line went green while nothing about
+    `explainability status` was checked.
+
+    Measured across the documented pages: exactly one invocation was validated
+    against the wrong command, and it is runbook §5b's SPLIT-BRAIN ASSERTION —
+    the check that catches the proxy lane and the client lane pointing at two
+    different deployments. The one command the morning handoff quotes, and the
+    one the guard was silently not covering.
+
+    Which flags take a value is not guessable from the text; it is a property of
+    the command tree, so the tree is asked.
+    """
+    words, flags = _split("aisquare --json explainability status")
+
+    assert words == ["explainability", "status"], (
+        f"a boolean flag ate the subcommand: parsed {words}"
+    )
+    assert "--json" in flags
+    chain, _legal, dangling = _walk(words)
+    assert chain == ["explainability", "status"] and dangling is None
+
+
+def test_a_value_taking_flag_still_consumes_its_value() -> None:
+    """The other half — the reason the naive rule existed at all.
+
+    `--target prod` must not leave `prod` looking like a subcommand, or the
+    runbook's own enable line starts failing as an unknown command.
+    """
+    words, flags = _split("aisquare explainability enable --target prod --key-env KEY")
+
+    assert words == ["explainability", "enable"], f"a flag value leaked into words: {words}"
+    assert "--target" in flags and "--key-env" in flags
+
+
+def test_the_split_brain_line_is_actually_covered() -> None:
+    """Point the assertion at the real runbook line, not a hand-typed copy.
+
+    A test that retypes the command proves the parser works on a string I
+    chose. This one fails if the runbook's line stops being resolved — which is
+    what "covered" has to mean.
+    """
+    runbook = "docs/runbooks/explainability-prod-cutover.md"
+    text = (REPO / runbook).read_text(encoding="utf-8")
+    resolved = {
+        tuple(_walk(_split(inv.text)[0])[0])
+        for inv in _from_text(runbook, text)
+        if "--json" in inv.text
+    }
+
+    assert ("explainability", "status") in resolved, (
+        "the runbook's --json split-brain check is not being resolved as "
+        f"`explainability status`; resolved chains were {sorted(resolved)}"
     )

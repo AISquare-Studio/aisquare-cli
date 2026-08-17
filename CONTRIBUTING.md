@@ -13,6 +13,13 @@ source .venv/bin/activate
 make install          # editable install + dev tools (ruff, mypy, pytest)
 ```
 
+> **Do not install the explainability extra into this checkout.**
+> `pip install 'aisquare-cli[explainability]'` puts a second `aisquare` package
+> ahead of your editable one, and from then on every command — including the
+> ones that would have explained it — dies with
+> `No module named 'aisquare.cli'`. Install the extra in a separate,
+> non-editable environment instead. If you already did: `pip uninstall aisquare`.
+
 ## Before you open a PR
 
 Run the full check suite — this is exactly what CI runs:

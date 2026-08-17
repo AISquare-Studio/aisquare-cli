@@ -148,6 +148,31 @@ def test_an_unwritable_link_target_fails_loudly_and_changes_nothing(tmp_path: Pa
     assert real.read_text(encoding="utf-8") == before, "a failed write modified the original"
 
 
+def test_the_failure_names_the_resolved_path_not_the_link(tmp_path: Path) -> None:
+    """@dfd9a883's condition on the ruling, and it is the difference between an
+    honest error and a confusing one.
+
+    The path that cannot be written is the REAL file's directory. Reported
+    against the link the caller typed, an operator goes looking at a directory
+    that is perfectly writable — we would have swapped a silent sever for a
+    misdirecting error and lost either way. The class and errno are preserved so
+    anything matching on PermissionError or errno still does.
+    """
+    link, real = _linked(tmp_path)
+    os.chmod(real.parent, 0o500)
+    try:
+        with pytest.raises(PermissionError) as caught:
+            save_config(_changed(), link)
+    finally:
+        os.chmod(real.parent, 0o700)
+
+    message = str(caught.value)
+    assert str(real) in message, f"the resolved path is not named: {message}"
+    assert str(real.parent) in message, "the directory needing permission is not named"
+    assert "symlink" in message, "nothing explains why a different path is involved"
+    assert caught.value.errno is not None, "errno was dropped"
+
+
 def test_a_plain_file_config_is_unchanged_by_all_of_this(tmp_path: Path) -> None:
     """The overwhelmingly common case must not have moved."""
     target = tmp_path / "config.toml"

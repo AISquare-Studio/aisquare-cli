@@ -118,3 +118,61 @@ def test_the_check_is_in_the_doctor_run() -> None:
     assert names.index("filesystem") == names.index("home") + 1, (
         "the filesystem line belongs beside the home line it qualifies"
     )
+
+
+def test_the_line_reports_a_plain_config_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """@9bbc8ed7's extension, accepted into this line rather than a new check.
+
+    Whether the config is a symlink is the same class of fact as which
+    filesystem it is on: invisible, chosen by the user, and consequential to how
+    a write behaves. Since ``save_config`` follows links, this is also the line
+    that tells an operator their dotfiles link IS being honoured — reassuring
+    only once it is visible.
+    """
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text("profile = 'default'\n", encoding="utf-8")
+
+    assert "regular file" in diagnostics._check_home_filesystem().detail
+
+
+def test_the_line_names_what_a_symlinked_config_points_at(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Naming the destination is the point: "symlink" alone says it is not a file."""
+    dotfiles = tmp_path / "dotfiles"
+    home = tmp_path / "home"
+    dotfiles.mkdir()
+    home.mkdir()
+    real = dotfiles / "config.toml"
+    real.write_text("profile = 'default'\n", encoding="utf-8")
+    (home / "config.toml").symlink_to(real)
+    monkeypatch.setenv("AISQUARE_HOME", str(home))
+
+    detail = diagnostics._check_home_filesystem().detail
+
+    assert "symlink" in detail
+    assert str(real) in detail, "the line must say WHERE the link points"
+
+
+def test_a_missing_config_is_said_plainly(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Before `init`, and it must not read as a problem — `home`/`config` own that."""
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path))
+
+    check = diagnostics._check_home_filesystem()
+
+    assert check.status is CheckStatus.ok
+    assert "not created yet" in check.detail
+
+
+def test_the_file_kind_never_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """It runs on every `doctor`; a stat failure must not take the command down."""
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path))
+
+    def _boom(self: Path) -> bool:
+        raise OSError("stat refused")
+
+    monkeypatch.setattr(Path, "is_symlink", _boom)
+
+    assert diagnostics._config_file_kind() == "unreadable"

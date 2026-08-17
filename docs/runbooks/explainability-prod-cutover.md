@@ -106,9 +106,27 @@ hypothesis are in `docs/store-migration-race.md`.
 status` prints **about sixty lines of Python stack trace** ending in
 `DatabaseError: file is not a database` and exits 1 — against six lines and exit
 0 on a healthy store. **The CLI has not exploded; recognise this and keep
-going.** Nine other read-only commands do the same thing on a damaged store
-(`log`, `inject`, `context list`, `project list/info`, `workspace list/info`);
-they all die in one place, `open_store`, and a fix is in flight.
+going.** **[verified-train]** Fourteen commands do this on a damaged store —
+`status`, `init`, `log`, `inject`, `context list/export/preview` (and the `ctx`
+aliases), `project list/info`, `workspace list/info`. They all die in one place,
+`open_store`, which is asserted by
+`tests/test_no_traceback_on_a_damaged_store.py` rather than remembered here, and
+a legible boundary is in flight.
+
+**`launch` is not one of them, and that is the part that matters at 08:05.**
+**[verified-train]** A damaged store used to kill every launch — exit 1, a stack
+trace, and the agent never started, so you could not even open a session to work
+the problem. Fixed: launch now exits **0**, the agent runs, and it tells you what
+it cost —
+
+```
+board: context.db unreadable (file is not a database) — launching without a board row
+Launching … as coder with no board row (context.db unreadable)…
+```
+
+No board row means no join to a gateway Run for that session: a lost trace, which
+is what the fail-open rule says to spend. **So you can start agents while the
+store is broken — but fix the store before you care about traces.**
 
 Recovery, **[verified-train]** end to end — `rm` then re-warm, then confirm:
 

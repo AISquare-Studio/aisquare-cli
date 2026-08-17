@@ -35,7 +35,6 @@ from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import (
-    probe_proxy,
     ship_once,
     shipping_state,
     trace_marker,
@@ -66,7 +65,11 @@ def status(
     config = load_config()
     settings = config.explainability
     target = ops.resolve_target(settings, target_name)
-    verdict = probe_proxy(target.proxy_url)
+    # One description of the proxy lane for both surfaces. It also decides
+    # whether to probe at all: a machine that never configured tracing has
+    # nothing to dial, and reporting a refused connection to a default address
+    # the operator never chose reads as a broken machine when nothing is wrong.
+    proxy = ops.proxy_state(target, on=settings.enabled)
     state = shipping_state()
     level = config.redaction.level
     if get_state().json_output:
@@ -82,7 +85,7 @@ def status(
                     "proxy": target.proxy_url,
                     "identity": target.agent_name_template,
                     "agents": list(target.agent_names),
-                    "probe": "healthy" if verdict.healthy else verdict.reason,
+                    "probe": proxy.summary,
                     "redaction": str(level),
                     "shipping": {
                         "reason": state.reason,
@@ -104,14 +107,16 @@ def status(
         typer.echo(f"proxy:    {target.proxy_url}")
         typer.echo(f"identity: {target.agent_name_template}")
         typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
-        typer.echo(f"probe:    {'healthy' if verdict.healthy else verdict.reason}")
+        typer.echo(f"probe:    {proxy.summary}")
         typer.echo(f"shipping: {state.reason}")
         typer.echo(f"spool:    {state.queued} queued, {state.sent} sent, {state.dead} dead-letter")
         # Directly under the spool counts on purpose: "how much am I sending"
         # and "what is in it" are one question, and an operator who reads the
         # first without the second is the person this line exists for.
         typer.echo(f"redaction: {ops.redaction_summary(level)}")
-    if settings.enabled and not verdict.healthy:
+    # Unchanged rule, same data: non-zero ONLY when tracing is on and the proxy
+    # would not take a session — the state where launches silently go untraced.
+    if settings.enabled and not proxy.healthy:
         raise typer.Exit(code=1)
 
 

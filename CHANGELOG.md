@@ -94,6 +94,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what leaves the machine.
 
 ### Fixed
+- **Model probes, gbrain and the detached distiller inherited the launching
+  session's tracing identity.** Identity is process-level — it rides in
+  `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` — and a child gets the
+  parent's environment unless told otherwise. So `team spawn`'s availability
+  probe, which runs a real `claude -p` per alias, posted a Run wearing
+  whichever role happened to be probing: junk data in the dataset, attributed
+  to a teammate who never asked a question. Fixed at the source rather than
+  leaning on the proxy's junk-run suppression, because the traffic is ours not
+  to send. gbrain gets the same treatment — its own env builder already guards
+  `ANTHROPIC_API_KEY`, which is the tell that an Anthropic path exists — as
+  does the detached `team distill` worker, which outlives the process that
+  started it and could otherwise attach to a Run that had already ended.
+  Credentials and `PATH` still travel; the strip is only the identity.
+- **Every process this CLI starts now carries a written tracing ruling, and it
+  is enforced.** `core/spawn.py` holds the inventory — all eleven
+  `subprocess`/`exec` call sites, each `traced` or `excluded` with a reason —
+  and a guard test walks the package's AST on every run, failing when a call
+  site exists that the registry has not ruled on. A docstring inventory drifts
+  silently the first time someone adds a `subprocess.run`; this one fails the
+  build. Recorded alongside it: Claude Code subagents and Workflow agents run
+  *in-process* and inherit their session's environment verbatim, so they
+  collapse into the parent's identity. Process is the identity boundary, and
+  no launcher change can move it.
 - **The tracing exports were bash-only, and silently misattributed every
   session started from `/bin/sh`.** `aisquare explainability env` quoted with
   bash's `$'…'`, which dash — `/bin/sh` on Debian and Ubuntu — does not treat

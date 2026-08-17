@@ -32,7 +32,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from aisquare.core import paths
+from aisquare.core import paths, spawn
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 _ON_VALUES = {"1", "true", "yes", "on"}
@@ -113,7 +113,14 @@ def brain_embeds(project_id: str) -> bool:
 
 
 def _env(home: Path) -> dict[str, str]:
-    env = dict(os.environ)
+    """The environment one gbrain command runs with.
+
+    Never a tracing identity: gbrain is a store, not an agent session, and the
+    ``ANTHROPIC_API_KEY`` guard below is the tell that an Anthropic path exists
+    at all — with an inherited ``ANTHROPIC_BASE_URL`` that path would run
+    through our proxy and post a Run under whichever role was distilling.
+    """
+    env = spawn.untraced_env()
     env["GBRAIN_HOME"] = str(home)
     if not embeddings_enabled():
         env.pop("OPENAI_API_KEY", None)

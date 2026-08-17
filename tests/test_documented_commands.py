@@ -260,15 +260,21 @@ def test_no_documented_command_uses_prose(documented: list[Invocation]) -> None:
         assert "has" not in words[:1], f"{invocation.where} parsed prose as a command"
 
 
-def test_every_documented_subcommand_exists(documented: list[Invocation]) -> None:
+def _unknown_commands(invocations: list[Invocation]) -> list[str]:
+    """Documented invocations whose subcommand does not resolve."""
     unknown: list[str] = []
-    for invocation in documented:
+    for invocation in invocations:
         words, _ = _split(invocation.text)
         if not words:
             continue  # bare `aisquare`, or only flags
         chain, _flags = _resolve(words)
         if not chain:
             unknown.append(f"{invocation.where}  {invocation.text}")
+    return unknown
+
+
+def test_every_documented_subcommand_exists(documented: list[Invocation]) -> None:
+    unknown = _unknown_commands(documented)
     assert not unknown, (
         "documented commands that do not exist:\n  "
         + "\n  ".join(unknown)
@@ -459,6 +465,49 @@ def test_inline_code_is_not_read_as_an_instruction() -> None:
     assert not _from_text("CONTRIBUTING.md", text), (
         "CONTRIBUTING gained fenced aisquare commands; decide whether they are "
         "instructions (add the page to DOCUMENTED) or warnings (unfence them)"
+    )
+
+
+def test_the_convention_survives_a_widening_in_both_directions() -> None:
+    """The half that makes the convention trustworthy: it must still CATCH things.
+
+    Proving only that a prohibition goes unflagged is exactly what would let a
+    relaxed guard look correct — a checker that ignores everything satisfies that
+    half perfectly. So this simulates the widening rather than performing it:
+    take the real CONTRIBUTING page, which carries a real prohibition as inline
+    code, append a genuinely stale command in a fenced block, and check the two
+    outcomes TOGETHER in ONE document.
+
+    The stale command used is the actual defect this guard was written for —
+    `launch --account`, deleted in ce6bc46 — so the catch being asserted is one
+    that really happened rather than an invented shape.
+
+    Scope is NOT widened here, per the task's boundary: DOCUMENTED is untouched
+    and this test builds its own invocation list.
+    """
+    text = (REPO / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "aisquare-cli[explainability]" in text, "the page no longer carries a prohibition"
+
+    widened = f"{text}\n```sh\naisquare launch coder --account ~/.claude-account1\n```\n"
+    invocations = _from_text("CONTRIBUTING.md", widened)
+
+    # Direction 1: the fenced stale command IS caught.
+    unknown_or_missing = _unknown_commands(invocations) + [
+        flag
+        for invocation in invocations
+        for flag in _split(invocation.text)[1]
+        if flag not in _resolve(_split(invocation.text)[0])[1]
+    ]
+    assert unknown_or_missing, (
+        "a stale command in a fenced block went uncaught — if the convention "
+        "reaches this state, widening the guard buys nothing"
+    )
+    assert any("--account" in item for item in unknown_or_missing)
+
+    # Direction 2: the inline prohibition is still invisible, in the SAME pass.
+    assert not any("aisquare-cli[explainability]" in i.text for i in invocations), (
+        "the inline prohibition was extracted — a warning would be graded as an "
+        "instruction the moment this document is listed"
     )
 
 

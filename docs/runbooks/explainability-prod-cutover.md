@@ -128,6 +128,34 @@ No board row means no join to a gateway Run for that session: a lost trace, whic
 is what the fail-open rule says to spend. **So you can start agents while the
 store is broken — but fix the store before you care about traces.**
 
+**[verified-train] Not every damaged store looks like that**, and one of them
+looks like nothing at all. Five damage shapes were measured against `aisquare
+status`:
+
+| what happened to the file | what you see |
+|---|---|
+| filled with non-database bytes | ~60 lines, `file is not a database`, exit 1 |
+| truncated part-way | ~60 lines, `database disk image is malformed`, exit 1 |
+| a page corrupted, header intact | **~39 lines**, `…malformed`, exit 1 |
+| **truncated to zero bytes** | **exit 0, no stack trace — one `board:` line, then normal output** |
+
+The last row is the one to know about, because it is the only shape that does
+not announce itself as a failure. SQLite reads a zero-length file as a
+brand-new empty database, so the store is silently re-created and migrated —
+every session, task and note that file held is gone, and `doctor` afterwards
+reports `✓ database: context.db is readable (0 user entries)`. The CLI now
+prints one line at the first open that sees the empty file:
+
+```
+board: ~/.aisquare/context.db exists but is empty — it was truncated, and the
+tasks, notes and sessions it held are gone.
+```
+
+That line appears **once**, on the open that saw it; every command afterwards
+looks entirely healthy, because by then it is. **So if the board is suddenly
+empty and `doctor` is green, the file was truncated, not corrupted.** The
+recovery below does not apply: there is nothing left to recover.
+
 Recovery, **[verified-train]** end to end — `rm` then re-warm, then confirm:
 
 ```bash

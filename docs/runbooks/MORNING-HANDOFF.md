@@ -246,3 +246,12 @@ behind it:
   recovery is in §0b of the runbook, measured end to end, and it **empties the
   board**: every session, task and note. Nothing about explainability lives in
   that file, so your config, targets and key survive it.
+- **A wedged store is loud; a TRUNCATED one is not, and it is already too
+  late.** A zero-length `context.db` is read by SQLite as a brand-new database,
+  so it is silently re-created and `doctor` reports it green while every
+  session, task and note it held is gone. The tell is an **empty board with a
+  healthy `doctor`** — that is truncation, not corruption, and unlike a wedge
+  there is no recovery, because the data is gone rather than unreachable.
+  Explainability config, targets and key survive it exactly as they survive a
+  wedge. The CLI now says so on the first open that sees the empty file; that
+  is the only moment it is knowable, because one line later the schema is back.

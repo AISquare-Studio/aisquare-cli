@@ -237,9 +237,12 @@ def test_no_print_argument_carries_a_markup_tag() -> None:
                 continue
             for piece in ast.walk(node):
                 literal = getattr(piece, "value", None)
-                if isinstance(piece, ast.Constant) and isinstance(literal, str):
-                    if tag.search(literal):
-                        offenders.append(f"{module.relative_to(package)}:{piece.lineno}")
+                if (
+                    isinstance(piece, ast.Constant)
+                    and isinstance(literal, str)
+                    and tag.search(literal)
+                ):
+                    offenders.append(f"{module.relative_to(package)}:{piece.lineno}")
 
     assert not offenders, (
         f"Rich markup tag inside a print at {offenders} — the consoles run "

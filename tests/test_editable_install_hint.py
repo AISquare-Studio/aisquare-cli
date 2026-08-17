@@ -12,9 +12,12 @@ checkout — it SHADOWS it wholesale, and every command dies with:
 
     ModuleNotFoundError: No module named 'aisquare.cli'
 
-Measured, all three directions: reinstalling editable does NOT recover it; only
-`pip uninstall aisquare` does; and a non-editable install with the extra is
-still fine.
+Measured on BOTH editable shapes pip produces — the `.pth` path line and the
+import-hook form (`_editable_impl_*.py`, hatchling's `dev-mode-exact`) — and
+both are bricked identically, so this is a property of editable installs rather
+than of one packaging style. Also measured: reinstalling editable does NOT
+recover it; only `pip uninstall aisquare` does; and a non-editable install with
+the extra is still fine.
 
 The CLI is dead at that point, so no doctor check can report it — the only
 useful moment is BEFORE, while we are still the ones printing the advice.
@@ -64,6 +67,19 @@ def test_running_from_site_packages_is_not_editable(monkeypatch: pytest.MonkeyPa
 def test_running_from_a_checkout_is_editable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service, "_package_root", lambda: "/home/me/work/aisquare-cli/src/aisquare")
 
+    assert service.running_editable() is True
+
+
+def test_detection_does_not_depend_on_the_editable_packaging_style() -> None:
+    """Both shapes pip emits resolve the package from the CHECKOUT, not site-packages.
+
+    Verified against a real import-hook install (hatchling `dev-mode-exact`,
+    which writes `_editable_impl_*.py` plus a `.pth` that imports it) as well as
+    the default `.pth` path form: both report editable, and both are shadowed by
+    the extra identically. Asking WHERE the package resolves from — rather than
+    HOW the install is wired — is what makes the detector indifferent to that.
+    """
+    assert "site-packages" not in service._package_root()
     assert service.running_editable() is True
 
 

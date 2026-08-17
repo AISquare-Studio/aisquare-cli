@@ -537,12 +537,14 @@ SDK_MODULE = "aisquare.explainability"
 INSTALL_HINT = 'pip install --upgrade "aisquare-cli[explainability]"'
 
 #: ...and what to say instead on an EDITABLE install, where that command does
-#: not merge the two packages, it SHADOWS ours. The editable hook is a `.pth`
-#: line appending the checkout's src/ to sys.path, and site-packages is searched
-#: FIRST — so the SDK's real `aisquare/` package wins wholesale and every
-#: command dies at import. Measured in all three directions: reinstalling
-#: editable does NOT recover it, only uninstalling the SDK does, and a
-#: non-editable install with the extra is unaffected.
+#: not merge the two packages, it SHADOWS ours: the SDK's real `aisquare/`
+#: package in site-packages wins wholesale and every command dies at import.
+#: Measured on BOTH editable shapes pip produces — the `.pth` line that appends
+#: the checkout's src/ to sys.path, and the import-hook form
+#: (`_editable_impl_*.py`, hatchling's `dev-mode-exact`) — and both are bricked
+#: identically, so this is a property of editable installs rather than of one
+#: packaging style. Also measured: reinstalling editable does NOT recover it,
+#: only uninstalling the SDK does, and a non-editable install is unaffected.
 #:
 #: This is the only moment the warning can be delivered. Once the extra is in,
 #: the CLI cannot start, so no check of ours will ever run to explain it.

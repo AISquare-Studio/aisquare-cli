@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aisquare.core import insights
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
@@ -58,7 +59,7 @@ def prompt_submitted(
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
     if prompt is not None and prompt.strip():
-        capture_prompt(prompt, cwd)
+        capture_prompt(prompt, cwd, session_id=session_id)
     if session_id is None:
         return ""
     return team_service.hook_prompt_heartbeat(
@@ -86,14 +87,19 @@ def needs_attention(
         team_service.hook_notification(session_id, cwd, message)
 
 
-def capture_prompt(prompt: str, cwd: Path | None) -> None:
-    """Record a submitted user prompt against the active project."""
+def capture_prompt(prompt: str, cwd: Path | None, *, session_id: str | None = None) -> None:
+    """Record a submitted user prompt against the active project.
+
+    Spooling for the gateway comes last and cannot raise: recording the prompt
+    locally is the job, shipping it is an observer of the job.
+    """
     if not prompt.strip():
         return
     with store_session() as store:
         project = active_project(store, cwd)
         store.ensure_project(project)
         store.add_prompt(prompt, project.id, source="claude-code")
+    insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
 
 
 def _directive(project_id: str, *, has_prompts: bool) -> str:

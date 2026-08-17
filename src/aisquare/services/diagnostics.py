@@ -16,8 +16,16 @@ from aisquare.core.injection import load_last
 from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
-from aisquare.models import CheckStatus, DoctorCheck, InjectionRecord, PromptRecord, StatusReport
+from aisquare.models import (
+    CheckStatus,
+    DoctorCheck,
+    InjectionRecord,
+    PromptRecord,
+    ShippingStatus,
+    StatusReport,
+)
 from aisquare.services import distill as distill_service
+from aisquare.services import explainability as explainability_service
 
 
 def status() -> StatusReport:
@@ -36,8 +44,33 @@ def status() -> StatusReport:
             project_count=len(store.list_projects()),
             agents_detected=[agent.name for agent in agents if agent.detected],
             agents_connected=[agent.name for agent in agents if agent.connected],
+            shipping=_shipping_status(),
         )
     return report
+
+
+def _shipping_status() -> ShippingStatus | None:
+    """Explainability shipping, or ``None`` when this install never opted in.
+
+    Silent by construction on an untouched machine: the line only appears once
+    someone configured shipping, or while records from a previous configuration
+    are still buffered — a queue that is quietly filling must never be
+    invisible. Never raises; ``status`` reporting on a broken spool is more
+    useful than ``status`` dying with it.
+    """
+    try:
+        state = explainability_service.shipping_state()
+    except Exception:  # diagnostics must never crash
+        return None
+    if not state.configured and not (state.queued or state.dead):
+        return None
+    return ShippingStatus(
+        configured=state.configured,
+        queued=state.queued,
+        sent=state.sent,
+        dead=state.dead,
+        reason=state.reason,
+    )
 
 
 def doctor() -> list[DoctorCheck]:

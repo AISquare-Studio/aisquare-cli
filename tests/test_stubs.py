@@ -31,6 +31,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("serve",),
     ("explainability", "status"),
     ("explainability", "env"),
+    ("explainability", "ship"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
     ("hook", "session-end"),

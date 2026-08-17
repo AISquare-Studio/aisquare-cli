@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import brain, harness, orchestrator
+from aisquare.core import brain, harness, insights, orchestrator
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
@@ -154,7 +154,15 @@ def _emit(
     task_id: str | None = None,
     to_role: str | None = None,
 ) -> TeamEvent:
-    return store.add_team_event(
+    """Write one board event — and, when configured, spool it for the gateway.
+
+    Every board write funnels through here, which is why the spool call lives
+    here and not at each of the twenty call sites: an insight the board records
+    but the gateway never hears about is exactly the gap #50 exists to close.
+    It runs after the commit and cannot raise, so a full disk costs a span, not
+    a note.
+    """
+    stored = store.add_team_event(
         TeamEvent(
             id=new_event_id(),
             project_id=project_id,
@@ -166,6 +174,16 @@ def _emit(
             created_at=_now(),
         )
     )
+    insights.record_team_event(
+        event_kind=stored.kind,
+        text=stored.text,
+        event_id=stored.id,
+        session_id=stored.session_id,
+        project_id=stored.project_id,
+        task_id=stored.task_id,
+        seq=stored.seq,
+    )
+    return stored
 
 
 def _project_root(store: ContextStore, project_id: str) -> Path | None:

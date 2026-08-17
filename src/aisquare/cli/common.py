@@ -342,6 +342,12 @@ def emit_status(report: StatusReport) -> None:
     )
     console.print(f"detected: {', '.join(report.agents_detected) or 'none'}")
     console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")
+    shipping = report.shipping
+    if shipping is not None:
+        console.print(
+            f"shipping: {shipping.queued} queued, {shipping.sent} sent, "
+            f"{shipping.dead} dead-letter — {shipping.reason}"
+        )
 
 
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}

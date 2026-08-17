@@ -6,7 +6,6 @@ from typing import Annotated
 
 import typer
 
-from aisquare import __version__
 from aisquare.cli import (
     agents,
     auth,
@@ -27,6 +26,7 @@ from aisquare.cli import (
 from aisquare.cli import config as config_cli
 from aisquare.cli.global_flags import GlobalFlagsGroup
 from aisquare.core.state import RuntimeState, set_state
+from aisquare.core.version import __version__
 
 app = typer.Typer(
     cls=GlobalFlagsGroup,

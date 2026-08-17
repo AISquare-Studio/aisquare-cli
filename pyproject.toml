@@ -36,6 +36,30 @@ serve = [
   # named mcp.server.fastmcp" -- a red typecheck job on a tree nobody touched.
   "mcp>=1.10,<2",
 ]
+explainability = [
+  # This extra installs a distribution that shares our top-level package
+  # DIRECTORY. `aisquare` (the SDK) ships aisquare/__init__.py; so do we. pip's
+  # RECORD for the two overlaps on exactly that one file and the last writer
+  # wins it, silently and without a warning -- a later `pip install -U aisquare`
+  # or `pip uninstall aisquare` leaves the SDK's __init__ in place, or none.
+  #
+  # That is survivable, load-bearingly so: aisquare/cli, /core, /services and
+  # aisquare/explainability, /governance are different directories, and an
+  # absent __init__.py merely makes `aisquare` a PEP 420 namespace package. The
+  # ONE thing that cannot survive it is reading a name out of the top-level
+  # __init__, which nothing in this package does any more -- see
+  # aisquare/core/version.py and tests/test_sdk_coexistence.py, which goes red
+  # if that ever regresses.
+  #
+  # Installing through THIS extra is also the order that leaves our __init__ in
+  # place (pip installs the dependency first), which is why the CLI's own advice
+  # says `pip install "aisquare-cli[explainability]"` and never a bare
+  # `pip install aisquare[explainability]` into an env that already has us.
+  #
+  # >=1.1 is where AgentRunTracer accepts run_id, which is how a session's spans
+  # join the proxy's Run instead of fragmenting into one Run per drain.
+  "aisquare[explainability]>=1.1",
+]
 tui = [
   "textual>=1.0",
 ]

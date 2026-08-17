@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -21,6 +22,7 @@ from aisquare.models import CheckStatus
 from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
+from aisquare.services import explainability as explainability_service
 from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import sync as sync_service
 
@@ -47,6 +49,14 @@ def init(
         bool, typer.Option("--reinit", help="Re-run setup even if already initialised.")
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Answer yes to every prompt.")] = False,
+    explainability: Annotated[
+        bool | None,
+        typer.Option(
+            "--explainability/--no-explainability",
+            help="Ship this CLI's insights (prompts, board events) to the "
+            "explainability gateway. Off unless you ask for it.",
+        ),
+    ] = None,
 ) -> None:
     """Set up aisquare on this machine and connect your agents."""
     report = lifecycle_service.initialize(
@@ -57,8 +67,35 @@ def init(
         onboard=not no_onboard,
         reinit=reinit,
         assume_yes=yes,
+        explainability=_explainability_decision(explainability),
     )
     emit_setup(report)
+
+
+def _explainability_decision(flag: bool | None) -> bool | None:
+    """What the user said about shipping insights — asking only where we may.
+
+    Ordinary ``init`` is non-interactive and idempotent, and scripts and CI
+    depend on that, so the question is asked ONLY at a terminal, and only when
+    the step could actually be accepted. Anywhere else the answer is "not
+    asked", which changes nothing.
+
+    ``--yes`` deliberately does NOT imply consent here. It exists to unblock
+    prompts, and "ship my prompts to a server" is not a prompt anyone should
+    answer by reflex — #50's boundary is that nothing ships before the user has
+    configured it.
+    """
+    if flag is not None:
+        return flag
+    if not sys.stdin.isatty():
+        return None
+    try:
+        if not explainability_service.shipping_offer().available:
+            return None
+    except Exception:  # an optional step may not break setup
+        return None
+    captures = explainability_service.ShippingOffer.CAPTURES
+    return typer.confirm(f"Ship {captures} to the explainability gateway?", default=False)
 
 
 def status() -> None:

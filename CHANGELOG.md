@@ -136,6 +136,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **Concurrent first opens of a fresh store could corrupt the migration,
+  permanently.** Several sessions launching together onto a machine that has
+  never run aisquare could raise a NON-transient `duplicate column name:
+  account` out of `_migrate` — and the damage did not heal: the column existed
+  while `user_version` still read 8, so every later attempt at migration 8
+  failed on that database forever.
+  - Time-of-check / time-of-use. The version was read, the migration chosen,
+    and only THEN the transaction started — so another opener could advance the
+    schema in between and this one applied an **old migration to a newer
+    database**. Instrumentation caught a thread running migration index 9
+    against a database that read version 8 on two independent connections.
+  - Fixed by taking the write lock first and re-reading the version **under**
+    it. `executescript` cannot be used for the transactional part — it issues an
+    implicit `COMMIT` before running, releasing a lock taken beforehand — so
+    statements are split with `sqlite3.complete_statement`, SQLite's own
+    tokenizer, and a test compares the resulting schema against what
+    `executescript` built, object for object: 29 objects, identical.
+  - The guard asserts the invariant, not the race: reproducing the failure needs
+    luck (0–2 of 15 twelve-way races), so a racing test would be the
+    load-sensitive kind this suite has twice had to repair. It traces a real
+    first open and pins that the version is re-read after every write lock and
+    before any DDL — verified red against the pre-fix ordering.
+  - `docs/store-migration-race.md` records the two hypotheses that were wrong
+    (`executescript` breaking the transaction; the connections disagreeing about
+    journal mode), both measured and both falsified, so the route is not
+    rediscovered.
 - **`aisquare doctor --live` now probes a proxy you configured, even with
   tracing off.** With tracing off nothing probes the proxy, which is right for
   the default case and wrong for the flag whose entire meaning is "make the

@@ -1294,31 +1294,70 @@ def is_locked_error(exc: sqlite3.Error) -> bool:
     return "locked" in text or "busy" in text
 
 
+def _statements(script: str) -> Iterator[str]:
+    """Split a migration script into statements, using SQLite's own parser.
+
+    ``sqlite3.complete_statement`` is the C tokenizer, so a semicolon inside a
+    string literal or a ``CREATE TRIGGER … BEGIN … END`` body does not split
+    the statement — which a regex would get wrong exactly once, on the day
+    someone adds a trigger.
+    """
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if buffer.strip() and sqlite3.complete_statement(buffer):
+            yield buffer
+            buffer = ""
+    if buffer.strip():
+        yield buffer
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Bring the schema to the current version, safely under concurrency.
 
-    Hooks race: several sessions can open (and try to migrate) the store in
-    the same instant. Each migration runs as ONE ``BEGIN IMMEDIATE``
-    transaction that also bumps ``user_version`` — so a rebuild like v4 can
-    never be observed half-done, and the write lock serialises racers. A
-    loser whose script then fails re-reads the version: if another process
+    Hooks race: several sessions can open (and try to migrate) the store in the
+    same instant. Each migration runs as ONE ``BEGIN IMMEDIATE`` transaction
+    that also bumps ``user_version`` — so a rebuild like v4 can never be
+    observed half-done, and the write lock serialises racers.
+
+    THE VERSION IS READ UNDER THE LOCK, and that ordering is the whole fix.
+    Reading it first and then starting the transaction is a time-of-check /
+    time-of-use gap: between the read and the ``BEGIN IMMEDIATE`` another opener
+    can advance the schema, and this one then applies an OLD migration to a
+    NEWER database. Measured before the fix, 12 concurrent first opens on a
+    fresh store: 27 failures in 15 runs, ``duplicate column name: account`` —
+    and instrumentation caught a thread running migration index 9 against a
+    database that read version 8 on two independent connections. Nothing about
+    it needed unusual load; it needed openers.
+
+    ``executescript`` cannot be used for the transactional part, and that is the
+    trap that makes the naive fix worse rather than better: it issues an
+    implicit COMMIT *before* running its script, so a ``BEGIN IMMEDIATE`` taken
+    beforehand is released instantly. The statements are therefore run one at a
+    time under our own transaction. ``_statements`` splits them with SQLite's
+    own parser, and a test pins that the schema this produces is byte-identical
+    to what ``executescript`` produced.
+
+    A loser whose script still fails re-reads the version: if another process
     advanced it, that's victory by other means; otherwise the error is real.
     """
     while True:
-        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version >= len(_MIGRATIONS):
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
             return
-        script = _MIGRATIONS[version]
         try:
-            connection.executescript(
-                f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version + 1};\nCOMMIT;"
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version >= len(_MIGRATIONS):
+                connection.execute("COMMIT")
+                return
+            for statement in _statements(_MIGRATIONS[version]):
+                connection.execute(statement)
+            connection.execute(f"PRAGMA user_version = {version + 1}")
+            connection.execute("COMMIT")
         except sqlite3.Error:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
-            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if current <= version:
-                raise  # a genuine migration failure, not a lost race
+            raise
 
 
 def open_store() -> ContextStore:

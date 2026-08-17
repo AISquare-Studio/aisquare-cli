@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated
 
 import typer
 
-from aisquare import __version__
 from aisquare.cli import (
     agents,
     auth,
@@ -37,10 +37,28 @@ app = typer.Typer(
 )
 
 
+def _installed_version() -> str:
+    """Our version from distribution metadata, never off the package root.
+
+    ``aisquare/__init__.py`` still exports ``__version__`` for library callers,
+    but the CLI must not depend on it: the Explainability SDK publishes as
+    distribution ``aisquare`` and ships a REGULAR package of the same name, so
+    it lands in the same ``site-packages/aisquare/`` directory. Installing it
+    overwrites our ``__init__.py`` with the SDK's; uninstalling it deletes the
+    shared file. Either way ``from aisquare import __version__`` raises and
+    every command dies at import — a bricked CLI, from a routine
+    ``pip install``. The dist-info metadata read here survives both.
+    """
+    try:
+        return version("aisquare-cli")
+    except PackageNotFoundError:  # pragma: no cover - only from a raw checkout
+        return "0.0.0+uninstalled"
+
+
 def _print_version(value: bool) -> None:
     """Eager callback for ``--version``."""
     if value:
-        typer.echo(f"aisquare {__version__}")
+        typer.echo(f"aisquare {_installed_version()}")
         raise typer.Exit()
 
 
@@ -116,9 +134,11 @@ app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
 app.add_typer(hook.app, name="hook", hidden=True)
-# Hidden while explainability.enabled defaults to off; flips visible with the
-# tracing rollout (prod cutover), same pattern as the roadmap groups above.
-app.add_typer(explainability.app, name="explainability", hidden=True)
+# Visible: unlike the roadmap groups above, every leaf here does something on a
+# stock machine — `enable` is the one command that turns tracing on, and the
+# rest report or wire it. A surface an operator has to be told exists is not an
+# operator surface, and the cutover is done by a human reading --help.
+app.add_typer(explainability.app, name="explainability")
 
 
 def main() -> None:

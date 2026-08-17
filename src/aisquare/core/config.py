@@ -29,6 +29,25 @@ class RedactionSettings(BaseModel):
     level: RedactionLevel = RedactionLevel.standard
 
 
+class ExplainabilityTarget(BaseModel):
+    """One explainability deployment (stg, prod, …) this machine can point at.
+
+    Every field falls back to the top-level ``[explainability]`` default when
+    unset, so a target is usually two lines. ``api_key_env`` is a *key source*,
+    never a key: the CLI reads the named environment variable at the moment it
+    needs it. No path to a secrets file is ever baked into config or source —
+    the operator sources their own file into the shell (or exports the var by
+    any other means) and the CLI just names what it needs.
+    """
+
+    gateway_url: str = ""
+    api_key_env: str = "EXPLAINABILITY_API_KEY"
+    studio_id: str = ""  # informational; the gateway routes by key + agent name
+    proxy_url: str | None = None
+    agent_name_template: str | None = None
+    roles: list[str] | None = None
+
+
 class ExplainabilitySettings(BaseModel):
     """Settings for tracing agent sessions through the explainability proxy.
 
@@ -36,11 +55,33 @@ class ExplainabilitySettings(BaseModel):
     team — flipping it on is the only opt-in, and every other safeguard
     (proxy health probe, mode check, pre-existing env detection) fails open:
     a session always launches, at worst untraced with a warning.
+
+    ``targets`` carries one entry per deployment, so moving this machine from
+    staging to production is a config edit (or ``aisquare explainability enable
+    --target prod``) rather than a code change::
+
+        [explainability]
+        enabled = true
+        target  = "stg"
+
+        [explainability.targets.stg]
+        gateway_url = "https://stg-explainability-api.example"
+
+        [explainability.targets.prod]
+        gateway_url = "https://explainability-api.example"
+        api_key_env = "EXPLAINABILITY_PROD_API_KEY"
+
+    The selector is deliberately NOT called "profile": ``aisquare --profile``
+    already means the top-level config profile, and one word for two unrelated
+    selectors is how an operator points production traffic at staging.
     """
 
     enabled: bool = False
     proxy_url: str = "http://127.0.0.1:9090"
     agent_name_template: str = "aisquare-{role}"
+    target: str = "stg"
+    roles: list[str] = Field(default_factory=lambda: ["planner", "coder", "runner"])
+    targets: dict[str, ExplainabilityTarget] = Field(default_factory=dict)
 
 
 class RoleLaunchProfile(BaseModel):

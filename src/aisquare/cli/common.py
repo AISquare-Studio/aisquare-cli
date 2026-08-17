@@ -9,6 +9,7 @@ from typing import NoReturn
 
 import tomli_w
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from aisquare.core.config import AppConfig
@@ -348,15 +349,22 @@ _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fai
 
 
 def emit_doctor(checks: list[DoctorCheck]) -> None:
-    """Render diagnostic check results, with a fix hint for anything not OK."""
+    """Render diagnostic check results, with a fix hint for anything not OK.
+
+    Details and fixes are escaped because they are DATA, not markup: a check
+    may carry text from a subprocess or another tool, and Rich reads anything
+    in square brackets as a style tag and prints nothing. Observed live — the
+    SDK doctor reports a configured key as ``[present]``, which rendered as an
+    empty detail and read exactly like a missing key.
+    """
     if get_state().json_output:
         typer.echo(json.dumps([check.model_dump(mode="json") for check in checks]))
         return
     console = stdout_console()
     for check in checks:
-        console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {check.detail}")
+        console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {escape(check.detail)}")
         if check.fix and check.status is not CheckStatus.ok:
-            console.print(f"    → {check.fix}")
+            console.print(f"    → {escape(check.fix)}")
 
 
 def fail(

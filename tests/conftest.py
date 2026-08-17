@@ -53,6 +53,13 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        # An operator's shell has these sourced from their explainability env
+        # file; leaving them set would resolve THEIR gateway and key inside the
+        # suite, so "this target is unconfigured" would pass or fail depending
+        # on whose terminal ran it.
+        "AISQUARE_EXPLAINABILITY_TARGET",
+        "EXPLAINABILITY_GATEWAY_URL",
+        "EXPLAINABILITY_API_KEY",
     ):
         monkeypatch.delenv(knob, raising=False)
     return home

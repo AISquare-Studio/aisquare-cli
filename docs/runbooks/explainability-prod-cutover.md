@@ -403,7 +403,7 @@ written; if you are comparing line-for-line, compare against this:
 ```
 enabled:  True
 target:   stg
-gateway:  https://…                     <- your prod value
+gateway:  https://… [config]            <- your prod value; [config] is where it came from
 key:      $EXPLAINABILITY_API_KEY is set
 proxy:    http://127.0.0.1:9190
 identity: aisquare-{role}
@@ -493,6 +493,23 @@ pretending.
 > `aisquare/` directory shadows the editable path hook and `aisquare.cli`
 > disappears. That is a developer-machine hazard, not yours, but do not run the
 > cutover from an editable checkout.
+
+**[verified-train] Assert the destination, not the counts.** After shipping is
+on, check that the client lane points where you think it does:
+
+```bash
+aisquare --json explainability status | jq -r .shipping.gateway
+# must equal your PROD gateway URL
+```
+
+This is the one check that can catch a split brain, and counts can never do it:
+`2 sent` reads identically whichever gateway it went to. The two lanes —
+proxy traffic and shipped insights — used to be able to point at DIFFERENT
+deployments, with `status` reporting only the proxy lane's target; configure
+shipping under a staging shell, then `enable --target prod`, and model traffic
+moved while insights kept going to staging with nothing to tell you. Shipping
+follows the active target now, so one switch moves both, and this line is how
+you prove it rather than assume it.
 
 **What `sent` means, and it is not what it sounds like:** handed to the SDK's
 durable inbox, **not acknowledged by the gateway**. A green `sent` count with a
@@ -625,7 +642,7 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 | 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable` |
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |
 | 5 Green | `doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable` |
-| 5b Insights | `status` → `shipping:` on, `spool:` counts move after `ship` | `aisquare init --no-explainability` (spool kept) |
+| 5b Insights | `.shipping.gateway` equals your prod URL, and `spool:` counts move after `ship` | `aisquare init --no-explainability` (spool kept) |
 
 ---
 

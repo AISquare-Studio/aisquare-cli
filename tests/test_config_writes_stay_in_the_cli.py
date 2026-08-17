@@ -37,11 +37,28 @@ NON_CLI_SURFACES = ("hooks.py", "mcp_server.py", "serve.py", "sweeper.py")
 KNOWN_WRITERS = ("set_", "redaction", "enable", "disable", "bind", "init")
 
 
-def _call_graph() -> tuple[dict[str, Path], dict[str, set[str]]]:
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    """``from x import save_config as _persist`` — ``_persist`` IS that call.
+
+    Per module, because an alias is only in scope where it was bound. Import
+    forms only: an assignment rebinding or a dynamically-built attribute cannot
+    be followed statically, and those remain invisible rather than guessed at.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            for imported in node.names:
+                if imported.asname:
+                    aliases[imported.asname] = imported.name.rsplit(".", 1)[-1]
+    return aliases
+
+
+def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[str, set[str]]]:
     defines: dict[str, Path] = {}
     calls: dict[str, set[str]] = defaultdict(set)
-    for module in sorted(SRC.rglob("*.py")):
+    for module in roots if roots is not None else sorted(SRC.rglob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+        aliases = _import_aliases(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
@@ -50,7 +67,7 @@ def _call_graph() -> tuple[dict[str, Path], dict[str, set[str]]]:
                 if isinstance(inner, ast.Call):
                     name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None)
                     if name:
-                        calls[node.name].add(name)
+                        calls[node.name].add(aliases.get(name, name))
     return defines, calls
 
 
@@ -103,4 +120,35 @@ def test_no_hook_or_daemon_surface_can_reach_a_config_write() -> None:
         f"these non-CLI surfaces can now reach a config write: {offenders}. "
         "The CLI write guard cannot cover them — either route the write through "
         "a command that wraps it, or make that surface handle the failure itself."
+    )
+
+
+def test_an_aliased_import_of_the_writer_is_still_a_config_write(tmp_path: Path) -> None:
+    """``from … import save_config as _persist`` must not hide the edge.
+
+    The graph is keyed by NAME, so a call to ``_persist`` looked like a call to
+    something unrelated and the closure lost the edge — measured: a direct
+    ``save_config`` in ``services/hooks.py`` failed this file, and the SAME write
+    through an alias left it green. That is the difference between a guard that
+    catches the change nobody anticipated and one that catches only the obvious
+    spelling of it, which is the entire reason this guard exists.
+
+    Resolution is per module and import-only. A rebinding through assignment
+    (``writer = save_config``) or a dynamically-built attribute is still
+    invisible; static analysis cannot follow those, and over-approximating is
+    the safe direction — an extra edge only widens the closure.
+    """
+    module = tmp_path / "aliased.py"
+    module.write_text(
+        "from aisquare.core.config import save_config as _persist\n\n"
+        "def writes_through_an_alias(config: object) -> None:\n"
+        "    _persist(config)\n",
+        encoding="utf-8",
+    )
+
+    _, calls = _call_graph(roots=[module])
+
+    assert "save_config" in calls["writes_through_an_alias"], (
+        "an aliased import hides the edge, so a config write behind a hook "
+        "would leave this guard green"
     )

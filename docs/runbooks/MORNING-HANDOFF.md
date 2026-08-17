@@ -44,20 +44,24 @@ something is.
 
    - `config set` on an unrelated key — **safe**. All five top-level
      `[explainability]` keys and the `[explainability.targets]` table survive.
-   - `init --reinit` — **destroys it, at head, not just on a stale build.**
-     `enabled` goes `true` → `false`, a top-level key is dropped, and the
-     **whole `[explainability.targets]` table disappears**. Exit **0**, no
-     warning. It calls `save_config(AppConfig())` unconditionally, and a fresh
-     default config is not a merge. Preserving *unknown* keys — which we do —
-     cannot help here, because these are *known* keys being written at their
-     defaults.
-   - `team bind` — **unmeasured at head.** Two attempts failed before writing
-     anything (a usage error, then exit 1), and "the config was unchanged"
-     after a command that never wrote is not evidence. Treat it as unknown.
+   - `init --reinit` — **destroyed it silently; now it refuses.** It calls
+     `save_config(AppConfig())` unconditionally, and a fresh default config is
+     not a merge, so `enabled` went `true` → `false` and the **whole
+     `[explainability.targets]` table disappeared** at exit **0**. Preserving
+     *unknown* keys — which we do — cannot help, because these are *known* keys
+     written at their defaults. It now **refuses** when a reset would discard a
+     configured section, names what would go, and points at `--yes`; with
+     `--yes` it resets as before and reports what it removed. An *unreadable*
+     config still resets without asking, because that is the recovery `doctor`
+     sends you here for.
+   - `team bind` — **safe at head.** Measured with a control proving the write
+     landed (the bound profile is present afterwards): every `[explainability]`
+     key and the targets table survive.
 
-   So after you configure explainability: **do not run `init --reinit`**. If you
-   must, re-run §1/§2 afterwards and verify with §5b's `jq -r
-   .shipping.gateway`, because nothing will tell you the targets table is gone.
+   So of the three, only `init --reinit` ever destroyed anything, and it now
+   stops and asks. If you pass `--yes` you still lose the section — re-run §1/§2
+   afterwards and verify with §5b's `jq -r .shipping.gateway`, because nothing
+   downstream reports a missing targets table.
    Two tells that need no comparison: `doctor` reports where the running build
    came from, and a build that prints **no** provenance line predates that check
    and is therefore older than this train.

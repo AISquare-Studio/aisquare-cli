@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from aisquare.core import paths
-from aisquare.core.config import AppConfig, save_config
+from aisquare.core.config import (
+    AppConfig,
+    ExplainabilitySettings,
+    load_config,
+    save_config,
+)
 from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import current_project
@@ -13,6 +18,42 @@ from aisquare.models import SetupReport
 from aisquare.services import agents as agents_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
+
+
+class ExplainabilityResetRefused(RuntimeError):
+    """``--reinit`` would discard a configured explainability section.
+
+    Raised rather than warned because the loss is not recoverable from anything
+    on the machine: ``[explainability.targets]`` holds a gateway URL and the
+    NAME of the environment variable holding the key, both configured out of
+    band. Afterwards ``status`` reads as a plausible *unconfigured* machine
+    rather than a broken one, so nothing downstream reports it.
+
+    Not raised when the config cannot be parsed: ``doctor`` sends an operator
+    here to reset an invalid file, and a refusal built on a section we cannot
+    read would strand exactly that person.
+    """
+
+    def __init__(self, summary: str) -> None:
+        super().__init__(summary)
+        self.summary = summary
+
+
+def _configured_explainability(settings: ExplainabilitySettings) -> str | None:
+    """What a reset would take, or None if there is nothing configured.
+
+    Keys on three fields rather than one: a machine mid-cutover may have any of
+    them set, and checking only ``targets`` would let a half-configured machine
+    be reset in silence.
+    """
+    parts: list[str] = []
+    if settings.targets:
+        parts.append("targets " + ", ".join(sorted(settings.targets)))
+    if settings.enabled:
+        parts.append("tracing enabled")
+    if settings.gateway_url:
+        parts.append(f"gateway {settings.gateway_url}")
+    return "; ".join(parts) or None
 
 
 def initialize(
@@ -37,6 +78,17 @@ def initialize(
     already_initialized = paths.config_path().exists() or paths.db_path().exists()
     paths.ensure_home()
 
+    discarded: str | None = None
+    if reinit and paths.config_path().exists():
+        try:
+            existing = load_config().explainability
+        except Exception:
+            existing = None  # unreadable: --reinit is the documented recovery
+        if existing is not None:
+            discarded = _configured_explainability(existing)
+            if discarded and not assume_yes:
+                raise ExplainabilityResetRefused(discarded)
+
     if reinit or not paths.config_path().exists():
         save_config(AppConfig())
 
@@ -45,6 +97,10 @@ def initialize(
         store.ensure_project(project)
 
     notes: list[str] = []
+    if discarded:
+        # Consent was given, so the reset happened — but say what went, because
+        # nothing downstream reports a missing targets table.
+        notes.append(f"reset discarded the configured explainability section ({discarded})")
     if api_key:
         credentials = paths.credentials_path()
         credentials.write_text(api_key, encoding="utf-8")

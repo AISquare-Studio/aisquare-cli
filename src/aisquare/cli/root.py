@@ -17,6 +17,7 @@ from aisquare.cli.common import (
     emit_setup,
     emit_status,
     expected_config_write_errors,
+    fail,
     resolve_pool,
 )
 from aisquare.models import CheckStatus
@@ -66,16 +67,25 @@ def init(
     ] = None,
 ) -> None:
     """Set up aisquare on this machine and connect your agents."""
-    with expected_config_write_errors():
-        report = lifecycle_service.initialize(
-            path,
-            api_key=api_key,
-            local=local,
-            agents=agent or [],
-            onboard=not no_onboard,
-            reinit=reinit,
-            assume_yes=yes,
-            explainability=_explainability_decision(explainability),
+    try:
+        with expected_config_write_errors():
+            report = lifecycle_service.initialize(
+                path,
+                api_key=api_key,
+                local=local,
+                agents=agent or [],
+                onboard=not no_onboard,
+                reinit=reinit,
+                assume_yes=yes,
+                explainability=_explainability_decision(explainability),
+            )
+    except lifecycle_service.ExplainabilityResetRefused as refused:
+        fail(
+            f"--reinit would discard this machine's explainability configuration "
+            f"({refused.summary}) and nothing afterwards would report it missing. "
+            f"Re-run with --yes if that is what you mean.",
+            error="reinit_would_discard_explainability",
+            hint="aisquare init --reinit --yes",
         )
     emit_setup(report)
 

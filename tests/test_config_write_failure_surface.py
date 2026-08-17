@@ -217,3 +217,69 @@ def test_init_routes_a_missing_target_too(
     assert "Traceback" not in result.output, result.output
     assert "✗" in result.output
     assert str(missing) in result.output
+
+
+def test_a_read_only_filesystem_reports_the_convention(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """EROFS is the operator's configuration choice, so it gets the one-liner.
+
+    Same test as permission and missing-directory: did WHERE THEY POINTED THE
+    CONFIG cause this, and can a line name the fix? Yes to both.
+    """
+    from aisquare.services import settings as settings_service
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise OSError(errno.EROFS, "Read-only file system", str(tmp_path / "config.toml"))
+
+    monkeypatch.setattr(settings_service, "save_config", _boom)
+
+    result = runner.invoke(app, ["config", "set", "explainability.proxy_url", "http://x"])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output, result.output
+    assert "✗" in result.output
+    assert str(tmp_path) in result.output
+
+
+def test_a_full_disk_still_raises_with_its_traceback(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ENOSPC is the machine breaking under a correct choice, so it stays loud.
+
+    The discriminator is not a list of errnos, it is whether the operator's own
+    configuration caused it. A full disk is probably breaking other things too;
+    a tidy ✗ would understate that.
+    """
+    from aisquare.services import settings as settings_service
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(settings_service, "save_config", _boom)
+
+    result = runner.invoke(app, ["config", "set", "explainability.proxy_url", "http://x"])
+
+    assert isinstance(result.exception, OSError)
+    assert result.exception.errno == errno.ENOSPC
+    assert "✗" not in result.output
+
+
+def test_the_redaction_command_translates_too(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The boundary the AST guard found that three sessions had missed by hand."""
+    from aisquare.services import settings as settings_service
+
+    missing = tmp_path / "dotfiles"
+    monkeypatch.setattr(
+        settings_service,
+        "save_config",
+        lambda *_a, **_k: (_ for _ in ()).throw(_missing_target_error(missing)),
+    )
+
+    result = runner.invoke(app, ["config", "redaction", "strict"])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output, result.output
+    assert "✗" in result.output

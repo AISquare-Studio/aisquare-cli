@@ -52,4 +52,6 @@ def redaction(
     level: Annotated[RedactionLevel, typer.Argument(help="Redaction level.")],
 ) -> None:
     """Set how aggressively captured data is scrubbed."""
-    emit_config_value("redaction.level", settings_service.set_redaction(level))
+    with expected_config_write_errors():
+        stored = settings_service.set_redaction(level)
+    emit_config_value("redaction.level", stored)

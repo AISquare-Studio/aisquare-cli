@@ -160,6 +160,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     "buffering", not the happy one.
   - A machine that never made a target is unaffected: the top-level
     `gateway_url` and the stored key file remain the fallback.
+  - **The stored key file no longer crosses deployments.**
+    `~/.aisquare/explainability-key` holds ONE unlabelled key, which is right
+    for the single-deployment machine `init --explainability` produces and
+    wrong the moment a target names its own variable. Follow the CLI's own
+    "or write \<key file\>" advice while on staging, switch to prod with
+    `PROD_KEY` unset, and the STAGING key was handed to the PROD gateway — the
+    reverse being worse, a prod key disclosed to a staging host. The file now
+    answers only when the active target has not named a variable of its own,
+    and the refusal stops advising a file it would ignore.
 - **Concurrent first opens of a fresh store could corrupt the migration,
   permanently.** Several sessions launching together onto a machine that has
   never run aisquare could raise a NON-transient `duplicate column name:

@@ -23,6 +23,7 @@ import os
 import random
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -1374,7 +1375,30 @@ def open_store() -> ContextStore:
     iterates.
     """
     paths.ensure_home()
-    connection = sqlite3.connect(str(paths.db_path()))
+    database = paths.db_path()
+    # SQLite treats a ZERO-LENGTH file as a brand-new empty database, so a
+    # truncated store is rebuilt, migrated, and reported healthy — measured:
+    # `status` exits 0 in six lines and `doctor` says "✓ database: context.db is
+    # readable", while every task, note and session it held is gone. It is the
+    # only damage shape with no signal; the other four raise loudly.
+    #
+    # ABSENT IS NOT TRUNCATED. A new machine has no file at all and creating one
+    # is correct. A file that EXISTS at zero length means something made it and
+    # it lost what it held, which is the one moment that fact is knowable —
+    # after this open the schema is back and the evidence is gone.
+    #
+    # Written straight to stderr rather than through the console helper: this
+    # module is the data layer and imports nothing from the CLI, and the
+    # doctrine for an observer that cannot fix what it sees is to say so on
+    # stderr and carry on. Nothing is repaired, refused or deleted.
+    if database.exists() and database.stat().st_size == 0:
+        print(
+            f"board: {database} exists but is empty — it was truncated, and the "
+            "tasks, notes and sessions it held are gone. A new store is being "
+            "created; this is not a fresh machine.",
+            file=sys.stderr,
+        )
+    connection = sqlite3.connect(str(database))
     connection.row_factory = sqlite3.Row
     busy_ms = _busy_timeout_ms()
     connection.execute(f"PRAGMA busy_timeout = {busy_ms}")

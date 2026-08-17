@@ -249,6 +249,18 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     permission error points at a directory that is perfectly writable. Nothing
     is modified on that path: the link and the original file both survive.
 
+    **A BROKEN link is followed too, and its missing directories are created.**
+    Measured: a link at a path four levels deep that does not exist yet produces
+    all four directories plus the file, exit 0, and the link then resolves. That
+    is what makes a dangling link work rather than fail, and a dangling link is a
+    user stating where their config should live — but it means this function can
+    create directories at a location NOBODY NAMED IN THE COMMAND, including on
+    another filesystem entirely. Two consequences worth knowing before relying on
+    it: a later ``git clone`` into that path fails with "already exists and is not
+    an empty directory"; and if the link points at a mounted Windows drive, the
+    directories are created there. ``aisquare doctor`` reports a symlinked config
+    and flags a missing target, so the state is visible before a write happens.
+
     Returns the path the CALLER asked for, not the resolved one: commands echo it
     back to an operator, and where the bytes physically land is not their concern.
     """

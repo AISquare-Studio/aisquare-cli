@@ -176,3 +176,52 @@ def test_the_file_kind_never_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     monkeypatch.setattr(Path, "is_symlink", _boom)
 
     assert diagnostics._config_file_kind() == "unreadable"
+
+
+def test_a_dangling_symlink_target_is_flagged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The one symlink shape whose consequences reach outside AISQUARE_HOME.
+
+    ``save_config`` follows a broken link and CREATES the missing directories at
+    its target — measured at four levels deep, and on a mounted Windows drive if
+    that is where the link points. @9bbc8ed7 raised that as a boundary this team
+    has held by hand four times, now reachable by the product through a link a
+    user set and forgot.
+
+    The behaviour stands (@dfd9a883's ruling: failing on a broken link would add
+    a failure mode in a state that is the user's to fix). What it lacked was
+    anyone being able to SEE it, which is what this line is for. Still a
+    detector — flagged in the detail, not promoted to a failure.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").symlink_to(tmp_path / "never" / "cloned" / "config.toml")
+    monkeypatch.setenv("AISQUARE_HOME", str(home))
+
+    check = diagnostics._check_home_filesystem()
+
+    assert "TARGET MISSING" in check.detail, (
+        "a dangling config link is invisible again — the state that lets a write "
+        "create directories somewhere nobody named"
+    )
+    assert check.status is not CheckStatus.fail, "a detector must not fail the machine"
+
+
+def test_a_live_symlink_is_not_flagged_as_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The negative half: a working link must read as reassurance, not a warning."""
+    dotfiles = tmp_path / "dotfiles"
+    home = tmp_path / "home"
+    dotfiles.mkdir()
+    home.mkdir()
+    real = dotfiles / "config.toml"
+    real.write_text("profile = 'default'\n", encoding="utf-8")
+    (home / "config.toml").symlink_to(real)
+    monkeypatch.setenv("AISQUARE_HOME", str(home))
+
+    detail = diagnostics._check_home_filesystem().detail
+
+    assert "symlink" in detail
+    assert "TARGET MISSING" not in detail

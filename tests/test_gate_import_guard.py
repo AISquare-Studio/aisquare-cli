@@ -70,6 +70,45 @@ def test_this_tree_is_not_reported() -> None:
     )
 
 
+def test_a_namespace_package_is_reported_rather_than_crashing() -> None:
+    """`aisquare.__file__` is None when the package resolved as a namespace.
+
+    Found by @9bbc8ed7 reviewing the hook: `Path(None)` raises, and a raise
+    inside a session-start hook means pytest dies with a raw TypeError traceback
+    — the least explanatory failure in the repo, from the one function whose only
+    job is to explain a failure.
+
+    Not hypothetical, though the route is narrow. PEP 420 forms a namespace
+    package only when NO regular `aisquare/__init__.py` exists anywhere on
+    sys.path, so an editable checkout can never reach it; verified by putting a
+    bare `aisquare/` directory first on the path and watching `__file__` still
+    resolve to src. It needs no real package on the path at all, plus a namespace
+    tree supplying the modules conftest imports — reproduced under `python -S`,
+    where `__file__` was None, those imports succeeded, and the pre-fix hook
+    raised.
+    """
+    reason = conftest._foreign_package_reason(None, Path("/repo/src"))
+
+    assert reason is not None, "a namespace package must be refused, not crash"
+    assert "namespace" in reason
+    assert "sys.path" in reason
+    assert "/repo/src" in reason
+
+
+def test_the_checker_accepts_the_raw_dunder_file_value() -> None:
+    """The hook hands over `aisquare.__file__` unresolved, so a str must work.
+
+    Resolving in the hook would put the one unguarded `Path()` conversion
+    outside every test that covers it — which is exactly how the None case got
+    in. This pins the contract that the checker owns the conversion.
+    """
+    assert (
+        conftest._foreign_package_reason("/repo/src/aisquare/__init__.py", Path("/repo/src"))
+        is None
+    )
+    assert conftest._foreign_package_reason("/elsewhere/aisquare/__init__.py", Path("/repo/src"))
+
+
 def test_the_reason_carries_the_fix_and_the_trap() -> None:
     """A refusal that does not say how to proceed just moves the confusion.
 

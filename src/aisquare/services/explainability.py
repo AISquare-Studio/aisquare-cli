@@ -108,11 +108,24 @@ _OFF_VALUES = {"0", "false", "no", "off"}
 #: OURS. Nothing else sets it, so "marker present" is the only reliable way to
 #: tell our own wiring apart from a gateway the operator exported themselves —
 #: which is what makes disowning safe.
-SESSION_ID_ENV_VAR = "AISQUARE_SESSION_ID"
+#:
+#: Named for what it holds. It was ``AISQUARE_SESSION_ID``, and that name is
+#: what let a careful reader key spans on it as though it were the board's
+#: session id — which it is NOT on any launch we could not pin, so those spans
+#: opened a second Run beside the model traffic. The value is the pipeline id;
+#: the name now says so.
+PIPELINE_ID_ENV_VAR = "AISQUARE_PIPELINE_ID"
 
-#: The identity that wiring ran under, carried beside the run key so a process
+#: The identity our wiring ran under, carried beside the run key so a process
 #: downstream of the launcher can record the join without re-reading config.
-AGENT_NAME_ENV_VAR = "AISQUARE_AGENT_NAME"
+#:
+#: Deliberately NOT ``AISQUARE_AGENT_NAME``. That name is already spoken for —
+#: see :data:`AGENT_NAME_ENV_VAR` below, the routing identity the SDK reads and
+#: the operator sets in their env file. Writing it from the launcher would
+#: silently override the operator's routing, which is the exact thing the
+#: reserved-var guard exists to prevent for ``ANTHROPIC_*``. A marker is
+#: internal plumbing and has no business sharing a name with a public contract.
+TRACE_AGENT_NAME_ENV_VAR = "AISQUARE_TRACE_AGENT_NAME"
 
 
 @dataclass(frozen=True)
@@ -179,17 +192,17 @@ def disown_inherited_trace(env: MutableMapping[str, str]) -> str | None:
     existed — drops every agent below the first off the trace entirely.
 
     So the parent's identity is removed and the caller wires a fresh one. Only
-    ever OUR identity: without :data:`SESSION_ID_ENV_VAR` beside them the
+    ever OUR identity: without :data:`PIPELINE_ID_ENV_VAR` beside them the
     ``ANTHROPIC_*`` are a gateway the operator set up, and those are theirs to
     keep — the caller then stands down exactly as it always did.
 
     ``None`` when there was nothing of ours to disown, which is every ordinary
     launch.
     """
-    parent_run = (env.get(SESSION_ID_ENV_VAR) or "").strip()
+    parent_run = (env.get(PIPELINE_ID_ENV_VAR) or "").strip()
     if not parent_run or not any(env.get(name) for name in RESERVED_ENV_VARS):
         return None
-    for name in (*RESERVED_ENV_VARS, SESSION_ID_ENV_VAR, AGENT_NAME_ENV_VAR):
+    for name in (*RESERVED_ENV_VARS, PIPELINE_ID_ENV_VAR, TRACE_AGENT_NAME_ENV_VAR):
         env.pop(name, None)
     return parent_run
 
@@ -207,9 +220,9 @@ def trace_marker(wiring: SessionWiring) -> dict[str, str]:
     """
     if not wiring.traced or not wiring.pipeline_id:
         return {}
-    marker = {SESSION_ID_ENV_VAR: wiring.pipeline_id}
+    marker = {PIPELINE_ID_ENV_VAR: wiring.pipeline_id}
     if wiring.agent_name:
-        marker[AGENT_NAME_ENV_VAR] = wiring.agent_name
+        marker[TRACE_AGENT_NAME_ENV_VAR] = wiring.agent_name
     return marker
 
 
@@ -220,10 +233,10 @@ def traced_by(env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
     the hook path leaves after one lookup.
     """
     source = os.environ if env is None else env
-    pipeline_id = (source.get(SESSION_ID_ENV_VAR) or "").strip()
+    pipeline_id = (source.get(PIPELINE_ID_ENV_VAR) or "").strip()
     if not pipeline_id:
         return None
-    return pipeline_id, (source.get(AGENT_NAME_ENV_VAR) or "").strip()
+    return pipeline_id, (source.get(TRACE_AGENT_NAME_ENV_VAR) or "").strip()
 
 
 def accepts_session_id(binary: str) -> bool:

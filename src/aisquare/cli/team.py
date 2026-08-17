@@ -39,8 +39,8 @@ app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no
 #: one. Deliberately unquoted: the value is a UUID, so word splitting produces
 #: exactly the two words intended, and ``sh``/``bash``/``zsh`` agree on it.
 _SESSION_ID_SUBSTITUTION = (
-    f"${{{explainability_service.SESSION_ID_ENV_VAR}:+"
-    f"--session-id ${explainability_service.SESSION_ID_ENV_VAR}}}"
+    f"${{{explainability_service.PIPELINE_ID_ENV_VAR}:+"
+    f"--session-id ${explainability_service.PIPELINE_ID_ENV_VAR}}}"
 )
 
 #: Clears the PREVIOUS paste's tracing out of this shell, and only ever the
@@ -53,13 +53,14 @@ _SESSION_ID_SUBSTITUTION = (
 #: ``X-Pipeline-Id`` and merges into its Run. Observed, not theorised: two
 #: pastes, one Run.
 #:
-#: ``AISQUARE_SESSION_ID`` is the discriminator, because nothing but our own
+#: ``AISQUARE_PIPELINE_ID`` is the discriminator, because nothing but our own
 #: wiring sets it. Present ⇒ the ANTHROPIC_* beside it are ours to clear.
 #: Absent ⇒ they are the operator's real gateway and stay untouched, so the
 #: "not overriding your routing" guard keeps working exactly as before.
 _CLEAR_PREVIOUS_TRACE = (
-    f'if [ -n "${{{explainability_service.SESSION_ID_ENV_VAR}:-}}" ]; then '
-    f"unset {explainability_service.SESSION_ID_ENV_VAR} "
+    f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
+    f"unset {explainability_service.PIPELINE_ID_ENV_VAR} "
+    f"{explainability_service.TRACE_AGENT_NAME_ENV_VAR} "
     f"{' '.join(explainability_service.RESERVED_ENV_VARS)}; fi"
 )
 

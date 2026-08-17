@@ -254,8 +254,8 @@ def _join_seen_by_the_agent(
     from aisquare.services import hooks
 
     for name in (
-        explainability_service.SESSION_ID_ENV_VAR,
-        explainability_service.AGENT_NAME_ENV_VAR,
+        explainability_service.PIPELINE_ID_ENV_VAR,
+        explainability_service.TRACE_AGENT_NAME_ENV_VAR,
     ):
         monkeypatch.delenv(name, raising=False)
         if name in agent_env:
@@ -283,7 +283,7 @@ def test_a_child_of_a_traced_session_gets_its_OWN_identity(
     monkeypatch.setenv(
         "ANTHROPIC_CUSTOM_HEADERS", "X-Agent-Name: aisquare-planner\nX-Pipeline-Id: parent-run"
     )
-    monkeypatch.setenv("AISQUARE_SESSION_ID", "parent-run")  # the marker: this trace is OURS
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "parent-run")  # the marker: this trace is OURS
 
     with healthy_proxy() as proxy_url:
         _tracing_on(proxy_url)
@@ -294,7 +294,7 @@ def test_a_child_of_a_traced_session_gets_its_OWN_identity(
     assert "X-Pipeline-Id: parent-run" not in headers, "the child must not join the parent's Run"
     assert "X-Agent-Name: aisquare-coder" in headers, "and it wears its own role"
     assert spy["env"]["ANTHROPIC_BASE_URL"] == proxy_url
-    assert spy["env"]["AISQUARE_SESSION_ID"] != "parent-run"
+    assert spy["env"]["AISQUARE_PIPELINE_ID"] != "parent-run"
     assert "--session-id" in spy["argv"], "a traced child is pinned like any other"
 
 
@@ -310,7 +310,7 @@ def test_a_real_gateway_of_the_operators_is_still_never_overridden(
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://my-own-gateway.example")
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
-    monkeypatch.delenv("AISQUARE_SESSION_ID", raising=False)  # no marker — not ours
+    monkeypatch.delenv("AISQUARE_PIPELINE_ID", raising=False)  # no marker — not ours
 
     with healthy_proxy() as proxy_url:
         _tracing_on(proxy_url)
@@ -334,7 +334,7 @@ def test_an_untraceable_child_does_not_keep_the_parents_identity(
     monkeypatch.setenv(
         "ANTHROPIC_CUSTOM_HEADERS", "X-Agent-Name: aisquare-planner\nX-Pipeline-Id: parent-run"
     )
-    monkeypatch.setenv("AISQUARE_SESSION_ID", "parent-run")
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "parent-run")
     _tracing_on("http://127.0.0.1:9")  # discard port — the child's wiring fails open
 
     result = runner.invoke(app, ["launch", "coder"])
@@ -342,7 +342,7 @@ def test_an_untraceable_child_does_not_keep_the_parents_identity(
     assert result.exit_code == 0, result.output
     assert "ANTHROPIC_BASE_URL" not in spy["env"], "an untraced child wears nobody's identity"
     assert "ANTHROPIC_CUSTOM_HEADERS" not in spy["env"]
-    assert "AISQUARE_SESSION_ID" not in spy["env"]
+    assert "AISQUARE_PIPELINE_ID" not in spy["env"]
     assert "untraced" in result.output
 
 
@@ -381,7 +381,7 @@ def test_a_role_bound_to_a_wrapper_traces_and_still_joins(
     assert spy["argv"] == ["my-wrapper"], "no flag may reach a binary we did not resolve"
     assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
 
-    keyed_by = spy["env"]["AISQUARE_SESSION_ID"]
+    keyed_by = spy["env"]["AISQUARE_PIPELINE_ID"]
     (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "board-session-42")
     assert record["session_id"] == "board-session-42"
     assert record["pipeline_id"] == keyed_by
@@ -417,8 +417,8 @@ def test_launch_starts_the_agent_on_the_id_it_traces_under(
 
     # The marker travels too, so the agent's own hook can close the join —
     # the strict path and the general path agree on the same id.
-    assert spy["env"]["AISQUARE_SESSION_ID"] == started_on
-    assert spy["env"]["AISQUARE_AGENT_NAME"] == "aisquare-coder"
+    assert spy["env"]["AISQUARE_PIPELINE_ID"] == started_on
+    assert spy["env"]["AISQUARE_TRACE_AGENT_NAME"] == "aisquare-coder"
 
     # The launcher writes nothing; the hook inside that agent does.
     assert join_records() == [], "the launcher records nothing; the hook does"
@@ -465,7 +465,7 @@ def test_launch_does_not_pin_an_id_it_cannot_own(
         assert spy["argv"] == ["claude", "--continue"]
         assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"]
         (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "the-resumed-session")
-        assert record["pipeline_id"] == spy["env"]["AISQUARE_SESSION_ID"]
+        assert record["pipeline_id"] == spy["env"]["AISQUARE_PIPELINE_ID"]
 
         result = runner.invoke(app, ["launch", "coder", "--command", "aider"])
         assert result.exit_code == 0, result.output
@@ -502,8 +502,8 @@ def test_a_session_starts_normally_when_the_join_cannot_be_written(
     from aisquare.core import paths
     from aisquare.services import hooks
 
-    monkeypatch.setenv("AISQUARE_SESSION_ID", "run-9")
-    monkeypatch.setenv("AISQUARE_AGENT_NAME", "aisquare-coder")
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "run-9")
+    monkeypatch.setenv("AISQUARE_TRACE_AGENT_NAME", "aisquare-coder")
     paths.explainability_dir().parent.mkdir(parents=True, exist_ok=True)
     paths.explainability_dir().write_text("in the way", encoding="utf-8")
 
@@ -522,7 +522,7 @@ def test_an_untraced_session_writes_no_join_at_all(
     from aisquare.core import paths
     from aisquare.services import hooks
 
-    monkeypatch.delenv("AISQUARE_SESSION_ID", raising=False)
+    monkeypatch.delenv("AISQUARE_PIPELINE_ID", raising=False)
 
     assert hooks.record_trace_join("board-10") is None
     assert not paths.explainability_joins_path().exists()

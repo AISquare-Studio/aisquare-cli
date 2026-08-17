@@ -94,6 +94,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what leaves the machine.
 
 ### Fixed
+- **The launcher was about to write a variable the SDK routes on.** Our
+  identity marker was called `AISQUARE_AGENT_NAME` — which the Explainability
+  SDK already reads as the registered routing identity, and which operators
+  set in their own env file. This module even had a constant for it already,
+  beside the gateway URL and the API key. Setting it from the launcher would
+  have silently overridden the operator's routing, the exact thing the
+  reserved-var guard refuses to do for `ANTHROPIC_*`. The marker is now
+  `AISQUARE_TRACE_AGENT_NAME`, unambiguously ours, and a test pins that the
+  two are different and that the SDK's variable is never written.
+- **The run-key marker is named for what it holds.**
+  `AISQUARE_SESSION_ID` became `AISQUARE_PIPELINE_ID`. The old name is what
+  let a careful reader key spans on it as though it were the board's session
+  id — which it is not on any launch that could not be pinned, so those spans
+  opened a second Run beside the model traffic. Renamed in the same commit as
+  `core.insights.RUN_KEY_ENV_VAR`, which duplicates it to stay off the heavy
+  import path; the drift test between them guarantees the pair moves together.
 - **Every agent below the first was launching under its PARENT's identity.**
   A traced session's environment carries the wiring that traced it, so
   `aisquare launch` run from inside one hit the "not overriding your routing"

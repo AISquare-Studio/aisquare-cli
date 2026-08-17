@@ -10,6 +10,7 @@ allowed outcome.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -225,23 +226,62 @@ def test_record_join_appends_one_line_per_session(isolated_home: Path) -> None:
 def test_the_marker_is_what_carries_the_run_into_the_agent() -> None:
     wiring = wire_session(_settings(), "coder", session_id="sess-1", prober=_healthy)
     assert trace_marker(wiring) == {
-        "AISQUARE_SESSION_ID": "sess-1",
-        "AISQUARE_AGENT_NAME": "aisquare-coder",
+        "AISQUARE_PIPELINE_ID": "sess-1",
+        "AISQUARE_TRACE_AGENT_NAME": "aisquare-coder",
     }
     assert trace_marker(wire_session(_settings(), "coder", prober=_dead)) == {}, (
         "a stale marker would have the agent's hook record a join that is not true"
     )
 
 
+def test_our_marker_never_writes_the_variable_the_sdk_routes_on() -> None:
+    """``AISQUARE_AGENT_NAME`` belongs to the SDK and to the operator.
+
+    It is the routing identity the Explainability SDK reads and the operator
+    sets in their env file — this module already names it as
+    ``AGENT_NAME_ENV_VAR``, beside the gateway URL and the API key. Writing it
+    from the launcher would silently override the operator's routing, which is
+    exactly what the reserved-var guard refuses to do for ``ANTHROPIC_*``. Our
+    marker is internal plumbing and keeps its own name.
+
+    Not an observed failure — a read of the SDK's documented contract against
+    this module's diff, pinned so it cannot become one.
+    """
+    from aisquare.services import explainability as service
+
+    assert service.TRACE_AGENT_NAME_ENV_VAR != service.AGENT_NAME_ENV_VAR
+    assert service.AGENT_NAME_ENV_VAR == "AISQUARE_AGENT_NAME", "the SDK's, unchanged"
+
+    wiring = wire_session(_settings(), "coder", session_id="sess-1", prober=_healthy)
+    assert service.AGENT_NAME_ENV_VAR not in trace_marker(wiring)
+    assert service.AGENT_NAME_ENV_VAR not in wiring.env
+
+
+def test_an_operators_sdk_routing_identity_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end-to-end version of the same promise, at the env seam."""
+    from aisquare.services import explainability as service
+
+    monkeypatch.setenv("AISQUARE_AGENT_NAME", "their-registered-identity")
+    wiring = wire_session(_settings(), "coder", session_id="sess-1", prober=_healthy)
+    marker = trace_marker(wiring)
+
+    assert marker["AISQUARE_TRACE_AGENT_NAME"] == "aisquare-coder"
+    assert "AISQUARE_AGENT_NAME" not in marker
+    assert os.environ["AISQUARE_AGENT_NAME"] == "their-registered-identity"
+    assert service.traced_by({**os.environ, **marker}) == ("sess-1", "aisquare-coder")
+
+
 def test_traced_by_reads_the_marker_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AISQUARE_SESSION_ID", raising=False)
+    monkeypatch.delenv("AISQUARE_PIPELINE_ID", raising=False)
     assert traced_by() is None, "an ordinary session leaves after one lookup"
 
-    monkeypatch.setenv("AISQUARE_SESSION_ID", "run-7")
-    monkeypatch.setenv("AISQUARE_AGENT_NAME", "aisquare-coder")
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "run-7")
+    monkeypatch.setenv("AISQUARE_TRACE_AGENT_NAME", "aisquare-coder")
     assert traced_by() == ("run-7", "aisquare-coder")
 
-    monkeypatch.setenv("AISQUARE_SESSION_ID", "   ")
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "   ")
     assert traced_by() is None, "a blank marker is not a Run"
 
 
@@ -250,8 +290,8 @@ def test_disowning_takes_only_what_is_ours(monkeypatch: pytest.MonkeyPatch) -> N
     ours = {
         "ANTHROPIC_BASE_URL": "http://127.0.0.1:9190",
         "ANTHROPIC_CUSTOM_HEADERS": "X-Pipeline-Id: parent",
-        "AISQUARE_SESSION_ID": "parent",
-        "AISQUARE_AGENT_NAME": "aisquare-planner",
+        "AISQUARE_PIPELINE_ID": "parent",
+        "AISQUARE_TRACE_AGENT_NAME": "aisquare-planner",
         "KEEP": "1",
     }
     assert disown_inherited_trace(ours) == "parent"
@@ -433,7 +473,7 @@ def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type
         server.shutdown()
 
     assert result.exit_code == 0, result.output
-    read_back = 'printf "%s" "$ANTHROPIC_BASE_URL|$ANTHROPIC_CUSTOM_HEADERS|$AISQUARE_SESSION_ID"'
+    read_back = 'printf "%s" "$ANTHROPIC_BASE_URL|$ANTHROPIC_CUSTOM_HEADERS|$AISQUARE_PIPELINE_ID"'
     echoed = subprocess.run(
         ["/bin/sh", "-c", f"{result.output}\n{read_back}"],
         capture_output=True,

@@ -498,7 +498,7 @@ def test_fake_sdk_module_shape_matches_what_the_service_calls() -> None:
 
 def test_the_run_key_env_var_matches_the_launcher() -> None:
     """core.insights duplicates the name to stay off the heavy import path."""
-    assert insights.RUN_KEY_ENV_VAR == service.SESSION_ID_ENV_VAR
+    assert insights.RUN_KEY_ENV_VAR == service.PIPELINE_ID_ENV_VAR
 
 
 def test_insights_captured_inside_a_traced_session_key_on_its_pipeline_id(

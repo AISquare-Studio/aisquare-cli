@@ -106,7 +106,25 @@ hypothesis are in `docs/store-migration-race.md`.
 status` prints **about sixty lines of Python stack trace** ending in
 `DatabaseError: file is not a database` and exits 1 — against six lines and exit
 0 on a healthy store. **The CLI has not exploded; recognise this and keep
-going.** **[verified-train]** Fourteen commands do this on a damaged store —
+going.**
+
+> ⚠️ **That description is one shape of several, and an earlier version of this
+> section taught it as if it were the only one.** **[verified-train]**, measured
+> at the current train: garbage bytes and a truncation both give exit 1 and ~60
+> lines. A **zero-length** file does not — SQLite reads it as a brand-new
+> database, so the store is silently rebuilt **empty** and everything reports
+> healthy. It now prints one line at the open saying the file existed and was
+> emptied; that line is the *only* signal, and it is worth more than it looks.
+> And a corrupt **page** in a region nothing happens to read stays invisible
+> entirely: exit 0, six lines, no warning. **So a green `doctor` is evidence
+> that the store opened, not that it is intact** — if the board is suddenly
+> empty, believe the board.
+>
+> This bears on the recovery below: use `rm`. A truncating redirect
+> (`> ~/.aisquare/context.db`) lands you in the zero-length case, which is the
+> one shape where the fix and the damage look identical.
+
+**[verified-train]** Fourteen commands do this on a damaged store —
 `status`, `init`, `log`, `inject`, `context list/export/preview` (and the `ctx`
 aliases), `project list/info`, `workspace list/info`. They all die in one place,
 `open_store`, which is asserted by

@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from aisquare.core import brain, orchestrator
+from aisquare.core import brain, orchestrator, spawn
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamEvent
 
@@ -106,6 +106,11 @@ def spawn_drain(cwd: Path | None = None, *, root: Path | None = None) -> None:
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            # Everything the parent had EXCEPT its tracing identity. A detached
+            # worker of ours is not an agent session, and this one outlives the
+            # process that started it — inheriting a live pipeline id would
+            # attach its gbrain work to a Run that may already have ended.
+            env=spawn.untraced_env(),
         )
     except OSError:
         return

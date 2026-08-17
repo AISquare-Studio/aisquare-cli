@@ -166,6 +166,44 @@ class AppConfig(BaseModel):
     team: TeamSettings = Field(default_factory=TeamSettings)
 
 
+def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
+    """``dumped``, plus any key in ``existing`` that ``model`` has no field for.
+
+    A build whose model lacks a field discards it on load and cannot write it
+    back, so a config written by a NEWER build and then saved by an OLDER one
+    loses everything the older one never heard of. Measured on this machine: a
+    build with a three-field ``ExplainabilitySettings`` erased ``target``,
+    ``roles``, ``ship``, ``gateway_url`` and ``[explainability.targets]`` —
+    exit 0, no warning, and because the tracing seam is fail-open the result is
+    a green-looking machine with no tracing.
+
+    The model stays AUTHORITATIVE for everything it knows, including absence:
+    unsetting a role binding has to actually remove it, so a key the model has
+    a field for is taken from ``dumped`` or not at all. Only keys with no
+    corresponding field survive from the file. Recursion follows the model, so a
+    field added inside an existing section is preserved too — which is the shape
+    the harm actually took, all five lost keys being sub-keys of a section both
+    builds knew about.
+
+    A field whose value is a plain container (``targets: dict[str, Target]``)
+    has no sub-model to recurse into, so the model owns that subtree entirely
+    and it is replaced wholesale. That is correct: its keys are data, and a
+    stale entry there is a stale deployment, not an unknown field.
+    """
+    if not isinstance(existing, dict) or not isinstance(dumped, dict):
+        return dumped
+    fields = getattr(type(model), "model_fields", None)
+    if not fields:
+        return dumped
+    merged = dict(dumped)
+    for key, value in existing.items():
+        if key not in fields:
+            merged.setdefault(key, value)
+        elif key in dumped:
+            merged[key] = _keep_unknown(value, dumped[key], getattr(model, key, None))
+    return merged
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
@@ -192,7 +230,18 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     """
     target = path or paths.config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = tomli_w.dumps(config.model_dump(mode="json", exclude_none=True))
+    dumped = config.model_dump(mode="json", exclude_none=True)
+    if target.exists():
+        # Keys this build has never heard of belong to whoever wrote them; see
+        # _keep_unknown. Reading fails open on purpose — a config we cannot parse
+        # is exactly the state a write is most likely trying to repair, and
+        # refusing to write would strand the operator with the broken file.
+        try:
+            with target.open("rb") as handle:
+                dumped = _keep_unknown(tomllib.load(handle), dumped, config)
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    payload = tomli_w.dumps(dumped)
 
     # Written BESIDE the target and renamed over it, never into the target
     # itself. ``os.replace`` is atomic within a filesystem, so a concurrent

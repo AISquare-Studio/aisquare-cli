@@ -191,7 +191,16 @@ Named so you can tell a decision from an oversight:
   over-approximation adds **no** spurious members (closure 16 either way).
 - `EROFS`/`ENOSPC` on config writes are exercised only via injected exceptions,
   never on a real read-only or full filesystem.
-- `doctor --fix` state creation is unmeasured.
+- `doctor --fix` state creation **is now measured, and the flag is safe to
+  run.** The only state it creates is the `~/.aisquare` layout when that is
+  missing — which is the flag's job, and is exactly what plain `doctor`
+  correctly refuses to do. It does **not** rewrite `config.toml` on a
+  configured machine (byte-identical afterwards, with a target and key variable
+  set), and it does **not** install the Claude Code hooks it reports as missing
+  — it prints the `agents connect` line and leaves your agent config alone. It
+  does not prompt, so it cannot hang a script with no terminal, and it still
+  exits non-zero for whatever it could not repair. Pinned in
+  `tests/test_doctor_does_not_create_state.py`.
 - A 9p/DrvFs write measurement — parked on the consent question above.
 
 ## Doctrine this integration holds to

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -104,3 +105,95 @@ def test_an_initialised_machine_is_unaffected(runner: CliRunner, tmp_path: Path)
 
     assert "not created yet" not in result.output, result.output
     assert "context.db is readable" in result.output
+
+
+def test_fix_is_the_one_that_may_build_the_home(runner: CliRunner) -> None:
+    """The other half of the ruling, and the reason the plain guard is safe to keep.
+
+    Declining to create state is right for a DIAGNOSTIC. It would be wrong for
+    an opt-in repair — `--fix` exists to "repair what can be repaired", and a
+    repair that refuses to create a missing home repairs nothing. The pair is
+    the actual rule: looking does not create, asking to fix does.
+
+    MORNING-HANDOFF.md listed "`doctor --fix` state creation is unmeasured"
+    under what was deliberately left. This is that measurement.
+    """
+    home = paths.aisquare_home()
+    assert not home.exists()
+
+    runner.invoke(app, ["doctor", "--fix", "--yes"], catch_exceptions=False)
+
+    assert home.exists(), (
+        "--fix left the home missing — an opt-in repair that repairs nothing is "
+        "worse than no flag, because the operator believes it tried"
+    )
+
+
+def test_fix_writes_nothing_outside_the_aisquare_home(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary that makes `--fix` safe to hand a stranger at 08:00.
+
+    `doctor` reports on the Claude config directory too, and the obvious reading
+    of "repair what can be repaired" would have it install the missing hooks.
+    It does not: it prints the `agents connect` line and leaves the directory
+    alone. That is the right call — hooks live in the operator's own agent
+    config, outside anything this CLI owns, and a diagnostic command silently
+    editing them is the surprise you cannot take back.
+
+    Measured rather than assumed, because the check that reports the hooks is
+    one line away from the code that could install them.
+    """
+    claude_config = tmp_path / "claude-config"
+    claude_config.mkdir()
+    # A sentinel, so the comparison below is not empty-against-empty: an rglob
+    # that saw nothing would satisfy an assertion over two empty lists.
+    (claude_config / "settings.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config))
+    before = sorted(path.name for path in claude_config.rglob("*"))
+    assert before == ["settings.json"], "the sentinel is not visible to the check"
+
+    result = runner.invoke(app, ["doctor", "--fix", "--yes"], catch_exceptions=False)
+
+    assert sorted(path.name for path in claude_config.rglob("*")) == before, (
+        "--fix wrote into the operator's agent config directory"
+    )
+    assert "agents connect claude-code" in result.output, (
+        "the hook repair must still be OFFERED, or declining to do it silently "
+        "leaves the operator with no way to find the fix"
+    )
+
+
+def test_fix_does_not_rewrite_a_configured_machine(runner: CliRunner) -> None:
+    """`--fix` must not be a second way to lose a configured section.
+
+    `init --reinit` was found this shift to discard a configured
+    [explainability] section at exit 0 (@9bbc8ed7 made it refuse). `--fix` is
+    the other command an operator reaches for when something looks wrong, and it
+    runs at exactly the moment they can least afford to lose the targets table —
+    a gateway URL and a key-variable name, both configured out of band.
+
+    Measured on a configured home: config.toml is byte-identical afterwards.
+    """
+    runner.invoke(app, ["init", "--yes"], catch_exceptions=False)
+    runner.invoke(
+        app,
+        [
+            "explainability",
+            "enable",
+            "--target",
+            "stg",
+            "--gateway-url",
+            "https://gw.example",
+            "--key-env",
+            "FOO_KEY",
+        ],
+        catch_exceptions=False,
+    )
+    config = paths.config_path()
+    before = config.read_bytes()
+    assert b"gw.example" in before, "the fixture did not configure anything to lose"
+
+    runner.invoke(app, ["doctor", "--fix", "--yes"], catch_exceptions=False)
+
+    assert config.read_bytes() == before, "--fix rewrote config.toml on a configured machine"

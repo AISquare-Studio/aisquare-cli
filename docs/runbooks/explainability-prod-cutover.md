@@ -34,12 +34,23 @@ cd /home/work/work/aisquare-cli
 git fetch origin && git log --oneline -1 origin/rc/v2026.08.18
 ```
 
-Reinstall the CLI so the binary on your `PATH` is the train, not a stale copy:
+Reinstall the CLI so the binary on your `PATH` is the train, not a stale copy —
+**not** as an editable install:
 
 ```bash
-python3 -m pip install -e '.[dev]'
+python3 -m pip install '.[dev]'      # NOT -e / --editable, see below
 which aisquare && aisquare --version
 ```
+
+> ⚠️ **[verified-train, planner `dfd9a883`] Do not use `-e` for a cutover.** §5
+> has you install `aisquare-cli[explainability]`, and over an editable checkout
+> that install **bricks the CLI** — the SDK ships a real `aisquare/` directory
+> which shadows the editable path hook, and `aisquare.cli` disappears
+> (`ModuleNotFoundError`, verified by `coder3`). An earlier revision of this
+> runbook opened with `pip install -e` and carried that warning 450 lines later,
+> phrased as a developer hazard — which it is, right up until §0 makes it yours.
+> Over a normal install the extra is safe. Develop from an editable checkout if
+> you like; do not run **this document** from one.
 
 **[verified-train] Do not skip this.** On this box overnight the installed
 binary and the train both reported `aisquare 0.4.0rc1` while being *different

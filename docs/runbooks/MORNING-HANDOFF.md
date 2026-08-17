@@ -9,7 +9,12 @@ shift, and notes scroll. Late in the shift the planner tried to retrieve the
 previous handoff and **could not** — `aisquare log` carries prompts, not notes,
 and `aisquare board` is a windowed view. A handoff that expires is not one.
 
-Last updated at train head `adb28b8` · 1146 tests · gate green.
+How current is this file? Ask git rather than trusting a line in it —
+`git log -1 --format='%h %ad' -- docs/runbooks/MORNING-HANDOFF.md`. It used to
+name a train head, which @9bbc8ed7 pointed out is *structurally* always one
+commit behind, because a file cannot name the commit that folds it. A stale
+number is worse than no number when the whole point is telling you how stale
+something is.
 
 ---
 
@@ -31,7 +36,11 @@ Last updated at train head `adb28b8` · 1146 tests · gate green.
    nothing looks wrong afterwards.
    The cutover itself cannot be half-done this way — `explainability enable`
    does not exist on the stale build and exits 2 — so the danger is entirely
-   *after* you configure. Step 1 closes the whole class.
+   *after* you configure. Step 1 closes the whole class, and that half is
+   measured too rather than assumed: at the train head, `config set` on an
+   unrelated key preserved all five top-level `[explainability]` keys **and**
+   the `[explainability.targets]` table (with a control confirming the write
+   actually landed — the first run of that check silently wrote nothing).
    Two tells that need no comparison: `doctor` reports where the running build
    came from, and a build that prints **no** provenance line predates that check
    and is therefore older than this train.

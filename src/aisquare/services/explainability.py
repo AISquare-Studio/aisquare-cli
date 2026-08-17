@@ -611,10 +611,16 @@ def _active_deployment(target_name: str | None = None) -> tuple[str, str, str | 
     # `gateway_url` is what `configure_shipping` writes on a machine that never
     # made a target, so it is the last fallback rather than an alternative.
     gateway_url = target.gateway_url or settings.gateway_url
-    # The key comes from the variable the TARGET names, then the machine-local
-    # key file. Never from another deployment's variable: shipping prod
-    # sessions with a staging key is worse than not shipping them.
-    key = target.api_key or _stored_api_key()
+    # The key comes from the variable the TARGET names. The machine-local key
+    # file answers ONLY when no variable was named — it holds one unlabelled
+    # key, so the moment a deployment declares "my key lives in $PROD_KEY" the
+    # file cannot stand in for it. Reproduced before this guard existed: follow
+    # the CLI's own "or write <key file>" advice while on staging, switch to
+    # prod, and the STAGING key went to the PROD gateway. The reverse is worse
+    # — a prod key disclosed to a staging host.
+    key = target.api_key
+    if key is None and target.api_key_env == KEY_ENV_VAR:
+        key = _stored_api_key()
     return gateway_url, target.api_key_env, key
 
 
@@ -661,7 +667,12 @@ def shipping_state(target_name: str | None = None) -> ShippingState:
     else:
         destination = f"on → {gateway_url}"
         if not has_key:
-            reason = f"{destination} — but no workspace key: set ${key_env} or write {key_path()}"
+            # Only offer the key file when it would actually be read. Telling
+            # someone to write a file we will then ignore is worse than silence.
+            where = f"set ${key_env}"
+            if key_env == KEY_ENV_VAR:
+                where += f" or write {key_path()}"
+            reason = f"{destination} — but no workspace key: {where}"
         elif not sdk:
             reason = (
                 f"{destination} — buffering, the explainability extra is missing: {INSTALL_HINT}"
@@ -759,7 +770,10 @@ def ship_once(limit: int = 500) -> ShipReport:
     # shipping prod sessions with a staging key is worse than not shipping.
     api_key = target_key
     if api_key is None:
-        return ShipReport(reason=f"no workspace key — set ${key_env} or write {key_path()}")
+        where = f"set ${key_env}"
+        if key_env == KEY_ENV_VAR:
+            where += f" or write {key_path()}"
+        return ShipReport(reason=f"no workspace key — {where}")
     if not sdk_available():
         pending = len(outbox.pending())
         return ShipReport(

@@ -536,6 +536,56 @@ SDK_MODULE = "aisquare.explainability"
 #: lets pip resolve both in one transaction.
 INSTALL_HINT = 'pip install --upgrade "aisquare-cli[explainability]"'
 
+#: ...and what to say instead on an EDITABLE install, where that command does
+#: not merge the two packages, it SHADOWS ours: the SDK's real `aisquare/`
+#: package in site-packages wins wholesale and every command dies at import.
+#: The discriminator is whether the editable hook maps SUBMODULES or only the
+#: top level, and it was worth measuring rather than assuming. Every editable
+#: form leaves the top-level `aisquare` resolving to site-packages, because the
+#: hooks install after PathFinder; what differs is whether anything still
+#: answers for `aisquare.cli`. Measured on both shapes THIS project can produce
+#: — the default `.pth` path append, and hatchling's `dev-mode-exact`, whose
+#: `editables` redirector maps the top level ALONE — and both are bricked. A
+#: setuptools finder built from a per-submodule package-dir mapping keeps its
+#: submodules and survives (measured by coder3 on a synthetic package), so the
+#: warning is conservative for that shape rather than wrong. Also measured:
+#: reinstalling editable does NOT recover it, only uninstalling the SDK does,
+#: and a non-editable install is unaffected.
+#:
+#: This is the only moment the warning can be delivered. Once the extra is in,
+#: the CLI cannot start, so no check of ours will ever run to explain it.
+EDITABLE_INSTALL_HINT = (
+    "this is an editable checkout — installing the extra here shadows it and "
+    "every command dies with \"No module named 'aisquare.cli'\". Install the "
+    "extra in a separate (non-editable) environment; if you already did, "
+    "recover with: pip uninstall aisquare"
+)
+
+
+def _package_root() -> str:
+    """Where this package is imported from. A seam so tests can state a location."""
+    import aisquare.core
+
+    return str(aisquare.core.__file__ or "")
+
+
+def running_editable() -> bool:
+    """Whether this CLI runs from a checkout rather than from site-packages.
+
+    Never raises: this only ever decides which sentence to print.
+    """
+    try:
+        root = _package_root()
+    except Exception:
+        return False
+    return bool(root) and not any(part in root for part in ("site-packages", "dist-packages"))
+
+
+def install_hint(*, editable: bool | None = None) -> str:
+    """The advice to print for THIS install."""
+    is_editable = running_editable() if editable is None else editable
+    return EDITABLE_INSTALL_HINT if is_editable else INSTALL_HINT
+
 
 def key_path() -> Path:
     """File holding the workspace ingest key (mode 600)."""
@@ -675,7 +725,7 @@ def shipping_state(target_name: str | None = None) -> ShippingState:
             reason = f"{destination} — but no workspace key: {where}"
         elif not sdk:
             reason = (
-                f"{destination} — buffering, the explainability extra is missing: {INSTALL_HINT}"
+                f"{destination} — buffering, the explainability extra is missing: {install_hint()}"
             )
         elif counts.queued:
             reason = (
@@ -778,7 +828,7 @@ def ship_once(limit: int = 500) -> ShipReport:
         pending = len(outbox.pending())
         return ShipReport(
             deferred=pending,
-            reason=f"explainability extra not installed, {pending} buffered — {INSTALL_HINT}",
+            reason=f"explainability extra not installed, {pending} buffered — {install_hint()}",
         )
 
     outbox.reclaim_stale()
@@ -982,7 +1032,7 @@ def shipping_offer() -> ShippingOffer:
     if not sdk:
         return ShippingOffer(
             available=False,
-            reason=f"explainability extra not installed ({INSTALL_HINT})",
+            reason=f"explainability extra not installed ({install_hint()})",
             gateway_url=gateway,
             has_key=has_key,
         )

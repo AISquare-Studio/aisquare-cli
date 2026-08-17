@@ -87,6 +87,19 @@ def status(
                     "agents": list(target.agent_names),
                     "probe": proxy.summary,
                     "redaction": str(level),
+                    # The spool counters live HERE, not under a top-level
+                    # "spool", even though the human view below prints them on
+                    # a line of their own. Both surfaces render ONE
+                    # shipping_state object; a second path to the same three
+                    # integers would give this payload two answers and no
+                    # canonical one. The runbook promised `.spool` and it never
+                    # existed — `jq -r` answers a missing key with null and
+                    # exits 0, so the command written to catch a silent backlog
+                    # was itself silent. Fixed on the page rather than here,
+                    # which is only safe while these three stay reachable:
+                    # tests/test_spool_counters_agree.py pins that they agree
+                    # with the human line, and that no top-level "spool"
+                    # quietly reappears.
                     "shipping": {
                         "gateway": state.gateway_url,
                         "reason": state.reason,

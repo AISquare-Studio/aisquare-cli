@@ -53,12 +53,48 @@ def _import_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
+def _rebinding_aliases(tree: ast.AST, imported: dict[str, str]) -> dict[str, str]:
+    """``writer = save_config`` — a call to ``writer`` IS that call.
+
+    The import form was closed first and this one was measured as still open
+    rather than assumed closed, which is why it could be shut deliberately.
+    Chains are followed (``a = save_config; b = a``) and resolved THROUGH the
+    import map, so an aliased import rebound by assignment composes rather than
+    merely coexisting.
+
+    The ``seen`` set is not defensive decoration: ``a = b; b = a`` is legal
+    Python, and without it this loops forever — a hang rather than a failure,
+    which is the worst shape a test helper can take.
+
+    Still invisible: an attribute, a dict entry, a closure, anything built at run
+    time. Over-approximating stays the safe direction, so a clean result remains
+    trustworthy.
+    """
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+            if isinstance(target, ast.Name) and isinstance(value, ast.Name):
+                bindings[target.id] = value.id
+
+    resolved: dict[str, str] = {}
+    for name in bindings:
+        seen = {name}
+        current = bindings[name]
+        while current in bindings and current not in seen:
+            seen.add(current)
+            current = bindings[current]
+        resolved[name] = imported.get(current, current)
+    return resolved
+
+
 def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[str, set[str]]]:
     defines: dict[str, Path] = {}
     calls: dict[str, set[str]] = defaultdict(set)
     for module in roots if roots is not None else sorted(SRC.rglob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
-        aliases = _import_aliases(tree)
+        imported = _import_aliases(tree)
+        aliases = {**imported, **_rebinding_aliases(tree, imported)}
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
@@ -152,3 +188,86 @@ def test_an_aliased_import_of_the_writer_is_still_a_config_write(tmp_path: Path)
         "an aliased import hides the edge, so a config write behind a hook "
         "would leave this guard green"
     )
+
+
+def test_a_rebinding_of_the_writer_is_still_a_config_write(tmp_path: Path) -> None:
+    """``writer = save_config; writer(config)`` must not hide the edge either.
+
+    @9bbc8ed7 closed the import half and MEASURED that this half stayed green
+    rather than assuming it, which is why it could be closed deliberately later
+    instead of discovered. Their argument applies unchanged here and is the
+    reason base rate is the wrong lens: this guard's whole job is the change
+    nobody anticipated, so a blind spot in it is not an unlikely spelling — it is
+    the one spelling that also happens to be invisible.
+
+    Resolution follows a chain (``a = save_config; b = a``) and through an import
+    alias (``import save_config as _p; w = _p``), with a cycle guard so a
+    pathological ``a = b; b = a`` terminates rather than hanging a test run.
+
+    STILL INVISIBLE, and stated rather than implied: a call through an attribute,
+    a dict entry, a closure or anything built at run time. Over-approximating
+    remains the safe direction — an extra edge only widens the closure, so a
+    clean result stays trustworthy.
+    """
+    module = tmp_path / "rebound.py"
+    module.write_text(
+        "from aisquare.core.config import save_config\n\n"
+        "writer = save_config\n\n"
+        "def writes_through_a_rebinding(config: object) -> None:\n"
+        "    writer(config)\n",
+        encoding="utf-8",
+    )
+
+    _defines, calls = _call_graph([module])
+
+    assert "save_config" in calls["writes_through_a_rebinding"], (
+        "a rebinding hid the edge: the closure cannot see a config write reached "
+        "through `writer = save_config`"
+    )
+
+
+def test_a_rebinding_chain_and_an_aliased_rebinding_both_resolve(tmp_path: Path) -> None:
+    """The two compositions of the two alias forms, since each was closed alone."""
+    chained = tmp_path / "chained.py"
+    chained.write_text(
+        "from aisquare.core.config import save_config\n\n"
+        "first = save_config\nsecond = first\n\n"
+        "def writes_through_a_chain(config: object) -> None:\n"
+        "    second(config)\n",
+        encoding="utf-8",
+    )
+    through_import = tmp_path / "both.py"
+    through_import.write_text(
+        "from aisquare.core.config import save_config as _persist\n\n"
+        "writer = _persist\n\n"
+        "def writes_through_both(config: object) -> None:\n"
+        "    writer(config)\n",
+        encoding="utf-8",
+    )
+
+    _d1, chain_calls = _call_graph([chained])
+    _d2, both_calls = _call_graph([through_import])
+
+    assert "save_config" in chain_calls["writes_through_a_chain"]
+    assert "save_config" in both_calls["writes_through_both"], (
+        "an import alias rebound through assignment lost the edge — the two "
+        "resolutions must compose, not merely coexist"
+    )
+
+
+def test_a_circular_rebinding_terminates(tmp_path: Path) -> None:
+    """`a = b; b = a` is nonsense a human would not write and a parser can meet.
+
+    Asserted because the resolver follows chains: without a cycle guard this
+    hangs the whole suite rather than failing, which is the worst failure shape
+    a test file can have.
+    """
+    module = tmp_path / "circular.py"
+    module.write_text(
+        "a = b\nb = a\n\ndef calls_a(config: object) -> None:\n    a(config)\n",
+        encoding="utf-8",
+    )
+
+    _defines, calls = _call_graph([module])
+
+    assert "calls_a" in calls

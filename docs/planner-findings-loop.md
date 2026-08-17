@@ -125,7 +125,10 @@ the board and before dispatching work.
 
 > **(N) CONSUME EXPLAINABILITY.** Read
 > `~/.aisquare/explainability/joins.jsonl` for sessions started since your last
-> cycle. For each `pipeline_id`, resolve the Run
+> cycle, **deduped on `(session_id, pipeline_id)`** — the log records session
+> STARTS, so one session that was `/clear`ed or resumed appears more than once
+> and would otherwise be triaged twice. For each distinct `pipeline_id`,
+> resolve the Run
 > (`by-agent-run-id`) and pull its RML findings and policy violations. Triage
 > every finding into exactly one of three outcomes, and say which:
 > **REAL** → `aisquare task add` with the run id, the board session id and the
@@ -144,6 +147,11 @@ Two properties worth keeping when this is edited:
 - **Cursor by `started_at`, not by "last N runs".** A quiet cycle must read
   nothing rather than re-triage the same Runs, or the noise corpus fills with
   duplicates and every cycle costs more than the last.
+- **Dedupe on `(session_id, pipeline_id)` before resolving anything.** The
+  rows are observations, not state: the hook appends on every session START,
+  so a `/clear` or a resume writes a second row for a session already triaged.
+  The cursor alone does not catch it, because the second row has a *newer*
+  `started_at` — it looks like new work and is not.
 - **A finding names its session, not just its Run.** The board session id is
   what lets a reader jump from a finding to the notes, claims and prompts that
   were live when it happened. That join is the whole point of the spine, and a

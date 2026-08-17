@@ -112,3 +112,30 @@ def test_the_page_points_at_the_join_log_the_code_actually_writes(
     assert written.exists()
     assert written.name in page
     assert "explainability" in str(written.parent)
+
+
+def test_the_page_tells_the_planner_to_dedupe_repeated_session_starts(
+    isolated_home: Path,
+) -> None:
+    """The trap the cursor does not catch, so the page has to.
+
+    The join log records session STARTS. A ``/clear`` or a resume appends a
+    SECOND row for a session already triaged — and that row has a newer
+    ``started_at``, so a cursor-only reader sees new work rather than a repeat
+    and files the same finding as a task twice. The writer's own docstring
+    says readers dedupe; this pins that the page passes that on, and proves
+    the duplicate is real rather than theoretical.
+    """
+    record_join(session_id="board-1", pipeline_id="run-1", role="planner")
+    record_join(session_id="board-1", pipeline_id="run-1", role="planner")
+    rows = join_records()
+
+    assert len(rows) == 2, "the log appends per session start — that is the premise"
+    assert rows[0]["session_id"] == rows[1]["session_id"]
+    assert rows[0]["pipeline_id"] == rows[1]["pipeline_id"]
+    assert len({(r["session_id"], r["pipeline_id"]) for r in rows}) == 1, (
+        "…and they collapse to one session under the key the page names"
+    )
+
+    page = _PAGE.read_text(encoding="utf-8")
+    assert "`(session_id, pipeline_id)`" in page, "the page must name the dedupe key"

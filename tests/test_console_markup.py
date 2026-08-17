@@ -249,3 +249,99 @@ def test_no_print_argument_carries_a_markup_tag() -> None:
         "markup=False, so that tag reaches the user as literal text. Use "
         "style=, Column(style=) or Text instead."
     )
+
+
+#: A Rich style tag written into a print argument. ``[/anything]`` is a closing
+#: tag and unambiguous; an opening ``[word]`` counts only when Rich itself can
+#: resolve ``word`` as a style. That distinction is the whole precision of this
+#: guard: ``[serve]``, ``[tui]``, ``[redacted]`` and ``/home/me/[archive]/repo``
+#: are DATA and must never trip it, while ``[dim]`` and ``[bold red]`` are
+#: intent and must always trip it.
+_TAG = re.compile(r"\[(/?)([^\[\]]{0,64})\]")
+
+
+def _style_tags(literal: str) -> list[str]:
+    """Rich style tags inside one string literal, asking Rich what a style is."""
+    from rich.errors import StyleSyntaxError
+    from rich.style import Style
+
+    found: list[str] = []
+    for closing, body in _TAG.findall(literal):
+        if closing:
+            found.append(f"[/{body}]")
+            continue
+        if not body:
+            continue
+        try:
+            Style.parse(body)
+        except (StyleSyntaxError, ValueError):
+            continue
+        found.append(f"[{body}]")
+    return found
+
+
+def test_the_detector_tells_styling_apart_from_data() -> None:
+    """The guard below is only worth having if it is precise. Pinned first.
+
+    A guard that fires on `pip install 'aisquare-cli[serve]'` would be silenced
+    within a day, and silencing it is how the class comes back.
+    """
+    for styling in ("[dim]x[/dim]", "[/dim]", "as [bold]coder[/bold]", "[bold red]danger[/]"):
+        assert _style_tags(styling), styling
+    for data in (
+        "pip install 'aisquare-cli[serve]'",
+        "tip: install 'aisquare-cli[tui]' for the board",
+        "EXPLAINABILITY_API_KEY=[redacted]",
+        "/home/me/[archive]/repo",
+        "gateway: {} [{}]",
+    ):
+        assert not _style_tags(data), data
+
+
+def test_no_print_argument_carries_a_style_tag() -> None:
+    """The other half of the class, and the half that actually recurred.
+
+    The consoles stopped parsing markup, so a ``[dim]…[/dim]`` written into a
+    print now reaches the user as literal tags. That is not hypothetical: two
+    such sites landed in ``cli/launch.py`` hours after the sweep was cut, from a
+    lane working off an older tree, and would have printed raw on the
+    nested-launch line — the line someone reads while they are already confused
+    about which agent owns which Run. The `Console`-construction guard above
+    cannot see it, because the defect is a call site, not a rogue console.
+
+    Styling is still available and still used; it just has to be structural —
+    ``style=``, ``Column(style=…)``, ``header_style``, ``rich.text.Text`` — all
+    of which render identically whether markup is on or off, and therefore
+    survive any fold order.
+    """
+    import ast
+
+    package = Path(__file__).resolve().parents[1] / "src" / "aisquare"
+    offenders: list[str] = []
+    for module in sorted(package.rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"print", "add_row", "add_column"}:
+                continue
+            literals: list[str] = []
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    literals.append(arg.value)
+                elif isinstance(arg, ast.JoinedStr):
+                    literals += [
+                        value.value
+                        for value in arg.values
+                        if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                    ]
+            for literal in literals:
+                tags = _style_tags(literal)
+                if tags:
+                    offenders.append(f"{module.relative_to(package)}:{node.lineno} {tags}")
+
+    assert not offenders, (
+        f"style tags written into a render call at {offenders} — the consoles do not "
+        "parse markup, so these print to the user as literal text. Use style=... on "
+        "the print, or build a rich.text.Text; both render the same with markup on or off."
+    )

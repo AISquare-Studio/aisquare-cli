@@ -679,9 +679,35 @@ prod` with no arguments to retype. After disabling, `status` reads `enabled:
 False` while still showing the target and gateway, and
 `aisquare explainability env <role>` exits `1` and emits no exports — so every
 session launches untraced. Reversible in both directions, no other behaviour
-change.
+change **to config**.
 
-To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
+### Your shell is not config, and the order matters
+
+§5 had you export `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS`. `disable`
+cannot touch those — a command cannot unset a variable in the shell that ran it,
+and a launcher that deleted routing it did not set would be seizing a gateway
+you own. So in **that** shell, config is off and launches still go through the
+proxy. Then stop the proxy and they point at a dead port.
+
+**[verified-train]** Measured with a stopped port, tracing disabled in config,
+`aisquare launch coder`: the banner prints normally, the child still receives
+`ANTHROPIC_BASE_URL=http://127.0.0.1:9299` and the header pair, and a request to
+it fails to connect. Nothing warns at launch time — by design, because with
+tracing off the launcher does not touch the environment at all.
+
+So do this first, in this order:
+
+```bash
+unset ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS   # or just close the shell
+```
+
+**[verified-train]** With those unset the same launch shows the child receiving
+neither variable. `disable` now prints this reminder itself when it can see that
+your shell is still routing through the configured proxy.
+
+**Then** stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
+Unsetting after stopping leaves a window where every launch from that shell
+dies.
 
 ---
 
@@ -697,9 +723,9 @@ To also stop the proxy: `Ctrl-C` the process from §3. **Not** the one on 9090.
 | 2 Secrets | `stat -c %a <env file>` → `600` | `rm` the file |
 | 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` | `Ctrl-C` (never port 9090) |
 | 3 Proxy build | the §3 check prints `IN FORCE` | reinstall `aisquare>=1.1.0` |
-| 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable` |
+| 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable`, then §7 |
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |
-| 5 Green | `doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable` |
+| 5 Green | `doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable`, then §7 |
 | 5b Insights | `.shipping.gateway` equals your prod URL; `spool:` counts move after `ship` **and keep moving** — a growing `N buffered` means draining stopped | `aisquare init --no-explainability` (spool kept) |
 
 ---

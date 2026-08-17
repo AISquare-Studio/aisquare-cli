@@ -35,6 +35,7 @@ from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import (
+    RESERVED_ENV_VARS,
     ship_once,
     shipping_state,
     trace_marker,
@@ -208,6 +209,30 @@ def disable() -> None:
     with expected_config_write_errors():
         save_config(config)
     typer.echo("✓ tracing disabled — sessions launch untraced, targets left in place")
+
+    # Config is ours; the operator's shell is not. §5 tells them to export these,
+    # so after `disable` the config says off while THIS shell still routes model
+    # traffic through the proxy — and the next rollback step stops that proxy,
+    # leaving every launch here pointed at a dead port. The launcher cannot help:
+    # an ANTHROPIC_* with no marker beside it is a gateway the operator set up and
+    # is theirs to keep, and the tracing block is skipped entirely when config is
+    # off so the default launch stays byte-identical. A child cannot unset a
+    # variable in its parent's shell either, so telling is the only honest move.
+    #
+    # Narrow on purpose: only when the value IS the proxy this machine was
+    # configured to use, and only when that proxy was CHOSEN. Without the second
+    # condition this fires on the shipped default 127.0.0.1:9090 — the address
+    # this project documents as someone else's long-running proxy — and tells an
+    # operator to unset a variable pointing at their own service.
+    target = ops.resolve_target(config.explainability, None)
+    ambient = os.environ.get(RESERVED_ENV_VARS[0])
+    if ambient and ambient == target.proxy_url and target.proxy_source != "default":
+        names = " ".join(RESERVED_ENV_VARS)
+        typer.echo(
+            f"  note: this shell still exports {names.split()[0]}={ambient} — "
+            "launches from here keep using the proxy and will fail once it stops. "
+            f"We cannot change your shell: unset {names}"
+        )
 
 
 @app.command()

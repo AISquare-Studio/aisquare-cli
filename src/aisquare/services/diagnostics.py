@@ -85,6 +85,7 @@ def doctor(*, live: bool = False, target: str | None = None) -> list[DoctorCheck
         _check_python(),
         _check_install(),
         _check_home(),
+        _check_home_filesystem(),
         _check_config(),
         _check_database(),
         _check_repomix(),
@@ -137,6 +138,85 @@ def _check_home() -> DoctorCheck:
     if home.exists():
         return _ok("home", f"{home} exists")
     return _fail("home", f"{home} is missing", "Set it up: aisquare init")
+
+
+#: Filesystems where ``os.replace`` is the kernel's own rename and the
+#: durable-replace guarantee in ``core.config.save_config`` holds as measured.
+_NATIVE_FILESYSTEMS = frozenset(
+    {"ext2", "ext3", "ext4", "btrfs", "xfs", "zfs", "f2fs", "apfs", "hfs", "tmpfs", "overlay"}
+)
+
+#: Filesystems reached through a translation layer or a network. Nothing here is
+#: known-broken; the point is that the atomicity of a rename is somebody else's
+#: promise and this project has never measured it. 9p is how WSL exposes Windows
+#: drives (/mnt/c), which is the reachable case: AISQUARE_HOME is taken verbatim.
+_TRANSLATED_FILESYSTEMS = frozenset({"9p", "cifs", "smb3", "nfs", "nfs4", "fuseblk", "virtiofs"})
+
+_MOUNTINFO = Path("/proc/self/mountinfo")
+
+
+def filesystem_of(path: Path, mountinfo: Path = _MOUNTINFO) -> str | None:
+    """Filesystem type ``path`` lives on, or None when it cannot be determined.
+
+    Reads ``/proc/self/mountinfo`` and takes the LONGEST mount point that is a
+    prefix of the path — mounts nest, and the first match is not the deepest, so
+    a shorter match would report the parent's filesystem for anything mounted
+    underneath it.
+
+    Never raises. This feeds a diagnostic line, and a machine must not fail
+    ``doctor`` because it has no /proc or an unreadable one; unknown is an
+    honest answer and is reported as such.
+    """
+    try:
+        target = path.resolve()
+        best: tuple[int, str] | None = None
+        for line in mountinfo.read_text(encoding="utf-8").splitlines():
+            head, _, tail = line.partition(" - ")
+            fields = head.split()
+            rest = tail.split()
+            if len(fields) < 5 or not rest:
+                continue
+            point = Path(fields[4])
+            if target == point or point in target.parents:
+                depth = len(point.parts)
+                if best is None or depth > best[0]:
+                    best = (depth, rest[0])
+        return best[1] if best else None
+    except Exception:
+        return None
+
+
+def _check_home_filesystem() -> DoctorCheck:
+    """Say out loud which filesystem the config lives on.
+
+    ``save_config`` publishes changes with write-temp/fsync/rename/fsync-parent,
+    and the atomicity of that rename is a property of the FILESYSTEM. It was
+    measured on a native disk, which is where the default ``~/.aisquare`` sits.
+    ``AISQUARE_HOME`` is taken verbatim, so a Windows-backed path is one export
+    away — and until now nothing in the code could tell an operator which kind of
+    path they were on.
+
+    A DETECTOR, not a checker: it reports so the operator can decide, and it
+    never fails. Being on a translated filesystem is not known-broken, it is
+    unmeasured, and turning "unmeasured" into "broken" would be the mandate this
+    project has been careful not to write into its own tools.
+    """
+    home = paths.aisquare_home()
+    kind = filesystem_of(home)
+    if kind is None:
+        return _ok("filesystem", f"{home} — filesystem not determined")
+    if kind in _TRANSLATED_FILESYSTEMS:
+        return _warn(
+            "filesystem",
+            f"{home} is on {kind}, where atomic config writes are unverified",
+            "Config writes rely on os.replace being atomic. That holds on a local "
+            "disk and has never been measured through a translation layer. If two "
+            "sessions may write config at once, point AISQUARE_HOME at a native "
+            "filesystem.",
+        )
+    if kind in _NATIVE_FILESYSTEMS:
+        return _ok("filesystem", f"{home} on {kind} — atomic config writes hold here")
+    return _ok("filesystem", f"{home} on {kind} — atomicity unmeasured for this filesystem")
 
 
 def _check_config() -> DoctorCheck:

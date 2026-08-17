@@ -140,8 +140,10 @@ The correlation spine: one id in four places — launcher mint → `--session-id
 argv → `X-Pipeline-Id` header → `AISQUARE_PIPELINE_ID` marker → board row via
 the `SessionStart` hook → `joins.jsonl`.
 
-Also folded: a doctor that verifies and helps wire it (#51) and does **not**
-create state; per-role identity resolved from the board role; redaction in
+Also folded: a doctor that verifies and helps wire it (#51) — plain `doctor`
+creates no state, `doctor --fix` creates only the home layout, both measured and
+pinned (see the doctrine section); per-role identity resolved from the board
+role; redaction in
 standard and strict modes, credentials-only by default, scrubbed *into* the
 spool rather than on the way out; an inventory of all 13 process-spawning seams,
 each ruled `TRACED` or `EXCLUDED` with a stated reason and held by an AST guard;
@@ -209,16 +211,6 @@ Named so you can tell a decision from an oversight:
   over-approximation adds **no** spurious members (closure 16 either way).
 - `EROFS`/`ENOSPC` on config writes are exercised only via injected exceptions,
   never on a real read-only or full filesystem.
-- `doctor --fix` state creation **is now measured, and the flag is safe to
-  run.** The only state it creates is the `~/.aisquare` layout when that is
-  missing — which is the flag's job, and is exactly what plain `doctor`
-  correctly refuses to do. It does **not** rewrite `config.toml` on a
-  configured machine (byte-identical afterwards, with a target and key variable
-  set), and it does **not** install the Claude Code hooks it reports as missing
-  — it prints the `agents connect` line and leaves your agent config alone. It
-  does not prompt, so it cannot hang a script with no terminal, and it still
-  exits non-zero for whatever it could not repair. Pinned in
-  `tests/test_doctor_does_not_create_state.py`.
 - A 9p/DrvFs write measurement — parked on the consent question above.
 
 ## Doctrine this integration holds to
@@ -236,6 +228,17 @@ behind it:
   never from `config.toml`, and no command prints one. Credential-shaped test
   data is assembled at import time rather than written as a literal — a literal
   fixture was rejected by push protection once, and the bypass was not used.
-- **Diagnostic commands do not create state; ordinary commands may.** `doctor`
-  is read-only. `status` **does** create and migrate the store, and the runbook
-  depends on that at §0b and again in wedge recovery — do not "fix" it.
+- **Looking does not create; asking to fix does.** Plain `doctor` is read-only
+  — it leaves a fresh home absent rather than building one. `doctor --fix`
+  creates the `~/.aisquare` layout, which is the flag's job, and **nothing
+  else**: measured, it does not rewrite `config.toml` on a configured machine
+  (byte-identical afterwards), does not install the Claude Code hooks it reports
+  as missing (it prints the `agents connect` line and leaves your agent config
+  alone), does not prompt so it cannot hang a script with no terminal, and still
+  exits non-zero for whatever it could not repair. Pinned in
+  `tests/test_doctor_does_not_create_state.py`.
+- **Diagnostic commands do not create state; ordinary commands may.** `status`
+  **does** create and migrate the store, and the runbook depends on that at §0b
+  and again in wedge recovery — do not "fix" it. (The *migrate* half is
+  unpinned; it also cannot fire at this cutover, because this RC adds no
+  migration — `_MIGRATIONS` has ten entries on `main@ce6bc46` and ten here.)

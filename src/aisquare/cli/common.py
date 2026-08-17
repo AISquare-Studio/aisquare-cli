@@ -436,8 +436,17 @@ def fail(
     Mirrors the stub contract: a machine-readable object on stdout under
     ``--json``, a human message on stderr otherwise. ``hint`` carries
     actionable context (e.g. which board actually holds a receipt) and
-    ``detail`` the underlying cause (e.g. the real sqlite error text) into
-    the JSON payload; the human message weaves both into its own text.
+    ``detail`` the underlying cause (e.g. the real sqlite error text).
+
+    **Both reach the JSON payload ONLY.** The human surface prints
+    ``✗ {message}`` and nothing else — so ANYTHING AN OPERATOR MUST ACT ON
+    BELONGS IN ``message``. This docstring used to claim the human message
+    "weaves both into its own text", which was never true of the code below
+    it, and the cost of that sentence is specific: it invites the next author
+    to put the one actionable token of a diagnosis into ``hint``, where the
+    only people who will ever see it are reading ``--json``. Caught by
+    ``coder3`` while implementing a message whose whole purpose was to stop an
+    operator looking at the wrong directory.
     """
     if get_state().json_output:
         payload = {"error": error}

@@ -11,12 +11,23 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
+from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
-from aisquare.services.explainability import ProxyProbe, probe_proxy, wire_session
+from aisquare.services.explainability import (
+    ProxyProbe,
+    join_records,
+    plan_session_identity,
+    probe_proxy,
+    record_join,
+    wire_session,
+)
 
 
 def _settings(**overrides: object) -> ExplainabilitySettings:
@@ -106,6 +117,135 @@ def test_two_launches_never_share_a_pipeline_id() -> None:
     first = wire_session(_settings(), "coder", prober=_healthy)
     second = wire_session(_settings(), "coder", prober=_healthy)
     assert first.pipeline_id != second.pipeline_id
+
+
+# ── the correlation spine: which id keys the Run ─────────────────────────────
+
+
+def test_plan_mints_an_id_and_tells_the_agent_to_use_it() -> None:
+    """The join only exists if the LAUNCHER chooses the id: the board keys a
+    session by the id the agent reports, so an id we merely trace under would
+    name a Run nothing on the board can be matched to."""
+    plan = plan_session_identity("claude", [])
+    assert plan.session_id is not None
+    assert plan.inject_args == ("--session-id", plan.session_id)
+    assert plan.note == ""
+    uuid.UUID(plan.session_id)  # claude's --session-id takes a uuid, nothing else
+
+
+def test_plan_never_mints_the_same_id_twice() -> None:
+    first = plan_session_identity("claude", [])
+    second = plan_session_identity("claude", [])
+    assert first.session_id != second.session_id
+
+
+def test_plan_reads_a_session_id_the_caller_already_chose() -> None:
+    """Both spellings, and no second --session-id on the command line: two of
+    them is a launch error, and the caller's id is already the board's."""
+    for args in (["--session-id", "sess-7"], ["--session-id=sess-7"]):
+        plan = plan_session_identity("claude", args)
+        assert plan.session_id == "sess-7"
+        assert plan.inject_args == ()
+
+
+def test_plan_reads_the_session_being_resumed() -> None:
+    plan = plan_session_identity("claude", ["--resume", "sess-9", "--model", "opus"])
+    assert plan.session_id == "sess-9"
+    assert plan.inject_args == ()
+
+
+def test_plan_leaves_a_run_time_session_choice_unjoined() -> None:
+    """--continue and a bare --resume name a session that does not exist yet.
+    Minting an id anyway would put a SECOND identity on a row the resumed
+    session already owns; no join is the safe answer, and it is said out loud.
+    """
+    for args in (["--continue"], ["-c"], ["--resume"], ["-r", "--model", "opus"]):
+        plan = plan_session_identity("claude", args)
+        assert plan.session_id is None, args
+        assert plan.inject_args == (), args
+        assert plan.note, args
+
+
+def test_plan_only_hands_the_flag_to_agents_that_speak_it() -> None:
+    """A flag the agent does not understand is a dead launch, and no trace is
+    worth that. Parallel installs named after claude are still claude."""
+    for binary in ("claude", "claude2", "claude-next", "/usr/local/bin/claude"):
+        assert plan_session_identity(binary, []).inject_args, binary
+    for binary in ("aider", "cursor-agent", "/opt/tools/gpt-cli"):
+        plan = plan_session_identity(binary, [])
+        assert plan.inject_args == (), binary
+        assert plan.session_id is None, binary
+        assert "--session-id" in plan.note, binary
+
+
+def test_pinning_can_be_turned_off_for_the_launch_it_breaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An escape hatch that costs a join, never a launch — the same trade the
+    rest of this module makes."""
+    monkeypatch.setenv("AISQUARE_PIN_SESSION_ID", "0")
+    plan = plan_session_identity("claude", [])
+    assert plan.inject_args == ()
+    assert plan.session_id is None
+
+
+# ── the join record: board rows to Runs, without dashboard access ────────────
+
+
+def test_record_join_appends_one_line_per_launch(isolated_home: Path) -> None:
+    assert (
+        record_join(session_id="s-1", agent_name="aisquare-coder", pipeline_id="s-1", role="coder")
+        is None
+    )
+    assert (
+        record_join(
+            session_id="s-2", agent_name="aisquare-runner", pipeline_id="s-2", role="runner"
+        )
+        is None
+    )
+
+    records = join_records()
+    assert [r["session_id"] for r in records] == ["s-1", "s-2"]
+    assert records[0]["agent_name"] == "aisquare-coder"
+    assert records[0]["pipeline_id"] == "s-1"
+    assert records[0]["joined"] is True
+    assert records[0]["role"] == "coder"
+    assert records[0]["started_at"]
+    assert paths.explainability_joins_path().exists()
+
+
+def test_record_join_marks_a_run_with_no_board_row(isolated_home: Path) -> None:
+    """An unjoinable Run is recorded, not dropped: "this Run has no board row"
+    is exactly what an operator reconciling the two datasets needs to know."""
+    record_join(session_id=None, agent_name="aisquare-coder", pipeline_id="p-3", role="coder")
+    (record,) = join_records()
+    assert record["session_id"] is None
+    assert record["pipeline_id"] == "p-3"
+    assert record["joined"] is False
+
+
+def test_record_join_fails_open_when_it_cannot_be_written(isolated_home: Path) -> None:
+    """The log is a convenience; the launch it describes is not."""
+    blocker = paths.explainability_dir()
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    reason = record_join(session_id="s-4", agent_name="a", pipeline_id="s-4", role="coder")
+
+    assert reason is not None and "join record" in reason
+
+
+def test_join_records_survive_a_half_written_line(isolated_home: Path) -> None:
+    record_join(session_id="s-5", agent_name="a", pipeline_id="s-5", role="coder")
+    with paths.explainability_joins_path().open("a", encoding="utf-8") as handle:
+        handle.write('{"session_id": "s-6", trunca\n')
+    record_join(session_id="s-7", agent_name="a", pipeline_id="s-7", role="coder")
+
+    assert [r["session_id"] for r in join_records()] == ["s-5", "s-7"]
+
+
+def test_join_records_is_empty_before_anything_is_launched(isolated_home: Path) -> None:
+    assert join_records() == []
 
 
 # ── fail-open, in every direction ────────────────────────────────────────────
@@ -223,10 +363,20 @@ def test_env_refuses_when_disabled(runner) -> None:  # type: ignore[no-untyped-d
     assert "disabled" in result.output
 
 
-def test_env_emits_ansi_c_quoted_exports(runner, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The emitted quoting must carry a REAL newline through eval: plain
-    single quotes deliver backslash-n, the proxy sees one glued header, and
-    the run is silently misattributed."""
+def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The header pair must reach the agent with a REAL newline in ANY shell.
+
+    This output is eval'd wherever it is pasted, and printed spawn commands
+    get run through ``/bin/sh`` — which on Debian and Ubuntu is dash. Bash's
+    ``$'…'`` form means nothing there: the value arrives with a literal ``$``
+    in front and a literal backslash-n where the separator should be, so the
+    proxy reads ONE glued header, never sees ``X-Pipeline-Id``, and files the
+    run under its default identity. That is the exact misattribution this
+    command exists to prevent, which is why the assertion is the round trip
+    through a real shell and not the quoting style.
+    """
+    import subprocess
+
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
     from aisquare.cli.app import app as cli_app
@@ -241,8 +391,12 @@ def test_env_emits_ansi_c_quoted_exports(runner, monkeypatch) -> None:  # type: 
         server.shutdown()
 
     assert result.exit_code == 0, result.output
-    assert f"export ANTHROPIC_BASE_URL=$'{url}'" in result.output
-    assert (
-        "export ANTHROPIC_CUSTOM_HEADERS="
-        "$'X-Agent-Name: aisquare-coder\\nX-Pipeline-Id: sess-9'" in result.output
+    read_back = 'printf "%s" "$ANTHROPIC_BASE_URL|$ANTHROPIC_CUSTOM_HEADERS|$AISQUARE_SESSION_ID"'
+    echoed = subprocess.run(
+        ["/bin/sh", "-c", f"{result.output}\n{read_back}"],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
+    assert echoed.returncode == 0, echoed.stderr
+    assert echoed.stdout == f"{url}|X-Agent-Name: aisquare-coder\nX-Pipeline-Id: sess-9|sess-9"

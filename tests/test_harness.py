@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -971,16 +972,117 @@ def test_spawn_print_default_config_is_unchanged(isolated_home: Path) -> None:
 def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     """The printed command must mint its pipeline id AT RUN TIME via eval —
     a fixed id burned into the command would be reused on every paste and
-    merge those sessions into one Run."""
+    merge those sessions into one Run.
+
+    The clear-out in front is part of that promise, not decoration: the eval
+    EXPORTS what it minted, so it outlives one paste, and a later spawn in the
+    same terminal would otherwise inherit the previous session's identity.
+    """
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
     result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["command"].startswith(
+        'if [ -n "${AISQUARE_SESSION_ID:-}" ]; then unset AISQUARE_SESSION_ID '
+        "ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS; fi; "
         'eval "$(aisquare explainability env coder)"; AISQUARE_ROLE=coder '
     )
     assert "X-Pipeline-Id" not in payload["command"]
+
+
+def test_spawn_printed_command_takes_its_session_id_from_the_shell(
+    isolated_home: Path,
+) -> None:
+    """The printed command carries the SHAPE of a session id, never a value.
+
+    A literal id here would be pasted into every terminal that copied the
+    banner, and those agents would share one board row and one Run. The
+    ``:+`` form also means an eval that refused contributes no flag at all
+    rather than an empty ``--session-id ''``, which would be a broken launch.
+    """
+    _tracing_enabled("http://127.0.0.1:9")
+    runner, app = _cli()
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    command = json.loads(result.output)["command"]
+    assert command.endswith("${AISQUARE_SESSION_ID:+--session-id $AISQUARE_SESSION_ID}")
+    assert not re.search(r"--session-id\s+[0-9a-f-]{36}", command), "no id may be burned in"
+
+
+def test_spawn_printed_command_omits_the_flag_an_agent_may_not_speak(
+    isolated_home: Path,
+) -> None:
+    """Same bar as ``launch``: an unknown flag is a dead launch, and the trace
+    is never worth that. It still traces, just unjoined."""
+    _tracing_enabled("http://127.0.0.1:9")
+    runner, app = _cli()
+    argv = ["--json", "team", "spawn", "coder", "--bin", "aider"]
+    result = runner.invoke(app, argv)  # type: ignore[arg-type]
+    command = json.loads(result.output)["command"]
+    assert "--session-id" not in command
+    assert 'eval "$(aisquare explainability env coder)"' in command, "it still traces"
+
+
+def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The correlation spine at the spawn seam, through the real wiring: the
+    id in argv is the id in ``X-Pipeline-Id``, and the join is written down."""
+    import uuid
+
+    from aisquare.services.explainability import join_records
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    calls: dict[str, object] = {}
+
+    def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
+        calls["argv"] = argv
+        calls["env"] = env
+
+    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
+    runner, app = _cli()
+    with healthy_proxy() as proxy_url:
+        _tracing_enabled(proxy_url)
+        result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
+
+    assert result.exit_code == 0, result.output
+    argv = calls["argv"]
+    assert isinstance(argv, list)
+    assert "--session-id" in argv
+    started_on = argv[argv.index("--session-id") + 1]
+    uuid.UUID(started_on)
+    env = calls["env"]
+    assert isinstance(env, dict)
+    assert f"X-Pipeline-Id: {started_on}" in env["ANTHROPIC_CUSTOM_HEADERS"]
+    (record,) = join_records()
+    assert record["session_id"] == started_on
+    assert record["role"] == "coder"
+    assert record["joined"] is True
+
+
+def test_spawn_exec_untraced_argv_is_never_pinned(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dead proxy: the spawn proceeds with exactly the argv it always had."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    _tracing_enabled("http://127.0.0.1:9")  # discard port — connection refused
+    calls: dict[str, object] = {}
+
+    def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
+        calls["argv"] = argv
+
+    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
+    runner, app = _cli()
+    result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
+
+    assert result.exit_code == 0, result.output
+    assert "--session-id" not in calls["argv"]  # type: ignore[operator]
+    assert "untraced" in result.output
 
 
 def test_spawn_exec_enabled_wires_the_traced_env(
@@ -1065,7 +1167,7 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     runner, app = _cli()
     printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     command = json.loads(printed.output)["command"]
-    assert command.startswith('eval "$(aisquare explainability env coder)"; ')
+    assert 'eval "$(aisquare explainability env coder)"; ' in command
 
     venv_bin = Path(sys.executable).parent
     child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
@@ -1084,7 +1186,9 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
 
     # End to end: the printed command runs the agent untraced via a real shell.
     stub = tmp_path / "claude"
-    stub.write_text('#!/bin/sh\necho "ran base=[$ANTHROPIC_BASE_URL]"\n', encoding="utf-8")
+    stub.write_text(
+        '#!/bin/sh\necho "ran base=[$ANTHROPIC_BASE_URL] argv=[$*]"\n', encoding="utf-8"
+    )
     stub.chmod(0o755)
     proc = subprocess.run(
         ["/bin/sh", "-c", command],
@@ -1096,3 +1200,54 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     assert proc.returncode == 0, proc.stderr
     assert "ran base=[]" in proc.stdout, "the agent must launch, untraced"
     assert "command not found" not in proc.stderr
+    # The session-id substitution obeys the same premise: a refused eval
+    # exports nothing, so ${VAR:+…} contributes NO argument. An empty
+    # `--session-id ''` would be the one way this could still kill a launch.
+    assert "--session-id" not in proc.stdout
+
+
+def test_spawn_printed_command_joins_each_paste_to_its_own_run(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """The correlation spine at the seam humans actually use, in a real shell.
+
+    ``team spawn`` PRINTS a command by default; ``--exec`` is the exception.
+    So the printed form is where most board rows are born, and it has to earn
+    the same property: the agent starts on the id its Run is keyed by, and a
+    second paste in the same terminal gets a DIFFERENT one.
+    """
+    import re as _re
+    import subprocess
+    import sys
+
+    from tests.proxy_stub import healthy_proxy
+
+    venv_bin = Path(sys.executable).parent
+    stub = tmp_path / "claude"
+    stub.write_text(
+        '#!/bin/sh\necho "ARGV $*"\nprintf "HEADERS %s\\n" "$ANTHROPIC_CUSTOM_HEADERS"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    with healthy_proxy() as proxy_url:
+        _tracing_enabled(proxy_url)
+        runner, app = _cli()
+        printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+        command = json.loads(printed.output)["command"]
+        child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
+        # Both pastes in ONE shell — the case the leading `unset` exists for.
+        proc = subprocess.run(
+            ["/bin/sh", "-c", f"{command}\n{command}"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=child_env,
+        )
+
+    assert proc.returncode == 0, proc.stderr
+    started = _re.findall(r"ARGV .*--session-id ([0-9a-f-]{36})", proc.stdout)
+    keyed = _re.findall(r"X-Pipeline-Id: ([0-9a-f-]{36})", proc.stdout)
+    assert len(started) == 2, proc.stdout
+    assert started == keyed, "the agent must start on the id its Run is keyed by"
+    assert started[0] != started[1], "a second paste must not reuse the first session's id"

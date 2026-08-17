@@ -30,6 +30,38 @@ from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
 app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no_args_is_help=True)
 
+#: Appended to a PRINTED spawn command so the session the human pastes starts
+#: on the very id its Run is keyed by. Expands to ``--session-id <uuid>`` when
+#: the ``explainability env`` eval in front of it minted one, and to NOTHING
+#: when that eval refused — which is the whole fail-open premise: an empty
+#: ``--session-id ''`` would be a broken launch, no flag at all is a normal
+#: one. Deliberately unquoted: the value is a UUID, so word splitting produces
+#: exactly the two words intended, and ``sh``/``bash``/``zsh`` agree on it.
+_SESSION_ID_SUBSTITUTION = (
+    f"${{{explainability_service.SESSION_ID_ENV_VAR}:+"
+    f"--session-id ${explainability_service.SESSION_ID_ENV_VAR}}}"
+)
+
+#: Clears the PREVIOUS paste's tracing out of this shell, and only ever the
+#: previous paste's.
+#:
+#: A terminal keeps what ``eval`` exported, so running a printed spawn command
+#: twice (the up-arrow flow, every time an agent exits) finds ANTHROPIC_* still
+#: set. ``wire_session`` then correctly refuses to clobber what looks like the
+#: user's own routing — and the second agent silently inherits the FIRST one's
+#: ``X-Pipeline-Id`` and merges into its Run. Observed, not theorised: two
+#: pastes, one Run.
+#:
+#: ``AISQUARE_SESSION_ID`` is the discriminator, because nothing but our own
+#: wiring sets it. Present ⇒ the ANTHROPIC_* beside it are ours to clear.
+#: Absent ⇒ they are the operator's real gateway and stay untouched, so the
+#: "not overriding your routing" guard keeps working exactly as before.
+_CLEAR_PREVIOUS_TRACE = (
+    f'if [ -n "${{{explainability_service.SESSION_ID_ENV_VAR}:-}}" ]; then '
+    f"unset {explainability_service.SESSION_ID_ENV_VAR} "
+    f"{' '.join(explainability_service.RESERVED_ENV_VARS)}; fi"
+)
+
 SessionRef = Annotated[
     str | None,
     typer.Option("--as", help="Act as this team session (id prefix, from your board)."),
@@ -358,7 +390,17 @@ def spawn(
         # eval mints a fresh id per run instead; if tracing is down at run
         # time, the substitution comes back empty with the reason on stderr
         # and the session starts untraced — the same fail-open as --exec.
-        command = f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
+        #
+        # That same eval also exports the id it minted, so the agent can be
+        # STARTED on it and its board row joins the Run (the correlation
+        # spine). The clear-out leads because what a previous paste exported
+        # outlives it — see _CLEAR_PREVIOUS_TRACE for the merge it prevents.
+        if explainability_service.accepts_session_id(binary.binary):
+            command = f"{command} {_SESSION_ID_SUBSTITUTION}"
+        command = (
+            f"{_CLEAR_PREVIOUS_TRACE}; "
+            f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
+        )
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -412,10 +454,41 @@ def spawn(
         env.update(launch_profile.env)
         if tracing is not None and tracing.enabled:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
-            # dead or wrong proxy costs the trace, never the spawn.
-            wiring = explainability_service.wire_session(tracing, role_name, base_env=env)
+            # dead or wrong proxy costs the trace, never the spawn. The id is
+            # planned from the args this spawn will really run with — a role
+            # whose profile already carries --session-id or --resume owns its
+            # own id and must not be handed a second one.
+            identity = explainability_service.plan_session_identity(
+                binary.binary, launch_profile.args
+            )
+            wiring = explainability_service.wire_session(
+                tracing, role_name, session_id=identity.session_id, base_env=env
+            )
             env.update(wiring.env)
             typer.echo(f"explainability: {wiring.reason}", err=True)
+            if wiring.traced:
+                # Pinned only on a spawn that is really traced: an untraced one
+                # has no Run to join, so touching its argv would be risk with
+                # no correlation to show for it.
+                argv = [*argv, *identity.inject_args]
+                # Same marker `aisquare launch` sets: it tells a spawn command
+                # run from INSIDE this session that the ANTHROPIC_* it can see
+                # are ours to clear, not the operator's own gateway.
+                if wiring.pipeline_id:
+                    env[explainability_service.SESSION_ID_ENV_VAR] = wiring.pipeline_id
+                if identity.note:
+                    typer.echo(
+                        f"explainability: {identity.note} — Run not joined to a board row",
+                        err=True,
+                    )
+                unwritten = explainability_service.record_join(
+                    session_id=identity.session_id,
+                    agent_name=wiring.agent_name or "",
+                    pipeline_id=wiring.pipeline_id or "",
+                    role=role_name,
+                )
+                if unwritten:
+                    typer.echo(f"explainability: {unwritten}", err=True)
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)

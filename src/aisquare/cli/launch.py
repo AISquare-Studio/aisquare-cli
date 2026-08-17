@@ -10,6 +10,12 @@ as if you had run the agent yourself.
 
 Anything after the role is forwarded untouched: ``aisquare launch coder
 --model opus`` runs ``claude --model opus``.
+
+One exception, and only when tracing is on AND actually succeeded: the launch
+appends ``--session-id <uuid>`` so the agent's session id, the board row and
+the gateway Run's ``X-Pipeline-Id`` are one key (see
+``services.explainability``). With tracing off — the default — the argv is
+byte-identical to what it always was.
 """
 
 from __future__ import annotations
@@ -67,22 +73,6 @@ def _role_ok(role: str) -> bool:
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
-
-
-def _forwarded_session_id(args: list[str]) -> str | None:
-    """The agent's own ``--session-id``, when the caller passed one.
-
-    Reusing it as the trace's pipeline id gives the board row and the
-    dashboard Run the same key. We only ever read the forwarded args — never
-    inject flags into them, because ``--command`` may name an agent that does
-    not speak claude's CLI.
-    """
-    for position, arg in enumerate(args):
-        if arg == "--session-id" and position + 1 < len(args):
-            return args[position + 1]
-        if arg.startswith("--session-id="):
-            return arg.split("=", 1)[1]
-    return None
 
 
 def launch(
@@ -180,20 +170,52 @@ def launch(
         stderr_console().print(
             f"[dim]explainability: config unreadable ({exc}) — launching untraced[/dim]"
         )
+    #: Appended to the agent's argv, and empty unless a trace actually happened.
+    pinned_id: list[str] = []
     if tracing is not None and tracing.enabled:
         # Fail-open by contract: wire_session returns an empty env delta (plus
         # the reason) rather than raising, so a dead or wrong proxy can only
         # ever cost the trace, never the launch. Disabled config skips even
         # this block — the default launch stays byte-identical.
+        # The EFFECTIVE binary, not the flag: post-#57 `command` is None unless
+        # the caller typed --command, and the role's binding decides what runs.
+        # Passing the flag here would hand `None` to os.path.basename (a crash,
+        # i.e. tracing costing a launch) and would ask "does claude accept
+        # --session-id?" about a role bound to a wrapper that does not.
+        identity = explainability_service.plan_session_identity(resolution.binary, ctx.args)
         wiring = explainability_service.wire_session(
             tracing,
             role,
-            session_id=_forwarded_session_id(ctx.args),
+            session_id=identity.session_id,
             base_env=env,
         )
         env.update(wiring.env)
         stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
-    argv = [resolution.binary, *profile.args, *ctx.args]
+        if wiring.traced:
+            # Only pin the id on a launch that is REALLY traced. An untraced
+            # launch has no Run to join, so touching its argv would be pure
+            # risk for no correlation — and it keeps the fallback identical to
+            # the launch the user would have got before any of this existed.
+            pinned_id = list(identity.inject_args)
+            # Marks the ANTHROPIC_* beside it as OURS rather than the
+            # operator's own gateway, which is what lets a spawn command run
+            # from inside this session clear them and take its own identity
+            # instead of silently inheriting this one's Run.
+            if wiring.pipeline_id:
+                env[explainability_service.SESSION_ID_ENV_VAR] = wiring.pipeline_id
+            if identity.note:
+                stderr_console().print(
+                    f"[dim]explainability: {identity.note} — Run not joined to a board row[/dim]"
+                )
+            unwritten = explainability_service.record_join(
+                session_id=identity.session_id,
+                agent_name=wiring.agent_name or "",
+                pipeline_id=wiring.pipeline_id or "",
+                role=role,
+            )
+            if unwritten:
+                stderr_console().print(f"[dim]explainability: {unwritten}[/dim]")
+    argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
     stderr_console().print(
         f"Launching {resolution.binary}{whose} as [bold]{role}[/bold] on the "
         f"{project.root.name or project.id} board…"

@@ -25,7 +25,12 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import harness, paths
-from aisquare.core.config import RoleLaunchProfile, load_config, save_config
+from aisquare.core.config import (
+    ExplainabilitySettings,
+    RoleLaunchProfile,
+    load_config,
+    save_config,
+)
 from aisquare.services import settings as settings_service
 
 ROLE = "coder"
@@ -50,6 +55,29 @@ def spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(launch_cli, "_exec", fake_exec)
     monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/local/bin/{cmd}")
     return captured
+
+
+def _tracing_on(monkeypatch: pytest.MonkeyPatch, proxy_url: str = "http://127.0.0.1:9") -> None:
+    """Enable tracing and fake ONLY the network probe.
+
+    The real ``wire_session`` still runs — identity planning, header building,
+    the reserved-var guard — because that logic is what these tests are about.
+    Only the socket is replaced, since ``prober`` is bound as a default
+    argument and cannot be reached by patching the module attribute.
+    """
+    from aisquare.services import explainability as explainability_service
+    from aisquare.services.explainability import ProxyProbe
+
+    config = load_config()
+    config.explainability = ExplainabilitySettings(enabled=True, proxy_url=proxy_url)
+    save_config(config)
+
+    real_wire = explainability_service.wire_session
+
+    def wire_with_a_healthy_proxy(settings: Any, role: str, **kwargs: Any) -> Any:
+        return real_wire(settings, role, prober=lambda _url: ProxyProbe(True, "test"), **kwargs)
+
+    monkeypatch.setattr(explainability_service, "wire_session", wire_with_a_healthy_proxy)
 
 
 def _bind(role: str, **kwargs: Any) -> None:
@@ -515,3 +543,55 @@ class TestLaunchHonoursTheBoundBinary:
         assert harness.resolve_binary("coder").binary == "claude-wrapper"
         runner.invoke(app, ["launch", "coder"])
         assert spy["argv"][0] == harness.resolve_binary("coder").binary
+
+
+class TestTracingReadsTheBoundBinaryNotTheFlag:
+    """Where the bound-binary fold and the correlation-spine fold meet.
+
+    Session pinning asks "does this agent accept ``--session-id``?" — and the
+    honest answer depends on what will ACTUALLY run, which is the role's bound
+    binary, not the ``--command`` flag. The flag is ``None`` on every launch
+    that does not type it, so reading it here would hand ``None`` to
+    ``os.path.basename`` and crash the launch outright: tracing costing a
+    launch, the one thing the wiring exists to never do. Neither branch could
+    have caught this alone — the spine was cut before the binding landed.
+    """
+
+    def test_a_wrapper_bound_role_launches_traced_and_unpinned(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        spy: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _tracing_on(monkeypatch)
+        _bind("coder", bin="my-agent-wrapper")
+
+        result = runner.invoke(app, ["launch", "coder"])
+
+        assert result.exit_code == 0, result.output
+        assert spy["argv"][0] == "my-agent-wrapper"
+        assert "--session-id" not in spy["argv"], (
+            "a wrapper is not known to accept the flag — pinning it would kill the launch"
+        )
+        assert "ANTHROPIC_BASE_URL" in spy["env"], "the trace itself must survive"
+
+    def test_an_unbound_role_still_gets_its_id_pinned(
+        self,
+        runner: CliRunner,
+        work_dir: Path,
+        spy: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The positive half: the default binary DOES accept the flag, so the
+        # common launch keeps its board-row-to-Run join.
+        _tracing_on(monkeypatch)
+
+        result = runner.invoke(app, ["launch", "coder"])
+
+        assert result.exit_code == 0, result.output
+        assert "--session-id" in spy["argv"]
+        pinned = spy["argv"][spy["argv"].index("--session-id") + 1]
+        assert f"X-Pipeline-Id: {pinned}" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], (
+            "the id the agent is started on and the id the Run is filed under must be one id"
+        )

@@ -542,6 +542,21 @@ def key_path() -> Path:
     return paths.aisquare_home() / "explainability-key"
 
 
+def _stored_api_key() -> str | None:
+    """The machine-local key file, with no environment fallback.
+
+    Deliberately narrower than :func:`resolve_api_key`: that one also reads
+    ``EXPLAINABILITY_API_KEY``, which is correct when the target names that
+    variable and WRONG when it names another. A staging key must not satisfy a
+    prod target just because it happens to be in the shell.
+    """
+    try:
+        stored = key_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return stored or None
+
+
 def resolve_api_key() -> str | None:
     """The workspace key, from the environment or the key file.
 
@@ -568,6 +583,41 @@ def store_api_key(key: str) -> Path:
     return target
 
 
+def _active_deployment(target_name: str | None = None) -> tuple[str, str, str | None]:
+    """Where the client lane ships, and with which key — from the ACTIVE TARGET.
+
+    Returns ``(gateway_url, key_env_name, key)``.
+
+    Both lanes must name one deployment. Reading the top-level ``gateway_url``
+    and a hardcoded ``EXPLAINABILITY_API_KEY`` here is how the two came apart:
+    an operator who configured shipping under a staging shell and then ran
+    ``enable --target prod`` moved the proxy lane and not this one, so model
+    traffic went to prod while insights kept going to staging — and ``status``
+    printed the prod gateway, because the line a human reads resolves the
+    target. Both halves looked healthy. Nobody was told.
+
+    ``resolve_target`` falls back to the top-level values when no target was
+    ever created, so the single-deployment machine ``init --explainability``
+    produces is unaffected.
+
+    Imported inside the function because ``explainability_ops`` imports this
+    module for ``probe_proxy``; at module scope that is a cycle.
+    """
+    from aisquare.services.explainability_ops import resolve_target
+
+    settings = load_config().explainability
+    target = resolve_target(settings, target_name)
+    # `resolve_target` looks at the target and the SDK's env var; the top-level
+    # `gateway_url` is what `configure_shipping` writes on a machine that never
+    # made a target, so it is the last fallback rather than an alternative.
+    gateway_url = target.gateway_url or settings.gateway_url
+    # The key comes from the variable the TARGET names, then the machine-local
+    # key file. Never from another deployment's variable: shipping prod
+    # sessions with a staging key is worse than not shipping them.
+    key = target.api_key or _stored_api_key()
+    return gateway_url, target.api_key_env, key
+
+
 def sdk_available() -> bool:
     """Whether the explainability extra is installed — without importing it."""
     try:
@@ -590,27 +640,42 @@ class ShippingState:
     reason: str
 
 
-def shipping_state() -> ShippingState:
-    """Describe the client lane as it stands right now."""
+def shipping_state(target_name: str | None = None) -> ShippingState:
+    """Describe the client lane as it stands right now, for the ACTIVE target."""
     settings = load_config().explainability
-    has_key = resolve_api_key() is not None
+    gateway_url, key_env, target_key = _active_deployment(target_name)
+    # The target's named variable first; the key FILE stays a fallback for the
+    # single-deployment setup that `init --explainability` writes.
+    has_key = target_key is not None
     sdk = sdk_available()
     counts = outbox.counts()
+    # Every "on" state names the DESTINATION. Counts alone cannot reveal a
+    # split brain — "2 sent" reads identically whether it went to prod or to
+    # staging — and the state an operator is in when that matters most is
+    # mid-cutover, which is exactly when the sub-state is "buffering" rather
+    # than the happy one.
     if not settings.ship:
         reason = "off — nothing is captured (aisquare init --explainability to turn it on)"
-    elif not settings.gateway_url:
+    elif not gateway_url:
         reason = f"on, but no gateway URL is configured ({GATEWAY_ENV_VAR})"
-    elif not has_key:
-        reason = f"on, but no workspace key — set {KEY_ENV_VAR} or write {key_path()}"
-    elif not sdk:
-        reason = f"on, buffering — the explainability extra is missing: {INSTALL_HINT}"
-    elif counts.queued:
-        reason = f"on — {counts.queued} buffered, run 'aisquare explainability ship' to drain"
     else:
-        reason = "on — nothing buffered"
+        destination = f"on → {gateway_url}"
+        if not has_key:
+            reason = f"{destination} — but no workspace key: set ${key_env} or write {key_path()}"
+        elif not sdk:
+            reason = (
+                f"{destination} — buffering, the explainability extra is missing: {INSTALL_HINT}"
+            )
+        elif counts.queued:
+            reason = (
+                f"{destination} — {counts.queued} buffered, "
+                "run 'aisquare explainability ship' to drain"
+            )
+        else:
+            reason = f"{destination} — nothing buffered"
     return ShippingState(
         configured=settings.ship,
-        gateway_url=settings.gateway_url,
+        gateway_url=gateway_url,
         has_key=has_key,
         sdk_installed=sdk,
         queued=counts.queued,
@@ -687,11 +752,14 @@ def ship_once(limit: int = 500) -> ShipReport:
     settings = load_config().explainability
     if not settings.ship:
         return ShipReport(reason="shipping is not configured — nothing to do")
-    if not settings.gateway_url:
+    gateway_url, key_env, target_key = _active_deployment()
+    if not gateway_url:
         return ShipReport(reason=f"no gateway URL configured ({GATEWAY_ENV_VAR})")
-    api_key = resolve_api_key()
+    # The active target's key, then the key file. Never another deployment's:
+    # shipping prod sessions with a staging key is worse than not shipping.
+    api_key = target_key
     if api_key is None:
-        return ShipReport(reason=f"no workspace key — set {KEY_ENV_VAR} or write {key_path()}")
+        return ShipReport(reason=f"no workspace key — set ${key_env} or write {key_path()}")
     if not sdk_available():
         pending = len(outbox.pending())
         return ShipReport(
@@ -705,7 +773,7 @@ def ship_once(limit: int = 500) -> ShipReport:
         return ShipReport(reason="nothing buffered")
 
     try:
-        sdk = _init_sdk(settings, api_key)
+        sdk = _init_sdk(gateway_url, api_key)
     except Exception as exc:  # the SDK failing to start is a deferral, not a loss
         return ShipReport(
             deferred=len(batch), reason=f"explainability SDK would not initialise: {exc}"
@@ -714,14 +782,14 @@ def ship_once(limit: int = 500) -> ShipReport:
     return _drain(sdk, settings, batch)
 
 
-def _init_sdk(settings: ExplainabilitySettings, api_key: str) -> Any:
+def _init_sdk(gateway_url: str, api_key: str) -> Any:
     """Import and initialise the SDK from an environment we control.
 
     ``init_from_env`` is the SDK's own contract, so we set the variables it
     reads rather than reaching past it into private setters — an SDK upgrade
     that changes its internals must not silently stop shipping.
     """
-    os.environ[GATEWAY_ENV_VAR] = settings.gateway_url
+    os.environ[GATEWAY_ENV_VAR] = gateway_url
     os.environ[KEY_ENV_VAR] = api_key
     sdk = importlib.import_module(SDK_MODULE)
     sdk.init_from_env(auto_instrument=False)

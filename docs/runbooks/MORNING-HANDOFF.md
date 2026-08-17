@@ -147,6 +147,17 @@ and rebindings.
   `aisquare --json explainability status | jq -r .shipping.gateway`
 - **`AISQUARE_AGENT_NAME` collided with the SDK's own routing variable.**
 - **A store-migration race** (TOCTOU) under concurrent first opens.
+- **`~/.aisquare/credentials` had two writers with incompatible formats, and
+  either destroyed the other.** This one is aimed at your machine: that file
+  exists here already. `init --api-key` wrote a bare key string as a whole-file
+  replace; `serve_token()` read the same path as JSON, treated an unparseable
+  file as *no data*, and overwrote it. So `aisquare serve` after `init
+  --api-key` silently destroyed the API key — and `serve_token()` is reachable
+  in normal use (`serve --show-token` and `run_http`, measured). Both writers now
+  go through one read-merge-write helper, and a pre-existing **bare** file is
+  *migrated* rather than discarded — because treating it as unparseable is the
+  exact reading that lost the data, so a fix that kept it would have preserved
+  the bug for every file already on disk.
 
 ## What is proven, and by what evidence
 

@@ -53,6 +53,12 @@ def aisquare_home() -> Path:
     FOR THE ATOMICITY GUARANTEE SPECIFICALLY. Everything still functions; what
     has not been ruled out is a torn read during a concurrent write, which on a
     native disk has been.
+
+    ``aisquare doctor`` now reports which filesystem this path is on, so an
+    operator does not have to know any of the above to find out they are in the
+    unmeasured case — see ``services.diagnostics._check_home_filesystem``. It
+    reports rather than refuses: being on a translated filesystem is unmeasured,
+    not known-broken.
     """
     override = os.environ.get(HOME_ENV_VAR)
     if override:

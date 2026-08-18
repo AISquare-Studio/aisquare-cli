@@ -1127,6 +1127,99 @@ is wrong, register the correct one; the wrong one simply goes unused.
 
 ---
 
+## 4c. Verify registration from the workspace side — read-only, no studio key (2 min)
+
+§4b registers the names and §5 proves a Run leaves the machine. Neither shows
+you the gateway's own verdict on the names. There is a read-only view that
+does, and it needs only the ordinary workspace `X-API-KEY` — no studio key, no
+dashboard JWT — so it is the one governance check you can run before Jatin has
+a studio credential in hand.
+
+> **[verified-stg, @8dd460fb 2026-08-18]** Measured against staging, read-only
+> GETs, nothing created.
+
+**The workspace id is `31`.** It is not in the env file and not in any
+response body; the gateway derives it from the key server-side. To find it
+without guessing, use the gateway as an oracle — a workspace-scoped route
+returns `200` only for the caller's own workspace and `403 "API key is not
+scoped to this workspace"` for every other id:
+
+```bash
+set -a; source /home/work/.config/aisquare/explainability-<env>.env; set +a
+for id in $(seq 1 40); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+    "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$id/my-capabilities")
+  [ "$code" = 200 ] && echo "your workspace id: $id"
+done
+# staging answered 31, and only 31, in 1..40. Prod may differ — re-derive it.
+```
+
+> **A word before you `curl` `my-capabilities` directly, because its body looks
+> alarming and is not.** On staging it returns `"bypass": true` beside a full
+> set — `view_runs`, `attach_rule_book_to_agent`, `replay_run` all `true`. On a
+> page about governance that reads like the gate is wide open. It is not: that
+> is the **expected** shape of a *workspace* key (`@9bbc8ed7`, from
+> `gateway/auth.py` at `bb88bb5`) — there is no human role to gate, so the capability map is
+> permissive, and it is a **separate gate** from studio-scoped enforcement.
+> Measured here: `my-capabilities` reports `view_runs: true` while
+> `GET /v1/studios/169/runs` on the same key returns `403`. The capability flag
+> is what the principal *may* do; the studio guard is what this *key* can reach,
+> and they disagree by design. `bypass` here is not a statement about whether
+> governance is enforced — that is §1's routing story, a different mechanism.
+
+Then read the gateway's rejection view for that workspace:
+
+```bash
+curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/31/ingest-rejections"
+# {"rejections":[]}   on staging right now
+```
+
+**`[]` IS NOT PROOF OF CLEAN DELIVERY, and reading it as such is the trap.**
+The store behind this route is in-memory and **windowed to 900 seconds**
+(`gateway/ingest_rejections.py`, `_DEFAULT_WINDOW_SECONDS = 900`). So `[]`
+means "no name was rejected in the last 15 minutes" — which is exactly what an
+**idle** workspace returns, indistinguishable here from a healthy one. Nothing
+is ingesting from this box until §5 runs, so the empty view on staging is the
+idle case, not a verdict.
+
+To make it a verdict, read it **inside the window, right after a real ingest**:
+
+```bash
+aisquare explainability register --target <env>     # §4b, once
+# ... run §5 so a traced Run actually ships ...
+curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/31/ingest-rejections"
+```
+
+Now a non-empty result is the direct read of §4b's failure mode. Each row is
+`{code, agent_name, count, last_seen}`, and the `code` names the remedy:
+
+- `agent_not_registered` — the name is known but unmapped. Re-run §4b; it is a
+  registration race and it drains on retry.
+- `no_agent_identity` — a span carried no `agent.name` at all. This one does
+  **not** drain on retry; it is an integration bug, not an onboarding gap.
+
+If instead the roster names do **not** appear after an ingest, that is the
+green reading you actually want: the gateway accepted them and routed them.
+
+**Cross-check, and it closes a loop.** This workspace owns exactly **one**
+studio — `169`, `has_runs: true` — read from `/v1/workspaces/31/studios`. That
+is the same `publication_id 169` §4b reports for all three roster names, from
+the opposite side of the boundary: the register call maps the roster *to* 169,
+and 169 is the studio this workspace *owns*. `GET /v1/studios` lists sixteen
+studios, but that is what the key can **see**, not what it owns; the owned set
+is the one studio, and mixing the two is how "sixteen owned studios" got onto
+the board earlier tonight.
+
+This is also the workspace-side confirmation of §1e's "leave
+`EXPLAINABILITY_STUDIO_ID` unset": the value currently in the env file matches
+neither the owned studio `169` nor any of the sixteen listable ids, so a pin
+built from it points at a studio this workspace can neither reach nor list.
+
+---
+
 ## 5. The one command that proves it green (1 min)
 
 **[verified-stg]** `doctor --live` is the real round-trip — gateway ready, key

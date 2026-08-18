@@ -191,6 +191,26 @@ def enable(
         save_config(config)
 
     resolved = ops.resolve_target(settings, name)
+    if get_state().json_output:
+        # Deliberately the field NAMES `status` already publishes rather than a
+        # second vocabulary for the same facts: two runbooks tell the operator
+        # to read `.shipping.gateway` off `status`, and a script that learns
+        # `gateway` there should not have to learn `gateway_url` here.
+        typer.echo(
+            json.dumps(
+                {
+                    "enabled": settings.enabled,
+                    "target": resolved.name,
+                    "gateway": resolved.gateway_url,
+                    "key_env": resolved.api_key_env,
+                    "key_set": bool(resolved.api_key),
+                    "proxy": resolved.proxy_url,
+                    "identity": resolved.agent_name_template,
+                    "agents": list(resolved.agent_names),
+                }
+            )
+        )
+        return
     typer.echo(f"✓ tracing enabled for target '{resolved.name}'")
     typer.echo(f"  gateway:  {resolved.gateway_url or '(unset)'}")
     typer.echo(
@@ -208,8 +228,6 @@ def disable() -> None:
     config.explainability.enabled = False
     with expected_config_write_errors():
         save_config(config)
-    typer.echo("✓ tracing disabled — sessions launch untraced, targets left in place")
-
     # Config is ours; the operator's shell is not. §5 tells them to export these,
     # so after `disable` the config says off while THIS shell still routes model
     # traffic through the proxy — and the next rollback step stops that proxy,
@@ -224,12 +242,44 @@ def disable() -> None:
     # condition this fires on the shipped default 127.0.0.1:9090 — the address
     # this project documents as someone else's long-running proxy — and tells an
     # operator to unset a variable pointing at their own service.
+    #
+    # Decided ONCE, above both renderings. It was briefly written twice — the
+    # condition in the JSON branch and again below — which is two answers to one
+    # question waiting for someone to edit one of them. `status` states the same
+    # rule about its spool counters for the same reason.
     target = ops.resolve_target(config.explainability, None)
     ambient = os.environ.get(RESERVED_ENV_VARS[0])
-    if ambient and ambient == target.proxy_url and target.proxy_source != "default":
+    stale = (
+        ambient
+        if ambient and ambient == target.proxy_url and target.proxy_source != "default"
+        else None
+    )
+
+    if get_state().json_output:
+        # The stale-export warning is the only thing here an operator ACTS on,
+        # so it survives into the machine-readable form rather than being
+        # dropped as decoration. An explicit null says "checked, nothing set",
+        # which a caller cannot otherwise tell from "never looked".
+        typer.echo(
+            json.dumps(
+                {
+                    "enabled": False,
+                    "target": target.name,
+                    "stale_shell_export": (
+                        None
+                        if stale is None
+                        else {"variable": RESERVED_ENV_VARS[0], "value": stale}
+                    ),
+                }
+            )
+        )
+        return
+
+    typer.echo("✓ tracing disabled — sessions launch untraced, targets left in place")
+    if stale is not None:
         names = " ".join(RESERVED_ENV_VARS)
         typer.echo(
-            f"  note: this shell still exports {names.split()[0]}={ambient} — "
+            f"  note: this shell still exports {names.split()[0]}={stale} — "
             "launches from here keep using the proxy and will fail once it stops. "
             f"We cannot change your shell: unset {names}"
         )
@@ -315,9 +365,26 @@ def ship(
     the design working, not a failure.
     """
     report = ship_once(limit=limit)
-    typer.echo(report.reason)
-    if report.runs:
-        typer.echo(f"runs: {', '.join(report.runs)}")
+    if get_state().json_output:
+        # The whole report. `blocked` is in it because its own comment says it
+        # is set rather than inferred "so no caller has to match on message
+        # text" — and a timer wrapper reading stdout is exactly that caller.
+        typer.echo(
+            json.dumps(
+                {
+                    "sent": report.sent,
+                    "deferred": report.deferred,
+                    "dead": report.dead,
+                    "runs": list(report.runs),
+                    "reason": report.reason,
+                    "blocked": report.blocked,
+                }
+            )
+        )
+    else:
+        typer.echo(report.reason)
+        if report.runs:
+            typer.echo(f"runs: {', '.join(report.runs)}")
     if report.dead:
         raise typer.Exit(code=1)
     # Opt-in, because the quiet default is doctrine: no key or config means

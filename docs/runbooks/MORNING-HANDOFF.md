@@ -29,7 +29,7 @@ forty lines.** Read the ones you need:
 
 1. **Reinstall non-editable** (§0). Not blocked on anything but typing, and it
    is a **precondition**, not just a hazard-avoidance step: it fixes a command
-   that is broken on this machine *today*, and two of the checks these documents
+   that is broken on this machine *today*, and three of the checks these documents
    tell you to run cannot answer until it has happened. Long here because it also
    closes a way three commands could silently strip your config afterwards.
 2. **Governance** — the one real blocker. Needs a credential we do not hold.
@@ -49,8 +49,8 @@ forty lines.** Read the ones you need:
    **What running it gets you, beyond the hazard below.** `aisquare config list`
    exits **1** with a traceback on this machine right now — see "Bugs found and
    fixed"; the trigger is your `[team.profiles.*]`, nothing to do with tracing,
-   and step 1 is the fix. And two checks these documents tell you to run cannot
-   answer before it, both measured:
+   and step 1 is the fix. And three checks these documents tell you to run
+   cannot answer before it, all three measured:
 
    - **§0's own verification.** It uses `doctor`'s provenance row, and the build
      on `PATH` today prints **no such row at all** — that absence *is* the tell
@@ -61,6 +61,10 @@ forty lines.** Read the ones you need:
      and after — §0 installs into that same pyenv `bin` — but the BUILD behind
      it changes, and the older one has no `ship`. Run before this item, the
      check exits **2** with a usage line instead of the **1** it is looking for.
+   - **Reading why either blocked task is blocked.** `task show` prints
+     `stopped because …` as of this train; the build on `PATH` predates that and
+     prints nothing, so item 3's workaround is only needed until this item is
+     done.
 
    This item is first in the list for a reason.
 
@@ -154,16 +158,22 @@ forty lines.** Read the ones you need:
    the one check nobody has ever executed: take a pipeline id out of
    `joins.jsonl`, read the Run back from the studio, and confirm the board row
    and the Run carry the *same* id. That is the join this whole integration is
-   for. Do not read either blocker off `aisquare task show` — it does not print
-   a blocked reason. The reason is *stored*, as a `team.task_blocked` event, so
-   `aisquare --json team log` carries it in full and needs no fix first (filed:
-   `tsk_01m0abnayp0kw249tywkxbs9p6`). **Run it from
-   `/home/work/work/aisquare-cli`.** `team log` is project-scoped and answers
-   for whatever project your directory maps to, without saying which: measured
-   from three places, the project directory returns 200 events and the blocker,
-   a worktree returns 0, and `$HOME` returns *twelve* — a different board that
-   looks like it answered. An empty board and a board you are not looking at
-   are indistinguishable today (filed: `tsk_01m0ac4b2r874y1n8dzyfrpfpn`).
+   for. To read either blocker: `aisquare task show <id>` prints it as
+   `stopped because …`, with `stopped_because` in `--json` — **but only after
+   step 1.** The `aisquare` on your `PATH` predates that fix until you
+   reinstall, and prints nothing; measured both ways on this box. That is the
+   *third* check step 1 gates, and the shortest reason to type it first.
+   Before step 1, `aisquare --json team log` carries the same text, run from
+   `/home/work/work/aisquare-cli`. **If a board read comes back empty or
+   implausibly short, do not conclude the board is empty.** Ours is set to
+   `AISQUARE_TEAM_HUB='./'`, and a *relative* hub resolves to the process cwd,
+   so the board silently follows the directory you are in — measured, a
+   worktree returns 0 events and `env -u AISQUARE_TEAM_HUB` makes the same
+   command return 200. From a non-repo directory such as `$HOME` you get a
+   genuinely different board, twelve plausible events, with or without the
+   variable. An empty board and a board you are not looking at are
+   indistinguishable today (filed: `tsk_01m0ad9ys7m12bczz9wgj9yptr`,
+   `tsk_01m0ac4b2r874y1n8dzyfrpfpn`).
 
 4. **Prod values are unverified.** Every *mechanism* here is verified against
    staging; the prod URL and key are `[unverified-prod]` throughout.

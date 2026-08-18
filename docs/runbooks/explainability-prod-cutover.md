@@ -468,10 +468,20 @@ curl -s http://127.0.0.1:9190/health
 {"status":"ok","service":"aisquare-proxy","mode":"claude_code","governance":"gateway"}
 ```
 
-Both fields matter. The CLI refuses any `/health` whose `service` is not
-`aisquare-proxy` or whose `mode` is not `claude_code`, and it **fails open** —
-so a wrong-mode proxy produces *untraced launches with no error*, not a failure.
-Silence is the failure mode. Check `/health` yourself.
+**Three of those four fields matter now.** The CLI refuses any `/health` whose
+`service` is not `aisquare-proxy`, whose `mode` is not `claude_code`, or whose
+`status` is present and not `ok` — and it **fails open**, so a wrong-mode proxy
+produces *untraced launches with no error*, not a failure. Silence is the failure
+mode. Check `/health` yourself.
+
+`status` was read only from this cycle (@9bbc8ed7). Until then the CLI inspected
+`service` and `mode` and **discarded the field the proxy uses to say it is
+unwell**: a proxy answering `{"status":"degraded"}` with the right service and
+mode was reported "proxy healthy" and model traffic routed to it. The check is
+deliberately tolerant — an **absent** `status` stays healthy, so an older proxy
+build keeps working, and only an explicit non-`ok` value is rejected. `governance`
+is still not read; that is recorded as unexamined rather than as approved, and one
+sample from one proxy is all anyone has.
 
 > **Port 9090 on this box belongs to a long-lived creator-mode proxy. Never kill
 > it.** Use `AISQUARE_PROXY_PORT` and point `explainability.proxy_url` at your

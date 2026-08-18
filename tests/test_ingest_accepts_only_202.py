@@ -98,3 +98,38 @@ def test_refusals_stay_diagnosable(status: int, expect_key_language: bool) -> No
     assert row.status is CheckStatus.fail, row.detail
     assert str(status) in row.detail
     assert ("rejected the key" in row.detail) is expect_key_language, row.detail
+
+
+@pytest.mark.parametrize("band", ["warn", "hard"])
+def test_a_billing_band_on_the_202_is_surfaced(band: str) -> None:
+    """The gateway puts a low-credit signal ON the 202 and we were dropping it.
+
+    From the gateway's own source (`gateway/models.py`), `IngestResponse`
+    carries `billing_warning: Optional[str]` — "a low-balance signal on the
+    202. A BAND STRING ONLY (warn|hard), never a numeric balance". And
+    `gateway/main.py` only converts that band into a 402 when
+    `BILLING_ENFORCEMENT_MODE == "hard"`; THE DEFAULT IS `soft`, where a
+    hard-band balance still returns 202 and the band rides in the body.
+
+    So on the default deployment an exhausted workspace renders
+    `✓ explainability ingest: test span accepted` and the operator learns
+    nothing. The traces really are landing, which is why this stays out of
+    `fail` — but "accepted" alone is not the whole of what the gateway said.
+    """
+    row = _ingest_row(
+        202,
+        {"status": "accepted", "trace_id": "t", "span_count": 1, "billing_warning": band},
+    )
+
+    assert row.status is CheckStatus.warn, row.detail
+    assert band in row.detail, row.detail
+    assert "accepted" in row.detail, "the span WAS accepted; do not lose that"
+    assert row.fix, "a credit warning with no remediation is a dead end"
+
+
+def test_a_202_without_a_band_stays_plainly_ok() -> None:
+    """The control. Most 202s carry no band and must not acquire a warning."""
+    row = _ingest_row(202, {"status": "accepted", "trace_id": "t", "span_count": 1})
+
+    assert row.status is CheckStatus.ok, row.detail
+    assert "credit" not in row.detail.lower()

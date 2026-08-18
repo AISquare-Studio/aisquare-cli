@@ -906,10 +906,39 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
 Degrade = Callable[[str, str, str], DoctorCheck]
 
 
+def _billing_band(payload: object) -> str | None:
+    """The gateway's low-credit band from an ingest 202, when it sent one.
+
+    Tolerant by construction: any payload shape that is not a mapping with a
+    non-empty string here means "no band", because a diagnostic must never turn
+    a successful ingest into an error over a field it failed to parse.
+    """
+    if not isinstance(payload, dict):
+        return None
+    band = payload.get("billing_warning")
+    return band if isinstance(band, str) and band else None
+
+
 def _ingest_check(verdict: HttpVerdict, identity: str, *, degrade: Degrade) -> DoctorCheck:
     name = "explainability ingest"
     if verdict.ok:
-        return _ok(name, f"test span accepted as '{identity}' (HTTP {verdict.status})")
+        accepted = f"test span accepted as '{identity}' (HTTP {verdict.status})"
+        # The gateway puts a low-credit signal ON the 202 rather than failing:
+        # `IngestResponse.billing_warning` is "a BAND STRING ONLY (warn|hard),
+        # never a numeric balance", and a hard band only becomes a 402 when the
+        # deployment sets BILLING_ENFORCEMENT_MODE=hard. THE DEFAULT IS soft, so
+        # an exhausted workspace answers 202 and says so in the body. Dropping
+        # it renders "accepted" over a studio that is out of credit.
+        band = _billing_band(verdict.payload)
+        if band is not None:
+            return _warn(
+                name,
+                f"{accepted} — but the workspace credit balance is in the "
+                f"'{band}' band, which the gateway reported on the 202",
+                "Top up the studio's credits; ingest still lands today, and "
+                "stops if the deployment enforces the hard band",
+            )
+        return _ok(name, accepted)
     if verdict.status in (401, 403):
         return degrade(
             name,

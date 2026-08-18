@@ -120,20 +120,6 @@ translated in one place now. That the class stays closed is asserted by
 than remembered here. If you DO see a traceback, you are on an older build; the
 recovery below still applies.
 
-> ⚠️ **Not every damaged store looks like that, and two shapes are quiet.**
-> **[verified-train, planner `dfd9a883`]** measured across five damage shapes: a
-> **zero-length** file is read by SQLite as a brand-new database, so the store is
-> rebuilt **empty** and the one line at the open saying it *existed and was
-> emptied* is the **only** signal you will ever get — there is no recovery,
-> because the history is gone rather than unreachable. And a corrupt **page** in
-> a region nothing happens to read stays invisible entirely: exit 0, six lines,
-> nothing. **So a green `doctor` is evidence that the store opened, not that it
-> is intact** — if the board is suddenly empty, believe the board.
->
-> Use the `mv` above rather than a truncating redirect. `> ~/.aisquare/context.db`
-> lands you in the zero-length case, which is the one shape where the repair and
-> the damage look identical.
-
 **`launch` is not one of them, and that is the part that matters at 08:05.**
 **[verified-train]** A damaged store used to kill every launch — exit 1, a stack
 trace, and the agent never started, so you could not even open a session to work
@@ -148,6 +134,33 @@ Launching … as coder with no board row (context.db unreadable)…
 No board row means no join to a gateway Run for that session: a lost trace, which
 is what the fail-open rule says to spend. **So you can start agents while the
 store is broken — but fix the store before you care about traces.**
+
+**[verified-train] Not every damaged store looks like that, and one of them
+looks like nothing at all.** Five damage shapes were measured. Four are **loud**
+— non-database bytes, a part-way truncation, a corrupted page with an intact
+header — and all of them now give you the one-line message above. *(They used to
+give 39-75 lines of traceback; if you see that, you are on an older build.)*
+
+**The fifth is silent, and it is the one to know about.** A file **truncated to
+zero bytes** is read by SQLite as a brand-new empty database, so the store is
+re-created and migrated, `status` exits 0, and `doctor` afterwards reports
+`✓ database: context.db is readable (0 user entries)` — while every session,
+task and note that file held is gone. The CLI prints one line at the first open
+that sees it:
+
+```
+board: ~/.aisquare/context.db exists but is empty — it was truncated, and the
+tasks, notes and sessions it held are gone.
+```
+
+That line appears **once**, on the open that saw it; everything afterwards looks
+healthy because by then it is. **So if the board is suddenly empty and `doctor`
+is green, the file was truncated, not corrupted** — and the recovery below does
+not apply, because there is nothing left to recover.
+
+Use the `mv` recovery rather than a truncating redirect: `> ~/.aisquare/context.db`
+puts you in exactly this row, the one shape where the repair and the damage are
+indistinguishable.
 
 Recovery, **[verified-train, coder3 `9bbc8ed7`]** end to end — this is the
 command the error above and `aisquare doctor` both print, verbatim:

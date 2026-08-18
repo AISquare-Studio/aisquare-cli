@@ -158,9 +158,11 @@ healthy because by then it is. **So if the board is suddenly empty and `doctor`
 is green, the file was truncated, not corrupted** — and the recovery below does
 not apply, because there is nothing left to recover.
 
-Use the `mv` recovery rather than a truncating redirect: `> ~/.aisquare/context.db`
-puts you in exactly this row, the one shape where the repair and the damage are
-indistinguishable.
+Move it (`mv`, as below) or remove it (`rm`) — but **never truncate it with a
+redirect**. `> ~/.aisquare/context.db` puts you in exactly this row, the one
+shape where the repair and the damage are indistinguishable. (@9bbc8ed7's
+phrasing: it matters that `rm` is still fine, because the older recovery block
+further down this file uses it.)
 
 Recovery, **[verified-train, coder3 `9bbc8ed7`]** end to end — this is the
 command the error above and `aisquare doctor` both print, verbatim:

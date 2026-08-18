@@ -889,7 +889,7 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
         # `_sdk_checks` asks the SDK's own doctor and never touches the gateway,
         # so a gateway failure was silently removing rows that had nothing to do
         # with it.
-        results.extend(_sdk_checks())
+        results.extend(_sdk_checks(degrade=degrade))
         return results
     results.append(_ok("explainability gateway", f"{target.gateway_url}/ready — HTTP 200"))
 
@@ -902,7 +902,9 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "Fix explainability.agent_name_template (it must contain {role})",
             )
         )
-        results.extend(_sdk_checks())  # local rows; nothing here depends on the gateway
+        results.extend(
+            _sdk_checks(degrade=degrade)
+        )  # local rows; nothing here depends on the gateway
         return results
 
     verdict = probe_ingest(target, identity)
@@ -917,7 +919,7 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "aisquare doctor --live",
             )
         )
-    results.extend(_sdk_checks())
+    results.extend(_sdk_checks(degrade=degrade))
     return results
 
 
@@ -986,12 +988,19 @@ def _ingest_check(verdict: HttpVerdict, identity: str, *, degrade: Degrade) -> D
     )
 
 
-def _sdk_checks() -> list[DoctorCheck]:
+def _sdk_checks(*, degrade: Degrade) -> list[DoctorCheck]:
     """The SDK doctor's rows, folded in as ``sdk:<name>`` checks.
 
     Reused rather than reimplemented — but filtered: the Agno adapter and the
     gateway's OPENAI_API_KEY are not this integration's business, and reporting
     them red would train an operator to ignore the section.
+
+    ``degrade`` is the same callable every first-party row here goes through:
+    ``_fail`` when tracing is on, ``_warn`` when it is off. These rows used to
+    call ``_fail`` directly, so with tracing OFF an unreachable gateway read
+    ``⚠ explainability gateway`` beside ``✗ sdk:gateway_ready`` — one condition,
+    two verdicts, and the louder one took the exit code with it. An observer
+    that fails your build is not an observer.
     """
     results: list[DoctorCheck] = []
     for row_name, status, detail in sdk_doctor():
@@ -1004,7 +1013,7 @@ def _sdk_checks() -> list[DoctorCheck]:
             results.append(_warn(name, detail, "See the SDK's own guidance above"))
         else:
             results.append(
-                _fail(name, detail, f"Re-run the SDK's own doctor for detail: {_SDK_SCRIPT}")
+                degrade(name, detail, f"Re-run the SDK's own doctor for detail: {_SDK_SCRIPT}")
             )
     return results
 

@@ -428,11 +428,17 @@ def test_the_sdk_doctors_table_is_read_back_into_rows() -> None:
     ]
 
 
+@pytest.mark.parametrize("degrade", [ops._fail, ops._warn])
 def test_expected_sdk_noise_is_not_reported_as_a_finding(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, degrade: ops.Degrade
 ) -> None:
     """agno and the gateway's OPENAI_API_KEY are not this lane's business;
-    printing them red trains an operator to ignore the section."""
+    printing them red trains an operator to ignore the section.
+
+    Run under both degrades: WHICH rows are reported is a filter and must not
+    depend on whether tracing is on, which only decides how loud a reported
+    row is. Parametrised rather than pinned to one, so the two concerns stay
+    provably separate."""
     rows = [
         ("delivery_backlog", "ok", "empty"),
         ("agno", "missing", "Install optional dependency: .[agno]"),
@@ -440,7 +446,7 @@ def test_expected_sdk_noise_is_not_reported_as_a_finding(
         ("openai_api_key", "warning", "Set OPENAI_API_KEY"),
     ]
     monkeypatch.setattr(ops, "sdk_doctor", lambda **_: rows)
-    names = [check.name for check in ops._sdk_checks()]
+    names = [check.name for check in ops._sdk_checks(degrade=degrade)]
     assert names == ["sdk:delivery_backlog"]
 
 

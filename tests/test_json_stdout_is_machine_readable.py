@@ -20,12 +20,15 @@ group, one flag, four commands, two behaviours.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core.paths import config_path
+from tests.proxy_stub import healthy_proxy
 from tests.test_no_traceback_in_a_configured_home import _swept, configured_home  # noqa: F401
 
 #: Commands whose stdout is a DOCUMENT or a PROTOCOL, not a report. ``--json``
@@ -48,13 +51,61 @@ def test_the_allow_list_names_commands_that_exist() -> None:
     assert not unknown, f"allowed but no longer swept: {unknown}"
 
 
-def test_json_stdout_is_empty_or_parseable(configured_home: Path, runner: CliRunner) -> None:  # noqa: F811
+@pytest.fixture(params=["proxy-down", "proxy-healthy"], ids=["proxy-down", "proxy-healthy"])
+def in_both_proxy_states(
+    request: pytest.FixtureRequest,
+    configured_home: Path,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
+    runner: CliRunner,
+) -> Iterator[str]:
+    """The configured machine with the proxy down, and again with it answering.
+
+    ONE PROXY STATE IS NOT THE COMMAND. ``explainability env`` refuses when the
+    session would not be traced, and that refusal goes through the shared
+    ``fail`` helper, which emits JSON. So with no proxy the command looks like a
+    good citizen of this contract and only its success path breaks it — the
+    sweep was measuring a branch and reporting on a command. That is the same
+    shape as an empty ratchet measured over one damage shape, which is why the
+    damaged-store file runs two.
+
+    The proxy binds port 0, so the OS picks it. Never 9090: this project
+    documents that port as somebody else's long-running proxy.
+    """
+    if request.param == "proxy-down":
+        # The premise, asserted: with nothing listening, env must REFUSE.
+        # Without this the two params could quietly be the same state twice.
+        assert runner.invoke(app, ["explainability", "env", "coder"]).exit_code == 1
+        yield request.param
+        return
+
+    with healthy_proxy() as url:
+        enabled = runner.invoke(app, ["explainability", "enable", "--proxy-url", url])
+        assert enabled.exit_code == 0, enabled.output
+        traced = runner.invoke(app, ["explainability", "env", "coder"])
+        assert traced.exit_code == 0, (
+            "the stub proxy is not being seen as healthy, so this parameter is "
+            f"the proxy-down case wearing another name: {traced.output}"
+        )
+        yield request.param
+
+
+def test_json_stdout_is_empty_or_parseable(in_both_proxy_states: str, runner: CliRunner) -> None:
     """The property, with every offender reported rather than just the first."""
+    # EVERY COMMAND SEES THE SAME MACHINE. Without this the sweep is
+    # order-dependent, and measurably so: `explainability disable` sorts before
+    # `explainability env` in the tree, so by the time `env` ran, tracing was
+    # off and it took its refusal branch — which emits JSON — no matter what
+    # proxy state this parameter set up. The sweep looked green over a state it
+    # had destroyed three commands earlier. Config only: the store is rebuilt
+    # by whatever needs it, and it is not what decides these branches.
+    config = config_path()
+    pristine = config.read_bytes()
+
     offenders: dict[str, str] = {}
     parsed = 0
     for name, argv in _swept():
         if name in NOT_A_REPORT:
             continue
+        config.write_bytes(pristine)
         stdout = runner.invoke(app, ["--json", *argv], catch_exceptions=True).stdout.strip()
         if not stdout:
             continue
@@ -67,7 +118,7 @@ def test_json_stdout_is_empty_or_parseable(configured_home: Path, runner: CliRun
 
     assert not offenders, (
         "these print human text to stdout under --json, so a jq pipeline over "
-        f"them fails with no explanation: {offenders}"
+        f"them fails with no explanation ({in_both_proxy_states}): {offenders}"
     )
     # Emptiness is the goal and the symptom: a sweep that stopped invoking
     # anything, or one where every command happened to print nothing, reports

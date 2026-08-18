@@ -20,6 +20,7 @@ rules out, so this is pinned by execution, not by string comparison.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -181,3 +182,84 @@ def test_env_honours_the_target_it_is_given(
     assert result.exit_code == 0, result.output
     assert url in result.output
     assert "acme-coder" in result.output
+
+
+def _name_lines(script_text: str) -> set[str]:
+    """The variable names a shell would bind, read off the ``export`` lines.
+
+    Only the NAME half is parsed. The values are quoted, can contain newlines,
+    and my first attempt at splitting them with ``shlex`` raised on the header
+    pair — which is the point of this whole file: the value side is the part
+    that must be handed to a real shell rather than re-implemented here.
+    """
+    return {
+        match.group(1)
+        for match in (
+            re.match(r"export ([A-Z_][A-Z0-9_]*)=", line) for line in script_text.splitlines()
+        )
+        if match
+    }
+
+
+def _shell_value(name: str, script_text: str) -> str:
+    """Eval ``script_text`` in ``/bin/sh`` and print ``$name`` byte for byte."""
+    assert re.fullmatch(r"[A-Z_][A-Z0-9_]*", name), name
+    completed = subprocess.run(
+        ["/bin/sh", "-c", f'eval "$1"; printf "%s" "${name}"', "sh", script_text],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
+
+
+def test_the_json_form_carries_the_same_exports(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--json`` was honoured on the branch that FAILS and ignored on the one
+    that WORKS.
+
+    The refusal goes through the shared ``fail`` helper and emits
+    ``{"error": "untraced"}``, so with no proxy reachable this command looked
+    like a good citizen of the machine-readable contract. Its success path
+    printed ``export …`` lines. A script piping it into jq therefore passed
+    every test an operator could run before §3 and broke on the day the proxy
+    came up — the failure arrives exactly when the system starts working.
+
+    Asserted as AGREEMENT between the two renderings rather than against a
+    literal payload, so it cannot rot into a snapshot of today's variables. The
+    values come back through a real ``/bin/sh``, for this file's own reason: the
+    quoted form is what must survive an ``eval``, and re-implementing that
+    parse in the test is how a broken emitter stays convincing.
+    """
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    from aisquare.cli.app import app as cli_app
+
+    server, url = _proxy()
+    try:
+        save_config(AppConfig(explainability=ExplainabilitySettings(enabled=True, proxy_url=url)))
+        human = runner.invoke(cli_app, ["explainability", "env", "coder", "--session-id", "s1"])
+        machine = runner.invoke(
+            cli_app, ["--json", "explainability", "env", "coder", "--session-id", "s1"]
+        )
+    finally:
+        server.shutdown()
+
+    assert human.exit_code == 0, human.output
+    assert machine.exit_code == 0, machine.output
+
+    payload = json.loads(machine.stdout)
+    assert payload["role"] == "coder"
+    assert set(payload["env"]) == _name_lines(human.stdout), (
+        "the two renderings export different variable NAMES: "
+        f"json={sorted(payload['env'])} shell={sorted(_name_lines(human.stdout))}"
+    )
+    for name, value in payload["env"].items():
+        assert _shell_value(name, human.stdout) == value, (
+            f"{name} differs between the renderings — a caller reading the JSON "
+            "would set a different value than `eval` does"
+        )
+    # The join key by the name §5 already uses, rather than a second spelling
+    # of the same value lifted to the top level.
+    assert payload["env"]["AISQUARE_PIPELINE_ID"] == "s1", payload

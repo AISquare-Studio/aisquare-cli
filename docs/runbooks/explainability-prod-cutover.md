@@ -525,14 +525,32 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > control that makes the rest mean anything:
 >
 > ```text
-> clean pending row, no 409       ✓  pending=1                    exit 0   <- CONTROL
-> pending, last_error 409         ✗  pending=1 — … gateway_status:409       exit 1
-> dead_letter row                 ✗  dead_letter=1 — … no_agent_identity   exit 1
-> tracing never configured        (row absent entirely)           exit 0
+> missing inbox file             ✓  "No inbox database at <path> …"          exit 0
+> inbox present, table empty      ✓  "empty"                                  exit 0
+> unreadable file                 ⚠  "Cannot read inbox at <path>: …"         exit 0
+> clean pending row, no 409       ✓  pending=1                                exit 0   <- CONTROL
+> pending, last_error 409         ✗  pending=1 — … gateway_status:409         exit 1
+> dead_letter row                 ✗  dead_letter=1 — … no_agent_identity     exit 1
+> tracing never configured        (row absent entirely)                      exit 0
 > ```
 >
 > The control is the load-bearing line: a clean pending row is `ok`, so the
-> failure is about **the 409** and not about having a queue at all.
+> failure is about **the 409** and not about having a queue at all. The
+> unreadable-file row is the doctrine on a path nobody had walked — a corrupt
+> buffer costs a warning, never the exit code. And the real proxy-written inbox
+> reads identically to a hand-built one: its schema has **ten** columns where the
+> fixture had three, and the check selects only `status` and `last_error`, so the
+> difference cannot matter (`8dd460fb`, read-only, file byte-identical before and
+> after).
+>
+> **⚠️ The two green readings are not the same news, and this is the one to learn.**
+> `empty` means the file is there and drained — the client lane is working and has
+> nothing queued. `No inbox database` means the file is *not there*, which given
+> the relative-default hazard above may simply mean **you are looking somewhere
+> else**. Same tick, opposite diagnostic value: one says "nothing to deliver", the
+> other cannot distinguish that from "not watching the queue that is filling". If
+> you see `No inbox database` after §4 and any work has run, check
+> `EXPLAINABILITY_INBOX_PATH` before you believe it.
 >
 > **Which gives the one sentence to remember about this row: it has two
 > preconditions, and missing either turns a real backlog into silence.** Tracing

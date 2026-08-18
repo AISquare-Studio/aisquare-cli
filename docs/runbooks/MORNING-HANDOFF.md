@@ -157,7 +157,13 @@ forty lines.** Read the ones you need:
    for. Do not read either blocker off `aisquare task show` — it does not print
    a blocked reason. The reason is *stored*, as a `team.task_blocked` event, so
    `aisquare --json team log` carries it in full and needs no fix first (filed:
-   `tsk_01m0abnayp0kw249tywkxbs9p6`).
+   `tsk_01m0abnayp0kw249tywkxbs9p6`). **Run it from
+   `/home/work/work/aisquare-cli`.** `team log` is project-scoped and answers
+   for whatever project your directory maps to, without saying which: measured
+   from three places, the project directory returns 200 events and the blocker,
+   a worktree returns 0, and `$HOME` returns *twelve* — a different board that
+   looks like it answered. An empty board and a board you are not looking at
+   are indistinguishable today (filed: `tsk_01m0ac4b2r874y1n8dzyfrpfpn`).
 
 4. **Prod values are unverified.** Every *mechanism* here is verified against
    staging; the prod URL and key are `[unverified-prod]` throughout.

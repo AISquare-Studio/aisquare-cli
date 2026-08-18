@@ -73,12 +73,37 @@ def _references() -> dict[str, list[Path]]:
     return found
 
 
-def _resolves(ref: str) -> bool:
-    """A citation may be repo-relative or bare (a test or module filename)."""
-    return any(
-        candidate.exists()
-        for candidate in (Path(ref), Path("tests") / ref, Path("src/aisquare") / ref)
-    )
+#: Where a citation is allowed to live. Data rather than a hardcoded tuple so
+#: the control below can point at the same roots the rule uses.
+_SEARCH_ROOTS = (Path("."), Path("tests"), Path("src/aisquare"))
+
+
+def _resolves(ref: str, roots: tuple[Path, ...] = _SEARCH_ROOTS) -> bool:
+    """A citation may be repo-relative or bare (a test or module filename).
+
+    ``roots`` is injectable so the controls can drive this against a temporary
+    tree instead of the repo — a control anchored to real cited files stops
+    controlling anything the day one of them is renamed.
+    """
+    return any((root / ref).exists() for root in roots)
+
+
+def _unresolvable(references: dict[str, list[Path]]) -> dict[str, list[Path]]:
+    """The citations that point at nothing and are not declared external.
+
+    A CALLABLE rule rather than a comprehension inside a test, and that is the
+    whole change. Measured before it existed: adding ``if False and`` to the
+    inline condition left ALL FIVE TESTS PASSING — the guard reported that every
+    cited path resolves while checking none of them.
+
+    ``_resolves`` was already extracted and that was not enough. Nothing ever
+    called it with a path known to be missing, so nothing noticed when the rule
+    stopped consulting it. EXTRACTION IS NOT THE POINT; REACHABILITY BY A
+    CONTROL IS — the lesson @8dd460fb and I each arrived at from our own files.
+    """
+    return {
+        ref: docs for ref, docs in references.items() if ref not in EXTERNAL and not _resolves(ref)
+    }
 
 
 def test_the_extraction_still_finds_references() -> None:
@@ -115,11 +140,7 @@ def test_the_extraction_still_finds_references() -> None:
 
 def test_every_cited_repo_path_exists() -> None:
     """The claim itself: a citation points at something real, or is declared."""
-    unresolvable = {
-        ref: docs
-        for ref, docs in _references().items()
-        if ref not in EXTERNAL and not _resolves(ref)
-    }
+    unresolvable = _unresolvable(_references())
 
     assert not unresolvable, "documents cite paths that do not exist: " + ", ".join(
         f"{ref} (in {', '.join(str(d) for d in docs)})"
@@ -170,3 +191,53 @@ def test_the_doctrine_citations_specifically_resolve() -> None:
     assert cited, "the doctrine section cites no test files at all; it changed shape"
     missing = [name for name in cited if not (Path("tests") / name).exists()]
     assert not missing, f"the doctrine section cites tests that do not exist: {missing}"
+
+
+#: One synthetic citation per shape the rule decides, plus the shape it must
+#: NOT accuse. Synthetic and driven against a temporary tree, so the control
+#: does not stop controlling the day a real cited file is renamed.
+_RESOLVING_SHAPES = {
+    "repo-relative path": "docs/made_up_note.md",
+    "bare test filename": "test_made_up_guard.py",
+    "bare module filename": "made_up_module.py",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_RESOLVING_SHAPES))
+def test_the_rule_still_decides_each_shape_it_claims(shape: str, tmp_path: Path) -> None:
+    """Positive control, per shape, so a failure names which one went blind."""
+    ref = _RESOLVING_SHAPES[shape]
+    roots = (tmp_path, tmp_path / "tests", tmp_path / "src/aisquare")
+    for root in roots:
+        root.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "docs").mkdir(exist_ok=True)
+
+    assert not _resolves(ref, roots), f"{shape}: the control's tree already contains it"
+
+    target = tmp_path / ref if "/" in ref else tmp_path / "tests" / ref
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("", encoding="utf-8")
+
+    assert _resolves(ref, roots), f"the rule no longer decides: {shape}"
+
+
+def test_the_rule_reports_a_citation_that_points_at_nothing() -> None:
+    """The rule itself, driven with known-bad input it cannot reach in the repo."""
+    missing = "definitely_not_a_real_file_in_this_repo.py"
+
+    reported = _unresolvable({missing: [Path("docs/synthetic.md")]})
+
+    assert missing in reported, "the rule no longer reports an unresolvable citation"
+
+
+def test_the_rule_does_not_report_a_declared_external() -> None:
+    """Negative control: "make the rule always fire" is not a fix.
+
+    ``claude_proxy.py`` is the live instance — it ships in the SDK and must stay
+    excusable through EXTERNAL rather than by the rule going blind.
+    """
+    external = next(iter(EXTERNAL))
+
+    reported = _unresolvable({external: [Path("docs/synthetic.md")]})
+
+    assert external not in reported, f"a declared external was reported: {external}"

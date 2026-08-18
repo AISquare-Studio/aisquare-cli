@@ -1079,6 +1079,19 @@ done
 # staging answered 31, and only 31, in 1..40. Prod may differ — re-derive it.
 ```
 
+> **A word before you `curl` `my-capabilities` directly, because its body looks
+> alarming and is not.** On staging it returns `"bypass": true` beside a full
+> set — `view_runs`, `attach_rule_book_to_agent`, `replay_run` all `true`. On a
+> page about governance that reads like the gate is wide open. It is not: that
+> is the **expected** shape of a *workspace* key (`@9bbc8ed7`, from
+> `gateway/auth.py` at `bb88bb5`) — there is no human role to gate, so the capability map is
+> permissive, and it is a **separate gate** from studio-scoped enforcement.
+> Measured here: `my-capabilities` reports `view_runs: true` while
+> `GET /v1/studios/169/runs` on the same key returns `403`. The capability flag
+> is what the principal *may* do; the studio guard is what this *key* can reach,
+> and they disagree by design. `bypass` here is not a statement about whether
+> governance is enforced — that is §1's routing story, a different mechanism.
+
 Then read the gateway's rejection view for that workspace:
 
 ```bash

@@ -139,6 +139,44 @@ aisquare doctor
 > The path is the tree you just checked out, and `(non-editable)` is the `-e`
 > warning below confirmed rather than assumed. A build that prints **no**
 > provenance row predates that check and is therefore older than this train.
+>
+> **[verified-train, coder2 `8dd460fb` + `9bbc8ed7`, 2026-08-18] The provenance
+> row and the explainability section are two readings of ONE install — and that
+> install was watched as a transition, not inferred from two builds.** Into a
+> throwaway venv, `python3 -m pip install '<train>[dev]'` exactly as above:
+>
+> ```text
+> BEFORE  python -c 'import aisquare'        ModuleNotFoundError
+> AFTER   --json doctor: provenance          installed (non-editable) from <train>
+> AFTER   --json doctor: explainability      present   (absent on the PATH build)
+> AFTER   aisquare.core                      23 modules incl. redaction/insights/outbox
+> ```
+>
+> **The louder symptom is the absent section, and on this box it is the state you
+> start in.** The build currently on `PATH` here prints **no explainability
+> section at all** — not a warning, not a skipped row, the whole subject of this
+> runbook simply missing — because its `aisquare.core` lacks `insights`,
+> `outbox`, `redaction`, `credentials`, `spawn` and `version`: the entire client
+> lane. It still exits `0`, and so does the train build, so **neither the exit
+> code nor `--version` distinguishes them.**
+>
+> **Count the section, not the rows — no total is a property of the build.** It
+> moves on two independent axes. Rendered rows depend on terminal width (the same
+> build reads as 17 rows on one terminal and 19 on another). And the `--json`
+> check total moves with **configuration**: this build reports 14 checks with 1
+> `explainability` unconfigured and 18 with 5 once a target and key are set,
+> because the section expands by design when the feature is set up (a six-line
+> section about a feature nobody enabled is how the rest of `doctor` stops being
+> read). Jatin configures at §2 and §4, so a count captured at §0 is already
+> stale when he re-runs `doctor`. **Presence of the `explainability` check is the
+> reading that holds** across width, configuration and rendering — the tell is
+> the section, never a number.
+>
+> **If the section is still absent AFTER the install above**, that is a different
+> fault with the same symptom: the install landed somewhere that is not on your
+> `PATH`. `which aisquare` separates the two, which is why it sits in the block
+> above. And the install is still a human's to run on their own `python` — the
+> transition above was a throwaway venv, not the operator's site-packages.
 
 > ⚠️ **[verified-train, planner `dfd9a883`] Do not use `-e` for a cutover.** §5b
 > has you install `aisquare-cli[explainability]`, and over an editable checkout
@@ -468,6 +506,16 @@ locally), and that endpoint returns `403` with the workspace key in our env file
 **Have a studio-scoped key or a dashboard/human JWT ready before you start** —
 the ingest key in `explainability-prod.env` cannot do this step.
 
+> **That credential has a second use, and it is the only instrument for it.**
+> Attaching the rule book is what this section needs it for. It is *also* the
+> only way to **verify** two of the things this document says nobody has
+> checked: whether board rows join gateway Runs on a shared key, and whether
+> runs are governed rather than merely traced. Both come from one call,
+> `GET /v1/studios/{studio_id}/ui/runs` — see §5c, hop 4. `session_id` appears
+> on exactly one route in the entire published surface, so **if this credential
+> is not provisioned there is no workaround to reach for.** Worth knowing while
+> you decide how urgently to get it.
+
 ### The order that actually works
 
 **1a. Register the roster.** **[unverified-prod]** — the auth shape is
@@ -537,7 +585,29 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > unregistered one takes the first branch: `gateway/main.py` raises
 > `409 agent_not_registered` with `routing.agent_name` attached.
 >
-> So the cost of leaving it out is a **growing backlog**, not a deletion.
+> **[verified-stg, `9bbc8ed7`, 2026-08-18] On staging it does not 409 at all —
+> and that is a fact about the WORKSPACE, not about the name.** A real insight
+> shipped from a train build under `aisquare-cli`, an identity nobody has
+> registered, was **accepted**: four spans, inbox status `dispatched`, zero
+> retries, no error. Ingest resolves `(workspace_id, agent_name)` through IAM's
+> auto-register endpoint, which `gateway/routing.py` describes as returning the
+> existing publication "or creates one when the workspace opted into
+> auto-discovery" — so acceptance under an unregistered name means **staging's
+> workspace has auto-discovery on**. Whether prod does is one of the open prod
+> questions, and nobody here can read that setting.
+>
+> **That is exactly why §4b still matters.** Registering removes the dependency
+> on a workspace setting you cannot see: with auto-discovery on the roster is
+> belt-and-braces, with it off the paragraph below is what happens instead.
+> Do not read "it worked on staging" as "the name need not be registered".
+>
+> **And do not use `/v1/routing/resolve` to predict this.** It returned `404`
+> for `aisquare-cli` *after* that agent's spans were accepted, and `404` for a
+> name never sent at all — measured. Its `404` is not evidence about whether
+> ingest will route you.
+>
+> With auto-discovery **off**, the cost of leaving the name out is a **growing
+> backlog**, not a deletion.
 > **Registering is idempotent** (a known name returns its existing
 > `publication_id`), so the fourth name costs nothing, and registering it
 > *later* still drains whatever queued in the meantime. Do not go looking for a
@@ -797,9 +867,14 @@ writes traces, cannot read or rebind. Rotation is new key → deploy → revoke 
 **Which build.** Pin **`aisquare>=1.1.0`**. Overnight receipts were collected
 against a local checkout of branch `f9/suppress-cc-shell-run` @ `bb88bb5`, and
 that raised a fair question: is the evidence reproducible from anything you can
-install? It is. `1.1.0` is on PyPI and carries the junk-run suppression —
-`_has_valid_correlation` in `claude_proxy.py` is **byte-identical** to the
-checkout's. The *released* `1.0.6` and `1.0.7` do **not** have it, and on those
+install? It is, with one correction to how it was first phrased. `1.1.0` is on PyPI and
+carries the junk-run suppression — the `_has_valid_correlation` **function** in
+`claude_proxy.py` is byte-identical to the checkout's (verified against the real
+PyPI wheel; the measured note below has the shas). The `claude_proxy.py` *file*
+around it is **not** byte-identical:
+`1.1.0` is a later build, and it gates that same function differently — read the
+note before you treat `1.1.0` as bit-for-bit the receipts' proxy. The *released*
+`1.0.6` and `1.0.7` do **not** have the function at all, and on those
 the junk-run behaviour returns silently as extra Runs in the dataset — but the
 `bb88bb5` checkout itself also self-reports `1.0.6`, so do not use the version
 string to decide; run the check below. (Measured block after it.)
@@ -916,10 +991,44 @@ against a fresh `aisquare==1.0.6` reports `MISSING`.
 > that already imported the old code. Reinstall is the remedy for `MISSING`,
 > never routine tidying.
 > **(d)** No `1.1.x` artefact exists on this box — pip cache, uv cache and every
-> `aisquare-*.dist-info` under `/home/work` are `1.0.3` or `1.0.6` — so that
-> install needs network, and the "byte-identical to `1.1.0`" claim above stays
-> **unverified from here**. What IS verified is the half the evidence row rests
-> on: the build now serving is byte-identical to the checkout the receipts used.
+> `aisquare-*.dist-info` under `/home/work` are `1.0.3` or `1.0.6`, so that
+> install needs network. **[verified-train, coder2 `8dd460fb`, 2026-08-18]**
+> `@9bbc8ed7` showed the network is open and `1.1.0` installs; I then pulled the
+> real PyPI wheel (`pip download aisquare==1.1.0 --no-deps`) and diffed it, and
+> the flat "byte-identical to `1.1.0`" claim was too strong:
+>
+> ```text
+> claude_proxy.py    bb88bb5   218592 bytes  sha256 f063820d…
+>                    PyPI 1.1.0 221830 bytes  sha256 9484a9ca…   NOT byte-identical (+158 lines)
+> _has_valid_correlation() body   1226 chars  sha 6ebd3b0e   IDENTICAL in both
+> its gate  bb88bb5     correlated = _has_valid_correlation(pipeline_id, traceparent)
+>           PyPI 1.1.0  correlated = _is_cc_mode() and _has_valid_correlation(pipeline_id, traceparent)
+> ```
+>
+> So the *function* reproduces exactly; the *file* is a later build that adds a
+> `_should_adopt_cc_session` path and now scopes the suppression behind
+> `_is_cc_mode()`. That gate is not per-request: `_is_cc_mode()` returns
+> `PROXY_MODE == "claude_code"`, and `PROXY_MODE` is read **once** at process
+> start from `AISQUARE_PROXY_MODE` (default `claude_code`), so for a `claude_code`
+> proxy the `and` short-circuits to the same `_has_valid_correlation(...)` gate
+> bb88bb5 has and the suppression fires identically — `1.1.0` is a sound prod pin.
+> **The caveat this exposes is real in the code, and doubly hard to reach
+> through the CLI** (`@9bbc8ed7` measured the reachability; my first wording
+> overclaimed it): `1.1.0` scopes the suppression to `claude_code` mode where
+> bb88bb5 applied it unconditionally, so a proxy started
+> `AISQUARE_PROXY_MODE=creator` gets **no** junk-run suppression from `1.1.0`.
+> But it is reachable only if such a proxy is actually deployed AND the CLI's own
+> check is bypassed: `probe_proxy` pins `_EXPECTED_MODE = "claude_code"` and
+> refuses a creator proxy by name (`proxy at <url> runs mode 'creator', need
+> 'claude_code'`), even though the default `proxy_url` is the creator port
+> `http://127.0.0.1:9090`. On the reference box today the single running proxy is
+> `claude_code` on 9190 and 9090 is empty, so there is nothing to act on here now
+> — the finding is a property of a creator-mode deployment, not of this box. The
+> default cutover path is `claude_code` and is unaffected. Whether
+> your prod proxy is in `claude_code` mode is one `/health` read
+> (`"mode":"claude_code"`), not an assumption. The half the evidence row rests
+> on is unchanged: the build now serving is byte-identical to the checkout the
+> receipts used — that is a `1.0.6`-labelled `bb88bb5`, not `1.1.0`.
 
 **[verified-stg]** Health check — run it yourself, do not assume:
 
@@ -1071,6 +1180,146 @@ second run returns the same ids rather than creating duplicates.
 
 **Rollback:** none needed — registration is additive and idempotent. If a name
 is wrong, register the correct one; the wrong one simply goes unused.
+
+---
+
+## 4c. Verify registration from the workspace side — read-only, no studio key (2 min)
+
+§4b registers the names and §5 proves a Run leaves the machine. Neither shows
+you the gateway's own verdict on the names. There is a read-only view that
+does, and it needs only the ordinary workspace `X-API-KEY` — no studio key, no
+dashboard JWT — so it is the one governance check you can run before Jatin has
+a studio credential in hand.
+
+> **[verified-stg, @8dd460fb 2026-08-18]** Measured against staging, read-only
+> GETs, nothing created.
+
+**The workspace id is `31`.** It is not in the env file and not in any
+response body; the gateway derives it from the key server-side. To find it
+without guessing, use the gateway as an oracle — a workspace-scoped route
+returns `200` only for the caller's own workspace and `403 "API key is not
+scoped to this workspace"` for every other id:
+
+```bash
+set -a; source /home/work/.config/aisquare/explainability-<env>.env; set +a
+for id in $(seq 1 40); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+    "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$id/my-capabilities")
+  [ "$code" = 200 ] && export WS=$id && echo "your workspace id: $WS"
+done
+# staging answered 31, and only 31, in 1..40. Prod may differ — re-derive it.
+# $WS is used by every workspace-scoped call below. If it is empty, widen the
+# range: the loop only searched 1..40.
+```
+
+> **A word before you `curl` `my-capabilities` directly, because its body looks
+> alarming and is not.** On staging it returns `"bypass": true` beside a full
+> set — `view_runs`, `attach_rule_book_to_agent`, `replay_run` all `true`. On a
+> page about governance that reads like the gate is wide open. It is not: that
+> is the **expected** shape of a *workspace* key (`@9bbc8ed7`, from
+> `gateway/auth.py` at `bb88bb5`) — there is no human role to gate, so the capability map is
+> permissive, and it is a **separate gate** from studio-scoped enforcement.
+> Measured here: `my-capabilities` reports `view_runs: true` while
+> `GET /v1/studios/169/runs` on the same key returns `403`. The capability flag
+> is what the principal *may* do; the studio guard is what this *key* can reach,
+> and they disagree by design. `bypass` here is not a statement about whether
+> governance is enforced — that is §1's routing story, a different mechanism.
+
+Then read the gateway's rejection view for that workspace:
+
+```bash
+curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$WS/ingest-rejections"
+# {"rejections":[]}   on staging right now
+```
+
+**`[]` IS NOT PROOF OF CLEAN DELIVERY, and reading it as such is the trap.**
+The store behind this route is in-memory and **windowed to 900 seconds**
+(`gateway/ingest_rejections.py`, `_DEFAULT_WINDOW_SECONDS = 900`). So `[]`
+means "no name was rejected in the last 15 minutes" — which is exactly what an
+**idle** workspace returns, indistinguishable here from a healthy one. Nothing
+is ingesting from this box until §5 runs, so the empty view on staging is the
+idle case, not a verdict.
+
+To make it a verdict, read it **inside the window, right after a real ingest**:
+
+```bash
+aisquare explainability register --target <env>     # §4b, once
+# ... run §5 so a traced Run actually ships ...
+curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$WS/ingest-rejections"
+```
+
+Now a non-empty result is the direct read of §4b's failure mode. Each row is
+`{code, agent_name, count, last_seen}`, and the `code` names the remedy:
+
+- `agent_not_registered` — the name is known but unmapped. Re-run §4b; it is a
+  registration race and it drains on retry.
+- `no_agent_identity` — a span carried no `agent.name` at all. This one does
+  **not** drain on retry; it is an integration bug, not an onboarding gap.
+
+If instead the roster names do **not** appear after an ingest, that is the
+green reading you actually want: the gateway accepted them and routed them.
+
+**Cross-check, and it closes a loop.** This workspace owns exactly **one**
+studio — `169`, `has_runs: true` — read from `/v1/workspaces/$WS/studios`. That
+is the same `publication_id 169` §4b reports for all three roster names, from
+the opposite side of the boundary: the register call maps the roster *to* 169,
+and 169 is the studio this workspace *owns*. `GET /v1/studios` lists sixteen
+studios, but that is what the key can **see**, not what it owns; the owned set
+is the one studio, and mixing the two is how "sixteen owned studios" got onto
+the board earlier tonight.
+
+This is also the workspace-side confirmation of §1e's "leave
+`EXPLAINABILITY_STUDIO_ID` unset": the value currently in the env file matches
+neither the owned studio `169` nor any of the sixteen listable ids, so a pin
+built from it points at a studio this workspace can neither reach nor list.
+
+### The success side — confirm runs LANDED, not just that none were rejected
+
+`ingest-rejections` above is the failure view; it is empty when nothing is
+wrong **and** when nothing is flowing. To confirm the integration actually
+worked — model traffic reached the gateway and insights shipped, both
+attributed — read the workspace's own record of its runs. Same workspace key,
+no studio credential:
+
+```bash
+curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$WS/credits/usage/by-run?since_days=1&limit=100"
+```
+
+> **[verified-stg, @8dd460fb + @9bbc8ed7 2026-08-18]** On staging this returns
+> the workspace's runs, each `{run_id, agent_name, studio_id, calls, credits,
+> last_at}`. Measured: **every run under studio `169`**, attributed
+> `aisquare-planner` / `aisquare-coder` / `aisquare-runner` / `aisquare-cli` —
+> the roster, each name distinct. That is the whole integration confirmed from
+> the gateway's side: per-role identity survived to delivery, and the
+> `aisquare-cli` fallback has real runs, so auto-discovery accepted the
+> unregistered name.
+>
+> **It covers BOTH lanes.** A proxy-lane launch and a client-lane
+> `explainability ship` both land here — measured, the same `by-run` call
+> carried a traced launch (`agent_name aisquare-runner`) and three shipped
+> insights (the attributed one as `aisquare-coder`, two unattributed as
+> `aisquare-cli`). So one call answers both "did my model traffic land" and
+> "did my insights land".
+>
+> **`run_id` is the OTel trace id, NOT the pipeline id the board joins on.**
+> Do not grep this view for your `AISQUARE_PIPELINE_ID` / board session id and
+> conclude it is broken when you do not find it — the pipeline id is not a
+> field in this projection. Match a run by its `agent_name` and `last_at`, or
+> by the OTel `trace_id` if you captured it. **This is why the join is not yet
+> closed:** the shared key the board joins on is absent here, so "board rows
+> join gateway Runs on a shared key" still needs the studio-scoped Run detail,
+> which `403`s. This view proves the runs EXIST and are ATTRIBUTED, not that a
+> given board row maps to a given Run.
+
+One more read answers the billing question a hard enforcement band would
+raise: `GET /v1/workspaces/$WS/credits/balance` → `{granted_credits,
+balance_credits, low_balance, band}`. On staging: granted `1000`, band `ok`.
+A `hard` band under hard enforcement is what returns `402` at ingest; `ok` is
+clear.
 
 ---
 
@@ -1462,6 +1711,17 @@ This is the north star's third clause — *board rows join to gateway Runs on a
 shared key* — and until now the runbook had no step that checked it. Three of
 the four hops need no credential and are below. The fourth does, and is marked.
 
+> ⚠️ **[verified-train, `9bbc8ed7`, 2026-08-18] The finder must select a TRACED
+> claude, and an empty id must stop you — the earlier version did neither, and
+> the pair produced a FALSE PASS.** On this box 12 processes match `claude`; the
+> old loop took whichever `/proc` listed first, which had no
+> `AISQUARE_PIPELINE_ID`. Hop 1 then printed nothing — easy to skim past — and
+> hop 2 substituted that empty string into `grep`, **which matches every line in
+> the join log and exits 0**. Measured: an empty pattern returned 2 of 2 rows on
+> a two-row file. So a wrong process read as a proven join. The loop now requires
+> the marker in the process's environment, and hops 1 and 2 refuse to run on an
+> empty id.
+
 **Anchor on the RUNNING session, not on the newest record.** Each launch mints
 its own id, so `tail -1 joins.jsonl` names whichever session started last,
 which is not necessarily the one you are looking at. Measured while writing
@@ -1469,19 +1729,22 @@ this: a second launch carried `29dc19d4…` while the newest join record still
 said `9fa349b2…`. Start from the process and work outward.
 
 ```bash
+# A TRACED claude, not merely the first claude — see the warning below.
 PID=$(python3 - <<'EOF'
 import pathlib
 for e in pathlib.Path("/proc").iterdir():
-    if e.name.isdigit():
-        try: argv = (e / "cmdline").read_bytes()
-        except OSError: continue
-        if b"claude" in argv: print(e.name); break
+    if not e.name.isdigit(): continue
+    try:
+        if b"claude" not in (e / "cmdline").read_bytes(): continue
+        if b"AISQUARE_PIPELINE_ID=" in (e / "environ").read_bytes(): print(e.name); break
+    except OSError: continue
 EOF
 )
-tr '\0' '\n' < /proc/$PID/environ | grep AISQUARE_PIPELINE_ID   # hop 1
-grep "$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^AISQUARE_PIPELINE_ID=//p')" \
-  ~/.aisquare/explainability/joins.jsonl                          # hop 2
-aisquare --json team status                                       # hop 3
+[ -n "$PID" ] || echo "no TRACED claude is running — launch one (§4), or tracing is off"
+ID=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^AISQUARE_PIPELINE_ID=//p')
+[ -n "$ID" ] && echo "$ID"                                             # hop 1
+[ -n "$ID" ] && grep -F "$ID" ~/.aisquare/explainability/joins.jsonl   # hop 2
+aisquare --json team status                                            # hop 3
 ```
 
 `team status` takes no `--as` — it resolves the board from the current
@@ -1505,14 +1768,93 @@ ALL THREE AGREE: True
 
 One id, three places, none of them needing the gateway.
 
+> **[verified-stg, `9bbc8ed7`, 2026-08-18] And a fourth place that DOES need the
+> gateway: the Run the insights actually shipped under.** The three hops above
+> are local agreement. This one is delivery — a train build with
+> `aisquare[explainability]` installed, capturing inside a session and draining:
+>
+> ```text
+> board session id                 a9efb7d2-072b-4a80-b77e-c7360735935c
+> ship "runs:"                     a9efb7d2-072b-4a80-b77e-c7360735935c
+> SDK inbox                        12 rows dispatched, 0 errors, max retries 0
+> ```
+>
+> **The negative control is what makes that mean anything**, because a run key
+> that is merely *present* is indistinguishable from one that is *correct*: the
+> same capture with `AISQUARE_PIPELINE_ID` unset ships under
+> `aisquare-cli-unattributed` instead. Marker set, the session's id; marker
+> unset, the shared bucket. Same rig, same target, one variable.
+>
+> `run_key()` reads that marker from the **ambient** environment — the processes
+> that capture are children of the traced session and inherit its wiring — so a
+> capture inside a real launch picks it up without being told. **[stand-in]**
+> the measurement above exported the marker rather than launching a real agent
+> around it; `d124bc26`'s receipt covers the real-launch half of the same chain.
+>
+> This still does not reach the studio. It shows the insight left under the
+> session's key and the gateway accepted it, not that a Run with that id can be
+> read back — hop 4 below is unchanged.
+
 > ⚠️ **HOP 4 IS BLOCKED AND THAT IS BY DESIGN, NOT BY OVERSIGHT.** Reading the
 > Run back from the studio — confirming the gateway holds a Run whose id is the
-> one above — needs a **read-scoped** credential. The ingest key is write-only
-> and returns 403 on reads, proven. That is
-> `tsk_01kzdee4pjw8e0ep2g968ejsq6`, and until it closes **every delivery claim
-> in this document stops at "the gateway accepted the bytes"**. Three hops
-> demonstrated locally is not the same as the join being observed end to end,
-> and nothing here should be read as upgrading that.
+> one above — needs a **studio-scoped** credential. That is
+> `tsk_01kzdee4pjw8e0ep2g968ejsq6`. Three hops demonstrated locally is not the
+> same as the join being observed end to end, and nothing here should be read as
+> upgrading that.
+>
+> **But the call that closes it is now named, and it is exactly one.**
+> **[verified-stg, `9bbc8ed7` + `8dd460fb`, 2026-08-18]** The board's key is a
+> first-class field on the gateway's Run record — `session_id` on
+> `UIRunListItem` — returned by:
+>
+> ```text
+> GET /v1/studios/{studio_id}/ui/runs        # 403 with a workspace key
+> ```
+>
+> With a studio-scoped credential, compare each Run's `session_id` against the
+> board's session ids and clause 3 is closed end to end. **The same response
+> also answers "traced but ungoverned"** — each Run carries `is_governed` and a
+> block of `policy_*` and `runtime_*` counters. One call, two of the three
+> things this document says nobody has checked.
+>
+> ⚠️ **There is no credential-free substitute, and that is measured rather than
+> assumed.** `session_id` appears in exactly two schemas across the whole
+> published surface — `UIRunListItem` and its wrapper — and exactly one route
+> returns either. §4c's `credits/usage/by-run` is workspace-scoped and reachable,
+> but its Run rows do **not** carry `session_id`, which is precisely why the join
+> stays invisible there. So the studio credential is **necessary** for the join,
+> not merely convenient: if it is not provisioned, there is nothing else to reach
+> for.
+>
+> ⚠️ **Present in the schema is not populated in the row.** Neither of us has
+> *seen* a `session_id` value — the route refuses us. If it comes back null for
+> your Runs, that is a different defect from the one this section describes, and
+> it is the first thing to check once the credential exists.
+>
+> **An earlier version of this note called the key "write-only". It is not** —
+> it is *workspace*-scoped, which fails differently and points at a different
+> remedy. **[verified-stg]**: `GET /v1/studios` returns `200` and sixteen
+> studios with the same key that `GET /v1/studios/<id>/runs` refuses. It reads
+> workspace-scoped routes and is refused on studio-scoped ones.
+>
+> The reason is in `gateway/auth.py` (bb88bb5): `validate_ingest_api_key`
+> "returns the base `studio_id` for studio keys, or **`None` for workspace
+> keys**", and the studio guard rejects "any caller whose resolved studio does
+> not match the studio named in the path" — so a workspace key, resolving to
+> `None`, matches no studio and is refused on every studio-scoped route. Not
+> for the right id, not for a studio the workspace owns. **The remedy is a
+> studio-scoped key (the gateway's "legacy studio key") or the dashboard JWT —
+> never a corrected id.**
+>
+> ⚠️ **AND THE TWO 403 STRINGS ARE ONE CAUSE, WHICH MATTERS BECAUSE ONE OF THEM
+> ARGUES AGAINST THIS PAGE.** `policy/check/*` and `agent-rule-books` answer
+> `{"detail":"Workspace does not own this studio"}` (the inline call sites);
+> `/runs` and its siblings answer `{"detail":"Studio ID mismatch"}` (the folded
+> guard). **[verified-stg]** — studios `169`, `144` and the pinned `21` all
+> return the latter. "Studio ID mismatch" reads like an invitation to go fix an
+> id, and §1 has just finished explaining that correcting
+> `EXPLAINABILITY_STUDIO_ID` fixes nothing. Same wall, two sentences; see §1 for
+> the write-side half.
 
 ---
 
@@ -1819,11 +2161,15 @@ dies.
    launch hard-failed under `sh`/`dash`. Fixed on the train (POSIX
    single-quoting) and re-verified under `dash`: `BASE=[http://…]`, a real
    newline in the header pair, `exit=0`. §5 is shell-agnostic now.
-7. **[CLOSED]** The proxy build is pinned. `aisquare>=1.1.0` is released and
-   carries the junk-run suppression — `_has_valid_correlation` is byte-identical
-   to the `bb88bb5` checkout the overnight receipts used, so that evidence is
-   reproducible from PyPI and nobody needs the unreleased branch. `1.0.6`/`1.0.7`
-   do **not** have it. §3 carries a check that reads the *running* proxy and was
+7. **[CLOSED, with a measured refinement]** The proxy build is pinned.
+   `aisquare>=1.1.0` is released and carries the junk-run suppression — the
+   `_has_valid_correlation` **function** is byte-identical to the `bb88bb5`
+   checkout the overnight receipts used (verified against the real PyPI wheel),
+   so the mechanism is reproducible from PyPI and nobody needs the unreleased
+   branch. The *file* is not identical — `1.1.0` is a later build that gates the
+   function behind `_is_cc_mode()`; for a `claude_code` proxy the suppression
+   still fires, and §3's (d) note carries the diff. `1.0.6`/`1.0.7` do **not**
+   have the function at all. §3 carries a check that reads the *running* proxy and was
    verified to discriminate (live proxy `IN FORCE`, fresh `1.0.6` `MISSING`)
    — but @8dd460fb measured what supplies that `IN FORCE`, and it is a
    **`1.0.6`-labelled editable checkout of `bb88bb5`**, not a `1.1.x`

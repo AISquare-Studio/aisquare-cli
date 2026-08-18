@@ -43,8 +43,10 @@ forty lines.** Read the ones you need:
 
 1. **Step 1 of the runbook (§0, the non-editable reinstall) has not been run.**
    Nothing blocks it but the typing; the command was verified working at the
-   current head. Until it runs, `aisquare` on `PATH` is the pyenv build and
-   `resolve_binary` reports 0.
+   current head. Until it runs, `aisquare` on `PATH` is the pyenv build — whose
+   `cli/launch.py` contains **no `resolve_binary` at all** (`grep -c` counts `0`
+   there and `1` on this train), which is the grep the runbook uses to tell the
+   two builds apart.
 
    **What running it gets you, beyond the hazard below.** `aisquare config list`
    exits **1** with a traceback on this machine right now — see "Bugs found and
@@ -427,13 +429,13 @@ Against staging, with real agent processes — not fixtures:
 | One id in four places | observed in all four simultaneously — **and now pinned**: `tests/test_correlation_spine.py` |
 | Per-role separation | 3 roles → 3 distinct trace ids — **pinned** in the same file |
 | Proxy lane ingest | 70/70, then 14/14, all `202` |
-| Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox |
+| Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox — **and re-observed on THIS train `9747e37` (@9bbc8ed7):** `1 queued → 1 sent`, four spans `dispatched`, `retries=0`, inbox byte-identical after. No longer only the pre-shift measurement |
 | Client-lane identity | `agent.run_id` = board session id; `agent.name` = `aisquare-coder`, accepted — that is the *attributed* case; see the fourth name below |
 | Redaction on the wire | standard **and** strict |
 | No secret in the spooled **bytes** | 3 capture paths incl. the prompt hook — **pinned**: `tests/test_no_secret_reaches_the_spool_file.py`, with a redaction-off control |
 | Token-shape coverage | all 11 vendor shapes survive the JSON→OTel round trip |
 | Both lanes, one session | same key carried on both (see the caveat above) — **re-measured at `948772e`**, four places one value. Verify it as "did every record captured *inside* the session carry the key?", not "did every record from this launch": a launch also spools one parent-captured `team_event` whose key is correctly `None` |
-| Proxy build pinned | **the capability, not the number** — `_has_valid_correlation` is in the build now serving, byte-identical to the checkout the receipts used. **Re-measured at `ae805c2`**: the live proxy self-reports **`1.0.6`** — an editable install of `bb88bb5`, whose branch never bumped the version — so `>=1.1.0` is an install target and **not** a check. `IN FORCE` does not invert to "we are on >=1.1.0", and if §3 already prints it, **do not reinstall**. No `1.1.x` artefact exists on this box, so byte-identity to the PyPI release is unverified here; see §3 of the cutover runbook |
+| Proxy build pinned | **the capability, not the number** — `_has_valid_correlation` is in the build now serving, byte-identical to the checkout the receipts used. **Re-measured at `ae805c2`**: the live proxy self-reports **`1.0.6`** — an editable install of `bb88bb5`, whose branch never bumped the version — so `>=1.1.0` is an install target and **not** a check. `IN FORCE` does not invert to "we are on >=1.1.0", and if §3 already prints it, **do not reinstall**. No `1.1.x` artefact is cached on this box, but byte-identity to the released `1.1.0` is now **measured** (@8dd460fb pulled the PyPI wheel): the `_has_valid_correlation` **function** is byte-identical, the **file** is a later build that gates it behind `_is_cc_mode()` — so `1.1.0` reproduces the receipts' behaviour for a `claude_code` proxy but is not the same bytes; see §3 of the cutover runbook |
 
 Everything in that table stops at the gateway boundary. Nothing in it is a
 statement about what the studio shows.
@@ -442,8 +444,13 @@ statement about what the studio shows.
 The first two and the spool-bytes row are now *pinned* — a test fails the gate on the day they stop
 being true. Every other row is a **staging measurement taken once**, most of
 them before a night of changes to the launcher, the store and the hooks; they
-were true when taken and nothing re-checks them. The spine row was in that
-weaker category until this shift, and the guard behind it is deliberately built
+were true when taken and — with three exceptions this shift — nothing re-checks
+them. **The exceptions, each with a receipt above:** *client lane delivery* was
+re-shipped end to end on this train (`9747e37`), *both lanes one session* was
+re-measured at `948772e`, and *proxy build pinned* was re-measured against the
+live proxy at `ae805c2` (its capability, not its version number — see §3 of the
+cutover). The other rows still stand on their original single measurement. The
+spine row was in that weaker category until this shift, and the guard behind it is deliberately built
 so it cannot be quietly narrowed: the four places are data, each records its
 value *and its origin*, and the claims are pinned by name so a deleted check
 fails and an unregistered new one fails too. It does not reach a fixed point —
@@ -465,8 +472,10 @@ creates.** The ordering defect that walk was run to look for does not exist.
 (@8dd460fb, against loopback stubs, all twelve sections accounted for) does not
 establish it either — deliberately. That walk measured **~29 seconds of command
 time, 23 of which is one `pip install`**, with ten of twelve sections walked or
-substituted, §1 not walked at all, and §5b's delivery half unreachable without
-the extra. It declined to put a wall clock on the *reading*, on the grounds that
+substituted, §1 not walked at all, and §5b's delivery half not exercised in that
+walk because the extra was not installed — **since reached: @9bbc8ed7 installed the
+real `aisquare` 1.1.0 from PyPI and shipped a live insight (`9747e37`), so the
+delivery half is demonstrated on this train, not merely deferred.** It declined to put a wall clock on the *reading*, on the grounds that
 an agent's reading speed is not a person's and the number would be a confident
 fabrication.
 

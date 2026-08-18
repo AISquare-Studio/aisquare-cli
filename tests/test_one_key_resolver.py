@@ -36,7 +36,6 @@ which is the machine ``init --explainability`` produces.
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 import pytest
@@ -152,34 +151,94 @@ _MAY_RESOLVE_KEY = {
 }
 
 
-#: Counts ``def`` at a line start — an independent parser, deliberately cruder
-#: than ``ast``. Two copies of one walk agreeing proves nothing.
-_DEF_LINE = re.compile(r"^\s*(?:async\s+)?def\s", re.MULTILINE)
+def _key_resolution_offences(node: ast.FunctionDef) -> list[str]:
+    """Every way this function resolves a key without going through the resolver.
 
+    A callable predicate rather than a loop body, so it can be CONTROLLED.
+    Measured before this existed: adding ``if True: continue`` inside the
+    offender loop made the rule examine no function at all and every meta-check
+    still passed — the train's version and mine both, 9 green each. They all
+    watch THE WALK, and the walk was fine; the rule had stopped consuming it.
 
-def _assert_the_walk_saw_the_whole_file(source: Path, found: list[ast.FunctionDef]) -> None:
-    """Guard the guard, WITH NO NUMBER IN IT.
-
-    These were ``len(functions) >= 30`` and ``>= 20`` — typed constants, which
-    become ``>= 0`` in one keystroke inside checks whose entire job is stopping
-    an AST walk from inspecting nothing. @8dd460fb escaped that category
-    structurally and this follows them: a crude regex counts ``def`` lines and
-    the AST walk must find at least as many. Two independent parsers, so a walk
-    that goes quiet is caught by the one that did not, and nothing to lower.
-
-    ``>=`` rather than ``==`` because ``ast`` legitimately sees more than the
-    regex does — a ``def`` inside a string or a continuation would not start a
-    line. The direction that matters is the walk finding FEWER, which is what a
-    broken walk looks like.
+    The ops rule in this file was already immune because it was extracted and
+    given a positive control, which is how the gap was noticed at all: same
+    file, two rules, one protected.
     """
-    by_regex = len(_DEF_LINE.findall(source.read_text(encoding="utf-8")))
+    found: list[str] = []
+    for inner in ast.walk(node):
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id in ("resolve_api_key", "_stored_api_key")
+        ):
+            found.append(f"{node.name} calls {inner.func.id}() directly")
+        # READING the file, not NAMING it. An earlier rule flagged any
+        # `key_path()` call and named `shipping_state` and `ship_once` — both
+        # correct: they use the path only to build the advice string "or write
+        # <path>", gated on the target naming the DEFAULT variable. A checker
+        # that misdiagnoses correct code is the failure this shift has found
+        # three times in its own instructions; the rule is contents, not mention.
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr in ("read_text", "read_bytes", "open")
+            and isinstance(inner.func.value, ast.Call)
+            and isinstance(inner.func.value.func, ast.Name)
+            and inner.func.value.func.id == "key_path"
+        ):
+            found.append(f"{node.name} reads the key file's contents directly")
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "get"
+            and any(isinstance(arg, ast.Name) and arg.id == "KEY_ENV_VAR" for arg in inner.args)
+        ):
+            found.append(f"{node.name} reads ${'{'}KEY_ENV_VAR{'}'} directly")
+    return found
 
-    assert by_regex, f"no def lines in {source}; this check is describing a ghost"
-    assert len(found) >= by_regex, (
-        f"the AST walk found {len(found)} functions in {source.name} where a "
-        f"plain regex sees {by_regex} — the walk is not seeing the whole file, "
-        "so every rule built on it is inspecting less than it claims"
-    )
+
+#: One synthetic function per shape the rule claims to catch, and one that is
+#: correct. Synthetic rather than real, following @8dd460fb: a control anchored
+#: to production code stops controlling anything the day that code is cleaned up.
+_OFFENDING_BODIES = {
+    "calls the resolver": "def f():\n    return resolve_api_key()\n",
+    "calls the file reader": "def f():\n    return _stored_api_key()\n",
+    "reads the key file": "def f():\n    return key_path().read_text()\n",
+    "reads the env var": "def f():\n    return os.environ.get(KEY_ENV_VAR)\n",
+}
+_CORRECT_BODIES = {
+    "names the key file in advice": 'def f():\n    return f"or write {key_path()}"\n',
+    "reads the resolved key": "def f(target):\n    return target.api_key\n",
+    "asks the one resolver": "def f():\n    return _active_deployment()[2]\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_OFFENDING_BODIES))
+def test_the_rule_still_fires_on_each_shape_it_claims(shape: str) -> None:
+    """The positive control the inline version could not have.
+
+    Without this, ``if True: continue`` in the loop below — or any change that
+    stops the rule matching — leaves a guard that reports a clean module while
+    inspecting nothing.
+    """
+    node = ast.parse(_OFFENDING_BODIES[shape]).body[0]
+    assert isinstance(node, ast.FunctionDef)
+
+    assert _key_resolution_offences(node), f"the rule no longer catches: {shape}"
+
+
+@pytest.mark.parametrize("shape", sorted(_CORRECT_BODIES))
+def test_the_rule_stays_quiet_on_correct_code(shape: str) -> None:
+    """The negative control, so "make the predicate always true" is not a fix.
+
+    Two of these are real functions in the module — naming the key file in
+    advice, and reading the resolved key — and a rule that accuses them is the
+    too-broad failure this file already committed once.
+    """
+    node = ast.parse(_CORRECT_BODIES[shape]).body[0]
+    assert isinstance(node, ast.FunctionDef)
+
+    assert not _key_resolution_offences(node), f"the rule now accuses correct code: {shape}"
 
 
 def test_there_is_exactly_one_place_that_resolves_a_key() -> None:
@@ -191,41 +250,13 @@ def test_there_is_exactly_one_place_that_resolves_a_key() -> None:
     ``resolve_api_key``, or read the key file.
     """
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-    offenders: list[str] = []
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef) or node.name in _MAY_RESOLVE_KEY:
-            continue
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Name)
-                and inner.func.id in ("resolve_api_key", "_stored_api_key")
-            ):
-                offenders.append(f"{node.name} calls {inner.func.id}() directly")
-            # READING the file, not NAMING it. My first rule flagged any
-            # `key_path()` call and named `shipping_state` and `ship_once` —
-            # both correct: they use the path only to build the advice string
-            # "or write <path>", and both already gate it on the target naming
-            # the DEFAULT variable. A checker that misdiagnoses correct code is
-            # the failure this shift has now found three times in its own
-            # instructions; the rule is contents, not mention.
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr in ("read_text", "read_bytes", "open")
-                and isinstance(inner.func.value, ast.Call)
-                and isinstance(inner.func.value.func, ast.Name)
-                and inner.func.value.func.id == "key_path"
-            ):
-                offenders.append(f"{node.name} reads the key file's contents directly")
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr == "get"
-                and any(isinstance(arg, ast.Name) and arg.id == "KEY_ENV_VAR" for arg in inner.args)
-            ):
-                offenders.append(f"{node.name} reads ${'{'}KEY_ENV_VAR{'}'} directly")
+    offenders = [
+        offence
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name not in _MAY_RESOLVE_KEY
+        for offence in _key_resolution_offences(node)
+    ]
 
     assert not offenders, (
         "these resolve a key without going through the one resolver, which is "
@@ -238,7 +269,11 @@ def test_the_guard_actually_inspects_something() -> None:
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
 
-    _assert_the_walk_saw_the_whole_file(SOURCE, functions)
+    # No typed floor here on purpose. A broken walk yields an empty set, which
+    # cannot be a superset of a non-empty allow list, so the assertion below
+    # already fails on it — VERIFIED by neutralising a `>= 30` floor AND breaking
+    # the walk together: this test still failed. A number would be the
+    # constant-that-can-be-lowered category (@8dd460fb), earning nothing.
     assert {n.name for n in functions} >= _MAY_RESOLVE_KEY, (
         "the allow list names functions that no longer exist, so it excuses nothing"
     )
@@ -327,7 +362,9 @@ def test_the_ops_walk_inspects_something_and_the_rule_can_match() -> None:
     tree = ast.parse(OPS_SOURCE.read_text(encoding="utf-8"))
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
 
-    _assert_the_walk_saw_the_whole_file(OPS_SOURCE, functions)
+    # No typed floor, same reason as above, and here the rule-still-matches
+    # assertion at the end of this function is a second cover: a broken walk
+    # makes its `next(...)` raise rather than pass.
     assert {n.name for n in functions} >= _OPS_MAY_RESOLVE_KEY, (
         "the ops allow list names functions that no longer exist"
     )

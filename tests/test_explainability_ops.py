@@ -142,7 +142,10 @@ def test_a_target_folds_its_overrides_onto_the_defaults() -> None:
     target = ops.resolve_target(settings, env={"PROD_KEY": SECRET})
     assert target.gateway_url == "https://prod.example"  # trailing slash dropped
     assert target.proxy_url == "http://127.0.0.1:9191"
-    assert target.agent_names == ("acme-planner",)
+    # "acme-cli" is FALLBACK_ROLE through this target's own template, not a
+    # hardcoded name: the ship path emits it whenever the board cannot say
+    # whose a Run is, so the roster has to carry it or those spans 409.
+    assert target.agent_names == ("acme-planner", "acme-cli")
     assert target.api_key == SECRET
 
 
@@ -656,7 +659,19 @@ def test_register_prints_each_identity_with_its_publication_id(
     posted = seen[0]
     assert posted["headers"]["x-api-key"] == SECRET
     assert "authorization" not in posted["headers"]
-    assert posted["body"] == {"agents": ["aisquare-planner", "aisquare-coder", "aisquare-runner"]}
+    # The fourth name is the point: `register` must declare every identity the
+    # CLI can emit, and `_agent_name_for` falls back to FALLBACK_ROLE for any
+    # Run the board cannot attribute. Registering is idempotent, so adding it
+    # costs nothing and its absence costs the spans permanently (409
+    # no_agent_identity is not retryable).
+    assert posted["body"] == {
+        "agents": [
+            "aisquare-planner",
+            "aisquare-coder",
+            "aisquare-runner",
+            "aisquare-cli",
+        ]
+    }
 
 
 def test_register_refuses_before_it_reaches_the_network(runner: CliRunner) -> None:
@@ -765,10 +780,14 @@ def test_register_renders_the_same_verdict_in_both_forms(
 
     payload = json.loads(machine.stdout)
     assert payload["target"] == "tst"
+    # aisquare-cli joins the null case the roster deliberately does not answer
+    # for — which is the right side of this test to land on, since the fallback
+    # identity is exactly the one an operator is most likely to have missed.
     assert payload["publications"] == {
         "aisquare-planner": "101",
         "aisquare-coder": "102",
         "aisquare-runner": None,
+        "aisquare-cli": None,
     }, payload
 
     # The human rendering says the same two things, in its own words.

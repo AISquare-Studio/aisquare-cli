@@ -506,6 +506,16 @@ locally), and that endpoint returns `403` with the workspace key in our env file
 **Have a studio-scoped key or a dashboard/human JWT ready before you start** —
 the ingest key in `explainability-prod.env` cannot do this step.
 
+> **That credential has a second use, and it is the only instrument for it.**
+> Attaching the rule book is what this section needs it for. It is *also* the
+> only way to **verify** two of the things this document says nobody has
+> checked: whether board rows join gateway Runs on a shared key, and whether
+> runs are governed rather than merely traced. Both come from one call,
+> `GET /v1/studios/{studio_id}/ui/runs` — see §5c, hop 4. `session_id` appears
+> on exactly one route in the entire published surface, so **if this credential
+> is not provisioned there is no workaround to reach for.** Worth knowing while
+> you decide how urgently to get it.
+
 ### The order that actually works
 
 **1a. Register the roster.** **[unverified-prod]** — the auth shape is
@@ -1772,10 +1782,38 @@ One id, three places, none of them needing the gateway.
 > ⚠️ **HOP 4 IS BLOCKED AND THAT IS BY DESIGN, NOT BY OVERSIGHT.** Reading the
 > Run back from the studio — confirming the gateway holds a Run whose id is the
 > one above — needs a **studio-scoped** credential. That is
-> `tsk_01kzdee4pjw8e0ep2g968ejsq6`, and until it closes **every delivery claim
-> in this document stops at "the gateway accepted the bytes"**. Three hops
-> demonstrated locally is not the same as the join being observed end to end,
-> and nothing here should be read as upgrading that.
+> `tsk_01kzdee4pjw8e0ep2g968ejsq6`. Three hops demonstrated locally is not the
+> same as the join being observed end to end, and nothing here should be read as
+> upgrading that.
+>
+> **But the call that closes it is now named, and it is exactly one.**
+> **[verified-stg, `9bbc8ed7` + `8dd460fb`, 2026-08-18]** The board's key is a
+> first-class field on the gateway's Run record — `session_id` on
+> `UIRunListItem` — returned by:
+>
+> ```text
+> GET /v1/studios/{studio_id}/ui/runs        # 403 with a workspace key
+> ```
+>
+> With a studio-scoped credential, compare each Run's `session_id` against the
+> board's session ids and clause 3 is closed end to end. **The same response
+> also answers "traced but ungoverned"** — each Run carries `is_governed` and a
+> block of `policy_*` and `runtime_*` counters. One call, two of the three
+> things this document says nobody has checked.
+>
+> ⚠️ **There is no credential-free substitute, and that is measured rather than
+> assumed.** `session_id` appears in exactly two schemas across the whole
+> published surface — `UIRunListItem` and its wrapper — and exactly one route
+> returns either. §4c's `credits/usage/by-run` is workspace-scoped and reachable,
+> but its Run rows do **not** carry `session_id`, which is precisely why the join
+> stays invisible there. So the studio credential is **necessary** for the join,
+> not merely convenient: if it is not provisioned, there is nothing else to reach
+> for.
+>
+> ⚠️ **Present in the schema is not populated in the row.** Neither of us has
+> *seen* a `session_id` value — the route refuses us. If it comes back null for
+> your Runs, that is a different defect from the one this section describes, and
+> it is the first thing to check once the credential exists.
 >
 > **An earlier version of this note called the key "write-only". It is not** —
 > it is *workspace*-scoped, which fails differently and points at a different

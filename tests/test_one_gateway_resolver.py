@@ -127,17 +127,7 @@ def test_only_the_named_functions_resolve_a_gateway() -> None:
     A guard that flagged message strings would be switched off by the next
     person to touch the file.
     """
-    offenders: list[str] = []
-    for module in (SERVICE, OPS):
-        tree = ast.parse(module.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) or node.name in _MAY_RESOLVE:
-                continue
-            for inner in ast.walk(node):
-                if _reads_configured_gateway(inner):
-                    offenders.append(f"{module.name}:{node.name} reads a configured gateway_url")
-                elif _reads_gateway_environment(inner):
-                    offenders.append(f"{module.name}:{node.name} reads $GATEWAY_ENV_VAR")
+    offenders = _offenders_in(SERVICE) + _offenders_in(OPS)
 
     assert not offenders, (
         "these resolve a gateway without going through the one resolver, which "
@@ -174,6 +164,37 @@ def test_the_guard_is_looking_at_something() -> None:
 _CONFIG_NAMES = {"settings", "config", "resolved_settings"}
 
 
+def _offenders_in(module: Path, source: str | None = None) -> list[str]:
+    """Every function in `module` that resolves a gateway without the resolver.
+
+    EXTRACTED SO A CONTROL CAN REACH IT, which is the whole point. This loop
+    used to live inline in the test body, and @9bbc8ed7 found the consequence in
+    the sibling guard: one `continue` inside it makes the rule examine nothing,
+    report no offender, and be indistinguishable from a clean module. Every
+    meta-check in this file passed that sabotage, because they all watched the
+    WALK — "the walk found functions", "the allow list names functions that
+    exist" — and the walk was fine. THE RULE HAD STOPPED CONSUMING IT.
+
+    A rule inline in a test body cannot be called with known-bad input, so it
+    cannot be controlled. Out here it can, and the controls below do.
+
+    `source` overrides the file's contents so controls can pass synthetic
+    modules; anchoring a control to production code stops controlling anything
+    the day that code is cleaned up.
+    """
+    text = module.read_text(encoding="utf-8") if source is None else source
+    found: list[str] = []
+    for node in ast.walk(ast.parse(text)):
+        if not isinstance(node, ast.FunctionDef) or node.name in _MAY_RESOLVE:
+            continue
+        for inner in ast.walk(node):
+            if _reads_configured_gateway(inner):
+                found.append(f"{module.name}:{node.name} reads a configured gateway_url")
+            elif _reads_gateway_environment(inner):
+                found.append(f"{module.name}:{node.name} reads $GATEWAY_ENV_VAR")
+    return found
+
+
 def _reads_configured_gateway(node: ast.AST) -> bool:
     """`settings.gateway_url` / `config.explainability.gateway_url` / `load_config()…`.
 
@@ -206,3 +227,61 @@ def _reads_gateway_environment(node: ast.AST) -> bool:
 #: a URL from the operator or the environment and records it, which is where a
 #: gateway ENTERS the machine rather than where one is chosen.
 _MAY_RESOLVE = {"_active_deployment", "resolve_target", "configure_shipping"}
+
+
+#: Synthetic modules, one per shape the rule claims to catch, plus correct code
+#: it must NOT accuse. Synthetic rather than real functions on purpose: a
+#: control anchored to production code stops controlling anything the day that
+#: code is cleaned up, and two of these shapes have no live instance to point at.
+_CAUGHT = {
+    "settings attribute": "def f():\n    return settings.gateway_url\n",
+    "config attribute": "def f():\n    return config.explainability.gateway_url\n",
+    "loaded config": "def f():\n    return load_config().explainability.gateway_url\n",
+    "environment read": 'def f():\n    return os.environ.get(GATEWAY_ENV_VAR, "")\n',
+}
+_ALLOWED = {
+    "a resolved target": "def f():\n    return target.gateway_url\n",
+    "naming it in a message": 'def f():\n    return f"set {GATEWAY_ENV_VAR}"\n',
+    "setting it for the SDK": "def f():\n    os.environ[GATEWAY_ENV_VAR] = url\n",
+    "the resolver itself": "def _active_deployment():\n    return settings.gateway_url\n",
+    "the writer": "def configure_shipping():\n    return os.environ.get(GATEWAY_ENV_VAR)\n",
+}
+
+
+def test_the_rule_still_catches_every_shape_it_claims() -> None:
+    """POSITIVE controls, and the reason this file needed them.
+
+    @9bbc8ed7 found that one `continue` inside the offender loop of the sibling
+    guard made it examine nothing while every meta-check stayed green — because
+    they all watched the WALK, and the walk was fine. Reproduced here before
+    fixing: the same line made all four of this file's tests pass.
+
+    A rule is only controlled by being CALLED WITH KNOWN-BAD INPUT. Each shape
+    is asserted separately so a failure says which one stopped being caught,
+    rather than "the rule is broken".
+    """
+    missed = [name for name, source in _CAUGHT.items() if not _offenders_in(SERVICE, source)]
+
+    assert not missed, (
+        f"the rule no longer catches: {missed}. It cannot report a clean module "
+        "if it cannot recognise a dirty one — a guard that examines nothing is "
+        "indistinguishable from a guard that finds nothing."
+    )
+
+
+def test_the_rule_still_permits_the_shapes_that_are_correct() -> None:
+    """NEGATIVE controls, so "make the predicate always true" is not a fix.
+
+    Without these, the cheapest way to pass the positive controls above is a
+    rule that accuses everything — which would then flag `target.gateway_url`,
+    read a dozen times in the ops module, and the guard would be deleted rather
+    than fixed. Two of these shapes are real code in the module today.
+    """
+    accused = {name: _offenders_in(SERVICE, source) for name, source in _ALLOWED.items()}
+
+    wrong = {name: hits for name, hits in accused.items() if hits}
+    assert not wrong, (
+        f"the rule now accuses correct code: {wrong}. Reading a RESOLVED target, "
+        "naming the variable in a message, and setting it for the SDK are all "
+        "fine; only reading a gateway from config or environment is not."
+    )

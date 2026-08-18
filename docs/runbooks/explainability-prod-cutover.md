@@ -835,12 +835,19 @@ identity: aisquare-{role}
 agents:   aisquare-planner, aisquare-coder, aisquare-runner
 probe:    claude_code proxy healthy at http://127.0.0.1:9190
 shipping: off — nothing is captured (aisquare init --explainability to turn it on)
-spool:    0 queued, 0 sent, 0 dead-letter
+spool:    0 queued, 0 sent, 0 dead-letter — /home/you/.aisquare/explainability/queue
 redaction: standard — credentials are removed from insights leaving this machine (paths and hostnames are kept); local capture keeps what you typed
 exit=0
 ```
 
-The two lines that depend on YOUR environment are `gateway` and `key`; the
+The path after the spool counters is where those records actually sit, and it
+is there because the counter says *spool* while the directory is `queue` — a
+mismatch that cost a reviewer ninety minutes and produced a false "the spool is
+empty" while the record was on disk. Read the counter; if you go looking, that
+is the directory.
+
+The two lines that depend on YOUR environment are `gateway`, `key` and that
+path; the
 sandbox run that produced this had neither set and showed `(unset)` and `is NOT
 set`. Everything else is what a correctly wired machine prints.
 

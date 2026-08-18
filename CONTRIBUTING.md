@@ -222,17 +222,28 @@ Two mechanical rules earned the hard way:
    cleaned up — and controlling a falsifiability guard by gutting a real test
    means shipping the defect to demonstrate it.
 
-One guard that cannot be built, recorded so nobody spends a cycle on it twice.
-The runbooks quote CLI output verbatim, and those quotes rot — one row quoted a
-message (`the context store is corrupt`) that the CLI has never printed. A static
-check that every quoted line exists in `src/` **does not work**, measured twice:
-literal matching fails on interpolation (`✓ tracing enabled for target 'stg'` is
-an f-string in the source, so a `grep -F` reports it missing while the command
-prints it exactly), and truncating to the pre-interpolation prefix leaves
-fragments so short they check nothing — `explainability` matches 209 places. The
-working instrument is dynamic: **run the command and compare**, which is what the
-`[verified-train]` markers in the runbook are for. If you find a quoted string
-that looks wrong, run it before filing it.
+One guard that cannot be built **for quoted output**, and one that can be built
+for quoted commands — the distinction was missed here once and is worth keeping
+separate.
+
+*Quoted output* rots: one runbook row quoted a message (`the context store is
+corrupt`) the CLI has never printed. A static check that every quoted line exists
+in `src/` **does not work**, measured twice: literal matching fails on
+interpolation (`✓ tracing enabled for target 'stg'` is an f-string in the source,
+so a `grep -F` reports it missing while the command prints it exactly), and
+truncating to the pre-interpolation prefix leaves fragments so short they check
+nothing — `explainability` matches 209 places. The working instrument is dynamic:
+**run the command and compare**, which is what the `[verified-train]` markers are
+for. If a quoted string looks wrong, run it before filing it.
+
+*Quoted commands* are a different surface and the interpolation argument does
+**not** carry over to them — that over-generalisation stood in this file for
+several cycles before it was measured. The handoff's inline spans hold six
+`aisquare …` commands and **none is interpolated**; the fenced-block guard
+deliberately ignores inline code, so nothing checked them. Verified by hand: all
+six resolve against the command tree, with a known-bad control. So the check is
+buildable there — it is simply not built, and that is a choice rather than an
+impossibility.
 
 On recorded numbers: a floor like `>= 900` is a constant anyone can lower while
 doing something else, so prefer a property with no number in it — and before

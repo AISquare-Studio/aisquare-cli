@@ -448,7 +448,7 @@ set -a; source /path/to/explainability-prod.env; set +a   # see §2
 curl -sS -X POST "$EXPLAINABILITY_GATEWAY_URL/v1/agents/register-roster" \
   -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"agents": ["aisquare-planner", "aisquare-coder", "aisquare-runner"]}'
+  -d '{"agents": ["aisquare-planner", "aisquare-coder", "aisquare-runner", "aisquare-cli"]}'
 ```
 
 The response carries a **`publication_id` per agent**. That is the id of the
@@ -460,6 +460,27 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > (**[verified-train]**), so the names the proxy will present are
 > `aisquare-planner`, `aisquare-coder`, `aisquare-runner`. A name that is not
 > registered is rejected at ingest with `409 no_agent_identity`.
+>
+> **`aisquare-cli` is the fourth name and it is not a typo.** The CLIENT lane
+> attributes each Run to the board role of its session, and falls back to the
+> role `cli` whenever the board cannot say whose a Run is — an unattributed
+> run, a session missing from the store, a roleless row, or a store read that
+> threw. Those are the sessions nobody is watching, so leaving the name out
+> loses exactly the data hardest to notice. **[verified-train]** on this tree:
+> `_agent_name_for(settings, UNATTRIBUTED_RUN)` returns `aisquare-cli` while
+> the roster held only the three roles.
+>
+> And unlike a `402`, this one does not queue and drain: the pinned SDK
+> (`bb88bb5`, `aisquare` 1.0.6) says a `409 no_agent_identity` row "can NEVER
+> be delivered by retrying", so the sweeper dead-letters it. **Registering is
+> idempotent** — a name already registered returns its existing
+> `publication_id` — so the fourth costs nothing and its absence is permanent.
+>
+> **Rather than retyping this list, let the CLI derive it:** `aisquare
+> explainability register` builds the roster from `explainability.roles` plus
+> the fallback and POSTs the same body, so it cannot drift from what the CLI
+> actually emits. The curl above is kept because it shows the auth shape and
+> runs before anything is configured.
 
 **1b. Bind those agents to the studio, in the studio UI.** This is the step that
 makes routing resolve. Open the studio in the dashboard (human JWT required —

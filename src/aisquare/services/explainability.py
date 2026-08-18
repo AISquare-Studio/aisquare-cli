@@ -1008,6 +1008,20 @@ def _group_by_session(batch: list[Path]) -> dict[str, list[Path]]:
 #: Runs is exactly the fragmentation the run doctrine forbids.
 UNATTRIBUTED_RUN = "aisquare-cli-unattributed"
 
+#: The role a Run falls back to when the board cannot say whose it is — an
+#: unattributed run, a session missing from the store, a roleless row, or a
+#: store read that threw. It is a ROLE and not a name on purpose: it goes
+#: through ``agent_name_template`` like every other, so a machine with its own
+#: template registers and emits the same string.
+#:
+#: ``ResolvedTarget.agent_names`` appends it to the roster. That is not
+#: decoration — an identity the gateway does not know is rejected 409
+#: ``no_agent_identity``, which the SDK's own doctor says "can NEVER be
+#: delivered by retrying", so those spans dead-letter instead of queueing.
+#: Whatever this renders to MUST be registered, which is why both sides read
+#: this one constant rather than each spelling "cli" for themselves.
+FALLBACK_ROLE = "cli"
+
 #: Spool schemas this sweeper can replay. A record from a NEWER CLI is
 #: dead-lettered rather than guessed at — shipping a span whose fields you have
 #: mis-read is worse than not shipping it, because it looks delivered. Older
@@ -1032,20 +1046,20 @@ def _agent_name_for(settings: ExplainabilitySettings, session_id: str) -> str:
     role up costs a store read, which is fine HERE: the sweeper is off the
     primary path, which is the entire reason it exists.
     """
-    role = "cli"
+    role = FALLBACK_ROLE
     if session_id != UNATTRIBUTED_RUN:
         try:
             with store_session() as store:
                 session = store.get_session(session_id)
             if session is not None and session.role:
                 role = session.role
-        except Exception:  # an unknown role still ships, as "cli"
-            role = "cli"
+        except Exception:  # an unknown role still ships, as the fallback
+            role = FALLBACK_ROLE
     try:
         name = settings.agent_name_template.format(role=role)
     except (KeyError, IndexError, ValueError):
         name = f"aisquare-{role}"
-    return name if _SAFE_ROLE.match(name) else "aisquare-cli"
+    return name if _SAFE_ROLE.match(name) else f"aisquare-{FALLBACK_ROLE}"
 
 
 @dataclass(frozen=True)

@@ -53,7 +53,12 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
-from aisquare.services.explainability import ProxyProbe, install_hint, probe_proxy
+from aisquare.services.explainability import (
+    FALLBACK_ROLE,
+    ProxyProbe,
+    install_hint,
+    probe_proxy,
+)
 
 #: Distribution that provides the SDK, and the console script it installs. The
 #: script is the collision-free way to reach it: it runs in whatever
@@ -118,12 +123,19 @@ class ResolvedTarget:
         the caller is a diagnostic, and a config typo must not stop it from
         reporting the other nine things that are wrong.
         """
-        names = []
-        for role in self.roles:
+        names: list[str] = []
+        # FALLBACK_ROLE last and deduped: the ship path emits it whenever the
+        # board cannot say whose a Run is, and an identity the gateway does not
+        # know is rejected 409 no_agent_identity — permanently, not
+        # transiently. The three role names keep their order because §1a of the
+        # cutover runbook quotes this list.
+        for role in (*self.roles, FALLBACK_ROLE):
             try:
-                names.append(self.agent_name_template.format(role=role))
+                name = self.agent_name_template.format(role=role)
             except (KeyError, IndexError, ValueError):
                 continue
+            if name not in names:
+                names.append(name)
         return tuple(names)
 
 

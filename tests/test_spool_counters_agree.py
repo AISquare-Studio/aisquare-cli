@@ -31,7 +31,14 @@ from aisquare.cli.app import app
 from aisquare.core import insights, outbox
 from aisquare.core.config import AppConfig, save_config
 
-_SPOOL_LINE = re.compile(r"^spool:\s+(\d+) queued, (\d+) sent, (\d+) dead-letter$", re.MULTILINE)
+#: The counters, wherever they sit on the line. The ``$`` anchor used to end at
+#: ``dead-letter``, and the line now carries the queue directory after them —
+#: which broke this guard without touching what it asserts. The suffix is
+#: deliberately tolerated and the COUNTER PHRASE is not: the three numbers, in
+#: that order, with those words, still have to be there for a match.
+_SPOOL_LINE = re.compile(
+    r"^spool:\s+(\d+) queued, (\d+) sent, (\d+) dead-letter(?: .*)?$", re.MULTILINE
+)
 
 
 def _configure_shipping() -> None:

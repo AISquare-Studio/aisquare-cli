@@ -31,6 +31,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail
+from aisquare.core import outbox
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.services import explainability_ops as ops
@@ -73,6 +74,20 @@ def status(
     proxy = ops.proxy_state(target, on=settings.enabled)
     state = shipping_state(target_name)
     level = config.redaction.level
+    # WHERE the counters count, resolved once for both renderings. The counter
+    # says "spool" and the directory is `queue/`: the word is this codebase's
+    # (insight_sweeper, "drain the spool") and the path is not it, which cost a
+    # senior engineer ninety minutes and produced a false "the spool is empty"
+    # while the record was on disk. Nothing shipped points at a WRONG path —
+    # the gap was that the tool never said the right one.
+    #
+    # Fail open: this is decoration on a status line, and `status`'s exit code
+    # has exactly one documented meaning (tracing on, proxy refusing). A home
+    # that cannot be resolved costs the path, never the command.
+    try:
+        queue_dir: str | None = str(outbox.queue_dir())
+    except Exception:
+        queue_dir = None
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -107,6 +122,11 @@ def status(
                         "queued": state.queued,
                         "sent": state.sent,
                         "dead": state.dead,
+                        # Beside the counters rather than at the top level: a
+                        # script that reads the numbers is the one that wants
+                        # the directory, and a second home for the same subject
+                        # would give this payload two answers.
+                        "queue_dir": queue_dir,
                     },
                 },
                 separators=(",", ":"),
@@ -124,7 +144,13 @@ def status(
         typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
         typer.echo(f"probe:    {proxy.summary}")
         typer.echo(f"shipping: {state.reason}")
-        typer.echo(f"spool:    {state.queued} queued, {state.sent} sent, {state.dead} dead-letter")
+        # On THIS line and not a new one: "how much is queued" and "where is it"
+        # are one question, and the empty case is exactly when someone goes
+        # looking — so the path is printed at 0 queued too.
+        located = f" — {queue_dir}" if queue_dir else ""
+        typer.echo(
+            f"spool:    {state.queued} queued, {state.sent} sent, {state.dead} dead-letter{located}"
+        )
         # Directly under the spool counts on purpose: "how much am I sending"
         # and "what is in it" are one question, and an operator who reads the
         # first without the second is the person this line exists for.

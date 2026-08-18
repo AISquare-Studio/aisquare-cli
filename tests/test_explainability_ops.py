@@ -696,3 +696,68 @@ def test_doctor_live_reports_the_round_trip_to_the_operator(
     # The dead proxy is a real failure once tracing is on, so doctor exits 1 —
     # and still printed the gateway verdict above it rather than bailing early.
     assert result.exit_code == 1
+
+
+def test_register_renders_the_same_verdict_in_both_forms(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--json register`` answered in JSON on five failure branches and in
+    prose on the one that succeeds.
+
+    Every guard clause in ``register`` goes through the shared ``fail`` helper —
+    unconfigured, no key, bad template, no agents, refused — so the command
+    looked like a good citizen of the machine-readable contract from every
+    angle an operator could test it before §1 actually worked. This is the same
+    shape ``explainability env`` had, and it survived the sweep for the same
+    reason: a success path behind a gateway is one no sweep can reach without
+    standing one up.
+
+    Asserted as AGREEMENT between the renderings, and the roster deliberately
+    answers for only TWO of the three agents, so the null case — registered,
+    no publication id — is exercised rather than assumed.
+    """
+    from aisquare.cli.app import app as cli_app
+
+    roster = {
+        "agents": [
+            {"name": "aisquare-planner", "publication_id": 101},
+            {"name": "aisquare-coder", "publication_id": 102},
+        ]
+    }
+    server, url, _seen = _gateway({"/v1/agents/register-roster": (200, roster)})
+    try:
+        # Not credential-shaped: a literal that looked like a key was rejected
+        # by push protection on this repo once, and the stub accepts anything.
+        monkeypatch.setenv("AISQUARE_LOCAL_STUB_KEY", "local-stub")
+        save_config(
+            AppConfig(
+                explainability=ExplainabilitySettings(
+                    enabled=True,
+                    targets={
+                        "tst": ExplainabilityTarget(
+                            gateway_url=url, api_key_env="AISQUARE_LOCAL_STUB_KEY"
+                        )
+                    },
+                    target="tst",
+                )
+            )
+        )
+        human = runner.invoke(cli_app, ["explainability", "register"])
+        machine = runner.invoke(cli_app, ["--json", "explainability", "register"])
+    finally:
+        server.shutdown()
+
+    assert human.exit_code == 0, human.output
+    assert machine.exit_code == 0, machine.output
+
+    payload = json.loads(machine.stdout)
+    assert payload["target"] == "tst"
+    assert payload["publications"] == {
+        "aisquare-planner": "101",
+        "aisquare-coder": "102",
+        "aisquare-runner": None,
+    }, payload
+
+    # The human rendering says the same two things, in its own words.
+    assert "aisquare-planner: publication_id 101" in human.stdout, human.stdout
+    assert "aisquare-runner: registered" in human.stdout, human.stdout

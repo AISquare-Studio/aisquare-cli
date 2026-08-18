@@ -29,12 +29,24 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core.paths import config_path
 from tests.proxy_stub import healthy_proxy
+from tests.test_explainability_ops import _gateway
 from tests.test_no_traceback_in_a_configured_home import _swept, configured_home  # noqa: F401
 
 #: Commands whose stdout is a DOCUMENT or a PROTOCOL, not a report. ``--json``
 #: selects how the CLI reports; it does not reformat a payload whose shape
 #: someone else parses. Each entry names what reads it, because "allowed" with
 #: no reason is how an allow list becomes a hiding place.
+#: A roster answer with BOTH shapes the human output distinguishes: an agent
+#: with a publication id, and one without. A stub that returned ids for all of
+#: them would leave the second branch of the renderer unexercised.
+_ROSTER_ROUTE = "/v1/agents/register-roster"
+_ROSTER_BODY = {
+    "agents": [
+        {"name": "aisquare-planner", "publication_id": 101},
+        {"name": "aisquare-coder", "publication_id": 102},
+    ]
+}
+
 NOT_A_REPORT = {
     "context export": "emits the markdown context document; --json would corrupt the export",
     "ctx export": "alias of context export",
@@ -56,6 +68,7 @@ def in_both_proxy_states(
     request: pytest.FixtureRequest,
     configured_home: Path,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
     runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[str]:
     """The configured machine with the proxy down, and again with it answering.
 
@@ -77,15 +90,42 @@ def in_both_proxy_states(
         yield request.param
         return
 
+    server, gateway, _seen = _gateway({_ROSTER_ROUTE: (200, _ROSTER_BODY)})
     with healthy_proxy() as url:
-        enabled = runner.invoke(app, ["explainability", "enable", "--proxy-url", url])
-        assert enabled.exit_code == 0, enabled.output
-        traced = runner.invoke(app, ["explainability", "env", "coder"])
-        assert traced.exit_code == 0, (
-            "the stub proxy is not being seen as healthy, so this parameter is "
-            f"the proxy-down case wearing another name: {traced.output}"
-        )
-        yield request.param
+        try:
+            # Not credential-shaped on purpose: a literal that LOOKS like a key
+            # was rejected by push protection on this repo once, and nothing
+            # here needs entropy — the stub accepts any value.
+            monkeypatch.setenv("AISQUARE_LOCAL_STUB_KEY", "local-stub")
+            enabled = runner.invoke(
+                app,
+                [
+                    "explainability",
+                    "enable",
+                    "--proxy-url",
+                    url,
+                    "--gateway-url",
+                    gateway,
+                    "--key-env",
+                    "AISQUARE_LOCAL_STUB_KEY",
+                ],
+            )
+            assert enabled.exit_code == 0, enabled.output
+
+            # The premise, twice, because this parameter now claims two things.
+            traced = runner.invoke(app, ["explainability", "env", "coder"])
+            assert traced.exit_code == 0, (
+                "the stub proxy is not being seen as healthy, so this parameter "
+                f"is the proxy-down case wearing another name: {traced.output}"
+            )
+            registered = runner.invoke(app, ["explainability", "register"])
+            assert registered.exit_code == 0, (
+                "the stub gateway is not accepting the roster, so `register` is "
+                f"still taking a failure branch here: {registered.output}"
+            )
+            yield request.param
+        finally:
+            server.shutdown()
 
 
 def test_json_stdout_is_empty_or_parseable(in_both_proxy_states: str, runner: CliRunner) -> None:

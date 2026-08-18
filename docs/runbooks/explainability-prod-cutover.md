@@ -1905,8 +1905,12 @@ Healthy: `delivery_backlog [OK] dispatched=N`, `gateway_live [OK]`,
 > installed anywhere on the machine". If the bare name is not found, the SDK is
 > not installed; that is §5b's `explainability` extra, not a path problem.
 
-**Known noise — do NOT treat as red** (**[verified-stg]**, all three seen on a
-fully healthy run):
+**Known noise — do NOT treat as red.** **[verified-stg]** on a fully healthy
+run. **These tables are a catalog across every tool this section covers, not the
+output of any one command** — the first three rows are
+`explainability-doctor`'s, the fourth is the proxy's log, the fifth is the test
+suite. Running the command above shows you the first three and none of the
+others, which is correct and not a missing check:
 
 | Line | Verdict |
 |---|---|
@@ -1916,7 +1920,10 @@ fully healthy run):
 | `HEAD /api/hello … 405 Method Not Allowed` | expected — a client probe the proxy does not implement |
 | `pydantic_settings IncompleteFieldDefinitionWarning` in the test suite | pre-existing, unrelated |
 
-**Genuinely red:**
+**Genuinely red** — same catalog, spanning `explainability-doctor`,
+`aisquare doctor --live`, the proxy log and the CLI's own errors. The credit-band
+row in particular comes from `aisquare doctor --live` (§5), not from the command
+above:
 
 | Line | Meaning |
 |---|---|

@@ -43,8 +43,10 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.services import explainability as service
+from aisquare.services import explainability_ops as ops
 
 SOURCE = Path(service.__file__)
+OPS_SOURCE = Path(ops.__file__)
 
 _FAKE_FILE_KEY = "-".join(["not", "a", "real", "file", "key"])
 _CUSTOM_VAR = "MY_KEY_VAR"
@@ -209,3 +211,97 @@ def test_the_guard_actually_inspects_something() -> None:
     assert {n.name for n in functions} >= _MAY_RESOLVE_KEY, (
         "the allow list names functions that no longer exist, so it excuses nothing"
     )
+
+
+#: Allowed to resolve a key IN ``explainability_ops``. ``resolve_target`` is the
+#: resolver; nothing else may read the variable a target names.
+#:
+#: Reading the RESOLVED ``target.api_key`` is fine and must not be flagged —
+#: ``probe_ingest``, ``register_roster`` and ``_check_config`` all do it and are
+#: correct. Accusing them would be the too-broad rule this file already
+#: committed once, when it conflated NAMING the key file with READING it.
+_OPS_MAY_RESOLVE_KEY = {"resolve_target"}
+
+
+def _resolves_from_a_named_variable(node: ast.FunctionDef) -> bool:
+    """True when this function reads ``environ.get(<something>.api_key_env)``.
+
+    An ATTRIBUTE argument, not a Name — which is the whole reason this rule is
+    written separately rather than copied. ``explainability.py`` resolves via
+    ``os.environ.get(KEY_ENV_VAR)``, a module constant; ops resolves via the
+    variable the TARGET names. A guard copied across unchanged would walk ops,
+    match nothing, and pass forever while inspecting nothing.
+    """
+    for inner in ast.walk(node):
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "get"
+            and any(
+                isinstance(arg, ast.Attribute) and arg.attr == "api_key_env" for arg in inner.args
+            )
+        ):
+            return True
+    return False
+
+
+def test_ops_has_exactly_one_place_that_resolves_a_key() -> None:
+    """The half the gateway guard covers and this one did not.
+
+    @8dd460fb's gateway guard walks both modules because ops is "the obvious
+    place a second resolver would appear". The key guard walked one. Both
+    divergences found tonight lived in a READER that never joined the resolver,
+    so the asymmetry is the gap that matters.
+    """
+    tree = ast.parse(OPS_SOURCE.read_text(encoding="utf-8"))
+
+    offenders = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name not in _OPS_MAY_RESOLVE_KEY
+        and _resolves_from_a_named_variable(node)
+    ]
+
+    assert not offenders, (
+        "these resolve a key from a target-named variable without being the "
+        f"resolver: {sorted(offenders)}"
+    )
+
+
+def test_reading_the_resolved_key_is_not_an_offence() -> None:
+    """The rule must not accuse correct code.
+
+    ``probe_ingest`` and ``register_roster`` read ``target.api_key`` — the
+    resolver's OUTPUT — and are exactly what the one-resolver design wants.
+    Measured: they touch a key and must still pass.
+    """
+    tree = ast.parse(OPS_SOURCE.read_text(encoding="utf-8"))
+    by_name = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+    for name in ("probe_ingest", "register_roster", "_check_config"):
+        assert name in by_name, f"{name} no longer exists; this test is describing a ghost"
+        assert not _resolves_from_a_named_variable(by_name[name]), (
+            f"{name} reads the resolved key and must not be flagged as a resolver"
+        )
+
+
+def test_the_ops_walk_inspects_something_and_the_rule_can_match() -> None:
+    """Guard the guard, both halves.
+
+    A walk that finds no functions passes; so does a rule that can never match.
+    The second is the one that bites — the ops rule is deliberately DIFFERENT
+    from the one above it, so "it compiles and passes" says nothing.
+    """
+    tree = ast.parse(OPS_SOURCE.read_text(encoding="utf-8"))
+    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+
+    assert len(functions) >= 20, f"only {len(functions)} functions parsed from {OPS_SOURCE}"
+    assert {n.name for n in functions} >= _OPS_MAY_RESOLVE_KEY, (
+        "the ops allow list names functions that no longer exist"
+    )
+    # The rule matches the one function that really does resolve, so a rule that
+    # matches nothing at all cannot masquerade as a clean module.
+    assert _resolves_from_a_named_variable(
+        next(n for n in functions if n.name == "resolve_target")
+    ), "the ops rule no longer matches the resolver itself, so it matches nothing"

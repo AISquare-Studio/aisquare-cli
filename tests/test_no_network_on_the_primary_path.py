@@ -16,18 +16,22 @@ WHAT AN OPERATOR PAYS per invocation, subprocess, medians of 9 runs:
       tracing on + shipping on      360 ms   (min 341, max 372)
 
 Decomposed so nobody reads 353 ms as a tracing cost: ``python3 -c pass`` 49 ms,
-``aisquare --version`` 326 ms, hook 353 ms. The CLI's import dominates. (An
-earlier revision also derived "the hook's own work is ~27 ms" from that
-subtraction; it is dropped, because the 36 ms floor cited below is larger than
-the 27 ms difference it came from.)
+``aisquare --version`` 326 ms, hook 353 ms. The CLI's import dominates.
 
-THOSE OVERLAPPING RANGES DO NOT BY THEMSELVES RULE ANYTHING OUT. The first
-version of this docstring said only "the difference is noise, and tracing adds
-~0", which lets a reader conclude more than the data supports: it never says
-what effect size the measurement could have DETECTED. @8dd460fb re-measured this
-box at 25 samples and found the BASE measurement alone spreads 36 ms — three of
-us run gates here — so against nine samples a genuine 15 ms cost would have been
-invisible and would have read exactly like zero.
+An earlier revision also derived "the hook's own work is ~27 ms" by subtracting
+326 from 353. THAT FIGURE IS RETRACTED: @8dd460fb characterised this box's
+wall-clock noise floor at **36 ms** between the fastest and slowest sample of a
+single measurement, under three concurrent gate runs — larger than the 27 ms
+difference it was derived from. A subtraction of two medians whose own spreads
+exceed the result does not survive. Use ``-X importtime`` self time for anything
+at this scale, as ``test_import_cost_of_the_integration.py`` now does.
+
+THE SAME FLOOR MEANS THE ROWS ABOVE DO NOT BY THEMSELVES RULE ANYTHING OUT.
+They were stated as OVERLAPPING RANGES, which is why the conclusion survives —
+but the first version of this docstring added "tracing adds ~0", and that says
+nothing about what effect size the measurement could have DETECTED. Against a
+36 ms floor and nine samples, a genuine 15 ms cost would have been invisible and
+would have read exactly like zero.
 
 SO THE BOUND IS STATED, WITH A CONTROL. In-process, which drops process startup
 out of the sample, 60 samples a side:

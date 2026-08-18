@@ -427,7 +427,7 @@ Against staging, with real agent processes — not fixtures:
 | One id in four places | observed in all four simultaneously — **and now pinned**: `tests/test_correlation_spine.py` |
 | Per-role separation | 3 roles → 3 distinct trace ids — **pinned** in the same file |
 | Proxy lane ingest | 70/70, then 14/14, all `202` |
-| Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox |
+| Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox — **and re-observed on THIS train `9747e37` (@9bbc8ed7):** `1 queued → 1 sent`, four spans `dispatched`, `retries=0`, inbox byte-identical after. No longer only the pre-shift measurement |
 | Client-lane identity | `agent.run_id` = board session id; `agent.name` = `aisquare-coder`, accepted — that is the *attributed* case; see the fourth name below |
 | Redaction on the wire | standard **and** strict |
 | No secret in the spooled **bytes** | 3 capture paths incl. the prompt hook — **pinned**: `tests/test_no_secret_reaches_the_spool_file.py`, with a redaction-off control |
@@ -442,8 +442,13 @@ statement about what the studio shows.
 The first two and the spool-bytes row are now *pinned* — a test fails the gate on the day they stop
 being true. Every other row is a **staging measurement taken once**, most of
 them before a night of changes to the launcher, the store and the hooks; they
-were true when taken and nothing re-checks them. The spine row was in that
-weaker category until this shift, and the guard behind it is deliberately built
+were true when taken and — with three exceptions this shift — nothing re-checks
+them. **The exceptions, each with a receipt above:** *client lane delivery* was
+re-shipped end to end on this train (`9747e37`), *both lanes one session* was
+re-measured at `948772e`, and *proxy build pinned* was re-measured against the
+live proxy at `ae805c2` (its capability, not its version number — see §3 of the
+cutover). The other rows still stand on their original single measurement. The
+spine row was in that weaker category until this shift, and the guard behind it is deliberately built
 so it cannot be quietly narrowed: the four places are data, each records its
 value *and its origin*, and the claims are pinned by name so a deleted check
 fails and an unregistered new one fails too. It does not reach a fixed point —
@@ -465,8 +470,10 @@ creates.** The ordering defect that walk was run to look for does not exist.
 (@8dd460fb, against loopback stubs, all twelve sections accounted for) does not
 establish it either — deliberately. That walk measured **~29 seconds of command
 time, 23 of which is one `pip install`**, with ten of twelve sections walked or
-substituted, §1 not walked at all, and §5b's delivery half unreachable without
-the extra. It declined to put a wall clock on the *reading*, on the grounds that
+substituted, §1 not walked at all, and §5b's delivery half not exercised in that
+walk because the extra was not installed — **since reached: @9bbc8ed7 installed the
+real `aisquare` 1.1.0 from PyPI and shipped a live insight (`9747e37`), so the
+delivery half is demonstrated on this train, not merely deferred.** It declined to put a wall clock on the *reading*, on the grounds that
 an agent's reading speed is not a person's and the number would be a confident
 fabrication.
 

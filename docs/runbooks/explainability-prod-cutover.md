@@ -533,11 +533,39 @@ for e in pathlib.Path("/proc").iterdir():
         if "aisquare.explainability.claude_proxy" in argv: print(e.name); break
 EOF
 )
-sudo -n true 2>/dev/null && EXE=$(readlink -f /proc/$PID/exe) || EXE=python
+EXE=$(readlink -f "/proc/$PID/exe" 2>/dev/null) || EXE=python   # no sudo needed for your own
 $EXE -c "import importlib.util as u; src=open(u.find_spec('aisquare.explainability.claude_proxy').origin).read(); print('junk-run suppression:', 'IN FORCE' if '_has_valid_correlation' in src else 'MISSING')"
-# IN FORCE   -> good
-# MISSING    -> you are on <1.1.0; extra Runs will appear in the dataset
+# IN FORCE            -> good
+# MISSING             -> you are on <1.1.0; extra Runs will appear in the dataset
+# ModuleNotFoundError -> $EXE is NOT the proxy's interpreter; see below
 ```
+
+> ⚠️ **[verified-train, @9bbc8ed7 2026-08-18] This line used to gate on `sudo`,
+> and the gate defeated the check it guarded.** It read
+> `sudo -n true … && EXE=$(readlink -f /proc/$PID/exe) || EXE=python`. On a box
+> without passwordless sudo — this one — the test fails and it takes the
+> fallback, `EXE=python`, WHICH IS EXACTLY "whatever you last installed", the
+> thing the comment above says this block exists not to answer for.
+>
+> **The sudo was never needed.** `/proc/<pid>/exe` is readable without privilege
+> for your OWN processes, and you start this proxy yourself:
+>
+> ```text
+> ls -l /proc/20753/exe -> lrwxrwxrwx 1 work work … -> /usr/bin/python3.10
+> that interpreter      -> junk-run suppression: IN FORCE
+> ```
+>
+> Measured against the proxy running on this box: the correct answer was
+> available with no privilege at all, and the sudo gate threw it away and
+> substituted a `ModuleNotFoundError` — a third outcome the two comment lines
+> did not cover. Reading the symlink directly and falling back only when the
+> READ fails keeps the privileged case working and stops inventing a wrong
+> answer in the ordinary one.
+>
+> If you do see `ModuleNotFoundError`, the fallback was taken: `$EXE` has no
+> `aisquare.explainability`, so the answer would have been about your shell's
+> Python rather than the proxy's. Find the proxy's interpreter by hand before
+> trusting anything this block prints.
 
 Verified to discriminate: the live proxy reports `IN FORCE`; the same check run
 against a fresh `aisquare==1.0.6` reports `MISSING`.

@@ -153,37 +153,38 @@ because conflict markers had nearly shipped: it reported every file clean while
 matching nothing, restoring exactly the hole it existed to close, behind a green
 suite. Assume the half you did not think of is a rule.
 
-**Four of the five shapes, one remedy — measured, not assumed.** Four of the
-shapes above are ways a rule goes *blind*; they are not four things to check
-for. A positive control catches all of them, because it tests the rule's ability
-to *see* a case it must report, and blindness is a failure to see however it was
-caused.
+**What a positive control does and does not cover — all five measured.** A
+control proves the rule can *see* an input it must report. It does **not** prove
+the real path ever *delivers* that input to the rule. Everything below follows
+from that one sentence, and each row was measured with the control present and
+with it removed:
 
-**The exception is "narrower than the property", and a control cannot reach
-it.** That rule is not blind — it sees perfectly, and reports on the wrong
-thing. Demonstrated: a redaction rule reading one field of a record, a claim
-about the whole record, a secret in a second field. The claim test passes, the
-positive control passes (the rule really does spot a leak in the field it
-reads), and the secret is in the artefact. **A control inherits the rule's blind
-spot, because you write the control in the rule's own terms** — you could only
-write the one that catches this if you already knew the rule was too narrow, and
-then you would widen the rule instead. The remedy is the one stated with that
-shape above: assert the artefact the claim names. Widening the rule and re-running
-does catch it.
+| shape | control catches it |
+|---|---|
+| upstream of the failure (the walk, not the rule) | yes |
+| emptiness as both goal and symptom | yes |
+| well-formed but never executed | yes |
+| narrower than the property | **no** |
+| downstream of the failure | **no** |
 
-Measured across three guards, both mutation styles, both arms — with the control
-present and with it removed:
+The first three are ways a rule goes *blind*, and blindness is a failure to see,
+so a control finds them however the blinding happened. Write one positive case
+per shape the rule claims to catch, plus a negative case of correct code it must
+not accuse, and those three are done.
 
-| | control present | control removed |
-|---|---|---|
-| the loop stops consuming the rule | caught | not caught |
-| the rule returns the success value | caught | not caught |
+**The last two are not blindness and no control reaches them.** In both, the
+rule sees perfectly and the real path never hands it the thing that matters.
+Demonstrated: a redaction rule reading one field while the secret sits in
+another — claim test passes, control passes, secret in the artefact. And an
+assertion on "did an exception escape?" against code that swallows — claim test
+passes, control passes, and the work silently did not happen. **A control
+inherits the rule's blind spot, because you write it in the rule's own terms**:
+you could only write the control that catches these if you already knew the rule
+was pointed at the wrong thing, and then you would repoint it instead.
 
-So when you add a guard, one positive control per shape it claims to catch is
-the whole job, and when you audit one, the question is not "which of the five
-is this" but "is there a case this rule must report, and does something drive
-it with that case". Three guards is what was measured; the reasoning is why it
-should hold generally, and those are different strengths of claim.
+For those two, ask what the claim is about and assert on *that* — the bytes that
+reached disk, the state the work should have produced — not on the channel you
+happened to reach for. Widening the rule and re-running catches both.
 
 **Not every green sabotage is a finding.** Replacing an assertion's *input* with
 a literal — `offenders = []` where the rule computed it — passes in every test
@@ -220,18 +221,6 @@ Two mechanical rules earned the hard way:
    pointed at a real function stops controlling anything the day that function is
    cleaned up — and controlling a falsifiability guard by gutting a real test
    means shipping the defect to demonstrate it.
-
-One guard that cannot be built, recorded so nobody spends a cycle on it twice.
-The runbooks quote CLI output verbatim, and those quotes rot — one row quoted a
-message (`the context store is corrupt`) that the CLI has never printed. A static
-check that every quoted line exists in `src/` **does not work**, measured twice:
-literal matching fails on interpolation (`✓ tracing enabled for target 'stg'` is
-an f-string in the source, so a `grep -F` reports it missing while the command
-prints it exactly), and truncating to the pre-interpolation prefix leaves
-fragments so short they check nothing — `explainability` matches 209 places. The
-working instrument is dynamic: **run the command and compare**, which is what the
-`[verified-train]` markers in the runbook are for. If you find a quoted string
-that looks wrong, run it before filing it.
 
 On recorded numbers: a floor like `>= 900` is a constant anyone can lower while
 doing something else, so prefer a property with no number in it — and before

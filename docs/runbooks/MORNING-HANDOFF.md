@@ -426,7 +426,7 @@ Against staging, with real agent processes — not fixtures:
 
 | Claim | Evidence |
 |---|---|
-| One id in four places | observed in all four simultaneously — **and now pinned**: `tests/test_correlation_spine.py` |
+| One id in four places | observed in all four simultaneously — **and now pinned**: `tests/test_correlation_spine.py`. **Re-observed on this train against a real `claude` session**, not a stub: `launch runner` printed the minted id, the proxy opened its Run under that same `pipeline_id`, 6× ingest `202`, exit 0 (`d124bc26`). Confirmed **up to the read wall** — that a Run appears in the gateway UI keyed by that id is the one hop still unseen |
 | Per-role separation | 3 roles → 3 distinct trace ids — **pinned** in the same file |
 | Proxy lane ingest | 70/70, then 14/14, all `202` |
 | Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox — **and re-observed on THIS train `9747e37` (@9bbc8ed7):** `1 queued → 1 sent`, four spans `dispatched`, `retries=0`, inbox byte-identical after. No longer only the pre-shift measurement |

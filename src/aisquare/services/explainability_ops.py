@@ -442,12 +442,32 @@ def probe_ingest(
             }
         ],
     }
-    return _request(
+    verdict = _request(
         f"{target.gateway_url}/v1/traces/ingest",
         api_key=target.api_key,
         body=batch,
         timeout=timeout,
     )
+    # `_request` calls any 2xx ok, because `/ready` legitimately answers 200.
+    # THIS probe's meaning is tied to one code: the docstring above, §5 of the
+    # cutover runbook and the gateway contract all say 202. A 200 from a reverse
+    # proxy, an auth portal or an API gateway's default route would otherwise
+    # render as "test span accepted" — the word this row commits to — from an
+    # endpoint that never saw a span. Measured before this narrowing: HTTP 200
+    # produced `✓ … test span accepted as 'aisquare-planner' (HTTP 200)`.
+    if verdict.ok and verdict.status != 202:
+        return HttpVerdict(
+            ok=False,
+            status=verdict.status,
+            detail=(
+                f"HTTP {verdict.status} — the gateway answered but did not ACCEPT "
+                "the span (ingest acknowledges with 202); check the URL reaches "
+                "the gateway itself rather than a proxy in front of it"
+            ),
+            code=verdict.code,
+            payload=verdict.payload,
+        )
+    return verdict
 
 
 def register_roster(

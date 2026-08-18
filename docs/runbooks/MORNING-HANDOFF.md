@@ -451,12 +451,23 @@ What that establishes, and it is worth having: **every executable step ran in
 documented order, none stalled or looped, and no step needed state a later step
 creates.** The ordering defect that walk was run to look for does not exist.
 
-**What it does not establish is the number.** The measured total was about seven
-seconds of *command* time. Fifteen minutes is a *human* reading, deciding,
-typing, and waiting on a proxy and a gateway, and four of the eleven steps did
-not run at all. Nobody has walked this as a person, so treat fifteen minutes as
-the design target rather than a measurement. **§1 is the budget** — it is a
-dashboard task plus a roster POST; the rest are single commands.
+**What it does not establish is the number**, and a second, fuller walk
+(@8dd460fb, against loopback stubs, all twelve sections accounted for) does not
+establish it either — deliberately. That walk measured **~29 seconds of command
+time, 23 of which is one `pip install`**, with ten of twelve sections walked or
+substituted, §1 not walked at all, and §5b's delivery half unreachable without
+the extra. It declined to put a wall clock on the *reading*, on the grounds that
+an agent's reading speed is not a person's and the number would be a confident
+fabrication.
+
+So the honest statement is narrower than either a confirmation or a correction:
+**the command path is ~29 seconds and everything else in the fifteen minutes is
+reading, deciding, and §1.** What the fifteen minutes must cover is now measured
+even though the minutes are not: **1330 lines across twelve sections, 44 fenced
+blocks, 12 ⚠ caveat blocks, and §3 alone is 179 lines with three of them.**
+Nobody has walked this as a person, so fifteen minutes remains the design target
+rather than a measurement. **§1 is the budget** — a dashboard task plus a roster
+POST; the rest are single commands.
 
 **And one caution the walk found that per-step checking could not.** §3 was
 blocked, and §5 still reported `✓ explainability proxy: claude_code proxy

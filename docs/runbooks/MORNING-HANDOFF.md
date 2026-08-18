@@ -125,8 +125,14 @@ forty lines.** Read the ones you need:
    **`--version` is not a third tell, and it is the one you will try first.**
    Measured at `d8b600b`: the pyenv build and this checkout both print
    `aisquare 0.4.0rc1`. The version string cannot separate them, so use the
-   provenance line — `✓ provenance: installed (editable) from …` — or
-   `command -v aisquare`.
+   provenance row. After §0 it reads `✓ provenance: installed (non-editable)
+   from …` and names the tree — **non**-editable, because that is what §0 has
+   you install and seeing `(editable)` there means the warning below was not
+   heeded.
+   `command -v aisquare` is **not** a third tell either, for a reason worth
+   knowing: it answers the same path before and after §0, because §0 installs
+   into that same pyenv `bin`. It tells you WHERE the binary is, never WHICH
+   build is behind it.
 
 2. **Governance is the one real blocker, and it is not a config edit.**
    No agent name resolves to a studio. Fixing it needs *both* an agent→studio

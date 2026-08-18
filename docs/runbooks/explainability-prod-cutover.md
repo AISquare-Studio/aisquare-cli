@@ -114,8 +114,7 @@ git log --oneline -1 && git status -sb      # ← what you are about to install
 >
 > `--ff-only` is deliberate — if the local branch has diverged it stops instead
 > of merging, and a divergence here is something to look at, not to resolve at
-> 08:00. `git status --short` is there because pip installs the working tree
-> including uncommitted changes.
+> 08:00.
 
 Reinstall the CLI so the binary on your `PATH` is the train, not a stale copy —
 **not** as an editable install:

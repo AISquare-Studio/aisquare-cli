@@ -1274,17 +1274,39 @@ fully healthy run):
 > bill or enforce → fall through (allow)" — so no band at all is also a
 > possible healthy reading.
 >
-> **The client lane is not affected by any of this, and that is measured rather
-> than hoped.** An earlier revision of this note warned that the SDK's
-> `/credits/check` preflight might refuse `ship` at a hard band, leaving the
-> client lane quietly dead while the proxy lane looked perfect. **`ship` does not
-> perform that preflight** — the SDK client package contains *zero* references to
-> credits, balance or billing, and `/credits/check` exists only server-side as
-> `POST /v1/studios/{id}/credits/check` (`8dd460fb`, read from source). The
-> gateway's own model says what it is for: **"the FORCE-STOP … the agent run
-> should be refused before it starts"** — a run-start gate, not a delivery gate.
-> So even a future SDK that adopted it would fail at *launch*, loudly, rather
-> than as a silent client lane.
+> **A 402 costs you latency, not data — both lanes retry it.** This is the part
+> worth reading twice, because it is the difference between "we lost the morning's
+> traces" and "they arrived late". Read from the pinned SDK,
+> `/home/work/work/AISquare-Explainability-SDK` @ `bb88bb5`, `aisquare` **1.0.6**:
+>
+> - `aisquare/explainability/sweeper.py` puts **402 in `_TRANSIENT_STATUSES`**,
+>   with its own comment saying why — *"402 — billing hard-band ('top up to
+>   resume ingest'): recoverable"*. A transient status is retried with capped
+>   backoff and **never dead-lettered** (`8dd460fb`).
+> - **And that covers the proxy lane too, which is not obvious.** The proxy's
+>   `ExplainabilityExporter` never posts a span itself: `_flush_locked` writes the
+>   trace to the inbox and wakes the sweeper, and
+>   `aisquare/explainability/main.py` builds it over that same inbox. So model-traffic spans are delivered by the same `InboxSweeper`
+>   that treats a 402 as recoverable. The two lanes do **not** diverge at a hard
+>   band — a question raised as plausible-and-unmeasured and closed here as a
+>   negative.
+>
+> So on a hard-mode gateway with an ungranted workspace: `doctor` fails loudly,
+> ingest returns 402, and **nothing is discarded** — traces and insights queue and
+> drain once credits are granted. `ship --strict` staying quiet on a deferral is
+> the design working, not a missed failure.
+>
+> **[unmeasured]** The inbox is a SQLite queue, so a *long* hard-band outage grows
+> a file rather than losing spans. Nobody has measured how large, or whether
+> anything bounds it. If credits stay unfunded for days, that is the thing to look
+> at — not lost data.
+>
+> `ship` also does not preflight credits, on the same pinned build: the client
+> package has no reference to credits at all, and `/credits/check` exists only
+> server-side as `POST /v1/studios/{id}/credits/check`. The gateway's model calls
+> it **"the FORCE-STOP … the agent run should be refused before it starts"** — a
+> run-start gate, not a delivery gate, so even a future SDK adopting it would fail
+> at *launch*, loudly, rather than as a silent client lane.
 >
 > **What `doctor` actually does at each band, measured through the real CLI
 > against a stub gateway** (`8dd460fb`):

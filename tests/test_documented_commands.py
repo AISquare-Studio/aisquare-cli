@@ -41,6 +41,11 @@ Scope, stated rather than implied:
   writing: 40 mentions = 12 resolved + 28 classified + 0 unaccounted.
 - A flag's VALUE is not validated, only its existence. `--target prod` proves
   nothing about whether a target named prod is configured.
+- An absolute PATH is not validated either. `exec /usr/local/bin/aisquare
+  explainability ship --strict` normalises to a real command and passes here,
+  and that literal did not exist on this machine — the §5b wrapper exited 127
+  before the CLI was reached. This guard answers "is this a command the CLI
+  has", never "will this line run on this box".
 - A word left over at a GROUP is a subcommand that does not exist; a word left
   over at a LEAF is an argument and stays silent. Before that distinction the
   check only fired when the FIRST word failed, so `explainability statuss`
@@ -810,6 +815,14 @@ _NOT_AN_INVOCATION = (
     ("a prose line inside an output block", re.compile(r"^\s*[→✓✗•]")),
     ("a URL", re.compile(r"https?://")),
     ("a pip requirement — the package name, not the command", re.compile(r"pip\s+install")),
+    # `command -v aisquare` names the binary to LOCATE it; the CLI is never run.
+    # Added when §5b stopped hardcoding a path and told the operator to derive
+    # one instead — the guard fired on the new line, which is the behaviour it
+    # exists for, and the fix is a recorded reason rather than a quieter rule.
+    (
+        "the argument to `command -v`, which locates the binary",
+        re.compile(r"command\s+-v\s+aisquare"),
+    ),
 )
 
 
@@ -819,7 +832,7 @@ CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "README.md": (55, 5),
     "docs/explainability-tracing-boundary.md": (2, 0),
-    "docs/runbooks/explainability-prod-cutover.md": (12, 28),
+    "docs/runbooks/explainability-prod-cutover.md": (12, 29),
 }
 
 

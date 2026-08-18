@@ -243,6 +243,16 @@ directions** is a control rather than a liability: the census guard survived the
 sabotage that beat two others precisely because its recorded counts have an upper
 bound as well as a lower one. The difference is the second direction.
 
+**But a two-directional floor still decays if nobody re-measures it.** One census
+entry recorded `(12, 29)` when its document was a third smaller; the file reached
+`(18, 37)`, and the guard would have tolerated the extractor silently losing eight
+of eighteen commands and fifteen of thirty-seven classified mentions. **A ratchet
+that is not re-measured becomes an allow list** — the same sentence that applies to
+a `STILL_RAISES` set, arriving at the other end of the same file. If you record a
+number against a growing artefact, say in the comment that it must be re-measured
+when the artefact grows, and treat a comfortable margin as a smell rather than
+headroom.
+
 ## Measuring anything about this repo, from a shell
 
 Every entry below cost someone here a **published or nearly-published wrong

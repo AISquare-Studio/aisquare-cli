@@ -138,6 +138,14 @@ I was standing".
   valid Python: the module parses, the tests pass, `make check` reports success.
   So do a gutted body, an unconditional skip, and an empty `parametrize` set —
   each collects, counts toward the total, and runs nothing.
+- **An assertion that degenerates on one input.** `"" in anything` is true, so a
+  substring check silently asserts nothing the moment a field becomes the empty
+  string — four fields of one payload stopped being checked and 46 tests stayed
+  green. This is *not* caught by the falsifiability sweep, which looks for
+  `assert True`, unconditional skips and empty `parametrize`: the test **can**
+  fail, just never for the value that matters. Assert non-empty before asserting
+  containment, and reach for the degenerate input — empty string, empty list,
+  zero, `None` — when sabotaging your own comparison.
 - **Emptiness as both goal and symptom.** In a guard whose whole value is that a
   class *stays* closed — "nothing raises", "the set of undecided call sites is
   empty", "the diff equals the record" — a rule that has gone blind produces the

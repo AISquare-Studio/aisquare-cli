@@ -29,6 +29,7 @@ the runbook rather than leave it as folklore.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from aisquare.services.explainability import probe_proxy
@@ -77,6 +78,31 @@ def test_section_3_says_a_healthy_answer_is_not_proof_of_ownership() -> None:
         "started' is unusable advice to someone who has not started it yet and "
         "has no PID to compare against; ELAPSED needs no prior knowledge."
     )
+
+
+def test_section_3_quotes_no_absolute_start_time() -> None:
+    """A [verified-train] block promises the reader can reproduce it.
+
+    `ps` computes rather than stores a start time —
+    `lstart = btime + starttime_ticks/HZ` — and on this box `/proc/uptime` does
+    not track wall clock, so the value moves. Three readings of one process
+    across forty minutes gave 03:13:35, 03:14:45 and 03:18:07, and I had quoted
+    the first as fixed evidence. A reader who runs the command gets a different
+    number and reasonably concludes the document is stale.
+
+    Keyed on the shape of a clock time inside the §3 evidence block rather than
+    on the specific string, because the defect is the CLASS — any wall-clock
+    stamp there is unreproducible, not just the one I wrote.
+    """
+    section = _section("## 3. Start the proxy")
+    start = section.index("LISTEN 127.0.0.1:9190")
+    evidence = section[start : section.index("```", start)]
+
+    assert not re.search(r"\b\d{2}:\d{2}:\d{2}\b", evidence), (
+        "the §3 evidence block quotes a wall-clock time; on this box that value "
+        f"is recomputed from /proc/uptime and drifts between reads:\n{evidence}"
+    )
+    assert "ELAPSED" in evidence, "the evidence no longer shows the age, which is the tell"
 
 
 def test_section_3_warns_that_a_clash_reports_startup_complete_first() -> None:

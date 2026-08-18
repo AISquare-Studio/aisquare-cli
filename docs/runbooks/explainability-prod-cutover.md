@@ -1711,6 +1711,17 @@ This is the north star's third clause — *board rows join to gateway Runs on a
 shared key* — and until now the runbook had no step that checked it. Three of
 the four hops need no credential and are below. The fourth does, and is marked.
 
+> ⚠️ **[verified-train, `9bbc8ed7`, 2026-08-18] The finder must select a TRACED
+> claude, and an empty id must stop you — the earlier version did neither, and
+> the pair produced a FALSE PASS.** On this box 12 processes match `claude`; the
+> old loop took whichever `/proc` listed first, which had no
+> `AISQUARE_PIPELINE_ID`. Hop 1 then printed nothing — easy to skim past — and
+> hop 2 substituted that empty string into `grep`, **which matches every line in
+> the join log and exits 0**. Measured: an empty pattern returned 2 of 2 rows on
+> a two-row file. So a wrong process read as a proven join. The loop now requires
+> the marker in the process's environment, and hops 1 and 2 refuse to run on an
+> empty id.
+
 **Anchor on the RUNNING session, not on the newest record.** Each launch mints
 its own id, so `tail -1 joins.jsonl` names whichever session started last,
 which is not necessarily the one you are looking at. Measured while writing
@@ -1718,19 +1729,22 @@ this: a second launch carried `29dc19d4…` while the newest join record still
 said `9fa349b2…`. Start from the process and work outward.
 
 ```bash
+# A TRACED claude, not merely the first claude — see the warning below.
 PID=$(python3 - <<'EOF'
 import pathlib
 for e in pathlib.Path("/proc").iterdir():
-    if e.name.isdigit():
-        try: argv = (e / "cmdline").read_bytes()
-        except OSError: continue
-        if b"claude" in argv: print(e.name); break
+    if not e.name.isdigit(): continue
+    try:
+        if b"claude" not in (e / "cmdline").read_bytes(): continue
+        if b"AISQUARE_PIPELINE_ID=" in (e / "environ").read_bytes(): print(e.name); break
+    except OSError: continue
 EOF
 )
-tr '\0' '\n' < /proc/$PID/environ | grep AISQUARE_PIPELINE_ID   # hop 1
-grep "$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^AISQUARE_PIPELINE_ID=//p')" \
-  ~/.aisquare/explainability/joins.jsonl                          # hop 2
-aisquare --json team status                                       # hop 3
+[ -n "$PID" ] || echo "no TRACED claude is running — launch one (§4), or tracing is off"
+ID=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^AISQUARE_PIPELINE_ID=//p')
+[ -n "$ID" ] && echo "$ID"                                             # hop 1
+[ -n "$ID" ] && grep -F "$ID" ~/.aisquare/explainability/joins.jsonl   # hop 2
+aisquare --json team status                                            # hop 3
 ```
 
 `team status` takes no `--as` — it resolves the board from the current

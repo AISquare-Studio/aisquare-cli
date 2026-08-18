@@ -16,7 +16,17 @@ worse than none:
 Overlapping ranges — the difference is noise, and a configured-but-dead proxy
 costs the hook nothing. Decomposed so nobody reads 353 ms as a tracing cost:
 ``python3 -c pass`` 49 ms, ``aisquare --version`` 326 ms, hook 353 ms. The CLI's
-import dominates, the hook's own work is ~27 ms, and tracing adds ~0.
+import dominates and tracing adds ~0.
+
+An earlier revision also derived "the hook's own work is ~27 ms" by subtracting
+326 from 353. THAT FIGURE IS RETRACTED: @8dd460fb later characterised this box's
+wall-clock noise floor at **36 ms** between the fastest and slowest sample of a
+single measurement, under three concurrent gate runs — larger than the 27 ms
+difference it was derived from. The conclusions above survive because they were
+stated as OVERLAPPING RANGES rather than as differences; a subtraction of two
+medians whose own spreads exceed the result does not survive. Use ``-X
+importtime`` self time for anything at this scale, as
+``test_import_cost_of_the_integration.py`` now does.
 
 WHAT IS ASSERTED HERE IS THE MECHANISM THOSE NUMBERS MEASURED: with tracing
 fully configured, the hook path opens no socket. That is deterministic where the

@@ -729,6 +729,24 @@ def _show_bindings() -> None:
         console.print(f"{name:<12} {_describe(profiles[name]) or '(empty)'}", markup=False)
 
 
+def _warn_board_scope(as_session: str | None) -> None:
+    """Say which board a cwd-resolved read answered for, when it may not be yours.
+
+    STDERR, always — a note on stdout would corrupt `--json` output that gets
+    piped into jq, which is exactly how these commands are used when someone is
+    debugging the thing this note exists for.
+
+    Silent when `--as` was given: that routes board resolution through the
+    session's own row (`log_events`, "exactly like attributed writes (#20)"),
+    so the answer is already anchored to something other than the directory.
+    """
+    if as_session is not None:
+        return
+    note = team_service.board_scope_note()
+    if note:
+        typer.echo(note, err=True)
+
+
 @app.command("log")
 def log(
     limit: Annotated[int, typer.Option("--limit", "-n", help="How many events to show.")] = 30,
@@ -772,6 +790,7 @@ def log(
         )
     except STORE_ERRORS as exc:
         _fail_team(exc, task or by or as_session)
+    _warn_board_scope(as_session)
     if get_state().json_output:
         typer.echo(json.dumps([event.as_envelope().model_dump(mode="json") for event in events]))
         return
@@ -1110,6 +1129,7 @@ def board(
         project, sessions, tasks, events = team_service.board_data()
     except STORE_ERRORS as exc:
         _fail_team(exc)
+    _warn_board_scope(None)
     if get_state().json_output:
         typer.echo(
             json.dumps(

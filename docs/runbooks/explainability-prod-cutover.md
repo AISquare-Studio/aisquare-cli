@@ -800,9 +800,14 @@ migration fails again — this does not heal on retry and it takes every
 `docs/store-migration-race.md`; §0b prevents it. To recover:
 
 ```bash
-rm ~/.aisquare/context.db          # or $AISQUARE_HOME/context.db
+mv ~/.aisquare/context.db ~/.aisquare/context.db.broken   # or $AISQUARE_HOME/…
 aisquare status > /dev/null        # ONE process, alone — this re-migrates
 ```
+
+`rm` in place of the `mv` works identically and destroys the evidence; there is
+no reason to prefer it. This block is the `mv` form because **a fenced block is
+what gets pasted** — the preference used to live in prose underneath, which is
+the half nobody runs.
 
 Verified by wedging a store to the failing state and back: before, `team status`
 exits 1 with the message above; after, `PRAGMA user_version` reports the current

@@ -507,8 +507,46 @@ Contents (values from the prod workspace — Settings → Studios → API keys):
 EXPLAINABILITY_GATEWAY_URL=https://<prod-explainability-host>
 EXPLAINABILITY_API_KEY=<prod ingest:write workspace key>
 EXPLAINABILITY_AGENTS=aisquare-planner,aisquare-coder,aisquare-runner
+EXPLAINABILITY_INBOX_PATH=/home/you/.aisquare/claude_proxy_inbox.db
 # EXPLAINABILITY_STUDIO_ID intentionally NOT set — see §1e.
 ```
+
+> ⚠️ **[verified-train, coder2 `8dd460fb`, 2026-08-18] `EXPLAINABILITY_INBOX_PATH`
+> is the fourth line for a reason: without it the SDK's own backlog check reads a
+> different file from the one its proxy writes.** In the pinned SDK
+> (`aisquare` 1.0.6 @ `bb88bb5`) it is **three-and-one**, not a two-way split:
+> the **proxy** overrides the path to `~/.aisquare/claude_proxy_inbox.db`, while
+> the **doctor**'s `_check_delivery_backlog`, the client **init**'s
+> `inbox_path=` default and `InboxWriter`'s `db_path=` default are all the same
+> **relative** `explainability_inbox.db`. So the doctor does not disagree with
+> the client library — it agrees with it, and both differ from the proxy. (All
+> four live in the SDK, not in this repo, which is why they are named by symbol
+> here rather than by path.)
+>
+> **And the shared default being relative is the half that costs data, not just
+> visibility.** A relative path resolves against the process working directory —
+> measured: `InboxWriter()._db_path` is the bare string `explainability_inbox.db`
+> in two different directories. So with this variable unset, the CLI's own
+> insight buffer FOLLOWS YOU AROUND: `aisquare explainability ship` run from two
+> directories drains two different inboxes, and nothing tells you which one you
+> are looking at. §5b puts `ship` in a **timer**, and a timer whose working
+> directory differs from the shell that captured the insights would drain an
+> empty inbox and report success — the silent-spool failure §5b exists to
+> prevent, arriving through the path instead of the key. Setting an ABSOLUTE
+> path here fixes that as well as the doctor row: all four sites read this one
+> variable. So with
+> the variable unset, `doctor --live` prints
+> `✓ sdk:delivery_backlog: No inbox database … (nothing recorded yet)` over a
+> live inbox. Measured both ways on a probe inbox holding one pending row: unset
+> → "No inbox database"; set → `pending=1`.
+> That check is the one designed to surface what the sweeper's retry loop hides
+> — its own docstring says it fails on dead-lettered rows and on pending rows a
+> gateway 409'd — so pointed at the wrong file it cannot do its job, and the day
+> there IS a backlog it will still say nothing was recorded. **The defect is the
+> SDK's and belongs upstream; this line is the mitigation available from here.**
+> Observed on this box: the proxy's inbox was 5.2 MB after 27 hours and held
+> **zero** rows — allocated space after rows were written, delivered and pruned.
+> Nothing was hidden; the detector simply could not see the file.
 
 > ⚠️ **[verified-train] Do NOT put `AISQUARE_AGENT_NAME` in this file.** An
 > earlier version of this runbook set it to `aisquare-runner`. That variable is

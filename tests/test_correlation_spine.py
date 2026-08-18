@@ -48,6 +48,26 @@ from aisquare.services.explainability import (
 )
 from aisquare.services.explainability_ops import effective_settings
 
+#: The four places the one id must reach, named as DATA.
+#:
+#: This started as four blocks of inline assertions, and @8dd460fb's third
+#: sabotage says that shape can be quietly narrowed: measured at 5fd9f3b,
+#: deleting the join-log block left the file GREEN, and so did deleting the
+#: header block — five passed either way, while the name, the docstring and the
+#: handoff's evidence table all still said FOUR. Not a wrong assertion; an
+#: assertion that stopped being made.
+#:
+#: As a set it cannot go quiet: removing a place changes something this file
+#: compares, and the failure names what went missing.
+SPINE_PLACES = frozenset(
+    {
+        "X-Pipeline-Id header",
+        "AISQUARE_PIPELINE_ID marker",
+        "board row",
+        "join log",
+    }
+)
+
 _KEY_VAR = "SPINE_KEY_VAR"
 
 
@@ -100,16 +120,24 @@ def test_one_minted_id_reaches_all_four_places(
     minted = wiring.pipeline_id
     assert minted, "nothing was minted"
 
-    # 1. the header the proxy sends
+    # Each place records the value AND where it was read from. The origins are
+    # asserted distinct below, because "four places" satisfied four times out of
+    # one object is the same narrowing one level down.
+    observed: dict[str, tuple[str, str]] = {}
+
     headers = wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
-    assert f"X-Pipeline-Id: {minted}" in headers
+    header_id = next(
+        line.split(":", 1)[1].strip()
+        for line in headers.splitlines()
+        if line.strip().startswith("X-Pipeline-Id:")
+    )
+    observed["X-Pipeline-Id header"] = (header_id, "wiring.env")
 
-    # 2. the marker the shell exports, which is what the next command reads
     marker = trace_marker(wiring)
-    assert marker[PIPELINE_ID_ENV_VAR] == minted
+    observed["AISQUARE_PIPELINE_ID marker"] = (marker[PIPELINE_ID_ENV_VAR], "trace_marker()")
 
-    # 3. the board row, created by the SessionStart hook the way Claude Code
-    #    invokes it — the agent was started ON the minted id.
+    # The board row, created by the SessionStart hook the way Claude Code
+    # invokes it — the agent was started ON the minted id.
     monkeypatch.setenv(PIPELINE_ID_ENV_VAR, minted)
     monkeypatch.setenv(TRACE_AGENT_NAME_ENV_VAR, marker[TRACE_AGENT_NAME_ENV_VAR])
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
@@ -127,15 +155,32 @@ def test_one_minted_id_reaches_all_four_places(
 
     listed = runner.invoke(app, ["--json", "team", "status"], catch_exceptions=False)
     sessions = json.loads(listed.stdout)["sessions"]
-    assert [s["id"] for s in sessions] == [minted], "the board row is keyed on something else"
+    assert len(sessions) == 1, f"expected one board row, got {len(sessions)}"
+    observed["board row"] = (sessions[0]["id"], "team status --json")
 
-    # 4. the join log, which is what ties the two together for anyone reading later
     joins = paths.explainability_joins_path()
     assert joins.exists(), "no join was recorded for a traced session"
     records = [json.loads(line) for line in joins.read_text().splitlines() if line.strip()]
     assert records, "join log is empty"
-    assert records[-1]["session_id"] == minted
-    assert records[-1]["pipeline_id"] == minted
+    assert records[-1]["session_id"] == records[-1]["pipeline_id"], (
+        "the join log's two halves disagree, so it joins nothing"
+    )
+    observed["join log"] = (records[-1]["pipeline_id"], "joins.jsonl on disk")
+
+    missing = SPINE_PLACES - set(observed)
+    assert not missing, f"the spine control stopped checking: {sorted(missing)}"
+    assert set(observed) == SPINE_PLACES, (
+        f"unexpected place: {sorted(set(observed) - SPINE_PLACES)}"
+    )
+
+    origins = {origin for _value, origin in observed.values()}
+    assert len(origins) == len(SPINE_PLACES), (
+        f"four places must come from four sources, got {sorted(origins)} — "
+        "the same object satisfying several places is the narrowing one level down"
+    )
+
+    disagreeing = {place: value for place, (value, _origin) in observed.items() if value != minted}
+    assert not disagreeing, f"these places carry a different id than the mint: {disagreeing}"
 
 
 def test_two_sessions_do_not_share_an_id(runner: CliRunner) -> None:
@@ -195,3 +240,50 @@ def test_an_untraced_session_passes_no_session_id_at_all() -> None:
 
     assert _SESSION_ID_SUBSTITUTION.startswith(f"${{{PIPELINE_ID_ENV_VAR}:+")
     assert _SESSION_ID_SUBSTITUTION.endswith("}")
+
+
+#: The claims this file exists to make. Deleting a PLACE now fails, because the
+#: places are a set — but deleting a whole TEST still passed, which is the same
+#: narrowing one level up: sabotage D, measured, 4 green with the distinctness
+#: control gone, and that control is the one thing standing between us and a
+#: mint that returns a constant.
+#:
+#: This does not reach a fixed point — the guard itself can be deleted. What it
+#: buys is that narrowing stops being SILENT: you can no longer quietly drop a
+#: claim, only conspicuously remove a claim and the record that it was made,
+#: which is two edits in one diff and reads as a decision rather than an
+#: oversight.
+REQUIRED_CLAIMS = frozenset(
+    {
+        "test_one_minted_id_reaches_all_four_places",
+        "test_two_sessions_do_not_share_an_id",
+        "test_the_agent_name_follows_the_role",
+        "test_the_spawn_template_passes_the_flag_the_parser_looks_for",
+        "test_an_untraced_session_passes_no_session_id_at_all",
+    }
+)
+
+
+_THIS_GUARD = "test_this_file_still_makes_every_claim_it_says_it_makes"
+
+
+def test_this_file_still_makes_every_claim_it_says_it_makes() -> None:
+    """Guard the guard, at the level a deleted test lives on.
+
+    Named from the module rather than counted, so the failure says WHICH claim
+    stopped being made — a count would only say that one did.
+    """
+    present = {name for name in globals() if name.startswith("test_")} - {_THIS_GUARD}
+
+    missing = REQUIRED_CLAIMS - present
+    unregistered = present - REQUIRED_CLAIMS
+
+    assert not missing, f"this file no longer makes these claims: {sorted(missing)}"
+    # The other direction, so the list cannot rot into a stale subset: a new
+    # claim that is never registered would leave REQUIRED_CLAIMS describing an
+    # older, smaller file while passing. Same reason @8dd460fb's ratchets fail
+    # both ways.
+    assert not unregistered, (
+        f"new claims are not registered in REQUIRED_CLAIMS: {sorted(unregistered)}"
+    )
+    assert REQUIRED_CLAIMS, "an empty REQUIRED_CLAIMS would satisfy both assertions above"

@@ -433,7 +433,7 @@ Against staging, with real agent processes — not fixtures:
 | No secret in the spooled **bytes** | 3 capture paths incl. the prompt hook — **pinned**: `tests/test_no_secret_reaches_the_spool_file.py`, with a redaction-off control |
 | Token-shape coverage | all 11 vendor shapes survive the JSON→OTel round trip |
 | Both lanes, one session | same key carried on both (see the caveat above) — **re-measured at `948772e`**, four places one value. Verify it as "did every record captured *inside* the session carry the key?", not "did every record from this launch": a launch also spools one parent-captured `team_event` whose key is correctly `None` |
-| Proxy build pinned | `aisquare>=1.1.0`; `_has_valid_correlation` byte-identical to the checkout the receipts used |
+| Proxy build pinned | **the capability, not the number** — `_has_valid_correlation` is in the build now serving, byte-identical to the checkout the receipts used. **Re-measured at `ae805c2`**: the live proxy self-reports **`1.0.6`** — an editable install of `bb88bb5`, whose branch never bumped the version — so `>=1.1.0` is an install target and **not** a check. `IN FORCE` does not invert to "we are on >=1.1.0", and if §3 already prints it, **do not reinstall**. No `1.1.x` artefact exists on this box, so byte-identity to the PyPI release is unverified here; see §3 of the cutover runbook |
 
 Everything in that table stops at the gateway boundary. Nothing in it is a
 statement about what the studio shows.

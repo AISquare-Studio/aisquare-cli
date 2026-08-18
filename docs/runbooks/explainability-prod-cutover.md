@@ -135,11 +135,20 @@ No board row means no join to a gateway Run for that session: a lost trace, whic
 is what the fail-open rule says to spend. **So you can start agents while the
 store is broken — but fix the store before you care about traces.**
 
-**[verified-train] Not every damaged store looks like that, and one of them
-looks like nothing at all.** Five damage shapes were measured. Four are **loud**
-— non-database bytes, a part-way truncation, a corrupted page with an intact
-header — and all of them now give you the one-line message above. *(They used to
-give 39-75 lines of traceback; if you see that, you are on an older build.)*
+**[verified-train] Not every damaged store looks like that — and an earlier
+version of this paragraph promised more than the code delivers.** It said four
+shapes were loud and *all* gave the one-line message above. That is true only of
+damage found when the file is **opened**: non-database bytes and a truncation.
+It is **not** true of damage found by a **query**.
+
+**If the file opens and a later read hits a bad page, you still get a stack
+trace** — the one-line seam has already let the command through by then.
+Measured at this train, zeroing one page of a small store: pages 3 and 5 gave
+**36 and 46 lines** with source frames and `database disk image is malformed`;
+pages 1, 2, 10 and 20 gave exit 0 and looked entirely normal. **Which page is
+fatal depends on what that store happens to hold, so do not read those numbers
+as a rule** — read the shape: *opened-then-queried damage can still traceback,
+and some of it is silent instead.* The recovery below is the same either way.
 
 **The fifth is silent, and it is the one to know about.** A file **truncated to
 zero bytes** is read by SQLite as a brand-new empty database, so the store is

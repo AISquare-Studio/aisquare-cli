@@ -43,8 +43,10 @@ forty lines.** Read the ones you need:
 
 1. **Step 1 of the runbook (§0, the non-editable reinstall) has not been run.**
    Nothing blocks it but the typing; the command was verified working at the
-   current head. Until it runs, `aisquare` on `PATH` is the pyenv build and
-   `resolve_binary` reports 0.
+   current head. Until it runs, `aisquare` on `PATH` is the pyenv build — whose
+   `cli/launch.py` contains **no `resolve_binary` at all** (`grep -c` counts `0`
+   there and `1` on this train), which is the grep the runbook uses to tell the
+   two builds apart.
 
    **What running it gets you, beyond the hazard below.** `aisquare config list`
    exits **1** with a traceback on this machine right now — see "Bugs found and
@@ -433,7 +435,7 @@ Against staging, with real agent processes — not fixtures:
 | No secret in the spooled **bytes** | 3 capture paths incl. the prompt hook — **pinned**: `tests/test_no_secret_reaches_the_spool_file.py`, with a redaction-off control |
 | Token-shape coverage | all 11 vendor shapes survive the JSON→OTel round trip |
 | Both lanes, one session | same key carried on both (see the caveat above) — **re-measured at `948772e`**, four places one value. Verify it as "did every record captured *inside* the session carry the key?", not "did every record from this launch": a launch also spools one parent-captured `team_event` whose key is correctly `None` |
-| Proxy build pinned | **the capability, not the number** — `_has_valid_correlation` is in the build now serving, byte-identical to the checkout the receipts used. **Re-measured at `ae805c2`**: the live proxy self-reports **`1.0.6`** — an editable install of `bb88bb5`, whose branch never bumped the version — so `>=1.1.0` is an install target and **not** a check. `IN FORCE` does not invert to "we are on >=1.1.0", and if §3 already prints it, **do not reinstall**. No `1.1.x` artefact exists on this box, so byte-identity to the PyPI release is unverified here; see §3 of the cutover runbook |
+| Proxy build pinned | **the capability, not the number** — `_has_valid_correlation` is in the build now serving, byte-identical to the checkout the receipts used. **Re-measured at `ae805c2`**: the live proxy self-reports **`1.0.6`** — an editable install of `bb88bb5`, whose branch never bumped the version — so `>=1.1.0` is an install target and **not** a check. `IN FORCE` does not invert to "we are on >=1.1.0", and if §3 already prints it, **do not reinstall**. No `1.1.x` artefact is cached on this box, but byte-identity to the released `1.1.0` is now **measured** (@8dd460fb pulled the PyPI wheel): the `_has_valid_correlation` **function** is byte-identical, the **file** is a later build that gates it behind `_is_cc_mode()` — so `1.1.0` reproduces the receipts' behaviour for a `claude_code` proxy but is not the same bytes; see §3 of the cutover runbook |
 
 Everything in that table stops at the gateway boundary. Nothing in it is a
 statement about what the studio shows.

@@ -215,6 +215,33 @@ Against staging, with real agent processes — not fixtures:
 Everything in that table stops at the gateway boundary. Nothing in it is a
 statement about what the studio shows.
 
+### The fifteen minutes — what is and is not established
+
+The runbook was walked **§0 → §7 in order, in one sitting**, in a throwaway home
+(@8dd460fb). **Seven steps executed, four blocked** — §1 and §4b need a
+credential nobody holds or mutate shared workspace state, §3 needs the SDK extra
+that §0 forbids installing over an editable checkout.
+
+What that establishes, and it is worth having: **every executable step ran in
+documented order, none stalled or looped, and no step needed state a later step
+creates.** The ordering defect that walk was run to look for does not exist.
+
+**What it does not establish is the number.** The measured total was about seven
+seconds of *command* time. Fifteen minutes is a *human* reading, deciding,
+typing, and waiting on a proxy and a gateway, and four of the eleven steps did
+not run at all. Nobody has walked this as a person, so treat fifteen minutes as
+the design target rather than a measurement. **§1 is the budget** — it is a
+dashboard task plus a roster POST; the rest are single commands.
+
+**And one caution the walk found that per-step checking could not.** §3 was
+blocked, and §5 still reported `✓ explainability proxy: claude_code proxy
+healthy`, because another process on this box was serving that port. The check
+is right that *a* proxy answered; it cannot tell you *whose*. So a green proxy
+row can hide a §3 that silently failed, and model traffic then goes to the older
+proxy. §5 now carries the confirming command beside its expected output. This
+was invisible to per-step verification because whoever verifies §5 has just done
+§3, so the state is always right.
+
 **Two of those rows are stronger than the rest, and the difference matters.**
 The first two are now *pinned* — a test fails the gate on the day they stop
 being true. Every other row is a **staging measurement taken once**, most of

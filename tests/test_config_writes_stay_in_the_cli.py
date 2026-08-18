@@ -24,8 +24,11 @@ which is stated rather than papered over.
 from __future__ import annotations
 
 import ast
+import sys
 from collections import defaultdict
 from pathlib import Path
+
+import pytest
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "aisquare"
 
@@ -125,6 +128,48 @@ def _reaches_a_config_write(calls: dict[str, set[str]]) -> set[str]:
                 reaching.add(fn)
                 changed = True
     return reaching
+
+
+def test_the_rebinding_resolution_adds_no_spurious_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The docstring above narrates "16 with and 16 without". Nothing pinned it.
+
+    That number is a measurement someone took once (@9bbc8ed7, 2026-08-17) and
+    wrote into prose, and MORNING-HANDOFF.md quotes it as a reason to trust the
+    guard's over-approximation. It still holds today — re-measured — but a
+    narrated number drifts in silence, which is the failure this suite keeps
+    finding elsewhere and had left standing in its own docstring.
+
+    THE COUNT IS NOT THE INVARIANT AND MUST NOT BE ASSERTED. It moves the
+    moment any command legitimately starts reaching a config write, and a test
+    pinning 16 would fail correct changes and get ratcheted to whatever passes.
+    The claim worth holding is the one the prose actually makes: resolving
+    rebindings widens the closure by NOTHING on this tree, so the extra
+    resolution costs no precision.
+
+    If this ever fails it is not necessarily a bug — it means the resolution
+    started mattering, and the prose that says it does not has to be rewritten.
+    """
+    with_resolution = _reaches_a_config_write(_call_graph()[1])
+
+    monkeypatch.setattr(sys.modules[__name__], "_rebinding_aliases", lambda tree, imported: {})
+    without_resolution = _reaches_a_config_write(_call_graph()[1])
+
+    assert with_resolution, "the closure is empty; this measures nothing"
+
+    # Counts first and a short sample after: a broken resolution pulls in
+    # hundreds of names, and a failure message that dumps all of them is the
+    # one nobody reads.
+    only_with = sorted(with_resolution - without_resolution)
+    only_without = sorted(without_resolution - with_resolution)
+    assert not only_with and not only_without, (
+        "the rebinding resolution now changes the closure, so the docstring "
+        "above and MORNING-HANDOFF.md are both out of date "
+        f"({len(with_resolution)} with, {len(without_resolution)} without): "
+        f"only-with[{len(only_with)}]={only_with[:8]} "
+        f"only-without[{len(only_without)}]={only_without[:8]}"
+    )
 
 
 def test_the_closure_finds_the_commands_that_do_write() -> None:

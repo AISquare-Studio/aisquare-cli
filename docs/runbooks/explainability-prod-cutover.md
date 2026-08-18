@@ -1002,11 +1002,19 @@ against a fresh `aisquare==1.0.6` reports `MISSING`.
 > start from `AISQUARE_PROXY_MODE` (default `claude_code`), so for a `claude_code`
 > proxy the `and` short-circuits to the same `_has_valid_correlation(...)` gate
 > bb88bb5 has and the suppression fires identically — `1.1.0` is a sound prod pin.
-> **The caveat this exposes is real on this box:** `1.1.0` scopes the suppression
-> to `claude_code` mode, where bb88bb5 applied it unconditionally, so a proxy
-> started with `AISQUARE_PROXY_MODE=creator` — the mode of the thing already on
-> `9090` — gets **no** junk-run suppression from `1.1.0`. The default cutover path
-> is `claude_code` and is unaffected; a creator-mode deployment is not. Whether
+> **The caveat this exposes is real in the code, and doubly hard to reach
+> through the CLI** (`@9bbc8ed7` measured the reachability; my first wording
+> overclaimed it): `1.1.0` scopes the suppression to `claude_code` mode where
+> bb88bb5 applied it unconditionally, so a proxy started
+> `AISQUARE_PROXY_MODE=creator` gets **no** junk-run suppression from `1.1.0`.
+> But it is reachable only if such a proxy is actually deployed AND the CLI's own
+> check is bypassed: `probe_proxy` pins `_EXPECTED_MODE = "claude_code"` and
+> refuses a creator proxy by name (`proxy at <url> runs mode 'creator', need
+> 'claude_code'`), even though the default `proxy_url` is the creator port
+> `http://127.0.0.1:9090`. On the reference box today the single running proxy is
+> `claude_code` on 9190 and 9090 is empty, so there is nothing to act on here now
+> — the finding is a property of a creator-mode deployment, not of this box. The
+> default cutover path is `claude_code` and is unaffected. Whether
 > your prod proxy is in `claude_code` mode is one `/health` read
 > (`"mode":"claude_code"`), not an assumption. The half the evidence row rests
 > on is unchanged: the build now serving is byte-identical to the checkout the

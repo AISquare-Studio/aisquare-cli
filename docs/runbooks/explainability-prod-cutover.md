@@ -914,10 +914,17 @@ against a fresh `aisquare==1.0.6` reports `MISSING`.
 >
 > So the *function* reproduces exactly; the *file* is a later build that adds a
 > `_should_adopt_cc_session` path and now scopes the suppression behind
-> `_is_cc_mode()`. For a `claude_code` proxy — which `/health` reports this one
-> is — that gate is satisfied and the suppression still fires, so `1.1.0` is a
-> sound prod pin; but it is the same behaviour by a later route, not the same
-> bytes. Whether `_is_cc_mode()` holds for your prod proxy is one `/health` read
+> `_is_cc_mode()`. That gate is not per-request: `_is_cc_mode()` returns
+> `PROXY_MODE == "claude_code"`, and `PROXY_MODE` is read **once** at process
+> start from `AISQUARE_PROXY_MODE` (default `claude_code`), so for a `claude_code`
+> proxy the `and` short-circuits to the same `_has_valid_correlation(...)` gate
+> bb88bb5 has and the suppression fires identically — `1.1.0` is a sound prod pin.
+> **The caveat this exposes is real on this box:** `1.1.0` scopes the suppression
+> to `claude_code` mode, where bb88bb5 applied it unconditionally, so a proxy
+> started with `AISQUARE_PROXY_MODE=creator` — the mode of the thing already on
+> `9090` — gets **no** junk-run suppression from `1.1.0`. The default cutover path
+> is `claude_code` and is unaffected; a creator-mode deployment is not. Whether
+> your prod proxy is in `claude_code` mode is one `/health` read
 > (`"mode":"claude_code"`), not an assumption. The half the evidence row rests
 > on is unchanged: the build now serving is byte-identical to the checkout the
 > receipts used — that is a `1.0.6`-labelled `bb88bb5`, not `1.1.0`.

@@ -408,18 +408,32 @@ WARNING [aisquare.explainability.policy] policy check degraded (FAIL_OPEN): poli
 ```
 
 29 of them in one short session — 19 `check/output` + 3 `check/retrieval` +
-7 `check/tool`, all 403. Probing the endpoint directly names the cause:
+7 `check/tool`, all 403, with `{"detail":"Workspace does not own this studio"}`.
 
-```
-{"detail":"Workspace does not own this studio"}
-```
+> ⚠️ **[verified-stg, runner `d124bc26`, 2026-08-18] CORRECTION — this is not a
+> wrong-studio-id problem, and an earlier revision of this section said it was.**
+> The id is a red herring. **The workspace `ingest:write` key cannot perform
+> studio-scoped policy operations against *any* studio.** Measured — a full
+> sweep of every studio the key can see, same key, same header:
+>
+> ```text
+> studio 144 145 146 147 148 149 150 151 152 153 158 159 162 165 166 169
+>   policy/check/output  ->  403 on all 16
+>   agent-rule-books     ->  403 on all 16
+> studio 21 (the pinned one)  ->  403 on both, same as the rest
+> ```
+>
+> Those sixteen are **every studio this very key can list** — `GET /v1/studios`
+> with it returns `200` and exactly those ids. I swept all of them, not a
+> sample: **16/16 403 on the policy surface, 0 non-403.** So the key
+> authenticates fine and is refused everywhere it could be used. That is **authorization, not a bad id and not a bad key**, and
+> correcting `EXPLAINABILITY_STUDIO_ID` to an owned studio does not fix it —
+> `169`, the number our own env-file comment records, is owned *and* still 403s.
 
-`EXPLAINABILITY_STUDIO_ID` is pinned to `21`, which is a **publication id**, not
-a studio the workspace owns. And a pinned value short-circuits the gateway's own
-lookup — `policy.py:_ensure_studio` opens with `if self.studio_id: return
-self.studio_id`, so the correct binding is never consulted.
-
-Unpinning alone does **not** save you. The binding genuinely does not exist:
+What remains true, and still matters: a pinned value short-circuits the
+gateway's own lookup — `policy.py:_ensure_studio` opens with `if self.studio_id:
+return self.studio_id`, so the binding is never consulted. And the binding does
+not exist yet:
 
 ```
 GET /v1/routing/resolve?agent_name=aisquare-runner
@@ -427,13 +441,32 @@ GET /v1/routing/resolve?agent_name=aisquare-runner
 ```
 
 **[verified-stg]** — same 404 for `aisquare-planner`, `aisquare-coder`,
-`aisquare-cli-test`, `aisquare-subagent-probe2`.
+`aisquare-cli-test`, `aisquare-subagent-probe2`. Either way — pinned or
+unpinned — **nothing is enforced today**, and every check fails open, so the
+dashboard looks healthy.
 
-A definitive 404 is cached as "no rule book" and every check passes through. So:
-pinned → 403 spam and ungoverned; unpinned → cleanly ungoverned. **Attaching a
-rule book in the studio UI will do nothing until the agent names resolve to a
-studio.** The 403s are the worse case only because they look like a permissions
-wall and hide the missing binding.
+> ⚠️ **[verified-stg, runner `d124bc26`, 2026-08-18] There is no separate "bind
+> the agents" step, and an earlier revision of this runbook invented one.**
+> Read from **staging's own OpenAPI** (`GET $EXPLAINABILITY_GATEWAY_URL/openapi.json`
+> — `info.version` `0.2.0`, identical to the local build), `/v1/routing/resolve`
+> documents itself:
+>
+> ```text
+> Workspace key -> resolve via the local agent_studio_routing binding
+> (written at attach time by ensure_agent_studio_binding); 404 until the
+> agent's rule book is attached (nothing to enforce yet anyway).
+> ```
+>
+> **The binding is a side effect of attaching the rule book.** So the 404 above
+> does not mean "bind first, then you may attach" — it means *no rule book is
+> attached yet*. Attach per agent, and the binding writes itself.
+
+**The actual 08:00 blocker is a credential, not a config value.** Attaching is
+`POST /v1/studios/{studio_id}/agent-rule-books` (required body: `agent_name`,
+`rule_book_url`, `label` — **[verified-stg]**, present on staging, not merely
+locally), and that endpoint returns `403` with the workspace key in our env file.
+**Have a studio-scoped key or a dashboard/human JWT ready before you start** —
+the ingest key in `explainability-prod.env` cannot do this step.
 
 ### The order that actually works
 
@@ -585,32 +618,63 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > actually emits. The curl above is kept because it shows the auth shape and
 > runs before anything is configured.
 
-**1b. Bind those agents to the studio, in the studio UI.** This is the step that
-makes routing resolve. Open the studio in the dashboard (human JWT required —
-the workspace key cannot do this, it is ingest-write only) and attach/bind the
-registered agents to it.
+**1b. Attach a rule book, per agent — this IS the bind step.**
+**[verified-stg]** There is no separate binding action; attaching writes the
+`agent_studio_routing` row (see the correction above). Do it in the studio
+dashboard, or call it directly if you hold a studio-scoped credential:
 
-**1c. Verify the binding took — this is the gate for the whole runbook:**
+```bash
+curl -sS -X POST "$EXPLAINABILITY_GATEWAY_URL/v1/studios/$STUDIO_ID/agent-rule-books" \
+  -H "X-API-KEY: $STUDIO_SCOPED_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_name": "aisquare-runner", "rule_book_url": "<url>", "label": "<label>"}'
+```
+
+`agent_name`, `rule_book_url` and `label` are the required fields
+(**[verified-stg]** from staging's OpenAPI). Repeat for `aisquare-planner`,
+`aisquare-coder` and `aisquare-cli`.
+
+> The workspace `ingest:write` key in `explainability-prod.env` gets `403` here
+> — measured against every studio it can list. Use the dashboard or a
+> studio-scoped key.
+
+**1c. Verify the attach took — this is the gate for the whole runbook:**
 
 ```bash
 curl -sS "$EXPLAINABILITY_GATEWAY_URL/v1/routing/resolve?agent_name=aisquare-runner" \
   -H "X-API-KEY: $EXPLAINABILITY_API_KEY"
 ```
 
-- ✅ `{"studio_id": "<something>"}` → bound. Continue.
-- ❌ `404 {"detail":"No studio bound to this agent yet"}` → **stop.** Tracing
-  will work and governance will not. Fix the binding before going further.
+- ✅ `{"agent_name": "…", "studio_id": "<a real id>"}` → attached and bound.
+- ❌ `404 {"detail":"No studio bound to this agent yet"}` → **stop.** The rule
+  book is not attached. Tracing will work and governance will not.
 
-Repeat for each of the three names.
+Repeat for each name. **[verified-stg]** this call works with the ordinary
+workspace key, so it is the one governance check Jatin can run without the
+studio credential.
 
-**1d. Attach the rule book** to that studio in the UI, then re-run 1c and make
-one traced call (§5). Confirm you no longer see `policy check degraded
-(FAIL_OPEN)` in the proxy log. **Absence of that warning is the only proof the
-rule book is live.**
+**1d. Probe the attachment — confirm the rule book actually loads.**
+**[verified-stg]** staging exposes a purpose-built check that beats reading a
+dashboard:
 
-**1e. Do not pin `EXPLAINABILITY_STUDIO_ID`** in the prod env file. Leave it
-unset so one-key mode resolves the studio by agent name. Pin it only if you have
-a real studio id from 1c, and never a `publication_id`.
+```bash
+curl -sS -X POST \
+  "$EXPLAINABILITY_GATEWAY_URL/v1/studios/$STUDIO_ID/agent-rule-books/$ATTACHMENT_ID/probe" \
+  -H "X-API-KEY: $STUDIO_SCOPED_KEY"
+```
+
+It forces a live fetch of the attachment URL with **no cache** and returns
+`{"ok": bool, "status_code": int, "sample_policies": [{"id": …, "name": …}]}`.
+`ok: true` with a non-empty `sample_policies` is the proof the rule book is live
+— a resolvable `studio_id` alone only proves the row exists.
+
+Then make one traced call (§5) and confirm `policy check degraded (FAIL_OPEN)`
+has **stopped** appearing in the proxy log.
+
+**1e. Leave `EXPLAINABILITY_STUDIO_ID` unset** in the prod env file so one-key
+mode resolves the studio by agent name (§1e is why the pin is harmful: it
+short-circuits resolution). Never put a `publication_id` there.
+
 
 ---
 

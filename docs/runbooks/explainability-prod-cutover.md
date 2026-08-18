@@ -564,8 +564,28 @@ curl -s http://127.0.0.1:9190/health
 > tell the difference between "mine" and "someone's":
 >
 > ```bash
-> ss -ltnp | grep 9190      # the PID should be the proxy you just started
+> ss -ltnp | grep 9190                  # note the pid=
+> ps -o pid,etime,args -p <that pid>    # ELAPSED is the tell
 > ```
+>
+> **Ask the age, not the identity.** "The PID should be the one you started" is
+> useless advice to someone who has not started it yet and has no PID to
+> compare against. `ELAPSED` needs no prior knowledge: a proxy you started for
+> this cutover is minutes old, and anything older was already there.
+>
+> **[verified-train, @9bbc8ed7 2026-08-18 06:00] There is one on this box as you
+> read this.** Measured, read-only, nothing started and nothing killed:
+>
+> ```text
+> LISTEN 127.0.0.1:9190  users:(("python",pid=20753,fd=13))
+> 20753  ELAPSED 1-02:35  STARTED Mon Aug 17 03:13:35 2026
+>        ./.venv/bin/python -m aisquare.explainability.claude_proxy
+> /health -> {"status":"ok","service":"aisquare-proxy","mode":"claude_code",...}
+> ```
+>
+> Twenty-six hours old, and it satisfies every check in this section. So on this
+> machine §3 goes green **whether or not your start succeeded**, and `ELAPSED`
+> is the only line above that says so.
 >
 > This is not a defect in the CLI. Asking the kernel who owns a socket is
 > `ss`'s job, not a diagnostic's; a payload check is the right check for "is

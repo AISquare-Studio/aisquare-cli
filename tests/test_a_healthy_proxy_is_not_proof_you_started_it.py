@@ -72,6 +72,11 @@ def test_section_3_says_a_healthy_answer_is_not_proof_of_ownership() -> None:
     section = _section("## 3. Start the proxy")
 
     assert "ss -ltnp" in section, "§3 verifies /health without saying how to confirm whose it is"
+    assert "etime" in section, (
+        "§3 names the socket but not its AGE. 'the PID should be the one you "
+        "started' is unusable advice to someone who has not started it yet and "
+        "has no PID to compare against; ELAPSED needs no prior knowledge."
+    )
 
 
 def test_the_at_a_glance_table_carries_the_same_caveat() -> None:

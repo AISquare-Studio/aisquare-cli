@@ -1556,6 +1556,33 @@ ALL THREE AGREE: True
 
 One id, three places, none of them needing the gateway.
 
+> **[verified-stg, `9bbc8ed7`, 2026-08-18] And a fourth place that DOES need the
+> gateway: the Run the insights actually shipped under.** The three hops above
+> are local agreement. This one is delivery — a train build with
+> `aisquare[explainability]` installed, capturing inside a session and draining:
+>
+> ```text
+> board session id                 a9efb7d2-072b-4a80-b77e-c7360735935c
+> ship "runs:"                     a9efb7d2-072b-4a80-b77e-c7360735935c
+> SDK inbox                        12 rows dispatched, 0 errors, max retries 0
+> ```
+>
+> **The negative control is what makes that mean anything**, because a run key
+> that is merely *present* is indistinguishable from one that is *correct*: the
+> same capture with `AISQUARE_PIPELINE_ID` unset ships under
+> `aisquare-cli-unattributed` instead. Marker set, the session's id; marker
+> unset, the shared bucket. Same rig, same target, one variable.
+>
+> `run_key()` reads that marker from the **ambient** environment — the processes
+> that capture are children of the traced session and inherit its wiring — so a
+> capture inside a real launch picks it up without being told. **[stand-in]**
+> the measurement above exported the marker rather than launching a real agent
+> around it; `d124bc26`'s receipt covers the real-launch half of the same chain.
+>
+> This still does not reach the studio. It shows the insight left under the
+> session's key and the gateway accepted it, not that a Run with that id can be
+> read back — hop 4 below is unchanged.
+
 > ⚠️ **HOP 4 IS BLOCKED AND THAT IS BY DESIGN, NOT BY OVERSIGHT.** Reading the
 > Run back from the studio — confirming the gateway holds a Run whose id is the
 > one above — needs a **studio-scoped** credential. That is

@@ -154,8 +154,10 @@ forty lines.** Read the ones you need:
    the one check nobody has ever executed: take a pipeline id out of
    `joins.jsonl`, read the Run back from the studio, and confirm the board row
    and the Run carry the *same* id. That is the join this whole integration is
-   for. Do not read the blocker off `aisquare task show` — it does not print a
-   blocked reason (filed: `tsk_01m0aagmd31ca2sembrbajca8j`).
+   for. Do not read either blocker off `aisquare task show` — it does not print
+   a blocked reason. The reason is *stored*, as a `team.task_blocked` event, so
+   `aisquare --json team log` carries it in full and needs no fix first (filed:
+   `tsk_01m0abnayp0kw249tywkxbs9p6`).
 
 4. **Prod values are unverified.** Every *mechanism* here is verified against
    staging; the prod URL and key are `[unverified-prod]` throughout.

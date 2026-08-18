@@ -2,7 +2,11 @@
 
 **Read this first, then `explainability-prod-cutover.md` to execute.** This file
 answers four questions: what is done, what is *proven* and how, what needs you,
-and what was deliberately left. It assumes you have read none of the board.
+and what was deliberately left. Two further sections are not questions and are
+easy to miss from this list: **the one thing to eyeball**, which is the only
+thing here that asks you to look at something outside this repo, and **the
+doctrine this integration holds to**, which is what to read before changing any
+of it. It assumes you have read none of the board.
 
 Why it is a file and not a board note: the handoff was a note for most of this
 shift, and notes scroll. Late in the shift the planner tried to retrieve the
@@ -56,8 +60,14 @@ forty lines.** Read the ones you need:
    is now measured command by command, because generalising from one of the three
    is a mistake two of us made in opposite directions:
 
-   - `config set` on an unrelated key — **safe**. All five top-level
-     `[explainability]` keys and the `[explainability.targets]` table survive.
+   - `config set` on an unrelated key — **safe**. All **seven** top-level
+     `[explainability]` keys — `enabled`, `proxy_url`, `agent_name_template`,
+     `target`, `roles`, `ship`, `gateway_url` — and the
+     `[explainability.targets]` table survive. (This read *five* until
+     `8dd460fb` re-ran it at `d8b600b`: `config set api_url …` changed exactly
+     one line and left the section byte-identical. The count was wrong when it
+     was written, not rotted — the paragraph above already enumerates seven,
+     three the stale build knows and four it drops.)
    - `init --reinit` — **destroyed it silently; now it refuses.** It calls
      `save_config(AppConfig())` unconditionally, and a fresh default config is
      not a merge, so `enabled` went `true` → `false` and the **whole
@@ -76,9 +86,26 @@ forty lines.** Read the ones you need:
    stops and asks. If you pass `--yes` you still lose the section — re-run §1/§2
    afterwards and verify with §5b's `jq -r .shipping.gateway`, because nothing
    downstream reports a missing targets table.
+   **[re-run 2026-08-18, `8dd460fb`, at `d8b600b`, in a throwaway
+   `AISQUARE_HOME`.]** Every claim in this item that can be executed at the
+   train head was: `config set` on an unrelated key changed one line and left
+   the section byte-identical; `init --reinit` **refused** at exit 1, named
+   what would go (`targets tst; tracing enabled`) and left the file identical;
+   `--reinit --yes` reset at exit 0 and *reported* what it removed; an
+   unreadable config reset without asking. Also confirmed: plain
+   `explainability ship` with no key exits **0** and `ship --strict` exits
+   **1**, and `doctor` prints the provenance line. **Not** re-run: the stale
+   build's three write paths, deliberately — nothing has installed over that
+   build, so re-measuring it re-derives rather than checks, and pointing it at
+   a home is the one experiment here that can damage a real one.
    Two tells that need no comparison: `doctor` reports where the running build
    came from, and a build that prints **no** provenance line predates that check
    and is therefore older than this train.
+   **`--version` is not a third tell, and it is the one you will try first.**
+   Measured at `d8b600b`: the pyenv build and this checkout both print
+   `aisquare 0.4.0rc1`. The version string cannot separate them, so use the
+   provenance line — `✓ provenance: installed (editable) from …` — or
+   `command -v aisquare`.
 
 2. **Governance is the one real blocker, and it is not a config edit.**
    No agent name resolves to a studio. Fixing it needs *both* an agent→studio
@@ -151,6 +178,15 @@ Two lanes, both wired end to end:
 The correlation spine: one id in four places — launcher mint → `--session-id`
 argv → `X-Pipeline-Id` header → `AISQUARE_PIPELINE_ID` marker → board row via
 the `SessionStart` hook → `joins.jsonl`.
+**Count that chain and you get more than four, so name the four that are
+pinned**, because they are not quite the four that were watched. `SPINE_PLACES`
+in `tests/test_correlation_spine.py` is the header, the marker, the board row
+and the join log; the hand-walk that established this watched the header, the
+**argv expansion**, the board row and `joins.jsonl`. The argv hop is covered a
+different way — `test_the_spawn_template_passes_the_flag_the_parser_looks_for`
+pins the flag *spelling* the parser matches, and the template interpolates the
+variable rather than a literal id — so nothing here is unheld. But "four
+places" names two different fours, and only one of them fails the gate.
 
 Also folded: a doctor that verifies and helps wire it (#51) — plain `doctor`
 creates no state, `doctor --fix` creates only the home layout, both measured and
@@ -183,6 +219,14 @@ and rebindings.
   could not make that value disagree with the active target. It confirms where
   you are pointed; it no longer proves the lanes agree, because they cannot
   currently disagree.)
+- **`config list` stopped being printable the moment you configured anything.**
+  `save_config` dumps with `exclude_none=True` because TOML has no null;
+  `emit_config` renders the same model through the same library and did not.
+  So `explainability enable` (a target that overrides nothing) *or* `team bind`
+  without `--bin` left `aisquare config list` exiting **1** with a traceback —
+  §2 of the runbook, and then the obvious next thing you would type to check
+  that §2 worked. Both existing tests of that command pass `--json`, and JSON
+  has null, so the gate covered the command and not the branch you see.
 - **`AISQUARE_AGENT_NAME` collided with the SDK's own routing variable.**
 - **A store-migration race** (TOCTOU) under concurrent first opens.
 - **`~/.aisquare/credentials` had two writers with incompatible formats, and

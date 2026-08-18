@@ -525,14 +525,25 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > control that makes the rest mean anything:
 >
 > ```text
+> ── measured with TRACING ON; the two ✗ rows are ⚠ / exit 0 with tracing off ──
 > missing inbox file             ✓  "No inbox database at <path> …"          exit 0
 > inbox present, table empty      ✓  "empty"                                  exit 0
 > unreadable file                 ⚠  "Cannot read inbox at <path>: …"         exit 0
 > clean pending row, no 409       ✓  pending=1                                exit 0   <- CONTROL
-> pending, last_error 409         ✗  pending=1 — … gateway_status:409         exit 1
-> dead_letter row                 ✗  dead_letter=1 — … no_agent_identity     exit 1
+> pending, last_error 409         ✗  pending=1 — … gateway_status:409         exit 1   ← ⚠ / exit 0 if tracing off
+> dead_letter row                 ✗  dead_letter=1 — … no_agent_identity     exit 1   ← ⚠ / exit 0 if tracing off
 > tracing never configured        (row absent entirely)                      exit 0
 > ```
+>
+> The condition is in the header because that is where the misreading happens:
+> §5b comes *after* §4 in the document but not necessarily on the machine, so a
+> reader who has not enabled tracing yet, hits a real backlog and glances at the
+> table sees a warning where it promises a cross — and a qualifier underneath
+> arrives after they have already drawn the wrong conclusion. **The backlog is
+> exactly as bad in both readings; only the loudness changes.**
+> **[verified-train]** — all six states re-measured with tracing off: the two
+> `✗` rows read `⚠` at exit 0, and the other four are byte-identical to the
+> readings above, so exactly two rows move.
 >
 > The control is the load-bearing line: a clean pending row is `ok`, so the
 > failure is about **the 409** and not about having a queue at all. The

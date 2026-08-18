@@ -6,30 +6,51 @@ dead proxy costs nothing. They decomposed the hook's 353 ms into ~326 ms of CLI
 IMPORT and ~27 ms of hook, and recorded the import cost rather than filing it —
 "real, on the primary path, and NOT this integration doing".
 
-Most of it is not. Some of it is, and nobody had split that. Measured at
-1481f19, medians of seven subprocess runs:
+Most of it is not. Some of it is, and nobody had split that. The cost is paid
+by `aisquare status` on a machine that has never configured explainability,
+because Typer imports the module to register its commands.
 
-    CLI without the explainability module    174 ms
-    the same plus cli.explainability          200 ms
-    MARGINAL                                   26 ms   (~12% of a 216 ms import)
+MEASURED BY CPU, NOT BY CLOCK, and the first version of this file got that
+wrong. Medians of nine `-X importtime` runs, self time per module:
 
-That is paid by `aisquare status` on a machine that has never configured
-explainability, because Typer imports the module to register its commands.
+    services.explainability        7.2 ms
+    services.explainability_ops    5.4 ms
+    ssl                            3.2 ms
+    http                           1.0 ms
+    cli.explainability             0.6 ms
+    sqlite3                        0.3 ms
+    ------------------------------------
+    identifiable                  ~17 ms
+
+An earlier revision reported 26 ms from subprocess wall-clock timing. That
+number was noise: on this box, under three concurrent test runs, the BASE
+measurement alone spread 36 ms between its fastest and slowest sample — a noise
+floor larger than the signal — and repeating it produced a median marginal of
+131 ms. The per-module CPU figures above hold to within a millisecond across
+nine runs, so they are what this file states.
+
+I had quoted @9bbc8ed7's rule approvingly while writing the first version — "a
+wall-clock bound in CI is flaky by construction" — and pinned module identity
+rather than milliseconds for exactly that reason. Then I put a wall-clock number
+in the prose as though it were solid. THE RULE APPLIED TO THE TEST AND NOT TO MY
+OWN REPORT.
 
 WHAT IT IS: module definitions only. No work happens at import — no config
 read, no filesystem, no network, and NO SDK, which the no-hard-dependency rule
 requires. The cost is the modules it pulls in, and this file records exactly
 which ones so the set cannot grow in silence.
 
-WHY A RECORD RATHER THAN A FIX. `ssl`, `http` and `sqlite3` are needed when a
-command probes a gateway or touches the spool, not to register a command, so
-deferring them into the functions that use them would recover most of the 26 ms
-— the codebase already does exactly that in `_active_deployment`, which imports
-`resolve_target` inside the function. It is a restructure of import order across
-a module every command loads, on a train that has been handed off, for a saving
-no human perceives. That is the train owner's risk to spend, not a coder's to
-take unilaterally at 20:00. What is defensible tonight is making the cost
-visible and bounded.
+WHY A RECORD RATHER THAN A FIX, AND THE DECOMPOSITION SETTLES IT. An earlier
+revision suggested deferring `ssl`, `http` and `sqlite3` into the functions that
+use them, on the grounds that it would recover most of the cost. It would not:
+those three total ~4.5 ms of ~17 ms. THE MAJORITY IS OUR OWN TWO MODULE BODIES —
+12.7 ms of dataclass definitions, compiled regexes and constants — which no
+amount of deferring imports touches, because it is the module executing, not its
+imports. So the restructure targets a quarter of the cost, on a module every
+command loads, on a handed-off train, for a saving no human perceives. It is not
+worth doing, and that is a firmer answer than "the owner's risk to spend".
+
+What is defensible is making the cost visible and bounded, which is this file.
 
 NOT A WALL-CLOCK ASSERTION, for @9bbc8ed7's reason: "a wall-clock bound in CI is
 flaky by construction and A MUTED TEST IS WORSE THAN NONE." The stable,

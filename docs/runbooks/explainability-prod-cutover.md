@@ -703,8 +703,10 @@ against a local checkout of branch `f9/suppress-cc-shell-run` @ `bb88bb5`, and
 that raised a fair question: is the evidence reproducible from anything you can
 install? It is. `1.1.0` is on PyPI and carries the junk-run suppression —
 `_has_valid_correlation` in `claude_proxy.py` is **byte-identical** to the
-checkout's. `1.0.6` and `1.0.7` do **not** have it, and on those the junk-run
-behaviour returns silently as extra Runs in the dataset.
+checkout's. The *released* `1.0.6` and `1.0.7` do **not** have it, and on those
+the junk-run behaviour returns silently as extra Runs in the dataset — but the
+`bb88bb5` checkout itself also self-reports `1.0.6`, so do not use the version
+string to decide; run the check below. (Measured block after it.)
 
 ```bash
 set -a; source /home/work/.config/aisquare/explainability-prod.env; set +a
@@ -786,6 +788,40 @@ $EXE -c "import importlib.util as u; src=open(u.find_spec('aisquare.explainabili
 
 Verified to discriminate: the live proxy reports `IN FORCE`; the same check run
 against a fresh `aisquare==1.0.6` reports `MISSING`.
+
+> ⚠️ **[verified-train, @8dd460fb 2026-08-18] That sentence is true and it is
+> not the whole truth: the version number is not the oracle, the capability
+> check is.** The proxy running on this box reports `IN FORCE` — and it is
+> **`1.0.6`**. Measured at pid 20753 (up 33.4h): its interpreter imports
+> `…/AISquare-Explainability-SDK/aisquare/explainability/claude_proxy.py`, an
+> *editable* install (`__editable__.aisquare-1.0.6.pth`) of the `bb88bb5`
+> checkout, whose `pyproject.toml` says `version = "1.0.6"` because the
+> suppression branch never bumped it. Two artefacts here both call themselves
+> `1.0.6` and only one carries the symbol:
+>
+> ```text
+> live editable source, bb88bb5    218592 bytes  sha256 f063820d…  2 hits
+> pip-cached aisquare-1.0.6 wheel  218592 bytes  sha256 f063820d…  2 hits  <- byte-identical, built from that checkout
+> pip-cached aisquare-1.0.3 wheel   49105 bytes  sha256 39d46716…  0 hits
+> ```
+>
+> **What follows, in the order you will meet it.**
+> **(a)** "`1.0.6` does not have it" above is true of the *PyPI release* and
+> false of the *checkout the overnight receipts used*. It is a claim about
+> provenance wearing a version number.
+> **(b)** The troubleshooting line does not invert: `IN FORCE` does **not**
+> mean you are on `>=1.1.0`.
+> **(c)** **If the check already prints `IN FORCE`, do not reinstall.**
+> `pip install 'aisquare>=1.1.0'` would replace a working editable install with
+> a PyPI build and detach the proxy from the tree that produced every overnight
+> receipt; run against a *live* proxy it also rewrites the disk under a process
+> that already imported the old code. Reinstall is the remedy for `MISSING`,
+> never routine tidying.
+> **(d)** No `1.1.x` artefact exists on this box — pip cache, uv cache and every
+> `aisquare-*.dist-info` under `/home/work` are `1.0.3` or `1.0.6` — so that
+> install needs network, and the "byte-identical to `1.1.0`" claim above stays
+> **unverified from here**. What IS verified is the half the evidence row rests
+> on: the build now serving is byte-identical to the checkout the receipts used.
 
 **[verified-stg]** Health check — run it yourself, do not assume:
 
@@ -1690,7 +1726,13 @@ dies.
    to the `bb88bb5` checkout the overnight receipts used, so that evidence is
    reproducible from PyPI and nobody needs the unreleased branch. `1.0.6`/`1.0.7`
    do **not** have it. §3 carries a check that reads the *running* proxy and was
-   verified to discriminate (live proxy `IN FORCE`, fresh `1.0.6` `MISSING`).
+   verified to discriminate (live proxy `IN FORCE`, fresh `1.0.6` `MISSING`)
+   — but @8dd460fb measured what supplies that `IN FORCE`, and it is a
+   **`1.0.6`-labelled editable checkout of `bb88bb5`**, not a `1.1.x`
+   install. The discrimination is by provenance, not by version number,
+   and `IN FORCE` must not be read back as "we are on >=1.1.0". No
+   `1.1.x` artefact exists on this box, so the byte-identity to the
+   PyPI release remains unverified here. See the block in §3.
    Two caveats: neither SDK PR #362 nor #363 is on `origin/main` (which is at
    #433), so the fix reached the release by some other route — treat the
    RELEASE, not the PR, as the thing to depend on. And **#363 is gateway-side**

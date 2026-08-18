@@ -343,7 +343,35 @@ def _check_database() -> DoctorCheck:
         # error the CLI prints, so the two cannot drift apart again — a
         # remediation nobody re-runs is how this one rotted.
         return _fail("database", f"context.db is unreadable: {exc}", damaged_store_recovery())
+    marker = paths.truncation_marker_path()
+    if marker.exists():
+        # The store opens and is perfectly valid — it is simply not the one this
+        # machine had. §0b teaches "an empty board with a green doctor means the
+        # file was truncated"; without this, doctor is the green half of that
+        # sentence and can never supply the other half, because by the time it
+        # runs the schema is back and nothing distinguishes the two cases.
+        when = _read_line(marker) or "an earlier run"
+        return _warn(
+            "database",
+            f"context.db is readable ({count} user entries) — but it was found "
+            f"TRUNCATED and rebuilt at {when}; the sessions, tasks and notes it "
+            "held are gone",
+            f"Nothing to repair — the history was lost before this. "
+            f"Acknowledge it with: rm {marker}",
+        )
     return _ok("database", f"context.db is readable ({count} user entries)")
+
+
+def _read_line(path: Path) -> str:
+    """First line of a small marker file, or empty when unreadable.
+
+    Never raises: a diagnostic that crashes on its own breadcrumb is worse than
+    one that says a little less.
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
 
 
 def _check_repomix() -> DoctorCheck:

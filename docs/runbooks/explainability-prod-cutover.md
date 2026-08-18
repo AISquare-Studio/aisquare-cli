@@ -214,20 +214,32 @@ have failed in your hands.
 
 **The fifth is silent, and it is the one to know about.** A file **truncated to
 zero bytes** is read by SQLite as a brand-new empty database, so the store is
-re-created and migrated, `status` exits 0, and `doctor` afterwards reports
-`✓ database: context.db is readable (0 user entries)` — while every session,
-task and note that file held is gone. The CLI prints one line at the first open
-that sees it:
+re-created and migrated and `status` exits 0 — while every session, task and
+note that file held is gone. The CLI prints one line at the first open that
+sees it:
 
 ```
 board: ~/.aisquare/context.db exists but is empty — it was truncated, and the
 tasks, notes and sessions it held are gone.
 ```
 
-That line appears **once**, on the open that saw it; everything afterwards looks
-healthy because by then it is. **So if the board is suddenly empty and `doctor`
-is green, the file was truncated, not corrupted** — and the recovery below does
-not apply, because there is nothing left to recover.
+**That line goes to whichever process opened the file first, which is usually a
+HOOK** — its stderr reaches neither you nor the agent. So do not rely on seeing
+it. **[verified-train]** Ask `doctor` instead, at any point afterwards:
+
+```
+⚠ database: context.db is readable (0 user entries) — but it was found
+TRUNCATED and rebuilt at 2026-08-18T01:19:55+00:00; the sessions, tasks and
+notes it held are gone
+    → Nothing to repair — the history was lost before this. Acknowledge it
+      with: rm ~/.aisquare/store-was-truncated
+```
+
+**So an empty board plus that ⚠ means truncation, not corruption** — and the
+recovery below does not apply, because there is nothing left to recover. The
+warning persists until you remove the marker file yourself, because a warning
+that clears itself is one nobody has to answer. Clearing it returns `doctor` to
+`✓`.
 
 Move it (`mv`, as below) or remove it (`rm`) — but **never truncate it with a
 redirect**. `> ~/.aisquare/context.db` puts you in exactly this row, the one

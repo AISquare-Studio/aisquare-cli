@@ -126,6 +126,21 @@ def explainability_joins_path() -> Path:
     return explainability_dir() / "joins.jsonl"
 
 
+def truncation_marker_path() -> Path:
+    """Records that ``context.db`` was found emptied and rebuilt.
+
+    Deliberately NOT under ``cache/``: that directory is documented as
+    disposable, and this is the only surviving evidence that a board's history
+    was lost. It exists because the fact is knowable for exactly one line —
+    ``open_store`` sees a zero-length file, and one statement later the schema is
+    back and nothing can tell an emptied store from a new machine.
+
+    Cleared by the operator, not by us. A warning that clears itself is one
+    nobody has to answer.
+    """
+    return aisquare_home() / "store-was-truncated"
+
+
 def ensure_home() -> Path:
     """Create the aisquare home layout if missing and return its root."""
     home = aisquare_home()

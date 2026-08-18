@@ -27,8 +27,11 @@ something is.
 **All six at a glance, because the detail below runs long and item 1 alone is
 forty lines.** Read the ones you need:
 
-1. **Reinstall non-editable** (§0). Not blocked on anything but typing. Long here
-   only because three commands could silently strip your config afterwards.
+1. **Reinstall non-editable** (§0). Not blocked on anything but typing, and it
+   is a **precondition**, not just a hazard-avoidance step: it fixes a command
+   that is broken on this machine *today*, and two of the checks these documents
+   tell you to run cannot answer until it has happened. Long here because it also
+   closes a way three commands could silently strip your config afterwards.
 2. **Governance** — the one real blocker. Needs a credential we do not hold.
 3. **Nobody has read the studio.** Every delivery claim stops at the gateway.
 4. **Prod values unverified.** Mechanisms verified against staging, not values.
@@ -40,6 +43,24 @@ forty lines.** Read the ones you need:
    Nothing blocks it but the typing; the command was verified working at the
    current head. Until it runs, `aisquare` on `PATH` is the pyenv build and
    `resolve_binary` reports 0.
+
+   **What running it gets you, beyond the hazard below.** `aisquare config list`
+   exits **1** with a traceback on this machine right now — see "Bugs found and
+   fixed"; the trigger is your `[team.profiles.*]`, nothing to do with tracing,
+   and step 1 is the fix. And two checks these documents tell you to run cannot
+   answer before it, both measured:
+
+   - **§0's own verification.** It uses `doctor`'s provenance row, and the build
+     on `PATH` today prints **no such row at all** — that absence *is* the tell
+     that it predates the check, but it is not an answer to "which tree am I
+     running". After the reinstall the row reads `installed (non-editable)
+     from …` and names it.
+   - **§5b's timer check.** `command -v aisquare` answers the same path before
+     and after — §0 installs into that same pyenv `bin` — but the BUILD behind
+     it changes, and the older one has no `ship`. Run before this item, the
+     check exits **2** with a usage line instead of the **1** it is looking for.
+
+   This item is first in the list for a reason.
 
    **And it is not only about what you gain by running it.** Once you *have*
    configured explainability, three commands run from a shell that still

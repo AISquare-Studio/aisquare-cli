@@ -69,6 +69,22 @@ which aisquare && aisquare --version
 > phrased as a developer hazard — which it is, right up until §0 makes it yours.
 > Over a normal install the extra is safe. Develop from an editable checkout if
 > you like; do not run **this document** from one.
+>
+> **[verified-train, coder2 `8dd460fb`, 2026-08-18] Both halves re-run in
+> throwaway venvs, mechanism and outcome.** This was one of the prose markers
+> nobody had re-executed this shift, and it is the one §0 rests on. Measured
+> against the current train, with the SDK's `aisquare/` package present:
+>
+> | install | result |
+> |---|---|
+> | `pip install -e` | **exit 1**, `ModuleNotFoundError: No module named 'aisquare.cli'` |
+> | `pip install` (normal) | **exit 0**, `aisquare.cli` *and* `aisquare.explainability` both import |
+>
+> The stated cause holds too: with the package present, `aisquare` resolves to
+> site-packages rather than the checkout, so the editable path hook is bypassed
+> and the CLI's own modules vanish. Reproduced by creating the package
+> directory, not by installing the real extra — the shadowing is the mechanism
+> the warning names, and it is what was tested.
 
 **[verified-train] Do not skip this.** On this box overnight the installed
 binary and the train both reported `aisquare 0.4.0rc1` while being *different

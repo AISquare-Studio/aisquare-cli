@@ -223,6 +223,13 @@ several sessions at once:
 aisquare status >/dev/null    # creates and migrates ~/.aisquare/context.db
 ```
 
+**On a home this new, `aisquare doctor` exits 1 with `fail home` — before the
+line above, not after.** Measured by `8dd460fb` in a throwaway home. This is
+not your case (yours holds days of data), and it is recorded because §0's own
+verify step *is* `doctor`: on a genuinely first-ever install that verify fails
+for a reason that has nothing to do with explainability, and the fix is the one
+command above rather than anything in this runbook.
+
 **Why.** Several sessions opening a *brand-new* store simultaneously can race
 its migration and fail with `store_error: duplicate column name: account`. That
 database is then permanently wedged for that migration — it is not a transient
@@ -1125,6 +1132,16 @@ because nothing has been traced. A reader who runs these commands too early
 gets `No such file or directory` and cannot tell expected-absence from
 breakage — which is why this section sits here and not next to §4.
 
+**And "launched" is not the precondition — "its `SessionStart` hook has fired"
+is.** The join record is written by the hook *inside* the agent, so a session
+that is running and already has its id in the environment can still have **no
+line in the join log**. Measured by `8dd460fb` walking this section: a stand-in
+agent that printed its environment without firing the hook produced a real
+pipeline id and an empty join log, and the check below came back `False` — the
+document was right and the session was simply too young. If you get a
+disagreement with an id in hand, let the agent do one turn of work and re-read
+before concluding the join is broken.
+
 This is the north star's third clause — *board rows join to gateway Runs on a
 shared key* — and until now the runbook had no step that checked it. Three of
 the four hops need no credential and are below. The fourth does, and is marked.
@@ -1230,18 +1247,32 @@ fully healthy run):
 | `✗ the context store is corrupt: …/context.db` | the file is damaged, not misconfigured — the message carries the whole recovery, and `aisquare doctor` prints the same one |
 
 > ⚠️ **The credit band rides on a successful ingest, and a fresh workspace starts
-> in the worst one.** Read from the gateway's own
-> `gateway/billing/enforcement.py`, not observed against prod:
-> `balance > warn_threshold` → no band; `<= warn_threshold` → `warn`;
-> `<= HARD` (default 0) → `hard`. And in its words: **"A never-granted
-> workspace (granted=0, balance=0) lands in 'hard'"**, because **"the gateway
-> never auto-grants — credits are issued by our backend."**
+> in the worst one.** Read from source, not observed against prod — and the
+> checkout matters, because there are two on this box three months apart:
+> `/home/work/work/AISquare-Explainability-SDK` @ `bb88bb5` (2026-08-07), which
+> is the revision §3 pins for the overnight receipts. Its
+> `gateway/billing/enforcement.py`: `balance > warn_threshold` → no band;
+> `<= warn_threshold` → `warn`; `<= HARD` (default 0) → `hard`. And in its
+> words: **"A never-granted workspace (granted=0, balance=0) lands in 'hard'"**,
+> because **"the gateway never auto-grants — credits are issued by our backend."**
 >
 > So on the prod workspace you stand up this morning, a `hard` band beside a
-> `202` is the expected reading, not a fault in anything you configured, and
-> **your traces are still landing**: ingest fails open at every band. The
-> remedy is a credit grant from whoever owns billing — there is no CLI or
-> config change that clears it.
+> `202` is the expected reading rather than a fault in anything you configured.
+> The remedy is a credit grant from whoever owns billing — no CLI or config
+> change clears it.
+>
+> **Whether your traces still land at a hard band depends on one server-side
+> setting, so do not assume it.** `gateway/main.py` surfaces the band whenever
+> it is not `ok`, and converts a hard band into a **402** only when
+> `BILLING_ENFORCEMENT_MODE == "hard"`; that variable defaults to `soft`. So on
+> a default deployment an exhausted workspace still answers `202` with the band
+> in the body and the spans land — but if prod runs `hard`, ingest returns 402
+> and the row above ("anything other than `202` → traces are not landing")
+> is the one that applies. If you see a hard band, ask which mode prod runs
+> before deciding whether you have lost anything. One more branch worth
+> knowing: an ingest key with no workspace skips enforcement entirely — "can't
+> bill or enforce → fall through (allow)" — so no band at all is also a
+> possible healthy reading.
 >
 > **[unverified]** The same module says the SDK's `/credits/check` preflight
 > *refuses* at the hard band while ingest keeps failing open. If `explainability

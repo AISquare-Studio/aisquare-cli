@@ -27,6 +27,8 @@ pointing at their own service.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
@@ -62,6 +64,37 @@ def test_disable_names_the_variables_when_the_shell_still_routes(
         "naming only one leaves the shell half-configured"
     )
     assert "unset" in result.output
+
+
+def test_the_json_rendering_carries_the_same_verdict(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both surfaces render ONE decision, and the machine one must not drop it.
+
+    `--json disable` grew a ``stale_shell_export`` field, and for one commit the
+    condition behind it was written TWICE — once per rendering — which is two
+    answers to one question waiting for someone to edit one of them. It is
+    decided once now, and this pins the agreement rather than the spelling: the
+    stale case must be non-null with the variable named, and the clean case must
+    be an explicit null, because a caller cannot tell a missing key from
+    "checked and nothing set".
+    """
+    _configured()
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", _PROXY)
+
+    stale = runner.invoke(app, ["--json", "explainability", "disable"], catch_exceptions=False)
+
+    assert stale.exit_code == 0
+    payload = json.loads(stale.stdout)
+    assert payload["enabled"] is False
+    assert payload["stale_shell_export"] == {"variable": "ANTHROPIC_BASE_URL", "value": _PROXY}
+
+    _configured()
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+    clean = runner.invoke(app, ["--json", "explainability", "disable"], catch_exceptions=False)
+
+    assert json.loads(clean.stdout)["stale_shell_export"] is None, clean.stdout
 
 
 def test_disable_says_nothing_when_the_shell_is_clean(

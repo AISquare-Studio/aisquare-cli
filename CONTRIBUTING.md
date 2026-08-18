@@ -100,6 +100,17 @@ layout and the thin-CLI / service / core split.
 
 ## Writing a guard that still guards
 
+**Read this if you are about to write one — not as a checklist to audit against.**
+There is no list of the guards in this repo, and the set is **not computable**: a
+heuristic sweep found 14 files and missed five that are unmistakably rule-shaped,
+including two fixed the same day; widening it found 20 and still missed five while
+pulling in ordinary behaviour tests that happen to contain `assert not`. False
+negatives and false positives from the same instrument at the same time. A
+hand-maintained registry was considered and declined, because a hand-kept list of
+"which guards are swept" rots exactly like the hand-checks it would replace.
+Four guards here already had the pattern below before anyone named it, which is
+the useful part: **the pattern is discoverable from the problem.**
+
 This repo has about a dozen AST- and document-level guards. Over one long shift
 every single one was found, by deliberate sabotage, to be passing while checking
 less than it claimed — and the failures fell into four shapes. They are all the
@@ -158,7 +169,16 @@ Two mechanical rules earned the hard way:
    pointed at a file that collects no tests, and then pytest emits no pass/fail
    line at all — "not caught" for a run that never happened reads exactly like a
    finding.
-2. **Anchor controls to synthetic inputs, not to production code.** A control
+2. **Break the rule, not the assertion's input.** Replacing an input with a
+   literal — `offenders = []` just above `assert not offenders` — is available in
+   every test ever written, proves nothing about the guard, and simulates *the
+   rule found nothing*, which is what a clean tree looks like. The defect is a
+   rule the assertion still calls but which has stopped looking. **Both print
+   green**, so a sweep without this distinction generates false instances as
+   readily as real ones. Calling the rule *inside* the assert shrinks the surface;
+   it does not close it, and nothing here can see an assertion whose input was
+   replaced by hand.
+3. **Anchor controls to synthetic inputs, not to production code.** A control
    pointed at a real function stops controlling anything the day that function is
    cleaned up — and controlling a falsifiability guard by gutting a real test
    means shipping the defect to demonstrate it.

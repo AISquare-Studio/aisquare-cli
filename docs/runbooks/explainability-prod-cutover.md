@@ -666,10 +666,12 @@ curl -s http://127.0.0.1:9190/health
 > `lstart = btime + starttime_ticks/HZ`, and `etime = uptime - starttime_ticks/HZ`.
 > Both come from `/proc/uptime`, which on WSL2 does not track wall clock. Three
 > readings of THIS process across forty minutes gave three different start
-> times — 03:13:35, 03:14:45, 03:18:07 — drifting forward while `etime` gained
-> forty-eight minutes over forty-one minutes of wall time. The only fixed
-> quantity in that arithmetic is the process's own `starttime` in
-> `/proc/<pid>/stat`, which nobody quotes.
+> times — 03:13:35, 03:14:45, 03:18:07 — drifting forward. Measured over a
+> timed interval rather than inferred: in 48.2s of wall clock `etimes` advanced
+> **45s** and `lstart` advanced **3s**. So the age runs about 6% slow and the
+> start time walks forward by roughly four minutes an hour, which is what the
+> three readings above show. The only fixed quantity in that arithmetic is the
+> process's own `starttime` in `/proc/<pid>/stat`, which nobody quotes.
 >
 > **That is why the test is orders of magnitude and not minutes.** A day-old
 > proxy against one you started five minutes ago survives any drift this box

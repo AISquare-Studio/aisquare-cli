@@ -127,6 +127,24 @@ I was standing".
   valid Python: the module parses, the tests pass, `make check` reports success.
   So do a gutted body, an unconditional skip, and an empty `parametrize` set —
   each collects, counts toward the total, and runs nothing.
+- **Emptiness as both goal and symptom.** In a guard whose whole value is that a
+  class *stays* closed — "nothing raises", "the set of undecided call sites is
+  empty", "the diff equals the record" — a rule that has gone blind produces the
+  correct-looking answer for free, and there is nothing in the output to tell
+  success from blindness. Such a guard needs something it must still **see**, not
+  only something it must not find.
+
+Half a control is the usual trap. Controlling the *scanner* — "the sweep found
+files", "the walk found functions", "the scanner would catch a new seam" — proves
+the scanner works and says nothing about whether the rule still consults it. Six
+guards here were found blind that way, including the one written specifically
+because conflict markers had nearly shipped: it reported every file clean while
+matching nothing, restoring exactly the hole it existed to close, behind a green
+suite. Assume the half you did not think of is a rule.
+
+The observed pattern in who finds these is worth knowing: people control what they
+have just built and not what they inherited from themselves a cycle earlier. Sweep
+your own old guards, and expect the unowned ones to be nobody's habit.
 
 Two mechanical rules earned the hard way:
 
@@ -135,7 +153,11 @@ Two mechanical rules earned the hard way:
    "anchor missed — result meaningless" otherwise. A sabotage that did not apply
    is a green run that means nothing, and it is indistinguishable from a guard
    working. A sabotage aimed at the wrong line, or along an axis nothing uses,
-   produces a real result for a fake reason.
+   produces a real result for a fake reason. **Check the run as well as the
+   mutation:** a mutation can apply and still break the file syntactically, or be
+   pointed at a file that collects no tests, and then pytest emits no pass/fail
+   line at all — "not caught" for a run that never happened reads exactly like a
+   finding.
 2. **Anchor controls to synthetic inputs, not to production code.** A control
    pointed at a real function stops controlling anything the day that function is
    cleaned up — and controlling a falsifiability guard by gutting a real test

@@ -139,6 +139,28 @@ aisquare doctor
 > The path is the tree you just checked out, and `(non-editable)` is the `-e`
 > warning below confirmed rather than assumed. A build that prints **no**
 > provenance row predates that check and is therefore older than this train.
+>
+> **[verified-train, coder2 `8dd460fb`, 2026-08-18] The provenance row and the
+> explainability section are two readings of ONE install, and that install was
+> watched as a transition rather than inferred from two builds.** Into a
+> throwaway venv, `python3 -m pip install '<train>[dev]'` exactly as above:
+>
+> ```text
+> BEFORE  python -c 'import aisquare'        ModuleNotFoundError
+> AFTER   --json doctor: provenance          installed (non-editable) from <train>
+> AFTER   --json doctor: explainability      present   (absent on the PATH build)
+> AFTER   aisquare.core                      23 modules incl. redaction/insights/outbox
+> ```
+>
+> This closes the one thing the row-count symptom left open — it was measured as
+> two builds side by side, and this is a single build going from no client lane
+> to the client lane. **Count the SECTION, not the rows.** `--json doctor` is the
+> instrument the provenance check above already uses; the rendered ROW total is
+> terminal-width-dependent and will not reproduce (measured 14 checks in JSON,
+> 17 rendered here, 19 rendered elsewhere for the same build). Presence of the
+> `explainability` check is the reading that holds across all three. Still a
+> human's to run on their own `python` — this was a throwaway venv, not the
+> operator's site-packages.
 
 > ⚠️ **[verified-train, planner `dfd9a883`] Do not use `-e` for a cutover.** §5b
 > has you install `aisquare-cli[explainability]`, and over an editable checkout

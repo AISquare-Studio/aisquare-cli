@@ -349,6 +349,39 @@ def _walk(words: list[str]) -> tuple[list[str], set[str], str | None]:
     return chain, flags, None
 
 
+def _forwards_unknown_flags(words: list[str]) -> bool:
+    """Does the resolved command hand flags it does not know to another program?
+
+    `launch` declares ``ignore_unknown_options`` and its help says so: "Extra
+    arguments are passed to the agent." So `aisquare launch coder --headless`
+    is not a defect — the flag belongs to `claude`, and the CLI never sees it.
+    Without this, the flag test reports a documented, working invocation as a
+    stale flag, and the obvious repair is to EDIT THE DOCUMENT — which is this
+    guard corrupting the file it guards, the failure this module's own header
+    warns about for counter-examples.
+
+    Read from ``context_settings`` rather than a list of command names, so a
+    second forwarding command is covered the day it is added rather than the
+    day someone notices.
+
+    THE EXEMPTION COVERS EVERY FLAG ON THE COMMAND, INCLUDING A TYPO IN ONE OF
+    ITS OWN. That is not a shortcut, it is what the CLI does: measured,
+    ``aisquare launch coder -c /bin/echo --envv FOO=bar`` exits 0 and hands
+    ``--envv FOO=bar`` to the program, so a misspelt ``--env`` sets nothing and
+    reports nothing. The parser cannot distinguish it from an agent flag, so
+    neither can a guard that asks the parser. The residual is real and stated
+    rather than papered over: a typo in ``--env`` or ``--command`` inside a
+    fenced block is invisible to this module.
+    """
+    node = _root()
+    for word in words:
+        children = getattr(node, "commands", None)
+        if not children or word not in children:
+            break
+        node = children[word]
+    return bool((getattr(node, "context_settings", None) or {}).get("ignore_unknown_options"))
+
+
 def _resolve(words: list[str]) -> tuple[list[str], set[str]]:
     """The chain and its legal flags. One walk backs both views of it."""
     chain, flags, _dangling = _walk(words)
@@ -426,24 +459,82 @@ def test_every_documented_subcommand_exists(documented: list[Invocation]) -> Non
     )
 
 
-def test_every_documented_flag_exists(documented: list[Invocation]) -> None:
-    """The README's `--account` defect. A deleted flag stays copy-pasteable."""
+def _stale_flags(invocations: list[Invocation]) -> list[str]:
+    """The rule itself, so a control can put a known input in front of it.
+
+    Called from inside the assert below rather than through a variable the test
+    could shadow, and reachable from the controls with synthetic invocations —
+    a rule no control can address is a rule nothing has ever checked.
+    """
     missing: list[str] = []
-    for invocation in documented:
+    for invocation in invocations:
         words, used = _split(invocation.text)
         chain, legal = _resolve(words)
+        if _forwards_unknown_flags(words):
+            continue  # the flags belong to the program it launches
         for flag in used:
             if flag not in legal:
                 missing.append(
                     f"{invocation.where}  `aisquare {' '.join(chain) or '<root>'}` "
                     f"has no {flag}\n      {invocation.text}"
                 )
+    return missing
+
+
+def test_every_documented_flag_exists(documented: list[Invocation]) -> None:
+    """The README's `--account` defect. A deleted flag stays copy-pasteable."""
+    missing = _stale_flags(documented)
     assert not missing, (
         "documented flags that do not exist:\n  "
         + "\n  ".join(missing)
         + "\n\nSame caution as above: if the line is a counter-example, move it to "
         "inline code rather than making the flag real."
     )
+
+
+def test_a_forwarding_command_may_document_flags_the_cli_never_declared() -> None:
+    """`launch` forwards to the agent, so its unknown flags are not defects.
+
+    Synthetic invocations, because there is no such line in the documents today
+    — this is a false positive waiting for the first person to document
+    `aisquare launch coder --headless`, and the repair it invites is to change
+    the document rather than the guard. Verified against the running CLI rather
+    than against a reading of click: `aisquare launch coder -c /bin/echo -p x`
+    exits 0 and the agent receives `-p x`.
+    """
+    forwarded = Invocation("probe.md", 1, "aisquare launch coder --headless")
+
+    assert _stale_flags([forwarded]) == []
+
+
+def test_the_forwarding_exemption_does_not_leak_to_ordinary_commands() -> None:
+    """The other half: an exemption that covers everything checks nothing.
+
+    Without this, `_forwards_unknown_flags` could return True unconditionally
+    and every test in this module would still pass.
+    """
+    ordinary = [
+        Invocation("probe.md", 1, "aisquare doctor --lives"),
+        Invocation("probe.md", 2, "aisquare explainability status --nope"),
+    ]
+
+    stale = _stale_flags(ordinary)
+
+    assert len(stale) == 2, f"the exemption swallowed a real stale flag: {stale}"
+    assert "--lives" in stale[0]
+    assert "--nope" in stale[1]
+
+
+def test_which_commands_forward_is_read_from_the_cli() -> None:
+    """Keyed on the parser, so this fails if `launch` stops forwarding.
+
+    A hardcoded name list would keep excusing `launch`'s flags forever after
+    the contract changed, which is the same staleness this module exists to
+    catch — one level up, in the guard instead of the document.
+    """
+    assert _forwards_unknown_flags(["launch"]), "launch no longer forwards agent args"
+    assert not _forwards_unknown_flags(["doctor"])
+    assert not _forwards_unknown_flags([]), "the root must not forward"
 
 
 def test_the_guard_bites_at_the_end_of_every_document() -> None:

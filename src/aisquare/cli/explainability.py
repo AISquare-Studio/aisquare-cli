@@ -437,5 +437,18 @@ def env(
         # same terminal clears our leftovers instead of silently inheriting
         # this session's pipeline id and merging two sessions into one Run.
         exports.update(trace_marker(wiring))
+    if get_state().json_output:
+        # The refusal above already answered in JSON, through the shared `fail`
+        # helper — so before this, the flag was honoured on the branch that
+        # FAILS and ignored on the branch that WORKS. A script piping this into
+        # jq passed every test while the proxy was down and broke on the day it
+        # came up.
+        #
+        # The variables are the payload, under one key, spelled exactly as they
+        # are exported: a caller reads `.env.AISQUARE_PIPELINE_ID`, which is the
+        # name §5 of the runbook already uses. Lifting the pipeline id to a
+        # second top-level field would give the same value two names.
+        typer.echo(json.dumps({"role": role, "env": exports}))
+        return
     for key, value in exports.items():
         typer.echo(f"export {key}={shlex.quote(value)}")

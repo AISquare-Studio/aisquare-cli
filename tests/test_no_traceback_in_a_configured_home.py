@@ -34,6 +34,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.config import load_config
+from tests.cli_tree import leaf_invocations_by_path
 
 # Shared with the damaged-store sweep on purpose. Two copies of "which commands
 # are unsafe for a test harness to run" would drift, and the drift would be
@@ -98,15 +99,33 @@ def configured_home(isolated_home: Path, runner: CliRunner) -> Path:
     return isolated_home
 
 
-def _swept() -> list[list[str]]:
-    """Every leaf command this sweep runs, required arguments left off.
+#: Commands that reach only click's parser: they exit 2 on usage, so their own
+#: logic never runs. A ratchet in both directions, and a COVERAGE ratchet rather
+#: than a defect one — an entry appearing here means the sweep quietly stopped
+#: testing that command.
+#:
+#: This file shipped with FORTY-TWO of ninety-seven in this state, because the
+#: invocations left required arguments off. `task claim`, `note`, `remember`,
+#: `recall`, `context add`, `config set`, `explainability env` and 35 more were
+#: held to nothing but argument parsing while the file read as though it held
+#: ninety-seven to the property — a test narrower than the property it is named
+#: for, in the file written to close that class.
+USAGE_ONLY: set[str] = set()
 
-    ``_leaves()`` yields the command path only. A command with a required
-    argument therefore exits 2 on usage, which is a legible exit and not what
-    this file is looking for — the point is that nothing reaches the operator
-    as a traceback, whichever way the command ends.
+
+def _swept() -> list[tuple[str, list[str]]]:
+    """``(name, argv)`` for every leaf command this sweep runs.
+
+    argv has its required arguments AND required options filled, so the command
+    body actually executes. name is the command path, because a ratchet keyed on
+    an argv full of placeholders is unreadable and breaks when a placeholder
+    changes.
     """
-    return [chain for chain in _leaves() if " ".join(chain) not in UNINVOKED]
+    return [
+        (" ".join(path), argv)
+        for path, argv in leaf_invocations_by_path()
+        if " ".join(path) not in UNINVOKED
+    ]
 
 
 def test_the_sweep_actually_covers_the_tree() -> None:
@@ -120,7 +139,7 @@ def test_the_sweep_actually_covers_the_tree() -> None:
     swept = _swept()
 
     assert len(swept) >= 90, f"only {len(swept)} commands would be swept"
-    names = {" ".join(chain) for chain in swept}
+    names = {name for name, _ in swept}
     for required in ("config list", "status", "explainability status", "doctor"):
         assert required in names, f"{required} is not being swept"
 
@@ -137,10 +156,14 @@ def test_the_ratchet_names_only_commands_that_exist() -> None:
 def test_no_command_raises_in_a_configured_home(configured_home: Path, runner: CliRunner) -> None:
     """The property, over every command, with the whole offender list reported."""
     raising: dict[str, str] = {}
-    for chain in _swept():
-        escaped = _escaped(runner.invoke(app, chain, catch_exceptions=True).exception)
+    usage_only: set[str] = set()
+    for name, argv in _swept():
+        result = runner.invoke(app, argv, catch_exceptions=True)
+        escaped = _escaped(result.exception)
         if escaped is not None:
-            raising[" ".join(chain)] = f"{type(escaped).__name__}: {escaped}"
+            raising[name] = f"{type(escaped).__name__}: {escaped}"
+        if result.exit_code == 2:
+            usage_only.add(name)
 
     unexpected = {
         name: why for name, why in raising.items() if name not in STILL_RAISES_WHEN_CONFIGURED
@@ -155,6 +178,25 @@ def test_no_command_raises_in_a_configured_home(configured_home: Path, runner: C
         f"these no longer raise — good: {fixed}. Remove them from "
         "STILL_RAISES_WHEN_CONFIGURED so the list keeps describing the truth; "
         "a ratchet that is not tightened is an allow list."
+    )
+
+    assert usage_only == USAGE_ONLY, (
+        "the set of commands that never reach their own body changed. Gained "
+        f"{sorted(usage_only - USAGE_ONLY)} — those are no longer tested for "
+        f"anything but usage; lost {sorted(USAGE_ONLY - usage_only)} — good, "
+        "remove them from USAGE_ONLY. A command that silently falls back to a "
+        "usage error takes its coverage with it."
+    )
+
+    # The filled invocations RUN, and running mutates: `config set`, `project
+    # switch` and `context remove` all write. If one of them destroys the
+    # configured state, every command swept after it runs on a machine that can
+    # no longer reproduce the defect — the sweep narrows and says nothing. So
+    # the premise is asserted at the END as well as in the fixture.
+    assert _nones(load_config().model_dump(mode="json")), (
+        "the configured state did not survive the sweep — some command in it "
+        "removed the unset optional this file exists to exercise, so every "
+        "command swept after that one proved nothing"
     )
 
 

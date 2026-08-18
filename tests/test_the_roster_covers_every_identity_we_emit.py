@@ -31,8 +31,13 @@ diverge exactly on this case. From ``sweeper.py`` at
 
 ``aisquare-cli`` IS a name, so it takes the first branch — ``gateway/main.py``
 raises ``409 agent_not_registered`` with ``routing.agent_name`` attached. So
-the real cost is a silent, indefinitely growing backlog that nothing reports,
-and registering the name later still drains it.
+the real cost is a growing backlog, and registering the name later still drains
+it. Nor is that backlog silent: the SDK's ``delivery_backlog`` check returns
+``error`` for ``pending`` rows whose ``last_error`` starts ``gateway_status:409``
+and names this remedy in its message, which ``_sdk_checks`` renders as
+``sdk:delivery_backlog``. It watches whatever ``EXPLAINABILITY_INBOX_PATH``
+resolves to, and that default is relative — ``8dd460fb``'s finding — so the
+reporting is real but conditional on the path being set.
 
 That makes the fix MORE obviously right, not less: this is an onboarding gap,
 and declaring the identity is exactly what closes an onboarding gap. It also

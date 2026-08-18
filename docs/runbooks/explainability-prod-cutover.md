@@ -483,12 +483,29 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > unregistered one takes the first branch: `gateway/main.py` raises
 > `409 agent_not_registered` with `routing.agent_name` attached.
 >
-> So the cost of leaving it out is a **silent, indefinitely growing backlog** —
-> those insights never land and nothing says so — not a deletion. **Registering
-> is idempotent** (a known name returns its existing `publication_id`), so the
-> fourth name costs nothing, and registering it *later* still drains whatever
-> queued in the meantime. Do not go looking for a dead-letter queue for this
-> case; there isn't one, by design.
+> So the cost of leaving it out is a **growing backlog**, not a deletion.
+> **Registering is idempotent** (a known name returns its existing
+> `publication_id`), so the fourth name costs nothing, and registering it
+> *later* still drains whatever queued in the meantime. Do not go looking for a
+> dead-letter queue for this case; there isn't one, by design.
+>
+> **And the backlog is not silent — `doctor` already fails on it, with the
+> remedy.** The SDK's own `delivery_backlog` check counts `pending` rows whose
+> `last_error` starts `gateway_status:409` and returns `error`, which this CLI
+> renders as `✗ sdk:delivery_backlog`. Its message names this exact case: *"if
+> the agent is named but unregistered, register it … or enable auto-discovery
+> (autoregister_unknown_agents) on the workspace"*. Its own docstring calls
+> these "the exact states the sweeper's silent retry loop otherwise hides from
+> the customer".
+>
+> **That reporting is only as good as `EXPLAINABILITY_INBOX_PATH`, which is
+> where §2 earns its keep.** The check reads that variable and defaults to the
+> RELATIVE `explainability_inbox.db`, so unset it resolves against whatever
+> directory `doctor` was run from — and `8dd460fb` measured that the proxy
+> writes an absolute path of its own while the doctor and the client library
+> share the relative default. Set it in the env file and this row watches the
+> inbox that is actually filling; leave it unset and a green
+> `sdk:delivery_backlog` may only mean you were standing somewhere else.
 >
 > **Rather than retyping this list, let the CLI derive it:** `aisquare
 > explainability register` builds the roster from `explainability.roles` plus

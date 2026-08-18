@@ -140,7 +140,7 @@ aisquare doctor
 > warning below confirmed rather than assumed. A build that prints **no**
 > provenance row predates that check and is therefore older than this train.
 
-> ⚠️ **[verified-train, planner `dfd9a883`] Do not use `-e` for a cutover.** §5
+> ⚠️ **[verified-train, planner `dfd9a883`] Do not use `-e` for a cutover.** §5b
 > has you install `aisquare-cli[explainability]`, and over an editable checkout
 > that install **bricks the CLI** — the SDK ships a real `aisquare/` directory
 > which shadows the editable path hook, and `aisquare.cli` disappears

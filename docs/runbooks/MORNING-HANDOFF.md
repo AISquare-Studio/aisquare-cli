@@ -190,8 +190,8 @@ Against staging, with real agent processes — not fixtures:
 
 | Claim | Evidence |
 |---|---|
-| One id in four places | observed in all four simultaneously |
-| Per-role separation | 3 roles → 3 distinct trace ids |
+| One id in four places | observed in all four simultaneously — **and now pinned**: `tests/test_correlation_spine.py` |
+| Per-role separation | 3 roles → 3 distinct trace ids — **pinned** in the same file |
 | Proxy lane ingest | 70/70, then 14/14, all `202` |
 | Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox |
 | Client-lane identity | `agent.run_id` = board session id; `agent.name` = `aisquare-coder`, accepted |
@@ -202,6 +202,18 @@ Against staging, with real agent processes — not fixtures:
 
 Everything in that table stops at the gateway boundary. Nothing in it is a
 statement about what the studio shows.
+
+**Two of those rows are stronger than the rest, and the difference matters.**
+The first two are now *pinned* — a test fails the gate on the day they stop
+being true. Every other row is a **staging measurement taken once**, most of
+them before a night of changes to the launcher, the store and the hooks; they
+were true when taken and nothing re-checks them. The spine row was in that
+weaker category until this shift, and the guard behind it is deliberately built
+so it cannot be quietly narrowed: the four places are data, each records its
+value *and its origin*, and the claims are pinned by name so a deleted check
+fails and an unregistered new one fails too. It does not reach a fixed point —
+the guard itself can be removed — but removing a claim now takes two visible
+edits in one diff, which reads as a decision rather than an oversight.
 
 ## What was deliberately left
 

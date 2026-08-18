@@ -172,6 +172,33 @@ def test_the_at_a_glance_table_carries_the_same_caveat() -> None:
     )
 
     assert "ss -ltnp" in row, f"the at-a-glance row still verifies by payload alone: {row}"
+    assert "etime" in row, (
+        "the summary names the socket but not its age, so it gives advice the "
+        f"body has already been corrected away from: {row}"
+    )
+
+
+def test_the_preflight_row_does_not_rest_on_provenance_alone() -> None:
+    """Row 0 lagged behind the §0 body fix by a whole cycle.
+
+    @8dd460fb corrected §0 because `git fetch` is not `git checkout` — "a
+    comparison with one side". The body grew `--ff-only` and `git status
+    --short`; the at-a-glance row kept naming `doctor` provenance as the whole
+    verification, and provenance is built from `direct_url.json`: an install
+    PATH and an editable flag, with no branch and no sha in it. A tree sitting
+    on main prints the identical row.
+
+    So the summary a human reads under time pressure still carried the check
+    the body had just been fixed for. Keyed on the head comparison, which is
+    the half that was missing.
+    """
+    row = next(
+        line
+        for line in RUNBOOK.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| 0 Preflight |")
+    )
+
+    assert "origin" in row, f"row 0 verifies §0 without comparing your head to origin's: {row}"
 
 
 def _section(heading: str) -> str:

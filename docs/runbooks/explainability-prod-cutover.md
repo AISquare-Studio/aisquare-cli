@@ -1217,13 +1217,13 @@ dies.
 
 | Step | Verify | Rollback |
 |---|---|---|
-| 0 Preflight | `doctor` provenance names this repo (empty ⇒ older than this train) | reinstall previous version |
+| 0 Preflight | `git log --oneline -1` matches origin's head **and** `doctor` provenance names this repo — provenance names a PATH and an editable flag, never a revision, so it cannot tell you which branch that tree is on (empty ⇒ older than this train) | reinstall previous version |
 | 0b Warm store | `PRAGMA user_version` on `~/.aisquare/context.db` is non-zero | none — the migration is forward-only |
 | 1a Roster | response lists each agent + `publication_id` | re-register; registration is idempotent by name |
 | 1b/1c Binding | `/v1/routing/resolve` returns a `studio_id` | unbind in the studio UI |
 | 1d Rule book | no `FAIL_OPEN` warning on a traced call | detach the rule book in the UI |
 | 2 Secrets | `stat -c %a <env file>` → `600` | `rm` the file |
-| 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` — **and `ss -ltnp \| grep 9190` to confirm the PID is the one you started**; the payload alone cannot tell you whose proxy answered | `Ctrl-C` (never port 9090) |
+| 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` — **then `ss -ltnp \| grep 9190` for the pid and `ps -o etime` on it**; the payload cannot say whose proxy answered, and ELAPSED is the only line that can (one has been up since Monday — see §3) | `Ctrl-C` (never port 9090) |
 | 3 Proxy build | the §3 check prints `IN FORCE` | reinstall `aisquare>=1.1.0` |
 | 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable`, then §7 |
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |

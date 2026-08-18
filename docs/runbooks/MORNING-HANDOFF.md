@@ -27,8 +27,11 @@ something is.
 **All six at a glance, because the detail below runs long and item 1 alone is
 forty lines.** Read the ones you need:
 
-1. **Reinstall non-editable** (§0). Not blocked on anything but typing. Long here
-   only because three commands could silently strip your config afterwards.
+1. **Reinstall non-editable** (§0). Not blocked on anything but typing, and it
+   is a **precondition**, not just a hazard-avoidance step: it fixes a command
+   that is broken on this machine *today*, and two of the checks these documents
+   tell you to run cannot answer until it has happened. Long here because it also
+   closes a way three commands could silently strip your config afterwards.
 2. **Governance** — the one real blocker. Needs a credential we do not hold.
 3. **Nobody has read the studio.** Every delivery claim stops at the gateway.
 4. **Prod values unverified.** Mechanisms verified against staging, not values.
@@ -40,6 +43,24 @@ forty lines.** Read the ones you need:
    Nothing blocks it but the typing; the command was verified working at the
    current head. Until it runs, `aisquare` on `PATH` is the pyenv build and
    `resolve_binary` reports 0.
+
+   **What running it gets you, beyond the hazard below.** `aisquare config list`
+   exits **1** with a traceback on this machine right now — see "Bugs found and
+   fixed"; the trigger is your `[team.profiles.*]`, nothing to do with tracing,
+   and step 1 is the fix. And two checks these documents tell you to run cannot
+   answer before it, both measured:
+
+   - **§0's own verification.** It uses `doctor`'s provenance row, and the build
+     on `PATH` today prints **no such row at all** — that absence *is* the tell
+     that it predates the check, but it is not an answer to "which tree am I
+     running". After the reinstall the row reads `installed (non-editable)
+     from …` and names it.
+   - **§5b's timer check.** `command -v aisquare` answers the same path before
+     and after — §0 installs into that same pyenv `bin` — but the BUILD behind
+     it changes, and the older one has no `ship`. Run before this item, the
+     check exits **2** with a usage line instead of the **1** it is looking for.
+
+   This item is first in the list for a reason.
 
    **And it is not only about what you gain by running it.** Once you *have*
    configured explainability, three commands run from a shell that still
@@ -227,7 +248,15 @@ and rebindings.
   could not make that value disagree with the active target. It confirms where
   you are pointed; it no longer proves the lanes agree, because they cannot
   currently disagree.)
-- **`config list` stopped being printable the moment you configured anything.**
+- **`config list` is broken on this machine right now, and it is not about
+  tracing.** Measured 2026-08-18 against your real `~/.aisquare` with the build
+  currently on `PATH`: `aisquare config list` exits **1** with `TypeError:
+  Object of type 'NoneType' is not TOML serializable`. Your config has **no**
+  explainability targets — the trigger is `[team.profiles.*]`, written by
+  `team bind`, whose `bin` is unset. **Step 1 clears it**; the train build
+  prints all 45 lines. If you have already seen that traceback, it is this, it
+  is known, and nothing you did caused it.
+  The mechanism, which is wider than either trigger:
   `save_config` dumps with `exclude_none=True` because TOML has no null;
   `emit_config` renders the same model through the same library and did not.
   So `explainability enable` (a target that overrides nothing) *or* `team bind`
@@ -248,6 +277,23 @@ and rebindings.
   *migrated* rather than discarded — because treating it as unparseable is the
   exact reading that lost the data, so a fix that kept it would have preserved
   the bug for every file already on disk.
+
+### The train against this machine's real state
+
+Everything else in this file was measured in a throwaway `AISQUARE_HOME`. On
+**2026-08-18** `coder2` ran the train build read-only against the real one — a
+**71 MB** store with a night of rows and the accumulated config — and
+`config.toml` was byte-identical afterwards. `status`, `doctor`, `explainability
+status`, `team status`, `config get` and `context list` all exit **0** with no
+traceback, and `--json` on the first four parses. Only `config list` differed,
+and that is the entry above.
+
+One warning from running that sweep: **`aisquare note` takes text, not a
+subcommand.** `aisquare note list` does not list anything — it posts a note
+whose body is the word "list", to whichever project your directory maps to.
+There is no `note list`; `aisquare board` is the reader. Left as-is rather than
+guarded, because changing the command every session uses to post receipts is not
+a change to make on cutover morning.
 
 ## What is proven, and by what evidence
 

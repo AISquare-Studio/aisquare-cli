@@ -369,7 +369,14 @@ def test_the_extractor_found_the_documented_commands(documented: list[Invocation
     whole would still have passed, because nothing asserted that page yields
     anything. Yields today are 55 / 2 / 10.
     """
-    assert len(documented) >= 30, f"only {len(documented)} invocations found — parser broke"
+    # Derived from CENSUS rather than typed, for the same reason: a bare `>= 30`
+    # can be lowered to `>= 0` without failing anything, measured.
+    floor = sum(resolved for resolved, _classified in CENSUS.values()) * 0.8
+    assert len(documented) >= floor, (
+        f"only {len(documented)} invocations found across every document, "
+        f"expected at least {floor:.0f} — the parser broke or a page lost its "
+        "commands"
+    )
     by_document = {invocation.document for invocation in documented}
     for name in DOCUMENTED:
         assert name in by_document, (
@@ -768,6 +775,20 @@ def test_every_aisquare_mention_is_classified(document: str) -> None:
         "— the reason patterns have stopped matching, so this audit is asserting "
         "over a set it no longer inspects"
     )
+    # THE RECORD IS ALSO A FLOOR, SO THE RECORD MUST STAY TRUE. The two
+    # assertions above compare reality against CENSUS, which means CENSUS is the
+    # guard — and a hand-typed number can be lowered. Measured: replacing every
+    # entry with (0, 0) leaves all 28 tests green, because a floor of zero is
+    # satisfied by anything. You cannot defend a constant by adding another
+    # constant, so this asserts the record has not drifted far BELOW reality
+    # either: it must stay roughly true in both directions, and a document that
+    # genuinely grows makes this fail on purpose, as a prompt to re-measure.
+    assert was_resolved >= len(extracted) * 0.5, (
+        f"{document}: CENSUS records {was_resolved} resolved but the extractor "
+        f"finds {len(extracted)}. The recorded number is the floor every other "
+        "assertion here leans on; a record this far below reality makes them "
+        "vacuous. Re-measure and update CENSUS."
+    )
     assert not unexplained, (
         "these lines mention aisquare, are not resolved as commands, and "
         "match no stated reason for being skipped:\n  " + "\n  ".join(unexplained) + "\n"
@@ -1059,3 +1080,61 @@ def test_the_staleness_detector_uses_the_same_rule_as_the_extractor(tmp_path: Pa
         "a page whose only commands use an absolute path inside a blockquoted "
         "fence is invisible to the detector, though the extractor reads both"
     )
+
+
+def test_no_skip_reason_can_excuse_a_plain_command() -> None:
+    """The census can be narrowed to nothing and nothing currently says so.
+
+    `_NOT_AN_INVOCATION` is what makes "0 unaccounted" mean something: every
+    fenced mention must be resolved OR match a stated reason. Add one reason
+    broad enough to match anything — `re.compile(r".")` is enough — and every
+    skip is excused, the census passes, and the guard checks nothing. Measured:
+    that sabotage leaves all 27 tests green.
+
+    Same category as the damage-shape deletion in
+    `test_no_traceback_on_a_damaged_store.py`: a change that breaks no
+    assertion and simply makes every assertion cover less. @dfd9a883 asked for
+    the pattern to be generalised to this file and this is that.
+
+    THE PROPERTY, and it is narrower than "no reason matches a documented line":
+    two REAL runbook invocations already match a reason — one carries a path in
+    a comment, one carries a URL — and that is harmless, because extraction wins
+    and classification never sees a line that resolved. What must never happen
+    is a reason matching a BARE COMMAND, which is the shape every excuse would
+    have to swallow to hide a real invocation.
+
+    The corpus is built from the command tree, so it cannot go stale as commands
+    are renamed.
+    """
+    commands = [f"aisquare {' '.join(chain)}" for chain in _leaf_chains()[:40]]
+    assert len(commands) >= 20, f"only {len(commands)} commands to test against"
+
+    excused = [
+        (command, reason)
+        for command in commands
+        for reason, pattern in _NOT_AN_INVOCATION
+        if pattern.search(command)
+    ]
+
+    assert not excused, (
+        "these skip reasons match a plain command, so they can excuse a real "
+        f"invocation from the census: {excused[:5]}\n"
+        "A reason must describe why some text is NOT a command. One that also "
+        "matches commands makes the '0 unaccounted' assertion vacuous."
+    )
+
+
+def _leaf_chains() -> list[list[str]]:
+    """Every runnable command in the tree, deepest names included."""
+    found: list[list[str]] = []
+
+    def walk(node: Any, chain: list[str]) -> None:
+        children = _subcommands(node)
+        if not children:
+            found.append(chain)
+            return
+        for name, child in sorted(children.items()):
+            walk(child, [*chain, name])
+
+    walk(_root(), [])
+    return found

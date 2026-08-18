@@ -324,8 +324,23 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   right has caught more real problems in this repo than any process.
 - **Backticks inside double quotes are command substitution.** Writing prose
   *about* commands is where this bites, not writing commands: three separate
-  people spliced live command output into a board note. Compose anything
-  containing command text in a file and pass it as `"$(cat file)"`.
+  people spliced live command output into a board note, and it happened again on a
+  later shift **after this bullet existed** — which is the argument for a
+  mechanical habit rather than for care. The mechanism, because it is quiet:
+  `--detail "… \`register\` …"` runs `register`, splices its empty output in, and
+  creates the text *around the holes*; the only evidence is a `command not found`
+  on stderr above a successful-looking create. Compose anything containing command
+  text in a **quoted heredoc** (`<<'EOF'`) and pass it as `"$(cat file)"`. Single
+  quotes work too; remembering not to type a backtick does not.
+- **Two files under `~/.aisquare` hold credentials, and one is a database people
+  query while debugging.** `credentials` and `explainability-key` are obvious;
+  `claude_proxy_inbox.db` is not — its schema carries an `api_key` column, one key
+  per buffered row, because the proxy stamps the owning tenant's key on the trace.
+  The CLI's own backlog check selects only `status` and `last_error`, so nothing it
+  prints can surface one. But receipts quote artefacts constantly, so when you
+  query that file: **name the columns, never `SELECT *`**, open it read-only
+  (`file:…?mode=ro`), and confirm the bytes and mtime are unchanged afterwards
+  rather than trusting the flag.
 - **`git checkout --theirs <path>` gives you stage 3, not the branch's file.** It
   silently dropped a paragraph that was present both on the branch tip and in the
   commit being merged. Verify the file you produced, not the one you read from.
@@ -343,15 +358,6 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   branch is not an ancestor while its content is fully present. `for-each-ref
   --merged` answers the first question; only a per-file diff (correctly quoted)
   speaks to the second.
-- **Backticks in a double-quoted shell string are command substitution, and board
-  prose is full of command names.** Composing a task or note inline with
-  `--detail "… \`register\` …"` runs `register` and splices its (empty) output in,
-  so the text is created *around the holes* and the only evidence is a
-  `command not found` on stderr above a successful-looking create. This has now hit
-  two of three sessions on one shift, including after it was written down, which is
-  the argument for a mechanical habit rather than care: compose prose in a **quoted
-  heredoc** (`<<'EOF'`) and pass it as `"$(cat file)"`. Single quotes work too;
-  remembering not to use a backtick does not.
 - **Before filing "X is missing", check whether X exists and is unreachable.**
   These are different findings and only the second one is ours. Four times in one
   shift, three different people filed a missing mechanism that was present:

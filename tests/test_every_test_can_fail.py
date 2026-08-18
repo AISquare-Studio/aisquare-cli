@@ -28,6 +28,8 @@ happens by accident, when someone silences a failure to get a branch green.
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 TESTS = Path(__file__).parent
@@ -86,12 +88,33 @@ def _can_fail(function: ast.FunctionDef) -> bool:
 
 
 def _test_functions() -> list[tuple[str, ast.FunctionDef]]:
+    """Every test in the suite, named the way PYTEST names it.
+
+    `ast.walk` finds functions inside classes too, but flattening them to
+    `file::name` gives an identity pytest does not use: 64 tests live in
+    classes, and pytest calls them `file::Class::name`. Two consequences, one
+    latent and one immediate.
+
+    LATENT: a flattened name is not unique. Two classes in one file may each
+    define `test_the_default_wins`, and a single entry in
+    ASSERTS_BY_NOT_RAISING would then excuse BOTH — one exception silently
+    covering two tests, which is the one-broad-exclusion disease in miniature.
+    Measured: zero collisions today, so this is a detector rather than a fix.
+
+    IMMEDIATE: a name this file prints in a failure could not be pasted into
+    `pytest` to run the offending test. A guard whose output you have to
+    translate by hand is one people stop reading.
+    """
     found: list[tuple[str, ast.FunctionDef]] = []
     for path in sorted(TESTS.glob("test_*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
                 found.append((f"{path.name}::{node.name}", node))
+            elif isinstance(node, ast.ClassDef):
+                for member in node.body:
+                    if isinstance(member, ast.FunctionDef) and member.name.startswith("test_"):
+                        found.append((f"{path.name}::{node.name}::{member.name}", member))
     return found
 
 
@@ -174,4 +197,50 @@ def test_every_test_file_yields_at_least_one_test() -> None:
         f"these test files yielded no test functions: {empty}. Either the sweep "
         "stopped parsing them — in which case every assertion in this file is "
         "passing over less than it claims — or they genuinely contain no tests."
+    )
+
+
+def test_the_sweep_sees_exactly_what_pytest_runs() -> None:
+    """The universe question, asked of the instrument rather than assumed.
+
+    Every assertion in this file is over tests found by parsing `tests/*.py`.
+    If pytest runs something this sweep cannot see — a file excluded by
+    configuration, a test generated at import time, a directory added to
+    testpaths — then "no test is incapable of failing" is a claim about a
+    smaller suite than the one that actually runs, and it would never say so.
+    That is the narrow-universe defect this shift has produced in four separate
+    instruments, including two of mine.
+
+    Asked by collecting with pytest itself and comparing NODE IDS, which is
+    also why `_test_functions` now names class-based tests the way pytest does.
+    Parametrised cases collapse to their function id — a parametrisation is one
+    body, and the body is what falsifiability is a property of.
+    """
+    collected: set[str] = set()
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", str(TESTS)],
+        capture_output=True,
+        text=True,
+        cwd=TESTS.parent,
+    )
+    assert result.returncode == 0, f"collection failed:\n{result.stdout[-2000:]}"
+    for line in result.stdout.splitlines():
+        if "::" not in line:
+            continue
+        path, _, rest = line.partition("::")
+        collected.add(f"{Path(path).name}::{rest.split('[')[0]}")
+
+    swept = {name for name, _function in _test_functions()}
+
+    assert collected, "pytest collected nothing — the comparison would be vacuous"
+    unseen = sorted(collected - swept)
+    assert not unseen, (
+        f"pytest runs {len(unseen)} tests this sweep cannot see, e.g. {unseen[:5]}. "
+        "Every assertion in this file is therefore about a smaller suite than "
+        "the one that runs."
+    )
+    phantom = sorted(swept - collected)
+    assert not phantom, (
+        f"this sweep checks {len(phantom)} tests pytest never runs, e.g. "
+        f"{phantom[:5]} — they are being audited and never executed."
     )

@@ -155,16 +155,12 @@ forty lines.** Read the ones you need:
    `tsk_01kze9s8w1n6nmctyr83an5kpt`). See "the one thing to eyeball" below.
    **When that credential exists**, the first thing to run is §5's
    `explainability doctor --live` (read-only, a remediation per line), and then
-   the one check nobody has ever executed: take a pipeline id out of the join
-   log, read the Run back from the studio, and confirm the board row and the Run
-   carry the *same* id. That is the join this whole integration is for.
-   **The join log does not exist yet, and that is correct.** It is written to
-   `~/.aisquare/explainability/joins.jsonl` the first time a traced session
-   launches, so it appears after §4 — not before. Until then `cat` on it is
-   `ENOENT`, which is the doctrine working (nothing ships before you configured
-   it) and not a fault to chase. The runbook has no step for this check today;
-   filed as `tsk_01m0afnx41hb0njhr4jyp779dw`, which adds one for the three hops
-   that need no credential and marks the studio hop blocked. To read either blocker **with the build you have right now, from any
+   the one check nobody has ever executed: **§5c**, which walks one id through
+   the join log, the board row and the process environment, and then hands the
+   fourth hop — reading the Run back from the studio — to your credential. Three
+   of the four need nothing from you but the earlier steps; §5c says which is
+   which and why it sits after §4 rather than beside it. That is the join this
+   whole integration is for. To read either blocker **with the build you have right now, from any
    directory**: `aisquare team log --limit 200 --as <session>`, where
    `<session>` is any id from the sessions list at the top of `aisquare
    board` — `dfd9a883` was the planner. The `--as` routes

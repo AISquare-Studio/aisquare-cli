@@ -152,6 +152,21 @@ I was standing".
   correct-looking answer for free, and there is nothing in the output to tell
   success from blindness. Such a guard needs something it must still **see**, not
   only something it must not find.
+- **A fixture that builds a state the program cannot reach.** The test executes,
+  asserts, and is about a world that does not exist. A warning was gated on
+  `settings.ship` — which the config module itself calls "the single predicate on
+  the primary path" — and the gate could never fire: `shipping_offer()` refuses
+  whenever the SDK is not importable, and `configure_shipping` sits behind that
+  refusal, so **`ship=True` and *not importable* are mutually exclusive**. Ten unit
+  tests passed, because each one set the two fields by hand. **When a gate and a
+  state cannot co-occur, hand-built fixtures agree with you forever.** No amount of
+  sabotage inside the fixture finds this: sabotage asks "does the assertion notice a
+  change", and the assertion is fine — the *premise* is not. What finds it is one
+  live run of the real path (here: `init --explainability` in a throwaway home,
+  which answered "extra not installed" and left `ship=False`). So when a fixture
+  sets two fields, ask whether any code path sets them that way together; and once
+  you know they exclude each other, **pin the exclusion**, so the next reader
+  inherits the fact instead of re-deriving it.
 
 Half a control is the usual trap. Controlling the *scanner* — "the sweep found
 files", "the walk found functions", "the scanner would catch a new seam" — proves
@@ -328,6 +343,15 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   branch is not an ancestor while its content is fully present. `for-each-ref
   --merged` answers the first question; only a per-file diff (correctly quoted)
   speaks to the second.
+- **Backticks in a double-quoted shell string are command substitution, and board
+  prose is full of command names.** Composing a task or note inline with
+  `--detail "… \`register\` …"` runs `register` and splices its (empty) output in,
+  so the text is created *around the holes* and the only evidence is a
+  `command not found` on stderr above a successful-looking create. This has now hit
+  two of three sessions on one shift, including after it was written down, which is
+  the argument for a mechanical habit rather than care: compose prose in a **quoted
+  heredoc** (`<<'EOF'`) and pass it as `"$(cat file)"`. Single quotes work too;
+  remembering not to use a backtick does not.
 - **Before filing "X is missing", check whether X exists and is unreachable.**
   These are different findings and only the second one is ours. Four times in one
   shift, three different people filed a missing mechanism that was present:

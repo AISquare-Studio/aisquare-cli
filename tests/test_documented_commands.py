@@ -813,26 +813,42 @@ _NOT_AN_INVOCATION = (
     # broken command Jatin runs.
     ("a `key: value` line of sample CLI output", re.compile(r"^\s*[\w. -]+:\s")),
     ("a prose line inside an output block", re.compile(r"^\s*[→✓✗•]")),
+    # SHADOWED, measured 2026-08-18: across all four documents this reason is
+    # never the FIRST to classify a line — all eight URL mentions are already
+    # caught by `aisquare[/-]` or the dotted-module pattern above. Kept rather
+    # than deleted, because it stops being dead the moment either of those is
+    # narrowed, and annotated rather than left silent, because a reader would
+    # otherwise believe it is what classifies URLs.
     ("a URL", re.compile(r"https?://")),
     ("a pip requirement — the package name, not the command", re.compile(r"pip\s+install")),
-    # `command -v aisquare` names the binary to LOCATE it; the CLI is never run.
-    # Added when §5b stopped hardcoding a path and told the operator to derive
-    # one instead — the guard fired on the new line, which is the behaviour it
-    # exists for, and the fix is a recorded reason rather than a quieter rule.
+    # `command -v aisquare` and `which aisquare` name the binary to LOCATE it;
+    # the CLI is never run. Both arrived from §0/§5b edits that stopped guessing
+    # a path, and `which aisquare` had been INVISIBLE here until then only
+    # because it shared a line with `&& aisquare --version` — the resolvable
+    # half was carrying the whole line. Splitting them exposed it, which is the
+    # guard behaving correctly on a line it had never really checked.
     (
-        "the argument to `command -v`, which locates the binary",
-        re.compile(r"command\s+-v\s+aisquare"),
+        "the argument to a locator (`command -v`, `which`), not an invocation",
+        re.compile(r"(?:command\s+-v|which)\s+aisquare"),
     ),
 )
 
 
 #: Resolved / classified counts measured per document, so a collapse in either
 #: number is visible instead of averaging out across the three.
+#:
+#: RE-MEASURE THESE WHEN A DOCUMENT GROWS. They are floors (0.8 and 0.6 below),
+#: and a floor taken from a smaller document decays into decoration: the runbook
+#: entry read (12, 29) while the file had reached (18, 37), so the guard would
+#: have tolerated the extractor losing EIGHT of eighteen commands and fifteen of
+#: thirty-seven classified mentions without a word. Measured 2026-08-18 by
+#: raising each entry to an absurd value and reading the counts out of the
+#: failure message, which is the only way this file reports them.
 CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "README.md": (55, 5),
     "docs/explainability-tracing-boundary.md": (2, 0),
-    "docs/runbooks/explainability-prod-cutover.md": (12, 29),
+    "docs/runbooks/explainability-prod-cutover.md": (18, 37),
 }
 
 

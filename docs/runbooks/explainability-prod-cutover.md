@@ -155,10 +155,17 @@ aisquare doctor
 > This closes the one thing the row-count symptom left open — it was measured as
 > two builds side by side, and this is a single build going from no client lane
 > to the client lane. **Count the SECTION, not the rows.** `--json doctor` is the
-> instrument the provenance check above already uses; the rendered ROW total is
-> terminal-width-dependent and will not reproduce (measured 14 checks in JSON,
-> 17 rendered here, 19 rendered elsewhere for the same build). Presence of the
-> `explainability` check is the reading that holds across all three. Still a
+> instrument the provenance check above already uses. But no TOTAL is a property
+> of the build — it moves on two axes. The rendered row total is
+> terminal-width-dependent (17 here, 19 elsewhere for the same build), and the
+> `--json` check total moves with CONFIGURATION: `@9bbc8ed7` measured this build
+> at 14 checks unconfigured and 18 once a target and key are set, because the
+> section expands by design when the feature is configured (an empty six-line
+> section is how the rest of `doctor` stops being read). Jatin configures at §2
+> and §4, so a count captured at §0 is stale by the time he re-runs `doctor`.
+> **Presence of the `explainability` check is the reading that holds** across
+> width, configuration and rendering — the tell is the section, never a number.
+> Still a
 > human's to run on their own `python` — this was a throwaway venv, not the
 > operator's site-packages.
 

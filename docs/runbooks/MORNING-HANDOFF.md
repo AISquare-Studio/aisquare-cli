@@ -155,7 +155,10 @@ forty lines.** Read the ones you need:
 
 5. **A proxy is already listening on 9190 on this box, and it answers §3's check
    perfectly.** **[verified-train]** pid 20753, `aisquare.explainability.claude_proxy`,
-   started 03:13 on 2026-08-17 and **over 27 hours old** at the time of writing. It
+   **over 27 hours old** when this was written and older when you read it. (An
+   absolute start time is deliberately not quoted: `ps lstart` drifts on this
+   box — three readings, three answers, measured below under "The train against
+   this machine's real state".) It
    returns `{"status":"ok","service":"aisquare-proxy","mode":"claude_code"}`, so
    `doctor` reports `explainability proxy: ok` whether or not your §3 start
    succeeded — and would report it even if you skipped §3 entirely. **The age is
@@ -310,27 +313,32 @@ status`, `team status`, `config get` and `context list` all exit **0** with no
 traceback, and `--json` on the first four parses. Only `config list` differed,
 and that is the entry above.
 
-**And one thing about this machine is not a measurement of ours but a process
-somebody else left running.** `coder3` found it and `coder2` confirmed it with a
-second instrument, read-only, nothing started and nothing killed:
+**The evidence behind item 5**, read-only, nothing started and nothing killed —
+the consequence and what to do about it are in that item and are not repeated
+here:
 
 ```text
 ss -ltnp   LISTEN 127.0.0.1:9190  users:(("python",pid=20753,fd=13))
-ps         20753  ELAPSED 1-02:48  STARTED Mon Aug 17 03:14:45 2026
+ps         20753  ELAPSED 1-03:15
            ./.venv/bin/python -m aisquare.explainability.claude_proxy
 /health    {"status":"ok","service":"aisquare-proxy","mode":"claude_code", …}
 ```
 
-**A `claude_code` proxy has been listening on 9190 since Monday morning, and it
-answers §3's verification perfectly.** By 08:00 it is about 29 hours old. So if
-your §3 start silently fails, or you skip it, or you run the check before the
-start — **the check goes green anyway**, on a process that predates this whole
-shift. §3 and the at-a-glance table carry the caveat and the commands that tell
-"mine" from "someone else's"; the tell you can actually use is the **age**,
-because you do not know the PID of a process you have not started yet.
+**And the age is not merely the tell you CAN use — it is the only one that is
+stable here.** Three readings of that PID's *absolute* start time, by two
+sessions, gave three answers:
 
-Nobody has touched it. It is not ours, it may be what the staging work has been
-running through, and stopping it is your call rather than a night-shift one.
+| read at | `ELAPSED` | `ps lstart` |
+|---|---|---|
+| ~05:49 | 1-02:35:44 | Mon Aug 17 03:13:35 |
+| ~06:03 | 1-02:48:27 | Mon Aug 17 03:14:45 |
+| ~06:33 | 1-03:15:36 | Mon Aug 17 03:17:20 |
+
+Each is self-consistent with its own `ELAPSED`, and the absolute time advanced
+about four minutes over forty-four minutes of wall clock. `lstart` is derived
+from the kernel's boot time, which is being stepped on this box, so a start
+*timestamp* here is not reproducible and yours will be a fourth one. Compare
+ages, never clock times.
 
 Also, so the standing instruction is not misread: **nothing is listening on
 9090 in this namespace.** "Never kill whatever holds 9090" is a rule about

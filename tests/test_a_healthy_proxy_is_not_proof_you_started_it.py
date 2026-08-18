@@ -79,6 +79,85 @@ def test_section_3_says_a_healthy_answer_is_not_proof_of_ownership() -> None:
     )
 
 
+def test_section_3_warns_that_a_clash_reports_startup_complete_first() -> None:
+    """Measured: uvicorn prints three reassuring lines before the bind error.
+
+    `Application startup complete` refers to the ASGI app, not the socket, and
+    it precedes `[Errno 98] … address already in use`. Exit code 1, no
+    traceback — a clean failure that reads like a success if you stop at the
+    third line. That matters more in this section than it would elsewhere,
+    because a proxy is already holding 9190 on this box, so a clash is the
+    expected case and every later check passes either way.
+    """
+    section = _section("## 3. Start the proxy")
+
+    # Both the WARNING and the EVIDENCE, scoped separately. A section-wide
+    # search for the phrase is satisfied by the headline alone — measured:
+    # eliding the line from the transcript left this green, because the
+    # sentence above quotes it too. Second time in one cycle that a string
+    # appearing twice made an assertion untestable; the fix is the same one.
+    transcript = section[section.index("INFO:     Started server process") :]
+    transcript = transcript[: transcript.index("```")]
+
+    assert "Errno 98" in transcript, "§3 does not show what an occupied port looks like"
+    assert "Application startup complete" in transcript, (
+        "§3's transcript no longer shows the success line that precedes the "
+        f"bind error; that line is the whole hazard. Transcript:\n{transcript}"
+    )
+    assert "Application startup complete" in section[: section.index("```text")], (
+        "§3 shows the misleading line but never warns about it in prose"
+    )
+
+
+def test_section_3_does_not_gate_the_build_check_on_sudo() -> None:
+    """The gate defeated the check it guarded, so it must not come back.
+
+    `sudo -n true && EXE=$(readlink -f /proc/$PID/exe) || EXE=python` takes the
+    fallback on any box without passwordless sudo — and the fallback is exactly
+    "whatever you last installed", which the block's own comment says it exists
+    not to answer for. `/proc/<pid>/exe` is readable without privilege for your
+    own processes, and the operator starts this proxy themselves.
+
+    Keyed on the absence of the sudo gate rather than on the presence of the
+    replacement, because there is more than one correct way to read that
+    symlink and only one wrong way to decide whether to try.
+    """
+    section = _section("## 3. Start the proxy")
+    start = section.index("```bash")
+    end = section.index("```", section.index("PID=$("))
+
+    assert "sudo -n true" not in section[start:end], (
+        "§3 gates the interpreter choice on sudo again; on a box without "
+        "passwordless sudo that silently answers for the wrong Python"
+    )
+
+
+def test_section_3_documents_the_outcome_the_fallback_produces() -> None:
+    """Two documented outcomes, three real ones.
+
+    `IN FORCE` and `MISSING` were the only results the block named. Measured on
+    this box, the fallback produces neither — it raises ModuleNotFoundError,
+    and an operator on the step that decides whether extra Runs pollute the
+    dataset got a traceback the document did not mention.
+    """
+    section = _section("## 3. Start the proxy")
+
+    # Scoped to the comment block beside the command, NOT the whole section:
+    # the prose caveat below also says "ModuleNotFoundError", so a section-wide
+    # search is satisfied by text the operator reads AFTER the command has
+    # already surprised them. Measured — deleting the comment line left a
+    # section-wide assertion passing, which is the shadowed-pattern failure
+    # @8dd460fb hit on the guard's own reason list.
+    outcomes = section[
+        section.index("# IN FORCE") : section.index("```", section.index("# IN FORCE"))
+    ]
+
+    assert "ModuleNotFoundError" in outcomes, (
+        "§3 lists IN FORCE and MISSING beside the command but not the error its "
+        f"own fallback raises; the block reads:\n{outcomes}"
+    )
+
+
 def test_the_at_a_glance_table_carries_the_same_caveat() -> None:
     """The summary is what gets read under time pressure.
 
@@ -93,6 +172,33 @@ def test_the_at_a_glance_table_carries_the_same_caveat() -> None:
     )
 
     assert "ss -ltnp" in row, f"the at-a-glance row still verifies by payload alone: {row}"
+    assert "etime" in row, (
+        "the summary names the socket but not its age, so it gives advice the "
+        f"body has already been corrected away from: {row}"
+    )
+
+
+def test_the_preflight_row_does_not_rest_on_provenance_alone() -> None:
+    """Row 0 lagged behind the §0 body fix by a whole cycle.
+
+    @8dd460fb corrected §0 because `git fetch` is not `git checkout` — "a
+    comparison with one side". The body grew `--ff-only` and `git status
+    --short`; the at-a-glance row kept naming `doctor` provenance as the whole
+    verification, and provenance is built from `direct_url.json`: an install
+    PATH and an editable flag, with no branch and no sha in it. A tree sitting
+    on main prints the identical row.
+
+    So the summary a human reads under time pressure still carried the check
+    the body had just been fixed for. Keyed on the head comparison, which is
+    the half that was missing.
+    """
+    row = next(
+        line
+        for line in RUNBOOK.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| 0 Preflight |")
+    )
+
+    assert "origin" in row, f"row 0 verifies §0 without comparing your head to origin's: {row}"
 
 
 def _section(heading: str) -> str:

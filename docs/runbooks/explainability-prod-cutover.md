@@ -517,6 +517,27 @@ python -m pip install 'aisquare>=1.1.0'
 python -m aisquare.explainability.claude_proxy
 ```
 
+> ⚠️ **[verified-train, @9bbc8ed7 2026-08-18] If something already holds the
+> port, this fails — but it says `Application startup complete` first.**
+> Measured against an occupied throwaway port (never 9190, never 9090):
+>
+> ```text
+> INFO:     Started server process [56195]
+> INFO:     Waiting for application startup.
+> INFO:     Application startup complete.
+> ERROR:    [Errno 98] error while attempting to bind on address
+>           ('127.0.0.1', PORT): address already in use
+> INFO:     Application shutdown complete.
+> ```
+>
+> Exit code 1, no traceback — a clean failure. But the three INFO lines above
+> the ERROR are uvicorn reporting that the *application* started, not that the
+> *socket* bound, and they print in that order. **Read to the last line, not
+> the third one.** This matters here more than it would elsewhere: a proxy is
+> already listening on 9190 on this box (see the caveat below), so a clash is
+> the expected case rather than the unlucky one, and every check after this
+> step passes whether or not your own start succeeded.
+
 **[verified-train]** Confirm the running proxy really has it — from the process
 itself, so it answers for the build that is actually serving rather than for
 whatever you last installed:
@@ -533,11 +554,39 @@ for e in pathlib.Path("/proc").iterdir():
         if "aisquare.explainability.claude_proxy" in argv: print(e.name); break
 EOF
 )
-sudo -n true 2>/dev/null && EXE=$(readlink -f /proc/$PID/exe) || EXE=python
+EXE=$(readlink -f "/proc/$PID/exe" 2>/dev/null) || EXE=python   # no sudo needed for your own
 $EXE -c "import importlib.util as u; src=open(u.find_spec('aisquare.explainability.claude_proxy').origin).read(); print('junk-run suppression:', 'IN FORCE' if '_has_valid_correlation' in src else 'MISSING')"
-# IN FORCE   -> good
-# MISSING    -> you are on <1.1.0; extra Runs will appear in the dataset
+# IN FORCE            -> good
+# MISSING             -> you are on <1.1.0; extra Runs will appear in the dataset
+# ModuleNotFoundError -> $EXE is NOT the proxy's interpreter; see below
 ```
+
+> ⚠️ **[verified-train, @9bbc8ed7 2026-08-18] This line used to gate on `sudo`,
+> and the gate defeated the check it guarded.** It read
+> `sudo -n true … && EXE=$(readlink -f /proc/$PID/exe) || EXE=python`. On a box
+> without passwordless sudo — this one — the test fails and it takes the
+> fallback, `EXE=python`, WHICH IS EXACTLY "whatever you last installed", the
+> thing the comment above says this block exists not to answer for.
+>
+> **The sudo was never needed.** `/proc/<pid>/exe` is readable without privilege
+> for your OWN processes, and you start this proxy yourself:
+>
+> ```text
+> ls -l /proc/20753/exe -> lrwxrwxrwx 1 work work … -> /usr/bin/python3.10
+> that interpreter      -> junk-run suppression: IN FORCE
+> ```
+>
+> Measured against the proxy running on this box: the correct answer was
+> available with no privilege at all, and the sudo gate threw it away and
+> substituted a `ModuleNotFoundError` — a third outcome the two comment lines
+> did not cover. Reading the symlink directly and falling back only when the
+> READ fails keeps the privileged case working and stops inventing a wrong
+> answer in the ordinary one.
+>
+> If you do see `ModuleNotFoundError`, the fallback was taken: `$EXE` has no
+> `aisquare.explainability`, so the answer would have been about your shell's
+> Python rather than the proxy's. Find the proxy's interpreter by hand before
+> trusting anything this block prints.
 
 Verified to discriminate: the live proxy reports `IN FORCE`; the same check run
 against a fresh `aisquare==1.0.6` reports `MISSING`.
@@ -1168,13 +1217,13 @@ dies.
 
 | Step | Verify | Rollback |
 |---|---|---|
-| 0 Preflight | `doctor` provenance names this repo (empty ⇒ older than this train) | reinstall previous version |
+| 0 Preflight | `git log --oneline -1` matches origin's head **and** `doctor` provenance names this repo — provenance names a PATH and an editable flag, never a revision, so it cannot tell you which branch that tree is on (empty ⇒ older than this train) | reinstall previous version |
 | 0b Warm store | `PRAGMA user_version` on `~/.aisquare/context.db` is non-zero | none — the migration is forward-only |
 | 1a Roster | response lists each agent + `publication_id` | re-register; registration is idempotent by name |
 | 1b/1c Binding | `/v1/routing/resolve` returns a `studio_id` | unbind in the studio UI |
 | 1d Rule book | no `FAIL_OPEN` warning on a traced call | detach the rule book in the UI |
 | 2 Secrets | `stat -c %a <env file>` → `600` | `rm` the file |
-| 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` — **and `ss -ltnp \| grep 9190` to confirm the PID is the one you started**; the payload alone cannot tell you whose proxy answered | `Ctrl-C` (never port 9090) |
+| 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` — **then `ss -ltnp \| grep 9190` for the pid and `ps -o etime` on it**; the payload cannot say whose proxy answered, and ELAPSED is the only line that can (one has been up since Monday — see §3) | `Ctrl-C` (never port 9090) |
 | 3 Proxy build | the §3 check prints `IN FORCE` | reinstall `aisquare>=1.1.0` |
 | 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable`, then §7 |
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |

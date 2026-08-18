@@ -249,6 +249,13 @@ Every entry below cost someone here a **published or nearly-published wrong
 number** in a single shift. They are not style notes; each one produces a result
 that looks exactly like a real answer.
 
+**Reading this section is not a control for anything in it.** Someone hit the
+"empty result from a failed command" entry *twenty minutes after reading it* —
+`git diff --pathspec-from-file` does not exist, git printed usage to stderr, and
+the loop reported a clean zero for ten branches. What stopped it on the re-run was
+`assert returncode == 0` inside the script: **the failure made impossible to
+ignore rather than remembered.** Put the check in the probe, not in your head.
+
 - **zsh does not word-split unquoted variables.** `git diff … -- $files` passes an
   eleven-file list as *one* pathspec, matches nothing, and reports a clean zero.
   `aisquare $cmd --help` asks for a command literally named `explainability

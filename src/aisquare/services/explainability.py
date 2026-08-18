@@ -96,6 +96,10 @@ RESERVED_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 #: proxy), and pointing a Claude Code session at it is not a risk worth taking.
 _EXPECTED_SERVICE = "aisquare-proxy"
 _EXPECTED_MODE = "claude_code"
+#: The proxy's own health field. `governance` is deliberately NOT checked: its
+#: contract is unknown from one sample, and the governance blocker belongs to
+#: the workspace rather than to this probe.
+_EXPECTED_STATUS = "ok"
 
 #: Role names travel inside an HTTP header value; anything beyond this set is
 #: either a typo or an injection attempt, and both fail open.
@@ -399,6 +403,10 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
         return ProxyProbe(False, f"proxy unreachable at {url}: {exc}")
     service = payload.get("service")
     mode = payload.get("mode")
+    status = payload.get("status")
+    # Identity first: "answers as 'something-else'" tells the operator they
+    # pointed at the wrong process, where a status complaint would send them
+    # reading a healthy proxy's internals.
     if service != _EXPECTED_SERVICE:
         return ProxyProbe(False, f"{url} answers as {service!r}, not the explainability proxy")
     if mode != _EXPECTED_MODE:
@@ -406,6 +414,15 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
             False,
             f"proxy at {url} runs mode {mode!r}, need {_EXPECTED_MODE!r} — "
             "point explainability.proxy_url at the claude_code proxy",
+        )
+    if status is not None and status != _EXPECTED_STATUS:
+        # The field whose entire job is reporting health, previously discarded.
+        # Tolerant of ABSENT on purpose: this rests on one payload from one
+        # proxy and an older build that never sends it must keep working, so
+        # only an explicit not-ok is rejected. Named in the reason, because
+        # "proxy unhealthy" without the value sends the operator nowhere.
+        return ProxyProbe(
+            False, f"proxy at {url} reports status {status!r}, not {_EXPECTED_STATUS!r}"
         )
     return ProxyProbe(True, "proxy healthy")
 

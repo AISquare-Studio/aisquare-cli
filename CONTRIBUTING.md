@@ -153,6 +153,32 @@ because conflict markers had nearly shipped: it reported every file clean while
 matching nothing, restoring exactly the hole it existed to close, behind a green
 suite. Assume the half you did not think of is a rule.
 
+**Five shapes, one remedy — measured, not assumed.** The shapes above are five
+ways a rule goes blind; they are not five things to check for. A positive
+control catches all of them, because it tests the rule's ability to *see* a case
+it must report, and every one of these failures is a failure to see. How the
+rule was blinded is a difference in cause, not in effect.
+
+Measured across three guards, both mutation styles, both arms — with the control
+present and with it removed:
+
+| | control present | control removed |
+|---|---|---|
+| the loop stops consuming the rule | caught | not caught |
+| the rule returns the success value | caught | not caught |
+
+So when you add a guard, one positive control per shape it claims to catch is
+the whole job, and when you audit one, the question is not "which of the five
+is this" but "is there a case this rule must report, and does something drive
+it with that case". Three guards is what was measured; the reasoning is why it
+should hold generally, and those are different strengths of claim.
+
+**Not every green sabotage is a finding.** Replacing an assertion's *input* with
+a literal — `offenders = []` where the rule computed it — passes in every test
+ever written and proves nothing about the guard. Blinding the *rule the
+assertion consults* is the defect. Both print green, and two non-findings were
+nearly banked as instances before that distinction was drawn.
+
 The observed pattern in who finds these is worth knowing: people control what they
 have just built and not what they inherited from themselves a cycle earlier. Sweep
 your own old guards, and expect the unowned ones to be nobody's habit.

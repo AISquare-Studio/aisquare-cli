@@ -328,6 +328,21 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   branch is not an ancestor while its content is fully present. `for-each-ref
   --merged` answers the first question; only a per-file diff (correctly quoted)
   speaks to the second.
+- **Before filing "X is missing", check whether X exists and is unreachable.**
+  These are different findings and only the second one is ours. Four times in one
+  shift, three different people filed a missing mechanism that was present:
+  a safety net "wired to nothing" whose caller was four lines above it; a board
+  resolver that "should use `find_project_root`" and already did; "a worktree
+  maps to its own project" when the resolver handles worktrees and an
+  `AISQUARE_TEAM_HUB='./'` override ran first; and "board reads take no `--as`"
+  when two of five had it and routed correctly. The measurement is usually
+  right — *"nothing imports this"*, *"the flag is absent here"* — and the
+  sentence it is used to justify is about the wrong thing. **Ask what would
+  reach it, not just what defines it:** an override earlier in the same
+  function, a caller in the same file, a flag on a sibling subcommand. The tell
+  is a fix that keeps shrinking: if each round of evidence makes the proposed
+  change smaller, the original diagnosis was about absence when it should have
+  been about reachability.
 
 ## Conventions
 

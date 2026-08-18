@@ -158,22 +158,27 @@ forty lines.** Read the ones you need:
    the one check nobody has ever executed: take a pipeline id out of
    `joins.jsonl`, read the Run back from the studio, and confirm the board row
    and the Run carry the *same* id. That is the join this whole integration is
-   for. To read either blocker: `aisquare task show <id>` prints it as
-   `stopped because …`, with `stopped_because` in `--json` — **but only after
-   step 1.** The `aisquare` on your `PATH` predates that fix until you
-   reinstall, and prints nothing; measured both ways on this box. That is the
-   *third* check step 1 gates, and the shortest reason to type it first.
-   Before step 1, `aisquare --json team log` carries the same text, run from
-   `/home/work/work/aisquare-cli`. **If a board read comes back empty or
-   implausibly short, do not conclude the board is empty.** Ours is set to
-   `AISQUARE_TEAM_HUB='./'`, and a *relative* hub resolves to the process cwd,
-   so the board silently follows the directory you are in — measured, a
-   worktree returns 0 events and `env -u AISQUARE_TEAM_HUB` makes the same
-   command return 200. From a non-repo directory such as `$HOME` you get a
-   genuinely different board, twelve plausible events, with or without the
-   variable. An empty board and a board you are not looking at are
-   indistinguishable today (filed: `tsk_01m0ad9ys7m12bczz9wgj9yptr`,
-   `tsk_01m0ac4b2r874y1n8dzyfrpfpn`).
+   for. To read either blocker **with the build you have right now, from any
+   directory**: `aisquare team log --limit 200 --as <session>`, where
+   `<session>` is any id from the sessions list at the top of `aisquare
+   board` — `dfd9a883` was the planner. The `--as` routes
+   board resolution through that session's row instead of your working
+   directory, which is what makes it directory-proof — verified from the project
+   directory, a worktree and `$HOME`, the same 200 events each time. This is the
+   one form that does not depend on step 1.
+   **After step 1** two things get easier. `aisquare task show <id>` prints the
+   blocker directly, as `stopped because …` with `stopped_because` in `--json`
+   — the build on your `PATH` predates that and prints nothing, which is the
+   *third* check step 1 gates. And a plain board read stops being able to lie
+   to you quietly: it warns that our `AISQUARE_TEAM_HUB='./'` is relative and
+   is being ignored, a worktree now reads the real board rather than an empty
+   one, and from a non-repo directory it names the board it answered —
+   `reading board work — /home/work is not a git repository, so the board
+   follows your directory; pass --as <session>`.
+   **Before step 1 none of those warnings exist.** The stale build answers `No
+   team events match` from a worktree and returns twelve plausible events from
+   `$HOME`, both silently. So until you reinstall, use `--as` and do not read a
+   quiet board as an empty one.
 
 4. **Prod values are unverified.** Every *mechanism* here is verified against
    staging; the prod URL and key are `[unverified-prod]` throughout.

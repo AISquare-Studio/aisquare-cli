@@ -459,7 +459,8 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > Use the real role names. `agent_name_template` defaults to `aisquare-{role}`
 > (**[verified-train]**), so the names the proxy will present are
 > `aisquare-planner`, `aisquare-coder`, `aisquare-runner`. A name that is not
-> registered is rejected at ingest with `409 no_agent_identity`.
+> registered is rejected at ingest with `409 agent_not_registered` (see below —
+> `no_agent_identity` is a different, permanent case).
 >
 > **`aisquare-cli` is the fourth name and it is not a typo.** The CLIENT lane
 > attributes each Run to the board role of its session, and falls back to the
@@ -836,8 +837,9 @@ never 9090 on this box (§3).
 
 The earlier runbook had no registration step at all. That is the omission that
 breaks a cutover while every other step reports success: unregistered names are
-refused by the gateway with **409 `no_agent_identity`**, so traces leave the
-machine and land nowhere.
+refused by the gateway with **409 `agent_not_registered`**, so traces leave the
+machine and land nowhere until the name is registered. They are *retried*, not
+discarded — see §1a for why that distinction decides what you do about it.
 
 ```bash
 aisquare explainability register --target prod
@@ -1341,7 +1343,8 @@ fully healthy run):
 |---|---|
 | `policy check degraded (FAIL_OPEN)` | governance is off — go back to §1 |
 | ingest returning anything other than `202` | traces are not landing |
-| `409 no_agent_identity` | the agent name is not registered — §1a |
+| `409 agent_not_registered` | the agent name is not registered — §1a. Transient: the rows retry and drain once you register it |
+| `409 no_agent_identity` | a batch with **no** agent name anywhere — a different, permanent case; the SDK dead-letters it after 3 attempts |
 | `test span accepted … — but the workspace credit balance is in the 'hard' band` | **expected on a workspace nobody has granted credits to, which a brand-new prod workspace is.** Not a misconfiguration; see the note below this table |
 | `probe: proxy unreachable` with `enabled: True` | launches are silently untraced — §3 |
 | `API Error: Invalid URL` with `exit=1` | you are on a build older than the POSIX-quoting fix, **or** an `ANTHROPIC_BASE_URL` in your own environment is malformed — the CLI now names it on stderr just above the failure |

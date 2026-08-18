@@ -65,9 +65,36 @@ def _skips_unconditionally(function: ast.FunctionDef) -> bool:
     return called == "skip"
 
 
+def _has_empty_parameter_set(function: ast.FunctionDef) -> bool:
+    """Whether a `parametrize` decorator hands this test an EMPTY set.
+
+    The third way to be unable to fail, and the one that hid from both my
+    guards. pytest COLLECTS such a test — it reports "got empty parameter set"
+    and SKIPS it — so it has a node id, my collection comparison sees no
+    asymmetry, and the body contains a perfectly good assertion that never
+    executes. Measured: `@pytest.mark.parametrize("x", [])` runs zero cases and
+    every check in this file passed it.
+
+    Detectable only when the set is a LITERAL. A computed list that happens to
+    be empty — a comprehension that filters everything out, a constant imported
+    from elsewhere — is invisible here, and that limit is real: the shape most
+    likely to become empty by accident is exactly the computed one.
+    """
+    for decorator in function.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        name = getattr(decorator.func, "attr", None) or getattr(decorator.func, "id", None)
+        if name != "parametrize":
+            continue
+        for argument in decorator.args[1:]:
+            if isinstance(argument, ast.List | ast.Tuple | ast.Set) and not argument.elts:
+                return True
+    return False
+
+
 def _can_fail(function: ast.FunctionDef) -> bool:
     """Whether anything in this body could make the test fail."""
-    if _skips_unconditionally(function):
+    if _skips_unconditionally(function) or _has_empty_parameter_set(function):
         return False
     for node in ast.walk(function):
         if isinstance(node, ast.Assert):
@@ -148,6 +175,12 @@ def test_the_predicate_recognises_the_shapes_that_cannot_fail() -> None:
         "with pytest.raises(ValueError):\n        boom()",
         "pytest.fail('no')",
     ]
+
+    empty_set = ast.parse(
+        '@pytest.mark.parametrize("x", [])\ndef test_x(x):\n    assert x == 1\n'
+    ).body[0]
+    assert isinstance(empty_set, ast.FunctionDef)
+    assert not _can_fail(empty_set), "an empty parameter set was read as able to fail"
 
     for body in cannot:
         node = ast.parse(f"def test_x():\n    {body}\n").body[0]

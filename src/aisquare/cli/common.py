@@ -215,11 +215,23 @@ def emit_setup(report: SetupReport) -> None:
 
 
 def emit_config(config: AppConfig) -> None:
-    """Render the full config — JSON under ``--json``, TOML otherwise."""
+    """Render the full config — JSON under ``--json``, TOML otherwise.
+
+    ``exclude_none`` on the TOML side for the reason ``save_config`` states:
+    TOML has no null, so ``tomli_w`` raises rather than writing anything, and
+    one unset optional field would make the whole config unprintable. It was
+    passed on the write path and not here, so ``explainability enable`` (a
+    target that overrides nothing) or ``team bind`` without ``--bin`` left
+    ``config list`` exiting 1 with a traceback. Omitting the key is also what
+    is on disk, so the two renderings agree.
+
+    JSON keeps its nulls: it can express them, and a consumer indexing a key
+    would rather read ``null`` than a ``KeyError``.
+    """
     if get_state().json_output:
         typer.echo(config.model_dump_json())
     else:
-        typer.echo(tomli_w.dumps(config.model_dump(mode="json")), nl=False)
+        typer.echo(tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)), nl=False)
 
 
 def emit_config_value(key: str, value: str) -> None:

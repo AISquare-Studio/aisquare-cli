@@ -776,9 +776,14 @@ writes traces, cannot read or rebind. Rotation is new key → deploy → revoke 
 **Which build.** Pin **`aisquare>=1.1.0`**. Overnight receipts were collected
 against a local checkout of branch `f9/suppress-cc-shell-run` @ `bb88bb5`, and
 that raised a fair question: is the evidence reproducible from anything you can
-install? It is. `1.1.0` is on PyPI and carries the junk-run suppression —
-`_has_valid_correlation` in `claude_proxy.py` is **byte-identical** to the
-checkout's. The *released* `1.0.6` and `1.0.7` do **not** have it, and on those
+install? It is, with one correction to how it was first phrased. `1.1.0` is on PyPI and
+carries the junk-run suppression — the `_has_valid_correlation` **function** in
+`claude_proxy.py` is byte-identical to the checkout's (verified against the real
+PyPI wheel; the measured note below has the shas). The `claude_proxy.py` *file*
+around it is **not** byte-identical:
+`1.1.0` is a later build, and it gates that same function differently — read the
+note before you treat `1.1.0` as bit-for-bit the receipts' proxy. The *released*
+`1.0.6` and `1.0.7` do **not** have the function at all, and on those
 the junk-run behaviour returns silently as extra Runs in the dataset — but the
 `bb88bb5` checkout itself also self-reports `1.0.6`, so do not use the version
 string to decide; run the check below. (Measured block after it.)
@@ -893,10 +898,29 @@ against a fresh `aisquare==1.0.6` reports `MISSING`.
 > that already imported the old code. Reinstall is the remedy for `MISSING`,
 > never routine tidying.
 > **(d)** No `1.1.x` artefact exists on this box — pip cache, uv cache and every
-> `aisquare-*.dist-info` under `/home/work` are `1.0.3` or `1.0.6` — so that
-> install needs network, and the "byte-identical to `1.1.0`" claim above stays
-> **unverified from here**. What IS verified is the half the evidence row rests
-> on: the build now serving is byte-identical to the checkout the receipts used.
+> `aisquare-*.dist-info` under `/home/work` are `1.0.3` or `1.0.6`, so that
+> install needs network. **[verified-train, coder2 `8dd460fb`, 2026-08-18]**
+> `@9bbc8ed7` showed the network is open and `1.1.0` installs; I then pulled the
+> real PyPI wheel (`pip download aisquare==1.1.0 --no-deps`) and diffed it, and
+> the flat "byte-identical to `1.1.0`" claim was too strong:
+>
+> ```text
+> claude_proxy.py    bb88bb5   218592 bytes  sha256 f063820d…
+>                    PyPI 1.1.0 221830 bytes  sha256 9484a9ca…   NOT byte-identical (+158 lines)
+> _has_valid_correlation() body   1226 chars  sha 6ebd3b0e   IDENTICAL in both
+> its gate  bb88bb5     correlated = _has_valid_correlation(pipeline_id, traceparent)
+>           PyPI 1.1.0  correlated = _is_cc_mode() and _has_valid_correlation(pipeline_id, traceparent)
+> ```
+>
+> So the *function* reproduces exactly; the *file* is a later build that adds a
+> `_should_adopt_cc_session` path and now scopes the suppression behind
+> `_is_cc_mode()`. For a `claude_code` proxy — which `/health` reports this one
+> is — that gate is satisfied and the suppression still fires, so `1.1.0` is a
+> sound prod pin; but it is the same behaviour by a later route, not the same
+> bytes. Whether `_is_cc_mode()` holds for your prod proxy is one `/health` read
+> (`"mode":"claude_code"`), not an assumption. The half the evidence row rests
+> on is unchanged: the build now serving is byte-identical to the checkout the
+> receipts used — that is a `1.0.6`-labelled `bb88bb5`, not `1.1.0`.
 
 **[verified-stg]** Health check — run it yourself, do not assume:
 
@@ -1796,11 +1820,15 @@ dies.
    launch hard-failed under `sh`/`dash`. Fixed on the train (POSIX
    single-quoting) and re-verified under `dash`: `BASE=[http://…]`, a real
    newline in the header pair, `exit=0`. §5 is shell-agnostic now.
-7. **[CLOSED]** The proxy build is pinned. `aisquare>=1.1.0` is released and
-   carries the junk-run suppression — `_has_valid_correlation` is byte-identical
-   to the `bb88bb5` checkout the overnight receipts used, so that evidence is
-   reproducible from PyPI and nobody needs the unreleased branch. `1.0.6`/`1.0.7`
-   do **not** have it. §3 carries a check that reads the *running* proxy and was
+7. **[CLOSED, with a measured refinement]** The proxy build is pinned.
+   `aisquare>=1.1.0` is released and carries the junk-run suppression — the
+   `_has_valid_correlation` **function** is byte-identical to the `bb88bb5`
+   checkout the overnight receipts used (verified against the real PyPI wheel),
+   so the mechanism is reproducible from PyPI and nobody needs the unreleased
+   branch. The *file* is not identical — `1.1.0` is a later build that gates the
+   function behind `_is_cc_mode()`; for a `claude_code` proxy the suppression
+   still fires, and §3's (d) note carries the diff. `1.0.6`/`1.0.7` do **not**
+   have the function at all. §3 carries a check that reads the *running* proxy and was
    verified to discriminate (live proxy `IN FORCE`, fresh `1.0.6` `MISSING`)
    — but @8dd460fb measured what supplies that `IN FORCE`, and it is a
    **`1.0.6`-labelled editable checkout of `bb88bb5`**, not a `1.1.x`

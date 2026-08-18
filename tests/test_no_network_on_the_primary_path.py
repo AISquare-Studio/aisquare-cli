@@ -4,29 +4,48 @@ That clause of the fail-open doctrine is the one with no test behind it, while
 the handoff's doctrine section says each of them has one. The primary path in
 the most literal sense is the hook: it runs on every prompt of every session.
 
-MEASURED AT 9dce497 — a measurement at a commit, recorded rather than asserted,
+MEASURED AT 9dce497 — measurements at a commit, recorded rather than asserted,
 because a wall-clock bound in CI is flaky by construction and a muted test is
-worse than none:
+worse than none.
 
-    aisquare hook user-prompt-submit, medians of 9 runs
+WHAT AN OPERATOR PAYS per invocation, subprocess, medians of 9 runs:
+
+    aisquare hook user-prompt-submit
       tracing off                   353 ms   (min 339, max 362)
       tracing on, proxy UNREACHABLE 363 ms   (min 340, max 415)
       tracing on + shipping on      360 ms   (min 341, max 372)
 
-Overlapping ranges — the difference is noise, and a configured-but-dead proxy
-costs the hook nothing. Decomposed so nobody reads 353 ms as a tracing cost:
-``python3 -c pass`` 49 ms, ``aisquare --version`` 326 ms, hook 353 ms. The CLI's
-import dominates and tracing adds ~0.
+Decomposed so nobody reads 353 ms as a tracing cost: ``python3 -c pass`` 49 ms,
+``aisquare --version`` 326 ms, hook 353 ms. The CLI's import dominates.
 
 An earlier revision also derived "the hook's own work is ~27 ms" by subtracting
-326 from 353. THAT FIGURE IS RETRACTED: @8dd460fb later characterised this box's
+326 from 353. THAT FIGURE IS RETRACTED: @8dd460fb characterised this box's
 wall-clock noise floor at **36 ms** between the fastest and slowest sample of a
 single measurement, under three concurrent gate runs — larger than the 27 ms
-difference it was derived from. The conclusions above survive because they were
-stated as OVERLAPPING RANGES rather than as differences; a subtraction of two
-medians whose own spreads exceed the result does not survive. Use ``-X
-importtime`` self time for anything at this scale, as
-``test_import_cost_of_the_integration.py`` now does.
+difference it was derived from. A subtraction of two medians whose own spreads
+exceed the result does not survive. Use ``-X importtime`` self time for anything
+at this scale, as ``test_import_cost_of_the_integration.py`` now does.
+
+THE SAME FLOOR MEANS THE ROWS ABOVE DO NOT BY THEMSELVES RULE ANYTHING OUT.
+They were stated as OVERLAPPING RANGES, which is why the conclusion survives —
+but the first version of this docstring added "tracing adds ~0", and that says
+nothing about what effect size the measurement could have DETECTED. Against a
+36 ms floor and nine samples, a genuine 15 ms cost would have been invisible and
+would have read exactly like zero.
+
+SO THE BOUND IS STATED, WITH A CONTROL. In-process, which drops process startup
+out of the sample, 60 samples a side:
+
+      tracing OFF              median 87.70 ms   p10 77.09  p90 102.36
+      tracing ON + shipping    median 85.78 ms   p10 75.05  p90 108.92
+      ON + a deliberate 5 ms   median 89.62 ms
+      tracing delta            -1.93 ms   (negative: what noise looks like)
+      injected-5 ms delta      +3.84 ms   <- the control
+
+A real five milliseconds moves the median by about four, so this harness
+resolves 5 ms even with that spread. The supportable claim is NO EFFECT THE SIZE
+OF 5 MS — not "tracing adds ~0". A configured-but-dead proxy costs the hook
+nothing detectable at that resolution.
 
 WHAT IS ASSERTED HERE IS THE MECHANISM THOSE NUMBERS MEASURED: with tracing
 fully configured, the hook path opens no socket. That is deterministic where the

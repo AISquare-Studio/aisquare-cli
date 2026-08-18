@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import insights, outbox
 from aisquare.core.config import AppConfig, save_config
-from aisquare.core.redaction import redact
+from aisquare.core.redaction import _CREDENTIAL_RULES, _IDENTITY_RULES, redact
 from aisquare.models import RedactionLevel
 from aisquare.services import hooks as hooks_service
 
@@ -64,6 +64,24 @@ SECRETS = {
         "-----BEGIN RSA PRIVATE KEY",
         "-----\nMIIEowIBAAKCAQEAx7Fk9sQmPq3vN2wZ\n-----END RSA PRIVATE KEY-----",
     ),
+}
+
+#: The ``strict`` counterpart: one sample per identity shape. Written as plain
+#: literals rather than through ``_shaped`` — a home directory is not
+#: credential-shaped, so the push-protection reason for assembling SECRETS does
+#: not apply here and pretending it does would teach the next reader the wrong
+#: rule.
+IDENTITIES = {
+    "email address": "jatin@opengrowth.com",
+    "unix home": "/home/jatin",
+    "windows home": "C:\\Users\\jatin",
+}
+
+#: Every rule collection in ``redaction`` and the samples that must exercise it.
+#: A third collection is registered here once and inherits both ratchets below.
+_COVERED = {
+    "credential": (_CREDENTIAL_RULES, SECRETS),
+    "identity": (_IDENTITY_RULES, IDENTITIES),
 }
 
 
@@ -172,18 +190,80 @@ def test_standard_keeps_the_engineering_substance(tmp_path: Path) -> None:
 
 
 def test_strict_also_removes_who_and_where(tmp_path: Path) -> None:
+    """Every identity shape, driven by the collection the ratchet below checks.
+
+    This was two shapes hand-written into one line, and the third rule in
+    ``_IDENTITY_RULES`` — the Windows home — was matched by nothing in the
+    suite. Reading the samples from ``IDENTITIES`` is what makes a fourth shape
+    impossible to add without exercising it here.
+    """
     _configure(RedactionLevel.strict)
-    typed = "mail jatin@opengrowth.com about /home/jatin/work/aisquare-cli"
+    typed = "mail " + " and ".join(IDENTITIES.values()) + " about work/aisquare-cli"
 
     hooks_service.capture_prompt(typed, tmp_path)
 
     shipped = _spooled_text()
-    assert "jatin@opengrowth.com" not in shipped
-    assert "/home/jatin" not in shipped
+    for label, value in IDENTITIES.items():
+        assert value not in shipped, f"{label}: {value!r} crossed the network"
     assert "aisquare-cli" in shipped, "strict anonymises, it does not delete the sentence"
 
 
 # --- properties the scrubber itself must hold ---
+
+
+def _uncovered(collection: str) -> tuple[list[str], list[str]]:
+    """Rules no sample matches, and samples no rule matches.
+
+    Matched against the RAW sample, never through ``redact``: the rules run in
+    sequence and an earlier one consumes text a later one would have matched.
+    The ``assigned secret`` sample is the live example — it trips the
+    ``NAME=value`` rule AND the ``wk_`` rule, but a pipeline run leaves only the
+    first, so asking the pipeline would under-report coverage by one rule.
+    Coverage is a question about the rule set, not about the output.
+    """
+    rules, samples = _COVERED[collection]
+    return (
+        [
+            pattern.pattern
+            for pattern, _ in rules
+            if not any(pattern.search(v) for v in samples.values())
+        ],
+        [
+            label
+            for label, v in samples.items()
+            if not any(pattern.search(v) for pattern, _ in rules)
+        ],
+    )
+
+
+@pytest.mark.parametrize("collection", sorted(_COVERED))
+def test_every_redaction_rule_has_a_sample(collection: str) -> None:
+    """A rule added without a sample is coverage that rots in silence.
+
+    The two collections are independent — the tests above import ``redact``,
+    the function, and never the rules — so today's completeness is a fact about
+    today. This is what makes it a fact about tomorrow. It asserts the
+    RELATIONSHIP and never the count: a count is a second container to update,
+    and this repo has been bitten by content moving while its container did not.
+    """
+    unmatched, _ = _uncovered(collection)
+
+    assert not unmatched, f"{collection} rules that no sample exercises:\n  " + "\n  ".join(
+        unmatched
+    )
+
+
+@pytest.mark.parametrize("collection", sorted(_COVERED))
+def test_every_redaction_sample_exercises_a_rule(collection: str) -> None:
+    """The other direction, without which the ratchet catches half.
+
+    A sample that matches no rule proves nothing: it would sail through the
+    parametrised tests above — nothing to redact, so nothing leaks — and read
+    as a shape we cover when it is a shape we do not.
+    """
+    _, inert = _uncovered(collection)
+
+    assert not inert, f"{collection} samples that match no rule and so prove nothing: {inert}"
 
 
 def test_redaction_marks_what_it_removed() -> None:

@@ -466,15 +466,45 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > role `cli` whenever the board cannot say whose a Run is — an unattributed
 > run, a session missing from the store, a roleless row, or a store read that
 > threw. Those are the sessions nobody is watching, so leaving the name out
-> loses exactly the data hardest to notice. **[verified-train]** on this tree:
+> strands exactly the data hardest to notice. **[verified-train]** on this tree:
 > `_agent_name_for(settings, UNATTRIBUTED_RUN)` returns `aisquare-cli` while
 > the roster held only the three roles.
 >
-> And unlike a `402`, this one does not queue and drain: the pinned SDK
-> (`bb88bb5`, `aisquare` 1.0.6) says a `409 no_agent_identity` row "can NEVER
-> be delivered by retrying", so the sweeper dead-letters it. **Registering is
-> idempotent** — a name already registered returns its existing
-> `publication_id` — so the fourth costs nothing and its absence is permanent.
+> **It queues, it does not vanish — and the difference decides what you do
+> about it.** An earlier draft of this note said these spans were lost
+> permanently. That was wrong, and `dfd9a883` caught it: there are three
+> distinct `409`s and they diverge exactly here. From `aisquare/explainability/sweeper.py` at
+> `bb88bb5` (`aisquare` 1.0.6), in its own words — `agent_not_registered` is
+> "the agent is named but IAM has no mapping … a routine onboarding race,
+> transient — retried forever"; only `no_agent_identity` (the batch holds the
+> trace's true root span and still has **no** agent name anywhere) is
+> "deterministic POISON" and dead-lettered. `aisquare-cli` **is** a name, so an
+> unregistered one takes the first branch: `gateway/main.py` raises
+> `409 agent_not_registered` with `routing.agent_name` attached.
+>
+> So the cost of leaving it out is a **growing backlog**, not a deletion.
+> **Registering is idempotent** (a known name returns its existing
+> `publication_id`), so the fourth name costs nothing, and registering it
+> *later* still drains whatever queued in the meantime. Do not go looking for a
+> dead-letter queue for this case; there isn't one, by design.
+>
+> **And the backlog is not silent — `doctor` already fails on it, with the
+> remedy.** The SDK's own `delivery_backlog` check counts `pending` rows whose
+> `last_error` starts `gateway_status:409` and returns `error`, which this CLI
+> renders as `✗ sdk:delivery_backlog`. Its message names this exact case: *"if
+> the agent is named but unregistered, register it … or enable auto-discovery
+> (autoregister_unknown_agents) on the workspace"*. Its own docstring calls
+> these "the exact states the sweeper's silent retry loop otherwise hides from
+> the customer".
+>
+> **That reporting is only as good as `EXPLAINABILITY_INBOX_PATH`, which is
+> where §2 earns its keep.** The check reads that variable and defaults to the
+> RELATIVE `explainability_inbox.db`, so unset it resolves against whatever
+> directory `doctor` was run from — and `8dd460fb` measured that the proxy
+> writes an absolute path of its own while the doctor and the client library
+> share the relative default. Set it in the env file and this row watches the
+> inbox that is actually filling; leave it unset and a green
+> `sdk:delivery_backlog` may only mean you were standing somewhere else.
 >
 > **Rather than retyping this list, let the CLI derive it:** `aisquare
 > explainability register` builds the roster from `explainability.roles` plus
@@ -948,6 +978,17 @@ aisquare explainability ship        # drain the spool — RECURRING, see below
 > and task event after that sits on disk while the proxy lane keeps working
 > perfectly. Model traffic flows, `status` is green, Runs appear — and clause
 > two of the north star is true only of the first few minutes.
+>
+> **If §4b registered the roster late, the insights already shipped are not
+> lost — they are queued.** The client lane attributes an unattributable Run to
+> `aisquare-cli`, and until that name is registered the gateway answers
+> `409 agent_not_registered`, which the sweeper treats as a transient
+> onboarding race and retries indefinitely rather than dead-lettering. So the
+> recovery is the registration itself: run §4b (or `aisquare explainability
+> register`, which sends the whole roster including `aisquare-cli`) and the
+> backlog drains on the next sweep with no further action. **[read from
+> `aisquare/explainability/sweeper.py` and `gateway/main.py` at `bb88bb5` / `aisquare` 1.0.6; not
+> observed against a live gateway.]**
 >
 
 **Run it on a timer** — and the obvious crontab line ships nothing, forever,

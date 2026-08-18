@@ -14,13 +14,36 @@ own words. ``ship_once`` passes that straight to
 ``register`` builds its roster from ``settings.roles``, and ``cli`` is not a
 role, so that name is never registered.
 
-AND THE CONSEQUENCE IS NOT A DEFERRAL, IT IS A DELETION. An unregistered name is
-rejected ``409 no_agent_identity``, and the PINNED SDK
-(``/home/work/work/AISquare-Explainability-SDK`` @ ``bb88bb5``, ``aisquare``
-1.0.6) says in ``doctor.py`` that such rows "can NEVER be delivered by
-retrying"; ``sweeper.py`` moves them to ``dead_letter``. That is the opposite of
-the 402 story — a 402 is transient and the queue drains when credits arrive,
-this one never drains.
+THE CONSEQUENCE IS A BACKLOG, NOT A DELETION — AND THE FIRST VERSION OF THIS
+DOCSTRING SAID OTHERWISE. I wrote that these spans were dead-lettered and lost
+permanently; ``dfd9a883`` corrected it, and the correction is worth keeping here
+because a wrong severity shapes a wrong fix. There are THREE ``409``s and they
+diverge exactly on this case. From ``sweeper.py`` at
+``/home/work/work/AISquare-Explainability-SDK`` @ ``bb88bb5`` (``aisquare``
+1.0.6), quoting its own comments:
+
+* ``agent_not_registered`` — "the agent is named but IAM has no mapping … a
+  routine onboarding race, transient — retried forever";
+* ``awaiting_trace_route`` — child-only batch, no route pin yet: transient;
+* ``no_agent_identity`` — the batch holds the trace's TRUE root span and still
+  has no agent name ANYWHERE, "deterministic POISON", dead-lettered after
+  ``_NO_AGENT_IDENTITY_GRACE``.
+
+``aisquare-cli`` IS a name, so it takes the first branch — ``gateway/main.py``
+raises ``409 agent_not_registered`` with ``routing.agent_name`` attached. So
+the real cost is a growing backlog, and registering the name later still drains
+it. Nor is that backlog silent: the SDK's ``delivery_backlog`` check returns
+``error`` for ``pending`` rows whose ``last_error`` starts ``gateway_status:409``
+and names this remedy in its message, which ``_sdk_checks`` renders as
+``sdk:delivery_backlog``. It watches whatever ``EXPLAINABILITY_INBOX_PATH``
+resolves to, and that default is relative — ``8dd460fb``'s finding — so the
+reporting is real but conditional on the path being set.
+
+That makes the fix MORE obviously right, not less: this is an onboarding gap,
+and declaring the identity is exactly what closes an onboarding gap. It also
+means there is nothing here to build — no dead-letter handling, no loss alarm,
+no retry policy. The SDK already retries correctly and adding to it would
+encode a failure mode that does not occur.
 
 It lands on the sessions nobody is watching: one started outside ``team spawn``,
 one whose board row is roleless, one whose store read blipped. Clause 2 of the

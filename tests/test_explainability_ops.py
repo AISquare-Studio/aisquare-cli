@@ -761,3 +761,73 @@ def test_register_renders_the_same_verdict_in_both_forms(
     # The human rendering says the same two things, in its own words.
     assert "aisquare-planner: publication_id 101" in human.stdout, human.stdout
     assert "aisquare-runner: registered" in human.stdout, human.stdout
+
+
+def test_enable_renders_the_same_facts_in_both_forms(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`enable`'s payload only PARSED until now, and parsing is not correctness.
+
+    The sweep asserts this command's stdout is JSON; ``{}`` would satisfy it.
+    Every field here is instead checked against the HUMAN rendering of the same
+    run, so a dropped or renamed field fails while a field added later does not
+    — the opposite of pinning a literal payload, which rots on the next
+    addition.
+
+    `key_set` is checked through the human view's own words rather than by
+    re-deriving it: the ✓ block prints "(NOT set)" when the named variable is
+    absent, and the two must not be able to disagree about the same shell.
+    """
+    from aisquare.cli.app import app as cli_app
+
+    monkeypatch.delenv("AISQUARE_AGREEMENT_KEY", raising=False)
+    argv = [
+        "explainability",
+        "enable",
+        "--target",
+        "tst",
+        "--gateway-url",
+        "https://gw.invalid",
+        "--key-env",
+        "AISQUARE_AGREEMENT_KEY",
+    ]
+    human = runner.invoke(cli_app, argv)
+    machine = runner.invoke(cli_app, ["--json", *argv])
+
+    assert human.exit_code == 0, human.output
+    assert machine.exit_code == 0, machine.output
+
+    payload = json.loads(machine.stdout)
+    assert payload["enabled"] is True, payload
+
+    # `identity` is MACHINE-ONLY, and writing this test is how I learned it: the
+    # human block prints the EXPANDED agent names, never the template they came
+    # from. That is the better human rendering and the field is still worth
+    # publishing — `status` publishes it too — so it is checked against its
+    # SOURCE rather than dropped from the rule or the rule weakened to fit.
+    # And it publishes the RESOLVED value, not the raw per-target field: this
+    # target overrides nothing, so its own `agent_name_template` is None while
+    # the identity actually in use is the top-level default. Comparing against
+    # the raw field failed here, which is the payload being right and my first
+    # source being wrong — a caller wants what WILL be used, which is what
+    # `status` publishes too.
+    resolved = ops.resolve_target(load_config().explainability, "tst")
+    assert payload["identity"] == resolved.agent_name_template
+
+    for field in ("target", "gateway", "key_env", "proxy"):
+        # NON-EMPTY FIRST, and that check is here because its absence made this
+        # loop vacuous: `"" in anything` is True, so a field that degenerated to
+        # the empty string satisfied the substring test everywhere. Found by
+        # sabotage — replacing the gateway with "" left all 46 tests green.
+        # Every one of these is non-empty by construction in this fixture.
+        assert payload[field], f"{field} came back empty: {payload}"
+        assert str(payload[field]) in human.stdout, (
+            f"{field}={payload[field]!r} is in the JSON and nowhere in the human "
+            f"rendering of the same run:\n{human.stdout}"
+        )
+    for agent_name in payload["agents"]:
+        assert agent_name in human.stdout, f"{agent_name} missing from the human view"
+    assert payload["key_set"] is ("(NOT set)" not in human.stdout), (
+        f"key_set={payload['key_set']} disagrees with the human view about the "
+        f"same shell:\n{human.stdout}"
+    )

@@ -24,6 +24,8 @@ operator to ignore the mail, which is how the quiet failure gets back in.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from typer.testing import CliRunner
 
@@ -138,3 +140,43 @@ def test_dead_lettering_still_fails_without_the_flag(
     result = runner.invoke(app, ["explainability", "ship"], catch_exceptions=False)
 
     assert result.exit_code == 1
+
+
+@pytest.mark.parametrize(
+    ("label", "ship", "gateway"),
+    [("shipping off", False, "https://gw.invalid"), ("no gateway", True, "")],
+)
+def test_the_json_blocked_field_means_what_strict_does(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, label: str, ship: bool, gateway: str
+) -> None:
+    """`blocked` is what a timer wrapper reads, and it only parsed until now.
+
+    The sweep in ``test_json_stdout_is_machine_readable.py`` asserts this
+    command's stdout is JSON. A payload of ``{}`` would satisfy that. The field
+    that matters is ``blocked``, which exists — its own comment says so — set
+    rather than inferred "so no caller has to match on message text", and a
+    wrapper keyed on it would misreport forever if it silently went missing:
+    the same silent-spool failure §5b exists to prevent, arriving through the
+    machine-readable door instead.
+
+    Pinned against the BEHAVIOUR rather than as a constant: whatever `--strict`
+    does in this state, `blocked` has to agree with it. A future state where
+    both flip stays consistent; one where only one flips fails here.
+    """
+    _configured(ship=ship, gateway=gateway)
+    monkeypatch.delenv(_KEY_VAR, raising=False)
+
+    machine = runner.invoke(app, ["--json", "explainability", "ship"], catch_exceptions=False)
+    human = runner.invoke(app, ["explainability", "ship"], catch_exceptions=False)
+    strict = runner.invoke(app, ["explainability", "ship", "--strict"], catch_exceptions=False)
+
+    payload = json.loads(machine.stdout)
+    assert payload["blocked"] is (strict.exit_code != 0), (
+        f"{label}: --strict exited {strict.exit_code} while the payload says "
+        f"blocked={payload['blocked']} — a timer reading one and a human reading "
+        "the other would disagree about the same run"
+    )
+    assert payload["reason"] == human.stdout.strip().splitlines()[0], (
+        f"{label}: the two renderings give different reasons for the same run"
+    )
+    assert {"sent", "deferred", "dead", "runs"} <= payload.keys(), payload

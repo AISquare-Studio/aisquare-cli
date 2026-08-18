@@ -549,6 +549,29 @@ curl -s http://127.0.0.1:9190/health
 {"status":"ok","service":"aisquare-proxy","mode":"claude_code","governance":"gateway"}
 ```
 
+> ⚠️ **[verified-train, @9bbc8ed7 2026-08-18] A healthy `/health` is not proof
+> you started it.** This check identifies a *payload*, never a *process*. Any
+> program serving those fields on that port satisfies it — measured with this
+> repo's own forty-line `tests/proxy_stub.py`, which answers
+> `{"status":"ok","service":"aisquare-proxy","mode":"claude_code"}` and is a
+> test fixture. A proxy left running by yesterday's cutover passes identically,
+> and then model traffic goes to the OLD one.
+>
+> @8dd460fb hit exactly this by walking the runbook with §3 skipped: the row
+> still read healthy because something else on the box was serving 9190. That
+> warning was recorded in §5, about the `doctor` row — the *consequence*. This
+> is the step that *causes* it, so confirm the owner here, where you can still
+> tell the difference between "mine" and "someone's":
+>
+> ```bash
+> ss -ltnp | grep 9190      # the PID should be the proxy you just started
+> ```
+>
+> This is not a defect in the CLI. Asking the kernel who owns a socket is
+> `ss`'s job, not a diagnostic's; a payload check is the right check for "is
+> the interface on this port the one I expect". It just is not the same
+> question as "is it mine".
+
 **Three of those four fields matter now.** The CLI refuses any `/health` whose
 `service` is not `aisquare-proxy`, whose `mode` is not `claude_code`, or whose
 `status` is present and not `ok` — and it **fails open**, so a wrong-mode proxy
@@ -1131,7 +1154,7 @@ dies.
 | 1b/1c Binding | `/v1/routing/resolve` returns a `studio_id` | unbind in the studio UI |
 | 1d Rule book | no `FAIL_OPEN` warning on a traced call | detach the rule book in the UI |
 | 2 Secrets | `stat -c %a <env file>` → `600` | `rm` the file |
-| 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` | `Ctrl-C` (never port 9090) |
+| 3 Proxy | `/health` → `service=aisquare-proxy`, `mode=claude_code` — **and `ss -ltnp \| grep 9190` to confirm the PID is the one you started**; the payload alone cannot tell you whose proxy answered | `Ctrl-C` (never port 9090) |
 | 3 Proxy build | the §3 check prints `IN FORCE` | reinstall `aisquare>=1.1.0` |
 | 4 Enable | `status` shows your target, gateway and proxy | `aisquare explainability disable`, then §7 |
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |

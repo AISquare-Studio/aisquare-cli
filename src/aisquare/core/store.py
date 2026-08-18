@@ -1295,6 +1295,35 @@ def is_locked_error(exc: sqlite3.Error) -> bool:
     return "locked" in text or "busy" in text
 
 
+def is_corrupt_error(exc: sqlite3.Error) -> bool:
+    """True when SQLite says the FILE is damaged, whenever it noticed.
+
+    Needed at query time, where nothing has raised ``StoreUnopenable`` because
+    nothing failed to open: a zeroed page with an intact header opens fine and
+    a ``SELECT`` finds it later. So the decision has to be made from the error
+    rather than from where it came from.
+
+    Narrow, and the narrowness is the point. ``OperationalError`` IS a
+    ``DatabaseError``, so a widening keyed on the base class would sweep up
+    "database is locked" — transient contention, which five sessions hit
+    nightly — and tell those operators their board is damaged. It would also
+    sweep up "no such table", which is a defect in OUR migrations and must keep
+    its traceback. Errorcode first, message only as the fallback for
+    hand-constructed exceptions, exactly as ``is_locked_error`` does.
+
+    This helper existed, was deleted as dead code when ``StoreUnopenable``
+    replaced its only caller, and is back because the query-time seam cannot be
+    written without it.
+    """
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_NOTADB, sqlite3.SQLITE_CORRUPT)
+    text = str(exc).lower()
+    return "not a database" in text or "disk image is malformed" in text
+
+
 class StoreUnopenable(sqlite3.DatabaseError):
     """The store could not be opened at all — whatever the cause.
 
@@ -1348,6 +1377,20 @@ def damaged_store_message(exc: sqlite3.Error) -> str:
     return (
         f"the context store cannot be opened: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
     )
+
+
+def damaged_data_message(exc: sqlite3.Error) -> str:
+    """For damage a QUERY found, where the file opened perfectly well.
+
+    Deliberately not ``damaged_store_message``: that one says the store "cannot
+    be opened", which is false here and would send the reader looking for the
+    wrong thing — and §0b of the cutover runbook quotes it verbatim, so editing
+    it in place would falsify an operator document nobody touched.
+
+    The recovery is the same function, because the two sentences drifting apart
+    is the defect this whole family exists to prevent.
+    """
+    return f"the context store is damaged: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
 
 
 def _statements(script: str) -> Iterator[str]:

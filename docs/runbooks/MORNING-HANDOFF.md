@@ -304,8 +304,17 @@ was invisible to per-step verification because whoever verifies §5 has just don
 
 Named so you can tell a decision from an oversight:
 
-- `root_package_shadowed()` is a safety net wired to nothing — deletion is
-  reserved for the next train (`tsk_01m07k2vr7avjmg63bcbgc2r3z`).
+- `root_package_shadowed()` was listed here as "a safety net wired to nothing",
+  and that was wrong — corrected rather than deleted, because this section's
+  whole value is telling a decision from an oversight, and a false entry in it
+  costs more than a missing one. It **is** wired: `sdk_presence()` calls it,
+  carries the result as `SdkPresence.shadowing`, and the `explainability sdk`
+  doctor check reads it and warns with a remediation naming who the collision
+  affects. That row appears once tracing is configured, which is the state you
+  are in after §4 of the cutover. The wiring (a5c8987, 05:52 UTC 08-17) predates
+  the note claiming its absence by four hours. Now pinned end-to-end by
+  `tests/test_the_shadow_check_reaches_doctor.py`, which removes the attribute
+  the real predicate reads rather than stubbing the function.
 - The write-boundary guard follows imports, aliases and name rebindings but
   **not** attribute, dict, or closure rebindings. Open by choice: a
   dynamically-built attribute is genuinely not statically resolvable, and the

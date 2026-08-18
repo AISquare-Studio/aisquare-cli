@@ -1274,13 +1274,30 @@ fully healthy run):
 > bill or enforce → fall through (allow)" — so no band at all is also a
 > possible healthy reading.
 >
-> **[unverified]** The same module says the SDK's `/credits/check` preflight
-> *refuses* at the hard band while ingest keeps failing open. If `explainability
-> ship` performs that preflight, the client lane could be refused on an
-> ungranted workspace while the proxy lane looks perfect — which would send you
-> hunting a key or a config that is not the cause. Nobody here has exercised
-> that path; treat a refused `ship` with a green proxy as a billing question
-> first.
+> **The client lane is not affected by any of this, and that is measured rather
+> than hoped.** An earlier revision of this note warned that the SDK's
+> `/credits/check` preflight might refuse `ship` at a hard band, leaving the
+> client lane quietly dead while the proxy lane looked perfect. **`ship` does not
+> perform that preflight** — the SDK client package contains *zero* references to
+> credits, balance or billing, and `/credits/check` exists only server-side as
+> `POST /v1/studios/{id}/credits/check` (`8dd460fb`, read from source). The
+> gateway's own model says what it is for: **"the FORCE-STOP … the agent run
+> should be refused before it starts"** — a run-start gate, not a delivery gate.
+> So even a future SDK that adopted it would fail at *launch*, loudly, rather
+> than as a silent client lane.
+>
+> **What `doctor` actually does at each band, measured through the real CLI
+> against a stub gateway** (`8dd460fb`):
+>
+> | gateway answers | `doctor --live` | ingest row |
+> |---|---|---|
+> | `202` clean | exit 0 | `ok` — test span accepted |
+> | `202` + band `hard` | exit 0 | **warn** — accepted, "but the workspace credit balance is in the 'hard' band" |
+> | `402` | **exit 1** | **fail** — "test span not accepted: HTTP 402: {…insufficient_credits…}" |
+>
+> Neither band case is silent, and the 402 quotes the body. **So there is exactly
+> one question to ask whoever stands the prod gateway up: what is
+> `BILLING_ENFORCEMENT_MODE`?** You cannot misconfigure this from the CLI.
 
 **[verified-train, planner `dfd9a883`]** **Recovering a wedged store.** If several
 sessions raced a *first* open, the store can be left permanently mid-migration:

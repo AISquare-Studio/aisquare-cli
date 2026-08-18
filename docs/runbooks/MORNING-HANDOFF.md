@@ -218,8 +218,13 @@ Named so you can tell a decision from an oversight:
 Worth knowing before you change anything, because each of these has a test
 behind it:
 
-- **Fail-open.** Tracing may cost a *trace*; it may never cost a launch or an
-  exit code.
+- **Fail-open, and say what it cost.** Tracing may cost a *trace*; it may never
+  cost a launch or an exit code — *and when it does fail open it says so on
+  stderr*, because a surface that fails open quietly is indistinguishable from
+  one that is working. `launch` against a damaged store is the worked example:
+  exit **0**, the agent runs, and one line naming what was lost — no board row,
+  therefore no join to a gateway Run, one lost trace. The second half of this
+  clause is the one that gets dropped; both halves have tests.
 - **No hard SDK dependency.**
 - **Nothing ships before you configured it.** No key or config ⇒ nothing
   captured, and nothing logged as an error either.

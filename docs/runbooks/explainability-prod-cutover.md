@@ -1108,6 +1108,74 @@ left on disk, not deleted, so nothing already captured is lost.
 
 ---
 
+## 5c. Prove the join — one id in three local places (3 min)
+
+**Run this only after §4 and after at least one traced session has launched.**
+Before that `~/.aisquare/explainability/joins.jsonl` **does not exist**, and
+neither does its parent directory. That absence is correct, not a fault: the
+writer creates the directory on its first append, and nothing has appended
+because nothing has been traced. A reader who runs these commands too early
+gets `No such file or directory` and cannot tell expected-absence from
+breakage — which is why this section sits here and not next to §4.
+
+This is the north star's third clause — *board rows join to gateway Runs on a
+shared key* — and until now the runbook had no step that checked it. Three of
+the four hops need no credential and are below. The fourth does, and is marked.
+
+**Anchor on the RUNNING session, not on the newest record.** Each launch mints
+its own id, so `tail -1 joins.jsonl` names whichever session started last,
+which is not necessarily the one you are looking at. Measured while writing
+this: a second launch carried `29dc19d4…` while the newest join record still
+said `9fa349b2…`. Start from the process and work outward.
+
+```bash
+PID=$(python3 - <<'EOF'
+import pathlib
+for e in pathlib.Path("/proc").iterdir():
+    if e.name.isdigit():
+        try: argv = (e / "cmdline").read_bytes()
+        except OSError: continue
+        if b"claude" in argv: print(e.name); break
+EOF
+)
+tr '\0' '\n' < /proc/$PID/environ | grep AISQUARE_PIPELINE_ID   # hop 1
+grep "$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^AISQUARE_PIPELINE_ID=//p')" \
+  ~/.aisquare/explainability/joins.jsonl                          # hop 2
+aisquare --json team status                                       # hop 3
+```
+
+`team status` takes no `--as` — it resolves the board from the current
+directory, so **run it from the repository**, not from a worktree or `$HOME`.
+If it answered for another board it now says so on stderr (`reading board … —
+this directory resolves elsewhere`); silence means the board is the one this
+repository maps to. That asymmetry is real and unfixed: `team log` and
+`note` route through `--as`, `team status`, `board` and `task list` cannot be
+pointed at a board at all.
+
+**[verified-train, @9bbc8ed7 2026-08-18] Run end to end under a throwaway
+`AISQUARE_HOME` with a stub proxy — never against the operator's home.** One
+traced session, all three hops, real output:
+
+```text
+running process  AISQUARE_PIPELINE_ID = 207fea48-f832-44de-b9ad-a52e3b4cd78c
+joins.jsonl      pipeline_ids         = ['207fea48-f832-44de-b9ad-a52e3b4cd78c']
+board            session ids          = ['207fea48-f832-44de-b9ad-a52e3b4cd78c']
+ALL THREE AGREE: True
+```
+
+One id, three places, none of them needing the gateway.
+
+> ⚠️ **HOP 4 IS BLOCKED AND THAT IS BY DESIGN, NOT BY OVERSIGHT.** Reading the
+> Run back from the studio — confirming the gateway holds a Run whose id is the
+> one above — needs a **read-scoped** credential. The ingest key is write-only
+> and returns 403 on reads, proven. That is
+> `tsk_01kzdee4pjw8e0ep2g968ejsq6`, and until it closes **every delivery claim
+> in this document stops at "the gateway accepted the bytes"**. Three hops
+> demonstrated locally is not the same as the join being observed end to end,
+> and nothing here should be read as upgrading that.
+
+---
+
 ## 6. What healthy looks like, and what is just noise
 
 **A healthy run, in the proxy log** (**[verified-stg]**):
@@ -1273,6 +1341,7 @@ dies.
 | 4b Register | each agent printed with a `publication_id` | none needed — additive and idempotent |
 | 5 Green | `doctor --live` → `ingest: test span accepted … (HTTP 202)` | `aisquare explainability disable`, then §7 |
 | 5b Insights | `.shipping.gateway` equals your prod URL; `spool:` counts move after `ship` **and keep moving** — a growing `N buffered` means draining stopped | `aisquare init --no-explainability` (spool kept) |
+| 5c Join | one id in three local places: the traced process's `AISQUARE_PIPELINE_ID`, its record in `joins.jsonl`, and its board row — anchor on the RUNNING session, not `tail -1` | none — read-only |
 
 ---
 

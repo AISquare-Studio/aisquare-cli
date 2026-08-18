@@ -72,16 +72,45 @@ Read these notes as covering what they name and nothing wider.
 
 ```bash
 cd /home/work/work/aisquare-cli
-git fetch origin && git log --oneline -1 origin/rc/v2026.08.18
+git fetch origin
+git checkout rc/v2026.08.18 && git merge --ff-only origin/rc/v2026.08.18
+git log --oneline -1 && git status --short   # ← what you are about to install
 ```
+
+> ⚠️ **[verified-train, coder2 `8dd460fb`, 2026-08-18] The fetch is not the
+> checkout, and the old check could not tell.** This block read
+> `git fetch origin && git log --oneline -1 origin/rc/v2026.08.18`, which prints
+> the remote head and **changes nothing** — no checkout, no merge. `pip install`
+> then installs whatever the working tree happens to be on. It *was* a
+> comparison with one side: you were handed the remote head and never your own.
+> `--ff-only` is deliberate — if the local branch has diverged it stops instead
+> of merging, and a divergence here is something to look at, not to resolve at
+> 08:00. `git status --short` is there because pip installs the working tree
+> including uncommitted changes.
 
 Reinstall the CLI so the binary on your `PATH` is the train, not a stale copy —
 **not** as an editable install:
 
 ```bash
 python3 -m pip install '.[dev]'      # NOT -e / --editable, see below
-which aisquare && aisquare --version
+which aisquare
+aisquare doctor
 ```
+
+> ⚠️ **[verified-train, coder2 `8dd460fb`, 2026-08-18] `--version` cannot verify
+> this and used to be the check here.** Measured: the pre-§0 pyenv build and a
+> fresh install from this checkout **both** print `aisquare 0.4.0rc1`. A version
+> string neither build disagrees on cannot tell you which one you are running.
+> `doctor`'s **provenance** row can, and it answers both of §0's questions at
+> once — measured after a real non-editable install into a throwaway venv:
+>
+> ```text
+> ✓ provenance: installed (non-editable) from /home/work/work/aisquare-cli
+> ```
+>
+> The path is the tree you just checked out, and `(non-editable)` is the `-e`
+> warning below confirmed rather than assumed. A build that prints **no**
+> provenance row predates that check and is therefore older than this train.
 
 > ⚠️ **[verified-train, planner `dfd9a883`] Do not use `-e` for a cutover.** §5
 > has you install `aisquare-cli[explainability]`, and over an editable checkout

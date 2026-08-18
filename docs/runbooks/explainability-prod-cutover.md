@@ -1216,10 +1216,33 @@ fully healthy run):
 | `policy check degraded (FAIL_OPEN)` | governance is off — go back to §1 |
 | ingest returning anything other than `202` | traces are not landing |
 | `409 no_agent_identity` | the agent name is not registered — §1a |
+| `test span accepted … — but the workspace credit balance is in the 'hard' band` | **expected on a workspace nobody has granted credits to, which a brand-new prod workspace is.** Not a misconfiguration; see the note below this table |
 | `probe: proxy unreachable` with `enabled: True` | launches are silently untraced — §3 |
 | `API Error: Invalid URL` with `exit=1` | you are on a build older than the POSIX-quoting fix, **or** an `ANTHROPIC_BASE_URL` in your own environment is malformed — the CLI now names it on stderr just above the failure |
 | `✗ context store error: duplicate column name: account` | you skipped §0b on a brand-new `~/.aisquare` — recovery below |
 | `✗ the context store is corrupt: …/context.db` | the file is damaged, not misconfigured — the message carries the whole recovery, and `aisquare doctor` prints the same one |
+
+> ⚠️ **The credit band rides on a successful ingest, and a fresh workspace starts
+> in the worst one.** Read from the gateway's own
+> `gateway/billing/enforcement.py`, not observed against prod:
+> `balance > warn_threshold` → no band; `<= warn_threshold` → `warn`;
+> `<= HARD` (default 0) → `hard`. And in its words: **"A never-granted
+> workspace (granted=0, balance=0) lands in 'hard'"**, because **"the gateway
+> never auto-grants — credits are issued by our backend."**
+>
+> So on the prod workspace you stand up this morning, a `hard` band beside a
+> `202` is the expected reading, not a fault in anything you configured, and
+> **your traces are still landing**: ingest fails open at every band. The
+> remedy is a credit grant from whoever owns billing — there is no CLI or
+> config change that clears it.
+>
+> **[unverified]** The same module says the SDK's `/credits/check` preflight
+> *refuses* at the hard band while ingest keeps failing open. If `explainability
+> ship` performs that preflight, the client lane could be refused on an
+> ungranted workspace while the proxy lane looks perfect — which would send you
+> hunting a key or a config that is not the cause. Nobody here has exercised
+> that path; treat a refused `ship` with a green proxy as a billing question
+> first.
 
 **[verified-train, planner `dfd9a883`]** **Recovering a wedged store.** If several
 sessions raced a *first* open, the store can be left permanently mid-migration:

@@ -304,6 +304,41 @@ status`, `team status`, `config get` and `context list` all exit **0** with no
 traceback, and `--json` on the first four parses. Only `config list` differed,
 and that is the entry above.
 
+**And one thing about this machine is not a measurement of ours but a process
+somebody else left running.** `coder3` found it and `coder2` confirmed it with a
+second instrument, read-only, nothing started and nothing killed:
+
+```text
+ss -ltnp   LISTEN 127.0.0.1:9190  users:(("python",pid=20753,fd=13))
+ps         20753  ELAPSED 1-02:48  STARTED Mon Aug 17 03:14:45 2026
+           ./.venv/bin/python -m aisquare.explainability.claude_proxy
+/health    {"status":"ok","service":"aisquare-proxy","mode":"claude_code", …}
+```
+
+**A `claude_code` proxy has been listening on 9190 since Monday morning, and it
+answers §3's verification perfectly.** By 08:00 it is about 29 hours old. So if
+your §3 start silently fails, or you skip it, or you run the check before the
+start — **the check goes green anyway**, on a process that predates this whole
+shift. §3 and the at-a-glance table carry the caveat and the commands that tell
+"mine" from "someone else's"; the tell you can actually use is the **age**,
+because you do not know the PID of a process you have not started yet.
+
+Nobody has touched it. It is not ours, it may be what the staging work has been
+running through, and stopping it is your call rather than a night-shift one.
+
+Also, so the standing instruction is not misread: **nothing is listening on
+9090 in this namespace.** "Never kill whatever holds 9090" is a rule about
+another context, not a statement that 9090 is serving something here. Measured
+at the train head, because I nearly wrote the wrong version of this sentence:
+
+* **never configured** — `doctor` says `✓ explainability: tracing is off`, and
+  `explainability status` prints the proxy URL with **no probe line at all**. A
+  machine that never asked for tracing reports no failure, which is deliberate.
+* **enabled, still pointing at the shipped default** — `✗ explainability proxy:
+  proxy unreachable at http://127.0.0.1:9090/health … Connection refused`, with
+  the remediation beside it. That is the *correct* red, and it is what you will
+  see between §2 and §3 if you leave `proxy_url` at its default.
+
 One warning from running that sweep: **`aisquare note` takes text, not a
 subcommand.** `aisquare note list` does not list anything — it posts a note
 whose body is the word "list", to whichever project your directory maps to.
@@ -366,7 +401,11 @@ blocked, and §5 still reported `✓ explainability proxy: claude_code proxy
 healthy`, because another process on this box was serving that port. The check
 is right that *a* proxy answered; it cannot tell you *whose*. So a green proxy
 row can hide a §3 that silently failed, and model traffic then goes to the older
-proxy. §5 now carries the confirming command beside its expected output. This
+proxy. §3 and the at-a-glance table now carry the caveat and its commands — §3
+because that is the CAUSE, where you can still tell "mine" from "someone
+else's", rather than only §5 where the symptom shows. **And this is no longer
+hypothetical: see "The train against this machine's real state" above for the
+process currently answering that port.** This
 was invisible to per-step verification because whoever verifies §5 has just done
 §3, so the state is always right.
 

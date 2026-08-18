@@ -178,6 +178,32 @@ def test_the_at_a_glance_table_carries_the_same_caveat() -> None:
     )
 
 
+def test_section_0_compares_your_head_to_origins_rather_than_just_showing_it() -> None:
+    """`--ff-only` stops on divergence, and AHEAD IS NOT DIVERGENCE.
+
+    Measured in a throwaway clone: a branch one commit ahead of origin
+    fast-forwards to nothing — `Already up to date.`, exit 0 — while
+    `git log --oneline -1` shows the local commit and `git status --short` is
+    empty. Every line of §0 reports success and the operator is not on origin's
+    train. That is the one-sided comparison @8dd460fb fixed this block for,
+    pointing the other way.
+
+    `git status -sb` prints `## branch...origin/branch [ahead 1]` and still
+    lists the uncommitted files, so it strictly dominates the flag it replaces.
+    Keyed on the absence of the bare `--short`, because that is the flag whose
+    silence is the defect.
+    """
+    section = _section("## 0. Preflight")
+    start = section.index("```bash")
+    block = section[start : section.index("```", start + 3)]
+
+    assert "status -sb" in block, f"§0 no longer compares your head to origin's:\n{block}"
+    assert "status --short" not in block, (
+        "§0 is back to `git status --short`, which is empty on a branch that is "
+        f"merely ahead of origin — the state the tree it names is normally in:\n{block}"
+    )
+
+
 def test_the_preflight_row_does_not_rest_on_provenance_alone() -> None:
     """Row 0 lagged behind the §0 body fix by a whole cycle.
 

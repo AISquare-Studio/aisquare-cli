@@ -74,7 +74,7 @@ Read these notes as covering what they name and nothing wider.
 cd /home/work/work/aisquare-cli
 git fetch origin
 git checkout rc/v2026.08.18 && git merge --ff-only origin/rc/v2026.08.18
-git log --oneline -1 && git status --short   # ← what you are about to install
+git log --oneline -1 && git status -sb      # ← what you are about to install
 ```
 
 > ⚠️ **[verified-train, coder2 `8dd460fb`, 2026-08-18] The fetch is not the
@@ -83,6 +83,35 @@ git log --oneline -1 && git status --short   # ← what you are about to install
 > the remote head and **changes nothing** — no checkout, no merge. `pip install`
 > then installs whatever the working tree happens to be on. It *was* a
 > comparison with one side: you were handed the remote head and never your own.
+> **[verified-train, @9bbc8ed7 2026-08-18] `-sb` and not `--short`, because
+> AHEAD IS NOT DIVERGENCE.** `--ff-only` stops on a genuine divergence — measured:
+> `fatal: Not possible to fast-forward, aborting.` But a branch that is merely
+> ahead of origin fast-forwards to nothing and reports success:
+>
+> ```text
+> git merge --ff-only origin/rc/v2026.08.18  ->  Already up to date.   exit 0
+> git log --oneline -1                       ->  your local commit
+> git status --short                         ->  (empty)
+> ```
+>
+> Every line passes and you are not on origin's train. That is the same
+> one-sided comparison this block was fixed for, pointing the other way: you
+> used to be shown origin's head and not your own, and would now be shown your
+> own and not origin's. **This is the normal state of the tree named above** —
+> a repo someone has been folding into sits ahead of the remote, and it was
+> four commits ahead when this was measured.
+>
+> `git status -sb` costs nothing and closes it. It still lists the uncommitted
+> files (pip installs them, which is why `--short` was here), and adds the line
+> that carries the other side:
+>
+> ```text
+> ahead   ->  ## rc/v2026.08.18...origin/rc/v2026.08.18 [ahead 1]
+> correct ->  ## rc/v2026.08.18...origin/rc/v2026.08.18
+> ```
+>
+> **No bracket after the branch name.** That is the whole check.
+>
 > `--ff-only` is deliberate — if the local branch has diverged it stops instead
 > of merging, and a divergence here is something to look at, not to resolve at
 > 08:00. `git status --short` is there because pip installs the working tree

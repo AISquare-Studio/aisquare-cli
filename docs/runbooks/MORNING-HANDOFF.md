@@ -24,7 +24,7 @@ something is.
 
 ## What needs you — in order, blockers first
 
-**All six at a glance, because the detail below runs long and item 1 alone is
+**All seven at a glance, because the detail below runs long and item 1 alone is
 forty lines.** Read the ones you need:
 
 1. **Reinstall non-editable** (§0). Not blocked on anything but typing, and it
@@ -35,8 +35,10 @@ forty lines.** Read the ones you need:
 2. **Governance** — the one real blocker. Needs a credential we do not hold.
 3. **Nobody has read the studio.** Every delivery claim stops at the gateway.
 4. **Prod values unverified.** Mechanisms verified against staging, not values.
-5. **One consent question**, never forced. Nothing breaks by leaving it.
-6. **Install the shipping timer** (§5b). Not a blocker, but forever after.
+5. **A proxy already answers §3 on this box** — 27 hours old. §3 can pass
+   without you.
+6. **One consent question**, never forced. Nothing breaks by leaving it.
+7. **Install the shipping timer** (§5b). Not a blocker, but forever after.
 
 
 1. **Step 1 of the runbook (§0, the non-editable reinstall) has not been run.**
@@ -145,11 +147,25 @@ forty lines.** Read the ones you need:
 4. **Prod values are unverified.** Every *mechanism* here is verified against
    staging; the prod URL and key are `[unverified-prod]` throughout.
 
-5. **One consent question, asked five-plus times and never forced:** may we
+5. **A proxy is already listening on 9190 on this box, and it answers §3's check
+   perfectly.** **[verified-train]** pid 20753, `aisquare.explainability.claude_proxy`,
+   started 03:13 on 2026-08-17 and **over 27 hours old** at the time of writing. It
+   returns `{"status":"ok","service":"aisquare-proxy","mode":"claude_code"}`, so
+   `doctor` reports `explainability proxy: ok` whether or not your §3 start
+   succeeded — and would report it even if you skipped §3 entirely. **The age is
+   the tell you can actually use**, because you do not know the PID of a process you
+   have not started yet: `ps -o pid,etime,args -p <pid>` after `ss -ltnp | grep 9190`.
+   Nobody here started it, nobody here has touched it, and it may be what the
+   staging work has been running through — so it is reported rather than killed.
+   (Nothing is listening on **9090** in this namespace, despite the standing "never
+   kill whatever holds 9090" rule; that rule is about not assuming, not about
+   something currently serving there.)
+
+6. **One consent question, asked five-plus times and never forced:** may we
    write to a `/mnt` (Windows) path? A 9p/DrvFs filesystem measurement is
    parked on it. Nothing is broken by leaving it parked.
 
-6. **Not a blocker, but the one thing you must set up and then keep:** install
+7. **Not a blocker, but the one thing you must set up and then keep:** install
    the shipping timer from §5b. Nothing drains the insight spool by itself, so
    without it you deliver whatever was captured before you finish and then
    nothing, forever, while model traffic keeps flowing and `status` reads green.

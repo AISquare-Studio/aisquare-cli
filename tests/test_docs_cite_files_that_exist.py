@@ -54,9 +54,11 @@ EXTERNAL = {
     "_has_valid_correlation as byte-identical in aisquare>=1.1.0",
 }
 
-#: A file that stops matching passes every assertion below while inspecting
-#: nothing. Measured: 20 references across the four documents.
-_FLOOR = 15
+#: A cheap, independent signal that a document OUGHT to yield references: it
+#: mentions a test or a repo path in plain text. Deliberately not the same
+#: machinery as ``_REFERENCE`` — two copies of one parser agreeing proves
+#: nothing, and the whole job here is catching that parser going quiet.
+_MENTIONS_A_PATH = re.compile(r"test_[a-z0-9_]+\.py|tests/|src/aisquare/")
 
 _REFERENCE = re.compile(r"`((?:tests|src|docs)/[A-Za-z0-9_./-]+|[a-z][a-z0-9_]*\.py)`")
 
@@ -80,18 +82,34 @@ def _resolves(ref: str) -> bool:
 
 
 def test_the_extraction_still_finds_references() -> None:
-    """Guard the guard: a regex that stops matching satisfies everything else.
+    """Guard the guard, WITH NO NUMBER IN IT.
 
-    This is the narrowing found in this repo's other census — one broad
-    exclusion made it report "0 unaccounted" while inspecting nothing. A floor
-    is the cheapest defence, and it is why the number is here rather than in a
-    comment.
+    This was ``len(found) >= 15`` — a typed constant, which becomes ``>= 0`` in
+    one keystroke inside the artifact whose whole job is stopping a guard from
+    inspecting nothing. @8dd460fb escaped that category structurally and this
+    follows them: a document that plainly mentions a test file or a repo path
+    MUST yield at least one structured reference. Two independent methods, so a
+    silent parser is caught by the other one, and nothing to lower.
+
+    The per-document condition is EARNED rather than assumed. Copying their
+    "every file yields one" shape directly would fail correct input here:
+    docs/store-migration-race.md cites nothing at all today, and a guard that
+    fails a correct document is the too-broad rule this shift has produced
+    three times.
     """
     found = _references()
+    citing = {doc for docs in found.values() for doc in docs}
 
-    assert len(found) >= _FLOOR, (
-        f"only {len(found)} references extracted, below the floor of {_FLOOR} — "
-        "the pattern has stopped matching and every check below is vacuous"
+    silent = [
+        doc
+        for doc in DOCS
+        if _MENTIONS_A_PATH.search(doc.read_text(encoding="utf-8")) and doc not in citing
+    ]
+
+    assert not silent, (
+        f"these documents plainly mention repo paths but the extractor found "
+        f"none in them: {[str(d) for d in silent]} — the pattern has stopped "
+        "matching and every check below is vacuous"
     )
 
 
@@ -146,6 +164,9 @@ def test_the_doctrine_citations_specifically_resolve() -> None:
     section = handoff[handoff.index("## Doctrine this integration holds to") :]
     cited = sorted(set(re.findall(r"`(test_[A-Za-z0-9_]+\.py)`", section)))
 
-    assert len(cited) >= 8, f"only {len(cited)} test files cited; the section changed shape"
+    # No count: the section is REQUIRED to cite something, and every citation
+    # must resolve. A section that stopped citing entirely fails the first
+    # assertion; one that cites a renamed file fails the second.
+    assert cited, "the doctrine section cites no test files at all; it changed shape"
     missing = [name for name in cited if not (Path("tests") / name).exists()]
     assert not missing, f"the doctrine section cites tests that do not exist: {missing}"

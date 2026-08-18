@@ -36,6 +36,7 @@ which is the machine ``init --explainability`` produces.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,36 @@ _MAY_RESOLVE_KEY = {
 }
 
 
+#: Counts ``def`` at a line start — an independent parser, deliberately cruder
+#: than ``ast``. Two copies of one walk agreeing proves nothing.
+_DEF_LINE = re.compile(r"^\s*(?:async\s+)?def\s", re.MULTILINE)
+
+
+def _assert_the_walk_saw_the_whole_file(source: Path, found: list[ast.FunctionDef]) -> None:
+    """Guard the guard, WITH NO NUMBER IN IT.
+
+    These were ``len(functions) >= 30`` and ``>= 20`` — typed constants, which
+    become ``>= 0`` in one keystroke inside checks whose entire job is stopping
+    an AST walk from inspecting nothing. @8dd460fb escaped that category
+    structurally and this follows them: a crude regex counts ``def`` lines and
+    the AST walk must find at least as many. Two independent parsers, so a walk
+    that goes quiet is caught by the one that did not, and nothing to lower.
+
+    ``>=`` rather than ``==`` because ``ast`` legitimately sees more than the
+    regex does — a ``def`` inside a string or a continuation would not start a
+    line. The direction that matters is the walk finding FEWER, which is what a
+    broken walk looks like.
+    """
+    by_regex = len(_DEF_LINE.findall(source.read_text(encoding="utf-8")))
+
+    assert by_regex, f"no def lines in {source}; this check is describing a ghost"
+    assert len(found) >= by_regex, (
+        f"the AST walk found {len(found)} functions in {source.name} where a "
+        f"plain regex sees {by_regex} — the walk is not seeing the whole file, "
+        "so every rule built on it is inspecting less than it claims"
+    )
+
+
 def test_there_is_exactly_one_place_that_resolves_a_key() -> None:
     """The half @8dd460fb's guard does not cover, in the same structural shape.
 
@@ -207,11 +238,7 @@ def test_the_guard_actually_inspects_something() -> None:
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
 
-    # No typed floor here on purpose. A broken walk yields an empty set, which
-    # cannot be a superset of a non-empty allow list, so the assertion below
-    # already fails on it — VERIFIED by neutralising a `>= 30` floor AND breaking
-    # the walk together: this test still failed. A number would be the
-    # constant-that-can-be-lowered category (@8dd460fb), earning nothing.
+    _assert_the_walk_saw_the_whole_file(SOURCE, functions)
     assert {n.name for n in functions} >= _MAY_RESOLVE_KEY, (
         "the allow list names functions that no longer exist, so it excuses nothing"
     )
@@ -300,9 +327,7 @@ def test_the_ops_walk_inspects_something_and_the_rule_can_match() -> None:
     tree = ast.parse(OPS_SOURCE.read_text(encoding="utf-8"))
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
 
-    # No typed floor, same reason as above, and here the rule-still-matches
-    # assertion at the end of this function is a second cover: a broken walk
-    # makes its `next(...)` raise rather than pass.
+    _assert_the_walk_saw_the_whole_file(OPS_SOURCE, functions)
     assert {n.name for n in functions} >= _OPS_MAY_RESOLVE_KEY, (
         "the ops allow list names functions that no longer exist"
     )

@@ -145,13 +145,40 @@ def _test_functions() -> list[tuple[str, ast.FunctionDef]]:
     return found
 
 
-def test_no_test_is_incapable_of_failing() -> None:
-    """The property the whole file exists for."""
-    unable = [
+def _unable_to_fail(functions: list[tuple[str, ast.FunctionDef]]) -> list[str]:
+    """The tests in `functions` that cannot fail, excluding recorded exceptions.
+
+    EXTRACTED SO A CONTROL CAN CALL IT WITH KNOWN-BAD INPUT. This loop lived
+    inline in the test body, and @9bbc8ed7 showed what that costs: one line
+    inside such a loop makes it flag nothing while every surrounding check stays
+    green. Reproduced here before fixing — `if False and …` left all five tests
+    passing, because the only thing controlled was the PREDICATE.
+
+    A predicate unit-tested on synthetic bodies proves the predicate. It says
+    nothing about whether anything still CALLS it. @dfd9a883 established this is
+    per-file work rather than a sweep, because each guard's loop has its own
+    shape; this is that work for this file, and the census guard next door
+    turned out to be immune already.
+    """
+    return [
         name
-        for name, function in _test_functions()
+        for name, function in functions
         if not _can_fail(function) and name not in ASSERTS_BY_NOT_RAISING
     ]
+
+
+def _functions_in(source: str, filename: str = "synthetic.py") -> list[tuple[str, ast.FunctionDef]]:
+    """Parse a synthetic module into the shape `_unable_to_fail` consumes."""
+    found: list[tuple[str, ast.FunctionDef]] = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            found.append((f"{filename}::{node.name}", node))
+    return found
+
+
+def test_no_test_is_incapable_of_failing() -> None:
+    """The property the whole file exists for."""
+    unable = _unable_to_fail(_test_functions())
 
     assert not unable, (
         f"these tests cannot fail, whatever the code does: {sorted(unable)}\n"
@@ -277,3 +304,80 @@ def test_the_sweep_sees_exactly_what_pytest_runs() -> None:
         f"this sweep checks {len(phantom)} tests pytest never runs, e.g. "
         f"{phantom[:5]} — they are being audited and never executed."
     )
+
+
+#: One synthetic module per shape the loop must report, and correct code it must
+#: not. Synthetic rather than real tests, because a control anchored to a real
+#: test stops controlling anything the day that test is rewritten — and gutting
+#: a real one to prove the point would be shipping the defect to prove it exists.
+_MUST_BE_REPORTED = {
+    "gutted body": "def test_x():\n    assert True\n",
+    "no assertion at all": "def test_x():\n    value = 2 + 2\n",
+    "always skips": 'def test_x():\n    pytest.skip("later")\n    assert 1 == 2\n',
+    "empty parameter set": '@pytest.mark.parametrize("v", [])\ndef test_x(v):\n    assert v\n',
+}
+_MUST_BE_LEFT_ALONE = {
+    "an ordinary assertion": "def test_x():\n    assert value == 1\n",
+    "raises block": "def test_x():\n    with pytest.raises(ValueError):\n        boom()\n",
+    "explicit fail": 'def test_x():\n    if bad:\n        pytest.fail("no")\n',
+    "a real parameter set": '@pytest.mark.parametrize("v", [1])\ndef test_x(v):\n    assert v\n',
+}
+
+
+def test_the_loop_still_reports_every_shape_it_claims() -> None:
+    """POSITIVE controls on the LOOP, not on the predicate.
+
+    The predicate already had unit tests and they did not help: `if False and
+    …` inside the offender loop left all five tests green, because nothing
+    called the loop with input it should reject. A rule is only controlled by
+    being run against something it must flag.
+
+    Each shape separately, so a failure names which one stopped being reported.
+    """
+    missed = [
+        name
+        for name, source in _MUST_BE_REPORTED.items()
+        if not _unable_to_fail(_functions_in(source))
+    ]
+
+    assert not missed, (
+        f"the loop no longer reports: {missed}. It cannot certify a suite it "
+        "cannot fault — a loop that examines nothing is indistinguishable from "
+        "a suite where every test can fail."
+    )
+
+
+def test_the_loop_still_leaves_correct_tests_alone() -> None:
+    """NEGATIVE controls, so "report everything" is not a way to pass the above.
+
+    Without these the cheapest fix for a broken loop is one that flags every
+    test, which would fail on the whole suite and be deleted rather than
+    repaired.
+    """
+    accused = {
+        name: _unable_to_fail(_functions_in(source))
+        for name, source in _MUST_BE_LEFT_ALONE.items()
+        if _unable_to_fail(_functions_in(source))
+    }
+
+    assert not accused, f"the loop now reports tests that CAN fail: {accused}"
+
+
+def test_a_recorded_exception_is_still_honoured_by_the_loop() -> None:
+    """The allow list must be consulted BY THE LOOP, not merely exist.
+
+    `test_the_recorded_exceptions_still_exist` checks the entries name real
+    tests. That is the walk again: an entry can be perfectly valid while the
+    loop has stopped reading the list, and every test in this file would pass.
+    """
+    functions = _functions_in("def test_x():\n    do_something()\n", "synthetic.py")
+    assert _unable_to_fail(functions), "the fixture is not a test that cannot fail"
+
+    with_exception = dict.fromkeys(["synthetic.py::test_x"], "control")
+    original = dict(ASSERTS_BY_NOT_RAISING)
+    ASSERTS_BY_NOT_RAISING.update(with_exception)
+    try:
+        assert not _unable_to_fail(functions), "the loop ignored the recorded exception"
+    finally:
+        ASSERTS_BY_NOT_RAISING.clear()
+        ASSERTS_BY_NOT_RAISING.update(original)

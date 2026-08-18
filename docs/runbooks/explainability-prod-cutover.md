@@ -151,8 +151,10 @@ as a rule** — read the shape: *opened-then-queried damage can still traceback,
 and some of it is silent instead.* The recovery below is the same either way.
 
 **"Loud" for a corrupted page means loud once something reads it.**
-**[verified-train]** The measurement above zeroed page 2, which every open
-touches, so it fails immediately. Damage further into the file sits there
+**[verified-train]** Whether a bad page is fatal depends on whether the command
+you ran reaches it — @8dd460fb's store failed immediately at page 2 and mine did
+not, on the same page number, because the two files held different things.
+Damage in a region nothing reads sits there
 silently until a query happens to reach it — which can be days later, on a
 command with no connection to whatever broke it. **So a store that opened
 cleanly this morning is not evidence that it is undamaged**, and a `✓ database`

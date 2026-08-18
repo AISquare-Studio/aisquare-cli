@@ -16,7 +16,7 @@ from __future__ import annotations
 import ast
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +121,25 @@ def _spawn_sites() -> set[str]:
 # ── the guard ────────────────────────────────────────────────────────────────
 
 
+def _undecided(sites: set[str], rulings: Iterable[str]) -> set[str]:
+    """Spawn sites with no entry in the inventory.
+
+    A CALLABLE rule rather than a set-difference inline in a test, so a control
+    can drive it with known-bad input. Measured before it was extracted:
+    replacing the expression with ``set()`` left ALL TWELVE TESTS PASSING — the
+    guard reported that every spawn site has a ruling while comparing nothing.
+
+    The scanner was already controlled, and that did not help: the control
+    proves the SCANNER sees seams, not that the RULE consults it.
+    """
+    return sites - set(rulings)
+
+
+def _stale(sites: set[str], rulings: Iterable[str]) -> set[str]:
+    """Inventory entries whose call site is gone. Same shape, same reason."""
+    return set(rulings) - sites
+
+
 def test_every_spawn_site_has_a_written_ruling() -> None:
     """A new ``subprocess.run`` may not land without a tracing decision.
 
@@ -129,7 +148,7 @@ def test_every_spawn_site_has_a_written_ruling() -> None:
     ``TRACED``; anything else is ``EXCLUDED``, and if it can reach a model it
     also takes ``untraced_env`` so it cannot inherit one.
     """
-    undecided = _spawn_sites() - set(SEAMS)
+    undecided = _undecided(_spawn_sites(), SEAMS)
     assert not undecided, (
         "process-spawn site(s) with no tracing decision: "
         f"{sorted(undecided)} — add each to core.spawn.SEAMS"
@@ -139,8 +158,31 @@ def test_every_spawn_site_has_a_written_ruling() -> None:
 def test_the_inventory_describes_nothing_that_is_gone() -> None:
     """A registry that outlives its call sites stops being an inventory and
     starts being folklore."""
-    stale = set(SEAMS) - _spawn_sites()
+    stale = _stale(_spawn_sites(), SEAMS)
     assert not stale, f"core.spawn.SEAMS names call site(s) that no longer exist: {sorted(stale)}"
+
+
+def test_the_undecided_rule_reports_a_site_with_no_ruling() -> None:
+    """Positive control. Synthetic, so it keeps controlling when SEAMS changes."""
+    assert _undecided({"mod.py::spawns"}, {"other.py::ruled"}) == {"mod.py::spawns"}
+
+
+def test_the_stale_rule_reports_a_ruling_with_no_site() -> None:
+    """Positive control, other direction, named separately so a failure says which."""
+    assert _stale({"mod.py::spawns"}, {"gone.py::vanished"}) == {"gone.py::vanished"}
+
+
+def test_neither_rule_reports_a_site_that_is_ruled() -> None:
+    """Negative control: "report everything" is not a fix for either rule.
+
+    Without this the cheapest way to satisfy both positives is a rule that
+    always fires, and a guard that accuses every seam gets deleted rather than
+    fixed.
+    """
+    both = {"mod.py::spawns"}
+
+    assert _undecided(both, both) == set()
+    assert _stale(both, both) == set()
 
 
 def test_the_scanner_would_actually_catch_a_new_seam(tmp_path: Path) -> None:

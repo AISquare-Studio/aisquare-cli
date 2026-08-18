@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import brain, harness, insights, orchestrator
+from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
@@ -340,6 +340,43 @@ def board_data(
             store.team_tasks(resolved.id),
             fetched,
         )
+
+
+def board_scope_note(cwd: Path | None = None) -> str | None:
+    """Name the board a cwd-resolved read answers for, when it may not be yours.
+
+    Board reads resolve from the current directory. A session in a linked
+    worktree, or anywhere outside a repository, silently reads a DIFFERENT
+    board — and the harmful case is not the empty one. Measured while this team
+    was live: the project directory returned 200 events, a worktree 0, and
+    ``$HOME`` TWELVE. Empty invites suspicion; a populated wrong board reads as
+    a successful answer.
+
+    Silent when the caller sits in a repository whose team project matches it,
+    which is every ordinary invocation — a banner on those is how people learn
+    to ignore banners.
+
+    Never raises. This is a diagnostic about a read, and the doctrine is that an
+    observer may cost its own output and never the command.
+    """
+    start = cwd or Path.cwd()
+    try:
+        board = orchestrator.team_project(start)
+        common = workspace.git_common_root(start)
+    except OSError:  # a diagnostic must not break a read; git or the fs, not a typo
+        return None
+    name = (board.root.name if board.root else "") or board.id
+    if common is None:
+        return (
+            f"reading board {name} — {start} is not a git repository, so the board "
+            "follows your directory; pass --as <session> to read your own"
+        )
+    if board.root is not None and board.root != common:
+        return (
+            f"reading board {name}, not {common.name} — this directory resolves "
+            "elsewhere; pass --as <session> to read your own"
+        )
+    return None
 
 
 def resolve_project(cwd: Path | None = None) -> ProjectInfo:

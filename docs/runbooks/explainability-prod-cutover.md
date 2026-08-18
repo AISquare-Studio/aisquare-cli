@@ -1015,8 +1015,14 @@ dies.
 ## Open items handed to the morning
 
 1. **[blocker]** No agent name resolves to a studio on staging (§1). Prod will
-   behave identically unless 1a–1d are done in that order. Until then runs are
-   ungoverned — traced, but enforcing nothing.
+   behave identically unless **every step of §1 is done, in order**. Until then
+   runs are ungoverned — traced, but enforcing nothing.
+   This line used to say "1a–1d". §1 has **five** sub-steps, and the fifth is a
+   *"do not"* — **1e: do not pin `EXPLAINABILITY_STUDIO_ID`** — which is the
+   exact mistake that produced the staging 403s this section diagnoses. A reader
+   scanning for actions skips a prohibition anyway; a range that stopped counting
+   at 1d hid it completely. The range is gone rather than corrected, because a
+   number written beside a list is a constant that falls behind the list.
 2. `EXPLAINABILITY_STUDIO_ID=21` should still be removed or corrected — but it
    is **not** the cause of the 403s, and correcting it alone will not fix
    governance. Measured: `GET /v1/studios` with the workspace key SUCCEEDS and

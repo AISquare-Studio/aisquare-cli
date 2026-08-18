@@ -61,13 +61,38 @@ which aisquare && aisquare --version
 binary and the train both reported `aisquare 0.4.0rc1` while being *different
 programs*: `site-packages/aisquare/cli/launch.py` had no `resolve_binary`, so a
 role bound to a wrapper silently launched the default agent and exited 0.
-**Version does not distinguish them.** Confirm the fix is present:
+**Version does not distinguish them.** Confirm by asking the binary you will
+actually run:
 
 ```bash
-grep -c resolve_binary "$(python3 -c 'import aisquare,os;print(os.path.dirname(aisquare.__file__))')/cli/launch.py"
+aisquare --json doctor | jq -r '.[]|select(.name=="provenance")|.detail'
 ```
 
-Expect `1` or more. `0` means you are running a stale install — reinstall.
+Expect `installed (non-editable) from <this repo>`. **Empty output means the
+build predates the provenance check and is therefore older than this train** —
+reinstall. This runs the `aisquare` on your `PATH`, so nothing about your
+interpreter can fool it.
+
+Empty is the *bad* reading here, so rule out the boring cause first: a missing
+`jq` also prints nothing. `aisquare doctor | grep provenance` answers the same
+question without it.
+
+> ⚠️ **[verified-train, coder3 `9bbc8ed7`] The older form of this check could
+> tell a correctly-installed operator to reinstall.** It was
+> `grep -c resolve_binary "$(python3 -c '…aisquare.__file__…')/cli/launch.py"`,
+> which asks whichever `python3` **the shell** resolves where the *package*
+> lives — not the interpreter behind the `aisquare` on your `PATH`. Measured in
+> three states: with a venv on `PATH` it reports `1` (correct, because `PATH`
+> brought both); on a genuinely stale box it reports `0` (correct); and with
+> **only the binary** on `PATH` — the shape `pipx` produces, and the shape
+> *`doctor`'s own remediation recommends* — it reports `0` **for a freshly
+> installed train build**, because it inspected an unrelated
+> `site-packages`. Following §0 exactly keeps them in step, since `python3 -m
+> pip install` installs into that same `python3`; the trap is for anyone who
+> installed as a global tool. If you still want the specific symbol, run the
+> grep with the interpreter you installed *with* — and do not parse the console
+> script's shebang to find it, because `pip` writes a `#!/bin/sh` exec-hack
+> when the interpreter path is long, which is exactly the `pipx` case.
 
 ---
 
@@ -895,7 +920,7 @@ dies.
 
 | Step | Verify | Rollback |
 |---|---|---|
-| 0 Preflight | `grep -c resolve_binary …/cli/launch.py` ≥ 1 | reinstall previous version |
+| 0 Preflight | `doctor` provenance names this repo (empty ⇒ older than this train) | reinstall previous version |
 | 0b Warm store | `PRAGMA user_version` on `~/.aisquare/context.db` is non-zero | none — the migration is forward-only |
 | 1a Roster | response lists each agent + `publication_id` | re-register; registration is idempotent by name |
 | 1b/1c Binding | `/v1/routing/resolve` returns a `studio_id` | unbind in the studio UI |

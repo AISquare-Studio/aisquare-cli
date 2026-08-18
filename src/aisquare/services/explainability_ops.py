@@ -53,7 +53,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
-from aisquare.services.explainability import ProxyProbe, probe_proxy
+from aisquare.services.explainability import ProxyProbe, install_hint, probe_proxy
 
 #: Distribution that provides the SDK, and the console script it installs. The
 #: script is the collision-free way to reach it: it runs in whatever
@@ -571,7 +571,7 @@ def checks(
     if not (touched or live):
         return [switch]
 
-    results = [switch, _check_sdk(on=touched, live=live)]
+    results = [switch, _check_sdk(on=touched, live=live, deployable=target.configured)]
     results.append(_check_config(target, on=on))
     results.append(_check_redaction(_redaction_level(), shipping=resolved_settings.ship))
     results.append(_check_proxy(target, on=on, live=live))
@@ -608,7 +608,7 @@ def _check_switch(
     )
 
 
-def _check_sdk(*, on: bool, live: bool) -> DoctorCheck:
+def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
     presence = sdk_presence()
     name = "explainability sdk"
     if presence.shadowing:
@@ -628,6 +628,30 @@ def _check_sdk(*, on: bool, live: bool) -> DoctorCheck:
         if not on:
             return _ok(name, f"{detail} (install: {INSTALL_HINT})")
         return _warn(name, detail, f"Install it: {INSTALL_HINT}")
+    if deployable and not presence.importable:
+        # `present` is an OR — importable or a console script on PATH — but the
+        # CLIENT lane needs the import: `sdk_available()` is `find_spec(...)`
+        # alone. So this row read green on a machine whose client lane cannot
+        # run, which is clause 2 of the north star failing in silence.
+        #
+        # Gated on `target.configured` (a gateway AND a key), NOT on
+        # `settings.ship`. Measured: `ship` can never be True in this state —
+        # `shipping_offer()` refuses with "extra not installed" when the SDK is
+        # not importable, and `configure_shipping` sits behind that refusal. A
+        # `shipping and not importable` gate is unreachable in production and
+        # would only ever pass in a test that built the impossible state by
+        # hand. `configured` is the reachable predicate: it is exactly the
+        # machine that WOULD ship, and is the one silently not shipping.
+        return _warn(
+            name,
+            f"{f'SDK {presence.version}' if presence.version else 'the SDK'} is "
+            f"reachable only as a console script ({presence.script}) and cannot "
+            "be imported here — the proxy "
+            "lane still traces model traffic, but the client lane is OFF: the "
+            "CLI cannot ship its own insights as spans, and 'init "
+            "--explainability' will decline to turn shipping on",
+            f"Install the SDK into the same environment as aisquare: {install_hint()}",
+        )
     where = "console script" if presence.script else "importable"
     detail = f"SDK {presence.version or 'present'} ({where})"
     if not live:

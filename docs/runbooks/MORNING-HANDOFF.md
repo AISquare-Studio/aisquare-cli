@@ -232,25 +232,28 @@ Named so you can tell a decision from an oversight:
 
 ## Doctrine this integration holds to
 
-Worth knowing before you change anything, because each of these has a test
-behind it:
+Worth knowing before you change anything. **Each clause names the test that
+pins it** — that used to read "each of these has a test behind it", which was an
+assertion rather than a fact, and it was **false for fifteen hours**: the
+primary-path clause had no test at all until `9bbc8ed7` measured and pinned it
+this shift. Naming the file makes the claim checkable instead of trusted:
 
-- **Fail-open, and say what it cost.** Tracing may cost a *trace*; it may never
+- **Fail-open, and say what it cost.** — `test_launch_survives_a_damaged_store.py`, `test_hooks_say_what_failing_open_costs.py`, `test_disable_names_ambient_routing.py`. Tracing may cost a *trace*; it may never
   cost a launch or an exit code — *and when it does fail open it says so on
   stderr*, because a surface that fails open quietly is indistinguishable from
   one that is working. `launch` against a damaged store is the worked example:
   exit **0**, the agent runs, and one line naming what was lost — no board row,
   therefore no join to a gateway Run, one lost trace. The second half of this
   clause is the one that gets dropped; both halves have tests.
-- **No hard SDK dependency.**
-- **Nothing ships before you configured it.** No key or config ⇒ nothing
+- **No hard SDK dependency.** — `test_insight_shipping.py`, `test_explainability_ops.py`.
+- **Nothing ships before you configured it.** — `test_insight_sweeper.py`, `test_explainability.py`. No key or config ⇒ nothing
   captured, and nothing logged as an error either.
-- **No secret in the repo, on the board, or in a fixture.** Keys are read from a
+- **No secret in the repo, on the board, or in a fixture.** — `test_key_never_crosses_deployments.py`, `test_credentials_single_format.py`. Keys are read from a
   named environment variable or `~/.aisquare/explainability-key` (mode 0600),
   never from `config.toml`, and no command prints one. Credential-shaped test
   data is assembled at import time rather than written as a literal — a literal
   fixture was rejected by push protection once, and the bypass was not used.
-- **Looking does not create; asking to fix does.** Plain `doctor` is read-only
+- **Looking does not create; asking to fix does.** — `test_doctor_does_not_create_state.py`. Plain `doctor` is read-only
   — it leaves a fresh home absent rather than building one. `doctor --fix`
   creates the `~/.aisquare` layout, which is the flag's job, and **nothing
   else**: measured, it does not rewrite `config.toml` on a configured machine
@@ -259,6 +262,7 @@ behind it:
   alone), does not prompt so it cannot hang a script with no terminal, and still
   exits non-zero for whatever it could not repair. Pinned in
   `tests/test_doctor_does_not_create_state.py`.
+- **Never a millisecond on the primary path either.** — `test_no_network_on_the_primary_path.py`, pinned by *mechanism* (no socket is opened) rather than by a clock, because a wall-clock bound in CI is flaky by construction and a muted test is worse than none. Measured on this box: a configured-but-dead proxy costs the hook nothing.
 - **Diagnostic commands do not create state; ordinary commands may.** `status`
   **does** create and migrate the store, and the runbook depends on that at §0b
   and again in wedge recovery — do not "fix" it. (The *migrate* half is

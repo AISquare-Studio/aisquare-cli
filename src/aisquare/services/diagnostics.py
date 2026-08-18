@@ -16,7 +16,7 @@ from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
-from aisquare.core.store import store_session
+from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
 from aisquare.models import (
@@ -333,7 +333,16 @@ def _check_database() -> DoctorCheck:
         with store_session() as store:
             count = len(store.entries("user"))
     except Exception as exc:  # diagnostics must never crash
-        return _fail("database", f"context.db is unreadable: {exc}", "Re-initialise: aisquare init")
+        # "Re-initialise: aisquare init" was measured CRASHING on every state
+        # that reaches this line — 59 lines of traceback on a corrupt file, 72
+        # on a store wedged mid-migration — and repairing neither. It is not
+        # narrowed to corruption because THIS LINE HAS ALREADY ESTABLISHED THAT
+        # THE STORE WILL NOT OPEN: whatever the cause, no history in it is
+        # reachable by this CLI, and the recovery MOVES the file rather than
+        # deleting it, so the bytes survive for a later fix. Shared with the
+        # error the CLI prints, so the two cannot drift apart again — a
+        # remediation nobody re-runs is how this one rotted.
+        return _fail("database", f"context.db is unreadable: {exc}", damaged_store_recovery())
     return _ok("database", f"context.db is readable ({count} user entries)")
 
 

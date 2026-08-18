@@ -150,6 +150,33 @@ fatal depends on what that store happens to hold, so do not read those numbers
 as a rule** — read the shape: *opened-then-queried damage can still traceback,
 and some of it is silent instead.* The recovery below is the same either way.
 
+**"Loud" for a corrupted page means loud once something reads it.**
+**[verified-train]** The measurement above zeroed page 2, which every open
+touches, so it fails immediately. Damage further into the file sits there
+silently until a query happens to reach it — which can be days later, on a
+command with no connection to whatever broke it. **So a store that opened
+cleanly this morning is not evidence that it is undamaged**, and a `✓ database`
+line means the file opened, not that all of it is readable. **[verified-train]**
+Measured: with a page zeroed deep in the file, `status` exits 0 and `doctor`
+prints `✓ database: context.db is readable (1 user entries)` — the row it counts
+still reads, while the file is malformed.
+
+To check the whole file rather than the part that happens to be read — nothing
+in the CLI does this, because it reads the entire database:
+
+```bash
+python3 -c 'import sqlite3,os
+p=os.path.expanduser("~/.aisquare/context.db")
+try: print(sqlite3.connect(p).execute("PRAGMA integrity_check").fetchone()[0])
+except Exception as e: print("DAMAGED:", e)'
+```
+
+`ok` means intact. **[verified-train]** both ways: `ok` on a healthy store,
+`DAMAGED: database disk image is malformed` on the zeroed-page one above.
+Python rather than the `sqlite3` shell because that binary is **not installed
+on this machine** — the first version of this instruction used it and would
+have failed in your hands.
+
 **The fifth is silent, and it is the one to know about.** A file **truncated to
 zero bytes** is read by SQLite as a brand-new empty database, so the store is
 re-created and migrated, `status` exits 0, and `doctor` afterwards reports

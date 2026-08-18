@@ -77,17 +77,19 @@ forty lines.** Read the ones you need:
    `[explainability.targets]` table on every write. The three keys a stale
    `config set` will *accept* are exactly the three that *survive*, which is why
    nothing looks wrong afterwards.
-   **What eventually looks wrong is an empty insight spool**, and it is worth
-   knowing because it cost a teammate ninety minutes tonight. `record_prompt`
+   **What eventually looks wrong is an empty insight spool.** `record_prompt`
    no-ops unless `ship` is true, so once `ship` has been stripped the client
    lane captures *nothing* while the proxy lane keeps working and `status`
    keeps reading green — the same asymmetry as the missing timer, arriving from
-   a different direction. If the spool is empty, suspect a stripped config
-   before you suspect capture. Setting the key back with a stale build does not
-   help either: `config set explainability.ship true` there prints
+   a different direction. Measured, both halves, under a throwaway home; setting
+   the key back with a stale build does not help either, because
+   `config set explainability.ship true` there prints
    `✗ unknown config key: explainability.ship` and exits non-zero, which is the
-   one loud member of this family — measured, both halves, under a throwaway
-   home.
+   one loud member of this family.
+   **First suspect your reading, not the config.** The only time anyone here
+   thought the spool was empty — ninety minutes of it — it was full; the reading
+   was wrong, not the configuration. Confirm it is really empty before you
+   suspect a stripped `ship`, and see the next paragraph for where to look.
    **Read the counter, not the directory — and if you do look, the directory is
    `~/.aisquare/explainability/queue/`, not `spool`.** `spool` is this
    codebase's word for the buffer (`status` prints `spool: 1 queued`) and is

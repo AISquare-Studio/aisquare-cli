@@ -1051,8 +1051,23 @@ def shipping_offer() -> ShippingOffer:
     # SENTENCE did, at the moment the operator decides whether to turn shipping
     # on. `resolve_target` still consults the variable when no target names a
     # gateway, so the single-deployment machine is unaffected.
-    gateway, _key_env, _target_key = _active_deployment()
-    has_key = resolve_api_key() is not None
+    gateway, _key_env, target_key = _active_deployment()
+    # Through the SAME resolver, for the same reason one line up. Reading
+    # `resolve_api_key()` here was env-first AND file-second, so on a machine
+    # whose target names its own key variable — unset — an unlabelled key FILE
+    # made `init` print "this machine can ship" while `status` and `ship` both
+    # said there was no key.
+    #
+    # The fix is on THIS side rather than teaching `_active_deployment` to read
+    # the file, and that direction matters: it refuses the file on purpose,
+    # because the file holds ONE unlabelled key. Following the CLI's own "or
+    # write <key file>" advice on staging and then switching to prod sent the
+    # STAGING key to the PROD gateway — see its comment, and
+    # test_key_never_crosses_deployments.py. The no-target machine is
+    # unaffected: `_active_deployment` still falls back to the file when the
+    # target names the DEFAULT variable, which is what `init --explainability`
+    # produces.
+    has_key = target_key is not None
     if not sdk:
         return ShippingOffer(
             available=False,

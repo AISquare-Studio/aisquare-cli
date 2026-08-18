@@ -243,6 +243,41 @@ directions** is a control rather than a liability: the census guard survived the
 sabotage that beat two others precisely because its recorded counts have an upper
 bound as well as a lower one. The difference is the second direction.
 
+## Measuring anything about this repo, from a shell
+
+Every entry below cost someone here a **published or nearly-published wrong
+number** in a single shift. They are not style notes; each one produces a result
+that looks exactly like a real answer.
+
+- **zsh does not word-split unquoted variables.** `git diff … -- $files` passes an
+  eleven-file list as *one* pathspec, matches nothing, and reports a clean zero.
+  `aisquare $cmd --help` asks for a command literally named `explainability
+  status`. `for b in $LANES` iterates once over the whole list. Twelve incidents,
+  and twice the false answer was the one the author wanted. Use an array —
+  `files=("${(@f)$(…)}")` then `-- "${files[@]}"` — or a literal list.
+- **A pipe between a command and its status reads the pipe's status.** `cmd | head`
+  reports 0 for a command that exits 1; `$?` after a pipeline is the *last*
+  stage's, and `PIPESTATUS` is bash-only (zsh spells it `$pipestatus`). Redirect to
+  a file and read the code, and never put a pipe between a test and its branch.
+- **An empty result from a *failed* command is indistinguishable from a clean
+  one**, and `2>/dev/null` hides which it was. A zero, an empty grep, and a
+  silent pytest run are all evidence about the *command* until you prove
+  otherwise. Implausibility is the cheapest alarm here — a count that cannot be
+  right has caught more real problems in this repo than any process.
+- **Backticks inside double quotes are command substitution.** Writing prose
+  *about* commands is where this bites, not writing commands: three separate
+  people spliced live command output into a board note. Compose anything
+  containing command text in a file and pass it as `"$(cat file)"`.
+- **`git checkout --theirs <path>` gives you stage 3, not the branch's file.** It
+  silently dropped a paragraph that was present both on the branch tip and in the
+  commit being merged. Verify the file you produced, not the one you read from.
+- **`git checkout -- <path>` cannot restore an untracked file** — and a new file is
+  exactly the one you are most likely to have just sabotaged.
+- **Ancestry proves landed; non-ancestry proves nothing.** A rebased or squashed
+  branch is not an ancestor while its content is fully present. `for-each-ref
+  --merged` answers the first question; only a per-file diff (correctly quoted)
+  speaks to the second.
+
 ## Conventions
 
 - **Type everything.** `mypy` runs in `strict` mode over `src` and `tests`.

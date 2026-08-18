@@ -507,7 +507,7 @@ Contents (values from the prod workspace — Settings → Studios → API keys):
 EXPLAINABILITY_GATEWAY_URL=https://<prod-explainability-host>
 EXPLAINABILITY_API_KEY=<prod ingest:write workspace key>
 EXPLAINABILITY_AGENTS=aisquare-planner,aisquare-coder,aisquare-runner
-EXPLAINABILITY_INBOX_PATH=/home/you/.aisquare/claude_proxy_inbox.db
+EXPLAINABILITY_INBOX_PATH=/home/work/.aisquare/claude_proxy_inbox.db
 # EXPLAINABILITY_STUDIO_ID intentionally NOT set — see §1e.
 ```
 
@@ -522,6 +522,16 @@ EXPLAINABILITY_INBOX_PATH=/home/you/.aisquare/claude_proxy_inbox.db
 > the client library — it agrees with it, and both differ from the proxy. (All
 > four live in the SDK, not in this repo, which is why they are named by symbol
 > here rather than by path.)
+>
+> **The path above is a literal, not a placeholder — and it is the one value in
+> this block that fails silently if you get it wrong.** Everything else you must
+> substitute is written in `<angle brackets>`; an earlier revision of this line
+> said `/home/you/…`, which looks like a value and is not, sitting three lines
+> under an `install` command that already names the real home. A wrong *binary*
+> path in §5b exits **127** and stops. A wrong *inbox* path stops nothing: the
+> backlog check prints "No inbox database … (nothing recorded yet)" and the §5b
+> timer drains a file that was never written. Check it against the `install` line
+> above and against `ls ~/.aisquare/claude_proxy_inbox.db`.
 >
 > **And the shared default being relative is the half that costs data, not just
 > visibility.** A relative path resolves against the process working directory —
@@ -880,10 +890,19 @@ identity: aisquare-{role}
 agents:   aisquare-planner, aisquare-coder, aisquare-runner
 probe:    claude_code proxy healthy at http://127.0.0.1:9190
 shipping: off — nothing is captured (aisquare init --explainability to turn it on)
-spool:    0 queued, 0 sent, 0 dead-letter — /home/you/.aisquare/explainability/queue
+spool:    0 queued, 0 sent, 0 dead-letter — /home/work/.aisquare/explainability/queue
 redaction: standard — credentials are removed from insights leaving this machine (paths and hostnames are kept); local capture keeps what you typed
 exit=0
 ```
+
+> ⚠️ **[verified-train, planner `dfd9a883`, 2026-08-18] That spool path used to
+> read `/home/you/…`, inside a block labelled captured-from-the-binary.** No run
+> on this machine prints that, so the transcript was partly hand-edited — which
+> is the one thing a `[verified-train]` block must not be, because its whole value
+> is that a reader can diff their output against it line for line, as the sentence
+> above invites. Note that the same block anonymises the gateway as `https://…`:
+> **an explicit ellipsis is honest, a plausible-looking substitute is not.** If a
+> value must be hidden inside a captured block, hide it visibly.
 
 The path after the spool counters is where those records actually sit, and it
 is there because the counter says *spool* while the directory is `queue` — a

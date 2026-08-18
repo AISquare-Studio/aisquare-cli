@@ -149,6 +149,13 @@ forty lines.** Read the ones you need:
    *the gateway accepted the bytes*. Two tasks are blocked on a read-scoped
    credential (`tsk_01kzdee4pjw8e0ep2g968ejsq6`,
    `tsk_01kze9s8w1n6nmctyr83an5kpt`). See "the one thing to eyeball" below.
+   **When that credential exists**, the first thing to run is §5's
+   `explainability doctor --live` (read-only, a remediation per line), and then
+   the one check nobody has ever executed: take a pipeline id out of
+   `joins.jsonl`, read the Run back from the studio, and confirm the board row
+   and the Run carry the *same* id. That is the join this whole integration is
+   for. Do not read the blocker off `aisquare task show` — it does not print a
+   blocked reason (filed: `tsk_01m0aagmd31ca2sembrbajca8j`).
 
 4. **Prod values are unverified.** Every *mechanism* here is verified against
    staging; the prod URL and key are `[unverified-prod]` throughout.

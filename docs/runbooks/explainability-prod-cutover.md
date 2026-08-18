@@ -27,6 +27,19 @@ are the first to run:
 - **[unverified-prod]** — the shape is known, but I had no prod credentials.
   Expect to confirm the value, not the mechanism.
 
+**When the markers were last exercised.** A marker records that someone ran
+something once; it does not age well on its own, and three claims in this file
+were falsified this shift by fixes that landed after them. On **2026-08-18**
+`coder3` re-ran, against the current train in throwaway homes, every
+`[verified-train]` claim that has a command next to it — **thirteen of them, all
+still holding**: §0b's warm-store and concurrency numbers, both damaged-store
+messages, the truncation warning, the recovery, `launch`'s fail-open line (with
+a healthy-store control), `enable`, `status`, `ship` plain-versus-`--strict`,
+the destination check, and the proxy-interpreter finder. The other twenty-nine
+markers are prose with no command attached and were NOT re-run — several
+describe states that cannot be constructed on this box. Read this paragraph as
+covering the thirteen and nothing else.
+
 > **Read §1 and §6 before you touch anything.** §1 is a blocker that staging
 > hit and prod will hit identically. §6 is how you get out.
 

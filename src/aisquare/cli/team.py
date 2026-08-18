@@ -25,8 +25,10 @@ from aisquare.core.state import get_state
 from aisquare.core.store import (
     AmbiguousIdError,
     StoreUnopenable,
+    damaged_data_message,
     damaged_store_message,
     damaged_store_recovery,
+    is_corrupt_error,
     is_locked_error,
 )
 from aisquare.services import explainability as explainability_service
@@ -112,6 +114,16 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
         fail(
             damaged_store_message(exc),
             error="store_unopenable",
+            hint=damaged_store_recovery(),
+            detail=str(exc),
+        )
+    if isinstance(exc, sqlite3.Error) and is_corrupt_error(exc):
+        # Reached when a SELECT finds the damage: the store opened, so the
+        # StoreUnopenable branch above never fires. Ordered AFTER is_locked_error
+        # so contention keeps its own answer.
+        fail(
+            damaged_data_message(exc),
+            error="store_damaged",
             hint=damaged_store_recovery(),
             detail=str(exc),
         )

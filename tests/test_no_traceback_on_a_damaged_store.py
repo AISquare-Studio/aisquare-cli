@@ -110,17 +110,12 @@ STILL_RAISES: set[str] = set()
 #: "your board is damaged". @9bbc8ed7 built `is_locked_error` for exactly that
 #: distinction and the widening is theirs to design; this only makes sure the
 #: gap cannot pass for closed in the meantime.
-STILL_RAISES_AT_QUERY = {
-    "context export",
-    "context list",
-    "context preview",
-    "ctx export",
-    "ctx list",
-    "ctx preview",
-    "init",
-    "inject",
-    "status",
-}
+#: EMPTIED by tsk_01m096hzpy9eff2rsnj6349y2y, the widening this comment handed
+#: over. The root group now also translates a corrupt-file error found by a
+#: QUERY, keyed on ``is_corrupt_error`` so that "database is locked" keeps
+#: meaning contention and "no such table" keeps its traceback. Both ratchets are
+#: empty now; each still fails in both directions, so neither can rot.
+STILL_RAISES_AT_QUERY: set[str] = set()
 
 
 def _leaves() -> list[list[str]]:
@@ -303,14 +298,14 @@ def test_the_class_is_closed_at_one_boundary(damaged_store: str) -> None:
         )
         return
 
-    # Query-time damage is not behind that seam yet, and the useful fact for
-    # whoever widens it is the same one that chose the first boundary: they all
-    # escape from ONE frame, so one boundary closes this class too.
-    assert frames == {"entries"}, (
-        f"query-time damage now escapes from {sorted(frames)} rather than "
-        "{'entries'}. Fewer frames means the seam has been widened — empty it "
-        "and STILL_RAISES_AT_QUERY together. MORE frames means this is no longer "
-        "one class, and a single boundary will not close it."
+    # It IS behind the seam now. This measured one shared frame — ``entries`` —
+    # which is what said a single boundary could close the class; it could, and
+    # it did. Held the other way round from here: nothing escapes at all, and a
+    # frame named here says which side of the seam regressed.
+    assert frames == set(), (
+        f"query-time damage is escaping again, from: {sorted(frames)}. The seam "
+        "is the root group translating a corrupt-file error that a query "
+        "raised; a frame here means it stopped."
     )
 
 

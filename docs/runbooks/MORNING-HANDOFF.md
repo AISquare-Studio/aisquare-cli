@@ -274,6 +274,16 @@ Two lanes, both wired end to end:
   exits **0** when it has no key, which is correct for an interactive run and
   is why a naive crontab line reports success forever.
 
+  **And this lane ships under a fourth identity you would not guess: `aisquare-cli`.**
+  Insights are attributed to the board role of their session, and fall back to the
+  role `cli` whenever the board cannot say whose a Run is — an unattributed run, a
+  session missing from the store, a store read that threw. So §4b registers **four**
+  names, not three, and if you are counting agents in the studio, four is right.
+  Unregistered, that name's insights are not lost but they never land: the gateway
+  answers `409 agent_not_registered`, which the SDK retries forever and drains the
+  moment the name is registered. §1a has the full taxonomy and why the *other* 409
+  is the permanent one; §4b registers it.
+
 The correlation spine: one id in four places — launcher mint → `--session-id`
 argv → `X-Pipeline-Id` header → `AISQUARE_PIPELINE_ID` marker → board row via
 the `SessionStart` hook → `joins.jsonl`.
@@ -418,7 +428,7 @@ Against staging, with real agent processes — not fixtures:
 | Per-role separation | 3 roles → 3 distinct trace ids — **pinned** in the same file |
 | Proxy lane ingest | 70/70, then 14/14, all `202` |
 | Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox |
-| Client-lane identity | `agent.run_id` = board session id; `agent.name` = `aisquare-coder`, accepted |
+| Client-lane identity | `agent.run_id` = board session id; `agent.name` = `aisquare-coder`, accepted — that is the *attributed* case; see the fourth name below |
 | Redaction on the wire | standard **and** strict |
 | No secret in the spooled **bytes** | 3 capture paths incl. the prompt hook — **pinned**: `tests/test_no_secret_reaches_the_spool_file.py`, with a redaction-off control |
 | Token-shape coverage | all 11 vendor shapes survive the JSON→OTel round trip |

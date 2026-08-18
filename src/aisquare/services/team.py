@@ -721,6 +721,54 @@ def show_task(ref: str) -> TeamTask:
         return task
 
 
+#: Which event kind puts a task into each status. The lookup below is keyed on
+#: the task's CURRENT status rather than on "does a task_blocked exist for this
+#: task", and that is the whole stale-note defence: nothing deletes an event, so
+#: a task blocked yesterday and claimed today still HAS its task_blocked. Asking
+#: what produced the status it is in now cannot go stale, and needs nothing
+#: cleared on claim — which is what the first version of this task's contract
+#: proposed and would have duplicated state that already exists.
+#:
+#: ``doing`` and ``dropped`` are deliberately absent: a claim carries no note,
+#: and nothing asked for the dropped case. An unmapped status renders nothing.
+_STATUS_EVENT_KIND = {
+    "blocked": "task_blocked",
+    "done": "task_done",
+    "todo": "task_reopened",
+}
+
+
+def stopped_because(task: TeamTask) -> str | None:
+    """The note attached to whatever put ``task`` in its current status.
+
+    A READ, not a new column. `task block --reason`, `task reopen --reason` and
+    `task done --note` all persist their note as an event whose text is
+    ``"<title> — <note>"``; none of them was readable through `task show`, so
+    one join answers for all three.
+
+    Returns ``None`` rather than an empty string when no note was given, because
+    the event text is then the title alone and a caller must be able to tell
+    "none given" from "given and empty".
+
+    FAILS OPEN. This is decoration on a read command: a store that cannot be
+    queried, or an event shaped differently by some future writer, costs the
+    note and never the exit code.
+    """
+    kind = _STATUS_EVENT_KIND.get(task.status)
+    if kind is None:
+        return None
+    try:
+        with store_session() as store:
+            events = store.filtered_events(task.project_id, kind=kind, task_id=task.id, limit=1)
+    except Exception:
+        return None
+    if not events:
+        return None
+    prefix = f"{task.title} — "
+    text = events[-1].text
+    return text[len(prefix) :] if text.startswith(prefix) else None
+
+
 def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Atomically claim a task; exactly one concurrent claimer wins.
 

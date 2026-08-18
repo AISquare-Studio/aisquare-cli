@@ -138,8 +138,14 @@ def show(ref: TaskRef) -> None:
         task = team_service.show_task(ref)
     except STORE_ERRORS as exc:
         _fail_team(exc, ref)
+    stopped = team_service.stopped_because(task)
     if get_state().json_output:
-        typer.echo(task.model_dump_json())
+        payload = task.model_dump(mode="json")
+        # Derived, not stored: the note lives in the event stream and this is a
+        # join. Always present as a key so a script can read it without probing
+        # — null means "no note", which is different from "field absent".
+        payload["stopped_because"] = stopped
+        typer.echo(json.dumps(payload))
         return
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="bold")
@@ -156,6 +162,8 @@ def show(ref: TaskRef) -> None:
     if task.claim_expires_at:
         grid.add_row("lease until", f"{local_time(task.claim_expires_at):%Y-%m-%d %H:%M}")
     grid.add_row("created", f"{local_time(task.created_at):%Y-%m-%d %H:%M}")
+    if stopped:
+        grid.add_row("stopped because", stopped)
     console = stdout_console()
     console.print(grid)
     console.print()

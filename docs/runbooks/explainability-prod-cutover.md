@@ -1889,11 +1889,21 @@ Overnight on staging: **70/70 ingest calls returned 202, zero non-202.**
 Backlog check:
 
 ```bash
-./.venv/bin/explainability-doctor
+explainability-doctor          # on PATH — see the note below, NOT ./.venv/bin/
 ```
 
 Healthy: `delivery_backlog [OK] dispatched=N`, `gateway_live [OK]`,
 `gateway_ready [OK]`.
+
+> ⚠️ **[verified-train, `9bbc8ed7`, 2026-08-18] This used to read
+> `./.venv/bin/explainability-doctor`, which cannot run anywhere you will be
+> standing.** §0 installs the CLI **non-editable into your python**, so there is
+> no `.venv` in your home — and the repo checkout's `.venv` does not contain
+> this script either, because it belongs to the SDK, not to `aisquare-cli`.
+> Measured: missing in both, present on `PATH`. The bare name is right for the
+> same reason the CLI itself prefers it — the console script "reaches an SDK
+> installed anywhere on the machine". If the bare name is not found, the SDK is
+> not installed; that is §5b's `explainability` extra, not a path problem.
 
 **Known noise — do NOT treat as red** (**[verified-stg]**, all three seen on a
 fully healthy run):

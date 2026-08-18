@@ -830,7 +830,9 @@ EOF
 EXE=$(readlink -f "/proc/$PID/exe" 2>/dev/null) || EXE=python   # no sudo needed for your own
 $EXE -c "import importlib.util as u; src=open(u.find_spec('aisquare.explainability.claude_proxy').origin).read(); print('junk-run suppression:', 'IN FORCE' if '_has_valid_correlation' in src else 'MISSING')"
 # IN FORCE            -> good
-# MISSING             -> you are on <1.1.0; extra Runs will appear in the dataset
+# MISSING             -> THIS BUILD lacks the suppression; extra Runs will appear
+#                        in the dataset. Not a statement about the version number:
+#                        a 1.0.6-labelled checkout can print IN FORCE (block below)
 # ModuleNotFoundError -> $EXE is NOT the proxy's interpreter; see below
 ```
 

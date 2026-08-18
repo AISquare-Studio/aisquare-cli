@@ -26,7 +26,9 @@ MARKERS = ("<" * 7, "=" * 7, ">" * 7)
 def _tracked_text_files() -> list[Path]:
     out = subprocess.run(
         ["git", "-C", str(REPO), "ls-files", "-z"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     paths = [REPO / n for n in out.split("\0") if n]
     return [p for p in paths if p.suffix in {".py", ".md", ".toml", ".cfg", ".yml", ".yaml"}]
@@ -50,5 +52,9 @@ def test_no_tracked_file_contains_a_conflict_marker() -> None:
 def test_the_sweep_is_looking_at_something() -> None:
     """Guard the guard: an empty file list would satisfy the check vacuously."""
     files = _tracked_text_files()
-    assert len(files) > 100, f"only {len(files)} text files swept — the sweep is broken, not the tree"
-    assert any(p.suffix == ".md" for p in files), "no markdown swept; docstring conflicts are not the only kind"
+    assert len(files) > 100, (
+        f"only {len(files)} text files swept — the sweep is broken, not the tree"
+    )
+    assert any(p.suffix == ".md" for p in files), (
+        "no markdown swept; docstring conflicts are not the only kind"
+    )

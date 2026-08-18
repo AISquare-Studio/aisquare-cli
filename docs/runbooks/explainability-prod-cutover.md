@@ -656,10 +656,26 @@ curl -s http://127.0.0.1:9190/health
 >
 > ```text
 > LISTEN 127.0.0.1:9190  users:(("python",pid=20753,fd=13))
-> 20753  ELAPSED 1-02:35  STARTED Mon Aug 17 03:13:35 2026
+> 20753  ELAPSED 1-02:35   (a day and two hours)
 >        ./.venv/bin/python -m aisquare.explainability.claude_proxy
 > /health -> {"status":"ok","service":"aisquare-proxy","mode":"claude_code",...}
 > ```
+>
+> **Do not compare the absolute start time — it is not reproducible on this
+> box.** `ps` does not store a start time, it computes one:
+> `lstart = btime + starttime_ticks/HZ`, and `etime = uptime - starttime_ticks/HZ`.
+> Both come from `/proc/uptime`, which on WSL2 does not track wall clock. Three
+> readings of THIS process across forty minutes gave three different start
+> times — 03:13:35, 03:14:45, 03:18:07 — drifting forward. Measured over a
+> timed interval rather than inferred: in 48.2s of wall clock `etimes` advanced
+> **45s** and `lstart` advanced **3s**. So the age runs about 6% slow and the
+> start time walks forward by roughly four minutes an hour, which is what the
+> three readings above show. The only fixed quantity in that arithmetic is the
+> process's own `starttime` in `/proc/<pid>/stat`, which nobody quotes.
+>
+> **That is why the test is orders of magnitude and not minutes.** A day-old
+> proxy against one you started five minutes ago survives any drift this box
+> produces; "started at 03:13" does not survive being read twice.
 >
 > Twenty-six hours old, and it satisfies every check in this section. So on this
 > machine §3 goes green **whether or not your start succeeded**, and `ELAPSED`

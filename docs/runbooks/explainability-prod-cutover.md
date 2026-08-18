@@ -1206,9 +1206,11 @@ for id in $(seq 1 40); do
   code=$(curl -s -o /dev/null -w '%{http_code}' \
     -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
     "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$id/my-capabilities")
-  [ "$code" = 200 ] && echo "your workspace id: $id"
+  [ "$code" = 200 ] && export WS=$id && echo "your workspace id: $WS"
 done
 # staging answered 31, and only 31, in 1..40. Prod may differ — re-derive it.
+# $WS is used by every workspace-scoped call below. If it is empty, widen the
+# range: the loop only searched 1..40.
 ```
 
 > **A word before you `curl` `my-capabilities` directly, because its body looks
@@ -1228,7 +1230,7 @@ Then read the gateway's rejection view for that workspace:
 
 ```bash
 curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
-  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/31/ingest-rejections"
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$WS/ingest-rejections"
 # {"rejections":[]}   on staging right now
 ```
 
@@ -1246,7 +1248,7 @@ To make it a verdict, read it **inside the window, right after a real ingest**:
 aisquare explainability register --target <env>     # §4b, once
 # ... run §5 so a traced Run actually ships ...
 curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
-  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/31/ingest-rejections"
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$WS/ingest-rejections"
 ```
 
 Now a non-empty result is the direct read of §4b's failure mode. Each row is
@@ -1284,7 +1286,7 @@ no studio credential:
 
 ```bash
 curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
-  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/31/credits/usage/by-run?since_days=1&limit=100"
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/$WS/credits/usage/by-run?since_days=1&limit=100"
 ```
 
 > **[verified-stg, @8dd460fb + @9bbc8ed7 2026-08-18]** On staging this returns

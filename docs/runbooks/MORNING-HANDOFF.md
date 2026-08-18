@@ -153,19 +153,15 @@ forty lines.** Read the ones you need:
 4. **Prod values are unverified.** Every *mechanism* here is verified against
    staging; the prod URL and key are `[unverified-prod]` throughout.
 
-5. **A proxy is already listening on 9190 on this box, and it answers §3's check
-   perfectly.** **[verified-train]** pid 20753, `aisquare.explainability.claude_proxy`,
-   started 03:13 on 2026-08-17 and **over 27 hours old** at the time of writing. It
-   returns `{"status":"ok","service":"aisquare-proxy","mode":"claude_code"}`, so
-   `doctor` reports `explainability proxy: ok` whether or not your §3 start
-   succeeded — and would report it even if you skipped §3 entirely. **The age is
-   the tell you can actually use**, because you do not know the PID of a process you
-   have not started yet: `ps -o pid,etime,args -p <pid>` after `ss -ltnp | grep 9190`.
-   Nobody here started it, nobody here has touched it, and it may be what the
-   staging work has been running through — so it is reported rather than killed.
-   (Nothing is listening on **9090** in this namespace, despite the standing "never
-   kill whatever holds 9090" rule; that rule is about not assuming, not about
-   something currently serving there.)
+5. **A proxy is already listening on 9190, and it answers §3's check perfectly.**
+   Not started by anyone here. So `doctor` reports `explainability proxy: ok`
+   whether or not your §3 start succeeded — and would report it if you skipped §3.
+   **The tell you can actually use is the age**, because you do not know the PID of
+   a process you have not started yet: `ss -ltnp | grep 9190` then
+   `ps -o pid,etime,args -p <pid>`. Two independent observations, the payload it
+   returns, and what is *not* listening on 9090 are all under "the operator's real
+   machine" below — recorded once there rather than twice. §3 and the at-a-glance
+   table carry the same caveat at the point of use.
 
 6. **One consent question, asked five-plus times and never forced:** may we
    write to a `/mnt` (Windows) path? A 9p/DrvFs filesystem measurement is

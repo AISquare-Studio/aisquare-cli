@@ -131,14 +131,21 @@ def test_the_default_variable_still_counts_when_no_target_names_another(
 
 #: Allowed to resolve a key. ``_active_deployment`` is the resolver;
 #: ``resolve_api_key`` and ``_stored_api_key`` ARE the readers it is built from;
-#: ``store_api_key`` and ``configure_shipping`` are writers — where a key enters
-#: the machine rather than where one is chosen.
+#: ``store_api_key`` is the writer — where a key enters the machine rather than
+#: where one is chosen.
+#:
+#: ``configure_shipping`` was here and is NOT any more. It decided the `ship`
+#: flag from ``resolve_api_key``, which broke its own documented invariant:
+#: ship=True on a machine whose target names a key variable it does not have,
+#: satisfied by an unlabelled key file, buffering forever. It now asks
+#: ``_active_deployment`` like everything else, so the exemption it needed is
+#: gone — and a shrinking allow list is the only direction this list should
+#: ever move.
 _MAY_RESOLVE_KEY = {
     "_active_deployment",
     "resolve_api_key",
     "_stored_api_key",
     "store_api_key",
-    "configure_shipping",
 }
 
 

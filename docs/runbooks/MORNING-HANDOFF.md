@@ -156,8 +156,9 @@ Also folded: a doctor that verifies and helps wire it (#51) — plain `doctor`
 creates no state, `doctor --fix` creates only the home layout, both measured and
 pinned (see the doctrine section); per-role identity resolved from the board
 role; redaction in
-standard and strict modes, credentials-only by default, scrubbed *into* the
-spool rather than on the way out; an inventory of all 13 process-spawning seams,
+standard and strict modes, credentials-only by default, and scrubbed *into* the
+spool rather than on the way out — a claim that rested on a one-field assertion
+until this shift and is now checked against the **bytes on disk**; an inventory of all 13 process-spawning seams,
 each ruled `TRACED` or `EXCLUDED` with a stated reason and held by an AST guard;
 atomic config writes; and a write-boundary guard that follows imports, aliases,
 and rebindings.
@@ -208,12 +209,25 @@ Against staging, with real agent processes — not fixtures:
 | Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox |
 | Client-lane identity | `agent.run_id` = board session id; `agent.name` = `aisquare-coder`, accepted |
 | Redaction on the wire | standard **and** strict |
+| No secret in the spooled **bytes** | 3 capture paths incl. the prompt hook — **pinned**: `tests/test_no_secret_reaches_the_spool_file.py`, with a redaction-off control |
 | Token-shape coverage | all 11 vendor shapes survive the JSON→OTel round trip |
 | Both lanes, one session | same key carried on both (see the caveat above) |
 | Proxy build pinned | `aisquare>=1.1.0`; `_has_valid_correlation` byte-identical to the checkout the receipts used |
 
 Everything in that table stops at the gateway boundary. Nothing in it is a
 statement about what the studio shows.
+
+**Three of those rows are stronger than the rest, and the difference matters.**
+The first two and the spool-bytes row are now *pinned* — a test fails the gate on the day they stop
+being true. Every other row is a **staging measurement taken once**, most of
+them before a night of changes to the launcher, the store and the hooks; they
+were true when taken and nothing re-checks them. The spine row was in that
+weaker category until this shift, and the guard behind it is deliberately built
+so it cannot be quietly narrowed: the four places are data, each records its
+value *and its origin*, and the claims are pinned by name so a deleted check
+fails and an unregistered new one fails too. It does not reach a fixed point —
+the guard itself can be removed — but removing a claim now takes two visible
+edits in one diff, which reads as a decision rather than an oversight.
 
 ### The fifteen minutes — what is and is not established
 
@@ -241,18 +255,6 @@ row can hide a §3 that silently failed, and model traffic then goes to the olde
 proxy. §5 now carries the confirming command beside its expected output. This
 was invisible to per-step verification because whoever verifies §5 has just done
 §3, so the state is always right.
-
-**Two of those rows are stronger than the rest, and the difference matters.**
-The first two are now *pinned* — a test fails the gate on the day they stop
-being true. Every other row is a **staging measurement taken once**, most of
-them before a night of changes to the launcher, the store and the hooks; they
-were true when taken and nothing re-checks them. The spine row was in that
-weaker category until this shift, and the guard behind it is deliberately built
-so it cannot be quietly narrowed: the four places are data, each records its
-value *and its origin*, and the claims are pinned by name so a deleted check
-fails and an unregistered new one fails too. It does not reach a fixed point —
-the guard itself can be removed — but removing a claim now takes two visible
-edits in one diff, which reads as a decision rather than an oversight.
 
 ## What was deliberately left
 

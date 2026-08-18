@@ -1291,7 +1291,7 @@ curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
 
 > **[verified-stg, @8dd460fb + @9bbc8ed7 2026-08-18]** On staging this returns
 > the workspace's runs, each `{run_id, agent_name, studio_id, calls, credits,
-> last_at}`. Measured: sixty runs, **every one under studio `169`**, attributed
+> last_at}`. Measured: **every run under studio `169`**, attributed
 > `aisquare-planner` / `aisquare-coder` / `aisquare-runner` / `aisquare-cli` —
 > the roster, each name distinct. That is the whole integration confirmed from
 > the gateway's side: per-role identity survived to delivery, and the

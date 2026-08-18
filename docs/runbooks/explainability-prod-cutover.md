@@ -1798,7 +1798,8 @@ One id, three places, none of them needing the gateway.
 > ⚠️ **HOP 4 IS BLOCKED AND THAT IS BY DESIGN, NOT BY OVERSIGHT.** Reading the
 > Run back from the studio — confirming the gateway holds a Run whose id is the
 > one above — needs a **studio-scoped** credential. That is
-> `tsk_01kzdee4pjw8e0ep2g968ejsq6`. Three hops demonstrated locally is not the
+> `tsk_01kzdee4pjw8e0ep2g968ejsq6`, and until it closes **every delivery claim
+> in this document stops at "the gateway accepted the bytes"**. Three hops
 > same as the join being observed end to end, and nothing here should be read as
 > upgrading that.
 >

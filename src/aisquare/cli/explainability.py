@@ -336,6 +336,26 @@ def register(
         )
 
     published = ops.publication_ids(verdict.payload)
+    if get_state().json_output:
+        # Every FAILURE above answers in JSON through the shared `fail` helper,
+        # so before this the flag was honoured on five branches that fail and
+        # ignored on the one that works — §1 of the runbook, and the first step
+        # that touches the gateway.
+        #
+        # One key, and it is the code's own word for the mapping
+        # (`publication_ids`). The two cases the human output distinguishes —
+        # an id, or registered with none — are an id or a null, so a caller
+        # reads `.publications["aisquare-coder"]` and gets the same answer the
+        # operator reads. A separate list of names would repeat the keys.
+        typer.echo(
+            json.dumps(
+                {
+                    "target": target.name,
+                    "publications": {name: published.get(name) for name in names},
+                }
+            )
+        )
+        return
     typer.echo(f"✓ registered {len(names)} identities with target '{target.name}'")
     for agent_name in names:
         publication = published.get(agent_name)

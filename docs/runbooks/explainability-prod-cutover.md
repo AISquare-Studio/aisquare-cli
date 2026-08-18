@@ -777,12 +777,32 @@ can run once by hand to check. Save as `~/.aisquare/ship-insights.sh`,
 set -a
 . "$HOME/.config/aisquare/explainability-stg.env"   # your env file; 0600
 set +a
-exec /usr/local/bin/aisquare explainability ship --strict
+exec /ABSOLUTE/PATH/TO/aisquare explainability ship --strict
 ```
 
 `set -a` matters: without it the file's values are shell variables, not
 environment variables, and the CLI never sees them. Use the **absolute** path
-to `aisquare` — cron's `PATH` will not find it. Then:
+to `aisquare` — cron's `PATH` will not find it.
+
+> ⚠️ **[verified-train, coder2 `8dd460fb`, 2026-08-18] Substitute that path;
+> do not guess it.** This line read `/usr/local/bin/aisquare`, and on this
+> machine **nothing is installed there** — nor in `/usr/bin`, nor in
+> `~/.local/bin` (whose only match is `aisquare-proxy`, a different binary).
+> Get the literal from your login shell:
+>
+> ```bash
+> command -v aisquare
+> ```
+>
+> On this box today that answers
+> `/home/work/.pyenv/versions/3.12.3/bin/aisquare`, and **§0 does not move
+> it**: §0 installs with `python3 -m pip`, and that interpreter's script
+> directory *is* that pyenv `bin`. So the path is the same before and after the
+> reinstall. Run as written with the old literal, under the model-cron line
+> below, the wrapper exits **127** — `exec: /usr/local/bin/aisquare: not
+> found` — before the CLI is ever reached.
+
+Then:
 
 ```bash
 */5 * * * * $HOME/.aisquare/ship-insights.sh
@@ -792,7 +812,16 @@ No `>/dev/null`: a non-zero exit is the entire signal, and cron mails you the
 reason.
 
 Check it before trusting it, with the key in scope exactly as the wrapper puts
-it there. A `0` means it really shipped; anything else prints why:
+it there. A `0` means it really shipped; anything else prints why — and read the
+number, because the failures mean different things: **127** is the `exec` line,
+so the path above is wrong and the CLI never ran; **1** is the CLI itself
+reporting a real reason through `--strict`; and **2** has *two* causes — the
+wrapper dying before the `exec` (see the model-cron note below), **or the CLI
+running and not having this command at all.** That second one is measured: with
+the correct path substituted but §0 not yet run, `aisquare` is the older build,
+and the wrapper exits **2** with `Usage: aisquare explainability …`. So run this
+check *after* §0, and read a `2` with a usage line in it as "wrong build", not
+"broken wrapper".
 
 ```bash
 aisquare explainability ship --strict

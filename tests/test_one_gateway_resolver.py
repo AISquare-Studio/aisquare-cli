@@ -37,8 +37,10 @@ from pathlib import Path
 import pytest
 
 from aisquare.services import explainability as service
+from aisquare.services import explainability_ops as ops
 
-SOURCE = Path(service.__file__)
+SERVICE = Path(service.__file__)
+OPS = Path(ops.__file__)
 
 
 @pytest.fixture
@@ -102,34 +104,40 @@ def test_the_exported_variable_still_works_when_no_target_names_one(
     assert service.shipping_offer().gateway_url == "https://only-source.example"
 
 
-def test_there_is_exactly_one_place_that_resolves_a_gateway(prod_machine: None) -> None:
+def test_only_the_named_functions_resolve_a_gateway() -> None:
     """A fourth resolver must fail here rather than be found by an operator.
 
     Structural rather than behavioural, because the behavioural version can only
-    catch divergences someone thought to construct — which is how this one
-    survived: three configurations were tried and the fourth was the env var.
+    catch divergences someone thought to construct — which is how the third one
+    survived: @dfd9a883 tried three configurations and the fourth was the
+    environment variable.
 
-    The rule: no function in this module other than the resolver itself may read
-    `gateway_url` off the loaded config or off the environment.
+    BOTH MODULES, because the first version of this guard covered one and I
+    checked the other BY HAND. A hand-check rots: it was true at the commit I
+    read it, nothing re-runs it, and `explainability_ops` is the obvious place a
+    fourth resolver would hide since it defines `GATEWAY_ENV_VAR` too.
+
+    THE RULE IS NARROWER THAN "MENTIONS A GATEWAY", and the precision is
+    load-bearing. Reading `target.gateway_url` is fine — that IS the resolved
+    answer, and the ops module does it a dozen times to build URLs. Naming
+    `GATEWAY_ENV_VAR` in an error message is fine. Setting it, as `_init_sdk`
+    does to hand the SDK our answer through its own contract, is fine. What is
+    forbidden is READING a gateway from config or environment: `settings`,
+    `config.explainability`, `load_config().…`, or `.get(GATEWAY_ENV_VAR)`.
+    A guard that flagged message strings would be switched off by the next
+    person to touch the file.
     """
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     offenders: list[str] = []
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef) or node.name in _MAY_RESOLVE:
-            continue
-        for inner in ast.walk(node):
-            if isinstance(inner, ast.Attribute) and inner.attr == "gateway_url":
-                offenders.append(f"{node.name} reads .gateway_url directly")
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr == "get"
-                and any(
-                    isinstance(arg, ast.Name) and arg.id == "GATEWAY_ENV_VAR" for arg in inner.args
-                )
-            ):
-                offenders.append(f"{node.name} reads ${'{'}GATEWAY_ENV_VAR{'}'} directly")
+    for module in (SERVICE, OPS):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name in _MAY_RESOLVE:
+                continue
+            for inner in ast.walk(node):
+                if _reads_configured_gateway(inner):
+                    offenders.append(f"{module.name}:{node.name} reads a configured gateway_url")
+                elif _reads_gateway_environment(inner):
+                    offenders.append(f"{module.name}:{node.name} reads $GATEWAY_ENV_VAR")
 
     assert not offenders, (
         "these resolve a gateway without going through the one resolver, which "
@@ -137,8 +145,64 @@ def test_there_is_exactly_one_place_that_resolves_a_gateway(prod_machine: None) 
     )
 
 
-#: The functions allowed to resolve a gateway from config or environment.
-#: `_active_deployment` is the resolver. `configure_shipping` is the WRITER —
-#: it takes a URL from the operator or the environment and records it, which is
-#: where a gateway enters the machine rather than where one is chosen.
-_MAY_RESOLVE = {"_active_deployment", "configure_shipping"}
+def test_the_guard_is_looking_at_something() -> None:
+    """Guard the guard: a rule this narrow could match nothing and pass.
+
+    Both modules must contain SOME allowed reader, or the walk has stopped
+    finding functions — a rename, a refactor into a class, a moved file — and
+    the assertion above would be green over nothing at all.
+    """
+    found: set[str] = set()
+    for module in (SERVICE, OPS):
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.FunctionDef) or node.name not in _MAY_RESOLVE:
+                continue
+            if any(
+                _reads_configured_gateway(i) or _reads_gateway_environment(i)
+                for i in ast.walk(node)
+            ):
+                found.add(f"{module.name}:{node.name}")
+
+    assert len(found) >= 3, (
+        f"only {sorted(found)} actually read a gateway — the rule has stopped "
+        "matching, so the guard above is asserting over nothing"
+    )
+
+
+#: `settings`-shaped names whose `.gateway_url` is the CONFIGURED value rather
+#: than a resolved target's.
+_CONFIG_NAMES = {"settings", "config", "resolved_settings"}
+
+
+def _reads_configured_gateway(node: ast.AST) -> bool:
+    """`settings.gateway_url` / `config.explainability.gateway_url` / `load_config()…`.
+
+    Deliberately NOT `target.gateway_url`, which is the resolver's own answer.
+    """
+    if not (isinstance(node, ast.Attribute) and node.attr == "gateway_url"):
+        return False
+    base = node.value
+    if isinstance(base, ast.Name):
+        return base.id in _CONFIG_NAMES
+    if isinstance(base, ast.Attribute):
+        return base.attr == "explainability"
+    return isinstance(base, ast.Call)
+
+
+def _reads_gateway_environment(node: ast.AST) -> bool:
+    """`environ.get(GATEWAY_ENV_VAR, …)` — a READ, not a mention and not a write."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and any(isinstance(a, ast.Name) and a.id == "GATEWAY_ENV_VAR" for a in node.args)
+    )
+
+
+#: The functions allowed to read a gateway from config or environment.
+#: `_active_deployment` is the resolver and `resolve_target` is its ops-side
+#: half, which consults the variable only AFTER the target — the ordering that
+#: makes the target authoritative. `configure_shipping` is the WRITER: it takes
+#: a URL from the operator or the environment and records it, which is where a
+#: gateway ENTERS the machine rather than where one is chosen.
+_MAY_RESOLVE = {"_active_deployment", "resolve_target", "configure_shipping"}

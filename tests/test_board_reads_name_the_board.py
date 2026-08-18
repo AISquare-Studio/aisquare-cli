@@ -135,3 +135,40 @@ def test_it_never_raises_on_a_directory_that_does_not_exist(
     note = team_service.board_scope_note(tmp_path / "gone")
 
     assert note is None or isinstance(note, str)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["team", "log", "--limit", "3"],
+        ["board"],
+        ["team", "status"],
+        ["task", "list"],
+    ],
+)
+def test_every_board_read_names_the_board_when_it_is_not_yours(
+    argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: object
+) -> None:
+    """The note has to reach EVERY read, not the one its author tested.
+
+    I wired `team log` and `board`, checked those two end to end, and reported
+    the task done — `task list` emitted nothing and the acceptance had named
+    it. A parametrised list is the difference between covering a command and
+    covering the one you remembered.
+
+    (`note list` is in the acceptance too and is NOT here: `note` is a WRITE.
+    `aisquare note list` posts a note whose text is "list", which is how a
+    teammate accidentally filed one tonight. There is no note read to cover.)
+    """
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+
+    monkeypatch.delenv("AISQUARE_TEAM_HUB", raising=False)
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    result = CliRunner().invoke(app, ["--json", *argv])
+
+    assert "reading board" in result.stderr, f"{' '.join(argv)} said nothing: {result.stderr!r}"

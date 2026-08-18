@@ -99,6 +99,29 @@ CORRUPT = b"this is not a sqlite database, and open_store must say so in words"
 #: instance has nowhere to be listed.
 STILL_RAISES: set[str] = set()
 
+#: The same ratchet for QUERY-TIME damage, which the seam does not yet reach.
+#: Measured at 984a3b9: these nine still raise when a SELECT hits a zeroed page,
+#: while the at-open list above is empty. Both directions fail the guard, so
+#: this cannot rot into an allow list and cannot outlive the defect.
+#:
+#: Deliberately not fixed here. Widening the seam means catching
+#: sqlite3.DatabaseError at a point where OperationalError — which IS a
+#: DatabaseError — must keep meaning "somebody else holds the lock" rather than
+#: "your board is damaged". @9bbc8ed7 built `is_locked_error` for exactly that
+#: distinction and the widening is theirs to design; this only makes sure the
+#: gap cannot pass for closed in the meantime.
+STILL_RAISES_AT_QUERY = {
+    "context export",
+    "context list",
+    "context preview",
+    "ctx export",
+    "ctx list",
+    "ctx preview",
+    "init",
+    "inject",
+    "status",
+}
+
 
 def _leaves() -> list[list[str]]:
     """Every runnable command in the tree, deepest names included."""
@@ -120,21 +143,54 @@ def _invoked() -> list[list[str]]:
     return [chain for chain in _leaves() if " ".join(chain) not in UNINVOKED]
 
 
-@pytest.fixture
-def damaged_store(isolated_home: Path) -> Path:
-    """A machine that has been used, whose database is now unreadable.
+def _corrupt_a_page(good: bytes) -> bytes:
+    """Zero page 2, keeping a valid header.
 
-    Built by letting the CLI create the store and then overwriting it, rather
-    than by writing a file called context.db into an empty directory: the second
-    is a machine that was never initialised, which is a different case with a
+    SQLite opens this file happily — the header and page 1 are intact — and only
+    discovers the damage when a query reaches the zeroed page. That is why it
+    belongs here: `open_store` never sees it.
+    """
+    assert len(good) > 8192, "store too small to corrupt a page of"
+    return good[:4096] + bytes(4096) + good[8192:]
+
+
+#: The two damage shapes, and they fail in DIFFERENT PLACES, which is the whole
+#: reason both are run:
+#:
+#:   at open  — the file is not a database at all; `open_store` raises
+#:              StoreUnopenable and the root group translates it.
+#:   at query — the file opens, and a SELECT reaches a zeroed page. The seam is
+#:              already behind us; nothing catches this.
+#:
+#: This file measured only the first for its whole existence and reported the
+#: class CLOSED on that evidence. An empty ratchet over one shape is a
+#: strong-looking claim about a narrow universe — the same disease as a census
+#: that cannot report its own blind spot, in the file built to prevent it.
+DAMAGE = {
+    "at-open": lambda good: CORRUPT,
+    "at-query": _corrupt_a_page,
+}
+
+
+@pytest.fixture(params=sorted(DAMAGE), ids=sorted(DAMAGE))
+def damaged_store(request: pytest.FixtureRequest, isolated_home: Path) -> str:
+    """A machine that has been used, whose database is now damaged.
+
+    Built by letting the CLI create the store and then damaging it, rather than
+    by writing a file called context.db into an empty directory: the second is a
+    machine that was never initialised, which is a different case with a
     different correct answer.
+
+    Returns the shape's name so a test can ask which one it is running under —
+    the two have different expectations while the query-time seam is open.
     """
     runner = CliRunner()
     runner.invoke(app, ["init", "--yes"], catch_exceptions=True)
     database = paths.db_path()
     assert database.exists(), "the fixture did not produce a store to damage"
-    database.write_bytes(CORRUPT)
-    return database
+    shape: str = request.param
+    database.write_bytes(DAMAGE[shape](database.read_bytes()))
+    return shape
 
 
 def test_the_uninvoked_list_names_only_real_commands() -> None:
@@ -163,7 +219,7 @@ def test_the_guard_actually_covers_the_tree() -> None:
 
 
 @pytest.mark.parametrize("chain", _invoked(), ids=lambda chain: " ".join(chain))
-def test_a_damaged_store_never_produces_a_traceback(chain: list[str], damaged_store: Path) -> None:
+def test_a_damaged_store_never_produces_a_traceback(chain: list[str], damaged_store: str) -> None:
     """The property, one test per command so a failure names the command.
 
     Parametrised rather than looped: a loop reports the first failure and hides
@@ -172,18 +228,20 @@ def test_a_damaged_store_never_produces_a_traceback(chain: list[str], damaged_st
     command or `open_store`.
     """
     name = " ".join(chain)
+    expected_to_raise = STILL_RAISES if damaged_store == "at-open" else STILL_RAISES_AT_QUERY
     raised = _raises_unhandled(chain)
 
-    if name in STILL_RAISES:
+    if name in expected_to_raise:
         assert raised is not None, (
-            f"`aisquare {name}` no longer raises — good. Remove it from "
-            "STILL_RAISES so the list keeps describing the truth; a ratchet that "
-            "is not tightened is an allow list."
+            f"`aisquare {name}` no longer raises under {damaged_store} damage — "
+            "good. Remove it from the matching STILL_RAISES set so the list keeps "
+            "describing the truth; a ratchet that is not tightened is an allow list."
         )
         return
 
     assert raised is None, (
-        f"`aisquare {name}` raised {type(raised).__name__}: {raised}\n"
+        f"`aisquare {name}` raised {type(raised).__name__} under {damaged_store} "
+        f"damage: {raised}\n"
         "An unhandled exception reaches the operator as a Python traceback. A "
         "store that cannot be opened is a condition to report in one line, "
         "naming the file and what to do about it — not a crash."
@@ -216,8 +274,7 @@ def test_the_ratchet_names_only_commands_that_exist() -> None:
     assert not unknown, f"STILL_RAISES names commands that do not exist: {unknown}"
 
 
-@pytest.mark.usefixtures("damaged_store")
-def test_the_class_is_closed_at_one_boundary() -> None:
+def test_the_class_is_closed_at_one_boundary(damaged_store: str) -> None:
     """This measured fourteen commands sharing one frame, so a fixer would know
     a single boundary could close the class. It could, and it did.
 
@@ -237,8 +294,56 @@ def test_the_class_is_closed_at_one_boundary() -> None:
         if traceback is not None:
             frames.add(traceback.tb_frame.f_code.co_name)
 
-    assert frames == set(), (
-        f"a damaged store is escaping again, from: {sorted(frames)}. "
-        "The seam is core.store.open_store raising StoreUnopenable and the root "
-        "group translating it; a frame here means one of the two stopped."
+    if damaged_store == "at-open":
+        assert frames == set(), (
+            f"a damaged store is escaping again, from: {sorted(frames)}. "
+            "The seam is core.store.open_store raising StoreUnopenable and the "
+            "root group translating it; a frame here means one of the two "
+            "stopped."
+        )
+        return
+
+    # Query-time damage is not behind that seam yet, and the useful fact for
+    # whoever widens it is the same one that chose the first boundary: they all
+    # escape from ONE frame, so one boundary closes this class too.
+    assert frames == {"entries"}, (
+        f"query-time damage now escapes from {sorted(frames)} rather than "
+        "{'entries'}. Fewer frames means the seam has been widened — empty it "
+        "and STILL_RAISES_AT_QUERY together. MORE frames means this is no longer "
+        "one class, and a single boundary will not close it."
     )
+
+
+def test_both_damage_shapes_are_run_and_are_genuinely_different() -> None:
+    """Deleting a shape must fail, not quietly narrow the guard.
+
+    This file spent its whole existence measuring one shape and reporting the
+    class closed. Removing `at-query` from DAMAGE does not break any assertion
+    above — everything simply passes over less, which is the failure mode that
+    produced the blind spot in the first place. So the SET of shapes is asserted
+    here, and so is the property that makes them worth running separately:
+
+        at-open   the file is not a database; SQLite refuses to open it
+        at-query  the file opens cleanly and a SELECT hits the damage
+
+    If the two ever stop differing in that way, running both costs time and
+    proves nothing extra, and this says so instead of leaving it to be noticed.
+    """
+    assert set(DAMAGE) == {"at-open", "at-query"}, (
+        f"damage shapes are now {sorted(DAMAGE)}. A shape removed here narrows "
+        "every assertion in this file without failing any of them."
+    )
+
+    good = b"SQLite format 3\x00" + bytes(9000)
+    at_open = DAMAGE["at-open"](good)
+    at_query = DAMAGE["at-query"](good)
+
+    assert not at_open.startswith(b"SQLite format 3"), (
+        "the at-open shape leaves a valid header, so SQLite would open it and "
+        "the two shapes would be testing the same path"
+    )
+    assert at_query.startswith(b"SQLite format 3"), (
+        "the at-query shape destroyed the header, so it fails at open like the "
+        "other one and the query-time path is no longer covered"
+    )
+    assert len(at_query) == len(good), "the at-query shape truncated rather than corrupted"

@@ -139,6 +139,37 @@ aisquare doctor
 > The path is the tree you just checked out, and `(non-editable)` is the `-e`
 > warning below confirmed rather than assumed. A build that prints **no**
 > provenance row predates that check and is therefore older than this train.
+>
+> **[verified-train, `9bbc8ed7`, 2026-08-18] There is a louder symptom than a
+> missing provenance row, and on this box it is the state you start in.** The
+> build currently on `PATH` here (`/home/work/.pyenv/.../bin/aisquare`) prints
+> **no explainability section at all** — not a warning, not a skipped row, the
+> whole subject of this runbook simply absent — because its `aisquare.core` is
+> missing `insights`, `outbox`, `redaction`, `credentials`, `spawn` and
+> `version`: the entire client lane. Measured side by side, same machine, same
+> moment:
+>
+> ```text
+> pre-§0 build on PATH   NO `explainability …` checks, no provenance   exit 0
+> train build            `explainability …` checks present, provenance  exit 0
+> ```
+>
+> **Both exit `0`.** The exit code does not distinguish them and neither does
+> `--version`, so presence of the section is the check: **if `aisquare doctor`
+> shows you no `explainability` rows, you are not running this train** — expected
+> before the install above, and a red flag after it.
+>
+> **Count the section, not the rows — no total here is stable.** An earlier
+> revision of this block gave row totals and they do not reproduce, in *two*
+> independent ways. Rendered rows depend on terminal width (`8dd460fb` measured
+> the same build as 13 rows where it renders as 11 here). And the structured
+> count depends on **configuration**, which is the one that would bite at 08:00:
+> `--json doctor` on this train reports **14 checks with 1 `explainability`** on
+> an unconfigured machine and **18 with 5** once a target and key are set — so a
+> number captured before §2 is wrong by §4. Zero versus non-zero is the only
+> reading that survives both. In that second case the
+> install landed somewhere that is not on your `PATH`; `which aisquare` tells
+> the two apart, which is why it sits in the block above.
 
 > ⚠️ **[verified-train, planner `dfd9a883`] Do not use `-e` for a cutover.** §5b
 > has you install `aisquare-cli[explainability]`, and over an editable checkout

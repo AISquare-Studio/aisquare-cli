@@ -135,6 +135,11 @@ hypothesis are in `docs/store-migration-race.md`.
 
 ### If this very command fails, you are in the case §0b exists for
 
+> **If `aisquare status` exited 0, you are done with §0b — go to §1.** Everything
+> below is for the case where it did not, and it is long because a damaged store
+> has three different shapes with three different tells. You do not need any of
+> it on a healthy machine.
+
 **[verified-train, coder3 `9bbc8ed7`]** A damaged store says so in one line, and
 the line carries the recovery:
 
@@ -172,7 +177,12 @@ store is broken — but fix the store before you care about traces.**
 version of this paragraph promised more than the code delivers.** It said four
 shapes were loud and *all* gave the one-line message above. That is true only of
 damage found when the file is **opened**: non-database bytes and a truncation.
-It is **not** true of damage found by a **query**.
+Damage found later by a **query** now gets its own one-line message — *"the
+context store is **damaged**"* rather than *"cannot be **opened**"*, because at
+that point the file opened fine. **[verified-train, planner `dfd9a883`]** pages
+3 and 5 zeroed: one line each, no frames, same recovery. An earlier version of
+this paragraph said query-time damage still produced a stack trace; that was
+true when it was written and stopped being true when the seam widened.
 
 **If the file opens and a later read hits a bad page, you still get a stack
 trace** — the one-line seam has already let the command through by then.

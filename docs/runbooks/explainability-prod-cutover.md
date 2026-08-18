@@ -516,7 +516,29 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > unregistered one takes the first branch: `gateway/main.py` raises
 > `409 agent_not_registered` with `routing.agent_name` attached.
 >
-> So the cost of leaving it out is a **growing backlog**, not a deletion.
+> **[verified-stg, `9bbc8ed7`, 2026-08-18] On staging it does not 409 at all —
+> and that is a fact about the WORKSPACE, not about the name.** A real insight
+> shipped from a train build under `aisquare-cli`, an identity nobody has
+> registered, was **accepted**: four spans, inbox status `dispatched`, zero
+> retries, no error. Ingest resolves `(workspace_id, agent_name)` through IAM's
+> auto-register endpoint, which `gateway/routing.py` describes as returning the
+> existing publication "or creates one when the workspace opted into
+> auto-discovery" — so acceptance under an unregistered name means **staging's
+> workspace has auto-discovery on**. Whether prod does is one of the open prod
+> questions, and nobody here can read that setting.
+>
+> **That is exactly why §4b still matters.** Registering removes the dependency
+> on a workspace setting you cannot see: with auto-discovery on the roster is
+> belt-and-braces, with it off the paragraph below is what happens instead.
+> Do not read "it worked on staging" as "the name need not be registered".
+>
+> **And do not use `/v1/routing/resolve` to predict this.** It returned `404`
+> for `aisquare-cli` *after* that agent's spans were accepted, and `404` for a
+> name never sent at all — measured. Its `404` is not evidence about whether
+> ingest will route you.
+>
+> With auto-discovery **off**, the cost of leaving the name out is a **growing
+> backlog**, not a deletion.
 > **Registering is idempotent** (a known name returns its existing
 > `publication_id`), so the fourth name costs nothing, and registering it
 > *later* still drains whatever queued in the meantime. Do not go looking for a

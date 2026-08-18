@@ -104,9 +104,25 @@ def _top_level_modules(code: str) -> set[str]:
     return {name for name in result.stdout.split() if "." not in name}
 
 
+def _uniquely_imported(with_code: str = _WITH, base_code: str = _BASE) -> set[str]:
+    """What `with_code` imports that `base_code` does not.
+
+    THE RULE, extracted so the real assertion and its controls run the SAME
+    code. My first attempt at controlling this file called `_top_level_modules`
+    directly from a control — which proved the HELPER works and left the rule
+    replaceable: `added = set(UNIQUELY_IMPORTED)` still passed everything.
+
+    That is the sentence I wrote one cycle earlier, about a different guard, and
+    then repeated here: A HELPER TEST PROVES THE HELPER. IT SAYS NOTHING ABOUT
+    WHETHER THE ASSERTION STILL CALLS IT. The control has to go through the same
+    door as the test.
+    """
+    return _top_level_modules(with_code) - _top_level_modules(base_code)
+
+
 def test_the_integration_pulls_in_exactly_what_is_recorded() -> None:
     """Both directions, so the record cannot rot into a stale allow list."""
-    added = _top_level_modules(_WITH) - _top_level_modules(_BASE)
+    added = _uniquely_imported()
 
     assert added == UNIQUELY_IMPORTED, (
         f"the explainability CLI now uniquely imports {sorted(added)}, recorded "
@@ -147,3 +163,43 @@ def test_the_measurement_is_looking_at_something() -> None:
         "the base CLI now imports ssl by itself, so this file is no longer "
         "measuring what the explainability integration adds"
     )
+
+
+def test_the_measurement_can_still_see_a_difference() -> None:
+    """POSITIVE control on the RULE, not on the walk.
+
+    Every check in this file is satisfied by "the diff equals the record" — and
+    replacing the measurement with the record itself produces that for free.
+    Measured: `added = set(UNIQUELY_IMPORTED)` left all three tests green. The
+    guard would then certify an import cost it never measured.
+
+    Same shape @9bbc8ed7 named in the AST guards: the surrounding checks watch
+    the walk — that the base set imported, that ssl is not in it — while the
+    RULE has stopped comparing anything.
+
+    Controlled against a module the base set demonstrably does NOT import, so
+    the difference is real and known in advance.
+    """
+    assert "xml" not in _top_level_modules(_BASE), (
+        "the control's premise is gone; pick another module"
+    )
+
+    added = _uniquely_imported(f"{_BASE}\nimport xml.etree.ElementTree")
+
+    assert "xml" in added, (
+        "the measurement no longer reports a module that was demonstrably "
+        "imported — it cannot certify what this integration costs if it cannot "
+        "detect an import at all"
+    )
+
+
+def test_the_measurement_reports_nothing_when_nothing_was_added() -> None:
+    """NEGATIVE control, so "report everything" is not a way to pass the above.
+
+    A rule that returned every loaded module would satisfy the positive control
+    and then fail the real assertion for the wrong reason — or, if the record
+    were widened to match, hide a genuine addition inside the noise.
+    """
+    added = _uniquely_imported(_BASE)
+
+    assert added == set(), f"the measurement invents imports that were not added: {sorted(added)}"

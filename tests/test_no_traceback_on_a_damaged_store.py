@@ -50,6 +50,7 @@ would have to be relaxed for every command that words it differently.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -243,16 +244,31 @@ def test_a_damaged_store_never_produces_a_traceback(chain: list[str], damaged_st
     )
 
 
-def _raises_unhandled(chain: list[str]) -> BaseException | None:
-    """The exception a command lets escape, or None.
+def _escaped(raised: BaseException | None) -> BaseException | None:
+    """Whether `raised` is an exception that would reach the operator.
 
-    `SystemExit` is not one: click raises it for usage errors and for its own
+    THE RULE, SPLIT OUT FROM THE INVOCATION so a control can call it with a
+    known-bad value. Both ratchets in this file are EMPTY, which means "nothing
+    raises" is the expected answer — so a detector that has gone blind produces
+    exactly the right result and every test passes. Measured: replacing the
+    invocation with `raised = None` left all 200 cases green.
+
+    That is the shape @9bbc8ed7 named: the checks watch the WALK — every command
+    invoked, every allow-list entry real — while the RULE has stopped deciding
+    anything. An empty ratchet makes it worse than usual, because emptiness is
+    also what success looks like.
+
+    `SystemExit` does not count: click raises it for usage errors and its own
     clean non-zero exits, and both are already legible.
     """
-    result = CliRunner().invoke(app, chain, catch_exceptions=True)
-    if result.exception is None or isinstance(result.exception, SystemExit):
+    if raised is None or isinstance(raised, SystemExit):
         return None
-    return result.exception
+    return raised
+
+
+def _raises_unhandled(chain: list[str]) -> BaseException | None:
+    """The exception a command lets escape, or None."""
+    return _escaped(CliRunner().invoke(app, chain, catch_exceptions=True).exception)
 
 
 def test_the_ratchet_names_only_commands_that_exist() -> None:
@@ -342,3 +358,32 @@ def test_both_damage_shapes_are_run_and_are_genuinely_different() -> None:
         "other one and the query-time path is no longer covered"
     )
     assert len(at_query) == len(good), "the at-query shape truncated rather than corrupted"
+
+
+def test_the_rule_still_recognises_an_escaping_exception() -> None:
+    """POSITIVE control on the rule, which the empty ratchets make essential.
+
+    With STILL_RAISES and STILL_RAISES_AT_QUERY both empty, every assertion in
+    this file is satisfied by "no command raised" — and a rule that can no
+    longer recognise an exception produces that answer for free. Nothing here
+    could tell the two apart until this control existed.
+
+    Synthetic exceptions rather than a command that really raises, because
+    there is no longer one: the seam closed the class, which is precisely why
+    the guard needs input it can no longer find in the wild.
+    """
+    escaping = sqlite3.DatabaseError("database disk image is malformed")
+
+    assert _escaped(escaping) is escaping, "the rule no longer recognises an escape"
+    assert _escaped(RuntimeError("anything unhandled")) is not None
+
+
+def test_the_rule_still_ignores_the_exits_that_are_legible() -> None:
+    """NEGATIVE control, so "call everything an escape" is not a fix.
+
+    click raises SystemExit for a usage error and for its own clean non-zero
+    exits. A rule that reported those would fail on every command that takes a
+    required argument, and the guard would be deleted rather than repaired.
+    """
+    assert _escaped(SystemExit(2)) is None, "a usage error is being called a traceback"
+    assert _escaped(None) is None

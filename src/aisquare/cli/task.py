@@ -16,6 +16,7 @@ from aisquare.cli.team import (
     delivery_fields,
     emit_write_warning,
     receipt_suffix,
+    warn_board_scope,
 )
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
@@ -108,6 +109,7 @@ def list_(
         tasks = team_service.list_tasks(narrowed)
     except STORE_ERRORS as exc:
         _fail_team(exc)
+    warn_board_scope(None)
     if get_state().json_output:
         typer.echo(json.dumps([task.model_dump(mode="json") for task in tasks]))
         return

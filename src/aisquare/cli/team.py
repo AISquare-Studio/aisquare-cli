@@ -729,7 +729,7 @@ def _show_bindings() -> None:
         console.print(f"{name:<12} {_describe(profiles[name]) or '(empty)'}", markup=False)
 
 
-def _warn_board_scope(as_session: str | None) -> None:
+def warn_board_scope(as_session: str | None) -> None:
     """Say which board a cwd-resolved read answered for, when it may not be yours.
 
     STDERR, always — a note on stdout would corrupt `--json` output that gets
@@ -790,7 +790,7 @@ def log(
         )
     except STORE_ERRORS as exc:
         _fail_team(exc, task or by or as_session)
-    _warn_board_scope(as_session)
+    warn_board_scope(as_session)
     if get_state().json_output:
         typer.echo(json.dumps([event.as_envelope().model_dump(mode="json") for event in events]))
         return
@@ -1129,7 +1129,7 @@ def board(
         project, sessions, tasks, events = team_service.board_data()
     except STORE_ERRORS as exc:
         _fail_team(exc)
-    _warn_board_scope(None)
+    warn_board_scope(None)
     if get_state().json_output:
         typer.echo(
             json.dumps(

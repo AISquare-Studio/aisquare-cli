@@ -221,6 +221,18 @@ Two mechanical rules earned the hard way:
    cleaned up — and controlling a falsifiability guard by gutting a real test
    means shipping the defect to demonstrate it.
 
+One guard that cannot be built, recorded so nobody spends a cycle on it twice.
+The runbooks quote CLI output verbatim, and those quotes rot — one row quoted a
+message (`the context store is corrupt`) that the CLI has never printed. A static
+check that every quoted line exists in `src/` **does not work**, measured twice:
+literal matching fails on interpolation (`✓ tracing enabled for target 'stg'` is
+an f-string in the source, so a `grep -F` reports it missing while the command
+prints it exactly), and truncating to the pre-interpolation prefix leaves
+fragments so short they check nothing — `explainability` matches 209 places. The
+working instrument is dynamic: **run the command and compare**, which is what the
+`[verified-train]` markers in the runbook are for. If you find a quoted string
+that looks wrong, run it before filing it.
+
 On recorded numbers: a floor like `>= 900` is a constant anyone can lower while
 doing something else, so prefer a property with no number in it — and before
 inventing one, check whether the number is simply **redundant** (a broken walk

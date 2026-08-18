@@ -489,14 +489,33 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > *later* still drains whatever queued in the meantime. Do not go looking for a
 > dead-letter queue for this case; there isn't one, by design.
 >
-> **And the backlog is not silent — `doctor` already fails on it, with the
-> remedy.** The SDK's own `delivery_backlog` check counts `pending` rows whose
-> `last_error` starts `gateway_status:409` and returns `error`, which this CLI
-> renders as `✗ sdk:delivery_backlog`. Its message names this exact case: *"if
-> the agent is named but unregistered, register it … or enable auto-discovery
-> (autoregister_unknown_agents) on the workspace"*. Its own docstring calls
-> these "the exact states the sweeper's silent retry loop otherwise hides from
-> the customer".
+> **And the backlog is not silent — `doctor` already reports it, with the
+> remedy.** The SDK's `delivery_backlog` check counts `pending` rows whose
+> `last_error` starts `gateway_status:409`; its docstring calls these "the exact
+> states the sweeper's silent retry loop otherwise hides from the customer".
+> **[verified-train]** — seeded one such row into a throwaway inbox and ran the
+> real command:
+>
+> ```text
+> empty inbox   ✓ sdk:delivery_backlog: empty
+> one 409 row   ⚠ sdk:delivery_backlog: pending=1 — 1 pending row(s) last rejected
+>               with gateway_status:409. … if the agent is named but unregistered,
+>               register it … or enable auto-discovery (autoregister_unknown_agents)
+> ```
+>
+> **Note the `⚠`, and note that `doctor` still exited 0.** The SDK returns
+> `error`; this CLI degrades every SDK row to a warning while tracing is OFF,
+> because an observer may never cost an exit code for a lane you have not turned
+> on. Turning tracing on flips the same row — measured, same seeded inbox, same
+> command:
+>
+> ```text
+> tracing off   ⚠ sdk:delivery_backlog: pending=1 — …     doctor exit 0
+> tracing on    ✗ sdk:delivery_backlog: pending=1 — …     doctor exit 1
+> ```
+>
+> So before §4 this is a line you have to *read*; after §4 it is one that stops
+> you.
 >
 > **That reporting is only as good as `EXPLAINABILITY_INBOX_PATH`, which is
 > where §2 earns its keep.** The check reads that variable and defaults to the

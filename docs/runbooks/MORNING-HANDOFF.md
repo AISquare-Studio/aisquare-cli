@@ -227,7 +227,15 @@ and rebindings.
   could not make that value disagree with the active target. It confirms where
   you are pointed; it no longer proves the lanes agree, because they cannot
   currently disagree.)
-- **`config list` stopped being printable the moment you configured anything.**
+- **`config list` is broken on this machine right now, and it is not about
+  tracing.** Measured 2026-08-18 against your real `~/.aisquare` with the build
+  currently on `PATH`: `aisquare config list` exits **1** with `TypeError:
+  Object of type 'NoneType' is not TOML serializable`. Your config has **no**
+  explainability targets — the trigger is `[team.profiles.*]`, written by
+  `team bind`, whose `bin` is unset. **Step 1 clears it**; the train build
+  prints all 45 lines. If you have already seen that traceback, it is this, it
+  is known, and nothing you did caused it.
+  The mechanism, which is wider than either trigger:
   `save_config` dumps with `exclude_none=True` because TOML has no null;
   `emit_config` renders the same model through the same library and did not.
   So `explainability enable` (a target that overrides nothing) *or* `team bind`
@@ -248,6 +256,23 @@ and rebindings.
   *migrated* rather than discarded — because treating it as unparseable is the
   exact reading that lost the data, so a fix that kept it would have preserved
   the bug for every file already on disk.
+
+### The train against this machine's real state
+
+Everything else in this file was measured in a throwaway `AISQUARE_HOME`. On
+**2026-08-18** `coder2` ran the train build read-only against the real one — a
+**71 MB** store with a night of rows and the accumulated config — and
+`config.toml` was byte-identical afterwards. `status`, `doctor`, `explainability
+status`, `team status`, `config get` and `context list` all exit **0** with no
+traceback, and `--json` on the first four parses. Only `config list` differed,
+and that is the entry above.
+
+One warning from running that sweep: **`aisquare note` takes text, not a
+subcommand.** `aisquare note list` does not list anything — it posts a note
+whose body is the word "list", to whichever project your directory maps to.
+There is no `note list`; `aisquare board` is the reader. Left as-is rather than
+guarded, because changing the command every session uses to post receipts is not
+a change to make on cutover morning.
 
 ## What is proven, and by what evidence
 

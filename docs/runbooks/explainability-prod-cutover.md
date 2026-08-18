@@ -1505,12 +1505,36 @@ One id, three places, none of them needing the gateway.
 
 > ⚠️ **HOP 4 IS BLOCKED AND THAT IS BY DESIGN, NOT BY OVERSIGHT.** Reading the
 > Run back from the studio — confirming the gateway holds a Run whose id is the
-> one above — needs a **read-scoped** credential. The ingest key is write-only
-> and returns 403 on reads, proven. That is
+> one above — needs a **studio-scoped** credential. That is
 > `tsk_01kzdee4pjw8e0ep2g968ejsq6`, and until it closes **every delivery claim
 > in this document stops at "the gateway accepted the bytes"**. Three hops
 > demonstrated locally is not the same as the join being observed end to end,
 > and nothing here should be read as upgrading that.
+>
+> **An earlier version of this note called the key "write-only". It is not** —
+> it is *workspace*-scoped, which fails differently and points at a different
+> remedy. **[verified-stg]**: `GET /v1/studios` returns `200` and sixteen
+> studios with the same key that `GET /v1/studios/<id>/runs` refuses. It reads
+> workspace-scoped routes and is refused on studio-scoped ones.
+>
+> The reason is in `gateway/auth.py` (bb88bb5): `validate_ingest_api_key`
+> "returns the base `studio_id` for studio keys, or **`None` for workspace
+> keys**", and the studio guard rejects "any caller whose resolved studio does
+> not match the studio named in the path" — so a workspace key, resolving to
+> `None`, matches no studio and is refused on every studio-scoped route. Not
+> for the right id, not for a studio the workspace owns. **The remedy is a
+> studio-scoped key (the gateway's "legacy studio key") or the dashboard JWT —
+> never a corrected id.**
+>
+> ⚠️ **AND THE TWO 403 STRINGS ARE ONE CAUSE, WHICH MATTERS BECAUSE ONE OF THEM
+> ARGUES AGAINST THIS PAGE.** `policy/check/*` and `agent-rule-books` answer
+> `{"detail":"Workspace does not own this studio"}` (the inline call sites);
+> `/runs` and its siblings answer `{"detail":"Studio ID mismatch"}` (the folded
+> guard). **[verified-stg]** — studios `169`, `144` and the pinned `21` all
+> return the latter. "Studio ID mismatch" reads like an invitation to go fix an
+> id, and §1 has just finished explaining that correcting
+> `EXPLAINABILITY_STUDIO_ID` fixes nothing. Same wall, two sentences; see §1 for
+> the write-side half.
 
 ---
 

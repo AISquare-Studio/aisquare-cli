@@ -1043,9 +1043,15 @@ def shipping_offer() -> ShippingOffer:
     half-configured state is a queue that fills forever.
     """
     sdk = sdk_available()
-    gateway = (
-        os.environ.get(GATEWAY_ENV_VAR, "").strip() or load_config().explainability.gateway_url
-    )
+    # Through the ONE resolver, not env-first. Reading $EXPLAINABILITY_GATEWAY_URL
+    # here made this a THIRD answer to "which deployment": with a prod target
+    # configured and a staging gateway still exported — the shell state §5 of the
+    # cutover runbook creates — `init` printed "this machine can ship … to
+    # <staging>" while the machine ships to prod. The lanes never diverged; the
+    # SENTENCE did, at the moment the operator decides whether to turn shipping
+    # on. `resolve_target` still consults the variable when no target names a
+    # gateway, so the single-deployment machine is unaffected.
+    gateway, _key_env, _target_key = _active_deployment()
     has_key = resolve_api_key() is not None
     if not sdk:
         return ShippingOffer(

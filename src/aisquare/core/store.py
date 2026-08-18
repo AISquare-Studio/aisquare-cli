@@ -1453,6 +1453,17 @@ def open_store() -> ContextStore:
             "created; this is not a fresh machine.",
             file=sys.stderr,
         )
+        # That line goes to whoever opened the file — on a working machine a
+        # HOOK, whose stderr neither the agent nor the operator reads. Record it
+        # so `doctor` can answer the question the runbook teaches people to ask.
+        # Fail-open: an observer may cost its own record, never the open.
+        try:
+            marker = paths.truncation_marker_path()
+            marker.write_text(
+                datetime.now(UTC).isoformat(timespec="seconds") + "\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
     connection = sqlite3.connect(str(database))
     connection.row_factory = sqlite3.Row
     busy_ms = _busy_timeout_ms()

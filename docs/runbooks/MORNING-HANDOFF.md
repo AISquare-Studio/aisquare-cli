@@ -432,7 +432,7 @@ Against staging, with real agent processes — not fixtures:
 | Redaction on the wire | standard **and** strict |
 | No secret in the spooled **bytes** | 3 capture paths incl. the prompt hook — **pinned**: `tests/test_no_secret_reaches_the_spool_file.py`, with a redaction-off control |
 | Token-shape coverage | all 11 vendor shapes survive the JSON→OTel round trip |
-| Both lanes, one session | same key carried on both (see the caveat above) |
+| Both lanes, one session | same key carried on both (see the caveat above) — **re-measured at `948772e`**, four places one value. Verify it as "did every record captured *inside* the session carry the key?", not "did every record from this launch": a launch also spools one parent-captured `team_event` whose key is correctly `None` |
 | Proxy build pinned | `aisquare>=1.1.0`; `_has_valid_correlation` byte-identical to the checkout the receipts used |
 
 Everything in that table stops at the gateway boundary. Nothing in it is a

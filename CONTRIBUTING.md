@@ -332,6 +332,17 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   on stderr above a successful-looking create. Compose anything containing command
   text in a **quoted heredoc** (`<<'EOF'`) and pass it as `"$(cat file)"`. Single
   quotes work too; remembering not to type a backtick does not.
+- **`ANTHROPIC_CUSTOM_HEADERS` contains a real newline, and it has now defeated two
+  different line-oriented instruments hours apart.** It carries both correlation
+  headers, so the value itself is multi-line. A `shlex` parse of it raised
+  `No closing quotation`; a `printf`-through-a-parser reported the header as
+  `(none)` — a false negative on a value that was present and correct. **A value
+  with an embedded newline cannot survive a line-oriented instrument**, so do not
+  build one: hand the string to a real shell (`sh -c` with the exports) or have the
+  process dump it to a file and read the bytes. The same applies to anything else
+  assembled from a template — a `--detail` body, a redacted payload, a span
+  attribute — and the tell is a confident empty reading on something you know you
+  set.
 - **Two files under `~/.aisquare` hold credentials, and one is a database people
   query while debugging.** `credentials` and `explainability-key` are obvious;
   `claude_proxy_inbox.db` is not — its schema carries an `api_key` column, one key

@@ -756,6 +756,21 @@ env -i HOME="$HOME" LOGNAME="$LOGNAME" SHELL=/bin/sh PATH=/usr/bin:/bin \
 > signal that draining has stopped. That counter is the saving grace: the
 > failure is invisible in every other surface but obvious here.
 >
+> **[verified-train, coder3 `9bbc8ed7`] Read it off the `spool:` line, not that
+> one.** The `shipping:` reason is an ordered chain, and `N buffered` is the
+> *last* branch — reached only once a key is in scope AND the extra is
+> installed. In the two states where draining is actually broken it says
+> something else and carries no count at all. Measured with five records
+> captured: with no key, `shipping: on → … — but no workspace key: set $VAR`;
+> with the extra missing, `shipping: on → … — buffering, the explainability
+> extra is missing: …` — and in **both**, `spool: 5 queued, 0 sent, 0
+> dead-letter`, with `jq -c .shipping` reporting `"queued":5`. Nothing is lost;
+> the number simply moves off the line you were told to watch, in exactly the
+> two states that make a cron timer ship nothing forever. The ordering is
+> right — "you have no key" is more actionable than "5 queued" — so watch the
+> surface that answers in every state, which is the `jq` command this section
+> already gives you.
+>
 > Two details that bite a scripted drain:
 > - `--limit` defaults to **500** records per pass. A backlog larger than that
 >   needs repeated runs, or one run with a bigger `--limit` — a single
@@ -932,8 +947,8 @@ aisquare explainability disable
 ```
 
 Targets are **kept**, so re-enabling is `aisquare explainability enable --target
-prod` with no arguments to retype. After disabling, `status` reads `enabled:
-False` while still showing the target and gateway, and
+prod` with no arguments to retype. After disabling, `status` reports enabled as
+false while still showing the target and gateway, and
 `aisquare explainability env <role>` exits `1` and emits no exports — so every
 session launches untraced. Reversible in both directions, no other behaviour
 change **to config**.

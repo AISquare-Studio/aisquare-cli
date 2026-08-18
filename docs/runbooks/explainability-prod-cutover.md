@@ -569,6 +569,14 @@ Run by me against staging, the explainability section verbatim:
 ✓ sdk:gateway_live: Alive        ✓ sdk:gateway_ready: Ready
 ```
 
+> ⚠️ **[verified-train, coder2 `8dd460fb`] The proxy row proves a proxy is
+> answering, not that YOU started one.** Walking this runbook end to end with §3
+> deliberately skipped, that line still read healthy — another process on the box
+> was serving 9190. So on a re-run, or on a machine where an earlier cutover left
+> a proxy up, a green proxy row can hide a §3 that silently failed, and the
+> traffic would go to the OLD proxy. If you did not watch §3 start it, confirm
+> whose it is before trusting this row: `ss -ltnp | grep 9190`.
+
 **`ingest: test span accepted … (HTTP 202)` is the line that matters.** It is
 the only one that proves the key, the gateway and the identity all work
 together. The `governance ⚠` is expected until §1 is done and is not a failure

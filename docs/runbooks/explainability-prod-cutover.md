@@ -1263,7 +1263,7 @@ If instead the roster names do **not** appear after an ingest, that is the
 green reading you actually want: the gateway accepted them and routed them.
 
 **Cross-check, and it closes a loop.** This workspace owns exactly **one**
-studio — `169`, `has_runs: true` — read from `/v1/workspaces/31/studios`. That
+studio — `169`, `has_runs: true` — read from `/v1/workspaces/$WS/studios`. That
 is the same `publication_id 169` §4b reports for all three roster names, from
 the opposite side of the boundary: the register call maps the roster *to* 169,
 and 169 is the studio this workspace *owns*. `GET /v1/studios` lists sixteen
@@ -1316,7 +1316,7 @@ curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
 > given board row maps to a given Run.
 
 One more read answers the billing question a hard enforcement band would
-raise: `GET /v1/workspaces/31/credits/balance` → `{granted_credits,
+raise: `GET /v1/workspaces/$WS/credits/balance` → `{granted_credits,
 balance_credits, low_balance, band}`. On staging: granted `1000`, band `ok`.
 A `hard` band under hard enforcement is what returns `402` at ingest; `ok` is
 clear.

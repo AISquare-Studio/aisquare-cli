@@ -775,10 +775,29 @@ def configure_shipping(
         config.explainability.gateway_url = url
     if api_key:
         store_api_key(api_key)
-    resolved_key = resolve_api_key()
-    if config.explainability.gateway_url and resolved_key:
-        config.explainability.ship = True
+    # STORE first, then ask whether the machine can now actually ship — this is
+    # the writer, so the resolver has to see what the operator just handed us.
     save_config(config)
+
+    # Both halves through the ONE resolver. Deciding from `resolve_api_key` and
+    # the TOP-LEVEL gateway broke this function's own invariant in both
+    # directions. With a target naming its own key variable (unset) and an
+    # unlabelled key file present — three documented steps: export the gateway
+    # per §5, enable a target, follow "set $VAR or write <key file>" — it set
+    # ship=True while `ship_once` answered "no workspace key", so the spool
+    # filled forever with §5b's timer reporting healthy. And reading the
+    # top-level `gateway_url` meant a machine whose gateway lives only in a
+    # TARGET could never turn shipping on at all.
+    #
+    # The no-target machine is unaffected: `_active_deployment` falls back to
+    # the key file when the target names the DEFAULT variable and to
+    # `settings.gateway_url` when no target names a gateway, which is exactly
+    # what `init --explainability` produces.
+    resolved_gateway, _key_env, resolved_key = _active_deployment()
+    if resolved_gateway and resolved_key:
+        config = load_config()
+        config.explainability.ship = True
+        save_config(config)
     insights.reset_cache()
     return shipping_state()
 

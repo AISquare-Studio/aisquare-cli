@@ -1334,6 +1334,21 @@ INFO:     127.0.0.1:xxxxx - "POST /v1/messages?beta=true HTTP/1.1" 200 OK
 One `pipeline-session: opened` per session, ingest `202`, messages `200`.
 Overnight on staging: **70/70 ingest calls returned 202, zero non-202.**
 
+> **What a verification label does and does not promise — this block and §5b's
+> `status` block carry the same one and support different claims.** Every value
+> above is per-run or per-deployment by construction: the pipeline id, the trace
+> id, the gateway host, the port. So the promise here is **the shape** — these
+> lines appear, in this order, with these statuses — and diffing your output
+> against these characters is not a thing a reader can do or should try.
+> §5b's `status` block is the other kind: on this machine its values *are*
+> reproducible, its own prose invites a line-for-line comparison, and that is
+> exactly why one hand-edited path in it was a defect worth fixing while the
+> placeholders above are correct. **The label certifies that a block was
+> captured; whether you can diff it depends on whether its values reproduce.**
+> When you add one, say which kind it is — `8dd460fb` swept both runbooks for
+> hand-edited values and found five suspect tokens, all five legitimate and four
+> of them here, precisely because this is a shape.
+
 Backlog check:
 
 ```bash

@@ -159,6 +159,9 @@ aisquare doctor
 > `outbox`, `redaction`, `credentials`, `spawn` and `version`: the entire client
 > lane. It still exits `0`, and so does the train build, so **neither the exit
 > code nor `--version` distinguishes them.**
+> So presence of the section is the check: **if `aisquare doctor` shows you no
+> `explainability` rows, you are not running this train** — expected before the
+> install above, and a red flag after it.
 >
 > **Count the section, not the rows — no total is a property of the build.** It
 > moves on two independent axes. Rendered rows depend on terminal width (the same

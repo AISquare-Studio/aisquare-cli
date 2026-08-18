@@ -98,6 +98,58 @@ signatures already exist. The flow is:
 See the README's [Architecture](README.md#architecture) section for the full
 layout and the thin-CLI / service / core split.
 
+## Writing a guard that still guards
+
+This repo has about a dozen AST- and document-level guards. Over one long shift
+every single one was found, by deliberate sabotage, to be passing while checking
+less than it claimed — and the failures fell into four shapes. They are all the
+same question asked at different points: **which thing is the assertion actually
+looking at?** The answer is reliably "the thing that was easy to reach from where
+I was standing".
+
+- **Downstream of the failure.** An assertion on `result.exception` cannot fail
+  when the code under test wraps everything in `except Exception` — the swallow
+  eats the tripwire too. Use state the swallow cannot reach. Likewise, a test
+  that measures elapsed time *after* a call cannot detect a call that never
+  returns; that is a hung build, not a failure.
+- **Narrower than the property.** Redaction was asserted on one field of a
+  twelve-field record while the claim was about the bytes on disk. Assert the
+  artefact the claim is about.
+- **Upstream of the failure.** Every meta-check watched the *walk* — "functions
+  were found", "the allow list names real symbols" — while the *rule* had stopped
+  consuming it. One `continue` inside an offender loop makes a guard inspect
+  nothing and report a clean tree. Extraction is not the fix: a predicate can be
+  extracted *and* unit-tested and still be called by nobody. **The loop must be
+  reachable by a control**, with a positive case per shape it claims to catch and
+  a negative case of correct code it must not accuse — without the negative half,
+  the cheapest way to pass is a rule that accuses everything.
+- **Well-formed but never executed.** Conflict markers inside a docstring are
+  valid Python: the module parses, the tests pass, `make check` reports success.
+  So do a gutted body, an unconditional skip, and an empty `parametrize` set —
+  each collects, counts toward the total, and runs nothing.
+
+Two mechanical rules earned the hard way:
+
+1. **A sabotage needs a control as much as a measurement does.** Assert the
+   mutation actually changed the file before running anything, and print
+   "anchor missed — result meaningless" otherwise. A sabotage that did not apply
+   is a green run that means nothing, and it is indistinguishable from a guard
+   working. A sabotage aimed at the wrong line, or along an axis nothing uses,
+   produces a real result for a fake reason.
+2. **Anchor controls to synthetic inputs, not to production code.** A control
+   pointed at a real function stops controlling anything the day that function is
+   cleaned up — and controlling a falsifiability guard by gutting a real test
+   means shipping the defect to demonstrate it.
+
+On recorded numbers: a floor like `>= 900` is a constant anyone can lower while
+doing something else, so prefer a property with no number in it — and before
+inventing one, check whether the number is simply **redundant** (a broken walk
+yields an empty set, which cannot be a superset of a non-empty allow list, so the
+assertion beside it already fails). But a number that must stay true in **both
+directions** is a control rather than a liability: the census guard survived the
+sabotage that beat two others precisely because its recorded counts have an upper
+bound as well as a lower one. The difference is the second direction.
+
 ## Conventions
 
 - **Type everything.** `mypy` runs in `strict` mode over `src` and `tests`.

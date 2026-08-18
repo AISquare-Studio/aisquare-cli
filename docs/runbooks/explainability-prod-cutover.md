@@ -476,6 +476,27 @@ the ingest key in `explainability-prod.env` cannot do this step.
 the whole call — confirmed: the same request with `Authorization: Bearer` returns
 `401 {"detail":"Token verification failed"}`).
 
+> **The body shape below is confirmed against the deployment's own declaration,
+> not against a checkout.** That distinction earns its place here because
+> `aisquare` **1.0.6** names two different artefacts on this box (§3), so a
+> source tree is precisely the thing whose identity cannot be assumed — whereas
+> a running gateway publishes what it will accept. From staging's unauthenticated
+> `GET /openapi.json` (`info.version` `0.2.0`): `RosterRegisterRequest` requires
+> `agents`, an **array of plain strings** — exactly the `curl` below, and exactly
+> what `aisquare explainability register` sends.
+>
+> **A schema match is not a successful call.** It rules out one failure mode —
+> a malformed body rejected `422` while you are reading a different section for
+> the cause — and rules out nothing else: not that prod accepts your key, not
+> that the roster is applied, not that prod publishes the same schema as staging.
+>
+> Its `200` is declared **free-form** (`additionalProperties: true`, no
+> structure), because the gateway forwards the Studio backend's body verbatim.
+> That is why `register` walks the response for `publication_id` instead of
+> parsing a fixed shape, and why it prints the raw body when it finds none — if
+> the backend renames that field, the command degrades to showing you the answer
+> rather than claiming there wasn't one.
+
 ```bash
 set -a; source /path/to/explainability-prod.env; set +a   # see §2
 curl -sS -X POST "$EXPLAINABILITY_GATEWAY_URL/v1/agents/register-roster" \

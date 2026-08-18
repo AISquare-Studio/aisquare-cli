@@ -79,6 +79,36 @@ def test_section_3_says_a_healthy_answer_is_not_proof_of_ownership() -> None:
     )
 
 
+def test_section_3_warns_that_a_clash_reports_startup_complete_first() -> None:
+    """Measured: uvicorn prints three reassuring lines before the bind error.
+
+    `Application startup complete` refers to the ASGI app, not the socket, and
+    it precedes `[Errno 98] … address already in use`. Exit code 1, no
+    traceback — a clean failure that reads like a success if you stop at the
+    third line. That matters more in this section than it would elsewhere,
+    because a proxy is already holding 9190 on this box, so a clash is the
+    expected case and every later check passes either way.
+    """
+    section = _section("## 3. Start the proxy")
+
+    # Both the WARNING and the EVIDENCE, scoped separately. A section-wide
+    # search for the phrase is satisfied by the headline alone — measured:
+    # eliding the line from the transcript left this green, because the
+    # sentence above quotes it too. Second time in one cycle that a string
+    # appearing twice made an assertion untestable; the fix is the same one.
+    transcript = section[section.index("INFO:     Started server process") :]
+    transcript = transcript[: transcript.index("```")]
+
+    assert "Errno 98" in transcript, "§3 does not show what an occupied port looks like"
+    assert "Application startup complete" in transcript, (
+        "§3's transcript no longer shows the success line that precedes the "
+        f"bind error; that line is the whole hazard. Transcript:\n{transcript}"
+    )
+    assert "Application startup complete" in section[: section.index("```text")], (
+        "§3 shows the misleading line but never warns about it in prose"
+    )
+
+
 def test_section_3_does_not_gate_the_build_check_on_sudo() -> None:
     """The gate defeated the check it guarded, so it must not come back.
 

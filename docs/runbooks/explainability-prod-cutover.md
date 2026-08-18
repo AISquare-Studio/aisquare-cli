@@ -517,6 +517,27 @@ python -m pip install 'aisquare>=1.1.0'
 python -m aisquare.explainability.claude_proxy
 ```
 
+> ⚠️ **[verified-train, @9bbc8ed7 2026-08-18] If something already holds the
+> port, this fails — but it says `Application startup complete` first.**
+> Measured against an occupied throwaway port (never 9190, never 9090):
+>
+> ```text
+> INFO:     Started server process [56195]
+> INFO:     Waiting for application startup.
+> INFO:     Application startup complete.
+> ERROR:    [Errno 98] error while attempting to bind on address
+>           ('127.0.0.1', PORT): address already in use
+> INFO:     Application shutdown complete.
+> ```
+>
+> Exit code 1, no traceback — a clean failure. But the three INFO lines above
+> the ERROR are uvicorn reporting that the *application* started, not that the
+> *socket* bound, and they print in that order. **Read to the last line, not
+> the third one.** This matters here more than it would elsewhere: a proxy is
+> already listening on 9190 on this box (see the caveat below), so a clash is
+> the expected case rather than the unlucky one, and every check after this
+> step passes whether or not your own start succeeded.
+
 **[verified-train]** Confirm the running proxy really has it — from the process
 itself, so it answers for the build that is actually serving rather than for
 whatever you last installed:

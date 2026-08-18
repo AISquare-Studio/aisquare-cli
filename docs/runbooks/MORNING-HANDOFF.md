@@ -20,6 +20,18 @@ something is.
 
 ## What needs you — in order, blockers first
 
+**All six at a glance, because the detail below runs long and item 1 alone is
+forty lines.** Read the ones you need:
+
+1. **Reinstall non-editable** (§0). Not blocked on anything but typing. Long here
+   only because three commands could silently strip your config afterwards.
+2. **Governance** — the one real blocker. Needs a credential we do not hold.
+3. **Nobody has read the studio.** Every delivery claim stops at the gateway.
+4. **Prod values unverified.** Mechanisms verified against staging, not values.
+5. **One consent question**, never forced. Nothing breaks by leaving it.
+6. **Install the shipping timer** (§5b). Not a blocker, but forever after.
+
+
 1. **Step 1 of the runbook (§0, the non-editable reinstall) has not been run.**
    Nothing blocks it but the typing; the command was verified working at the
    current head. Until it runs, `aisquare` on `PATH` is the pyenv build and

@@ -249,6 +249,13 @@ Every entry below cost someone here a **published or nearly-published wrong
 number** in a single shift. They are not style notes; each one produces a result
 that looks exactly like a real answer.
 
+**One false entry means audit the rest, not note that someone should.** A single
+wrong line was found in the handoff's "what was deliberately left" — the section
+whose entire value is telling a decision from an oversight — and the response was
+to re-check all four entries. Exactly one was false; one of the three survivors
+was nearly reported as a second defect off a grep alone before the code refuted
+it. A section that exists to be trusted earns an audit the moment it is wrong once.
+
 **Reading this section is not a control for anything in it.** Someone hit the
 "empty result from a failed command" entry *twenty minutes after reading it* —
 `git diff --pathspec-from-file` does not exist, git printed usage to stderr, and
@@ -280,6 +287,14 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   commit being merged. Verify the file you produced, not the one you read from.
 - **`git checkout -- <path>` cannot restore an untracked file** — and a new file is
   exactly the one you are most likely to have just sabotaged.
+- **Do not `pkill` a pytest run by a pytest pattern.** Part of this suite spawns
+  `python -m pytest --collect-only` as a subprocess, so a pattern matching the
+  parent matches the child too. Killing one produced `1 failed, 1639 passed` with
+  the failure attributed to `test_the_sweep_sees_exactly_what_pytest_runs` — the
+  most alarming name in the suite — and the only tell was `returncode=-15` with
+  empty stdout *and* empty stderr, which no real collection failure produces. This
+  is worse than a wrong number: it is **a wrong failure, arriving under a
+  frightening name.**
 - **Ancestry proves landed; non-ancestry proves nothing.** A rebased or squashed
   branch is not an ancestor while its content is fully present. `for-each-ref
   --merged` answers the first question; only a per-file diff (correctly quoted)

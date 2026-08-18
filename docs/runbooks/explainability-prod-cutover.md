@@ -517,6 +517,30 @@ the staging 403s. Record the values; do not wire them anywhere yet.
 > So before §4 this is a line you have to *read*; after §4 it is one that stops
 > you.
 >
+> **And there is a third state that prints nothing at all.** On a machine where
+> tracing was *never configured*, the SDK section collapses and this row is
+> **absent** — not `ok`, not `⚠`. That is correct (an untouched machine has no
+> backlog either) but it is a different reading from "tracing off", and the two
+> are easy to conflate. **[verified-train, `8dd460fb`]**, seeded inbox, with the
+> control that makes the rest mean anything:
+>
+> ```text
+> clean pending row, no 409       ✓  pending=1                    exit 0   <- CONTROL
+> pending, last_error 409         ✗  pending=1 — … gateway_status:409       exit 1
+> dead_letter row                 ✗  dead_letter=1 — … no_agent_identity   exit 1
+> tracing never configured        (row absent entirely)           exit 0
+> ```
+>
+> The control is the load-bearing line: a clean pending row is `ok`, so the
+> failure is about **the 409** and not about having a queue at all.
+>
+> **Which gives the one sentence to remember about this row: it has two
+> preconditions, and missing either turns a real backlog into silence.** Tracing
+> must be on, *and* `EXPLAINABILITY_INBOX_PATH` must point at the file that was
+> actually written. Miss the first and the row is absent; miss the second and it
+> says `✓ … No inbox database … (nothing recorded yet)` over a filling queue.
+> Both failures look like health.
+>
 > **That reporting is only as good as `EXPLAINABILITY_INBOX_PATH`, which is
 > where §2 earns its keep.** The check reads that variable and defaults to the
 > RELATIVE `explainability_inbox.db`, so unset it resolves against whatever

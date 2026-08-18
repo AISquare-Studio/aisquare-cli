@@ -77,6 +77,14 @@ Empty is the *bad* reading here, so rule out the boring cause first: a missing
 `jq` also prints nothing. `aisquare doctor | grep provenance` answers the same
 question without it.
 
+**`installed (editable) from …` is also a fail, and it will not look like one**
+— it is non-empty, so it passes the rule above while putting you in exactly the
+state the warning at the top of §0 forbids. **[verified-train, planner
+`dfd9a883`]** this box answers `installed (editable) from
+/home/work/work/aisquare-cli` for a venv build, so the reading is reachable, not
+theoretical. If you see `editable`, reinstall non-editable before §5 — that is
+the install that bricks the CLI when the explainability extra lands on top.
+
 > ⚠️ **[verified-train, coder3 `9bbc8ed7`] The older form of this check could
 > tell a correctly-installed operator to reinstall.** It was
 > `grep -c resolve_binary "$(python3 -c '…aisquare.__file__…')/cli/launch.py"`,

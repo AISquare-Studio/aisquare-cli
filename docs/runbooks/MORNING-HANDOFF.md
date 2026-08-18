@@ -88,6 +88,13 @@ forty lines.** Read the ones you need:
    `✗ unknown config key: explainability.ship` and exits non-zero, which is the
    one loud member of this family — measured, both halves, under a throwaway
    home.
+   **Read the counter, not the directory — and if you do look, the directory is
+   `~/.aisquare/explainability/queue/`, not `spool`.** `spool` is this
+   codebase's word for the buffer (`status` prints `spool: 1 queued`) and is
+   not a path anywhere; the ninety minutes above were lost searching for a
+   `spool` directory that does not exist. Nothing shipped points at the wrong
+   name — swept both runbooks, the README and CONTRIBUTING — so this line is
+   here to name the right one, not to correct a bad one.
    The cutover itself cannot be half-done this way — `explainability enable`
    does not exist on the stale build and exits 2 — so the danger is entirely
    *after* you configure.

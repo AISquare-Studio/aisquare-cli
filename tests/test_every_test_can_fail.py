@@ -46,8 +46,27 @@ ASSERTS_BY_NOT_RAISING = {
 _RAISING_HELPERS = {"raises", "warns", "fail"}
 
 
+def _skips_unconditionally(function: ast.FunctionDef) -> bool:
+    """Whether the first thing this test does is skip itself.
+
+    A test that always skips passes without asserting anything, counts in the
+    total, and satisfies a claims registry — the same three properties as a
+    gutted one. I shipped one earlier tonight and removed it when @9bbc8ed7's
+    phrase named it: "a test that always skips is dead weight pretending to be
+    coverage". There are none today; this is the detector so there are none
+    tomorrow either.
+    """
+    first = function.body[0] if function.body else None
+    if not (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)):
+        return False
+    called = getattr(first.value.func, "attr", None) or getattr(first.value.func, "id", None)
+    return called == "skip"
+
+
 def _can_fail(function: ast.FunctionDef) -> bool:
     """Whether anything in this body could make the test fail."""
+    if _skips_unconditionally(function):
+        return False
     for node in ast.walk(function):
         if isinstance(node, ast.Assert):
             if isinstance(node.test, ast.Constant) and node.test.value:
@@ -131,12 +150,28 @@ def test_the_recorded_exceptions_still_exist() -> None:
     assert not missing, f"recorded as asserting-by-not-raising but gone: {missing}"
 
 
-def test_the_sweep_is_looking_at_the_suite() -> None:
-    """Guard the guard: an empty walk satisfies every assertion above."""
-    found = _test_functions()
+def test_every_test_file_yields_at_least_one_test() -> None:
+    """Guard the guard, WITHOUT a number anyone can lower.
 
-    assert len(found) >= 900, f"only {len(found)} test functions found — the walk broke"
-    names = {name for name, _function in found}
-    assert any(name.startswith("test_correlation_spine.py::") for name in names), (
-        "the file whose gutting motivated this is not being swept"
+    The first version asserted `len(found) >= 900`. That is the
+    constant-that-can-be-lowered category I named two cycles ago and then
+    committed again in the same file that closes the residual about guards
+    which stop guarding — you cannot defend a constant by adding another
+    constant, and `>= 900` becomes `>= 0` in one keystroke.
+
+    So there is no threshold: EVERY `test_*.py` on disk must yield at least one
+    test function. A walk that breaks yields zero from every file and fails by
+    name; a file that loses its last test fails too, which is worth knowing on
+    its own. Nothing to lower, because nothing is typed.
+    """
+    on_disk = sorted(path.name for path in TESTS.glob("test_*.py"))
+    assert on_disk, "no test files found at all — TESTS is pointing somewhere wrong"
+
+    swept = {name.split("::", 1)[0] for name, _function in _test_functions()}
+
+    empty = [name for name in on_disk if name not in swept]
+    assert not empty, (
+        f"these test files yielded no test functions: {empty}. Either the sweep "
+        "stopped parsing them — in which case every assertion in this file is "
+        "passing over less than it claims — or they genuinely contain no tests."
     )

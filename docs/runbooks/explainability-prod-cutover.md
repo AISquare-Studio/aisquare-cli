@@ -1264,6 +1264,51 @@ This is also the workspace-side confirmation of §1e's "leave
 neither the owned studio `169` nor any of the sixteen listable ids, so a pin
 built from it points at a studio this workspace can neither reach nor list.
 
+### The success side — confirm runs LANDED, not just that none were rejected
+
+`ingest-rejections` above is the failure view; it is empty when nothing is
+wrong **and** when nothing is flowing. To confirm the integration actually
+worked — model traffic reached the gateway and insights shipped, both
+attributed — read the workspace's own record of its runs. Same workspace key,
+no studio credential:
+
+```bash
+curl -s -H "X-API-KEY: $EXPLAINABILITY_API_KEY" \
+  "$EXPLAINABILITY_GATEWAY_URL/v1/workspaces/31/credits/usage/by-run?since_days=1&limit=100"
+```
+
+> **[verified-stg, @8dd460fb + @9bbc8ed7 2026-08-18]** On staging this returns
+> the workspace's runs, each `{run_id, agent_name, studio_id, calls, credits,
+> last_at}`. Measured: sixty runs, **every one under studio `169`**, attributed
+> `aisquare-planner` / `aisquare-coder` / `aisquare-runner` / `aisquare-cli` —
+> the roster, each name distinct. That is the whole integration confirmed from
+> the gateway's side: per-role identity survived to delivery, and the
+> `aisquare-cli` fallback has real runs, so auto-discovery accepted the
+> unregistered name.
+>
+> **It covers BOTH lanes.** A proxy-lane launch and a client-lane
+> `explainability ship` both land here — measured, the same `by-run` call
+> carried a traced launch (`agent_name aisquare-runner`) and three shipped
+> insights (the attributed one as `aisquare-coder`, two unattributed as
+> `aisquare-cli`). So one call answers both "did my model traffic land" and
+> "did my insights land".
+>
+> **`run_id` is the OTel trace id, NOT the pipeline id the board joins on.**
+> Do not grep this view for your `AISQUARE_PIPELINE_ID` / board session id and
+> conclude it is broken when you do not find it — the pipeline id is not a
+> field in this projection. Match a run by its `agent_name` and `last_at`, or
+> by the OTel `trace_id` if you captured it. **This is why the join is not yet
+> closed:** the shared key the board joins on is absent here, so "board rows
+> join gateway Runs on a shared key" still needs the studio-scoped Run detail,
+> which `403`s. This view proves the runs EXIST and are ATTRIBUTED, not that a
+> given board row maps to a given Run.
+
+One more read answers the billing question a hard enforcement band would
+raise: `GET /v1/workspaces/31/credits/balance` → `{granted_credits,
+balance_credits, low_balance, band}`. On staging: granted `1000`, band `ok`.
+A `hard` band under hard enforcement is what returns `402` at ingest; `ok` is
+clear.
+
 ---
 
 ## 5. The one command that proves it green (1 min)

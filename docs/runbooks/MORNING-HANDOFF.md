@@ -137,6 +137,14 @@ forty lines.** Read the ones you need:
    success for as long as you leave it there. Details in "What is done and
    folded"; it is listed *here* too because a recurring obligation described only
    under "done" gets read as done.
+   **Do this after item 1, not before.** The wrapper needs the absolute path to
+   *your* `aisquare`, substituted at write time because cron has no useful `PATH`,
+   and §5b's own check cannot give you a meaningful answer until the reinstall has
+   happened: measured on this box, the path §5b used to hardcode does not exist at
+   all, and resolving it with `command -v aisquare` before item 1 finds the stale
+   build, which has no `ship` — so the check exits **2** with a usage line rather
+   than the **1** it is looking for. Exit 2 with usage in it means the wrong
+   *build*, not a broken wrapper.
 
 ---
 

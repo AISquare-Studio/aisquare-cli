@@ -871,6 +871,25 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "deployment, confirm the VPN or tunnel is up",
             )
         )
+        # The ingest probe stays gated — posting a span to a URL that just
+        # failed readiness would produce a second confusing failure, and could
+        # post to something that is not our gateway. But an ABSENT row reads
+        # exactly like a passing one: an operator with a red gateway cannot
+        # tell whether ingest is also broken or merely unasked, which is
+        # whether fixing the URL is the whole job. Say it was skipped, in the
+        # idiom this function already uses twice.
+        results.append(
+            _warn(
+                "explainability ingest",
+                "skipped — the gateway did not answer /ready, so no span was posted; "
+                "this is not a verdict on ingest",
+                "Fix the gateway row above, then re-run: aisquare doctor --live",
+            )
+        )
+        # `_sdk_checks` asks the SDK's own doctor and never touches the gateway,
+        # so a gateway failure was silently removing rows that had nothing to do
+        # with it.
+        results.extend(_sdk_checks())
         return results
     results.append(_ok("explainability gateway", f"{target.gateway_url}/ready — HTTP 200"))
 
@@ -883,6 +902,7 @@ def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:
                 "Fix explainability.agent_name_template (it must contain {role})",
             )
         )
+        results.extend(_sdk_checks())  # local rows; nothing here depends on the gateway
         return results
 
     verdict = probe_ingest(target, identity)

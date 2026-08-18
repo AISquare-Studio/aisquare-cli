@@ -376,7 +376,14 @@ def test_an_unreachable_gateway_never_reports_a_green_round_trip() -> None:
     checks = ops.checks(_wired(url), live=True, env=_env())
     gateway = next(c for c in checks if c.name == "explainability gateway")
     assert gateway.status is CheckStatus.fail
-    assert not any(c.name == "explainability ingest" for c in checks)
+    # This used to assert the ingest row was ABSENT. The test's own name is
+    # "never reports a GREEN round trip", and absence was a narrower claim than
+    # that — it also made the row's silence indistinguishable from a pass it
+    # never attempted, which is the defect tsk_01m0ak70 fixed. The row is now
+    # reported as skipped; what must never happen is it reading ok.
+    ingest = next(c for c in checks if c.name == "explainability ingest")
+    assert ingest.status is not CheckStatus.ok, ingest.detail
+    assert ingest.detail.startswith("skipped"), ingest.detail
 
 
 def test_a_green_round_trip_still_flags_ungoverned_runs() -> None:

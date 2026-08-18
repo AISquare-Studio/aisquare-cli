@@ -107,6 +107,59 @@ def _mint(role: str = "coder") -> SessionWiring:
     return wiring
 
 
+def _places_carrying_another_id(
+    observed: dict[str, tuple[str, str]], minted: str
+) -> dict[str, str]:
+    """Places whose value is not the one that was minted.
+
+    A CALLABLE rule rather than a comprehension inside the test, because this
+    guard's ratchet is EMPTY: "nothing disagrees" is what success looks like,
+    so a rule that has gone blind produces the correct-looking answer for free.
+    Measured before this existed — ``if value != minted`` replaced by
+    ``if False`` left SIX TESTS PASSING, and the guard reported that one minted
+    id reached all four places while comparing none of them.
+
+    @8dd460fb named the wrinkle: in an empty-ratchet guard, emptiness is both
+    the goal and the symptom, and the only thing that can tell them apart is an
+    input the rule must still SEE. Hence the positive control below, driven
+    through this same function rather than around it — proving a helper works
+    says nothing about whether the assertion still calls it.
+    """
+    return {place: value for place, (value, _origin) in observed.items() if value != minted}
+
+
+def test_the_disagreement_rule_reports_a_place_that_carries_another_id() -> None:
+    """Positive control: the input this rule must still see.
+
+    Synthetic rather than the real spine walk, so it keeps controlling when the
+    walk changes — and it names the place, because "something disagreed" would
+    not tell whoever reads the failure which hop broke.
+    """
+    observed = {
+        "X-Pipeline-Id header": ("the-minted-id", "wiring.env"),
+        "board row": ("a-different-id", "team status --json"),
+    }
+
+    reported = _places_carrying_another_id(observed, "the-minted-id")
+
+    assert reported == {"board row": "a-different-id"}
+
+
+def test_the_disagreement_rule_stays_quiet_when_every_place_agrees() -> None:
+    """Negative control, so "report everything" is not a fix.
+
+    Without it the cheapest way to satisfy the positive control is a rule that
+    always fires, and a guard that fails on a healthy spine gets deleted rather
+    than repaired.
+    """
+    observed = {
+        "X-Pipeline-Id header": ("the-minted-id", "wiring.env"),
+        "board row": ("the-minted-id", "team status --json"),
+    }
+
+    assert _places_carrying_another_id(observed, "the-minted-id") == {}
+
+
 def test_one_minted_id_reaches_all_four_places(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -179,8 +232,28 @@ def test_one_minted_id_reaches_all_four_places(
         "the same object satisfying several places is the narrowing one level down"
     )
 
-    disagreeing = {place: value for place, (value, _origin) in observed.items() if value != minted}
-    assert not disagreeing, f"these places carry a different id than the mint: {disagreeing}"
+    # No intermediate variable on purpose: `disagreeing = {}` was a one-word
+    # bypass that left every assertion here passing. Calling the rule inside
+    # the assert means a bypass has to edit the assert itself, which is a
+    # conspicuous edit rather than a silent one.
+    assert not _places_carrying_another_id(observed, minted), (
+        "these places carry a different id than the mint: "
+        f"{_places_carrying_another_id(observed, minted)}"
+    )
+    # The rule, demonstrated on THIS data rather than on a synthetic mapping:
+    # seed one place with a wrong id and require it to be reported. Without
+    # this, a rule blinded to disagreements produces the empty answer that
+    # success also produces, which is @8dd460fb's empty-ratchet wrinkle.
+    #
+    # It does NOT close the regress: `disagreeing = {}` above still passes,
+    # because an assertion's input can always be replaced with a literal and
+    # nothing in this file can see that. What it buys is that the rule cannot
+    # go blind unnoticed — only that this one assertion can be bypassed
+    # deliberately, which is a conspicuous edit rather than a silent one.
+    seeded = {**observed, "board row": (minted + "-not-the-mint", "team status --json")}
+    assert _places_carrying_another_id(seeded, minted) == {"board row": minted + "-not-the-mint"}, (
+        "the rule cannot see a disagreement in the very data this test just checked"
+    )
 
 
 def test_two_sessions_do_not_share_an_id(runner: CliRunner) -> None:
@@ -260,6 +333,8 @@ REQUIRED_CLAIMS = frozenset(
         "test_the_agent_name_follows_the_role",
         "test_the_spawn_template_passes_the_flag_the_parser_looks_for",
         "test_an_untraced_session_passes_no_session_id_at_all",
+        "test_the_disagreement_rule_reports_a_place_that_carries_another_id",
+        "test_the_disagreement_rule_stays_quiet_when_every_place_agrees",
     }
 )
 

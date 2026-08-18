@@ -779,7 +779,16 @@ aisquare --json explainability status | jq -r .shipping.gateway
 # must equal your PROD gateway URL
 ```
 
-This is the one check that can catch a split brain, and counts can never do it:
+**[verified-train, planner `dfd9a883`] Read this as "confirm the resolved
+gateway", not "detect a split brain".** It was written when the two lanes could
+resolve *independently* — model traffic to prod while insights kept going to
+staging. That fix landed: both lanes now resolve from the one active target, and
+across three configurations — target `stg`, target `prod`, and a hand-pinned
+stale top-level `gateway_url` — `.shipping.gateway` tracked the active target
+every time. **I could not construct a state where it disagrees**, so treat the
+old billing as retired: this tells you *which deployment you are actually
+pointed at*, which is still worth one command before you trust the run. Counts
+still cannot do that:
 `2 sent` reads identically whichever gateway it went to. The two lanes —
 proxy traffic and shipped insights — used to be able to point at DIFFERENT
 deployments, with `status` reporting only the proxy lane's target; configure

@@ -163,8 +163,13 @@ and rebindings.
   halves looked healthy and nobody was told. One target switch now moves both
   lanes, and if the target names a key variable that is not set, shipping
   **refuses by name** rather than quietly using a stored one.
-  The only check that can detect a recurrence:
+  Confirm which deployment you actually ended up on:
   `aisquare --json explainability status | jq -r .shipping.gateway`
+  (This used to be billed as *the* split-brain detector. It is not, any more —
+  both lanes now resolve from one target, and across three configurations I
+  could not make that value disagree with the active target. It confirms where
+  you are pointed; it no longer proves the lanes agree, because they cannot
+  currently disagree.)
 - **`AISQUARE_AGENT_NAME` collided with the SDK's own routing variable.**
 - **A store-migration race** (TOCTOU) under concurrent first opens.
 - **`~/.aisquare/credentials` had two writers with incompatible formats, and

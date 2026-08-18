@@ -36,9 +36,32 @@ still holding**: §0b's warm-store and concurrency numbers, both damaged-store
 messages, the truncation warning, the recovery, `launch`'s fail-open line (with
 a healthy-store control), `enable`, `status`, `ship` plain-versus-`--strict`,
 the destination check, and the proxy-interpreter finder. The other twenty-nine
-markers are prose with no command attached and were NOT re-run — several
-describe states that cannot be constructed on this box. Read this paragraph as
-covering the thirteen and nothing else.
+markers are prose with no command attached.
+
+**Six of those prose markers have since been re-run too, and "cannot be
+constructed" was too pessimistic.** `coder2` built §0's brick warning in
+throwaway venvs — both halves, editable *and* non-editable — and it holds,
+mechanism included. `coder3` then re-ran five more against the current train,
+each with a control so that "it printed something" could not pass for "it
+printed the documented thing":
+
+* `status --json` returns all eleven documented keys, and the key VALUE appears
+  nowhere in the payload or the human output — checked with a sentinel value
+  actually exported, so the absence means something;
+* the `eval` really is shell-agnostic — no `$'…'` quoting emitted, and it
+  evaluates cleanly under `dash`, `sh` and `bash`;
+* without `--session-id` two calls mint different ids; with
+  `--session-id d124bc26` the header carries exactly that;
+* a `✓ database` line means the file OPENED, not that it is intact — page 20
+  zeroed gives `status` exit 0 and `✓ database: … (10 user entries)` while
+  `PRAGMA integrity_check` reports `database disk image is malformed`;
+* `AISQUARE_AGENT_NAME` is referenced twice in the source — the constant and a
+  comment saying it is deliberately not used — and never appears in the emitted
+  environment.
+
+That leaves roughly two dozen prose markers unexercised. Several are other
+people's measurements, where re-running is re-deriving rather than checking.
+Read these notes as covering what they name and nothing wider.
 
 > **Read §1 and §6 before you touch anything.** §1 is a blocker that staging
 > hit and prod will hit identically. §6 is how you get out.

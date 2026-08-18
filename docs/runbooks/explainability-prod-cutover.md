@@ -507,8 +507,30 @@ Contents (values from the prod workspace — Settings → Studios → API keys):
 EXPLAINABILITY_GATEWAY_URL=https://<prod-explainability-host>
 EXPLAINABILITY_API_KEY=<prod ingest:write workspace key>
 EXPLAINABILITY_AGENTS=aisquare-planner,aisquare-coder,aisquare-runner
+EXPLAINABILITY_INBOX_PATH=/home/you/.aisquare/claude_proxy_inbox.db
 # EXPLAINABILITY_STUDIO_ID intentionally NOT set — see §1e.
 ```
+
+> ⚠️ **[verified-train, coder2 `8dd460fb`, 2026-08-18] `EXPLAINABILITY_INBOX_PATH`
+> is the fourth line for a reason: without it the SDK's own backlog check reads a
+> different file from the one its proxy writes.** In the pinned SDK
+> (`aisquare` 1.0.6 @ `bb88bb5`) the two defaults disagree — its **proxy**
+> writes `~/.aisquare/claude_proxy_inbox.db`, while its **doctor**'s
+> `_check_delivery_backlog` looks for a **relative** `explainability_inbox.db`
+> in whatever directory you happen to be in. (Both live in the SDK, not in this
+> repo, which is why they are named by symbol here rather than by path.) So with
+> the variable unset, `doctor --live` prints
+> `✓ sdk:delivery_backlog: No inbox database … (nothing recorded yet)` over a
+> live inbox. Measured both ways on a probe inbox holding one pending row: unset
+> → "No inbox database"; set → `pending=1`.
+> That check is the one designed to surface what the sweeper's retry loop hides
+> — its own docstring says it fails on dead-lettered rows and on pending rows a
+> gateway 409'd — so pointed at the wrong file it cannot do its job, and the day
+> there IS a backlog it will still say nothing was recorded. **The defect is the
+> SDK's and belongs upstream; this line is the mitigation available from here.**
+> Observed on this box: the proxy's inbox was 5.2 MB after 27 hours and held
+> **zero** rows — allocated space after rows were written, delivered and pruned.
+> Nothing was hidden; the detector simply could not see the file.
 
 > ⚠️ **[verified-train] Do NOT put `AISQUARE_AGENT_NAME` in this file.** An
 > earlier version of this runbook set it to `aisquare-runner`. That variable is

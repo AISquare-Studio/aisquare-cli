@@ -35,7 +35,7 @@ forty lines.** Read the ones you need:
 2. **Governance** — the one real blocker. Needs a credential we do not hold.
 3. **Nobody has read the studio.** Every delivery claim stops at the gateway.
 4. **Prod values unverified.** Mechanisms verified against staging, not values.
-5. **A proxy already answers §3 on this box** — 27 hours old. §3 can pass
+5. **A proxy already answers §3 on this box**, more than a day old. §3 can pass
    without you.
 6. **One consent question**, never forced. Nothing breaks by leaving it.
 7. **Install the shipping timer** (§5b). Not a blocker, but forever after.

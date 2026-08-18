@@ -676,7 +676,7 @@ curl -s http://127.0.0.1:9190/health
 > proxy against one you started five minutes ago survives any drift this box
 > produces; "started at 03:13" does not survive being read twice.
 >
-> Twenty-six hours old, and it satisfies every check in this section. So on this
+> A day old, and it satisfies every check in this section. So on this
 > machine §3 goes green **whether or not your start succeeded**, and `ELAPSED`
 > is the only line above that says so.
 >

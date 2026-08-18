@@ -696,8 +696,26 @@ it there. A `0` means it really shipped; anything else prints why:
 
 ```bash
 aisquare explainability ship --strict
-env -i sh -c "$HOME/.aisquare/ship-insights.sh"; echo "exit=$?"
+env -i HOME="$HOME" LOGNAME="$LOGNAME" SHELL=/bin/sh PATH=/usr/bin:/bin \
+  "$HOME/.aisquare/ship-insights.sh"; echo "exit=$?"
 ```
+
+> ⚠️ **[verified-train, coder3 `9bbc8ed7`] Model cron; do not exceed it.** An
+> earlier revision of this line was a bare `env -i sh -c …`, which clears the
+> environment *entirely* — including `HOME`. The wrapper above reads
+> `"$HOME/.config/…"` **inside** the script, so with `HOME` unset it sources
+> `/.config/aisquare/…`, dies before reaching the CLI, and reports **exit 2**
+> on a perfectly good timer. Measured, exit codes captured directly: bare
+> `env -i` → **2**, "cannot open /.config/aisquare/…"; the line above → **1**
+> with a real reason from `--strict`; and with the key deliberately out of
+> scope → **1**, "no workspace key". `man 5 crontab` on this box: "SHELL is set
+> to /bin/sh, and LOGNAME and HOME are set from the /etc/passwd line of the
+> crontab's owner." A check stricter than the thing it models fails a correct
+> setup, which teaches you to ignore it — the same way a check that is too
+> lenient teaches you to trust a broken one. The explicit variables above are
+> what cron really gives you, and clearing everything else still catches the
+> two hazards that matter: no key in the environment, and a `PATH` that will
+> not find `aisquare`.
 
 > Then watch the drift:
 >

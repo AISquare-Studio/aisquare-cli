@@ -7,12 +7,14 @@ failure is swallowed and the command exits 0, never disrupting the agent.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
 
 import typer
 
+from aisquare.core import paths
 from aisquare.services import hooks as hooks_service
 
 app = typer.Typer(
@@ -20,6 +22,49 @@ app = typer.Typer(
     hidden=True,
     no_args_is_help=True,
 )
+
+
+#: What each boundary actually costs when it fails open. Named per hook rather
+#: than shared, because three of the five do not inject context at all and a
+#: line claiming they did would be a wrong sentence printed on every turn — the
+#: two that matter to a reader are the ones a TEAMMATE sees: a session that
+#: never leaves "running", and a turn that arrives with no delta.
+_COST = {
+    "session-start": "this session starts with no aisquare context",
+    "user-prompt-submit": "no teammate updates reach this turn",
+    "session-end": "the board will keep showing this session as running",
+    "stop": "the board will not show this session as waiting for input",
+    "notification": "the board will not show this session as needing attention",
+}
+
+
+def _cost_of_failing_open(hook: str, exc: Exception) -> None:
+    """Never disrupt the agent — and never lose the reason either.
+
+    Failing open is half the doctrine. The other half is saying what it cost,
+    and these five boundaries were doing only the first: a damaged store made
+    every session start with no context and every prompt arrive with no
+    teammate delta, silently, with ``doctor`` the only surface that knew and
+    nothing to suggest running it.
+
+    STDERR, NEVER STDOUT. For ``session-start`` and ``user-prompt-submit``
+    stdout BECOMES the agent's context, so a diagnostic printed there is
+    injected into the model's prompt — a worse defect than the silence it
+    would replace. ``typer.echo(..., err=True)`` matches ``emit_write_warning``
+    in the team CLI, which is already the agent-facing warning channel.
+
+    EVERY OCCURRENCE, not once per session: warning once would need somewhere
+    to record that it already warned, and the thing that is broken IS the place
+    we would record it. Each occurrence is a real loss — that prompt genuinely
+    did not get its delta — and the volume is bounded by fixing the store,
+    which is what the line says to do.
+    """
+    if isinstance(exc, sqlite3.Error):
+        reason = f"{paths.db_path()} unreadable ({exc})"
+    else:
+        reason = f"{hook} failed ({type(exc).__name__}: {exc})"
+    cost = _COST.get(hook, "this hook did nothing")
+    typer.echo(f"aisquare: {reason} — {cost}; run: aisquare doctor", err=True)
 
 
 def _payload() -> dict[str, Any]:
@@ -65,7 +110,8 @@ def session_start() -> None:
             model=_str(payload, "model"),
             effort=_effort_level(payload),
         )
-    except Exception:  # never disrupt the agent
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open("session-start", exc)
         return
     if context:
         typer.echo(context)
@@ -85,7 +131,8 @@ def user_prompt_submit() -> None:
             model=_str(payload, "model"),
             effort=_effort_level(payload),
         )
-    except Exception:  # never disrupt the agent
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open("user-prompt-submit", exc)
         return
     if delta:
         typer.echo(delta)
@@ -97,7 +144,8 @@ def session_end() -> None:
     try:
         payload = _payload()
         hooks_service.session_ended(_cwd(payload), session_id=_str(payload, "session_id"))
-    except Exception:  # never disrupt the agent
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open("session-end", exc)
         return
 
 
@@ -107,7 +155,8 @@ def stop() -> None:
     try:
         payload = _payload()
         hooks_service.turn_stopped(_cwd(payload), session_id=_str(payload, "session_id"))
-    except Exception:  # never disrupt the agent
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open("stop", exc)
         return
 
 
@@ -121,5 +170,6 @@ def notification() -> None:
             session_id=_str(payload, "session_id"),
             message=_str(payload, "message"),
         )
-    except Exception:  # never disrupt the agent
+    except Exception as exc:  # never disrupt the agent
+        _cost_of_failing_open("notification", exc)
         return

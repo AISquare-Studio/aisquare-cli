@@ -153,11 +153,23 @@ because conflict markers had nearly shipped: it reported every file clean while
 matching nothing, restoring exactly the hole it existed to close, behind a green
 suite. Assume the half you did not think of is a rule.
 
-**Five shapes, one remedy — measured, not assumed.** The shapes above are five
-ways a rule goes blind; they are not five things to check for. A positive
-control catches all of them, because it tests the rule's ability to *see* a case
-it must report, and every one of these failures is a failure to see. How the
-rule was blinded is a difference in cause, not in effect.
+**Four of the five shapes, one remedy — measured, not assumed.** Four of the
+shapes above are ways a rule goes *blind*; they are not four things to check
+for. A positive control catches all of them, because it tests the rule's ability
+to *see* a case it must report, and blindness is a failure to see however it was
+caused.
+
+**The exception is "narrower than the property", and a control cannot reach
+it.** That rule is not blind — it sees perfectly, and reports on the wrong
+thing. Demonstrated: a redaction rule reading one field of a record, a claim
+about the whole record, a secret in a second field. The claim test passes, the
+positive control passes (the rule really does spot a leak in the field it
+reads), and the secret is in the artefact. **A control inherits the rule's blind
+spot, because you write the control in the rule's own terms** — you could only
+write the one that catches this if you already knew the rule was too narrow, and
+then you would widen the rule instead. The remedy is the one stated with that
+shape above: assert the artefact the claim names. Widening the rule and re-running
+does catch it.
 
 Measured across three guards, both mutation styles, both arms — with the control
 present and with it removed:

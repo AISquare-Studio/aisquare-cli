@@ -207,7 +207,11 @@ def test_the_guard_actually_inspects_something() -> None:
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
 
-    assert len(functions) >= 30, f"only {len(functions)} functions parsed from {SOURCE}"
+    # No typed floor here on purpose. A broken walk yields an empty set, which
+    # cannot be a superset of a non-empty allow list, so the assertion below
+    # already fails on it — VERIFIED by neutralising a `>= 30` floor AND breaking
+    # the walk together: this test still failed. A number would be the
+    # constant-that-can-be-lowered category (@8dd460fb), earning nothing.
     assert {n.name for n in functions} >= _MAY_RESOLVE_KEY, (
         "the allow list names functions that no longer exist, so it excuses nothing"
     )
@@ -296,7 +300,9 @@ def test_the_ops_walk_inspects_something_and_the_rule_can_match() -> None:
     tree = ast.parse(OPS_SOURCE.read_text(encoding="utf-8"))
     functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
 
-    assert len(functions) >= 20, f"only {len(functions)} functions parsed from {OPS_SOURCE}"
+    # No typed floor, same reason as above, and here the rule-still-matches
+    # assertion at the end of this function is a second cover: a broken walk
+    # makes its `next(...)` raise rather than pass.
     assert {n.name for n in functions} >= _OPS_MAY_RESOLVE_KEY, (
         "the ops allow list names functions that no longer exist"
     )

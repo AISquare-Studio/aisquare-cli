@@ -343,6 +343,26 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   assembled from a template — a `--detail` body, a redacted payload, a span
   attribute — and the tell is a confident empty reading on something you know you
   set.
+- **A killed gate prints failure-shaped output that is not a failure, and it has
+  two faces.** A 10-minute ceiling fired mid-file and the log read
+  `tests/test_serve_lifecycle.py ..FF` immediately before
+  `make: *** [Makefile:16: test] Terminated` — the file passes 5/5 in 13s in
+  isolation, so both `F`s were collateral from the SIGTERM. The same ceiling firing
+  just as the suite reached `[100%]` reads instead as "the suite hangs at
+  teardown", and was nearly filed as a CI-blocking regression. **Before reading any
+  `F` in a gate log, check whether the log ends in `Terminated` or `Killed`** — if
+  it does, the run has no verdict at all and the named file must be re-run alone.
+  Both of those were caught by looking at the box rather than at the log: three
+  full suites on 16 cores, load 10.6, a starved suite rather than a broken one.
+- **A `ps | grep` for a command counts the shell that is running the grep.** The
+  `[m]ake` bracket trick stops the pattern matching the *grep* process; it does not
+  stop it matching the *invoking shell*, whose argv contains the whole pipeline
+  including the string you are searching for. A published "check whether a gate is
+  already running" rule reported **three concurrent gates at load average 1.07** —
+  impossible, and the only reason it was caught. Count the process that actually
+  burns CPU and read the load, never the command name:
+  `ps -eo pid,pcpu,args | awk '$3 ~ /pytest$|\/pytest/ {n++} END {print n+0}'` and
+  `awk '{print $1/16}' /proc/loadavg`.
 - **Two files under `~/.aisquare` hold credentials, and one is a database people
   query while debugging.** `credentials` and `explainability-key` are obvious;
   `claude_proxy_inbox.db` is not — its schema carries an `api_key` column, one key

@@ -375,6 +375,31 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   /proc/loadavg` read **0.13 while that same gate ran**, because one suite two
   minutes in does not move a 16-core average. It only crosses `0.5` once the box
   is already in trouble, which is after the point you wanted to decide.
+- **Do not search for your own description of somebody's work — ask the commit
+  for its own words.** Verifying that a lane survived a fold by grepping a phrase
+  from its RECEIPT, its COMMIT MESSAGE, or your paraphrase of either produces a
+  false "it is gone" every time the wording differs, which is most of the time.
+  This has now cost five false alarms in one shift, each one briefly reading as
+  "I deleted a teammate's measurement". The mechanical form takes the added lines
+  from the commit itself and asks whether each survived:
+
+  ```bash
+  git show <sha> -- <path> | sed -n 's/^+\([^+]\)/\1/p' | grep -v '^[[:space:]]*$' > /tmp/added
+  git show <ref>:<path> > /tmp/target
+  grep -vxFf /tmp/target /tmp/added        # prints the added lines that did NOT survive
+  ```
+
+  **A non-zero result is not automatically a loss** — it means the lines changed,
+  and the next question is whether the CLAIMS survived, not the lines. A lane
+  whose block was deliberately merged with another author's reports most of its
+  lines "missing" and is perfectly intact; only then is it worth reading. Zero is
+  the cheap answer, non-zero is the beginning of a question.
+
+  **This is also the check the two-dot file list cannot do.** The file list catches
+  a stale base reverting work you never touched; it is blind to two lanes that
+  agree on the file and disagree on the paragraph, because both say "1 file".
+  Probe per lane, in the lane's own words, after the fold.
+
 - **Two files under `~/.aisquare` hold credentials, and one is a database people
   query while debugging.** `credentials` and `explainability-key` are obvious;
   `claude_proxy_inbox.db` is not — its schema carries an `api_key` column, one key

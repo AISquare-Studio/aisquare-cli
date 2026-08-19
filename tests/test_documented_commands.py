@@ -110,6 +110,7 @@ DOCUMENTED = (
     # belongs here. Trivially stable today; listed because the resolution rule
     # is the rule, not because this command is likely to drift.
     ".github/ISSUE_TEMPLATE/bug_report.md",
+    "docs/runbooks/MORNING-HANDOFF.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -846,6 +847,7 @@ _NOT_AN_INVOCATION = (
 #: failure message, which is the only way this file reports them.
 CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
+    "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
     "README.md": (55, 5),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),

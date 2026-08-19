@@ -199,11 +199,24 @@ forty lines.** Read the ones you need:
    **And one specific launch is joined end to end**: the runner's real `claude`
    session printed `trace_id=3b0d901cdb31c7a3…`, and the gateway carries
    `run_id 3b0d901cdb31c7a3facf01f15c719ad4`, `aisquare-runner`, studio 169.
-   **What is still missing is the single shared key, and that is the honest
-   remainder.** This view carries no `session_id`, so joining a Run to a board row
-   goes board row → `pipeline_id` → the proxy's own `pipeline_id=… trace_id=…`
-   line → `run_id`. Two steps, not one key. The one route that carries
-   `session_id` directly is studio-scoped and still `403`s. Two tasks remain
+   **What the credential buys is not new data — it is a view of data you have
+   already sent.** That is the sharpest form of the remainder and it is worth
+   reading twice. Every field this projection exposes for a Run was dumped and
+   searched: nine of them, `title` null, **no `session_id`, and the board key
+   absent in both spellings** (`9bbc8ed7`). So the one-step join is genuinely not
+   available here. **But the key is already inside the spans the gateway
+   accepted** — read out of the outbox payload, the attribute `agent.run_id`
+   carries the board session id verbatim. It is not that the join key never
+   reaches the gateway; the projection our credential opens **drops** it, while
+   the studio route surfaces the same value as `session_id`. One credential, one
+   route, to read back something already delivered.
+   **[unverified]** `agent.run_id` was read from the bytes we sent, not from
+   anything the gateway echoed; "the gateway has it" follows from those spans
+   being accepted (dispatched, zero retries), not from seeing it there.
+   **And Runs are not merged on that key in this projection** — two `ship`
+   invocations sharing one `agent.run_id` appear as two distinct Runs, because
+   Runs are keyed by OTel trace id and each `ship` mints its own. Whether the
+   studio view merges them is unknown and unreachable from here. Two tasks remain
    blocked on that credential (`tsk_01kzdee4pjw8e0ep2g968ejsq6`,
    `tsk_01kze9s8w1n6nmctyr83an5kpt`). See "the one thing to eyeball" below.
    **When that credential exists**, the first thing to run is §5's

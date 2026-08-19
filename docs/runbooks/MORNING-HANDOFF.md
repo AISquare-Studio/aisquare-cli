@@ -68,6 +68,20 @@ forty lines.** Read the ones you need:
      prints nothing, so item 3's workaround is only needed until this item is
      done.
 
+   **And there is a cheaper tell than any of those three, which you can run
+   before you decide anything.** The build on your `PATH` right now prints **no
+   `explainability` rows at all** — not a warning, not a skipped row, the entire
+   subject of the cutover missing — because its `aisquare.core` predates the whole
+   client lane (`insights`, `outbox`, `redaction`, `credentials`, `spawn`,
+   `version`). Measured side by side on this box, same moment: **11 doctor rows
+   with no provenance, against the train's 19 with five explainability rows —
+   and both exit 0.** So neither the exit code nor `--version` distinguishes them,
+   and the check is: **if `aisquare doctor` shows you no `explainability` rows,
+   you are not running this train.** §0 has the measurement; two sessions found
+   it from opposite ends within an hour, one through doctor's row set and one
+   because the feedback publisher fail-closed on `aisquare.core.redaction is not
+   importable` against the CLI you actually type.
+
    This item is first in the list for a reason.
 
    **And it is not only about what you gain by running it.** Once you *have*

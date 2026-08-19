@@ -44,8 +44,18 @@ forty lines.** Read the ones you need:
 
 
 1. **Step 1 of the runbook (§0, the non-editable reinstall) has not been run.**
-   Nothing blocks it but the typing; the command was verified working at the
-   current head. Until it runs, `aisquare` on `PATH` is the pyenv build — whose
+   **It is these three lines, from §0, in the tree at
+   `/home/work/work/aisquare-cli`:**
+
+   ```bash
+   python3 -m pip install '.[dev]'      # NOT -e / --editable — §0 says why
+   which aisquare
+   aisquare doctor
+   ```
+
+   Everything else in this item is why it matters and what it costs to skip; the
+   action is above. Nothing blocks it but the typing, and the command was verified
+   working at the current head. Until it runs, `aisquare` on `PATH` is the pyenv build — whose
    `cli/launch.py` contains **no `resolve_binary` at all** (`grep -c` counts `0`
    there and `1` on this train), which is the grep the runbook uses to tell the
    two builds apart.

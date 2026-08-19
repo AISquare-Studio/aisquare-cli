@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -78,3 +79,57 @@ def test_generate_raises_when_repomix_unavailable() -> None:
     # The autouse no_repomix fixture makes _run_repomix raise.
     with pytest.raises(snapshot.RepomixUnavailableError):
         snapshot.generate("prj_none", Path("/tmp/repo"))
+
+
+def test_repomix_base_runs_the_resolved_path_not_a_bare_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare name is unrunnable on Windows even when the tool is on PATH.
+
+    ``CreateProcess`` does not apply ``PATHEXT``, so ``subprocess`` cannot find
+    the ``npx.CMD``/``repomix.CMD`` shims by name and raises FileNotFoundError.
+    ``shutil.which`` has already resolved them, so pass what it found.
+    """
+    npx = r"C:\Program Files\nodejs\npx.CMD"
+    monkeypatch.setattr(
+        "aisquare.core.snapshot.shutil.which", lambda name: npx if name == "npx" else None
+    )
+    assert snapshot._repomix_base() == [npx, "--yes", "repomix"]
+
+    direct = "/usr/local/bin/repomix"
+    monkeypatch.setattr(
+        "aisquare.core.snapshot.shutil.which", lambda name: direct if name == "repomix" else None
+    )
+    assert snapshot._repomix_base() == [direct]
+
+
+def test_repomix_base_still_reports_when_nothing_is_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("aisquare.core.snapshot.shutil.which", lambda _name: None)
+    with pytest.raises(snapshot.RepomixUnavailableError):
+        snapshot._repomix_base()
+
+
+def test_child_output_is_decoded_as_utf8_not_the_locale_codec(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Tool output is UTF-8, whatever the machine's locale happens to be.
+
+    ``subprocess`` with ``text=True`` and no explicit encoding decodes using
+    the locale codec. On Windows that is the ANSI codepage (cp1252), so the
+    UTF-8 these tools emit raised UnicodeDecodeError inside subprocess's reader
+    thread — repomix's own token count was lost that way, and the traceback was
+    printed straight at the user mid-pack.
+    """
+    seen: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="deadbeef\n", stderr="")
+
+    monkeypatch.setattr("aisquare.core.snapshot.subprocess.run", _capture)
+
+    assert snapshot.head_sha(tmp_path) == "deadbeef"
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "replace"

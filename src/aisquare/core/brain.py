@@ -1,4 +1,4 @@
-"""The project brain: flock-guarded access to a per-project gbrain store.
+"""The project brain: lock-guarded access to a per-project gbrain store.
 
 gbrain (a third-party CLI) is the team's long-term memory: durable decisions,
 results and task outcomes get distilled into one brain per project at
@@ -9,8 +9,8 @@ post-mortems):
 
 - **Never two writers.** gbrain's PGLite engine is single-process and its own
   lock self-destructs after five minutes, so aisquare holds its *own*
-  ``flock`` around every gbrain invocation. Only the distiller and ``recall``
-  ever touch a brain — no daemon, no server, no lock to steal.
+  exclusive file lock around every gbrain invocation. Only the distiller and
+  ``recall`` ever touch a brain — no daemon, no server, no lock to steal.
 - **Never fatal.** A missing gbrain, a failed init or a busy brain degrades
   to "no long-term memory right now" — it must never break the orchestrator or a
   session. Every function here returns a value instead of raising.
@@ -22,17 +22,52 @@ Embeddings are stripped from the environment unless ``AISQUARE_BRAIN_EMBED=1``
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 from aisquare.core import paths
+
+# The exclusive-lock primitive, per platform. ``fcntl`` is POSIX-only and
+# ``msvcrt`` is Windows-only, so the import is branched on ``sys.platform``
+# rather than wrapped in ``try``/``except ImportError``: mypy narrows on
+# ``sys.platform`` and type-checks only the branch that is real for the
+# platform it runs on, which a ``try`` block would not do.
+if sys.platform == "win32":
+    import msvcrt
+
+    def _lock_exclusive(handle: IO[str]) -> None:
+        """Take the lock without blocking; raise ``OSError`` if held."""
+        # Windows byte-range locks are per handle and mandatory, so locking
+        # one byte at offset 0 is exclusive across processes just like flock.
+        # The region may sit past EOF, which is what keeps this working on the
+        # empty lock file.
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(handle: IO[str]) -> None:
+        """Release the lock taken by :func:`_lock_exclusive`."""
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_exclusive(handle: IO[str]) -> None:
+        """Take the lock without blocking; raise ``OSError`` if held."""
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(handle: IO[str]) -> None:
+        """Release the lock taken by :func:`_lock_exclusive`."""
+        fcntl.flock(handle, fcntl.LOCK_UN)
+
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 _ON_VALUES = {"1", "true", "yes", "on"}
@@ -70,7 +105,13 @@ def gbrain_version() -> str | None:
         return None
     try:
         result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=15, check=False
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -134,7 +175,7 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
     try:
         while True:
             try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _lock_exclusive(handle)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -144,7 +185,7 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
         try:
             yield True
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            _unlock(handle)
     finally:
         handle.close()
 
@@ -160,6 +201,8 @@ def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int)
             input=stdin,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
             env=_env(home),

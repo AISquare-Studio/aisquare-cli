@@ -88,6 +88,8 @@ def head_sha(root: Path) -> str | None:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             check=True,
         )
@@ -97,10 +99,21 @@ def head_sha(root: Path) -> str | None:
 
 
 def _repomix_base() -> list[str]:
-    if shutil.which("repomix"):
-        return ["repomix"]
-    if shutil.which("npx"):
-        return ["npx", "--yes", "repomix"]
+    """The argv prefix that runs repomix, as an already-resolved path.
+
+    ``shutil.which`` has done the PATH lookup, so the resolved path is what
+    gets run: on Windows these are ``.CMD`` shims, and ``CreateProcess`` does
+    not apply ``PATHEXT``, so handing ``subprocess`` the bare name raises
+    ``FileNotFoundError`` even though the tool is installed and on PATH.
+    Passing the resolved path is also marginally better on POSIX — one PATH
+    walk instead of two, and immune to PATH changing in between.
+    """
+    direct = shutil.which("repomix")
+    if direct:
+        return [direct]
+    npx = shutil.which("npx")
+    if npx:
+        return [npx, "--yes", "repomix"]
     raise RepomixUnavailableError(
         "repomix not found — install Node.js then `npm install -g repomix`"
     )
@@ -115,7 +128,14 @@ def _run_repomix(root: Path, *, compress: bool) -> tuple[str, str]:
         if compress:
             argv.insert(len(base), "--compress")
         result = subprocess.run(
-            argv, cwd=root, capture_output=True, text=True, timeout=_PACK_TIMEOUT, check=True
+            argv,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_PACK_TIMEOUT,
+            check=True,
         )
         text = out.read_text(encoding="utf-8") if out.exists() else ""
     return text, result.stdout or ""

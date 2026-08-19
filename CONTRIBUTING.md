@@ -360,9 +360,21 @@ ignore rather than remembered.** Put the check in the probe, not in your head.
   including the string you are searching for. A published "check whether a gate is
   already running" rule reported **three concurrent gates at load average 1.07** —
   impossible, and the only reason it was caught. Count the process that actually
-  burns CPU and read the load, never the command name:
-  `ps -eo pid,pcpu,args | awk '$3 ~ /pytest$|\/pytest/ {n++} END {print n+0}'` and
-  `awk '{print $1/16}' /proc/loadavg`.
+  burns CPU and read the load, never the command name. **Match the EXECUTABLE,
+  not the argv text** — any argv-text search matches the shell whose command line
+  contains it, which is the same root cause one level up:
+  `ps -eo pid,comm,args --no-headers | awk '$2 ~ /^(python|pytest)/ && $0 ~ /pytest/ {n++} END {print n+0}'`.
+  The first replacement for this rule was `awk '$3 ~ /pytest$|\/pytest/'`, and it
+  scored **0 with a gate running** — this repo's target is `$(PYTHON) -m pytest`,
+  so argv is `…/python -m pytest` and field `$3` is `-m`. That fails in the
+  *dangerous* direction: the original over-reported and made you wait for nothing,
+  its replacement under-reported and told you to pile on. Verified against a live
+  control — a real gate in flight, which the comm form counts as `1` and the
+  argv form as `0`.
+  **The load ratio is corroboration, not the decision:** `awk '{print $1/16}'
+  /proc/loadavg` read **0.13 while that same gate ran**, because one suite two
+  minutes in does not move a 16-core average. It only crosses `0.5` once the box
+  is already in trouble, which is after the point you wanted to decide.
 - **Two files under `~/.aisquare` hold credentials, and one is a database people
   query while debugging.** `credentials` and `explainability-key` are obvious;
   `claude_proxy_inbox.db` is not — its schema carries an `api_key` column, one key

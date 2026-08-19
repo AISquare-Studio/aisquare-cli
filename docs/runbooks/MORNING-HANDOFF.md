@@ -33,7 +33,9 @@ forty lines.** Read the ones you need:
    tell you to run cannot answer until it has happened. Long here because it also
    closes a way three commands could silently strip your config afterwards.
 2. **Governance** — the one real blocker. Needs a credential we do not hold.
-3. **Nobody has read the studio.** Every delivery claim stops at the gateway.
+3. **The Runs are visible now; the *studio* route still is not.** A
+   workspace-scoped billing view lists them, correctly attributed. Joining one
+   to a board row on a single shared key still needs the studio credential.
 4. **Prod values unverified.** Mechanisms verified against staging, not values.
 5. **A proxy already answers §3 on this box**, more than a day old. §3 can pass
    without you.
@@ -185,9 +187,24 @@ forty lines.** Read the ones you need:
    `EXPLAINABILITY_STUDIO_ID=21` pin changes nothing. Until this is resolved,
    runs are **traced but ungoverned** — enforcing nothing.
 
-3. **Nobody has read the studio.** Every delivery claim in this repo stops at
-   *the gateway accepted the bytes*. Two tasks are blocked on a read-scoped
-   credential (`tsk_01kzdee4pjw8e0ep2g968ejsq6`,
+3. **The Runs are visible from the gateway now — "nobody has read the studio" is
+   no longer the right sentence.** A **workspace-scoped** billing projection,
+   `GET /v1/workspaces/<ws>/credits/usage/by-run`, answers `200` with our key and
+   lists sixty Runs, every one under our owned studio `169`, keyed by OTel
+   `trace_id` and attributed by agent name (`8dd460fb`). **Both lanes appear
+   there** — the proxy lane's model traffic and, once you look up the client
+   lane's trace ids in the SDK inbox rather than its run keys, the shipped
+   insights too, as `aisquare-coder` and the `aisquare-cli` fallback
+   (`9bbc8ed7`, correcting a first reading that called the view proxy-only).
+   **And one specific launch is joined end to end**: the runner's real `claude`
+   session printed `trace_id=3b0d901cdb31c7a3…`, and the gateway carries
+   `run_id 3b0d901cdb31c7a3facf01f15c719ad4`, `aisquare-runner`, studio 169.
+   **What is still missing is the single shared key, and that is the honest
+   remainder.** This view carries no `session_id`, so joining a Run to a board row
+   goes board row → `pipeline_id` → the proxy's own `pipeline_id=… trace_id=…`
+   line → `run_id`. Two steps, not one key. The one route that carries
+   `session_id` directly is studio-scoped and still `403`s. Two tasks remain
+   blocked on that credential (`tsk_01kzdee4pjw8e0ep2g968ejsq6`,
    `tsk_01kze9s8w1n6nmctyr83an5kpt`). See "the one thing to eyeball" below.
    **When that credential exists**, the first thing to run is §5's
    `explainability doctor --live` (read-only, a remediation per line), and then
@@ -441,7 +458,7 @@ Against staging, with real agent processes — not fixtures:
 | Claim | Evidence |
 |---|---|
 | One id in four places | observed in all four simultaneously — **and now pinned**: `tests/test_correlation_spine.py`. **Re-observed on this train against a real `claude` session**, not a stub: `launch runner` printed the minted id, the proxy opened its Run under that same `pipeline_id`, 6× ingest `202`, exit 0 (`d124bc26`). Confirmed **up to the read wall** — that a Run appears in the gateway UI keyed by that id is the one hop still unseen |
-| Per-role separation | 3 roles → 3 distinct trace ids — **pinned** in the same file |
+| Per-role separation | 3 roles → 3 distinct trace ids — **pinned** in the same file, and now **confirmed at DELIVERY from the gateway's own record**: sixty Runs under our studio `169`, attributed `aisquare-planner` 30 / `aisquare-coder` 14 / `aisquare-runner` 5 / `claude-code` 4 / `aisquare-cli` 3. Distinct and correctly named, read without a studio credential (`8dd460fb`) |
 | Proxy lane ingest | 70/70, then 14/14, all `202` |
 | Client lane delivery | 6/6 `DISPATCHED`, 0 `dead_letter`, 0 `auth_failed`, read from the SDK's own inbox — **and re-observed on THIS train `9747e37` (@9bbc8ed7):** `1 queued → 1 sent`, four spans `dispatched`, `retries=0`, inbox byte-identical after. No longer only the pre-shift measurement |
 | Client-lane identity | `agent.run_id` = board session id; `agent.name` = `aisquare-coder`, accepted — that is the *attributed* case; see the fourth name below |

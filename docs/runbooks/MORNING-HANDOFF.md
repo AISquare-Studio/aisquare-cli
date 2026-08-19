@@ -227,7 +227,7 @@ forty lines.** Read the ones you need:
    invocations sharing one `agent.run_id` appear as two distinct Runs, because
    Runs are keyed by OTel trace id and each `ship` mints its own. Whether the
    studio view merges them is unknown and unreachable from here. Two tasks remain
-   blocked on that credential (`tsk_01kzdee4pjw8e0ep2g968ejsq6`,
+   blocked on that credential (`tsk_01m0bx5e12m91jjqydxrk26a5h`,
    `tsk_01kze9s8w1n6nmctyr83an5kpt`). See "the one thing to eyeball" below.
    **When that credential exists**, the first thing to run is §5's
    `explainability doctor --live` (read-only, a remediation per line), and then

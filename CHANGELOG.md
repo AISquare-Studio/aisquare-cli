@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0rc2] - 2026-08-19
+
+Two PRs on top of rc1. **#48 makes `aisquare` run on Windows at all** — the
+package died on `import fcntl` before it could print `--version`, and four more
+defects sat underneath that one; read the migration note under Fixed, because
+hooks installed by rc1 carry broken quoting and need one `agents connect` to
+become runnable. #56 adds the per-role launch profile, folding #52 + #54's
+narrower `team.bins` into a single `team.profiles.<role>` map before it reached
+a release. Windows is not in the CI matrix yet — the Windows branches read
+`sys.platform` at call time and are exercised by monkeypatched tests on ubuntu,
+but pre-existing POSIX-only assumptions in the suite need fixing before a
+`windows-latest` job can go green.
+
 ### Added
 - **Per-role LAUNCH PROFILE — the third launch axis, and deliberately the
   dumbest one.** The ladder decides *what* model a role runs on, `--bin` (#52)
@@ -41,6 +54,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     a banner is a terminal).
 
 ### Fixed
+- **`aisquare` runs on Windows (#48).** `core/brain.py` imported `fcntl` at
+  module scope and sits on the import path of every command, so a Windows
+  install died before it could print `--version` — and fixing that exposed four
+  more defects underneath, each independently breaking a feature. Five fixes,
+  one commit each, POSIX behaviour unchanged throughout:
+  - The brain lock goes through a platform-appropriate primitive — a
+    non-blocking `msvcrt` byte-range lock there, `flock` here — behind one
+    contract both backends share.
+  - Hook commands are quoted for the shell that will actually run them, and
+    the matcher that recognises them is the exact inverse. Those two halves
+    disagreeing was a two-sided bug: `shlex.quote` wrapped every Windows path
+    in single quotes `cmd.exe` has no syntax for, so no hook could launch,
+    while `shlex.split` ate the path separators as escapes, so
+    `hooks_installed()` always returned `False` — `doctor` reported hooks
+    "missing or outdated" with all five sitting in `settings.json`, `connect`
+    appended duplicates and `disconnect` could remove nothing.
+  - `repomix`/`npx` run through the path `shutil.which` already resolved.
+    `CreateProcess` does not apply `PATHEXT`, so a bare name raised
+    `FileNotFoundError` and `project onboard` could never pack — which also
+    makes `doctor` honest, since it probed with `shutil.which` alone and
+    reported repomix available on a machine where packing could not work.
+  - A redirected console is reconfigured to UTF-8. Windows streams fall back
+    to the ANSI codepage when not attached to a console, which cannot encode
+    the `✓`/`⚠`/`→` this CLI prints, so `aisquare doctor > out.txt` exited 1
+    on `UnicodeEncodeError` while the same command run interactively was fine.
+  - Every `subprocess.run` capturing text decodes as UTF-8 with
+    `errors="replace"` rather than the locale codec, which raised
+    `UnicodeDecodeError` mid-pack and silently lost repomix's token count.
+
+  *Migration:* hooks installed by an earlier release carry the broken quoting
+  and are not runnable. `doctor` now recognises them and reports them
+  connected, so re-run `aisquare agents connect claude-code` once to rewrite
+  them.
 - **`team prune` no longer releases a quiet session's in-progress claim (#49).**
   Presence and ownership now retire on different clocks: the session row still
   goes at the threshold (30m), but its `doing` claims are only returned to the
@@ -291,6 +337,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...HEAD
+[0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
+[0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1
 [0.2.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AISquare-Studio/aisquare-cli/releases/tag/v0.1.0

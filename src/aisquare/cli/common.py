@@ -150,6 +150,13 @@ def emit_injection_record(record: InjectionRecord | None) -> None:
         f"  {total} entries — {record.user_count} from your user pool, "
         f"{record.project_count} from this project"
     )
+    if record.retrieved_chars:
+        console.print(
+            f"  {record.retrieved_chars} chars retrieved by the CI test bed "
+            "(candidate reference, not fetched by the agent)"
+        )
+        if record.retrieved_sources:
+            console.print("  sources: " + ", ".join(record.retrieved_sources))
 
 
 def emit_project_detail(project: ProjectInfo) -> None:

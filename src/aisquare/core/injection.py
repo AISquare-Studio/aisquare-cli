@@ -38,6 +38,50 @@ def _bullet(text: str) -> str:
     return "\n".join([f"- {first}", *(f"  {line}" for line in rest)])
 
 
+def build_retrieved_block(context: str, sources: list[str]) -> str:
+    """Frame CI-retrieved documents as candidates, not as fact or instruction.
+
+    The wording here is part of the experiment, not decoration. This material
+    was retrieved by a machine against a prompt and the agent did not fetch it,
+    so it may be irrelevant or wrong. Rendered as plain context it reads as
+    established fact and gets acted on unchecked; rendered as an instruction it
+    steers the agent instead of informing it. Labelling it as candidate
+    reference with its sources attached keeps a bad retrieval visible in the
+    transcript — the agent can open the cited file and disagree — rather than
+    silently absorbed into the answer.
+    """
+    lines = [
+        "## Possibly relevant (retrieved by aisquare — you did not fetch this)",
+        "",
+        "Candidate reference material for this prompt. It may be incomplete or",
+        "wrong. Prefer it over exploring blind, but open the cited source before",
+        "relying on anything from it.",
+        "",
+        context.strip(),
+    ]
+    if sources:
+        lines += ["", "Sources: " + ", ".join(dict.fromkeys(sources))]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def record_retrieval(*, project_id: str, context: str, sources: list[str]) -> InjectionRecord:
+    """Persist what CI contributed to a turn, so ``why`` can account for it.
+
+    Written only when there is something to record. The hook path runs in front
+    of a waiting developer, and a file write on every prompt to note that
+    nothing happened is a cost with no reader.
+    """
+    record = InjectionRecord(
+        injected_at=datetime.now(tz=UTC),
+        project_id=project_id,
+        retrieved_chars=len(context),
+        retrieved_sources=list(dict.fromkeys(sources)),
+    )
+    paths.ensure_home()
+    paths.last_injection_path().write_text(record.model_dump_json(indent=2), encoding="utf-8")
+    return record
+
+
 def record_injection(entries: list[ContextEntry], project: ProjectInfo) -> InjectionRecord:
     """Persist a record of an injection and return it."""
     record = InjectionRecord(

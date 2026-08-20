@@ -18,6 +18,7 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
+from aisquare.services import ci_augment
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
 
@@ -45,7 +46,10 @@ def session_start_context(
         if session_id
         else ""
     )
-    return "\n\n".join(part for part in (directive, block, team_block) if part)
+    # Last, and only when the experiment is on: retrieved material sits closest
+    # to what the agent is about to do, and is the part it should weigh least.
+    retrieved = ci_augment.for_session_start(project_id=project.id, session_id=session_id).block
+    return "\n\n".join(part for part in (directive, block, team_block, retrieved) if part)
 
 
 def prompt_submitted(
@@ -58,12 +62,13 @@ def prompt_submitted(
     effort: str | None = None,
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
-    capture_prompt(prompt, cwd, session_id=session_id)
+    retrieved = capture_prompt(prompt, cwd, session_id=session_id)
     if session_id is None:
-        return ""
-    return team_service.hook_prompt_heartbeat(
+        return retrieved
+    delta = team_service.hook_prompt_heartbeat(
         session_id, cwd, transcript_path=transcript_path, model=model, effort=effort
     )
+    return "\n\n".join(part for part in (delta, retrieved) if part)
 
 
 def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
@@ -89,8 +94,8 @@ def needs_attention(
         team_service.hook_notification(session_id, cwd, message)
 
 
-def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> None:
-    """Record the prompt and open this turn's metrics row, in one store open.
+def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
+    """Record the prompt, consult CI, open this turn's row — in one store open.
 
     Both halves need the active project, and this runs synchronously in front
     of a developer who has just hit enter — resolving it twice would double the
@@ -103,6 +108,9 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     Failures are swallowed here rather than in the caller so that a store
     problem costs the record, not the teammate delta the hook still owes the
     session.
+
+    Returns the retrieved block to inject, or ``""`` — which is what every turn
+    returns while the experiment is off.
     """
     try:
         with store_session() as store:
@@ -110,9 +118,19 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             if prompt is not None and prompt.strip():
                 store.ensure_project(project)
                 store.add_prompt(prompt, project.id, source="claude-code")
-            metrics_service.open_turn(project.id, session_id=session_id, store=store)
+            augmentation = ci_augment.for_prompt(
+                prompt, project_id=project.id, session_id=session_id
+            )
+            metrics_service.open_turn(
+                project.id,
+                session_id=session_id,
+                call=augmentation.call,
+                injected_chars=len(augmentation.block) or None,
+                store=store,
+            )
     except Exception:  # never disrupt the session to record it
-        return
+        return ""
+    return augmentation.block
 
 
 def _directive(project_id: str, *, has_prompts: bool) -> str:

@@ -104,6 +104,10 @@ class InjectionRecord(BaseModel):
     user_count: int = 0
     project_count: int = 0
     entry_ids: list[str] = Field(default_factory=list)
+    retrieved_chars: int = 0
+    """Characters of CI-retrieved context injected this turn; 0 when none was."""
+    retrieved_sources: list[str] = Field(default_factory=list)
+    """Where retrieved context came from, so ``why`` can attribute it."""
 
 
 class SetupReport(BaseModel):

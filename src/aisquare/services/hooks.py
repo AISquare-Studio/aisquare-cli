@@ -18,6 +18,7 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
+from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
 
 
@@ -57,8 +58,7 @@ def prompt_submitted(
     effort: str | None = None,
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
-    if prompt is not None and prompt.strip():
-        capture_prompt(prompt, cwd)
+    capture_prompt(prompt, cwd, session_id=session_id)
     if session_id is None:
         return ""
     return team_service.hook_prompt_heartbeat(
@@ -73,9 +73,12 @@ def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
 
 
 def turn_stopped(cwd: Path | None, *, session_id: str | None = None) -> None:
-    """Mark the session as waiting for input (its turn just ended)."""
+    """Mark the session as waiting for input, and close this turn's metrics row."""
     if session_id is not None:
         team_service.hook_stop(session_id, cwd)
+        # After the team update, never before: a metrics failure must not cost
+        # the board its state change, and close_turn swallows its own errors.
+        metrics_service.close_turn(session_id)
 
 
 def needs_attention(
@@ -86,14 +89,30 @@ def needs_attention(
         team_service.hook_notification(session_id, cwd, message)
 
 
-def capture_prompt(prompt: str, cwd: Path | None) -> None:
-    """Record a submitted user prompt against the active project."""
-    if not prompt.strip():
+def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> None:
+    """Record the prompt and open this turn's metrics row, in one store open.
+
+    Both halves need the active project, and this runs synchronously in front
+    of a developer who has just hit enter — resolving it twice would double the
+    only unavoidable cost on the path.
+
+    A turn is opened even when the prompt is empty and even when CI never ran:
+    a row per turn from the day this ships is what turns the stretch before the
+    endpoint goes live into a baseline rather than a gap.
+
+    Failures are swallowed here rather than in the caller so that a store
+    problem costs the record, not the teammate delta the hook still owes the
+    session.
+    """
+    try:
+        with store_session() as store:
+            project = active_project(store, cwd)
+            if prompt is not None and prompt.strip():
+                store.ensure_project(project)
+                store.add_prompt(prompt, project.id, source="claude-code")
+            metrics_service.open_turn(project.id, session_id=session_id, store=store)
+    except Exception:  # never disrupt the session to record it
         return
-    with store_session() as store:
-        project = active_project(store, cwd)
-        store.ensure_project(project)
-        store.add_prompt(prompt, project.id, source="claude-code")
 
 
 def _directive(project_id: str, *, has_prompts: bool) -> str:

@@ -156,6 +156,68 @@ class PromptRecord(BaseModel):
     created_at: datetime
 
 
+class TurnMetric(BaseModel):
+    """One turn, as the CI test bed measures it.
+
+    Opened by ``UserPromptSubmit`` and closed by ``Stop``, so a row exists for
+    every turn whether or not CI was consulted — which is what makes the
+    period before the endpoint goes live a usable baseline rather than a gap.
+    """
+
+    trace_id: str
+    project_id: str
+    session_id: str | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    wall_ms: int | None = None
+
+    ci_action: str = "allow"
+    degradation_reason: str = "disabled"
+    """Why there is no server decision, or ``none``.
+
+    Recorded beside the action because the action cannot carry it: a timed-out
+    call and a server deliberately answering "nothing to add" are both
+    ``allow``. Without this column an endpoint failing every request is
+    indistinguishable from a clean baseline.
+    """
+
+    cache_hit: bool = False
+    server_ms: int | None = None
+    round_trip_ms: int | None = None
+    budget_breach: bool = False
+    injected_chars: int | None = None
+
+    run_id: str | None = None
+    arm: str | None = None
+    flags_hash: str | None = None
+
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    tool_calls: int | None = None
+    """Token and tool counts stay ``None`` until the OTel work lands — hook
+    payloads do not carry them, and a fabricated number is worse than a null."""
+
+
+class MetricsSummary(BaseModel):
+    """An aggregate over recorded turns, computed on read."""
+
+    turns: int
+    project_id: str | None = None
+    ci_consulted: int = 0
+    degraded: int = 0
+    cache_hits: int = 0
+    budget_breaches: int = 0
+    injected_turns: int = 0
+    by_action: dict[str, int] = Field(default_factory=dict)
+    by_reason: dict[str, int] = Field(default_factory=dict)
+    median_wall_ms: int | None = None
+    median_round_trip_ms: int | None = None
+    p95_round_trip_ms: int | None = None
+    turns_with_tokens: int = 0
+    """How many rows carry token data. Reported so a zero reads as "not
+    measured yet" rather than as "no tokens were used"."""
+
+
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
 """Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
 

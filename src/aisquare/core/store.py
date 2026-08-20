@@ -41,6 +41,7 @@ from aisquare.models import (
     TeamEvent,
     TeamSession,
     TeamTask,
+    TurnMetric,
 )
 
 _SCHEMA_V1 = """
@@ -220,6 +221,60 @@ ALTER TABLE team_session ADD COLUMN model TEXT;
 ALTER TABLE team_session ADD COLUMN effort TEXT;
 """
 
+# v11: the CI test bed's per-turn metrics. One row per turn, opened by the
+# UserPromptSubmit hook and closed by Stop, so a row exists whether or not CI
+# was consulted — which is what makes the stretch before the endpoint goes
+# live a usable baseline rather than a gap in the record.
+#
+# degradation_reason is here from creation, not bolted on later, because
+# ci_action cannot carry what it encodes: a timed-out call and a server
+# deliberately answering "nothing to add" are both `allow`. A table recording
+# only the action makes an endpoint failing every single request look exactly
+# like a clean baseline, and every aggregate over it measures plumbing rather
+# than retrieval.
+#
+# Token and tool columns are nullable and stay unwritten until the OTel work
+# lands: hook payloads do not carry counts, and a fabricated number here is
+# worse than a null because it survives into a published comparison.
+#
+# `run` is created now though nothing fills it until T4 — run_id is server-
+# minted and null throughout Phase 1. Creating it here costs one CREATE and
+# saves a migration against a table that will already hold real data.
+_SCHEMA_V11 = """
+CREATE TABLE metric (
+    trace_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    wall_ms INTEGER,
+    ci_action TEXT NOT NULL DEFAULT 'allow',
+    degradation_reason TEXT NOT NULL DEFAULT 'disabled',
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    server_ms INTEGER,
+    round_trip_ms INTEGER,
+    budget_breach INTEGER NOT NULL DEFAULT 0,
+    injected_chars INTEGER,
+    run_id TEXT,
+    arm TEXT,
+    flags_hash TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tool_calls INTEGER
+);
+
+CREATE INDEX metric_project_started ON metric (project_id, started_at);
+CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_at IS NULL;
+
+CREATE TABLE run (
+    id TEXT PRIMARY KEY,
+    arm TEXT,
+    flags_hash TEXT,
+    started_at TEXT NOT NULL,
+    note TEXT
+);
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -232,11 +287,18 @@ _MIGRATIONS = (
     _SCHEMA_V8,
     _SCHEMA_V9,
     _SCHEMA_V10,
+    _SCHEMA_V11,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
+_METRIC_COLUMNS = (
+    "trace_id, project_id, session_id, started_at, ended_at, wall_ms, "
+    "ci_action, degradation_reason, cache_hit, server_ms, round_trip_ms, "
+    "budget_breach, injected_chars, run_id, arm, flags_hash, "
+    "tokens_in, tokens_out, tool_calls"
+)
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
     "transcript_path, account, model, effort"
@@ -313,6 +375,11 @@ class ContextStore(Protocol):
     def next_task(
         self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
     ) -> TeamTask | None: ...
+    def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
+    def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
+    def turn_metrics(
+        self, *, project_id: str | None = None, session_id: str | None = None, limit: int = 500
+    ) -> list[TurnMetric]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
@@ -382,6 +449,30 @@ def _row_to_prompt(row: sqlite3.Row) -> PromptRecord:
 
 def _maybe_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
+    return TurnMetric(
+        trace_id=row["trace_id"],
+        project_id=row["project_id"],
+        session_id=row["session_id"],
+        started_at=datetime.fromisoformat(row["started_at"]),
+        ended_at=_maybe_dt(row["ended_at"]),
+        wall_ms=row["wall_ms"],
+        ci_action=row["ci_action"],
+        degradation_reason=row["degradation_reason"],
+        cache_hit=bool(row["cache_hit"]),
+        server_ms=row["server_ms"],
+        round_trip_ms=row["round_trip_ms"],
+        budget_breach=bool(row["budget_breach"]),
+        injected_chars=row["injected_chars"],
+        run_id=row["run_id"],
+        arm=row["arm"],
+        flags_hash=row["flags_hash"],
+        tokens_in=row["tokens_in"],
+        tokens_out=row["tokens_out"],
+        tool_calls=row["tool_calls"],
+    )
 
 
 def _row_to_session(row: sqlite3.Row) -> TeamSession:
@@ -1030,6 +1121,83 @@ class SqliteStore:
             "SELECT id, status FROM team_task WHERE project_id = ?", (project_id,)
         ).fetchall()
         return {row["id"]: row["status"] for row in rows}
+
+    def open_turn(self, metric: TurnMetric) -> TurnMetric:
+        """Record the start of a turn. One INSERT — this is the hot path."""
+        self._conn.execute(
+            f"INSERT OR REPLACE INTO metric ({_METRIC_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                metric.trace_id,
+                metric.project_id,
+                metric.session_id,
+                metric.started_at.isoformat(),
+                metric.ended_at.isoformat() if metric.ended_at else None,
+                metric.wall_ms,
+                metric.ci_action,
+                metric.degradation_reason,
+                int(metric.cache_hit),
+                metric.server_ms,
+                metric.round_trip_ms,
+                int(metric.budget_breach),
+                metric.injected_chars,
+                metric.run_id,
+                metric.arm,
+                metric.flags_hash,
+                metric.tokens_in,
+                metric.tokens_out,
+                metric.tool_calls,
+            ),
+        )
+        self._conn.commit()
+        return metric
+
+    def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None:
+        """Close this session's newest open turn; ``None`` when there is none.
+
+        Matched on the session rather than carried through the agent, because
+        the Stop hook payload has no trace id in it — only the session. The
+        newest open row is the turn that just finished; a turn that never
+        received a Stop (a killed terminal) simply stays open and is excluded
+        from wall-clock aggregates rather than being closed with a fabricated
+        end time.
+        """
+        row = self._conn.execute(
+            f"SELECT {_METRIC_COLUMNS} FROM metric "
+            "WHERE session_id = ? AND ended_at IS NULL "
+            "ORDER BY started_at DESC, trace_id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        metric = _row_to_metric(row)
+        wall_ms = max(0, int((ended_at - metric.started_at).total_seconds() * 1000))
+        self._conn.execute(
+            "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ?",
+            (ended_at.isoformat(), wall_ms, metric.trace_id),
+        )
+        self._conn.commit()
+        return metric.model_copy(update={"ended_at": ended_at, "wall_ms": wall_ms})
+
+    def turn_metrics(
+        self, *, project_id: str | None = None, session_id: str | None = None, limit: int = 500
+    ) -> list[TurnMetric]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        params.append(limit)
+        rows = self._conn.execute(
+            f"SELECT {_METRIC_COLUMNS} FROM metric {where}"
+            "ORDER BY started_at DESC, trace_id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [_row_to_metric(row) for row in rows]
 
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM team_meta WHERE key = ?", (key,)).fetchone()

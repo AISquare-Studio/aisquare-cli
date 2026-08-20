@@ -21,12 +21,14 @@ from aisquare.models import (
     ContextEntry,
     DoctorCheck,
     InjectionRecord,
+    MetricsSummary,
     OnboardReport,
     Pool,
     ProjectInfo,
     PromptRecord,
     SetupReport,
     StatusReport,
+    TurnMetric,
 )
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
@@ -316,6 +318,81 @@ def emit_prompts(prompts: list[PromptRecord]) -> None:
     for prompt in prompts:
         table.add_row(prompt.created_at.strftime("%Y-%m-%d %H:%M"), prompt.text)
     stdout_console().print(table)
+
+
+def emit_metrics_summary(summary: MetricsSummary) -> None:
+    """Render a metrics summary — JSON under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps(summary.model_dump(mode="json")))
+        return
+    console = stdout_console()
+    if not summary.turns:
+        console.print(
+            "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code"
+        )
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("METRIC", no_wrap=True)
+    table.add_column("VALUE", justify="right")
+    table.add_row("turns", str(summary.turns))
+    table.add_row("median wall", _ms(summary.median_wall_ms))
+    table.add_row("CI answered", str(summary.ci_consulted))
+    table.add_row("CI degraded", str(summary.degraded))
+    table.add_row("cache hits", str(summary.cache_hits))
+    table.add_row("budget breaches", str(summary.budget_breaches))
+    table.add_row("turns with injection", str(summary.injected_turns))
+    table.add_row("median round trip", _ms(summary.median_round_trip_ms))
+    table.add_row("p95 round trip", _ms(summary.p95_round_trip_ms))
+    console.print(table)
+
+    if summary.by_reason:
+        reasons = ", ".join(
+            f"{reason} {count}" for reason, count in sorted(summary.by_reason.items())
+        )
+        console.print(f"reasons: {reasons}")
+    if summary.budget_breaches:
+        console.print(
+            f"⚠ {summary.budget_breaches} turn(s) hit the client backstop — "
+            "that is a server-side latency bug, not a result"
+        )
+    if not summary.turns_with_tokens:
+        console.print(
+            "note: no token counts recorded — hook payloads do not carry them "
+            "(pending the OTel work), so token savings cannot be read from this yet"
+        )
+
+
+def emit_turn_metrics(turns: list[TurnMetric]) -> None:
+    """Render recent turns — a JSON array under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps([turn.model_dump(mode="json") for turn in turns]))
+        return
+    if not turns:
+        stdout_console().print("No turns recorded yet.")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("WHEN", no_wrap=True)
+    table.add_column("TRACE", no_wrap=True)
+    table.add_column("ACTION", no_wrap=True)
+    table.add_column("REASON", no_wrap=True)
+    table.add_column("WALL", justify="right")
+    table.add_column("TRIP", justify="right")
+    for turn in turns:
+        table.add_row(
+            local_time(turn.started_at).strftime("%m-%d %H:%M:%S"),
+            turn.trace_id[:12],
+            turn.ci_action,
+            turn.degradation_reason,
+            _ms(turn.wall_ms),
+            "cached" if turn.cache_hit else _ms(turn.round_trip_ms),
+        )
+    stdout_console().print(table)
+
+
+def _ms(value: int | None) -> str:
+    """A millisecond count, or an em dash when the turn never recorded one."""
+    return "—" if value is None else f"{value} ms"
 
 
 def emit_disconnected(name: str) -> None:

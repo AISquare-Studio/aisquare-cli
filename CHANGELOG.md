@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **CI test bed — retrieval in front of the agent, off by default (experimental).**
+  When a prompt is submitted, aisquare can ask a retrieval endpoint whether it
+  knows anything relevant and hand those documents to the agent *before* it
+  starts exploring, through the `UserPromptSubmit` hook that has been installed
+  since day one. **Nothing runs unless `AISQUARE_CI=1` and an endpoint are set:**
+  with the master switch off there is no request, no connection and no
+  measurable latency, which is what makes it shippable while the endpoint is
+  still being built.
+  - `aisquare metrics show|list` (hidden) — one row per turn, written whether or
+    not the endpoint was consulted. That is deliberate: the period before it goes
+    live is the baseline, not a gap.
+  - Every row records **why** there was no server decision alongside what was
+    decided. A timed-out call and a server deliberately answering "nothing to
+    add" are both `allow`; without the reason beside it, an endpoint failing
+    every request is indistinguishable from a clean baseline.
+  - Retrieved material is framed as candidate reference with its sources
+    attached, so a bad retrieval shows up in the transcript instead of being
+    absorbed into the answer. `aisquare why` accounts for it.
+  - `doctor` reports the state and whether the endpoint is reachable; the
+    `[experiment]` extra adds no dependencies (the transport is stdlib, so the
+    hot path works in a base install).
+  - Token counts are **not** recorded — hook payloads do not carry them, and
+    `metrics show` says so rather than reporting a zero that reads as "no tokens
+    were used". The wire protocol and its open bilateral decisions are in
+    `docs/ci-contract.md`.
 - **Per-role LAUNCH PROFILE — the third launch axis, and deliberately the
   dumbest one.** The ladder decides *what* model a role runs on, `--bin` (#52)
   decides *which* executable runs it, and a profile carries *whatever else* the

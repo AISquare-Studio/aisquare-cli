@@ -467,7 +467,8 @@ aisquare
 ├── board [-w] [-i SECONDS] · recall <query>
 ├── launch <planner|coder|runner> [--account DIR] [--command CMD] [… agent args]
 ├── serve [--stdio | --port N --bind H] [--show-token]
-└── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
+├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
+└── metrics         show [-n N] [--session S] · list        (CI test bed; hidden)
 ```
 
 Everything `aisquare --help` lists is implemented. Roadmap commands are
@@ -490,6 +491,48 @@ so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in
 [issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
+
+## CI test bed (experimental, off by default)
+
+An opt-in experiment: when you submit a prompt, aisquare can ask a retrieval
+endpoint whether it knows anything relevant and hand those documents to the
+agent **before** it starts exploring. The hypothesis is that an agent which
+starts better informed reads fewer files to get to the same answer.
+
+**It is off unless you turn it on**, and off costs nothing — no request, no
+connection, no measurable latency. Nothing below runs for a normal install.
+
+```sh
+pip install 'aisquare-cli[experiment]'   # the extra adds no dependencies today
+export AISQUARE_CI=1
+export AISQUARE_CI_URL=https://…
+export AISQUARE_CI_KEY=…
+aisquare doctor                          # reports state and reachability
+aisquare metrics show                    # what was recorded, per turn
+```
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `AISQUARE_CI` | off | Master switch; overrides config in both directions |
+| `AISQUARE_CI_URL` | unset | Endpoint. Unset ⇒ no request is made |
+| `AISQUARE_CI_KEY` | unset | Bearer token. **Environment only** — never read from `config.toml` |
+
+Three things worth knowing before you enable it:
+
+- **The prompt hook is synchronous.** You are waiting on it. A client-side
+  backstop caps that wait, but the endpoint owns its own latency.
+- **Retrieved material is labelled as candidate reference, not fact**, with its
+  sources attached, so a bad retrieval is visible in the transcript rather than
+  silently absorbed into the answer.
+- **Every turn is recorded whether or not the endpoint answered**, along with
+  *why* it did not. A timeout and a server with nothing to add both look like
+  "allow", and telling them apart afterwards is the difference between a result
+  and a coincidence.
+
+Token counts are **not** recorded yet — hook payloads do not carry them — so
+`metrics show` reports round-trip latency and injection rates, and says
+plainly that token savings cannot be read from it. The wire protocol is
+[`docs/ci-contract.md`](docs/ci-contract.md).
 
 ## Development
 

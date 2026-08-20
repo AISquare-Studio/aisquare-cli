@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import socket
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
@@ -17,6 +19,7 @@ from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
 from aisquare.models import CheckStatus, DoctorCheck, InjectionRecord, PromptRecord, StatusReport
+from aisquare.services import ci_client
 from aisquare.services import distill as distill_service
 
 
@@ -40,6 +43,10 @@ def status() -> StatusReport:
     return report
 
 
+_CI_PROBE_TIMEOUT_SECONDS = 1.5
+"""Doctor must stay fast; an unreachable endpoint is the common case here."""
+
+
 def doctor() -> list[DoctorCheck]:
     """Run health checks over the install, dependencies and integration."""
     return [
@@ -54,6 +61,7 @@ def doctor() -> list[DoctorCheck]:
         _check_snapshot(),
         _check_brain(),
         _check_harness(),
+        _check_experiment(),
     ]
 
 
@@ -246,6 +254,59 @@ def _check_brain() -> DoctorCheck:
             "brain", f"gbrain {version}, brain ready{embed} ({lag} pipe events awaiting distill)"
         )
     return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
+
+
+def _check_experiment() -> DoctorCheck:
+    """The CI test bed's state, and whether its endpoint can be reached.
+
+    Off is reported as ``ok`` rather than as a warning: off is the intended
+    state for everyone who has not been asked to run the experiment, and a
+    permanent warning trains people to ignore the one line that matters.
+    """
+    if not ci_client.enabled():
+        return _ok("ci test bed", "off — no requests, no added latency (AISQUARE_CI=1 enables)")
+    url = ci_client.endpoint()
+    if not url:
+        return _warn(
+            "ci test bed",
+            "enabled but no endpoint configured — every prompt records not_configured",
+            "Point it at the endpoint: export AISQUARE_CI_URL=https://…",
+        )
+    if not ci_client.api_key():
+        return _warn(
+            "ci test bed",
+            f"enabled for {url}, but no bearer token — requests will be rejected",
+            "Set the token: export AISQUARE_CI_KEY=…",
+        )
+    reachable, why = _probe_endpoint(url)
+    if not reachable:
+        return _warn(
+            "ci test bed",
+            f"enabled for {url}, but it is not reachable ({why}) — "
+            "prompts still work, every turn records transport_error",
+            "Check the endpoint is up, or turn it off: export AISQUARE_CI=0",
+        )
+    return _ok("ci test bed", f"enabled for {url} — endpoint reachable")
+
+
+def _probe_endpoint(url: str) -> tuple[bool, str]:
+    """Whether something is listening at ``url``. Never raises, always bounded.
+
+    A TCP connect rather than a request: the contract defines one route and it
+    is a POST that does work, so probing it would mean sending the endpoint
+    real traffic every time someone runs ``doctor``. Whether it should expose a
+    health route is bilateral decision #6 in docs/ci-contract.md.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False, "unparseable url"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=_CI_PROBE_TIMEOUT_SECONDS):
+            return True, ""
+    except OSError as exc:
+        return False, type(exc).__name__
 
 
 def _has_module(name: str) -> bool:

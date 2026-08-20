@@ -236,6 +236,20 @@ does not fail loudly — it produces a run where every call quietly did nothing.
 **Needed:** agreement that the server never ships a schema change under
 `contract: 1`, and a channel for announcing a bump before it deploys.
 
+### 6. A health route for `doctor` — *proposed*
+
+`aisquare doctor` reports whether the endpoint is reachable. It currently does
+a **TCP connect** rather than a request, because the contract defines exactly
+one route and it is a `POST` that does real work — probing it would send the
+endpoint live traffic every time anyone runs `doctor`.
+
+A TCP connect proves a listener exists and nothing more: a process that is up
+but failing every request reads as healthy.
+
+**Proposed:** `GET /v1/health` returning `{"contract": 1, "ok": true}`, cheap
+enough to call freely. **Needed:** agreement, or confirmation that a TCP
+connect is all `doctor` should ever do.
+
 ### 5. Cache lifetime vs. run boundaries — *proposed*
 
 The CLI caches per **session**, under the server's `cache_hint.key`, and sweeps

@@ -1,0 +1,9 @@
+{
+  "contract": 1,
+  "action": "inject",
+  "context": "## Possibly relevant\n\n- `core/brain.py` takes the brain lock through a platform primitive.",
+  "provenance": [{"node_id": "n_brain_lock", "source": "src/aisquare/core/brain.py"}],
+  "flags_applied": ["ci_retrieval", "graphify"],
+  "server_ms": 118,
+  "cache_hint": {"ttl_s": 900, "key": "prj_8f333d29:brain-lock"}
+}

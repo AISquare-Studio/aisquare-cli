@@ -1,0 +1,12 @@
+{
+  "trigger": "prompt_submit",
+  "session_id": "ses_01k9q8p3k7zr4m2n6v0c1d8e5f",
+  "trace_id": "trc_01k9q8p3k7zr4m2n6v0c1d8e60",
+  "project_id": "prj_8f333d29022eae0c8c0700eb",
+  "budget_ms": 400,
+  "run_id": "r-20260819-0134",
+  "arm": "B",
+  "snapshot_ref": null,
+  "prompt": "why does the brain lock use msvcrt on windows",
+  "tool": null
+}

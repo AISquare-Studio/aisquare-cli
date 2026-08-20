@@ -1,0 +1,9 @@
+{
+  "contract": 1,
+  "action": "substitute",
+  "tool_result": "src/aisquare/core/brain.py:37: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)",
+  "provenance": [{"node_id": "n_brain_lock", "source": "src/aisquare/core/brain.py"}],
+  "flags_applied": ["ci_retrieval"],
+  "server_ms": 96,
+  "cache_hint": {"ttl_s": 300, "key": "prj_8f333d29:grep:msvcrt"}
+}

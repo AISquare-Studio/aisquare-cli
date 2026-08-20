@@ -22,6 +22,21 @@ X-CI-Contract: 1
 Content-Type: application/json
 ```
 
+### Header casing — read this before matching on it
+
+The client sends the contract header over `urllib`, which **title-cases header
+names**. `X-CI-Contract` goes out on the wire as:
+
+```
+X-Ci-Contract: 1
+```
+
+HTTP field names are case-insensitive and any correct server handles this, but
+a server matching the literal string `X-CI-Contract` will see no contract
+version at all — and then guess, which is the one thing this header exists to
+prevent. Match case-insensitively. Pinned CLI-side by
+`test_the_contract_header_arrives_case_normalised`.
+
 ## Request
 
 ```json
@@ -220,6 +235,20 @@ does not fail loudly — it produces a run where every call quietly did nothing.
 
 **Needed:** agreement that the server never ships a schema change under
 `contract: 1`, and a channel for announcing a bump before it deploys.
+
+### 5. Cache lifetime vs. run boundaries — *proposed*
+
+The CLI caches per **session**, under the server's `cache_hint.key`, and sweeps
+session files older than 24 h. It has no notion of a run ending, so a long
+session spanning an arm switch would serve entries minted under the previous
+arm.
+
+**Proposed:** any response whose `arm` differs from the request's is not
+cacheable, and the server omits `cache_hint` on it. Cheaper than teaching the
+client about arms, and keeps arm assignment entirely server-side.
+
+**Needed:** confirmation, or a different rule. Until then, do not switch arms
+inside a live session.
 
 ### 4. `arm` opacity
 

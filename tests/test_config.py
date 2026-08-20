@@ -7,6 +7,7 @@ from pathlib import Path
 from aisquare.core.config import (
     AppConfig,
     CaptureSettings,
+    ExperimentSettings,
     RedactionSettings,
     load_config,
     save_config,
@@ -61,3 +62,39 @@ def test_ensure_home_creates_layout(isolated_home: Path) -> None:
     assert home == aisquare_home()
     assert cache_dir().is_dir()
     assert log_dir().is_dir()
+
+
+def test_experiment_is_off_by_default() -> None:
+    """The state every existing user is in. ``prompt_submit`` runs
+    synchronously in front of a developer who has just hit enter, so off has to
+    be the default rather than something a release turns on for everyone."""
+    config = AppConfig()
+    assert config.experiment.enabled is False
+    assert config.experiment.url == ""
+
+
+def test_experiment_sub_flags_default_true_under_a_disabled_master() -> None:
+    """T4 specifies both true — which is only true once someone has opted in."""
+    config = AppConfig()
+    assert config.experiment.push is True
+    assert config.experiment.pull is True
+    assert config.experiment.enabled is False
+
+
+def test_experiment_settings_round_trip(tmp_path: Path) -> None:
+    config = AppConfig(experiment=ExperimentSettings(enabled=True, url="http://ci.internal"))
+    target = save_config(config, tmp_path / "config.toml")
+    assert load_config(target) == config
+
+
+def test_experiment_has_nowhere_to_put_a_key() -> None:
+    """config.toml is a file people diff, paste into issues and copy between
+    machines; the bearer token is read from the environment only."""
+    assert "key" not in ExperimentSettings.model_fields
+
+
+def test_a_config_without_an_experiment_section_still_loads(tmp_path: Path) -> None:
+    """Every config written before this release."""
+    target = tmp_path / "config.toml"
+    target.write_text('profile = "default"\n', encoding="utf-8")
+    assert load_config(target).experiment.enabled is False

@@ -34,6 +34,11 @@ def cache_dir() -> Path:
     return aisquare_home() / "cache"
 
 
+def ci_cache_dir() -> Path:
+    """Directory for cached CI endpoint responses, one file per session."""
+    return cache_dir() / "ci"
+
+
 def log_dir() -> Path:
     """Directory for capture and diagnostic logs."""
     return aisquare_home() / "log"

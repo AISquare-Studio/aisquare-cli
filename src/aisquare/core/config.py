@@ -43,6 +43,33 @@ class ExplainabilitySettings(BaseModel):
     agent_name_template: str = "aisquare-{role}"
 
 
+class ExperimentSettings(BaseModel):
+    """Settings for the CI test bed — the retrieval experiment.
+
+    ``enabled`` is False, and stays False for everyone who has not deliberately
+    opted in. That is not caution about a half-built feature: the
+    ``prompt_submit`` call runs *synchronously* in front of a developer who has
+    just hit enter, so the off state has to cost exactly nothing — no request,
+    no connection, no measurable latency. Shipping in that state is what makes
+    the client safe to land on ``main`` while the endpoint is still being
+    built, instead of accruing on a branch.
+
+    ``push`` and ``pull`` are sub-flags *of* ``enabled``. Both default true, as
+    T4 specifies — which is only true once someone has opted in; with
+    ``enabled`` False neither is ever consulted.
+
+    There is deliberately no key field. The bearer token is read from
+    ``AISQUARE_CI_KEY`` and nowhere else: ``config.toml`` is a file people
+    diff, paste into issues and copy between machines, and a secret that lives
+    there leaks by being ordinary.
+    """
+
+    enabled: bool = False
+    url: str = ""
+    push: bool = True
+    pull: bool = True
+
+
 class RoleLaunchProfile(BaseModel):
     """One role's launch spec, carried verbatim and never interpreted.
 
@@ -103,6 +130,7 @@ class AppConfig(BaseModel):
     redaction: RedactionSettings = Field(default_factory=RedactionSettings)
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)
+    experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
 
 
 def load_config(path: Path | None = None) -> AppConfig:

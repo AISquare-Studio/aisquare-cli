@@ -6,6 +6,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`~/.aisquare` is no longer treated as a project root.** `.aisquare` is
+  overloaded — `<project>/.aisquare` is the opt-in project marker, but
+  `~/.aisquare` is where config, the context database and the agent registry
+  live. The marker walk could not tell them apart, so **every markerless
+  directory under `$HOME` resolved to `$HOME`** and shared one context pool.
+  It also defeated the guard written against exactly that: `serve --stdio`
+  refuses to activate a directory that is not a project root *because* Claude
+  Desktop launches from `$HOME`, and since `$HOME` always holds `.aisquare`
+  the refusal never fired — the server silently activated the home directory
+  instead. An aisquare home is now recognised by its layout and skipped as a
+  marker. A hand-made `<project>/.aisquare` still works, and `.git`/`.hg`
+  are untouched. Not a Windows bug, though Windows shows it most (temporary
+  directories live under `%USERPROFILE%`).
+- **Credentials and the serve token are now restricted on Windows.**
+  `chmod(0o600)` is the whole story on POSIX and does nothing on NTFS, where
+  the group/other bits have no equivalent — so the API key and the bearer
+  token guarding the HTTP server stayed readable by every other account on the
+  machine, with no error to say so. Both files now get an ACL that drops
+  inherited entries and grants only the current user; `init` and `serve` say
+  so explicitly when the restriction could not be applied, rather than
+  implying a protection that is not there. POSIX behaviour is unchanged.
+
+### Changed
+
+- **CI runs on Windows.** The `check` job gains a `windows-latest` leg (3.12;
+  the platform branches read `sys.platform` at call time, so a second
+  interpreter would only re-run the same branches), and `package` builds and
+  smoke-tests the wheel on both platforms. Getting there meant fixing the
+  suite's own POSIX-only assumptions rather than skipping past them: the
+  gbrain fake is now reachable through `PATHEXT`, the #20 bulk-delivery storm
+  and the harness `eval` test are ported instead of skipped, test file reads
+  no longer go through the locale codec, and the #56 tilde test sets the
+  variable `expanduser` actually reads on each platform. The suite is green on
+  Windows with no platform skips.
+
 ## [0.4.0rc2] - 2026-08-19
 
 Two PRs on top of rc1. **#48 makes `aisquare` run on Windows at all** — the

@@ -72,8 +72,9 @@ def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path)
         # offers, where 0600 never excluded root. What must not appear is
         # Users, Everyone or Authenticated Users.
         me = winacl.current_user_sid()
-        assert me in granted, granted
-        assert not (granted - winacl.PRIVILEGED_TRUSTEES - {me}), granted
+        mine = winacl.user_trustees(granted, me)
+        assert mine, (granted, me)
+        assert not (granted - winacl.PRIVILEGED_TRUSTEES - mine), granted
     else:
         assert stat.S_IMODE(creds.stat().st_mode) == 0o600
 

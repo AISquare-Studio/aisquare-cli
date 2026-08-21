@@ -46,6 +46,30 @@ USERS_TRUSTEE = "BU"
 USERS_SID = "S-1-5-32-545"
 """The same principal, spelled for ``icacls /grant`` (which accepts ``*<sid>``)."""
 
+# SDDL abbreviates some *account* SIDs too, not just group ones, and which
+# abbreviation appears depends on who is logged in. A GitHub windows-latest
+# runner runs as the built-in Administrator, so its own SID comes back as "LA"
+# rather than spelled out -- invisible on a desktop, where the login is an
+# ordinary account with a RID well above 500.
+_ACCOUNT_ABBREVIATIONS = {
+    "LA": "-500",  # built-in Administrator
+    "LG": "-501",  # built-in Guest
+}
+
+
+def denotes_user(trustee: str, sid: str) -> bool:
+    """Whether an SDDL ``trustee`` refers to the account with ``sid``."""
+    if trustee == sid:
+        return True
+    suffix = _ACCOUNT_ABBREVIATIONS.get(trustee)
+    return suffix is not None and sid.endswith(suffix)
+
+
+def user_trustees(trustees: set[str], sid: str) -> set[str]:
+    """The subset of ``trustees`` that denote the account with ``sid``."""
+    return {trustee for trustee in trustees if denotes_user(trustee, sid)}
+
+
 _ACE = re.compile(r"\(([^)]*)\)")
 
 

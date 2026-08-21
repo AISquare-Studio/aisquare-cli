@@ -119,7 +119,7 @@ def test_theme_picker_stays_open_and_autosaves(
     still_open, applied, final = asyncio.run(browse())
     assert still_open  # selection does NOT close the dialog
     assert applied == final  # the browsed theme stuck after closing
-    saved = json.loads((isolated_home / "state.json").read_text())["board_theme"]
+    saved = json.loads((isolated_home / "state.json").read_text(encoding="utf-8"))["board_theme"]
     assert saved == final  # …and was autosaved without any save step
 
     async def relaunch() -> str:
@@ -149,7 +149,7 @@ def test_screenshot_key_saves_svg_locally(
 
     shots = asyncio.run(snap())
     assert len(shots) == 1
-    assert "<svg" in shots[0].read_text()[:200]
+    assert "<svg" in shots[0].read_text(encoding="utf-8")[:200]
 
 
 def test_palette_change_theme_opens_our_picker(

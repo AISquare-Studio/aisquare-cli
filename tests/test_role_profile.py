@@ -66,7 +66,12 @@ class TestExpansion:
         assert harness.expand_value("$HOME/.claude2") == "/home/someone/.claude2"
 
     def test_tilde_expands(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Both, because `expanduser` reads a different variable per platform:
+        # HOME on POSIX, USERPROFILE on Windows (where HOME is ignored
+        # outright). Setting only HOME asserts the POSIX half of a call the
+        # product makes on both.
         monkeypatch.setenv("HOME", "/home/someone")
+        monkeypatch.setenv("USERPROFILE", "/home/someone")
         assert harness.expand_value("~/.cache/claude2") == "/home/someone/.cache/claude2"
 
     def test_an_undefined_var_is_left_verbatim_not_blanked(

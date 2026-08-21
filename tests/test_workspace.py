@@ -70,3 +70,39 @@ def test_active_project_ignores_a_stale_pin(tmp_path: Path) -> None:
     pin_project("prj_never_registered")
     with store_session() as store:
         assert active_project(store, cwd=tmp_path).id == project_id_for(tmp_path.resolve())
+
+
+def test_a_handmade_project_marker_still_resolves(tmp_path: Path) -> None:
+    """``<project>/.aisquare`` is an opt-in marker and must keep working."""
+    (tmp_path / ".aisquare").mkdir()
+    nested = tmp_path / "src"
+    nested.mkdir()
+    assert find_project_root(nested) == tmp_path.resolve()
+
+
+def test_our_own_home_is_not_a_project_root(tmp_path: Path) -> None:
+    """``~/.aisquare`` is state, not a project.
+
+    Without this, every markerless directory under ``$HOME`` resolves to
+    ``$HOME`` and shares one context pool. The home is recognised by its
+    layout, so a *different* home than the configured one (what the suite
+    itself creates, and what a developer's real ``~/.aisquare`` is relative to
+    a temp tree) is caught too.
+    """
+    home = tmp_path / ".aisquare"
+    home.mkdir()
+    (home / "config.toml").write_text("", encoding="utf-8")
+    bare = tmp_path / "scratch"
+    bare.mkdir()
+    assert find_project_root(bare) == bare.resolve()
+
+
+def test_a_git_marker_beats_an_aisquare_home(tmp_path: Path) -> None:
+    """Skipping our home must not skip a real marker in the same directory."""
+    home = tmp_path / ".aisquare"
+    home.mkdir()
+    (home / "context.db").write_text("", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "src"
+    nested.mkdir()
+    assert find_project_root(nested) == tmp_path.resolve()

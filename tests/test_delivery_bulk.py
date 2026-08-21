@@ -4,8 +4,8 @@ Single-call suites lie (the fixer notes on issue #19): the misrouting and
 lying-success bugs only surfaced under many concurrent writers with reader
 loops hammering the same store. This harness drives the REAL CLI as
 subprocesses — 8 writers x 25 mixed writes against ONE shared isolated
-``AISQUARE_HOME`` while while-read+timeout reader loops (the #19 repro
-signature) run alongside — and holds the #20 delivery contract in bulk:
+``AISQUARE_HOME`` while time-boxed reader loops (the #19 repro signature)
+run alongside — and holds the #20 delivery contract in bulk:
 
 (a) every write that exited 0 and carried the success marker
     (``delivered: true``) is on the board EXACTLY once, via read-back;
@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -137,23 +136,70 @@ def _writer(index: int, *, project: Path, env: dict[str, str]) -> list[WriteResu
     return results
 
 
+_READER_SCRIPT = """\
+import subprocess
+import sys
+
+# The #19 repro signature, in Python rather than `seq | while read` + `timeout`:
+# separate short-lived processes hammering one store, each call time-boxed, each
+# failure swallowed (the shell's `|| true`). Driving it from Python keeps the
+# repro identical on every platform instead of only where coreutils exists.
+iterations = int(sys.argv[1])
+for _ in range(iterations):
+    for args in (["board"], ["--json", "task", "list"]):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "aisquare", *args],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+"""
+
+
 def _reader_loop(project: Path, env: dict[str, str], iterations: int) -> subprocess.Popen[bytes]:
-    """The #19 repro signature: a while-read loop with per-call timeouts."""
-    aisq = f"{shlex.quote(sys.executable)} -m aisquare"
-    script = (
-        f"seq {iterations} | while read -r _; do "
-        f"timeout 5 {aisq} board >/dev/null 2>&1 || true; "
-        f"timeout 5 {aisq} --json task list >/dev/null 2>&1 || true; "
-        "done"
+    """The #19 repro signature: a read loop with per-call timeouts."""
+    return subprocess.Popen(
+        [sys.executable, "-c", _READER_SCRIPT, str(iterations)],
+        cwd=project,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    return subprocess.Popen(["bash", "-c", script], cwd=project, env=env)
 
 
 def _stdio_daemon_count() -> int:
-    proc = subprocess.run(
-        ["pgrep", "-fc", "aisquare serve --stdio"], capture_output=True, text=True
-    )
-    return int(proc.stdout.strip() or "0") if proc.returncode == 0 else 0
+    """How many ``aisquare serve --stdio`` daemons are alive right now."""
+    if sys.platform == "win32":
+        # No pgrep; Win32_Process is the only place a full command line lives.
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "@(Get-CimInstance Win32_Process | "
+                "Where-Object { $_.CommandLine -like '*aisquare serve --stdio*' }).Count",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
+    else:
+        proc = subprocess.run(
+            ["pgrep", "-fc", "aisquare serve --stdio"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if proc.returncode != 0:
+        return 0
+    return int(proc.stdout.strip() or "0")
 
 
 def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> None:

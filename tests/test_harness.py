@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -1084,6 +1085,7 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     the eval), so the discriminating assert is env's empty stdout, not the
     launch itself.
     """
+    import os
     import subprocess
     import sys
 
@@ -1094,9 +1096,13 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     assert command.startswith('eval "$(aisquare explainability env coder)"; ')
 
     venv_bin = Path(sys.executable).parent
-    child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
+    child_env = {
+        **os.environ,
+        "PATH": os.pathsep.join([str(tmp_path), str(venv_bin), os.environ.get("PATH", "")]),
+    }
 
-    # Premise: refusal → stderr only, stdout EMPTY, nonzero exit.
+    # Premise: refusal → stderr only, stdout EMPTY, nonzero exit. This is the
+    # discriminating half and it is pure CLI, so it runs on every platform.
     refusal = subprocess.run(
         [str(venv_bin / "aisquare"), "explainability", "env", "coder"],
         capture_output=True,
@@ -1109,11 +1115,18 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     assert "untraced" in refusal.stderr
 
     # End to end: the printed command runs the agent untraced via a real shell.
+    # `eval "$(...)"` is a POSIX-shell construct, so this half needs a POSIX
+    # shell rather than a POSIX *platform* — Git Bash ships one on Windows, and
+    # windows-latest has it on PATH. Skipping on `which` keeps the assertion
+    # wherever it can actually mean something.
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the eval printable is a sh construct")
     stub = tmp_path / "claude"
     stub.write_text('#!/bin/sh\necho "ran base=[$ANTHROPIC_BASE_URL]"\n', encoding="utf-8")
     stub.chmod(0o755)
     proc = subprocess.run(
-        ["/bin/sh", "-c", command],
+        [shell, "-c", command],
         capture_output=True,
         text=True,
         timeout=60,

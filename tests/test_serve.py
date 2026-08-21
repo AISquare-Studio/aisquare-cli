@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import getpass
 import json
-import re
 import stat
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +21,7 @@ from mcp.types import CallToolResult, TextContent
 
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
+from tests import winacl
 
 
 @pytest.fixture(autouse=True)
@@ -62,24 +60,20 @@ def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path)
     if sys.platform == "win32":
         # Mode bits are advisory on NTFS -- S_IMODE reports 0o666 however the
         # file is really protected -- so assert the ACL that was actually
-        # applied: inheritance broken, and nobody granted but this account.
-        result = subprocess.run(
-            ["icacls", str(creds)], capture_output=True, text=True, encoding="utf-8", check=True
-        )
-        # icacls prints "<path> PRINCIPAL:(perms)" then one indented ACE per
-        # line. Matching on the "(" is what keeps the drive letter in the path
-        # from parsing as a principal.
-        principals = {
-            name.rsplit("\\", 1)[-1] for name in re.findall(r"([^\s:]+):\([^)]*\)", result.stdout)
-        }
-        assert principals, f"no ACEs parsed from icacls output: {result.stdout!r}"
-        # The invariant is "no ORDINARY other user", not "nobody else": a
-        # machine whose temp tree carries an explicit Administrators ACE keeps
-        # it, and that is the same deal POSIX offers — 0600 never excluded
-        # root either. What must not appear is a second real account.
-        privileged = {"Administrators", "SYSTEM", "TrustedInstaller", "ALL APPLICATION PACKAGES"}
-        assert getpass.getuser() in principals, result.stdout
-        assert not (principals - privileged - {getpass.getuser()}), result.stdout
+        # applied. Compare SIDs, not the names icacls prints: those contain
+        # spaces ("OWNER RIGHTS", "NT AUTHORITY\\SYSTEM") so they do not parse
+        # on whitespace, and they are localized, so an English-only assertion
+        # would fail on a German runner for no real reason.
+        granted = winacl.ace_sids(creds)
+        assert granted, "no ACEs read back from the credentials file"
+        # The invariant is "no ORDINARY account other than me" -- not "nobody
+        # else". The privileged SIDs below are the machine's own plumbing, and
+        # an admin can take ownership regardless; that is the same deal POSIX
+        # offers, where 0600 never excluded root. What must not appear is
+        # Users, Everyone or Authenticated Users.
+        me = winacl.current_user_sid()
+        assert me in granted, granted
+        assert not (granted - winacl.PRIVILEGED_SIDS - {me}), granted
     else:
         assert stat.S_IMODE(creds.stat().st_mode) == 0o600
 

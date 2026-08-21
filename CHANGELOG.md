@@ -25,12 +25,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `chmod(0o600)` is the whole story on POSIX and does nothing on NTFS, where
   the group/other bits have no equivalent — so the API key and the bearer
   token guarding the HTTP server stayed readable by every other account on the
-  machine, with no error to say so. Both files now get an ACL that drops
-  inherited entries and leaves no other ordinary account on them (an
-  `Administrators` entry survives, as root does for a 0600 file on POSIX);
-  `init` and `serve` say so explicitly when the restriction could not be
-  applied, rather than implying a protection that is not there. POSIX
-  behaviour is unchanged.
+  machine, with no error to say so. Both files now get a DACL rebuilt from
+  scratch — explicit entries reset, inheritance stripped, then the owner
+  granted — which matters because an explicit `BUILTIN\Users` ACE survives
+  the obvious `/inheritance:r` + `/grant:r` pairing and would have left the
+  file readable by everyone anyway. An `Administrators` entry can remain, as
+  root does for a 0600 file on POSIX. `init` and `serve` say so explicitly
+  when the restriction could not be applied, rather than implying a
+  protection that is not there. POSIX behaviour is unchanged.
 
 ### Changed
 

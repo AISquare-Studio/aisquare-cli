@@ -31,14 +31,20 @@ def restrict_to_owner(path: Path) -> bool:
     ``chmod(0o600)`` is the whole story on POSIX, and *nothing* on Windows:
     the group/other bits have no NTFS equivalent, so ``os.chmod`` silently
     leaves the file readable by every other account on the machine. Since the
-    two callers are an API key and a bearer token, "silently" is the problem —
-    the ACL has to be rewritten for real, dropping inherited entries
-    (``/inheritance:r``) and replacing the grants (``/grant:r``) so no other
-    ordinary account is left on it.
+    two callers are an API key and a bearer token, "silently" is the problem.
 
-    "Ordinary" is the honest word: an explicit ``Administrators`` entry on the
-    containing tree survives, and chasing it would be theatre — an admin can
-    take ownership regardless, exactly as root reads a 0600 file on POSIX.
+    Two icacls calls, and both are load-bearing. ``/inheritance:r`` removes
+    only *inherited* entries and ``/grant:r`` replaces the grant only for the
+    user it names, so an **explicit** ``BUILTIN\\Users`` ACE — inherited from
+    a widened parent at creation time, or set by hand — survives both and
+    leaves the file readable by every account on the box. ``/reset`` first
+    discards the explicit entries and restores inheritance from the parent;
+    stripping inheritance and granting afterwards then leaves the owner alone
+    on the DACL.
+
+    An ``Administrators`` entry can remain when the parent grants one, which is
+    not worth chasing: an admin can take ownership regardless, exactly as root
+    reads a 0600 file on POSIX.
 
     Returns False when the restriction could not be applied, so a caller can
     say so rather than implying a protection that is not there.
@@ -50,19 +56,25 @@ def restrict_to_owner(path: Path) -> bool:
         user = getpass.getuser()
     except Exception:  # pragma: no cover - getuser needs an identifiable user
         return False
-    try:
-        result = subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+    for argv in (
+        ["icacls", str(path), "/reset"],
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
+    ):
+        try:
+            result = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if result.returncode != 0:
+            return False
+    return True
 
 
 def aisquare_home() -> Path:

@@ -26,9 +26,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the group/other bits have no equivalent — so the API key and the bearer
   token guarding the HTTP server stayed readable by every other account on the
   machine, with no error to say so. Both files now get an ACL that drops
-  inherited entries and grants only the current user; `init` and `serve` say
-  so explicitly when the restriction could not be applied, rather than
-  implying a protection that is not there. POSIX behaviour is unchanged.
+  inherited entries and leaves no other ordinary account on them (an
+  `Administrators` entry survives, as root does for a 0600 file on POSIX);
+  `init` and `serve` say so explicitly when the restriction could not be
+  applied, rather than implying a protection that is not there. POSIX
+  behaviour is unchanged.
 
 ### Changed
 

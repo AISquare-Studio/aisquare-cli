@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sysconfig
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -1095,16 +1096,22 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     command = json.loads(printed.output)["command"]
     assert command.startswith('eval "$(aisquare explainability env coder)"; ')
 
-    venv_bin = Path(sys.executable).parent
+    # sysconfig, not `Path(sys.executable).parent`: the two coincide inside a
+    # venv (which is why the parent form survived for so long) but diverge
+    # wherever pip installs outside one — on a Windows CI runner python.exe
+    # sits in `x64\` while the console scripts land in `x64\Scripts\`, so the
+    # parent form pointed at a directory holding no `aisquare` at all.
+    scripts_dir = Path(sysconfig.get_path("scripts"))
+    aisquare_bin = scripts_dir / ("aisquare.exe" if sys.platform == "win32" else "aisquare")
     child_env = {
         **os.environ,
-        "PATH": os.pathsep.join([str(tmp_path), str(venv_bin), os.environ.get("PATH", "")]),
+        "PATH": os.pathsep.join([str(tmp_path), str(scripts_dir), os.environ.get("PATH", "")]),
     }
 
     # Premise: refusal → stderr only, stdout EMPTY, nonzero exit. This is the
     # discriminating half and it is pure CLI, so it runs on every platform.
     refusal = subprocess.run(
-        [str(venv_bin / "aisquare"), "explainability", "env", "coder"],
+        [str(aisquare_bin), "explainability", "env", "coder"],
         capture_output=True,
         text=True,
         timeout=60,

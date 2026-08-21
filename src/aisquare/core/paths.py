@@ -33,8 +33,12 @@ def restrict_to_owner(path: Path) -> bool:
     leaves the file readable by every other account on the machine. Since the
     two callers are an API key and a bearer token, "silently" is the problem —
     the ACL has to be rewritten for real, dropping inherited entries
-    (``/inheritance:r``) and replacing the grants (``/grant:r``) so only the
-    current user is left.
+    (``/inheritance:r``) and replacing the grants (``/grant:r``) so no other
+    ordinary account is left on it.
+
+    "Ordinary" is the honest word: an explicit ``Administrators`` entry on the
+    containing tree survives, and chasing it would be theatre — an admin can
+    take ownership regardless, exactly as root reads a 0600 file on POSIX.
 
     Returns False when the restriction could not be applied, so a caller can
     say so rather than implying a protection that is not there.

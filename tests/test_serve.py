@@ -64,7 +64,7 @@ def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path)
         # spaces ("OWNER RIGHTS", "NT AUTHORITY\\SYSTEM") so they do not parse
         # on whitespace, and they are localized, so an English-only assertion
         # would fail on a German runner for no real reason.
-        granted = winacl.ace_sids(creds)
+        granted = winacl.dacl_trustees(creds)
         assert granted, "no ACEs read back from the credentials file"
         # The invariant is "no ORDINARY account other than me" -- not "nobody
         # else". The privileged SIDs below are the machine's own plumbing, and
@@ -73,7 +73,7 @@ def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path)
         # Users, Everyone or Authenticated Users.
         me = winacl.current_user_sid()
         assert me in granted, granted
-        assert not (granted - winacl.PRIVILEGED_SIDS - {me}), granted
+        assert not (granted - winacl.PRIVILEGED_TRUSTEES - {me}), granted
     else:
         assert stat.S_IMODE(creds.stat().st_mode) == 0o600
 

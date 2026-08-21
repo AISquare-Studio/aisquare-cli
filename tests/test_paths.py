@@ -35,12 +35,12 @@ def test_restrict_to_owner_removes_a_broad_grant_on_windows(tmp_path: Path) -> N
     secret.write_text("token", encoding="utf-8")
 
     winacl.grant_users_group(secret)
-    assert winacl.USERS_SID in winacl.ace_sids(secret), "the leak was not manufactured"
+    assert winacl.USERS_TRUSTEE in winacl.dacl_trustees(secret), "the leak was not manufactured"
 
     assert paths.restrict_to_owner(secret) is True
 
-    granted = winacl.ace_sids(secret)
+    trustees = winacl.dacl_trustees(secret)
     me = winacl.current_user_sid()
-    assert winacl.USERS_SID not in granted, granted
-    assert me in granted, granted
-    assert not (granted - winacl.PRIVILEGED_SIDS - {me}), granted
+    assert winacl.USERS_TRUSTEE not in trustees, trustees
+    assert me in trustees, trustees
+    assert not (trustees - winacl.PRIVILEGED_TRUSTEES - {me}), trustees

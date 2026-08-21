@@ -34,7 +34,12 @@ USERS_SID = "S-1-5-32-545"
 
 
 def powershell(script: str, **env: str) -> str:
-    """Run a PowerShell snippet and return its stdout."""
+    """Run a PowerShell snippet and return its stdout.
+
+    Failure raises with PowerShell's own stderr in the message. ``check=True``
+    would raise a CalledProcessError that prints the argv and swallows the
+    reason, which is exactly the unhelpful shape a CI-only failure arrives in.
+    """
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
@@ -42,22 +47,37 @@ def powershell(script: str, **env: str) -> str:
         encoding="utf-8",
         errors="replace",
         timeout=120,
-        check=True,
+        check=False,
         env={**os.environ, **env},
     )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"powershell exited {result.returncode}\n"
+            f"--- script ---\n{script}\n"
+            f"--- stdout ---\n{result.stdout}\n"
+            f"--- stderr ---\n{result.stderr}"
+        )
     return result.stdout
 
 
 def ace_sids(path: Path) -> set[str]:
     """The SIDs holding an ACE on ``path``.
 
+    ``GetAccessRules`` is asked for identities as ``SecurityIdentifier``, so
+    .NET hands back SIDs directly. Reading ``.Access`` and calling
+    ``.Translate()`` per entry looks equivalent and is not: translation is an
+    LSA name lookup that fails outright for an account the machine cannot
+    resolve, which is how this reddened a CI run while passing locally.
+
     The path travels by environment variable rather than being interpolated
     into the script, so a quote or a ``$`` in a temp path cannot end up parsed
     as PowerShell.
     """
     out = powershell(
-        "(Get-Acl -LiteralPath $env:ACL_TARGET).Access | ForEach-Object { "
-        "$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }",
+        "$acl = Get-Acl -LiteralPath $env:ACL_TARGET; "
+        "$acl.GetAccessRules($true, $true, "
+        "[System.Security.Principal.SecurityIdentifier]) | "
+        "ForEach-Object { $_.IdentityReference.Value }",
         ACL_TARGET=str(path),
     )
     return {line.strip() for line in out.splitlines() if line.strip()}

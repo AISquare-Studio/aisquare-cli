@@ -16,12 +16,19 @@ permissions:
 
 jobs:
   check:
-    name: check (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        include:
+          # Windows on one interpreter rather than the full cross-product: the
+          # platform-specific branches read sys.platform at call time, so a
+          # second Python version re-runs the same branches for ~3x the minutes.
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v7
 
@@ -50,8 +57,12 @@ jobs:
         run: pytest -ra
 
   package:
-    name: package (build + install)
-    runs-on: ubuntu-latest
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -65,12 +76,30 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
-      - name: Install the wheel in a clean environment
+      # One Python driver instead of two shell dialects: the venv layout differs
+      # (bin/ vs Scripts/) and `dist/*.whl` is a shell glob that cmd.exe does not
+      # expand, so the portable way to smoke-test the artifact is to resolve both
+      # in Python and hand subprocess an argv.
+      - name: Install the wheel and smoke-test the console scripts
+        shell: python
         run: |
-          python -m venv /tmp/smoke
-          /tmp/smoke/bin/pip install dist/*.whl
-      - name: Smoke-test the console scripts
-        run: |
-          /tmp/smoke/bin/aisquare --version
-          /tmp/smoke/bin/asq --version
-          /tmp/smoke/bin/aisquare --help
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+
+          venv = Path("smoke").resolve()
+          subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+          scripts = "Scripts" if sys.platform == "win32" else "bin"
+          bindir = venv / scripts
+          suffix = ".exe" if sys.platform == "win32" else ""
+
+          subprocess.run([str(bindir / f"pip{suffix}"), "install", str(wheels[0])], check=True)
+          for argv in (
+              [f"aisquare{suffix}", "--version"],
+              [f"asq{suffix}", "--version"],
+              [f"aisquare{suffix}", "--help"],
+          ):
+              subprocess.run([str(bindir / argv[0]), *argv[1:]], check=True)

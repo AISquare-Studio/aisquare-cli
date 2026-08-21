@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import getpass
 import json
+import re
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +59,23 @@ def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path)
     second = mcp_server.serve_token()
     assert first == second and len(first) > 30
     creds = isolated_home / "credentials"
-    assert stat.S_IMODE(creds.stat().st_mode) == 0o600
+    if sys.platform == "win32":
+        # Mode bits are advisory on NTFS -- S_IMODE reports 0o666 however the
+        # file is really protected -- so assert the ACL that was actually
+        # applied: inheritance broken, and nobody granted but this account.
+        result = subprocess.run(
+            ["icacls", str(creds)], capture_output=True, text=True, encoding="utf-8", check=True
+        )
+        # icacls prints "<path> PRINCIPAL:(perms)" then one indented ACE per
+        # line. Matching on the "(" is what keeps the drive letter in the path
+        # from parsing as a principal.
+        principals = {
+            name.rsplit("\\", 1)[-1] for name in re.findall(r"([^\s:]+):\([^)]*\)", result.stdout)
+        }
+        assert principals, f"no ACEs parsed from icacls output: {result.stdout!r}"
+        assert principals == {getpass.getuser()}, result.stdout
+    else:
+        assert stat.S_IMODE(creds.stat().st_mode) == 0o600
 
 
 def test_remote_tools_act_as_an_attributed_virtual_session(

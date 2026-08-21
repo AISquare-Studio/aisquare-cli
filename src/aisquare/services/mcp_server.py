@@ -19,7 +19,8 @@ Transports:
 - ``stdio`` — for Claude Desktop launching the server itself (on Windows:
   ``wsl -e … aisquare serve --stdio``). No network, no token.
 - ``streamable HTTP`` — bound to 127.0.0.1 by default and always guarded by
-  the static bearer token stored in ``~/.aisquare/credentials`` (0600).
+  the static bearer token stored in ``~/.aisquare/credentials``, restricted to
+  the current user (0600 on POSIX, an equivalent ACL on Windows).
 
 This module needs the optional ``mcp`` dependency (``pip install
 aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
@@ -31,7 +32,6 @@ import json
 import os
 import secrets
 import sqlite3
-import stat
 import sys
 import time
 from typing import TYPE_CHECKING, Any, cast
@@ -357,7 +357,14 @@ def serve_token() -> str:
         token = secrets.token_urlsafe(32)
         data[_TOKEN_KEY] = token
         path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        if not paths.restrict_to_owner(path):
+            # The token is the only thing standing in front of the HTTP
+            # server, so an unrestricted file is worth a word on stderr.
+            print(
+                f"warning: could not restrict {path} to your account — "
+                "other users on this machine may be able to read the serve token.",
+                file=sys.stderr,
+            )
     return token
 
 

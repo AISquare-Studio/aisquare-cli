@@ -14,11 +14,51 @@ Set ``AISQUARE_HOME`` to relocate the whole tree (tests rely on this).
 
 from __future__ import annotations
 
+import getpass
 import os
+import stat
+import subprocess
+import sys
 from pathlib import Path
 
 HOME_ENV_VAR = "AISQUARE_HOME"
 """Environment variable that overrides the default ``~/.aisquare`` location."""
+
+
+def restrict_to_owner(path: Path) -> bool:
+    """Make ``path`` readable and writable by its owner only. True when enforced.
+
+    ``chmod(0o600)`` is the whole story on POSIX, and *nothing* on Windows:
+    the group/other bits have no NTFS equivalent, so ``os.chmod`` silently
+    leaves the file readable by every other account on the machine. Since the
+    two callers are an API key and a bearer token, "silently" is the problem —
+    the ACL has to be rewritten for real, dropping inherited entries
+    (``/inheritance:r``) and replacing the grants (``/grant:r``) so only the
+    current user is left.
+
+    Returns False when the restriction could not be applied, so a caller can
+    say so rather than implying a protection that is not there.
+    """
+    if sys.platform != "win32":
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        return True
+    try:
+        user = getpass.getuser()
+    except Exception:  # pragma: no cover - getuser needs an identifiable user
+        return False
+    try:
+        result = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def aisquare_home() -> Path:

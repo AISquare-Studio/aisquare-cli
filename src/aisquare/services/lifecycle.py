@@ -46,8 +46,13 @@ def initialize(
     if api_key:
         credentials = paths.credentials_path()
         credentials.write_text(api_key, encoding="utf-8")
-        credentials.chmod(0o600)
-        notes.append("Stored API key in ~/.aisquare/credentials.")
+        if paths.restrict_to_owner(credentials):
+            notes.append("Stored API key in ~/.aisquare/credentials.")
+        else:
+            notes.append(
+                "Stored API key in ~/.aisquare/credentials — but could NOT restrict it to "
+                "your account; other users on this machine may be able to read it."
+            )
     elif not local:
         notes.append(
             "No API key given — running local-only; re-run with --api-key to connect later."

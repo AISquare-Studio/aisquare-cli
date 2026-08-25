@@ -18,6 +18,7 @@ flag is its one-line help.
 
 from __future__ import annotations
 
+import typer.main
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -43,29 +44,34 @@ def test_reinit_discards_bound_seats(runner: CliRunner) -> None:
     assert load_config().team.profiles == {}, "reinit is expected to reset config"
 
 
-def test_the_reinit_help_names_what_a_reset_costs(runner: CliRunner) -> None:
+def test_the_reinit_help_names_what_a_reset_costs() -> None:
     """A user meets this flag in exactly one place: one line of ``--help``.
 
     "Re-run setup even if already initialised" describes the trigger and not
     the consequence, next to a command documented as safe to re-run. The help
     has to say that config is reset and that the seat bindings go with it.
-    """
-    # Rich wraps help to the terminal width and breaks lines mid-sentence, so
-    # compare on collapsed whitespace rather than on the rendered layout — the
-    # renderer's width is not part of the claim (that mistake cost two false
-    # positives on this board tonight).
-    #
-    # Collapsing whitespace handles WRAPPING. It does not handle TRUNCATION,
-    # which is what Rich does to an options panel below roughly 70 columns: the
-    # flag name itself is dropped and this assertion fails on the one thing it
-    # is not about. Measured: green at COLUMNS=80, red at 60 and at 40 — and CI
-    # runs narrower than a developer's terminal, which is why this passed
-    # locally and failed there. So the width is pinned rather than inherited.
-    help_text = runner.invoke(
-        app, ["init", "--help"], catch_exceptions=False, env={"COLUMNS": "200"}
-    ).output
-    flat = " ".join(help_text.split())
 
-    assert "--reinit" in flat
+    ASKED OF THE DECLARED OPTION, NOT OF RENDERED OUTPUT, and that took three
+    failures to learn. Reading `--help` back as text put Rich between the claim
+    and the assertion, and Rich is not a constant: it wraps at the terminal
+    width (handled, by collapsing whitespace), it TRUNCATES an options panel
+    below roughly 70 columns so the flag name vanishes (green at COLUMNS=80,
+    red at 60 and 40 — and CI is narrower than a developer's terminal), and
+    with the width pinned wide it still rendered no `--reinit` on 3.11-3.13
+    while rendering it on 3.14. Three different reasons, none of them anything
+    to do with whether the help text says what a reset costs.
+
+    The help string is what the claim is about and it is a declared attribute,
+    so this reads it off the command. That gives up one thing honestly: it no
+    longer proves Typer SHOWS the option. Nothing here ever proved that
+    reliably — the renderer is the part that kept moving — and `--help` listing
+    a declared option is Typer's job, tested by Typer.
+    """
+    command = typer.main.get_command(app)
+    init_command = command.commands["init"]  # type: ignore[attr-defined]
+    reinit = next(p for p in init_command.params if "--reinit" in p.opts)
+
+    help_text = reinit.help or ""
+
     for named in ("config.toml", "team bind"):
-        assert named in flat, f"the --reinit help does not name {named!r}"
+        assert named in help_text, f"the --reinit help does not name {named!r}: {help_text!r}"

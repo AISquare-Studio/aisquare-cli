@@ -104,6 +104,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **`doctor --fix` could brick the checkout it was run in — including the test
+  suite's own interpreter.** The entry below documents that hazard and warns
+  about it; `apply_fixes` then went ahead and performed exactly that install,
+  because `running_editable()` was wired to the paths that *advise* an install
+  and not to the one that *performs* one. On an editable checkout the install is
+  now refused outright, ahead of the consent check: `--yes` is consent to a
+  repair, and a CLI that can no longer start is not one.
+  - The suite is a caller. `doctor --fix --yes` appears in four tests, so pytest
+    pip-installed the SDK into `sys.executable` mid-run, over the network, and
+    every test spawning a subprocess afterwards graded a shadowed CLI — 15
+    failures, all of them collected after the test that caused it, none of them
+    in it. The environment stayed broken after pytest exited.
+  - `pytest_sessionfinish` now fails any run that ends with a distribution
+    installed into its own interpreter that was absent at the start. Not
+    specific to pip or to that command: anything writing a distribution there
+    invalidates the whole run, and the honest report is "these results do not
+    describe this tree" rather than one unlucky test's traceback.
+  - Three tests were passing for reasons nobody chose, and now state their
+    premises instead of inheriting them: the `--reinit` help assertion read a
+    Rich options panel that TRUNCATES below ~70 columns (green at 80, red at 60
+    — and CI runs narrower than a developer's terminal); the "healthy install"
+    doctor control asserted `ok` against whatever the ambient interpreter held,
+    which was `ok` only because an earlier test had installed the SDK, making
+    alphabetical order load-bearing; and the `pgrep` decoy was a single-command
+    `sh -c`, which dash execs, replacing the shell's argv — the part holding the
+    phrase the decoy exists to supply — with `sleep 30`.
+  - `test_import_cost_of_the_integration` no longer swallows its subprocess's
+    stderr. `check=True` reports the return code and discards the message, so a
+    red CI said "returned non-zero exit status 1" while the interpreter had been
+    printing the root cause all along.
 - **Our own install advice could brick an editable checkout.** On a normal
   install `aisquare-cli[explainability]` is safe: both distributions land in one
   site-packages directory, their subpackages merge, and only the top-level

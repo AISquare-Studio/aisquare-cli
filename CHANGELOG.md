@@ -20,38 +20,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every Run we started. A test pins the page's field table against what
   `record_join` actually writes, in both directions, and is verified to fail
   when a row is renamed.
-- **Per-role LAUNCH PROFILE — the third launch axis, and deliberately the
-  dumbest one.** The ladder decides *what* model a role runs on, `--bin` (#52)
-  decides *which* executable runs it, and a profile carries *whatever else* the
-  operator wants on the command — verbatim. Three axes because they change for
-  three different reasons; **one config map**, because they describe one role.
-  - `aisquare team bind <role> [--bin CMD] [--env KEY=VALUE ...] [--arg ARG ...]`
-    is the one-time setup, with `--unset KEY`, `--clear`, and a bare
-    `aisquare team bind` to print the bindings. Everything a role launches with
-    is stored under `team.profiles.<role>` — `bin`, `env`, `args`. #52's
-    narrower `team.bins` (role → executable) was a strict subset of
-    `profiles.<role>.bin`, so it is **deleted rather than deprecated**: it
-    reached no release, no config file anywhere holds the key, and a
-    hand-written one still loads because unknown keys are ignored. One map is
-    one place to look, no precedence rule to learn, and nowhere for a `--clear`
-    to leave an entry still steering the role.
-  - `aisquare launch <role>` and `aisquare team spawn <role>` carry the binding
-    with no flag; `--env KEY=VALUE` (repeatable) adds to or overrides it for a
-    single launch. Env merges **per key**, so one variable can be changed
-    without discarding its siblings; args **append**.
-  - Values may use `~` and `$VAR`, expanded at launch — so one binding follows
-    you across machines with different homes. An undefined `$VAR` is left
-    verbatim rather than blanked, because a silently empty `CLAUDE_CONFIG_DIR`
-    starts a fresh unauthenticated profile that surfaces as a login failure
-    hours later instead of the typo it is.
-  - **Nothing here interprets what you bind.** Parallel agent installs reached
-    through shell aliases are just two env entries; a proxy, a region, or a
-    wrapper's own variables work identically, without the CLI learning about
-    any of them. Reaching these installs via `--bin` cannot work — an alias is
-    not an executable, so `shutil.which("claude2")` is `None`.
-  - `team harness` and `spawn`'s banner report which env keys a role carries
-    and where each came from (keys only — the values are paths and tokens, and
-    a banner is a terminal).
 - **The correlation spine: one session, one Run, one key.** Tracing already
   sent an `X-Pipeline-Id`, but it was a random UUID — so a gateway Run and the
   board row for the very same session had nothing in common, and the two
@@ -387,6 +355,88 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an agent exits. The printed command now clears the previous paste's tracing
   first, keyed on a marker only our own wiring sets, so a real operator
   gateway still stops the trace exactly as before.
+
+## [0.4.0rc2] - 2026-08-19
+
+Two PRs on top of rc1. **#48 makes `aisquare` run on Windows at all** — the
+package died on `import fcntl` before it could print `--version`, and four more
+defects sat underneath that one; read the migration note under Fixed, because
+hooks installed by rc1 carry broken quoting and need one `agents connect` to
+become runnable. #56 adds the per-role launch profile, folding #52 + #54's
+narrower `team.bins` into a single `team.profiles.<role>` map before it reached
+a release. Windows is not in the CI matrix yet — the Windows branches read
+`sys.platform` at call time and are exercised by monkeypatched tests on ubuntu,
+but pre-existing POSIX-only assumptions in the suite need fixing before a
+`windows-latest` job can go green.
+
+### Added
+- **Per-role LAUNCH PROFILE — the third launch axis, and deliberately the
+  dumbest one.** The ladder decides *what* model a role runs on, `--bin` (#52)
+  decides *which* executable runs it, and a profile carries *whatever else* the
+  operator wants on the command — verbatim. Three axes because they change for
+  three different reasons; **one config map**, because they describe one role.
+  - `aisquare team bind <role> [--bin CMD] [--env KEY=VALUE ...] [--arg ARG ...]`
+    is the one-time setup, with `--unset KEY`, `--clear`, and a bare
+    `aisquare team bind` to print the bindings. Everything a role launches with
+    is stored under `team.profiles.<role>` — `bin`, `env`, `args`. #52's
+    narrower `team.bins` (role → executable) was a strict subset of
+    `profiles.<role>.bin`, so it is **deleted rather than deprecated**: it
+    reached no release, no config file anywhere holds the key, and a
+    hand-written one still loads because unknown keys are ignored. One map is
+    one place to look, no precedence rule to learn, and nowhere for a `--clear`
+    to leave an entry still steering the role.
+  - `aisquare launch <role>` and `aisquare team spawn <role>` carry the binding
+    with no flag; `--env KEY=VALUE` (repeatable) adds to or overrides it for a
+    single launch. Env merges **per key**, so one variable can be changed
+    without discarding its siblings; args **append**.
+  - Values may use `~` and `$VAR`, expanded at launch — so one binding follows
+    you across machines with different homes. An undefined `$VAR` is left
+    verbatim rather than blanked, because a silently empty `CLAUDE_CONFIG_DIR`
+    starts a fresh unauthenticated profile that surfaces as a login failure
+    hours later instead of the typo it is.
+  - **Nothing here interprets what you bind.** Parallel agent installs reached
+    through shell aliases are just two env entries; a proxy, a region, or a
+    wrapper's own variables work identically, without the CLI learning about
+    any of them. Reaching these installs via `--bin` cannot work — an alias is
+    not an executable, so `shutil.which("claude2")` is `None`.
+  - `team harness` and `spawn`'s banner report which env keys a role carries
+    and where each came from (keys only — the values are paths and tokens, and
+    a banner is a terminal).
+
+### Fixed
+- **`aisquare` runs on Windows (#48).** `core/brain.py` imported `fcntl` at
+  module scope and sits on the import path of every command, so a Windows
+  install died before it could print `--version` — and fixing that exposed four
+  more defects underneath, each independently breaking a feature. Five fixes,
+  one commit each, POSIX behaviour unchanged throughout:
+  - The brain lock goes through a platform-appropriate primitive — a
+    non-blocking `msvcrt` byte-range lock there, `flock` here — behind one
+    contract both backends share.
+  - Hook commands are quoted for the shell that will actually run them, and
+    the matcher that recognises them is the exact inverse. Those two halves
+    disagreeing was a two-sided bug: `shlex.quote` wrapped every Windows path
+    in single quotes `cmd.exe` has no syntax for, so no hook could launch,
+    while `shlex.split` ate the path separators as escapes, so
+    `hooks_installed()` always returned `False` — `doctor` reported hooks
+    "missing or outdated" with all five sitting in `settings.json`, `connect`
+    appended duplicates and `disconnect` could remove nothing.
+  - `repomix`/`npx` run through the path `shutil.which` already resolved.
+    `CreateProcess` does not apply `PATHEXT`, so a bare name raised
+    `FileNotFoundError` and `project onboard` could never pack — which also
+    makes `doctor` honest, since it probed with `shutil.which` alone and
+    reported repomix available on a machine where packing could not work.
+  - A redirected console is reconfigured to UTF-8. Windows streams fall back
+    to the ANSI codepage when not attached to a console, which cannot encode
+    the `✓`/`⚠`/`→` this CLI prints, so `aisquare doctor > out.txt` exited 1
+    on `UnicodeEncodeError` while the same command run interactively was fine.
+  - Every `subprocess.run` capturing text decodes as UTF-8 with
+    `errors="replace"` rather than the locale codec, which raised
+    `UnicodeDecodeError` mid-pack and silently lost repomix's token count.
+
+  *Migration:* hooks installed by an earlier release carry the broken quoting
+  and are not runnable. `doctor` now recognises them and reports them
+  connected, so re-run `aisquare agents connect claude-code` once to rewrite
+  them.
 - **`team prune` no longer releases a quiet session's in-progress claim (#49).**
   Presence and ownership now retire on different clocks: the session row still
   goes at the threshold (30m), but its `doing` claims are only returned to the
@@ -637,6 +687,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...HEAD
+[0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
+[0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1
 [0.2.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AISquare-Studio/aisquare-cli/releases/tag/v0.1.0

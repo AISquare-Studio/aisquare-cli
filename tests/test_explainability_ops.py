@@ -547,6 +547,9 @@ def test_fix_never_installs_without_being_asked(monkeypatch: pytest.MonkeyPatch)
         "install_sdk",
         lambda: pytest.fail("installed without consent"),
     )
+    # This file runs FROM a checkout, so the editable refusal would answer first
+    # and this test would pass without ever reaching the consent it is about.
+    monkeypatch.setattr(ops, "running_editable", lambda: False)
     actions = ops.apply_fixes(confirm=lambda _: False)
     assert any(ops.INSTALL_HINT in action for action in actions)
 
@@ -558,6 +561,7 @@ def test_fix_installs_when_consent_is_given(monkeypatch: pytest.MonkeyPatch) -> 
         lambda: ops.SdkPresence(importable=False, script=None, version=None, shadowing=False),
     )
     monkeypatch.setattr(ops, "install_sdk", lambda: (True, "installed aisquare[explainability]"))
+    monkeypatch.setattr(ops, "running_editable", lambda: False)
     actions = ops.apply_fixes(assume_yes=True)
     assert any("installed" in action for action in actions)
 

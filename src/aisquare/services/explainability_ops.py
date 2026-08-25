@@ -54,10 +54,12 @@ from aisquare.core.config import (
 )
 from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
 from aisquare.services.explainability import (
+    EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
     ProxyProbe,
     install_hint,
     probe_proxy,
+    running_editable,
 )
 
 #: Distribution that provides the SDK, and the console script it installs. The
@@ -1093,6 +1095,23 @@ def apply_fixes(
 
     presence = sdk_presence()
     if not presence.present:
+        # An editable checkout is the ONE environment where this install is not
+        # reversible-and-local but destructive: the SDK's real `aisquare/` in
+        # site-packages wins the import name wholesale and every command dies
+        # with "No module named 'aisquare.cli'" — measured on both editable
+        # shapes this project can produce, and `pip install -e` does not recover
+        # it (see EDITABLE_INSTALL_HINT). Consent cannot make that safe, because
+        # what the operator consented to was a repair.
+        #
+        # This is also why it must be checked HERE and not only at the hint: the
+        # test suite runs `doctor --fix --yes` against a checkout, so without
+        # this branch pytest pip-installs the SDK into its own interpreter and
+        # every subsequent subprocess test fails against a shadowed CLI — while
+        # the test doing it passes. That was the cause of a 15-failure CI run
+        # whose failures were all, and only, the tests collected after it.
+        if running_editable():
+            actions.append(f"SDK install refused — {EDITABLE_INSTALL_HINT}")
+            return actions
         allowed = assume_yes or (
             confirm is not None
             and confirm(

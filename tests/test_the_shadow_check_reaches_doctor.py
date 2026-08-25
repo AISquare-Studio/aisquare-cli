@@ -122,8 +122,29 @@ def test_the_value_reaches_the_presence_record(monkeypatch: pytest.MonkeyPatch) 
     assert ops.sdk_presence().shadowing is True
 
 
-def test_the_row_is_clean_on_a_healthy_install(configured_home: Path, runner: CliRunner) -> None:
-    """The control. Without it, a doctor that always warned would pass below."""
+def test_the_row_is_clean_on_a_healthy_install(
+    configured_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control. Without it, a doctor that always warned would pass below.
+
+    "Healthy" has to be STATED, not inherited from the interpreter. This test
+    used to assert ``ok`` against whatever the ambient environment happened to
+    hold, and it passed for a reason nobody chose: an earlier test in the run
+    — ``test_doctor_does_not_create_state``, via ``doctor --fix --yes`` — really
+    pip-installed the SDK into this interpreter, so by the time the letter T was
+    collected the row genuinely read ``ok``. Alphabetical order was load-bearing.
+    With that install refused (it shadowed the CLI and broke fifteen later
+    tests), a clean environment has no SDK and the row correctly warns, so the
+    control has to supply the presence it is a control for.
+    """
+    monkeypatch.setattr(
+        ops,
+        "sdk_presence",
+        lambda: ops.SdkPresence(
+            importable=True, script="explainability-doctor", version="1.1.0", shadowing=False
+        ),
+    )
+
     row = _rows(runner).get(_ROW)
 
     assert row is not None, f"`{_ROW}` is not a doctor check any more"

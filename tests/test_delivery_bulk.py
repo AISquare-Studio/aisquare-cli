@@ -294,8 +294,16 @@ def test_the_probe_ignores_a_shell_that_merely_mentions_the_daemon(tmp_path: Pat
     """
     home = tmp_path / "home"
     home.mkdir()
+    # `sleep 30; :` rather than `sleep 30`, and the trailing no-op is the whole
+    # point. Given a script that is ONE command, dash execs it and the shell's
+    # own argv — the part carrying the phrase — is replaced: /proc/<pid>/cmdline
+    # reads `sleep 30`, `pgrep -f` cannot match it, and the decoy stops being a
+    # false positive, so this test fails while asserting its own setup. Whether
+    # it fails is a race between pgrep and the exec, which is why it passed on
+    # CI and not on a developer's box. A second command makes the optimisation
+    # illegal, so the shell survives holding its argv.
     decoy = subprocess.Popen(
-        ["/bin/sh", "-c", "sleep 30  # aisquare serve --stdio"],
+        ["/bin/sh", "-c", "sleep 30; :  # aisquare serve --stdio"],
         env={**os.environ, HOME_ENV_VAR: str(home)},
     )
     try:

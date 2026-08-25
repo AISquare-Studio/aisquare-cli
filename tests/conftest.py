@@ -8,7 +8,10 @@ the narrow one nobody selects it with.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as metadata_version
 from pathlib import Path
 
 import pytest
@@ -89,6 +92,52 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     reason = _foreign_package_reason(aisquare.__file__, SRC)
     if reason is not None:
         pytest.exit(reason, returncode=4)
+
+
+def _sdk_installed() -> bool:
+    """Whether the SDK distribution is present in THIS interpreter."""
+    try:
+        metadata_version("aisquare")
+    except PackageNotFoundError:
+        return False
+    return True
+
+
+_SDK_AT_START = _sdk_installed()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Refuse to end a run that installed something into its own interpreter.
+
+    ``sessionstart`` proves the run is grading this tree. Nothing proved it was
+    still grading it at the end, and it was not: ``doctor --fix --yes`` used to
+    reach ``pip install aisquare[explainability]``, three tests invoke that
+    command, and the SDK shares this package's import name. The install landed
+    in site-packages, which precedes the editable ``src`` on ``sys.path``, so
+    from that moment every subprocess got a CLI with no ``aisquare.cli`` — 15
+    failures, none of them in the test that caused it, and the venv stayed
+    broken after pytest exited.
+
+    Checked at the END rather than per-test because the mechanism is not
+    specific to pip or to that command: anything that writes a distribution
+    into ``sys.executable``'s environment invalidates the whole run, and the
+    honest report is "these results do not describe this tree" rather than one
+    unlucky test's traceback. Stated as a warning plus a non-zero status: the
+    per-test failures are already loud, and this is the sentence that explains
+    them.
+    """
+    if _sdk_installed() and not _SDK_AT_START:
+        session.exitstatus = max(exitstatus, 1)
+        print(
+            "\nFATAL: this run installed the 'aisquare' distribution into "
+            f"{sys.executable}.\n"
+            "It shares this package's import name, so every result after the "
+            "install graded a shadowed CLI, and this environment is now broken "
+            "for ordinary use.\n"
+            "Recover with: pip uninstall aisquare\n"
+            "Then find the caller — a test reaching a real install rather than "
+            "a patched one."
+        )
 
 
 @pytest.fixture(autouse=True)

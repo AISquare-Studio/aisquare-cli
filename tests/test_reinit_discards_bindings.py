@@ -50,11 +50,20 @@ def test_the_reinit_help_names_what_a_reset_costs(runner: CliRunner) -> None:
     the consequence, next to a command documented as safe to re-run. The help
     has to say that config is reset and that the seat bindings go with it.
     """
-    help_text = runner.invoke(app, ["init", "--help"], catch_exceptions=False).output
     # Rich wraps help to the terminal width and breaks lines mid-sentence, so
     # compare on collapsed whitespace rather than on the rendered layout — the
     # renderer's width is not part of the claim (that mistake cost two false
     # positives on this board tonight).
+    #
+    # Collapsing whitespace handles WRAPPING. It does not handle TRUNCATION,
+    # which is what Rich does to an options panel below roughly 70 columns: the
+    # flag name itself is dropped and this assertion fails on the one thing it
+    # is not about. Measured: green at COLUMNS=80, red at 60 and at 40 — and CI
+    # runs narrower than a developer's terminal, which is why this passed
+    # locally and failed there. So the width is pinned rather than inherited.
+    help_text = runner.invoke(
+        app, ["init", "--help"], catch_exceptions=False, env={"COLUMNS": "200"}
+    ).output
     flat = " ".join(help_text.split())
 
     assert "--reinit" in flat

@@ -85,6 +85,30 @@ UNIQUELY_IMPORTED = {
     "ssl",
 }
 
+#: What the SAME code additionally pulls in on 3.14, measured rather than
+#: guessed: ``socket``, ``_socket`` and ``tempfile``.
+#:
+#: They are not a cost this integration added — they are stdlib reshuffling.
+#: On 3.11-3.13 the base set already imports all three (``ssl`` pulls
+#: ``socket``, and something in the base chain pulls ``tempfile``), so they
+#: cancel in the diff; on 3.14 they leave the base and arrive only with this
+#: module, so the same subtraction reports them.
+#:
+#: Kept as a SEPARATE set, unioned per interpreter, rather than folded into the
+#: record above. Folding would spend the guard's whole point: `socket` appearing
+#: on 3.12 would then be indistinguishable from `socket` appearing on 3.14, and
+#: the first is a real regression on the primary path while the second is the
+#: standard library moving underneath us.
+UNIQUELY_IMPORTED_FROM_314 = {"_socket", "socket", "tempfile"}
+
+
+def _recorded() -> set[str]:
+    """The record for the interpreter actually running this test."""
+    if sys.version_info >= (3, 14):
+        return UNIQUELY_IMPORTED | UNIQUELY_IMPORTED_FROM_314
+    return UNIQUELY_IMPORTED
+
+
 _BASE = "import aisquare.cli.common, aisquare.core.config, aisquare.models"
 _WITH = f"{_BASE}, aisquare.cli.explainability"
 
@@ -99,7 +123,18 @@ def _top_level_modules(code: str) -> set[str]:
         [sys.executable, "-c", f"{code}\nimport sys\nprint(' '.join(sorted(sys.modules)))"],
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
+    )
+    # NOT check=True. It raises CalledProcessError, whose message carries the
+    # returncode and not the captured stderr, and capture_output means nothing
+    # else prints it either — so the interpreter's own explanation is thrown
+    # away at the only moment anyone wants it. That cost real time: a CI run
+    # where these five tests failed reported "returned non-zero exit status 1"
+    # and nothing more, and the actual message ("No module named
+    # 'aisquare.cli'", from a shadowing install) named the root cause outright.
+    assert result.returncode == 0, (
+        f"the measurement subprocess failed (exit {result.returncode}); it says:\n"
+        f"{(result.stderr or result.stdout or '<no output>').strip()}"
     )
     return {name for name in result.stdout.split() if "." not in name}
 
@@ -124,9 +159,9 @@ def test_the_integration_pulls_in_exactly_what_is_recorded() -> None:
     """Both directions, so the record cannot rot into a stale allow list."""
     added = _uniquely_imported()
 
-    assert added == UNIQUELY_IMPORTED, (
+    assert added == _recorded(), (
         f"the explainability CLI now uniquely imports {sorted(added)}, recorded "
-        f"as {sorted(UNIQUELY_IMPORTED)}.\n"
+        f"as {sorted(_recorded())}.\n"
         "Added: a cost paid by every command that never uses this integration — "
         "deferring the import into the function that needs it is the usual fix.\n"
         "Removed: good; update the record so it keeps describing the truth."

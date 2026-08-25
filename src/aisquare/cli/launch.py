@@ -212,7 +212,20 @@ def launch(
                 "this one takes its own identity",
                 style="dim",
             )
-        identity = explainability_service.plan_session_identity(resolution.binary, ctx.args)
+        # The EFFECTIVE argument list, not just what this invocation typed.
+        # `argv` below is `[binary, *profile.args, *ctx.args, *pinned_id]`, so a
+        # role bound with `--session-id`, `--resume` or `--continue` via
+        # `team bind --arg` carries it here without appearing in `ctx.args`.
+        # Planning on `ctx.args` alone therefore read those launches as fresh:
+        # a bound `--session-id X` got a SECOND `--session-id` appended after
+        # it, and a bound `--continue`/`--resume` defeated the deliberate
+        # refusal to pin — the one this module's own comment calls "pure risk
+        # for no correlation", because guessing an id merges two agents onto one
+        # board row and one Run. `team spawn` already passes its profile args
+        # (cli/team.py), so this path was the asymmetric one.
+        identity = explainability_service.plan_session_identity(
+            resolution.binary, [*profile.args, *ctx.args]
+        )
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
         # them per target, and wire_session only ever looks at the top level —

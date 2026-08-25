@@ -619,13 +619,18 @@ def key_path() -> Path:
     return paths.aisquare_home() / "explainability-key"
 
 
-def _stored_api_key() -> str | None:
+def stored_api_key() -> str | None:
     """The machine-local key file, with no environment fallback.
 
     Deliberately narrower than :func:`resolve_api_key`: that one also reads
     ``EXPLAINABILITY_API_KEY``, which is correct when the target names that
     variable and WRONG when it names another. A staging key must not satisfy a
     prod target just because it happens to be in the shell.
+
+    Public because it has two callers now: this module's ``_active_deployment``
+    and ``explainability_ops.resolve_target``, which is where the fallback
+    belongs — see that function for why the operational surfaces used to
+    disagree with the shipping path about whether a key exists.
     """
     try:
         stored = key_path().read_text(encoding="utf-8").strip()
@@ -673,9 +678,18 @@ def _active_deployment(target_name: str | None = None) -> tuple[str, str, str | 
     printed the prod gateway, because the line a human reads resolves the
     target. Both halves looked healthy. Nobody was told.
 
-    ``resolve_target`` falls back to the top-level values when no target was
-    ever created, so the single-deployment machine ``init --explainability``
-    produces is unaffected.
+    ``resolve_target`` falls back to the top-level ``gateway_url`` and the key
+    file when no target was ever created, so the single-deployment machine
+    ``init --explainability`` produces is unaffected.
+
+    IT DID NOT USED TO. This function compensated with an
+    ``or settings.gateway_url`` and a key-file read of its own, while this
+    docstring — and a second one in ``shipping_offer`` — credited
+    ``resolve_target`` with fallbacks it did not have. That is why the surfaces
+    built on ``resolve_target`` (``status``, ``doctor``, ``register``) called a
+    working single-deployment machine unconfigured. Both fallbacks now live in
+    the resolver, which is the only place either AST guard permits, and this
+    function is a projection of it rather than a second opinion.
 
     Imported inside the function because ``explainability_ops`` imports this
     module for ``probe_proxy``; at module scope that is a cycle.
@@ -684,21 +698,7 @@ def _active_deployment(target_name: str | None = None) -> tuple[str, str, str | 
 
     settings = load_config().explainability
     target = resolve_target(settings, target_name)
-    # `resolve_target` looks at the target and the SDK's env var; the top-level
-    # `gateway_url` is what `configure_shipping` writes on a machine that never
-    # made a target, so it is the last fallback rather than an alternative.
-    gateway_url = target.gateway_url or settings.gateway_url
-    # The key comes from the variable the TARGET names. The machine-local key
-    # file answers ONLY when no variable was named — it holds one unlabelled
-    # key, so the moment a deployment declares "my key lives in $PROD_KEY" the
-    # file cannot stand in for it. Reproduced before this guard existed: follow
-    # the CLI's own "or write <key file>" advice while on staging, switch to
-    # prod, and the STAGING key went to the PROD gateway. The reverse is worse
-    # — a prod key disclosed to a staging host.
-    key = target.api_key
-    if key is None and target.api_key_env == KEY_ENV_VAR:
-        key = _stored_api_key()
-    return gateway_url, target.api_key_env, key
+    return target.gateway_url, target.api_key_env, target.api_key
 
 
 def sdk_available() -> bool:
@@ -1100,7 +1100,9 @@ def shipping_offer() -> ShippingOffer:
     # <staging>" while the machine ships to prod. The lanes never diverged; the
     # SENTENCE did, at the moment the operator decides whether to turn shipping
     # on. `resolve_target` still consults the variable when no target names a
-    # gateway, so the single-deployment machine is unaffected.
+    # gateway, and now also the top-level `gateway_url` and the key file, so the
+    # single-deployment machine is unaffected — see `_active_deployment`, where
+    # this sentence used to be true of a fallback that lived there instead.
     gateway, _key_env, target_key = _active_deployment()
     # Through the SAME resolver, for the same reason one line up. Reading
     # `resolve_api_key()` here was env-first AND file-second, so on a machine

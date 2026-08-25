@@ -131,10 +131,17 @@ def test_the_default_variable_still_counts_when_no_target_names_another(
     assert service.shipping_offer().has_key is True
 
 
-#: Allowed to resolve a key. ``_active_deployment`` is the resolver;
-#: ``resolve_api_key`` and ``_stored_api_key`` ARE the readers it is built from;
-#: ``store_api_key`` is the writer — where a key enters the machine rather than
-#: where one is chosen.
+#: Allowed to resolve a key. ``resolve_target`` (in ``explainability_ops``, and
+#: guarded separately below) is the resolver; ``resolve_api_key`` and
+#: ``stored_api_key`` ARE the readers it is built from; ``store_api_key`` is the
+#: writer — where a key enters the machine rather than where one is chosen.
+#: ``_active_deployment`` stays listed as a projection of the resolver: it no
+#: longer reads a key itself, and if it ever does again this list is where the
+#: exemption has to be argued for.
+#:
+#: ``stored_api_key`` was ``_stored_api_key``. It became public when
+#: ``resolve_target`` gained the key-file fallback that the operational surfaces
+#: were missing — the same file reader, one more legitimate caller.
 #:
 #: ``configure_shipping`` was here and is NOT any more. It decided the `ship`
 #: flag from ``resolve_api_key``, which broke its own documented invariant:
@@ -146,7 +153,7 @@ def test_the_default_variable_still_counts_when_no_target_names_another(
 _MAY_RESOLVE_KEY = {
     "_active_deployment",
     "resolve_api_key",
-    "_stored_api_key",
+    "stored_api_key",
     "store_api_key",
 }
 
@@ -169,7 +176,7 @@ def _key_resolution_offences(node: ast.FunctionDef) -> list[str]:
         if (
             isinstance(inner, ast.Call)
             and isinstance(inner.func, ast.Name)
-            and inner.func.id in ("resolve_api_key", "_stored_api_key")
+            and inner.func.id in ("resolve_api_key", "stored_api_key")
         ):
             found.append(f"{node.name} calls {inner.func.id}() directly")
         # READING the file, not NAMING it. An earlier rule flagged any
@@ -202,7 +209,7 @@ def _key_resolution_offences(node: ast.FunctionDef) -> list[str]:
 #: to production code stops controlling anything the day that code is cleaned up.
 _OFFENDING_BODIES = {
     "calls the resolver": "def f():\n    return resolve_api_key()\n",
-    "calls the file reader": "def f():\n    return _stored_api_key()\n",
+    "calls the file reader": "def f():\n    return stored_api_key()\n",
     "reads the key file": "def f():\n    return key_path().read_text()\n",
     "reads the env var": "def f():\n    return os.environ.get(KEY_ENV_VAR)\n",
 }

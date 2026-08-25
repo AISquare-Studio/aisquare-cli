@@ -151,9 +151,23 @@ def test_the_guard_is_looking_at_something() -> None:
                 _reads_configured_gateway(i) or _reads_gateway_environment(i)
                 for i in ast.walk(node)
             ):
-                found.add(f"{module.name}:{node.name}")
+                found.add(node.name)
 
-    assert len(found) >= 3, (
+    # BY NAME, not `len(found) >= 3`. That floor was a snapshot of how many
+    # readers happened to exist, and it failed the moment the count went DOWN
+    # for the right reason: `_active_deployment` used to carry its own
+    # `or settings.gateway_url`, compensating for a fallback `resolve_target`
+    # was documented to have and did not — which is exactly how `status`,
+    # `doctor` and `register` came to call a working single-deployment machine
+    # unconfigured. Consolidating into the resolver left two readers, and a
+    # guard that fails when a duplicate resolver is REMOVED is pressure in the
+    # wrong direction. It is also the "constant that can be lowered" category
+    # this file's sibling (test_one_key_resolver) already argues against.
+    #
+    # These two must read a gateway: the resolver, and the writer that decides
+    # the `ship` flag. A rename, a refactor into a class or a moved file empties
+    # `found` and fails the superset, which is what the check is for.
+    assert found >= {"resolve_target", "configure_shipping"}, (
         f"only {sorted(found)} actually read a gateway — the rule has stopped "
         "matching, so the guard above is asserting over nothing"
     )

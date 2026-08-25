@@ -56,10 +56,12 @@ from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
 from aisquare.services.explainability import (
     EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
+    KEY_ENV_VAR,
     ProxyProbe,
     install_hint,
     probe_proxy,
     running_editable,
+    stored_api_key,
 )
 
 #: Distribution that provides the SDK, and the console script it installs. The
@@ -149,10 +151,34 @@ def resolve_target(
 ) -> ResolvedTarget:
     """Fold the active target's overrides onto the top-level defaults.
 
-    Precedence for the gateway URL is config, then the SDK's environment
-    variable — config wins so that a shell which sourced staging credentials
-    cannot silently redirect a machine configured for production, and the
-    winning source is reported either way.
+    Precedence for the gateway URL is the target, then the SDK's environment
+    variable, then the top-level ``gateway_url`` — and the winning source is
+    reported either way.
+
+    THE LAST FALLBACK IS THE SINGLE-DEPLOYMENT MACHINE, and it was missing.
+    ``init --explainability`` writes ``settings.gateway_url`` and the key file
+    and creates no target at all, which is the shape most machines are in. Two
+    docstrings in ``explainability.py`` said this function already fell back to
+    those — it did not, and ``_active_deployment`` was quietly compensating with
+    an ``or settings.gateway_url`` of its own. So the shipping path saw a
+    configured machine while every surface built on this function saw an
+    unconfigured one. Reproduced on one config, in one ``status --json``
+    payload: ``"gateway": ""`` and ``"key_set": false`` beside
+    ``"shipping": {"gateway": "https://…"}``. ``doctor`` called it unconfigured
+    and ``register`` refused to run until the operator re-exported credentials
+    the machine already had.
+
+    The fallbacks live HERE rather than in each caller because the two AST
+    guards in ``tests/test_one_gateway_resolver.py`` and
+    ``tests/test_one_key_resolver.py`` name this function as the one place
+    allowed to resolve either — a second reader is the defect they exist to
+    catch, and both divergences found so far lived in a reader that never
+    joined the resolver.
+
+    The key fallback keeps ``_active_deployment``'s guard exactly: the file
+    answers ONLY for a target naming the DEFAULT variable, because it holds one
+    unlabelled key and a staging key must never satisfy a prod target. See
+    ``tests/test_key_never_crosses_deployments.py``.
     """
     environ = os.environ if env is None else env
     chosen = name or environ.get(TARGET_ENV_VAR) or settings.target
@@ -162,7 +188,13 @@ def resolve_target(
     if not gateway_url:
         gateway_url, source = environ.get(GATEWAY_ENV_VAR, ""), "env"
     if not gateway_url:
+        gateway_url, source = settings.gateway_url, "config"
+    if not gateway_url:
         source = "unset"
+
+    api_key = environ.get(target.api_key_env) or None
+    if api_key is None and target.api_key_env == KEY_ENV_VAR:
+        api_key = stored_api_key()
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -170,7 +202,7 @@ def resolve_target(
         gateway_url=gateway_url.rstrip("/"),
         gateway_source=source,
         api_key_env=target.api_key_env,
-        api_key=environ.get(target.api_key_env) or None,
+        api_key=api_key,
         proxy_url=target.proxy_url or settings.proxy_url,
         proxy_source=_proxy_source(settings, target),
         agent_name_template=target.agent_name_template or settings.agent_name_template,

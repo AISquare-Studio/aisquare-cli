@@ -618,3 +618,89 @@ def test_launch_survives_a_corrupt_config(
     assert result.exit_code == 0, result.output
     assert spy["env"]["AISQUARE_ROLE"] == "coder", "the launch must happen regardless"
     assert "config unreadable" in result.output
+
+
+def test_a_role_bound_to_a_session_id_is_not_given_a_second_one(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session planning has to read the EFFECTIVE argv, not just what was typed.
+
+    `argv` is `[binary, *profile.args, *ctx.args, *pinned_id]`, so a role bound
+    with `--session-id` via `team bind --arg` carries it without it ever
+    appearing in `ctx.args`. Planning on `ctx.args` alone read this launch as
+    fresh and appended a SECOND `--session-id`, silently overriding the id the
+    operator bound — and the board/Run join then keys on the minted id rather
+    than theirs. `team spawn` already passed its profile args; this path did not.
+    """
+    from aisquare.core.config import (
+        AppConfig,
+        ExplainabilitySettings,
+        RoleLaunchProfile,
+        TeamSettings,
+        save_config,
+    )
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    with healthy_proxy() as proxy_url:
+        save_config(
+            AppConfig(
+                explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url),
+                team=TeamSettings(
+                    profiles={"coder": RoleLaunchProfile(args=["--session-id", "bound-id-1234"])}
+                ),
+            )
+        )
+        result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"].count("--session-id") == 1, (
+        f"two --session-id flags reached the agent: {spy['argv']}"
+    )
+    assert spy["argv"] == ["claude", "--session-id", "bound-id-1234"], spy["argv"]
+    assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
+
+
+@pytest.mark.parametrize("bound", [["--continue"], ["--resume"]])
+def test_a_role_bound_to_a_resume_is_not_pinned(
+    bound: list[str],
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal to pin has to survive the flag arriving from a binding.
+
+    `--continue` and a bare `--resume` name a session chosen at run time, so
+    planning deliberately injects nothing: guessing an id merges two agents onto
+    one board row and one Run, which is worse than no join. Read off `ctx.args`
+    only, that refusal never fired for a bound flag and the launcher appended a
+    `--session-id` to a resume.
+    """
+    from aisquare.core.config import (
+        AppConfig,
+        ExplainabilitySettings,
+        RoleLaunchProfile,
+        TeamSettings,
+        save_config,
+    )
+    from tests.proxy_stub import healthy_proxy
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    with healthy_proxy() as proxy_url:
+        save_config(
+            AppConfig(
+                explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url),
+                team=TeamSettings(profiles={"coder": RoleLaunchProfile(args=list(bound))}),
+            )
+        )
+        result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert "--session-id" not in spy["argv"], (
+        f"pinned an id onto {bound[0]}, which names a session that does not exist "
+        f"yet: {spy['argv']}"
+    )
+    assert spy["argv"] == ["claude", *bound], spy["argv"]

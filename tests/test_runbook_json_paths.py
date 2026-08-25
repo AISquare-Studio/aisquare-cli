@@ -96,13 +96,21 @@ def _enumerated_keys(text: str) -> set[str]:
     Parentheticals are removed first — the list reads
     ``key_env``/``key_set`` (never the key itself), ``proxy``, … — so the aside
     would otherwise cut the run of backticked names in half.
+
+    The slash group repeats (``*``, not ``?``). It allowed exactly two names,
+    which was every group the doc had until the key fields became four —
+    ``key_env``/``key_set``/``key_source``/``key_origin`` — and then the run
+    stopped at the third slash and the enumeration silently lost everything
+    after it. The failure was legible (this file's sibling assertion reported
+    eight missing keys) but it accused the DOC of omitting names it listed, so
+    the extractor is the thing that was wrong.
     """
     keys: set[str] = set()
     for match in re.finditer(re.escape(ENUMERATION_ANCHOR), text):
         window = text[match.end() : match.end() + 600]
         window = " ".join(line.lstrip("> ").strip() for line in window.splitlines())
         window = re.sub(r"\([^)]*\)", "", window)
-        run = re.search(r"(?:`[a-z_]+`(?:\s*/\s*`[a-z_]+`)?(?:\s*,\s*)?)+", window)
+        run = re.search(r"(?:`[a-z_]+`(?:\s*/\s*`[a-z_]+`)*(?:\s*,\s*)?)+", window)
         assert run, f"the payload enumeration stopped parsing near: {window[:120]!r}"
         keys.update(re.findall(r"`([a-z_]+)`", run.group(0)))
     return keys

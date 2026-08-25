@@ -40,6 +40,7 @@ def _target(url: str) -> ops.ResolvedTarget:
         gateway_source="config",
         api_key_env="EXPLAINABILITY_API_KEY",
         api_key="k",
+        key_source="env",
         proxy_url=url,
         proxy_source="config",
         agent_name_template="aisquare-{role}",

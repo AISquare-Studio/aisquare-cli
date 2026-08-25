@@ -98,6 +98,13 @@ def status(
                     "gateway_source": target.gateway_source,
                     "key_env": target.api_key_env,
                     "key_set": bool(target.api_key),
+                    # `key_set` alone said "the named variable holds a key",
+                    # which stopped being true when the resolver gained the
+                    # key-file fallback. `key_source` is the field a script
+                    # should branch on; `key_env` stays the variable the target
+                    # NAMES, set or not.
+                    "key_source": target.key_source,
+                    "key_origin": target.key_origin,
                     "proxy": target.proxy_url,
                     "identity": target.agent_name_template,
                     "agents": list(target.agent_names),
@@ -136,9 +143,7 @@ def status(
         typer.echo(f"enabled:  {settings.enabled}")
         typer.echo(f"target:   {target.name}")
         typer.echo(f"gateway:  {target.gateway_url or '(unset)'} [{target.gateway_source}]")
-        typer.echo(
-            f"key:      ${target.api_key_env} {'is set' if target.api_key else 'is NOT set'}"
-        )
+        typer.echo(f"key:      {target.key_origin} {'is set' if target.api_key else 'is NOT set'}")
         typer.echo(f"proxy:    {target.proxy_url}")
         typer.echo(f"identity: {target.agent_name_template}")
         typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
@@ -230,6 +235,8 @@ def enable(
                     "gateway": resolved.gateway_url,
                     "key_env": resolved.api_key_env,
                     "key_set": bool(resolved.api_key),
+                    "key_source": resolved.key_source,
+                    "key_origin": resolved.key_origin,
                     "proxy": resolved.proxy_url,
                     "identity": resolved.agent_name_template,
                     "agents": list(resolved.agent_names),
@@ -239,9 +246,7 @@ def enable(
         return
     typer.echo(f"✓ tracing enabled for target '{resolved.name}'")
     typer.echo(f"  gateway:  {resolved.gateway_url or '(unset)'}")
-    typer.echo(
-        f"  key from: ${resolved.api_key_env} {'(set)' if resolved.api_key else '(NOT set)'}"
-    )
+    typer.echo(f"  key from: {resolved.key_origin} {'(set)' if resolved.api_key else '(NOT set)'}")
     typer.echo(f"  proxy:    {resolved.proxy_url}")
     typer.echo(f"  agents:   {', '.join(resolved.agent_names) or '(none)'}")
     typer.echo("  next:     aisquare doctor --live")

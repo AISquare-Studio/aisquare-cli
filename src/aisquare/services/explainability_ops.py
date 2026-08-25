@@ -59,6 +59,7 @@ from aisquare.services.explainability import (
     KEY_ENV_VAR,
     ProxyProbe,
     install_hint,
+    key_path,
     probe_proxy,
     running_editable,
     stored_api_key,
@@ -108,6 +109,16 @@ class ResolvedTarget:
     gateway_source: str  # "config" | "env" | "unset" — shown, so surprises are visible
     api_key_env: str
     api_key: str | None
+    #: "env" | "file" | "unset" — WHERE the key won, not just which variable was
+    #: named. The gateway has carried its source since the split-brain fix for
+    #: the same reason, and the key needed it the moment `resolve_target` gained
+    #: the key-file fallback: until then `api_key_env` WAS the provenance,
+    #: because the environment was the only place a key could come from. After
+    #: it, every surface rendered `${api_key_env} is set` for a key that came
+    #: out of `~/.aisquare/explainability-key` while that variable was empty —
+    #: which sends an operator to rotate or debug a credential source that is
+    #: not in play.
+    key_source: str
     proxy_url: str
     proxy_source: str  # "config" | "default" — the default is unreachable ON PURPOSE
     agent_name_template: str
@@ -118,6 +129,30 @@ class ResolvedTarget:
     def configured(self) -> bool:
         """True when this machine knows where to ship and with what key."""
         return bool(self.gateway_url and self.api_key)
+
+    @property
+    def key_origin(self) -> str:
+        """Where the key actually came from, phrased for a human to act on.
+
+        ONE renderer for both surfaces, for the reason `status` and `doctor`
+        already share their redaction sentence: two phrasings of the same fact
+        drift, and the drift is invisible until an operator compares them
+        mid-incident. The file case names the PATH rather than saying "a file",
+        because the next thing anyone does with this line is go and look.
+
+        Names the SOURCE only. Whether a key is present is each surface's own
+        sentence — they already word it differently ("is NOT set", "(NOT set)")
+        and those phrasings are pinned — so folding presence in here would churn
+        three renderers to fix a provenance bug in one of them.
+
+        With nothing set anywhere there is no winning source, so it falls back
+        to the variable the target NAMES: that is the thing an operator would
+        populate next, and it is what every remediation line already tells them
+        to export.
+        """
+        if self.key_source == "file":
+            return str(key_path())
+        return f"${self.api_key_env}"
 
     @property
     def agent_names(self) -> tuple[str, ...]:
@@ -192,9 +227,11 @@ def resolve_target(
     if not gateway_url:
         source = "unset"
 
-    api_key = environ.get(target.api_key_env) or None
+    api_key, key_source = environ.get(target.api_key_env) or None, "env"
     if api_key is None and target.api_key_env == KEY_ENV_VAR:
-        api_key = stored_api_key()
+        api_key, key_source = stored_api_key(), "file"
+    if api_key is None:
+        key_source = "unset"
 
     roles = target.roles if target.roles is not None else settings.roles
     return ResolvedTarget(
@@ -203,6 +240,7 @@ def resolve_target(
         gateway_source=source,
         api_key_env=target.api_key_env,
         api_key=api_key,
+        key_source=key_source,
         proxy_url=target.proxy_url or settings.proxy_url,
         proxy_source=_proxy_source(settings, target),
         agent_name_template=target.agent_name_template or settings.agent_name_template,
@@ -729,7 +767,7 @@ def _check_config(target: ResolvedTarget, *, on: bool) -> DoctorCheck:
     return _ok(
         name,
         f"target '{target.name}' -> {target.gateway_url} ({target.gateway_source}), "
-        f"key from ${target.api_key_env}, identities: {identities}",
+        f"key from {target.key_origin}, identities: {identities}",
     )
 
 

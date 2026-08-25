@@ -180,3 +180,74 @@ def test_the_key_file_still_cannot_satisfy_a_target_that_named_its_own_variable(
     assert resolved.api_key is None, (
         "the unlabelled key file satisfied a target that named its own variable"
     )
+
+
+def test_the_key_source_names_the_file_when_the_file_won(single_deployment: None) -> None:
+    """Provenance, not just presence.
+
+    `resolve_target` carried `api_key_env` as the key's origin, which WAS the
+    provenance while the environment was the only place a key could come from.
+    The key-file fallback broke that silently: `api_key` filled from the file
+    while `api_key_env` still named a variable nobody had set.
+    """
+    resolved = ops.resolve_target(load_config().explainability)
+
+    assert resolved.api_key == _FILE_KEY
+    assert resolved.key_source == "file"
+    assert resolved.key_origin == str(service.key_path())
+    assert "$" not in resolved.key_origin, "a file path must not be rendered as a variable"
+
+
+def test_the_key_source_names_the_variable_when_the_variable_won(
+    single_deployment: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control. A `key_source` stuck on "file" would pass the test above."""
+    monkeypatch.setenv(service.KEY_ENV_VAR, "-".join(["not", "a", "real", "env", "key"]))
+
+    resolved = ops.resolve_target(load_config().explainability)
+
+    assert resolved.key_source == "env"
+    assert resolved.key_origin == f"${service.KEY_ENV_VAR}"
+
+
+def test_no_surface_claims_an_unset_variable_holds_the_key(
+    single_deployment: None, runner: CliRunner
+) -> None:
+    """The operator-facing form, on all three surfaces at once.
+
+    Measured before the fix, with the variable unset and the file populated:
+    `status` printed "key: $EXPLAINABILITY_API_KEY is set" and `doctor` printed
+    "key from $EXPLAINABILITY_API_KEY". Both false, and both send someone to
+    rotate or debug a credential source that is not in play.
+    """
+    status = runner.invoke(app, ["explainability", "status"], catch_exceptions=False).output
+    payload = json.loads(
+        runner.invoke(app, ["explainability", "status", "--json"], catch_exceptions=False).output
+    )
+    doctor = runner.invoke(app, ["doctor"], catch_exceptions=False).output
+
+    key_file = str(service.key_path())
+    assert f"${service.KEY_ENV_VAR} is set" not in status, status
+    assert key_file in status, status
+    assert payload["key_source"] == "file"
+    assert payload["key_origin"] == key_file
+    assert f"key from ${service.KEY_ENV_VAR}" not in doctor, doctor
+
+
+def test_key_set_still_answers_the_question_a_script_was_asking(
+    single_deployment: None, runner: CliRunner
+) -> None:
+    """`key_source` is added, `key_set` is not repurposed.
+
+    The runbook greps this payload, so a field changing meaning is worse than a
+    field being added: `key_set` keeps meaning "a key was resolved", which is
+    what it has always been asked.
+    """
+    payload = json.loads(
+        runner.invoke(app, ["explainability", "status", "--json"], catch_exceptions=False).output
+    )
+
+    assert payload["key_set"] is True
+    assert payload["key_env"] == service.KEY_ENV_VAR, (
+        "key_env must keep naming the variable the TARGET names, set or not"
+    )

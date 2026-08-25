@@ -1421,9 +1421,17 @@ is what makes it the right single check.
 
 > **[verified-train]** `status` honours `--json` now (it used to print human
 > text under the flag). `aisquare --json explainability status` returns a real
-> payload — `enabled`, `target`, `gateway`/`gateway_source`, `key_env`/`key_set`
-> (never the key itself), `proxy`, `identity`, `agents`, `probe`, `shipping`,
-> `redaction` — so the cutover can be scripted rather than eyeballed. The spool
+> payload — `enabled`, `target`, `gateway`/`gateway_source`,
+> `key_env`/`key_set`/`key_source`/`key_origin` (never the key itself),
+> `proxy`, `identity`, `agents`, `probe`, `shipping`,
+> `redaction` — so the cutover can be scripted rather than eyeballed.
+> **Branch on `key_source`, not on `key_env`.** `key_env` is the variable the
+> target NAMES, set or not; `key_source` is where the key actually came from
+> (`env`, `file`, or `unset`) and `key_origin` renders it — `$VAR` or the path
+> of `~/.aisquare/explainability-key`. On the single-deployment machine §1
+> produces, the key comes from the FILE while `key_env` still reads
+> `EXPLAINABILITY_API_KEY`, so a check that rotated or debugged the named
+> variable would be working on a credential that is not in play. The spool
 > counters live **inside** `.shipping`, not under a top-level `.spool`. That key
 > list is now asserted against the real payload in both directions by
 > `tests/test_runbook_json_paths.py`, so it cannot drift unnoticed again.
@@ -2160,8 +2168,9 @@ dies.
    Governance needs a credential class we do not hold, not a config edit.
 3. **[CLOSED]** `explainability status` honours `--json`. It used to print
    human text under the flag; it now returns a real payload — `enabled`,
-   `target`, `gateway`/`gateway_source`, `key_env`/`key_set` (never the key
-   itself), `proxy`, `identity`, `agents`, `probe`, `shipping`,
+   `target`, `gateway`/`gateway_source`,
+   `key_env`/`key_set`/`key_source`/`key_origin` (never the key itself),
+   `proxy`, `identity`, `agents`, `probe`, `shipping`,
    `redaction` — the spool counters are inside `.shipping`, and this list once
    claimed a top-level `.spool` that never existed.
    This matters more than it looks: §5b's split-brain assertion

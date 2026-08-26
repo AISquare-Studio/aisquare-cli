@@ -95,7 +95,7 @@ RESERVED_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 #: mode mismatch means "some other listener owns that port" (e.g. a creator-mode
 #: proxy), and pointing a Claude Code session at it is not a risk worth taking.
 _EXPECTED_SERVICE = "aisquare-proxy"
-_EXPECTED_MODE = "claude_code"
+EXPECTED_MODE = "claude_code"
 #: The proxy's own health field. `governance` is deliberately NOT checked: its
 #: contract is unknown from one sample, and the governance blocker belongs to
 #: the workspace rather than to this probe.
@@ -409,10 +409,10 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
     # reading a healthy proxy's internals.
     if service != _EXPECTED_SERVICE:
         return ProxyProbe(False, f"{url} answers as {service!r}, not the explainability proxy")
-    if mode != _EXPECTED_MODE:
+    if mode != EXPECTED_MODE:
         return ProxyProbe(
             False,
-            f"proxy at {url} runs mode {mode!r}, need {_EXPECTED_MODE!r} — "
+            f"proxy at {url} runs mode {mode!r}, need {EXPECTED_MODE!r} — "
             "point explainability.proxy_url at the claude_code proxy",
         )
     if status is not None and status != _EXPECTED_STATUS:

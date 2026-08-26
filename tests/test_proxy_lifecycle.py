@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -33,8 +34,8 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import paths
-from aisquare.core.config import AppConfig, ExplainabilitySettings, save_config
+from aisquare.core import filelock, paths
+from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
 from aisquare.services import explainability_proxy as proxy
 from aisquare.services.explainability import ProxyProbe
 
@@ -43,6 +44,7 @@ from aisquare.services.explainability import ProxyProbe
 #: `shutil` are imports the module happens to hold, not part of its interface.
 _POPEN = "aisquare.services.explainability_proxy.subprocess.Popen"
 _WHICH = "aisquare.services.explainability_proxy.shutil.which"
+_EXECUTABLE = "aisquare.services.explainability_proxy.sys.executable"
 
 
 def _stopper(spawned: dict[str, Any], seen: list[int]) -> Callable[[int], bool]:
@@ -81,13 +83,38 @@ _KEY = "-".join(["not", "a", "real", "key"])
 
 
 class _FakeProcess:
-    """A Popen stand-in: alive until told otherwise, and remembers its argv."""
+    """A Popen stand-in: alive until told otherwise, and remembers its argv.
+
+    Carries `terminate`/`kill`/`wait` because post-spawn rollback goes through the
+    CHILD HANDLE rather than the pid — no pid-reuse question for a process we
+    hold, and `wait` gives a confirmed exit instead of inferring one from
+    `os.kill(pid, 0)`. `stopped` records that it happened; set `refuses_to_die`
+    to model a child that survives, which is what makes the rollback report a
+    still-live pid instead of claiming success.
+    """
 
     def __init__(self, argv: list[str], env: dict[str, str], pid: int = 424242) -> None:
         self.argv, self.env, self.pid = argv, env, pid
         self.returncode: int | None = None
+        self.stopped = False
+        self.refuses_to_die = False
 
     def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        if not self.refuses_to_die:
+            self.stopped = True
+            self.returncode = -15
+
+    def kill(self) -> None:
+        if not self.refuses_to_die:
+            self.stopped = True
+            self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("aisquare-proxy", timeout or 0)
         return self.returncode
 
 
@@ -128,7 +155,9 @@ def spawned(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         captured["env"] = dict(kwargs.get("env") or {})
         captured["new_session"] = kwargs.get("start_new_session")
         captured["live"] = True
-        return _FakeProcess(argv, captured["env"])
+        child = _FakeProcess(argv, captured["env"])
+        captured["child"] = child
+        return child
 
     def fake_probe(_url: str, timeout: float = 1.0) -> ProxyProbe:
         if captured.get("live"):
@@ -190,19 +219,24 @@ def test_a_start_that_never_answers_is_a_failure_and_leaves_nothing_behind(
     pid proves nothing. `up` must report failure, and must not leave a process
     it cannot account for.
     """
-    killed: list[int] = []
-    monkeypatch.setattr(_POPEN, lambda argv, **kw: _FakeProcess(argv, {}))
+    children: list[_FakeProcess] = []
+
+    def spawn(argv: list[str], **kw: Any) -> _FakeProcess:
+        child = _FakeProcess(argv, {})
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(_POPEN, spawn)
     monkeypatch.setattr(
         proxy, "probe_proxy", lambda _url, timeout=1.0: ProxyProbe(False, "unreachable")
     )
-    monkeypatch.setattr(proxy, "_terminate", _recorder(killed))
     monkeypatch.setattr(proxy, "_BOOT_TIMEOUT_SECONDS", 0.4)
     monkeypatch.setattr(proxy, "_POLL_INTERVAL_SECONDS", 0.05)
 
     result = runner.invoke(app, ["explainability", "proxy", "up"])
 
     assert result.exit_code != 0, result.output
-    assert killed == [424242], "left a proxy running that never answered"
+    assert children and children[0].stopped, "left a proxy running that never answered"
     assert not paths.explainability_proxy_state_path().exists(), (
         "recorded a proxy that never came up"
     )
@@ -608,30 +642,227 @@ def test_up_refuses_rather_than_leaving_an_unidentifiable_orphan(
     the port, announced as a success. It is stopped instead, and the operator is
     handed the manual command.
     """
-    stopped: list[int] = []
     monkeypatch.setattr(proxy, "_identity_token", lambda _pid: None)
-    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
 
     result = runner.invoke(app, ["explainability", "proxy", "up"])
 
     assert result.exit_code != 0, result.output
-    assert stopped == [424242], "left a proxy it could never identify again"
+    assert spawned["child"].stopped, "left a proxy it could never identify again"
     assert not paths.explainability_proxy_state_path().exists()
     assert "Run the sidecar yourself" in result.output, "refused without a way forward"
 
 
-def test_the_identity_token_is_scoped_to_this_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.skipif(
+    proxy._boot_id() is None, reason="no /proc boot id here; identity comes from `ps` instead"
+)
+def test_the_proc_identity_token_is_scoped_to_this_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     """`starttime` is ticks SINCE boot, and the record outlives a reboot.
 
     Without the boot id the token repeats across the exact boundary it exists to
     protect: same pid, same tick, same basename — and for a console script that
     basename is usually `python`, so the collision is not even unlikely.
-    """
-    token = proxy._identity_token(os.getpid())
 
-    assert token is not None, "this platform must produce a token for the test to mean anything"
-    assert proxy._boot_id() in token, f"token is not boot-scoped: {token}"
+    SKIPPED where there is no boot id rather than asserted unconditionally: the
+    implementation has a `ps` fallback whose `lstart` is absolute and needs no
+    boot scoping, so on those platforms this test would be asserting a property
+    of a code path that never runs.
+    """
+    boot_id = proxy._boot_id()
+    token = proxy._proc_identity(os.getpid())
+
+    assert boot_id is not None
+    assert token is not None, "the skipif promised /proc is readable here"
+    assert boot_id in token, f"token is not boot-scoped: {token}"
 
     monkeypatch.setattr(proxy, "_boot_id", lambda: "a-different-boot")
 
-    assert proxy._identity_token(os.getpid()) != token
+    assert proxy._proc_identity(os.getpid()) != token
+
+
+def test_an_unreadable_boot_id_does_not_become_a_sentinel_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_boot_id` used to return "?" and that was accepted into the token.
+
+    `proc:?:…` looks boot-scoped, compares equal across reboots, and reintroduces
+    exactly the collision the boot id was added to prevent. The /proc source must
+    decline, leaving `ps` — whose `lstart` is absolute — to answer.
+    """
+    monkeypatch.setattr(proxy, "_boot_id", lambda: None)
+
+    assert proxy._proc_identity(os.getpid()) is None
+
+    monkeypatch.setattr(proxy, "_ps_identity", lambda _pid: None)
+
+    assert proxy._identity_token(os.getpid()) is None, (
+        "with neither source answering, the token must be absent rather than a sentinel"
+    )
+
+
+def test_the_sidecar_is_found_beside_the_interpreter_not_only_on_path(
+    configured: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pipx-shaped installation, which `shutil.which` alone cannot serve.
+
+    The extra installs `aisquare-proxy` beside the interpreter running us. That
+    directory need not be on PATH — pipx exposes the MAIN distribution's apps and
+    not a dependency's, and invoking the CLI by absolute path does the same. The
+    reproduction was: extra installed, `venv/bin/aisquare-proxy` present, and
+    `proxy up` reporting the extra missing.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    script = bindir / proxy.PROXY_SCRIPT
+    script.write_text("#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(_EXECUTABLE, str(bindir / "python"))
+    monkeypatch.setattr(_WHICH, lambda _n: None)  # nothing on PATH at all
+
+    assert proxy._resolve_proxy_script() == str(script)
+
+
+def test_path_is_still_the_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The supported case where the SDK lives in a different environment."""
+    monkeypatch.setattr(_EXECUTABLE, str(tmp_path / "nowhere" / "python"))
+    monkeypatch.setattr(_WHICH, lambda _n: "/elsewhere/bin/aisquare-proxy")
+
+    assert proxy._resolve_proxy_script() == "/elsewhere/bin/aisquare-proxy"
+
+
+def test_two_concurrent_ups_cannot_both_spawn(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """`up` is a check-then-act, so it has to be serialised across processes.
+
+    Both callers passed the idempotence check, both spawned, both wrote the
+    record, and both reported managed — and with real sockets one child satisfies
+    the OTHER's health poll, so the surviving record can name the child that lost
+    the bind and exited, leaving the real listener foreign.
+
+    Modelled by holding the lock from outside: the second caller must refuse
+    rather than proceed.
+    """
+    lock_path = paths.explainability_dir() / "proxy.lock"
+    monkeypatch.setattr(proxy, "_LOCK_WAIT_SECONDS", 0.2)
+
+    with filelock.held(lock_path, wait_s=1.0) as won:
+        assert won, "the test could not take the lock it needs to hold"
+        result = runner.invoke(app, ["explainability", "proxy", "up"])
+
+    assert result.exit_code != 0, result.output
+    assert "argv" not in spawned, "spawned while another lifecycle command held the lock"
+    assert "still running" in result.output
+
+
+def test_a_record_that_cannot_be_written_does_not_leave_a_live_orphan(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Commit failure must end in a durable record OR a confirmed-dead child.
+
+    The write was unguarded, so an unwritable state directory let the raw
+    exception escape with the proxy still running and nothing recording it.
+    """
+
+    def unwritable(_record: Any) -> None:
+        raise PermissionError("read-only state directory")
+
+    monkeypatch.setattr(proxy, "_write_record", unwritable)
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"])
+
+    assert result.exit_code != 0, result.output
+    assert spawned["child"].stopped, "left a live proxy with no record of it"
+    assert "record could not be written" in result.output
+
+
+def test_a_rollback_that_cannot_stop_the_child_says_so_and_names_the_pid(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The rollback paths used to claim "has been stopped" regardless.
+
+    A child that survives has to be reported, with its pid, or the operator is
+    told the machine is clean while a proxy holds the port.
+    """
+    monkeypatch.setattr(proxy, "_identity_token", lambda _pid: None)
+    monkeypatch.setattr(proxy, "_STOP_TIMEOUT_SECONDS", 0.1)
+
+    def spawn(argv: list[str], **kw: Any) -> _FakeProcess:
+        child = _FakeProcess(argv, dict(kw.get("env") or {}))
+        child.refuses_to_die = True
+        spawned["child"] = child
+        spawned["live"] = True
+        return child
+
+    monkeypatch.setattr(_POPEN, spawn)
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"])
+
+    assert result.exit_code != 0
+    assert "could NOT be stopped" in result.output
+    assert "424242" in result.output, "did not name the pid that is still running"
+
+
+def test_the_child_binds_the_address_the_url_names(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """`::1` was accepted by the preflight and then not honoured.
+
+    The SDK defaults its host to 127.0.0.1, so an accepted `http://[::1]:9090`
+    started a proxy on IPv4 that never answered the URL it was validated against.
+    An ambient AISQUARE_PROXY_HOST was inherited too, which could move a
+    "local sidecar" off the address the loopback check had approved.
+    """
+    monkeypatch.setenv(proxy.HOST_ENV_VAR, "0.0.0.0")
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True, gateway_url=_GATEWAY, proxy_url="http://[::1]:9090"
+            )
+        )
+    )
+
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+
+    assert spawned["env"][proxy.HOST_ENV_VAR] == "::1", spawned["env"][proxy.HOST_ENV_VAR]
+    assert spawned["env"][proxy.MODE_ENV_VAR] == "claude_code", "the proxy mode is not pinned"
+
+
+def test_the_manual_command_names_the_key_source_that_is_actually_in_use(
+    configured: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It always said `$(cat ~/.aisquare/explainability-key)`.
+
+    The production runbook sources the key from the target's named variable, and
+    that file need not exist — so the printed recovery command told the operator
+    to read something absent.
+    """
+    from aisquare.services import explainability_ops as ops
+
+    env_backed = ops.resolve_target(load_config().explainability)
+    assert env_backed.key_source == "env", "the fixture exports a key, so env must win"
+
+    line = proxy._manual_command(env_backed, 9090)
+
+    assert f"${env_backed.api_key_env}" in line
+    assert "cat " not in line, line
+
+
+def test_the_manual_command_is_shell_quoted(configured: None) -> None:
+    """These are URLs and paths out of config; one with a space silently ran
+    the wrong thing."""
+    from aisquare.services import explainability_ops as ops
+
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True,
+                gateway_url="https://gateway.example/a b",
+                proxy_url="http://127.0.0.1:9090",
+            )
+        )
+    )
+    target = ops.resolve_target(load_config().explainability)
+
+    line = proxy._manual_command(target, 9090)
+
+    assert "'https://gateway.example/a b'" in line, line

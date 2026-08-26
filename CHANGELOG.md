@@ -67,6 +67,44 @@ target, starts the sidecar detached, and waits until it answers `/health`.
   script the recorded basename is usually `python`, so a collision was not even
   unlikely. Signals now go through a **pidfd** where the kernel offers one,
   which closes the window between verifying a pid and signalling it.
+- **The whole lifecycle is serialised across processes.** `up` reads status,
+  decides, spawns and commits — a check-then-act that assumed it was alone. Two
+  concurrent calls both passed the idempotence check, both spawned and both
+  reported managed, and with real sockets one child can satisfy the *other's*
+  health poll, so the surviving record may name the child that lost the bind and
+  exited. The platform lock primitive moved out of `core/brain.py` into
+  `core/filelock.py` rather than being copied.
+- **The sidecar is found beside this interpreter, not only on `PATH`.** The extra
+  installs `aisquare-proxy` next to the CLI, and that directory need not be on
+  `PATH` — pipx exposes the main distribution's apps and not a dependency's, and
+  invoking the CLI by absolute path does the same. `up` reported the extra as
+  missing on an installation that had it.
+- **Post-spawn failures are transactional.** An unwritable state directory used
+  to let the exception escape with the proxy running and nothing recording it.
+  Every rollback now goes through the `Popen` handle — no pid-reuse question, and
+  `wait` confirms the exit — and a rollback that *cannot* stop the child says so
+  and names the pid instead of claiming it stopped. `up` also requires the
+  committed final status to be managed: one healthy sample during the poll is not
+  a healthy proxy.
+- **The child binds the address the URL names.** `::1` was accepted by the
+  loopback preflight and then not honoured, because the SDK defaults its host to
+  IPv4 — so a validated `http://[::1]:…` started a proxy that never answered it.
+  An ambient `AISQUARE_PROXY_HOST` was inherited too. Host and `claude_code` mode
+  are now both set explicitly from the validated configuration.
+- **The pidfd actually closes the race now.** It was opened *inside* the
+  terminate call, after ownership had been verified, so a successor that
+  inherited the number in between was exactly what it attached to. It is opened
+  before verification and the same handle carries the signal. `pidfd_open`
+  raising ESRCH is terminal rather than a fall-through to a numeric `os.kill` —
+  "this pid is gone" is precisely when the number may belong to someone else.
+- **An unreadable boot id no longer becomes a token.** `_boot_id` returned `"?"`
+  and that was accepted, producing `proc:?:…` — a string that looks boot-scoped
+  and compares equal across reboots. It now declines, leaving `ps`, whose
+  `lstart` is absolute.
+- **The manual recovery command names the key source in use** and shell-quotes
+  every value. It always printed `$(cat ~/.aisquare/explainability-key)`, while
+  the production runbook sources the key from the target's named variable and
+  that file may not exist.
 - Not on the launch path. Nothing here runs in front of a waiting developer.
 
   *Upgrade note:* a proxy started by a pre-0.5.0 build has a record without the

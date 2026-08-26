@@ -36,9 +36,11 @@ import contextlib
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -46,12 +48,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from aisquare.core import paths
+from aisquare.core import filelock, paths
 from aisquare.core.config import load_config
+from aisquare.services.explainability import (
+    EXPECTED_MODE as _EXPECTED_MODE,
+)
 from aisquare.services.explainability import (
     GATEWAY_ENV_VAR,
     KEY_ENV_VAR,
     ProxyProbe,
+    key_path,
     probe_proxy,
 )
 from aisquare.services.explainability_ops import ResolvedTarget, resolve_target
@@ -64,6 +70,21 @@ PROXY_SCRIPT = "aisquare-proxy"
 
 #: The SDK reads its port from here (``claude_proxy.PROXY_PORT``).
 PORT_ENV_VAR = "AISQUARE_PROXY_PORT"
+
+#: ...and its bind address and mode from these. Both are SET EXPLICITLY rather
+#: than left to the SDK's defaults or to whatever the operator's shell holds.
+#:
+#: The host matters twice. An accepted ``http://[::1]:9090`` configuration would
+#: have started a proxy on the SDK's 127.0.0.1 default and never answered the URL
+#: it was validated against; and an ambient ``AISQUARE_PROXY_HOST`` is inherited
+#: by the child, so a "local sidecar" could bind somewhere the loopback preflight
+#: never saw. Deriving it from the validated URL closes both.
+#:
+#: The mode matters because ``probe_proxy`` requires ``claude_code`` and the SDK
+#: ships several; inheriting a stray ``AISQUARE_PROXY_MODE=creator`` would start a
+#: proxy this CLI then reports as somebody else's service.
+HOST_ENV_VAR = "AISQUARE_PROXY_HOST"
+MODE_ENV_VAR = "AISQUARE_PROXY_MODE"
 
 #: How long ``up`` waits for the proxy to answer /health before giving up, and
 #: how often it asks. Ten seconds is generous for a local uvicorn boot and short
@@ -99,16 +120,76 @@ def key_fingerprint(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
-def _boot_id() -> str:
-    """This boot's identifier, or "?" where the kernel does not publish one.
+#: How long a lifecycle command waits for another one to finish before giving up.
+#: Longer than a boot poll plus a stop timeout, so a queued `up` behind a `down`
+#: waits rather than failing; short enough that a wedged holder is reported.
+_LOCK_WAIT_SECONDS = 30.0
+
+
+@contextlib.contextmanager
+def _lifecycle_lock() -> Iterator[None]:
+    """Serialise the whole check-then-act, across processes.
+
+    `up` reads status, decides, spawns, and commits a record. Every one of those
+    steps assumed it was alone. Two concurrent `up` calls both passed the
+    idempotence check, both spawned, both wrote the record, and both reported
+    managed — and with real sockets one child satisfies the OTHER's health poll,
+    so the surviving record can name the child that lost the bind and exited,
+    leaving the real listener foreign to the CLI that started it.
+
+    The lock covers status through commit-or-rollback, not just the write: a lock
+    around the write alone would still let both spawn.
+    """
+    lock_path = paths.explainability_dir() / "proxy.lock"
+    with filelock.held(lock_path, wait_s=_LOCK_WAIT_SECONDS) as won:
+        if not won:
+            raise ProxyError(
+                "another aisquare proxy lifecycle command is still running "
+                f"(waited {_LOCK_WAIT_SECONDS:.0f}s for {lock_path}). Re-run in a moment; "
+                "if nothing else is running, remove that lock file."
+            )
+        yield
+
+
+def _resolve_proxy_script() -> str | None:
+    """Where the sidecar's console script is, checking our own bin dir FIRST.
+
+    ``shutil.which`` alone was wrong for every installation whose script
+    directory is not on ``PATH`` — which includes being invoked by absolute path,
+    and pipx, which exposes the MAIN distribution's apps and not a dependency's.
+    Reproduced: the extra installed, ``venv/bin/aisquare-proxy`` present, and
+    ``proxy up`` reporting the extra as missing because the venv was not on PATH.
+
+    The script the extra installed sits beside the interpreter running us, so
+    that is the authoritative place to look. PATH remains the fallback, for the
+    supported case where the SDK deliberately lives in a different environment.
+    """
+    here = Path(sys.executable).parent
+    # Windows installs console scripts as .exe; POSIX has no suffix.
+    for candidate in (here / PROXY_SCRIPT, here / f"{PROXY_SCRIPT}.exe"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which(PROXY_SCRIPT)
+
+
+def _boot_id() -> str | None:
+    """This boot's identifier, or None where the kernel does not publish one.
 
     ``/proc/sys/kernel/random/boot_id`` changes on every boot, which is exactly
     the axis ``starttime`` cannot express.
+
+    RETURNS NONE RATHER THAN A SENTINEL. It used to return ``"?"``, which was
+    then accepted into the token — producing ``proc:?:…``, a string that looks
+    boot-scoped, compares equal across reboots, and reintroduces the collision
+    the boot id was added to prevent. A token that cannot be scoped must be
+    absent, because absent is the value every caller already treats as
+    "unverifiable".
     """
     try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     except OSError:
-        return "?"
+        return None
+    return value or None
 
 
 def _port_went_quiet(url: str, timeout: float = _STOP_TIMEOUT_SECONDS) -> bool:
@@ -127,55 +208,44 @@ def _port_went_quiet(url: str, timeout: float = _STOP_TIMEOUT_SECONDS) -> bool:
     return not probe_proxy(url, timeout=1.0).healthy
 
 
-def _identity_token(pid: int) -> str | None:
-    """A token that changes if this pid stops being the process we started.
+def _proc_identity(pid: int) -> str | None:
+    """Linux identity: boot id + start time + argv[0], or None.
 
-    PIDs ARE REUSED, and the record deliberately outlives a reboot, so
-    ``os.kill(pid, 0)`` proves only that *something* holds that number. Without
-    this, a stale record plus a recycled pid means SIGTERM to a stranger.
+    ``starttime`` is field 22 of ``/proc/<pid>/stat``, counted from after the
+    LAST ``)`` because ``comm`` sits in parentheses and may itself contain
+    spaces and parentheses; splitting from the left is the classic way to
+    misparse this file.
 
-    Two sources, both reading the OS rather than guessing:
-
-    * Linux — field 22 of ``/proc/<pid>/stat`` is the process start time in
-      clock ticks since boot, paired here with argv[0]. The field is counted
-      from after the LAST ``)`` because ``comm`` sits in parentheses and may
-      itself contain spaces and parentheses; splitting from the left is the
-      classic way to misparse this file.
-    * Elsewhere — ``ps -o lstart=,comm=``, which carries the same two facts.
-
-    Returns None when neither is available, and every caller treats that as
-    "cannot verify" rather than "verified". Refusing to act on an unverifiable
-    pid is the only safe direction: the cost is an operator stopping a proxy by
-    hand, and the cost of guessing wrong is killing something else.
+    The boot id is REQUIRED here, not decorative: ``starttime`` is ticks since
+    boot, the record deliberately survives a reboot, and without the boot id the
+    token repeats across the exact boundary it exists to protect. Returning None
+    when it is unreadable sends the caller to ``ps``, whose ``lstart`` is an
+    absolute time and needs no boot scoping.
     """
-    stat = Path(f"/proc/{pid}/stat")
+    boot_id = _boot_id()
+    if boot_id is None:
+        return None
     try:
-        raw = stat.read_text(encoding="utf-8", errors="replace")
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
     except OSError:
-        raw = ""
-    if raw:
-        # THE BOOT ID IS NOT OPTIONAL, because the record deliberately survives a
-        # reboot and `starttime` is measured in ticks SINCE boot. Without it the
-        # token repeats across the exact boundary it exists to protect: after the
-        # next boot the same pid can hold a different process started at the same
-        # tick with the same basename — and for a console script that basename is
-        # usually `python`, so the collision is not even unlikely. Same token,
-        # false ownership, SIGTERM to a stranger.
-        boot_id = _boot_id()
-        tail = raw.rpartition(")")[2].split()
-        # tail[0] is `state`, i.e. field 3, so starttime (field 22) is tail[19].
-        if len(tail) > 19:
-            try:
-                argv0 = (
-                    Path(f"/proc/{pid}/cmdline")
-                    .read_bytes()
-                    .split(b"\0")[0]
-                    .decode("utf-8", "replace")
-                )
-            except OSError:
-                argv0 = ""
-            return f"proc:{boot_id}:{tail[19]}:{Path(argv0).name}"
+        return None
+    fields = raw.rpartition(")")[2].split()
+    # fields[0] is `state`, i.e. field 3, so starttime (field 22) is fields[19].
+    if len(fields) <= 19:
+        return None
+    try:
+        argv0 = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[0].decode("utf-8", "replace")
+    except OSError:
+        argv0 = ""
+    return f"proc:{boot_id}:{fields[19]}:{Path(argv0).name}"
 
+
+def _ps_identity(pid: int) -> str | None:
+    """Portable identity: ``ps -o lstart=,comm=``, or None.
+
+    ``lstart`` is an absolute wall-clock start time, so unlike ``/proc``'s
+    ticks-since-boot it is already unique across reboots.
+    """
     ps = shutil.which("ps")
     if ps is None:
         return None
@@ -192,6 +262,21 @@ def _identity_token(pid: int) -> str | None:
     if completed.returncode != 0 or not completed.stdout.strip():
         return None
     return "ps:" + " ".join(completed.stdout.split())
+
+
+def _identity_token(pid: int) -> str | None:
+    """A token that changes if this pid stops being the process we started.
+
+    PIDs ARE REUSED, and the record deliberately outlives a reboot, so
+    ``os.kill(pid, 0)`` proves only that *something* holds that number. Without
+    this, a stale record plus a recycled pid means SIGTERM to a stranger.
+
+    Returns None when neither source can answer, and every caller treats that as
+    "cannot verify" rather than "verified". Refusing to act on an unverifiable
+    pid is the only safe direction: the cost is an operator stopping a proxy by
+    hand, and the cost of guessing wrong is signalling something else.
+    """
+    return _proc_identity(pid) or _ps_identity(pid)
 
 
 @dataclass(frozen=True)
@@ -290,6 +375,16 @@ def _humanise(seconds: float | None) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def _bind_host(url: str) -> str:
+    """The address the child must bind so it answers ``url``.
+
+    ``localhost`` is normalised to ``127.0.0.1``: it resolves to either family
+    depending on the host's configuration, and the SDK binds one socket.
+    """
+    hostname = urlparse(url).hostname or "127.0.0.1"
+    return "127.0.0.1" if hostname == "localhost" else hostname
+
+
 def _port_of(url: str) -> int:
     """The port the configured proxy URL names, with http's default filled in."""
     parsed = urlparse(url)
@@ -328,7 +423,11 @@ def read_record() -> ProxyRecord | None:
 def _write_record(record: ProxyRecord) -> None:
     path = paths.explainability_proxy_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
+    # Unique per writer: a shared ".json.tmp" means two concurrent writers
+    # interleave into one file and the winner is whoever renames last. The
+    # lifecycle lock is the real serialisation; this is defence in depth for any
+    # path that reaches here without it.
+    tmp = path.with_suffix(f".json.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(record.to_json(), indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
 
@@ -420,8 +519,15 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
 
     Idempotent: an already-running proxy of ours is returned as-is rather than
     started twice, because two proxies on one port means one of them silently
-    lost the bind and nobody can say which is recording.
+    lost the bind and nobody can say which is recording. Serialised against every
+    other lifecycle command, because that idempotence is a check-then-act.
     """
+    with _lifecycle_lock():
+        return _up_locked(log_path=log_path)
+
+
+def _up_locked(*, log_path: Path | None = None) -> ProxyStatus:
+    """:func:`up`, with the lifecycle lock already held."""
     settings = load_config().explainability
     target = resolve_target(settings)
 
@@ -455,15 +561,20 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
             "look like it worked."
         )
 
-    script = shutil.which(PROXY_SCRIPT)
+    script = _resolve_proxy_script()
     if script is None:
         raise ProxyError(
-            f"{PROXY_SCRIPT} is not on PATH — the explainability extra provides it: "
-            'pip install --upgrade "aisquare-cli[explainability]"'
+            f"{PROXY_SCRIPT} was not found beside this interpreter "
+            f"({Path(sys.executable).parent}) or on PATH — the explainability extra "
+            'provides it: pip install --upgrade "aisquare-cli[explainability]"'
         )
 
     port = _port_of(target.proxy_url)
     parsed = urlparse(target.proxy_url)
+    # `::1` is accepted here AND now honoured: the bind host is set from this URL
+    # rather than left to the SDK's IPv4 default, so an accepted `[::1]` no longer
+    # starts a proxy on 127.0.0.1 that never answers the address it was validated
+    # against.
     if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
         # The SDK refuses to bind beyond loopback without inbound keys rather
         # than become an open relay, so a remote proxy_url is somebody else's
@@ -480,6 +591,8 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
     env[GATEWAY_ENV_VAR] = target.gateway_url
     env[KEY_ENV_VAR] = target.api_key
     env[PORT_ENV_VAR] = str(port)
+    env[HOST_ENV_VAR] = _bind_host(target.proxy_url)
+    env[MODE_ENV_VAR] = _EXPECTED_MODE
 
     if existing.owned:
         # Ours, so we may replace it — and must, because neither remaining state
@@ -541,98 +654,182 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
     handle.close()
 
     deadline = time.monotonic() + _BOOT_TIMEOUT_SECONDS
+    healthy = False
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise ProxyError(
                 f"{PROXY_SCRIPT} exited immediately (code {process.returncode}). "
                 f"Its output is in {destination}"
             )
-        probe = probe_proxy(target.proxy_url, timeout=1.0)
-        if probe.healthy:
-            identity = _identity_token(process.pid)
-            if identity is None:
-                # We just started something we could never afterwards recognise:
-                # `_owns` rejects a null identity, so the process would be foreign
-                # to `status` and `down` from the moment it booted — an orphan
-                # holding the port, reported as a success. Refuse, and stop the
-                # child we still hold a handle to.
-                _terminate(process.pid)
-                key_file = paths.aisquare_home() / "explainability-key"
-                raise ProxyError(
-                    "started the proxy but could not read its process identity on this "
-                    "platform (no readable /proc and no usable `ps`), so this CLI could "
-                    "never recognise or stop it again. It has been stopped rather than "
-                    "left as an orphan.\n"
-                    "Run the sidecar yourself instead:\n"
-                    f"  EXPLAINABILITY_GATEWAY_URL={target.gateway_url} \\\n"
-                    f"  EXPLAINABILITY_API_KEY=$(cat {key_file}) \\\n"
-                    f"  {PORT_ENV_VAR}={port} {PROXY_SCRIPT}"
-                )
-            record = ProxyRecord(
-                pid=process.pid,
-                port=port,
-                url=target.proxy_url,
-                gateway_url=target.gateway_url,
-                target=target.name,
-                key_fp=key_fingerprint(target.api_key),
-                # Taken above rather than right after Popen: until /health
-                # answers the child may not have finished exec'ing, and a token
-                # read from the interpreter that preceded the exec would never
-                # match again.
-                identity=identity,
-                started_at=time.time(),
-            )
-            _write_record(record)
-            return status()
+        if probe_proxy(target.proxy_url, timeout=1.0).healthy:
+            healthy = True
+            break
         time.sleep(_POLL_INTERVAL_SECONDS)
 
-    # Timed out. Do not leave a process we cannot account for behind: the
-    # occupied-port case prints "Application startup complete" and then fails,
-    # so a running pid is not evidence that anything is listening.
-    _terminate(process.pid)
-    raise ProxyError(
-        f"{PROXY_SCRIPT} did not answer {target.proxy_url}/health within "
-        f"{_BOOT_TIMEOUT_SECONDS:.0f}s and has been stopped. Its output is in "
-        f"{destination} — a port already in use is the usual cause, and the proxy "
-        "reports startup BEFORE it binds, so its own log looks healthy."
+    if not healthy:
+        # Timed out. Do not leave a process we cannot account for behind: the
+        # occupied-port case prints "Application startup complete" and then
+        # fails, so a running pid is not evidence that anything is listening.
+        raise _rollback(
+            process,
+            destination,
+            f"{PROXY_SCRIPT} did not answer {target.proxy_url}/health within "
+            f"{_BOOT_TIMEOUT_SECONDS:.0f}s — a port already in use is the usual cause, "
+            "and the proxy reports startup BEFORE it binds, so its own log looks healthy.",
+        )
+
+    identity = _identity_token(process.pid)
+    if identity is None:
+        # We just started something we could never afterwards recognise: `_owns`
+        # rejects a null identity, so the process would be foreign to `status`
+        # and `down` from the moment it booted — an orphan holding the port,
+        # reported as a success.
+        raise _rollback(
+            process,
+            destination,
+            "started the proxy but could not read its process identity on this platform "
+            "(no readable /proc and no usable `ps`), so this CLI could never recognise "
+            "or stop it again.\n"
+            "Run the sidecar yourself instead:\n  " + _manual_command(target, port),
+        )
+
+    record = ProxyRecord(
+        pid=process.pid,
+        port=port,
+        url=target.proxy_url,
+        gateway_url=target.gateway_url,
+        target=target.name,
+        key_fp=key_fingerprint(target.api_key),
+        # Taken above rather than right after Popen: until /health answers the
+        # child may not have finished exec'ing, and a token read from the
+        # interpreter that preceded the exec would never match again.
+        identity=identity,
+        started_at=time.time(),
+    )
+    try:
+        _write_record(record)
+    except OSError as exc:
+        # An unwritable state directory used to let the raw exception escape
+        # with the child still running and nothing recording it — a live orphan
+        # produced by a failed commit. Commit failure must end in either a
+        # durable record or a confirmed-dead child.
+        raise _rollback(
+            process, destination, f"the proxy started but its record could not be written ({exc})"
+        ) from exc
+
+    final = status()
+    if not final.managed:
+        # One healthy sample is not the same as a healthy proxy. `up` used to
+        # return `status()` unconditionally, so a probe that succeeded during the
+        # poll and failed immediately after produced managed=False, healthy=False
+        # and a summary of "not running" — under an unconditional ✓ and
+        # "Sessions … are traced".
+        raise _rollback(
+            process,
+            destination,
+            f"the proxy answered once but is not serving this machine's configuration "
+            f"({final.summary})",
+        )
+    return final
+
+
+def _manual_command(target: ResolvedTarget, port: int) -> str:
+    """The exact shell line that starts the sidecar by hand, correctly quoted.
+
+    Built from the RESOLVED key source rather than always naming the key file.
+    The production runbook sources the key from the target's own variable, and
+    that file may not exist at all — so the printed recovery command told the
+    operator to `cat` something absent. Every substituted value is shell-quoted:
+    these are URLs, paths and variable names out of config, and a path with a
+    space produced a line that silently ran the wrong thing.
+    """
+    if target.key_source == "file":
+        key = f"$(cat {shlex.quote(str(key_path()))})"
+    else:
+        key = f"${target.api_key_env}"
+    return (
+        f"{GATEWAY_ENV_VAR}={shlex.quote(target.gateway_url)} "
+        f"{KEY_ENV_VAR}={key} "
+        f"{HOST_ENV_VAR}={shlex.quote(_bind_host(target.proxy_url))} "
+        f"{PORT_ENV_VAR}={port} {MODE_ENV_VAR}={_EXPECTED_MODE} {PROXY_SCRIPT}"
     )
 
 
-@contextlib.contextmanager
-def _signal_handle(pid: int) -> Iterator[Callable[[int], None]]:
-    """A way to signal ``pid`` that cannot land on a different process.
+def _rollback(process: Any, destination: Path, why: str) -> ProxyError:
+    """Stop a child we just started and return the error to raise.
 
-    Verifying identity and then calling ``os.kill(pid, …)`` leaves a window: the
-    process can exit between the two and the number can be reused, so the signal
-    arrives at whatever inherited it. A pidfd refers to the PROCESS, not the
-    number — once opened, ``pidfd_send_signal`` either reaches that process or
-    fails with ESRCH, and can never reach a successor. Linux 5.3+, and Python
-    exposes both calls only there.
+    Returns rather than raises so every call site reads `raise _rollback(...)`
+    and cannot forget to.
 
-    Falls back to ``os.kill`` where pidfd is unavailable. The window is real
-    there, and narrow: it needs the proxy to exit and the pid to be recycled
-    inside the microseconds between the check and the signal. Ownership
-    verification is what makes it narrow, and this is what closes it where the
-    kernel allows.
+    THE ROLLBACK RESULT IS REPORTED. The earlier paths called `_terminate` and
+    then said "has been stopped" regardless, so a child that survived was
+    described as cleaned up and its pid never surfaced. `_terminate_child` uses
+    the `Popen` handle — no pid-reuse question, and `wait` confirms the exit — and
+    a failure to stop names the pid that is still running.
     """
+    if _terminate_child(process, process.pid):
+        return ProxyError(f"{why}\nIt has been stopped. Its output is in {destination}")
+    return ProxyError(
+        f"{why}\nWARNING: it could NOT be stopped and is still running as pid "
+        f"{process.pid} — stop it by hand. Its output is in {destination}"
+    )
 
-    def by_pid(sig: int) -> None:
-        os.kill(pid, sig)
 
+class _Gone(Exception):
+    """The process is not there. Terminal — never a reason to fall back."""
+
+
+@contextlib.contextmanager
+def _process_handle(pid: int) -> Iterator[Callable[[int], None]]:
+    """Bind to a PROCESS, then yield a way to signal exactly that process.
+
+    ORDER IS THE WHOLE POINT, and the first version got it wrong. It verified
+    ownership and *then* opened the pidfd inside the terminate call, so a
+    successor that inherited the number in between was precisely what the pidfd
+    attached to — the race the pidfd was added to close, still open. Opening
+    first and holding the same handle across verification and signalling is what
+    closes it: after ``pidfd_open`` succeeds the handle refers to that process
+    forever, so a signal through it either reaches it or fails with ESRCH, and
+    can never reach whatever later holds the number.
+
+    ESRCH IS TERMINAL. ``pidfd_open`` raising ``ProcessLookupError`` used to be
+    swallowed by a broad ``except OSError`` and answered with a numeric
+    ``os.kill`` — which is the one thing that must not happen, because "this pid
+    is gone" is the exact condition under which the number may already belong to
+    someone else. It now raises :class:`_Gone`.
+
+    The numeric fallback remains for platforms where the calls do not exist at
+    all. The window is real there and narrow, and ownership verification is what
+    keeps it narrow.
+    """
     opener = getattr(os, "pidfd_open", None)
     sender = getattr(signal, "pidfd_send_signal", None)
     if opener is None or sender is None:
+
+        def by_pid(sig: int) -> None:
+            os.kill(pid, sig)
+
         yield by_pid
         return
 
     try:
         fd = opener(pid)
-    except (OSError, AttributeError):
-        yield by_pid
+    except ProcessLookupError as exc:
+        raise _Gone(pid) from exc
+    except OSError:
+        # Genuinely unavailable (an old kernel, a seccomp policy). NOT "gone" —
+        # that case is caught above and must never reach the numeric path.
+        def by_pid_fallback(sig: int) -> None:
+            os.kill(pid, sig)
+
+        yield by_pid_fallback
         return
 
     def by_pidfd(sig: int) -> None:
-        sender(fd, sig)
+        try:
+            sender(fd, sig)
+        except ProcessLookupError as exc:
+            raise _Gone(pid) from exc
 
     try:
         yield by_pidfd
@@ -642,13 +839,16 @@ def _signal_handle(pid: int) -> Iterator[Callable[[int], None]]:
 
 
 def _terminate(pid: int) -> bool:
-    """SIGTERM, then SIGKILL if it will not go. True when it is gone."""
+    """SIGTERM, then SIGKILL if it will not go. True when it is gone.
+
+    Callers MUST check the result. A false here means the process is still
+    running and still ours, which is why `up` refuses to spawn a replacement and
+    every rollback path reports the surviving pid rather than claiming success.
+    """
     try:
-        with _signal_handle(pid) as send:
+        with _process_handle(pid) as send:
             try:
                 send(signal.SIGTERM)
-            except ProcessLookupError:
-                return True
             except PermissionError:
                 return False
             deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
@@ -656,16 +856,45 @@ def _terminate(pid: int) -> bool:
                 if not _alive(pid):
                     return True
                 time.sleep(_POLL_INTERVAL_SECONDS)
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            with contextlib.suppress(PermissionError, OSError):
                 send(signal.SIGKILL)
-    except ProcessLookupError:
-        # pidfd_open on a pid that is already gone.
+    except _Gone:
         return True
     return not _alive(pid)
 
 
+def _terminate_child(process: Any, pid: int) -> bool:
+    """Stop a child created in THIS invocation, and confirm it is reaped.
+
+    Preferred over `_terminate` for our own `Popen`: the handle refers to the
+    child directly, so there is no pid-reuse question at all, and `wait` gives a
+    confirmed exit rather than an inference from `os.kill(pid, 0)`. That
+    confirmation is what lets a post-spawn rollback say "stopped" truthfully.
+    """
+    with contextlib.suppress(OSError, ProcessLookupError):
+        process.terminate()
+    try:
+        process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+        return True
+    except Exception:  # any wait failure escalates identically
+        pass
+    with contextlib.suppress(OSError, ProcessLookupError):
+        process.kill()
+    try:
+        process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+        return True
+    except Exception:
+        return not _alive(pid)
+
+
 def down() -> str:
-    """Stop the proxy this CLI started. Returns what happened.
+    """Stop the proxy this CLI started, serialised against `up`."""
+    with _lifecycle_lock():
+        return _down_locked()
+
+
+def _down_locked() -> str:
+    """:func:`down`, with the lifecycle lock already held.
 
     Refuses to touch a proxy it did not start. Killing a process on the strength
     of "something is listening on 9090" is how you take down a colleague's

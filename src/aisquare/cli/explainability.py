@@ -533,6 +533,10 @@ def proxy_up() -> None:
     if get_state().json_output:
         typer.echo(json.dumps(_proxy_payload(state)))
         return
+    # `up` only returns on a managed state now — it rolls back and raises
+    # otherwise — so this line is no longer an unconditional claim. It used to be
+    # printed beside a summary reading "not running", because `up` returned
+    # `status()` whatever it said.
     typer.echo(f"✓ {state.summary}")
     typer.echo(
         "  Sessions launched from now on are traced. Stop it with: "

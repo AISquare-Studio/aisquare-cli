@@ -6,6 +6,386 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`docs/planner-findings-loop.md` — the find→fix loop, and the one thing
+  that blocks it.** The write half is done: a traced session opens a Run keyed
+  by an id the board also knows, so a finding can be traced back to the
+  session, the role and the task that was open at the time. The read half needs
+  a read-scoped credential, and the page makes that a five-minute unblock
+  rather than a morning of discovery — it carries the falsified hypotheses (the
+  403 is not about which studio is pinned), the exact env names to add, the
+  gateway routes confirmed to exist, and the loop step to paste into the
+  planner's prompt. The loop is driven from our own `joins.jsonl` rather than
+  by polling the gateway, because `runs` has no `since` and we already know
+  every Run we started. A test pins the page's field table against what
+  `record_join` actually writes, in both directions, and is verified to fail
+  when a row is renamed.
+- **The correlation spine: one session, one Run, one key.** Tracing already
+  sent an `X-Pipeline-Id`, but it was a random UUID — so a gateway Run and the
+  board row for the very same session had nothing in common, and the two
+  datasets could not be joined at all. The board keys a session by the id the
+  *agent* reports, which means the launcher is the only place the two can be
+  made equal: it now mints the id, starts the agent on it
+  (`claude --session-id <uuid>`), and traces under that same id.
+  - Applies to `aisquare launch`, `aisquare team spawn --exec`, **and** the
+    printed `team spawn` command — the default, and the one a human actually
+    pastes. The printed form takes its id from the same run-time `eval`, so it
+    is still fresh per paste; nothing is ever burned into the banner.
+  - Only when tracing is enabled **and** the wiring actually traced. With
+    tracing off (the default) the argv is byte-identical to before, and an
+    untraced fallback is exactly the launch you would have got anyway — an id
+    pinned on a launch with no Run to join is risk bought for nothing.
+  - Skipped, loudly, where it cannot be honoured: `--continue` and a bare
+    `--resume` name a session that does not exist yet, and an agent that is
+    not `claude` (or an install named after it) may not know the flag. Those
+    still trace, unjoined, with the reason on stderr — a flag the agent
+    rejects would cost the launch, and nothing may. `AISQUARE_PIN_SESSION_ID=0`
+    opts out entirely.
+  - A `--session-id` or `--resume <id>` you passed yourself is read, never
+    doubled: your id is already the board's.
+  - Every traced launch appends one JSON line to
+    `~/.aisquare/explainability/joins.jsonl` — session id, agent name,
+    pipeline id, started at — so board events can be joined to Runs without
+    dashboard access. Unwritable log ⇒ a warning, never a failed launch.
+- **`config.redaction.level` finally does something, and what it does is keep
+  a pasted credential off the network.** The setting has existed since the
+  first release with nothing reading it — so `strict` changed no behaviour
+  anywhere, which is worse than having no setting, because an operator who set
+  it believed they were protected. It is now honoured on the explainability
+  shipping path: prompts and board events are scrubbed on their way into the
+  spool, before anything is written to a file whose purpose is to be uploaded.
+  - `off` ships as typed. `standard` (the default) removes credentials — vendor
+    token shapes (`sk-`, `ghp_`, `glpat-`, `xox*-`, `AKIA`, `AIza`), JWTs, PEM
+    private-key blocks, `Authorization`/`Bearer` values, `NAME=value` where the
+    name says secret, and `user:pass@host` in a URL. `strict` adds identity:
+    email addresses, and `/home/<user>` → `~`.
+  - `standard` deliberately keeps file paths, hostnames and ports. A pasted key
+    is an incident; a path is the substance of an engineering prompt, and
+    redacting those by default would gut the dataset in exchange for a risk
+    nobody has articulated. An over-match is a sentence the dataset cannot
+    learn from, so a test pins that ordinary prose comes back byte-identical.
+  - An assignment keeps its key name (`EXPLAINABILITY_API_KEY=[redacted]`), and
+    every removal is marked — a silent scrub is indistinguishable from a user
+    who typed nothing.
+  - **Local capture is untouched.** `aisquare log` and the board row keep
+    exactly what was typed; this is about what crosses the network, and
+    rewriting someone's own history would make it useless for the debugging it
+    exists to support.
+  - The `init` consent line now names the level, so whoever says yes learns
+    what leaves the machine.
+- **The tracing boundary, written down before anyone measures against it**
+  (`docs/explainability-tracing-boundary.md`). A Run is a **process**, not an
+  agent: identity rides in process-level environment (`ANTHROPIC_BASE_URL` +
+  `ANTHROPIC_CUSTOM_HEADERS`), so an in-process Claude Code Task subagent or
+  Workflow step inherits the parent's identity verbatim and cannot carry its
+  own. Per-role and per-session numbers are real and verified against staging;
+  per-subagent numbers **do not exist**, and a query that appears to return one
+  is reading root-level spans and attributing them to whichever subagent the
+  reader assumed — a plausible number rather than an error, which is why this
+  is a data-correctness note and not a docs nicety. Task fan-out is countable
+  (`Tool:Agent` spans); a Workflow's is not recoverable at all. Separation
+  needs a separate **process**, which is exactly what `aisquare launch` and
+  `aisquare team spawn` give you. A test pins the page's mechanical claim
+  against the code, so it cannot rot quietly.
+  - **`aisquare explainability status` and `doctor` state the active level**,
+    status directly under the spool counts — "how much am I sending" and "what
+    is in it" are one question. Both surfaces render the same sentence from one
+    source so they cannot drift, and both say plainly that the scrub applies to
+    what LEAVES: local capture keeps what you typed. `off` renders as the
+    setting it is, never as a failed check — doctor makes decisions visible, it
+    does not overrule them. The setting spent its whole life being read by
+    nothing, so being able to SEE it is what makes it trustworthy.
+- **`aisquare explainability status` honours `--json`.** It printed human text
+  under `--json` while `team status` and `explainability env` both returned
+  real JSON — and this is the command a cutover gets scripted against, so every
+  check in the runbook was a grep against prose. The payload carries every
+  field the human view shows; `key` splits into `key_env`/`key_set` (never the
+  key itself) and the spool counts nest under `shipping` as numbers. A test
+  compares the two views so one cannot quietly gain a field the other lacks.
+
+### Fixed
+- **`doctor --fix` could brick the checkout it was run in — including the test
+  suite's own interpreter.** The entry below documents that hazard and warns
+  about it; `apply_fixes` then went ahead and performed exactly that install,
+  because `running_editable()` was wired to the paths that *advise* an install
+  and not to the one that *performs* one. On an editable checkout the install is
+  now refused outright, ahead of the consent check: `--yes` is consent to a
+  repair, and a CLI that can no longer start is not one.
+  - The suite is a caller. `doctor --fix --yes` appears in four tests, so pytest
+    pip-installed the SDK into `sys.executable` mid-run, over the network, and
+    every test spawning a subprocess afterwards graded a shadowed CLI — 15
+    failures, all of them collected after the test that caused it, none of them
+    in it. The environment stayed broken after pytest exited.
+  - `pytest_sessionfinish` now fails any run that ends with a distribution
+    installed into its own interpreter that was absent at the start. Not
+    specific to pip or to that command: anything writing a distribution there
+    invalidates the whole run, and the honest report is "these results do not
+    describe this tree" rather than one unlucky test's traceback.
+  - Three tests were passing for reasons nobody chose, and now state their
+    premises instead of inheriting them: the `--reinit` help assertion read a
+    Rich options panel that TRUNCATES below ~70 columns (green at 80, red at 60
+    — and CI runs narrower than a developer's terminal); the "healthy install"
+    doctor control asserted `ok` against whatever the ambient interpreter held,
+    which was `ok` only because an earlier test had installed the SDK, making
+    alphabetical order load-bearing; and the `pgrep` decoy was a single-command
+    `sh -c`, which dash execs, replacing the shell's argv — the part holding the
+    phrase the decoy exists to supply — with `sleep 30`.
+  - `test_import_cost_of_the_integration` no longer swallows its subprocess's
+    stderr. `check=True` reports the return code and discards the message, so a
+    red CI said "returned non-zero exit status 1" while the interpreter had been
+    printing the root cause all along.
+- **Our own install advice could brick an editable checkout.** On a normal
+  install `aisquare-cli[explainability]` is safe: both distributions land in one
+  site-packages directory, their subpackages merge, and only the top-level
+  `__init__.py` collides — which the CLI survives. An EDITABLE install differs
+  in kind: the editable hook is a `.pth` line appending the checkout's `src/` to
+  `sys.path`, and site-packages is searched FIRST, so the SDK's real `aisquare/`
+  package does not merge with the checkout — it shadows it, and every command
+  dies with `ModuleNotFoundError: No module named 'aisquare.cli'`.
+  - Measured in all three directions: reinstalling editable does **not** recover
+    it, only `pip uninstall aisquare` does, and a non-editable install with the
+    extra is unaffected.
+  - The advice now depends on the install shape. An editable checkout is told
+    what would happen, the exact symptom to search for, and the one command that
+    recovers it. This is the only moment the warning can be delivered — once the
+    extra is in, the CLI cannot start, so no check of ours would ever run to
+    explain it.
+- **The two explainability lanes could point at different deployments, and
+  `status` reported the wrong one.** The proxy lane resolves a target —
+  `enable --target prod --gateway-url … --key-env PROD_KEY` — and `status` and
+  `doctor` report what it resolves to. The client lane (the spool and
+  `explainability ship`) did not: it read the top-level `gateway_url` and a
+  hardcoded `EXPLAINABILITY_API_KEY`, ignoring the active target.
+  - That splits at the moment it costs most. Configure shipping while a staging
+    shell is sourced — which is what the cutover runbook has you do — then
+    switch the proxy lane to prod: model traffic goes to prod, CLI insights keep
+    going to staging, and `status` prints the prod gateway because the line a
+    human reads resolves the target. Both halves look healthy and nobody is
+    told.
+  - Shipping now resolves through the active target, so one switch moves both
+    lanes. The key comes from the variable the target NAMES; a differently
+    named key in the shell no longer satisfies it, because shipping prod
+    sessions with a staging key is worse than not shipping them — it refuses
+    and says which variable it wanted.
+  - **Every "on" state now names the destination**: `shipping: on →
+    https://prod.example — …`, and `--json` carries `shipping.gateway`. Counts
+    alone cannot reveal a split brain — "2 sent" reads identically whichever
+    gateway it went to — and the state that matters most mid-cutover is
+    "buffering", not the happy one.
+  - A machine that never made a target is unaffected: the top-level
+    `gateway_url` and the stored key file remain the fallback.
+  - **The stored key file no longer crosses deployments.**
+    `~/.aisquare/explainability-key` holds ONE unlabelled key, which is right
+    for the single-deployment machine `init --explainability` produces and
+    wrong the moment a target names its own variable. Follow the CLI's own
+    "or write \<key file\>" advice while on staging, switch to prod with
+    `PROD_KEY` unset, and the STAGING key was handed to the PROD gateway — the
+    reverse being worse, a prod key disclosed to a staging host. The file now
+    answers only when the active target has not named a variable of its own,
+    and the refusal stops advising a file it would ignore.
+- **Concurrent first opens of a fresh store could corrupt the migration,
+  permanently.** Several sessions launching together onto a machine that has
+  never run aisquare could raise a NON-transient `duplicate column name:
+  account` out of `_migrate` — and the damage did not heal: the column existed
+  while `user_version` still read 8, so every later attempt at migration 8
+  failed on that database forever.
+  - Time-of-check / time-of-use. The version was read, the migration chosen,
+    and only THEN the transaction started — so another opener could advance the
+    schema in between and this one applied an **old migration to a newer
+    database**. Instrumentation caught a thread running migration index 9
+    against a database that read version 8 on two independent connections.
+  - Fixed by taking the write lock first and re-reading the version **under**
+    it. `executescript` cannot be used for the transactional part — it issues an
+    implicit `COMMIT` before running, releasing a lock taken beforehand — so
+    statements are split with `sqlite3.complete_statement`, SQLite's own
+    tokenizer, and a test compares the resulting schema against what
+    `executescript` built, object for object: 29 objects, identical.
+  - The guard asserts the invariant, not the race: reproducing the failure needs
+    luck (0–2 of 15 twelve-way races), so a racing test would be the
+    load-sensitive kind this suite has twice had to repair. It traces a real
+    first open and pins that the version is re-read after every write lock and
+    before any DDL — verified red against the pre-fix ordering.
+  - `docs/store-migration-race.md` records the two hypotheses that were wrong
+    (`executescript` breaking the transaction; the connections disagreeing about
+    journal mode), both measured and both falsified, so the route is not
+    rediscovered.
+- **`aisquare doctor --live` now probes a proxy you configured, even with
+  tracing off.** With tracing off nothing probes the proxy, which is right for
+  the default case and wrong for the flag whose entire meaning is "make the
+  network calls": mid-cutover there was no way to confirm the proxy you just
+  started answers *before* enabling tracing. Under `--live` it is probed and
+  reported informationally — **never as a failure**, because nothing is being
+  traced so nothing is broken — and each answer carries what it means rather
+  than only what happened. An **unconfigured** default is still never dialled,
+  `--live` or not: nobody asked about that address, and a test forbids the
+  socket. Plain `doctor`, plain `status` and the tracing-on red path are
+  unchanged in every state.
+- **Rich was deleting bracketed text out of everything the CLI printed.** Rich
+  reads `[...]` as a style tag and removes it, and almost every line this CLI
+  prints interpolates data it does not control — paths, git refs, role names,
+  config values, binary names, URLs, remembered context text. Two independent
+  lanes hit it the same night from different directions: the serve hint reached
+  users as `pip install 'aisquare-cli'` with the extra name gone, and the
+  doctor's detail column ate the SDK's `[present]` so a configured key read
+  exactly like a missing one. Neither raised — both printed a confident wrong
+  answer, which is worse.
+  - Fixed once, at the console factories, so the safe behaviour is what the
+    next call site inherits rather than something ninety of them each have to
+    remember. An AST scan counted **87 render sites carrying interpolated
+    data**; all are covered by construction. It reaches Rich **tables** too,
+    which parse cell text the same way — `aisquare context list` was mangling
+    remembered entries.
+  - **Deliberate styling is untouched.** `style=` arguments, `Column(style=…)`,
+    `header_style` and `rich.text.Text` all bypass the markup parser. The six
+    sites that styled text with inline tags now carry that styling structurally
+    instead, so the data never reaches a parser — and a test asserts a styled
+    line is still styled, on the ANSI Rich actually emits.
+  - A test walks the package AST and fails if a `Console` is built outside the
+    factories, because that is the one way the default gets bypassed.
+- **A machine that never configured tracing reported a failure it did not
+  have.** `aisquare explainability status` printed `probe: proxy unreachable at
+  http://127.0.0.1:9090/health: <urlopen error [Errno 111] Connection refused>`
+  on a stock install. Nothing was wrong with that machine: the shipped default
+  points at loopback and nothing is listening, which is exactly right for an
+  install that has never asked for tracing. But it read as broken, and the
+  first thing anyone does with a line like that is go debug a proxy that was
+  never meant to exist yet.
+  - The line now distinguishes **not configured** (informational — the default
+    is not consulted while tracing is off) from **configured and down**
+    (unmistakably red, and still carrying its remediation, because launches
+    keep working while silently going untraced). A cold `status` also stops
+    dialling the default address at all: nothing to probe means nothing to wait
+    for.
+  - `status` and `doctor` now render **one sentence from one function**. They
+    had already drifted — doctor knew to stay quiet while tracing was off and
+    status did not — so the same machine read green in one surface and broken
+    in the other.
+  - The default `proxy_url` is unchanged and the exit-code rule is unchanged:
+    non-zero only when tracing is on and the proxy would not take a session.
+    The default being unreachable was never the bug; the wording was.
+- **Model probes, gbrain and the detached distiller inherited the launching
+  session's tracing identity.** Identity is process-level — it rides in
+  `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` — and a child gets the
+  parent's environment unless told otherwise. So `team spawn`'s availability
+  probe, which runs a real `claude -p` per alias, posted a Run wearing
+  whichever role happened to be probing: junk data in the dataset, attributed
+  to a teammate who never asked a question. Fixed at the source rather than
+  leaning on the proxy's junk-run suppression, because the traffic is ours not
+  to send. gbrain gets the same treatment — its own env builder already guards
+  `ANTHROPIC_API_KEY`, which is the tell that an Anthropic path exists — as
+  does the detached `team distill` worker, which outlives the process that
+  started it and could otherwise attach to a Run that had already ended.
+  Credentials and `PATH` still travel; the strip is only the identity.
+- **Every process this CLI starts now carries a written tracing ruling, and it
+  is enforced.** `core/spawn.py` holds the inventory — all eleven
+  `subprocess`/`exec` call sites, each `traced` or `excluded` with a reason —
+  and a guard test walks the package's AST on every run, failing when a call
+  site exists that the registry has not ruled on. A docstring inventory drifts
+  silently the first time someone adds a `subprocess.run`; this one fails the
+  build. Recorded alongside it: Claude Code subagents and Workflow agents run
+  *in-process* and inherit their session's environment verbatim, so they
+  collapse into the parent's identity. Process is the identity boundary, and
+  no launcher change can move it.
+- **A proxy URL the agent cannot parse is now refused before it can reach
+  one.** `ANTHROPIC_BASE_URL` is the one value in this wiring that costs a
+  *launch* rather than a trace: the agent parses it before it can report
+  anything, so a malformed one dies at the first request with `API Error:
+  Invalid URL` and exit 1. `wire_session` now checks the value it is about to
+  set — scheme and host, nothing about reachability, which is still the
+  probe's job — and launches untraced with the reason instead. The check is
+  deliberately independent of the probe: the probe *happened* to reject an
+  unparseable URL as "unreachable", which is both a misleading message (it
+  blames the network for a typo in config) and an accident a caller with its
+  own `prober` sails straight past. Refused, never repaired — a value we
+  invented is a value nobody configured.
+- **A corrupt `ANTHROPIC_BASE_URL` already in your environment is now named
+  before it kills the launch.** That one is *not* ours to remove — overriding
+  the operator's routing is forbidden, and we cannot know it is wrong for them
+  — so we still stand down. But the agent is about to fail with a message that
+  points nowhere near the cause, so the stand-down now says which value it
+  deferred to and that it will not work. Stale shells from before the quoting
+  fix are exactly this case.
+- **The launcher was about to write a variable the SDK routes on.** Our
+  identity marker was called `AISQUARE_AGENT_NAME` — which the Explainability
+  SDK already reads as the registered routing identity, and which operators
+  set in their own env file. This module even had a constant for it already,
+  beside the gateway URL and the API key. Setting it from the launcher would
+  have silently overridden the operator's routing, the exact thing the
+  reserved-var guard refuses to do for `ANTHROPIC_*`. The marker is now
+  `AISQUARE_TRACE_AGENT_NAME`, unambiguously ours, and a test pins that the
+  two are different and that the SDK's variable is never written.
+- **The run-key marker is named for what it holds.**
+  `AISQUARE_SESSION_ID` became `AISQUARE_PIPELINE_ID`. The old name is what
+  let a careful reader key spans on it as though it were the board's session
+  id — which it is not on any launch that could not be pinned, so those spans
+  opened a second Run beside the model traffic. Renamed in the same commit as
+  `core.insights.RUN_KEY_ENV_VAR`, which duplicates it to stay off the heavy
+  import path; the drift test between them guarantees the pair moves together.
+- **Every agent below the first was launching under its PARENT's identity.**
+  A traced session's environment carries the wiring that traced it, so
+  `aisquare launch` run from inside one hit the "not overriding your routing"
+  guard, reported *untraced* — and then handed the child the parent's
+  `X-Pipeline-Id` anyway, because standing down leaves the inherited variables
+  in place. So the child was not untraced at all: its traffic was filed into
+  the parent's Run under the parent's role. That is the whole shape of the
+  morning's collective-intelligence work — agents spawning agents — and it
+  would have produced one Run wearing one identity for an entire tree.
+  A parent's identity is now disowned before the child wires its own, at both
+  launch seams. Only ever *ours*: a gateway the operator exported has no
+  marker beside it, is not ours, and still makes us stand down untouched.
+- **A role bound to a wrapper is now joined, not just traced.** The
+  session→Run join moved off the launcher and onto the hook that runs *inside*
+  the agent — the one place that holds both halves, since Claude Code hands it
+  the board session id and the launcher left the pipeline id in the
+  environment. It needs nothing from the binary, so a wrapper that has never
+  heard of `--session-id` joins exactly like the default agent. Pinning the id
+  with `--session-id` survives as a strict extra for the one program verified
+  to accept it, narrowed from "anything named claude*" to exactly `claude`,
+  because since #57 an unknown flag can be a dead launch and the hook seam
+  already guarantees the join. One row per session, both halves always real.
+- **`aisquare launch` ignored the active target's overrides.**
+  `explainability enable --target prod --proxy-url …` writes per target, and
+  the wiring only ever read the top level — so a launch silently used the
+  wrong proxy while reporting success, which is worse than config that is
+  plainly absent. Both launch seams now fold the active target down first, and
+  a broken target definition costs the override rather than the launch.
+- **A pruned-but-alive session stayed invisible while its write path kept
+  working** (#47). A live session whose wakeup cadence stretched past the stale
+  threshold got retired by `team prune` — and then never came back, because
+  only `SessionStart` cleared `ended_at` while every subsequent proof of life
+  (prompt heartbeat, end of turn, permission prompt) went through writes that
+  did not. Meanwhile its notes landed with verifiable receipts, `team role`
+  succeeded and its claims held, so `board`, `team status`, `watch` and
+  `doctor` — all of which read liveness as `ended_at IS NULL` — showed nothing
+  while the session worked on. Operators read row-absence as death: on the
+  board that filed this, one healthy session was pruned on a cadence artifact
+  and then presumed dead a second time *because* the severed row masked its own
+  recovery. `end_session` had documented the repair all along ("a wrongly
+  retired presence row is repaired by the session's next heartbeat"); now it
+  happens. A heartbeat is evidence and prune's retirement was an inference from
+  silence, so the evidence wins — and the restore keeps the row's role, label
+  and focus rather than letting a planner rejoin as `unassigned`. Nothing
+  resurrects on its own: a session that really ended stays ended, and prune
+  still retires a row that has genuinely gone quiet.
+- **The tracing exports were bash-only, and silently misattributed every
+  session started from `/bin/sh`.** `aisquare explainability env` quoted with
+  bash's `$'…'`, which dash — `/bin/sh` on Debian and Ubuntu — does not treat
+  as special: the value arrived with a literal `$` in front and a literal
+  backslash-n where the header separator belongs. The proxy then read one
+  glued header, never saw `X-Pipeline-Id`, and filed the run under its default
+  identity — the exact misattribution that command exists to prevent. Now
+  POSIX single-quoted, which carries a real newline in `sh`, `bash` and `zsh`
+  alike. The old test pinned the *quoting syntax*, so it passed while the
+  premise was false; it now pins the round trip through a real `/bin/sh`.
+- **Two spawn commands pasted into one terminal merged into a single Run.**
+  The first `eval` exports `ANTHROPIC_*` into the shell, so the second one
+  correctly refused to clobber what looks like the operator's own routing —
+  and the second agent inherited the first's `X-Pipeline-Id` verbatim. Two
+  sessions, one Run, silently; and this is the up-arrow flow, run every time
+  an agent exits. The printed command now clears the previous paste's tracing
+  first, keyed on a marker only our own wiring sets, so a real operator
+  gateway still stops the trace exactly as before.
+
 ## [0.4.0rc2] - 2026-08-19
 
 Two PRs on top of rc1. **#48 makes `aisquare` run on Windows at all** — the

@@ -49,15 +49,35 @@ def _placeholder(parameter: Any) -> str:
     return "sample"
 
 
-def leaf_invocations() -> list[list[str]]:
-    """argv for every leaf command, with required arguments filled in."""
-    invocations: list[list[str]] = []
+def leaf_invocations_by_path() -> list[tuple[tuple[str, ...], list[str]]]:
+    """``(path, argv)`` for every leaf: its own name, and a RUNNABLE invocation.
+
+    Required *options* are filled as well as required arguments. Without them a
+    command with a required option exits 2 on usage and never runs a line of its
+    own logic — which reads as coverage in a sweep and is not. Measured: only
+    ``task block`` and ``task reopen`` have one (``--reason``), and both were
+    exiting 2 in the configured-home sweep for that reason alone.
+
+    The path is returned alongside argv because a sweep wants to key its allow
+    lists and ratchets on the command's NAME, not on an argv full of
+    placeholders.
+    """
+    invocations: list[tuple[tuple[str, ...], list[str]]] = []
     for path, command in _iter_nodes(root_command(), ()):
         if isinstance(command, TyperGroup):
             continue
         argv = [*path]
         for parameter in command.params:
-            if parameter.param_type_name == "argument" and parameter.required:
+            if not parameter.required:
+                continue
+            if parameter.param_type_name == "argument":
                 argv.append(_placeholder(parameter))
-        invocations.append(argv)
+            elif parameter.param_type_name == "option":
+                argv.extend([parameter.opts[0], _placeholder(parameter)])
+        invocations.append((path, argv))
     return invocations
+
+
+def leaf_invocations() -> list[list[str]]:
+    """argv for every leaf command, with required arguments and options filled in."""
+    return [argv for _, argv in leaf_invocations_by_path()]

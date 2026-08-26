@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
@@ -11,6 +14,7 @@ import tomli_w
 import typer
 from rich.table import Table
 
+from aisquare.core import paths
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -211,11 +215,23 @@ def emit_setup(report: SetupReport) -> None:
 
 
 def emit_config(config: AppConfig) -> None:
-    """Render the full config — JSON under ``--json``, TOML otherwise."""
+    """Render the full config — JSON under ``--json``, TOML otherwise.
+
+    ``exclude_none`` on the TOML side for the reason ``save_config`` states:
+    TOML has no null, so ``tomli_w`` raises rather than writing anything, and
+    one unset optional field would make the whole config unprintable. It was
+    passed on the write path and not here, so ``explainability enable`` (a
+    target that overrides nothing) or ``team bind`` without ``--bin`` left
+    ``config list`` exiting 1 with a traceback. Omitting the key is also what
+    is on disk, so the two renderings agree.
+
+    JSON keeps its nulls: it can express them, and a consumer indexing a key
+    would rather read ``null`` than a ``KeyError``.
+    """
     if get_state().json_output:
         typer.echo(config.model_dump_json())
     else:
-        typer.echo(tomli_w.dumps(config.model_dump(mode="json")), nl=False)
+        typer.echo(tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)), nl=False)
 
 
 def emit_config_value(key: str, value: str) -> None:
@@ -342,13 +358,32 @@ def emit_status(report: StatusReport) -> None:
     )
     console.print(f"detected: {', '.join(report.agents_detected) or 'none'}")
     console.print(f"connected: {', '.join(report.agents_connected) or 'none'}")
+    shipping = report.shipping
+    if shipping is not None:
+        console.print(
+            f"shipping: {shipping.queued} queued, {shipping.sent} sent, "
+            f"{shipping.dead} dead-letter — {shipping.reason}"
+        )
 
 
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 
 
 def emit_doctor(checks: list[DoctorCheck]) -> None:
-    """Render diagnostic check results, with a fix hint for anything not OK."""
+    """Render diagnostic check results, with a fix hint for anything not OK.
+
+    Details and fixes are DATA, not markup: a check may carry text from a
+    subprocess or another tool, and Rich reads anything in square brackets as a
+    style tag and prints nothing. Observed live — the SDK doctor reports a
+    configured key as ``[present]``, which rendered as an empty detail and read
+    exactly like a missing key.
+
+    They are no longer run through ``rich.markup.escape``. The output consoles
+    stopped parsing markup at all (see :mod:`aisquare.core.console`), and
+    escaping for a parser that is switched off prints the backslash it was
+    meant to hide. The protection moved down a layer; the reason for it did not
+    change.
+    """
     if get_state().json_output:
         typer.echo(json.dumps([check.model_dump(mode="json") for check in checks]))
         return
@@ -357,6 +392,75 @@ def emit_doctor(checks: list[DoctorCheck]) -> None:
         console.print(f"{_CHECK_SYMBOL[check.status]} {check.name}: {check.detail}")
         if check.fix and check.status is not CheckStatus.ok:
             console.print(f"    → {check.fix}")
+
+
+@contextmanager
+def expected_config_write_errors() -> Iterator[None]:
+    """Route a foreseeable "config is not writable" failure through ``fail``.
+
+    ``PermissionError`` out of ``save_config`` is not a crash: it is the
+    operator's filesystem saying no, and this CLI already has a convention for
+    that — one ``✗`` line and exit 1. Without this it arrived as 56 lines of
+    Rich traceback with the useful sentence at the bottom, which is the shape
+    operators skip past.
+
+    Deliberately NOT a catch in ``main()``. A global handler would tidy
+    UNEXPECTED OSErrors the same way, and an unexpected OSError is a bug where a
+    traceback is the correct output — burying one costs whoever debugs it later
+    far more than a buried message costs an operator now. So only the commands
+    that KNOW this failure is foreseeable translate it, and only
+    ``PermissionError``: every other OSError keeps its traceback.
+
+    ``hint`` and ``detail`` reach the JSON payload; the human surface prints the
+    message alone, so the directory that actually needs permission is named
+    there rather than left to the hint.
+    """
+    try:
+        yield
+    except PermissionError as exc:
+        config = paths.config_path()
+        resolved = Path(exc.filename) if exc.filename else None
+        directory = resolved.parent if resolved is not None else config.parent
+        through = (
+            f" (a symlink to {resolved})"
+            if resolved is not None and resolved != config and resolved.name == config.name
+            else ""
+        )
+        fail(
+            f"cannot write the config at {config}{through}: "
+            f"write permission is needed on {directory}",
+            error="config_not_writable",
+            hint=f"write permission is needed on {directory}",
+            detail=exc.strerror or str(exc),
+        )
+    except FileNotFoundError as exc:
+        # ``save_config`` raises this deliberately when a followed symlink's
+        # directory is missing: following a link is honouring stated intent,
+        # materialising a tree the user never created would be inventing it.
+        # Its message already names the missing directory and both remedies, so
+        # this ROUTES the message rather than rewriting it — a second wording
+        # would drift from the one the tests over there pin.
+        fail(
+            exc.strerror or str(exc),
+            error="config_target_missing",
+            hint=f"create {exc.filename} or repoint the link" if exc.filename else None,
+        )
+    except OSError as exc:
+        # EROFS belongs with the two above by the same test: it is a consequence
+        # of WHERE THE OPERATOR POINTED THE CONFIG, and a one-line message can
+        # name the fix. ENOSPC and EIO are the machine breaking underneath a
+        # correct choice — tidying those into a ✗ would understate a condition
+        # that is probably breaking other things too, so they keep the traceback
+        # that is the honest signal. Re-raised explicitly rather than caught by
+        # class, because EROFS has no dedicated exception type.
+        if exc.errno != errno.EROFS:
+            raise
+        where = Path(exc.filename).parent if exc.filename else paths.config_path().parent
+        fail(
+            f"cannot write the config: {where} is on a read-only filesystem",
+            error="config_filesystem_read_only",
+            hint=f"remount {where} read-write, or point AISQUARE_HOME elsewhere",
+        )
 
 
 def fail(
@@ -373,8 +477,17 @@ def fail(
     Mirrors the stub contract: a machine-readable object on stdout under
     ``--json``, a human message on stderr otherwise. ``hint`` carries
     actionable context (e.g. which board actually holds a receipt) and
-    ``detail`` the underlying cause (e.g. the real sqlite error text) into
-    the JSON payload; the human message weaves both into its own text.
+    ``detail`` the underlying cause (e.g. the real sqlite error text).
+
+    **Both reach the JSON payload ONLY.** The human surface prints
+    ``✗ {message}`` and nothing else — so ANYTHING AN OPERATOR MUST ACT ON
+    BELONGS IN ``message``. This docstring used to claim the human message
+    "weaves both into its own text", which was never true of the code below
+    it, and the cost of that sentence is specific: it invites the next author
+    to put the one actionable token of a diagnosis into ``hint``, where the
+    only people who will ever see it are reading ``--json``. Caught by
+    ``coder3`` while implementing a message whose whole purpose was to stop an
+    operator looking at the wrong directory.
     """
     if get_state().json_output:
         payload = {"error": error}
@@ -386,5 +499,11 @@ def fail(
             payload["detail"] = detail
         typer.echo(json.dumps(payload, separators=(",", ":")))
     else:
-        stderr_console().print(f"✗ {message}")
+        # markup=False because an error message is DATA, not a template. Rich
+        # reads `[...]` as a style tag and deletes it silently, which rendered
+        # the serve hint as `pip install 'aisquare-cli'` — the extra name, the
+        # one actionable token in the sentence, gone. Every other fail message
+        # interpolates user-controlled text (paths, refs, role names, config
+        # values), so this was a class of silent mangling, not one bad string.
+        stderr_console().print(f"✗ {message}", markup=False)
     raise typer.Exit(exit_code)

@@ -8,17 +8,58 @@
   heartbeats the session on the orchestrator, and returns the teammate delta to
   inject (empty when the team has been quiet).
 - ``session_ended`` retires the session from the orchestrator.
+
+``session_start`` is also where the explainability join is closed. It is the
+one place that holds BOTH halves of the correlation spine — Claude Code hands
+it the session id the board row uses, and a traced launcher left the pipeline
+id in this process's environment — and it needs nothing from the binary that
+was launched, which is why a role bound to a wrapper joins exactly like the
+default agent does.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+from aisquare.core import insights
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
+from aisquare.services import explainability as explainability_service
 from aisquare.services import team as team_service
+
+
+def record_trace_join(session_id: str | None) -> str | None:
+    """Pair this session's board id with the Run its launcher opened for it.
+
+    Returns the reason it could not be written, or ``None`` — including when
+    there was nothing to write, which is the ordinary case: an untraced
+    session carries no marker and leaves after one lookup.
+
+    Deliberately silent about failures rather than loud. Every other fail-open
+    in the tracing path prints to stderr because a human is watching a launch;
+    this one runs inside the agent, where stderr is the hook's own channel and
+    noise there is paid on every single session start. An unwritten join is
+    recoverable — the Run still carries the agent name — so it is not worth
+    spending that.
+    """
+    if not session_id:
+        return None
+    try:
+        marker = explainability_service.traced_by()
+        if marker is None:
+            return None
+        pipeline_id, agent_name = marker
+        return explainability_service.record_join(
+            session_id=session_id,
+            pipeline_id=pipeline_id,
+            agent_name=agent_name,
+            role=os.environ.get("AISQUARE_ROLE") or None,
+        )
+    except Exception as exc:  # an observer may never disrupt a session start
+        return f"join record not written ({exc})"
 
 
 def session_start_context(
@@ -31,6 +72,7 @@ def session_start_context(
     effort: str | None = None,
 ) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
+    record_trace_join(session_id)
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
@@ -58,7 +100,7 @@ def prompt_submitted(
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
     if prompt is not None and prompt.strip():
-        capture_prompt(prompt, cwd)
+        capture_prompt(prompt, cwd, session_id=session_id)
     if session_id is None:
         return ""
     return team_service.hook_prompt_heartbeat(
@@ -86,14 +128,19 @@ def needs_attention(
         team_service.hook_notification(session_id, cwd, message)
 
 
-def capture_prompt(prompt: str, cwd: Path | None) -> None:
-    """Record a submitted user prompt against the active project."""
+def capture_prompt(prompt: str, cwd: Path | None, *, session_id: str | None = None) -> None:
+    """Record a submitted user prompt against the active project.
+
+    Spooling for the gateway comes last and cannot raise: recording the prompt
+    locally is the job, shipping it is an observer of the job.
+    """
     if not prompt.strip():
         return
     with store_session() as store:
         project = active_project(store, cwd)
         store.ensure_project(project)
         store.add_prompt(prompt, project.id, source="claude-code")
+    insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
 
 
 def _directive(project_id: str, *, has_prompts: bool) -> str:

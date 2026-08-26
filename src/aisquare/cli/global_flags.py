@@ -31,13 +31,22 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from difflib import get_close_matches
 from typing import Any
 
 import typer
 from typer.core import TyperGroup, TyperOption
 
+from aisquare.cli.common import fail
 from aisquare.core.state import get_state
+from aisquare.core.store import (
+    StoreUnopenable,
+    damaged_data_message,
+    damaged_store_message,
+    damaged_store_recovery,
+    is_corrupt_error,
+)
 
 INJECTED_MARK = "aisquare_injected_global_flag"
 """Attribute stamped on injected params so tests can tell them from locals."""
@@ -250,9 +259,46 @@ class GlobalFlagsGroup(TyperGroup):
         _inject_tree(self)
 
     def invoke(self, ctx: Any) -> Any:
-        """Dispatch, translating usage errors per the #21 contract."""
+        """Dispatch, translating usage errors per the #21 contract.
+
+        ``StoreUnopenable`` is translated here for the same reason the flags are
+        injected here: every command in the tree passes through this one place,
+        on every entry path. Eleven commands were measured printing 59-75 lines
+        of traceback against a damaged store — they all die in ``open_store``,
+        so wrapping each call site would be eleven chances to miss one and a
+        twelfth defect the day someone adds a command.
+
+        Narrow on purpose, and not a general tidier: ONE exception type whose
+        entire meaning is "the store would not open", raised from one function.
+        Every other error — including a ``DatabaseError`` from a later query,
+        which may be a bug in our SQL against a healthy store — keeps its
+        traceback, because burying one of those costs whoever debugs it far
+        more than a buried message costs an operator.
+        """
         try:
             return super().invoke(ctx)
+        except StoreUnopenable as damaged:
+            fail(
+                damaged_store_message(damaged),
+                error="store_unopenable",
+                hint=damaged_store_recovery(),
+                detail=str(damaged),
+            )
+        except sqlite3.DatabaseError as damaged:
+            # Damage a QUERY found: the file opened, so StoreUnopenable never
+            # fired. Keyed on the error rather than on where it came from,
+            # because by here the frame is long gone — and narrowed to
+            # corruption, since OperationalError is also a DatabaseError and
+            # "database is locked" must keep meaning "try again", not "your
+            # board is damaged".
+            if not is_corrupt_error(damaged):
+                raise
+            fail(
+                damaged_data_message(damaged),
+                error="store_damaged",
+                hint=damaged_store_recovery(),
+                detail=str(damaged),
+            )
         except _USAGE_ERROR as error:
             _handle_usage_error(error)
             raise

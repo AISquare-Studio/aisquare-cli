@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -15,12 +16,16 @@ from aisquare.cli.common import (
     emit_prompts,
     emit_setup,
     emit_status,
+    expected_config_write_errors,
+    fail,
     resolve_pool,
 )
 from aisquare.models import CheckStatus
 from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
+from aisquare.services import explainability as explainability_service
+from aisquare.services import explainability_ops
 from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import sync as sync_service
 
@@ -44,21 +49,71 @@ def init(
         bool, typer.Option("--no-onboard", help="Skip project onboarding after setup.")
     ] = False,
     reinit: Annotated[
-        bool, typer.Option("--reinit", help="Re-run setup even if already initialised.")
+        bool,
+        typer.Option(
+            "--reinit",
+            help="Re-run setup, resetting config.toml to defaults. Discards role "
+            "bindings made with team bind.",
+        ),
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Answer yes to every prompt.")] = False,
+    explainability: Annotated[
+        bool | None,
+        typer.Option(
+            "--explainability/--no-explainability",
+            help="Ship this CLI's insights (prompts, board events) to the "
+            "explainability gateway. Off unless you ask for it.",
+        ),
+    ] = None,
 ) -> None:
     """Set up aisquare on this machine and connect your agents."""
-    report = lifecycle_service.initialize(
-        path,
-        api_key=api_key,
-        local=local,
-        agents=agent or [],
-        onboard=not no_onboard,
-        reinit=reinit,
-        assume_yes=yes,
-    )
+    try:
+        with expected_config_write_errors():
+            report = lifecycle_service.initialize(
+                path,
+                api_key=api_key,
+                local=local,
+                agents=agent or [],
+                onboard=not no_onboard,
+                reinit=reinit,
+                assume_yes=yes,
+                explainability=_explainability_decision(explainability),
+            )
+    except lifecycle_service.ExplainabilityResetRefused as refused:
+        fail(
+            f"--reinit would discard this machine's explainability configuration "
+            f"({refused.summary}) and nothing afterwards would report it missing. "
+            f"Re-run with --yes if that is what you mean.",
+            error="reinit_would_discard_explainability",
+            hint="aisquare init --reinit --yes",
+        )
     emit_setup(report)
+
+
+def _explainability_decision(flag: bool | None) -> bool | None:
+    """What the user said about shipping insights — asking only where we may.
+
+    Ordinary ``init`` is non-interactive and idempotent, and scripts and CI
+    depend on that, so the question is asked ONLY at a terminal, and only when
+    the step could actually be accepted. Anywhere else the answer is "not
+    asked", which changes nothing.
+
+    ``--yes`` deliberately does NOT imply consent here. It exists to unblock
+    prompts, and "ship my prompts to a server" is not a prompt anyone should
+    answer by reflex — #50's boundary is that nothing ships before the user has
+    configured it.
+    """
+    if flag is not None:
+        return flag
+    if not sys.stdin.isatty():
+        return None
+    try:
+        if not explainability_service.shipping_offer().available:
+            return None
+    except Exception:  # an optional step may not break setup
+        return None
+    captures = explainability_service.ShippingOffer.CAPTURES
+    return typer.confirm(f"Ship {captures} to the explainability gateway?", default=False)
 
 
 def status() -> None:
@@ -66,9 +121,34 @@ def status() -> None:
     emit_status(diagnostics_service.status())
 
 
-def doctor() -> None:
+def doctor(
+    live: Annotated[
+        bool,
+        typer.Option(
+            "--live",
+            help="Also run the checks that leave this machine (explainability "
+            "gateway reachability, key acceptance, a real span round-trip).",
+        ),
+    ] = False,
+    fix: Annotated[
+        bool,
+        typer.Option("--fix", help="Repair what can be repaired, then re-check."),
+    ] = False,
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Explainability deployment to check, e.g. stg or prod."),
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")
+    ] = False,
+) -> None:
     """Run diagnostics and suggest fixes for common problems."""
-    checks = diagnostics_service.doctor()
+    if fix:
+        for action in explainability_ops.apply_fixes(
+            target=target, assume_yes=yes, confirm=typer.confirm
+        ):
+            typer.echo(f"fix: {action}")
+    checks = diagnostics_service.doctor(live=live, target=target)
     emit_doctor(checks)
     if any(check.status is CheckStatus.fail for check in checks):
         raise typer.Exit(1)

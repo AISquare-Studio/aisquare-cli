@@ -94,8 +94,11 @@ target, starts the sidecar detached, and waits until it answers `/health`.
 - **The pidfd actually closes the race now.** It was opened *inside* the
   terminate call, after ownership had been verified, so a successor that
   inherited the number in between was exactly what it attached to. It is opened
-  before verification and the same handle carries the signal. `pidfd_open`
-  raising ESRCH is terminal rather than a fall-through to a numeric `os.kill` —
+  before verification and the same handle carries the signal — through
+  `_owned_handle`, which binds and only then checks identity; the previous
+  attempt opened it inside the stop call, after verification, which merely moved
+  the window rather than closing it. `pidfd_open` raising ESRCH is terminal
+  rather than a fall-through to a numeric `os.kill` —
   "this pid is gone" is precisely when the number may belong to someone else.
 - **An unreadable boot id no longer becomes a token.** `_boot_id` returned `"?"`
   and that was accepted, producing `proc:?:…` — a string that looks boot-scoped
@@ -105,6 +108,25 @@ target, starts the sidecar detached, and waits until it answers `/health`.
   every value. It always printed `$(cat ~/.aisquare/explainability-key)`, while
   the production runbook sources the key from the target's named variable and
   that file may not exist.
+- **Ownership is about the process, not the configuration.** `_owns` used to
+  short-circuit on the proxy URL, so `enable --proxy-url` made a running proxy
+  stop being ours: `up` spawned a second and clobbered the only record of the
+  first, which then ran forever on the old port with the old gateway and key,
+  unstoppable by `down`. The URL moved to the deployment check, where a mismatch
+  means "restart it" rather than "not ours".
+- **`managed` describes the machine, not the shell that asked.** The key
+  fingerprint was compared against `key_fingerprint(None or "")` when no key was
+  resolvable, so asking from a shell without the key exported reported a healthy,
+  correctly-pointed proxy as misconfigured and told the operator to restart it.
+  The key is compared only when this shell can resolve one.
+- **A zombie is not alive.** `os.kill(pid, 0)` succeeds for an exited-but-unreaped
+  process, so a stop would wait out its timeout on something already gone and
+  report failure, and `status` would call it running.
+- **`ProcessLookupError` no longer escapes as a traceback** where there is no
+  pidfd (macOS, Windows, pre-5.3 kernels). It is an `OSError` and was neither
+  `_Gone` nor `PermissionError`, so a proxy exiting between the liveness check
+  and the SIGTERM — the SDK's own handler finishing between poll iterations is
+  enough — gave a traceback instead of "was already gone".
 - Not on the launch path. Nothing here runs in front of a waiting developer.
 
   *Upgrade note:* a proxy started by a pre-0.5.0 build has a record without the

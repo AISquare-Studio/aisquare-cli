@@ -438,7 +438,18 @@ def _clear_record() -> None:
 
 
 def _alive(pid: int) -> bool:
-    """Whether this pid exists. Signal 0 checks without delivering anything."""
+    """Whether this pid is a running process. A zombie is not one.
+
+    ``os.kill(pid, 0)`` succeeds for a zombie — an exited process still in the
+    table because nobody has reaped it — so signal 0 alone reported a dead proxy
+    as alive. That matters twice: a stop would time out waiting for something
+    already gone and report failure, and `status` would call a zombie owned and
+    running when it is answering nothing.
+
+    Only reachable when the caller is the parent (nobody else can leave it
+    unreaped), which is why it went unnoticed: `up` and `down` normally run in a
+    different process from the one that spawned the proxy.
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -446,24 +457,44 @@ def _alive(pid: int) -> bool:
     except PermissionError:
         # Exists and belongs to someone else — for our purposes, alive.
         return True
-    return True
+    return not _is_zombie(pid)
 
 
-def _owns(record: ProxyRecord | None, url: str) -> bool:
+def _is_zombie(pid: int) -> bool:
+    """Whether this pid has exited and is only waiting to be reaped (Linux)."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    state = raw.rpartition(")")[2].split()
+    return bool(state) and state[0] == "Z"
+
+
+def _owns(record: ProxyRecord | None) -> bool:
     """Whether the recorded process is still the one this CLI started.
 
-    Deliberately three conditions and not one. `_alive` alone was the original
-    bug: the record outlives a reboot on purpose, pids are recycled, and
-    `os.kill(pid, 0)` cannot tell a recycled pid from ours — so `down` could
-    SIGTERM a stranger that happened to inherit the number.
+    ABOUT THE PROCESS ONLY — deliberately not about the configuration. It used to
+    short-circuit on `record.url != <current proxy_url>`, so a proxy stopped
+    being "ours" the moment someone ran `enable --proxy-url`. Nothing then owned
+    the running process: `up` saw neither an owned proxy nor a healthy one on the
+    NEW port, so it spawned a second and `_write_record` clobbered the only
+    record of the first. The old one ran on forever with the old gateway and key
+    — unstoppable by `down`, called foreign by `status`, still answering its
+    port. The runbook's manual form uses 9190 while the default is 9090, so this
+    is a path operators take.
+
+    Whether it serves the CURRENT configuration is a separate question, asked by
+    `_serves_this_deployment`, and the URL now lives there.
+
+    `_alive` alone was the original bug: the record outlives a reboot on purpose,
+    pids are recycled, and `os.kill(pid, 0)` cannot tell a recycled pid from ours
+    — so `down` could SIGTERM a stranger that happened to inherit the number.
 
     An UNVERIFIABLE identity counts as not-ours. That is the conservative
     direction: the cost is telling an operator to stop a proxy by hand, and the
     cost of the other direction is killing somebody else's process.
     """
-    if record is None or record.url != url or not _alive(record.pid):
-        return False
-    if record.identity is None:
+    if record is None or not _alive(record.pid) or record.identity is None:
         return False
     return _identity_token(record.pid) == record.identity
 
@@ -475,13 +506,26 @@ def _serves_this_deployment(record: ProxyRecord, target: ResolvedTarget) -> bool
     proxy URL, so a target switch changes nothing the URL can see: the old proxy
     keeps running, holding the old gateway and the old key, and reusing it sends
     prod-labelled sessions to staging. Matching on the URL alone made that
-    outcome a green ✓.
+    outcome a green ✓. The URL is checked here too, since `_owns` stopped doing
+    it — a proxy on a port we no longer configure is still ours, and still ours
+    to stop.
+
+    THE KEY IS ONLY COMPARED WHEN THIS SHELL CAN RESOLVE ONE. `managed` is meant
+    to describe the machine, and comparing against `key_fingerprint(None or "")`
+    made it describe the invoking shell: start the proxy with
+    `EXPLAINABILITY_API_KEY` exported, then run `status` in a fresh shell with no
+    key file, and a healthy correctly-configured proxy was reported as "not
+    serving this machine's configuration — restart it". Acting on that either
+    hits the no-key preflight or kills a working proxy. An unresolvable key is
+    surfaced by :meth:`ProxyStatus.summary` instead of being called a mismatch.
     """
-    return (
-        record.target == target.name
-        and record.gateway_url == target.gateway_url
-        and record.key_fp == key_fingerprint(target.api_key or "")
-    )
+    if record.url != target.proxy_url:
+        return False
+    if record.target != target.name or record.gateway_url != target.gateway_url:
+        return False
+    if target.api_key is None:
+        return True
+    return record.key_fp == key_fingerprint(target.api_key)
 
 
 def status() -> ProxyStatus:
@@ -491,7 +535,7 @@ def status() -> ProxyStatus:
     url = target.proxy_url
     probe = probe_proxy(url)
     record = read_record()
-    owned = _owns(record, url)
+    owned = _owns(record)
     # `managed` is the strong claim, and every conjunct is load-bearing. Ours,
     # AND still pointed at the deployment this machine names, AND actually
     # answering. Dropping the last one let `up` print "✓ … sessions are traced"
@@ -606,7 +650,7 @@ def _up_locked(*, log_path: Path | None = None) -> ProxyStatus:
         # the old gateway. The health poll cannot distinguish two proxies on one
         # port; only refusing to proceed can. The record is retained on purpose:
         # the process it names is still alive and still ours to stop.
-        if existing.pid and not _terminate(existing.pid):
+        if existing.record is not None and not _stop_owned(existing.record):
             raise ProxyError(
                 f"could not stop the proxy we started (pid {existing.pid}) at "
                 f"{target.proxy_url} — it is running as another user, or refusing both "
@@ -779,18 +823,43 @@ class _Gone(Exception):
     """The process is not there. Terminal — never a reason to fall back."""
 
 
+def _numeric_sender(pid: int) -> Callable[[int], None]:
+    """`os.kill` for platforms with no pidfd, raising :class:`_Gone` on ESRCH.
+
+    The translation matters as much as the signal. `os.kill` raises
+    `ProcessLookupError`, which is an `OSError` and was neither `_Gone` (caught
+    by `_terminate`'s outer handler) nor `PermissionError` (caught by the inner
+    one) — so on macOS, Windows or a pre-5.3 kernel, a proxy that exited between
+    the liveness check and the SIGTERM gave the operator a raw traceback instead
+    of "was already gone — cleared the stale record". The SDK's own SIGTERM
+    handler finishing between poll iterations is enough to hit it.
+    """
+
+    def send(sig: int) -> None:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError as exc:
+            raise _Gone(pid) from exc
+
+    return send
+
+
 @contextlib.contextmanager
 def _process_handle(pid: int) -> Iterator[Callable[[int], None]]:
     """Bind to a PROCESS, then yield a way to signal exactly that process.
 
-    ORDER IS THE WHOLE POINT, and the first version got it wrong. It verified
-    ownership and *then* opened the pidfd inside the terminate call, so a
-    successor that inherited the number in between was precisely what the pidfd
-    attached to — the race the pidfd was added to close, still open. Opening
-    first and holding the same handle across verification and signalling is what
-    closes it: after ``pidfd_open`` succeeds the handle refers to that process
-    forever, so a signal through it either reaches it or fails with ESRCH, and
-    can never reach whatever later holds the number.
+    Binding first is what makes a later signal safe: after ``pidfd_open``
+    succeeds the handle refers to that process forever, so a signal through it
+    either reaches it or fails with ESRCH, and can never reach whatever later
+    holds the number.
+
+    THIS ALONE DOES NOT CLOSE THE RACE, and two earlier revisions claimed it
+    did. Callers verify ownership and then call `_terminate`, which opens the
+    handle — so the window simply moved from signal-time to ``pidfd_open``-time.
+    :func:`_owned_handle` is the version that actually closes it, by opening the
+    handle BEFORE the identity check and signalling through that same handle.
+    Use it wherever a verified stop is required; this context manager remains for
+    stopping a pid whose ownership has not been asserted.
 
     ESRCH IS TERMINAL. ``pidfd_open`` raising ``ProcessLookupError`` used to be
     swallowed by a broad ``except OSError`` and answered with a numeric
@@ -805,11 +874,7 @@ def _process_handle(pid: int) -> Iterator[Callable[[int], None]]:
     opener = getattr(os, "pidfd_open", None)
     sender = getattr(signal, "pidfd_send_signal", None)
     if opener is None or sender is None:
-
-        def by_pid(sig: int) -> None:
-            os.kill(pid, sig)
-
-        yield by_pid
+        yield _numeric_sender(pid)
         return
 
     try:
@@ -819,10 +884,7 @@ def _process_handle(pid: int) -> Iterator[Callable[[int], None]]:
     except OSError:
         # Genuinely unavailable (an old kernel, a seccomp policy). NOT "gone" —
         # that case is caught above and must never reach the numeric path.
-        def by_pid_fallback(sig: int) -> None:
-            os.kill(pid, sig)
-
-        yield by_pid_fallback
+        yield _numeric_sender(pid)
         return
 
     def by_pidfd(sig: int) -> None:
@@ -838,29 +900,82 @@ def _process_handle(pid: int) -> Iterator[Callable[[int], None]]:
             os.close(fd)
 
 
+def _stop_owned(record: ProxyRecord) -> bool:
+    """Stop the recorded process, verifying ownership inside the bound handle.
+
+    The verified counterpart to :func:`_terminate`. False means either "not ours"
+    or "would not die"; both are cases the caller must refuse to proceed past,
+    and both leave the process alone.
+    """
+    with _owned_handle(record) as send:
+        if send is None:
+            return False
+        return _stop_through(send, record.pid)
+
+
+@contextlib.contextmanager
+def _owned_handle(record: ProxyRecord) -> Iterator[Callable[[int], None] | None]:
+    """Bind to the recorded process, THEN verify it, and yield a way to signal it.
+
+    The ordering is the entire point and is what two previous attempts got wrong.
+    Verifying ownership and then opening a handle leaves a window: the process can
+    exit and the number be recycled in between, and the handle then binds to the
+    successor. Opening first means the handle is pinned to whatever was there at
+    bind time, and the identity check that follows decides whether that thing was
+    ours — so a signal sent afterwards cannot reach anything else.
+
+    Yields None when the process is gone or is not ours, which callers report
+    rather than act on.
+    """
+    try:
+        with _process_handle(record.pid) as send:
+            if _identity_token(record.pid) != record.identity or record.identity is None:
+                yield None
+            else:
+                yield send
+    except _Gone:
+        yield None
+
+
+def _stop_through(send: Callable[[int], None], pid: int) -> bool:
+    """SIGTERM, then SIGKILL if it will not go, through an already-bound sender.
+
+    Takes the sender rather than the pid so the caller decides what it is bound
+    to — a bare pid, or a pidfd opened before ownership was verified. That choice
+    is the difference between narrowing the wrong-process window and closing it.
+    """
+    try:
+        send(signal.SIGTERM)
+    except PermissionError:
+        return False
+    except _Gone:
+        return True
+    deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    with contextlib.suppress(PermissionError, OSError, _Gone):
+        send(signal.SIGKILL)
+    return not _alive(pid)
+
+
 def _terminate(pid: int) -> bool:
-    """SIGTERM, then SIGKILL if it will not go. True when it is gone.
+    """Stop a pid whose ownership the caller has NOT asserted. True when gone.
+
+    Used where ownership is not in question because the caller holds the process
+    another way — a `Popen` rollback — or where there is nothing to verify. For a
+    verified stop use :func:`_owned_handle`, which closes the race this cannot.
 
     Callers MUST check the result. A false here means the process is still
-    running and still ours, which is why `up` refuses to spawn a replacement and
-    every rollback path reports the surviving pid rather than claiming success.
+    running, which is why `up` refuses to spawn a replacement and every rollback
+    path reports the surviving pid rather than claiming success.
     """
     try:
         with _process_handle(pid) as send:
-            try:
-                send(signal.SIGTERM)
-            except PermissionError:
-                return False
-            deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
-            while time.monotonic() < deadline:
-                if not _alive(pid):
-                    return True
-                time.sleep(_POLL_INTERVAL_SECONDS)
-            with contextlib.suppress(PermissionError, OSError):
-                send(signal.SIGKILL)
+            return _stop_through(send, pid)
     except _Gone:
         return True
-    return not _alive(pid)
 
 
 def _terminate_child(process: Any, pid: int) -> bool:
@@ -912,20 +1027,23 @@ def _down_locked() -> str:
     if not _alive(record.pid):
         _clear_record()
         return f"proxy (pid {record.pid}) was already gone — cleared the stale record"
-    if not _owns(record, record.url):
-        # Alive, but not the process we started: the record outlives a reboot and
-        # pids get recycled, so this number now belongs to something else — or to
-        # something we cannot identify on this platform. Either way, not ours to
-        # signal.
-        _clear_record()
-        return (
-            f"pid {record.pid} is alive but is NOT the proxy we started (pids are reused) "
-            "— cleared the stale record and left that process alone"
-        )
-    if not _terminate(record.pid):
-        raise ProxyError(
-            f"could not stop pid {record.pid} — it is running as another user, or "
-            "refusing both SIGTERM and SIGKILL"
-        )
+    # Bind to the process, verify it, and signal it — all through ONE handle, so
+    # nothing can slip in between the check and the signal.
+    with _owned_handle(record) as send:
+        if send is None:
+            # Alive, but not the process we started: the record outlives a reboot
+            # and pids get recycled, so this number now belongs to something else
+            # — or to something we cannot identify on this platform. Either way,
+            # not ours to signal.
+            _clear_record()
+            return (
+                f"pid {record.pid} is alive but is NOT the proxy we started (pids are "
+                "reused) — cleared the stale record and left that process alone"
+            )
+        if not _stop_through(send, record.pid):
+            raise ProxyError(
+                f"could not stop pid {record.pid} — it is running as another user, or "
+                "refusing both SIGTERM and SIGKILL"
+            )
     _clear_record()
     return f"stopped the proxy (pid {record.pid}) at {record.url}"

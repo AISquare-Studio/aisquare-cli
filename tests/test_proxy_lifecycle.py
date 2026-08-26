@@ -23,10 +23,13 @@ WHAT IS ACTUALLY WORTH PINNING, because "it starts a process" is not:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
-from collections.abc import Callable
+import sys
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,7 @@ from aisquare.core import filelock, paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
 from aisquare.services import explainability_proxy as proxy
 from aisquare.services.explainability import ProxyProbe
+from aisquare.services.explainability_proxy import ProxyRecord
 
 #: Patch targets as dotted strings. `monkeypatch.setattr(proxy.subprocess, ...)`
 #: reads more naturally and mypy strict rejects it, correctly: `subprocess` and
@@ -45,6 +49,39 @@ from aisquare.services.explainability import ProxyProbe
 _POPEN = "aisquare.services.explainability_proxy.subprocess.Popen"
 _WHICH = "aisquare.services.explainability_proxy.shutil.which"
 _EXECUTABLE = "aisquare.services.explainability_proxy.sys.executable"
+_PIDFD_OPEN = "aisquare.services.explainability_proxy.os.pidfd_open"
+_OS_KILL = "aisquare.services.explainability_proxy.os.kill"
+
+
+def _owned_stopper(spawned: dict[str, Any], seen: list[int]) -> Callable[[Any], bool]:
+    """A `_stop_owned` that records the pid and frees the port, as a real stop does."""
+
+    def stop(record: Any) -> bool:
+        seen.append(record.pid)
+        spawned.pop("live", None)
+        return True
+
+    return stop
+
+
+def _through_recorder(seen: list[int]) -> Callable[[Any, int], bool]:
+    """A `_stop_through` that records the pid it was asked to signal."""
+
+    def stop(_send: Any, pid: int) -> bool:
+        seen.append(pid)
+        return True
+
+    return stop
+
+
+def _owned_recorder(seen: list[int]) -> Callable[[Any], bool]:
+    """A `_stop_owned` that records the pid and reports success, port untouched."""
+
+    def stop(record: Any) -> bool:
+        seen.append(record.pid)
+        return True
+
+    return stop
 
 
 def _stopper(spawned: dict[str, Any], seen: list[int]) -> Callable[[int], bool]:
@@ -130,6 +167,26 @@ def configured(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setenv("EXPLAINABILITY_API_KEY", _KEY)
     monkeypatch.setattr(_WHICH, lambda _name: "/usr/local/bin/aisquare-proxy")
+    # ...and the bin dir beside the interpreter, which `_resolve_proxy_script`
+    # now checks FIRST. Patching only `_WHICH` left that lookup live, so on any
+    # machine with `[explainability]` installed the real
+    # `.venv/bin/aisquare-proxy` won over the stub. CI installs `.[dev]` only, so
+    # the script is never beside the interpreter there and this stayed green —
+    # exactly the "green on CI, red for anyone following the runbook" shape this
+    # file's own fixtures were fixed for twice.
+    monkeypatch.setattr(_EXECUTABLE, str(isolated_home / "no-scripts-here" / "python"))
+
+    # The fake pid is not a real process, so `_process_handle`'s `pidfd_open`
+    # would raise and `_owned_handle` would correctly report "not ours" —
+    # short-circuiting every stop-path test before it reached the decision it is
+    # about. Stubbed at the OS boundary only: `_owned_handle`'s ordering and its
+    # identity check still run for real. The real thing is covered separately,
+    # against real children, in the stop-path tests below.
+    @contextlib.contextmanager
+    def fake_handle(_pid: int) -> Iterator[Callable[[int], None]]:
+        yield lambda _sig: None
+
+    monkeypatch.setattr(proxy, "_process_handle", fake_handle)
     monkeypatch.setattr(proxy, "_alive", lambda _pid: True)
     # Ownership now needs a verifiable identity, so the fake OS must supply a
     # stable one. A None here means "cannot verify", which is correctly treated
@@ -333,7 +390,9 @@ def test_down_stops_only_what_we_started(
     configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
     stopped: list[int] = []
-    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+    # `down` binds the handle, verifies inside it, then escalates — so the seam
+    # is `_stop_through`, not a pid-taking terminate.
+    monkeypatch.setattr(proxy, "_stop_through", _through_recorder(stopped))
     runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
 
     result = runner.invoke(app, ["explainability", "proxy", "down"], catch_exceptions=False)
@@ -433,7 +492,7 @@ def test_a_target_switch_does_not_reuse_the_previous_deployments_proxy(
         )
     )
     stopped: list[int] = []
-    monkeypatch.setattr(proxy, "_terminate", _stopper(spawned, stopped))
+    monkeypatch.setattr(proxy, "_stop_owned", _owned_stopper(spawned, stopped))
     spawned.pop("argv", None)
 
     result = runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
@@ -482,7 +541,7 @@ def test_up_does_not_call_a_wedged_process_a_success(
     runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
     spawned.pop("live", None)  # the process stays alive; the port goes quiet
     stopped: list[int] = []
-    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+    monkeypatch.setattr(proxy, "_stop_owned", _owned_stopper(spawned, stopped))
     spawned.pop("argv", None)
 
     result = runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
@@ -503,7 +562,7 @@ def test_down_will_not_signal_a_recycled_pid(
     runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
     # Same pid, different process: exactly what a recycled pid looks like.
     monkeypatch.setattr(proxy, "_identity_token", lambda _pid: "proc:99999:something-else")
-    monkeypatch.setattr(proxy, "_terminate", lambda pid: pytest.fail(f"signalled pid {pid}"))
+    monkeypatch.setattr(proxy, "_stop_through", lambda _s, pid: pytest.fail(f"signalled {pid}"))
 
     result = runner.invoke(app, ["explainability", "proxy", "down"], catch_exceptions=False)
 
@@ -522,7 +581,7 @@ def test_an_unverifiable_pid_is_never_signalled(
     """
     runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
     monkeypatch.setattr(proxy, "_identity_token", lambda _pid: None)
-    monkeypatch.setattr(proxy, "_terminate", lambda pid: pytest.fail(f"signalled pid {pid}"))
+    monkeypatch.setattr(proxy, "_stop_through", lambda _s, pid: pytest.fail(f"signalled {pid}"))
 
     result = runner.invoke(app, ["explainability", "proxy", "down"], catch_exceptions=False)
 
@@ -564,7 +623,7 @@ def test_a_failed_stop_does_not_start_a_replacement(
             )
         )
     )
-    monkeypatch.setattr(proxy, "_terminate", lambda _pid: False)
+    monkeypatch.setattr(proxy, "_stop_owned", lambda _record: False)
     spawned.pop("argv", None)
 
     result = runner.invoke(app, ["explainability", "proxy", "up"])
@@ -596,7 +655,7 @@ def test_a_port_that_stays_occupied_does_not_start_a_replacement(
         )
     )
     stopped: list[int] = []
-    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+    monkeypatch.setattr(proxy, "_stop_owned", _owned_recorder(stopped))
     monkeypatch.setattr(proxy, "_port_went_quiet", lambda _url, timeout=0.0: False)
     spawned.pop("argv", None)
 
@@ -624,7 +683,7 @@ def test_a_broken_new_target_does_not_stop_the_working_proxy(
             )
         )
     )
-    monkeypatch.setattr(proxy, "_terminate", lambda pid: pytest.fail(f"stopped pid {pid}"))
+    monkeypatch.setattr(proxy, "_stop_owned", lambda r: pytest.fail(f"stopped pid {r.pid}"))
 
     result = runner.invoke(app, ["explainability", "proxy", "up"])
 
@@ -866,3 +925,248 @@ def test_the_manual_command_is_shell_quoted(configured: None) -> None:
     line = proxy._manual_command(target, 9090)
 
     assert "'https://gateway.example/a b'" in line, line
+
+
+# ── the stop path, against REAL processes ────────────────────────────────────
+#
+# Every test above stubs the OS boundary, which is right for testing decisions
+# and is exactly why the signal machinery shipped twice with the wrong ordering:
+# `_process_handle`, the ESRCH rule, the PermissionError path, the SIGTERM→
+# SIGKILL escalation and `_terminate_child`'s wait-confirmation had no coverage
+# at all, so a regression reintroducing the swallowed-ESRCH bug would have passed
+# the entire suite. These use real children. They are slower and they are the
+# only tests here that would notice.
+
+
+@pytest.fixture
+def sleeper() -> Iterator[subprocess.Popen[bytes]]:
+    """A real child that ignores nothing and exits when signalled."""
+    child = subprocess.Popen(["sleep", "60"])
+    try:
+        yield child
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_stop_through_really_stops_a_real_process(sleeper: subprocess.Popen[bytes]) -> None:
+    """The escalation, end to end, with no stubs between it and the kernel."""
+    with proxy._process_handle(sleeper.pid) as send:
+        assert proxy._stop_through(send, sleeper.pid) is True
+
+    sleeper.wait(timeout=5)
+    assert sleeper.poll() is not None
+
+
+def test_the_pidfd_is_bound_before_ownership_is_checked(
+    sleeper: subprocess.Popen[bytes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordering that took three attempts, asserted rather than described.
+
+    `_owned_handle` must bind to the process FIRST and verify SECOND. Verifying
+    first leaves a window in which the process can exit and its number be
+    recycled, and the handle then binds to the successor.
+
+    Pinned by observation order: the identity check must not run until after the
+    handle exists.
+    """
+    order: list[str] = []
+    real_handle = proxy._process_handle
+    real_token = proxy._identity_token
+
+    @contextlib.contextmanager
+    def watched_handle(pid: int) -> Iterator[Callable[[int], None]]:
+        order.append("bind")
+        with real_handle(pid) as send:
+            yield send
+
+    def watched_token(pid: int) -> str | None:
+        order.append("verify")
+        return real_token(pid)
+
+    monkeypatch.setattr(proxy, "_process_handle", watched_handle)
+    monkeypatch.setattr(proxy, "_identity_token", watched_token)
+
+    record = ProxyRecord(
+        pid=sleeper.pid,
+        port=9090,
+        url="http://127.0.0.1:9090",
+        gateway_url=_GATEWAY,
+        target="stg",
+        key_fp=proxy.key_fingerprint(_KEY),
+        identity=real_token(sleeper.pid),
+        started_at=time.time(),
+    )
+
+    with proxy._owned_handle(record) as send:
+        assert send is not None, "the record describes this live child, so it is ours"
+
+    assert order == ["bind", "verify"], f"verified before binding: {order}"
+
+
+def test_a_mismatched_identity_yields_no_sender(sleeper: subprocess.Popen[bytes]) -> None:
+    """A recycled pid: alive, right number, different process."""
+    record = ProxyRecord(
+        pid=sleeper.pid,
+        port=9090,
+        url="http://127.0.0.1:9090",
+        gateway_url=_GATEWAY,
+        target="stg",
+        key_fp=proxy.key_fingerprint(_KEY),
+        identity="proc:some-other-boot:1:aisquare-proxy",
+        started_at=time.time(),
+    )
+
+    with proxy._owned_handle(record) as send:
+        assert send is None
+
+    assert sleeper.poll() is None, "the child was signalled despite not being ours"
+
+
+def test_esrch_is_terminal_and_never_becomes_a_numeric_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worst line in the earlier version, pinned.
+
+    `pidfd_open` raising ESRCH means the pid is gone — which is precisely when the
+    number may already belong to somebody else. Falling back to a numeric
+    `os.kill` there is the one thing that must not happen.
+    """
+    monkeypatch.setattr(_PIDFD_OPEN, lambda _pid: (_ for _ in ()).throw(ProcessLookupError()))
+    monkeypatch.setattr(_OS_KILL, lambda *a: pytest.fail("fell back to a numeric kill"))
+
+    # `_terminate` reports "gone", which is true, and signals nothing.
+    assert proxy._terminate(424242) is True
+
+
+def test_the_numeric_fallback_translates_esrch_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On macOS, Windows or a pre-5.3 kernel there is no pidfd.
+
+    `os.kill` raises `ProcessLookupError`, which is an `OSError` and was neither
+    `_Gone` nor `PermissionError` — so a proxy that exited between the liveness
+    check and the SIGTERM gave the operator a raw traceback instead of "was
+    already gone".
+    """
+    monkeypatch.delattr(_PIDFD_OPEN, raising=False)
+    monkeypatch.setattr(_OS_KILL, lambda *a: (_ for _ in ()).throw(ProcessLookupError()))
+
+    assert proxy._terminate(424242) is True
+
+
+def test_a_permission_error_reports_failure_rather_than_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another user's process. False is what makes `up` refuse to replace it."""
+    monkeypatch.delattr(_PIDFD_OPEN, raising=False)
+    monkeypatch.setattr(_OS_KILL, lambda *a: (_ for _ in ()).throw(PermissionError()))
+
+    assert proxy._terminate(424242) is False
+
+
+def test_terminate_child_confirms_the_exit(sleeper: subprocess.Popen[bytes]) -> None:
+    """Rollback uses the `Popen` handle, so the exit is confirmed not inferred."""
+    assert proxy._terminate_child(sleeper, sleeper.pid) is True
+    assert sleeper.poll() is not None
+
+
+def test_terminate_child_escalates_to_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child that ignores SIGTERM must still be stopped."""
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)",
+        ]
+    )
+    try:
+        time.sleep(0.5)
+        monkeypatch.setattr(proxy, "_STOP_TIMEOUT_SECONDS", 0.5)
+
+        assert proxy._terminate_child(child, child.pid) is True
+        assert child.poll() is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_changing_the_proxy_url_stops_the_old_proxy_instead_of_orphaning_it(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The deployment-switch failure, reached through the one field it missed.
+
+    `_owns` used to short-circuit on `record.url != <current proxy_url>`, so
+    `enable --proxy-url http://127.0.0.1:9190` made the running proxy stop being
+    ours. `up` then saw neither an owned proxy nor a healthy one on the new port,
+    spawned a second, and `_write_record` clobbered the only record of the first —
+    which then ran forever on 9090 with the old gateway and key, unstoppable by
+    `down`. The runbook's manual form uses 9190 while the default is 9090, so
+    this is a path operators take.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    stopped: list[int] = []
+    monkeypatch.setattr(proxy, "_stop_owned", _owned_stopper(spawned, stopped))
+    runner.invoke(
+        app,
+        ["explainability", "enable", "--proxy-url", "http://127.0.0.1:9190"],
+        catch_exceptions=False,
+    )
+    spawned.pop("argv", None)
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert stopped == [424242], "orphaned the proxy on the old port"
+    assert spawned["env"][proxy.PORT_ENV_VAR] == "9190", "did not move to the new port"
+
+
+def test_status_still_owns_a_proxy_on_a_port_we_no_longer_configure(
+    configured: None, spawned: dict[str, Any], runner: CliRunner
+) -> None:
+    """Ownership is about the process; the URL is about the configuration.
+
+    `down` has to be able to stop it, which means `status` has to still call it
+    ours.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    runner.invoke(
+        app,
+        ["explainability", "enable", "--proxy-url", "http://127.0.0.1:9190"],
+        catch_exceptions=False,
+    )
+
+    payload = json.loads(
+        runner.invoke(
+            app, ["--json", "explainability", "proxy", "status"], catch_exceptions=False
+        ).output
+    )
+
+    assert payload["managed"] is False, "a proxy on an unconfigured port is not managed"
+    assert payload["pid"] == 424242, "lost track of a process we started"
+
+
+def test_status_does_not_call_a_working_proxy_misconfigured_from_a_keyless_shell(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """`managed` must describe the machine, not the shell that asked.
+
+    Start the proxy with the key exported, then ask from a shell that cannot
+    resolve one: comparing the recorded fingerprint against
+    `key_fingerprint(None or "")` reported a healthy correctly-pointed proxy as
+    "not serving this machine's configuration — restart it". Acting on that
+    either hits the no-key preflight or kills a working proxy.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    monkeypatch.delenv("EXPLAINABILITY_API_KEY", raising=False)
+
+    payload = json.loads(
+        runner.invoke(
+            app, ["--json", "explainability", "proxy", "status"], catch_exceptions=False
+        ).output
+    )
+
+    assert payload["managed"] is True, payload["summary"]
+    assert "restart" not in payload["summary"].lower(), payload["summary"]

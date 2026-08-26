@@ -48,7 +48,30 @@ target, starts the sidecar detached, and waits until it answers `/health`.
   process-identity token (`/proc/<pid>/stat` start time plus argv[0]; `ps
   -o lstart=,comm=` elsewhere), and an identity that cannot be verified counts
   as not-ours rather than ours.
+- **A stop that fails aborts the replacement.** Ignoring the terminate result
+  let the old proxy survive, keep the port, and *answer the new child's startup
+  poll* — so `up` recorded the new pid and reported the new deployment while
+  every span still went to the old gateway. The health poll cannot tell two
+  proxies on one port apart, so only refusing to proceed can. `up` also confirms
+  the port went quiet before spawning, and preflights the new target, key and
+  script *before* stopping a working proxy — the checks used to sit after it,
+  trading a proxy on the wrong deployment for no proxy at all.
+- **A proxy whose identity cannot be read is stopped, not recorded.** `_owns`
+  rejects a null identity, so writing one produced a process that was foreign to
+  `status` and `down` from the moment it booted: an orphan holding the port,
+  announced as a success. `up` now fails non-zero and prints the manual command
+  instead.
+- **The identity token is scoped to the boot.** `starttime` is ticks *since*
+  boot and the record outlives a reboot, so without the boot id the token
+  repeated across the exact boundary it exists to protect — and for a console
+  script the recorded basename is usually `python`, so a collision was not even
+  unlikely. Signals now go through a **pidfd** where the kernel offers one,
+  which closes the window between verifying a pid and signalling it.
 - Not on the launch path. Nothing here runs in front of a waiting developer.
+
+  *Upgrade note:* a proxy started by a pre-0.5.0 build has a record without the
+  new fields, so it reads as absent and the process is treated as foreign — left
+  alone rather than signalled. Stop it by hand once, then `proxy up`.
 
 **`aisquare-cli[explainability]` now installs the proxy's own runtime**
 (`fastapi`, `uvicorn`). It did not, and no other extra did either, so

@@ -40,6 +40,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,34 @@ def key_fingerprint(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
+def _boot_id() -> str:
+    """This boot's identifier, or "?" where the kernel does not publish one.
+
+    ``/proc/sys/kernel/random/boot_id`` changes on every boot, which is exactly
+    the axis ``starttime`` cannot express.
+    """
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "?"
+
+
+def _port_went_quiet(url: str, timeout: float = _STOP_TIMEOUT_SECONDS) -> bool:
+    """Whether nothing answers ``url`` any more, within ``timeout``.
+
+    A stop that reports success is not proof the listener is gone: sockets linger
+    and a second proxy may be sharing the port. Starting a replacement while
+    anything still answers means the replacement's own startup poll can be
+    satisfied by the process it was meant to replace.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not probe_proxy(url, timeout=1.0).healthy:
+            return True
+        time.sleep(_POLL_INTERVAL_SECONDS)
+    return not probe_proxy(url, timeout=1.0).healthy
+
+
 def _identity_token(pid: int) -> str | None:
     """A token that changes if this pid stops being the process we started.
 
@@ -125,6 +154,14 @@ def _identity_token(pid: int) -> str | None:
     except OSError:
         raw = ""
     if raw:
+        # THE BOOT ID IS NOT OPTIONAL, because the record deliberately survives a
+        # reboot and `starttime` is measured in ticks SINCE boot. Without it the
+        # token repeats across the exact boundary it exists to protect: after the
+        # next boot the same pid can hold a different process started at the same
+        # tick with the same basename — and for a console script that basename is
+        # usually `python`, so the collision is not even unlikely. Same token,
+        # false ownership, SIGTERM to a stranger.
+        boot_id = _boot_id()
         tail = raw.rpartition(")")[2].split()
         # tail[0] is `state`, i.e. field 3, so starttime (field 22) is tail[19].
         if len(tail) > 19:
@@ -137,7 +174,7 @@ def _identity_token(pid: int) -> str | None:
                 )
             except OSError:
                 argv0 = ""
-            return f"proc:{tail[19]}:{Path(argv0).name}"
+            return f"proc:{boot_id}:{tail[19]}:{Path(argv0).name}"
 
     ps = shutil.which("ps")
     if ps is None:
@@ -397,20 +434,13 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
     # sending prod-labelled sessions to staging.
     if existing.managed:
         return existing
-    if existing.owned:
-        # Ours, so we may replace it — and must, because neither remaining state
-        # is usable: it is either not answering, or answering for the wrong
-        # deployment. Stopping first keeps the port free for the new one.
-        if existing.pid:
-            _terminate(existing.pid)
-        _clear_record()
-    elif existing.probe.healthy:
-        raise ProxyError(
-            f"a proxy is already answering at {target.proxy_url}, and this CLI did not "
-            "start it. Stop it yourself, or point this machine at it with: "
-            f"aisquare explainability enable --proxy-url {target.proxy_url}"
-        )
 
+    # PREFLIGHT BEFORE TOUCHING ANYTHING THAT IS RUNNING. These checks used to
+    # sit below the replacement, so a cutover to a target with no gateway, or a
+    # machine that had lost the console script, stopped a working proxy and only
+    # then discovered it could not start another — trading a proxy on the wrong
+    # deployment for no proxy at all, which is strictly worse because nothing is
+    # recorded either way and only one of the two states is obvious.
     if not target.gateway_url:
         raise ProxyError(
             f"target '{target.name}' has no gateway URL — the proxy would have nowhere "
@@ -451,6 +481,44 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
     env[KEY_ENV_VAR] = target.api_key
     env[PORT_ENV_VAR] = str(port)
 
+    if existing.owned:
+        # Ours, so we may replace it — and must, because neither remaining state
+        # is usable: it is either not answering, or answering for the wrong
+        # deployment.
+        #
+        # A FAILED STOP IS A HARD ERROR, and this is the subtle one. Ignoring
+        # `_terminate`'s result let the old proxy survive, keep the port, and
+        # ANSWER THE NEW CHILD'S STARTUP POLL — so `up` recorded the new pid and
+        # reported the new deployment as managed while every span still went to
+        # the old gateway. The health poll cannot distinguish two proxies on one
+        # port; only refusing to proceed can. The record is retained on purpose:
+        # the process it names is still alive and still ours to stop.
+        if existing.pid and not _terminate(existing.pid):
+            raise ProxyError(
+                f"could not stop the proxy we started (pid {existing.pid}) at "
+                f"{target.proxy_url} — it is running as another user, or refusing both "
+                "SIGTERM and SIGKILL. NOT starting a replacement: it would fail to bind "
+                "and the old proxy would answer for it, so this machine would report the "
+                "new deployment while shipping to the old one. Stop pid "
+                f"{existing.pid} by hand, then re-run."
+            )
+        # And confirm the port actually went quiet. A stop that reports success
+        # while something still answers is the same failure one step later.
+        if not _port_went_quiet(target.proxy_url):
+            raise ProxyError(
+                f"stopped the proxy we started, but something is still answering at "
+                f"{target.proxy_url}. NOT starting a replacement — a second listener "
+                "would satisfy the startup poll and the spans would go somewhere this "
+                "CLI cannot see."
+            )
+        _clear_record()
+    elif existing.probe.healthy:
+        raise ProxyError(
+            f"a proxy is already answering at {target.proxy_url}, and this CLI did not "
+            "start it. Stop it yourself, or point this machine at it with: "
+            f"aisquare explainability enable --proxy-url {target.proxy_url}"
+        )
+
     destination = log_path or (paths.log_dir() / "explainability-proxy.log")
     destination.parent.mkdir(parents=True, exist_ok=True)
     handle = destination.open("ab")
@@ -481,6 +549,25 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
             )
         probe = probe_proxy(target.proxy_url, timeout=1.0)
         if probe.healthy:
+            identity = _identity_token(process.pid)
+            if identity is None:
+                # We just started something we could never afterwards recognise:
+                # `_owns` rejects a null identity, so the process would be foreign
+                # to `status` and `down` from the moment it booted — an orphan
+                # holding the port, reported as a success. Refuse, and stop the
+                # child we still hold a handle to.
+                _terminate(process.pid)
+                key_file = paths.aisquare_home() / "explainability-key"
+                raise ProxyError(
+                    "started the proxy but could not read its process identity on this "
+                    "platform (no readable /proc and no usable `ps`), so this CLI could "
+                    "never recognise or stop it again. It has been stopped rather than "
+                    "left as an orphan.\n"
+                    "Run the sidecar yourself instead:\n"
+                    f"  EXPLAINABILITY_GATEWAY_URL={target.gateway_url} \\\n"
+                    f"  EXPLAINABILITY_API_KEY=$(cat {key_file}) \\\n"
+                    f"  {PORT_ENV_VAR}={port} {PROXY_SCRIPT}"
+                )
             record = ProxyRecord(
                 pid=process.pid,
                 port=port,
@@ -488,10 +575,11 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
                 gateway_url=target.gateway_url,
                 target=target.name,
                 key_fp=key_fingerprint(target.api_key),
-                # Taken HERE rather than right after Popen: until /health answers
-                # the child may not have finished exec'ing, and a token read from
-                # the interpreter that preceded the exec would never match again.
-                identity=_identity_token(process.pid),
+                # Taken above rather than right after Popen: until /health
+                # answers the child may not have finished exec'ing, and a token
+                # read from the interpreter that preceded the exec would never
+                # match again.
+                identity=identity,
                 started_at=time.time(),
             )
             _write_record(record)
@@ -510,21 +598,69 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
     )
 
 
+@contextlib.contextmanager
+def _signal_handle(pid: int) -> Iterator[Callable[[int], None]]:
+    """A way to signal ``pid`` that cannot land on a different process.
+
+    Verifying identity and then calling ``os.kill(pid, …)`` leaves a window: the
+    process can exit between the two and the number can be reused, so the signal
+    arrives at whatever inherited it. A pidfd refers to the PROCESS, not the
+    number — once opened, ``pidfd_send_signal`` either reaches that process or
+    fails with ESRCH, and can never reach a successor. Linux 5.3+, and Python
+    exposes both calls only there.
+
+    Falls back to ``os.kill`` where pidfd is unavailable. The window is real
+    there, and narrow: it needs the proxy to exit and the pid to be recycled
+    inside the microseconds between the check and the signal. Ownership
+    verification is what makes it narrow, and this is what closes it where the
+    kernel allows.
+    """
+
+    def by_pid(sig: int) -> None:
+        os.kill(pid, sig)
+
+    opener = getattr(os, "pidfd_open", None)
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if opener is None or sender is None:
+        yield by_pid
+        return
+
+    try:
+        fd = opener(pid)
+    except (OSError, AttributeError):
+        yield by_pid
+        return
+
+    def by_pidfd(sig: int) -> None:
+        sender(fd, sig)
+
+    try:
+        yield by_pidfd
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 def _terminate(pid: int) -> bool:
     """SIGTERM, then SIGKILL if it will not go. True when it is gone."""
     try:
-        os.kill(pid, signal.SIGTERM)
+        with _signal_handle(pid) as send:
+            try:
+                send(signal.SIGTERM)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
+            while time.monotonic() < deadline:
+                if not _alive(pid):
+                    return True
+                time.sleep(_POLL_INTERVAL_SECONDS)
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                send(signal.SIGKILL)
     except ProcessLookupError:
+        # pidfd_open on a pid that is already gone.
         return True
-    except PermissionError:
-        return False
-    deadline = time.monotonic() + _STOP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if not _alive(pid):
-            return True
-        time.sleep(_POLL_INTERVAL_SECONDS)
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.kill(pid, signal.SIGKILL)
     return not _alive(pid)
 
 

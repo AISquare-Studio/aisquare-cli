@@ -24,6 +24,7 @@ WHAT IS ACTUALLY WORTH PINNING, because "it starts a process" is not:
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,22 @@ from aisquare.services.explainability import ProxyProbe
 #: `shutil` are imports the module happens to hold, not part of its interface.
 _POPEN = "aisquare.services.explainability_proxy.subprocess.Popen"
 _WHICH = "aisquare.services.explainability_proxy.shutil.which"
+
+
+def _stopper(spawned: dict[str, Any], seen: list[int]) -> Callable[[int], bool]:
+    """A ``_terminate`` that also makes the port go quiet, as stopping one does.
+
+    `up` now confirms the port is free before spawning a replacement, so a
+    terminate stub that leaves the fake probe answering models a proxy that
+    refused to die — which is a different test.
+    """
+
+    def terminate(pid: int) -> bool:
+        seen.append(pid)
+        spawned.pop("live", None)
+        return True
+
+    return terminate
 
 
 def _recorder(seen: list[int]) -> Callable[[int], bool]:
@@ -382,7 +399,7 @@ def test_a_target_switch_does_not_reuse_the_previous_deployments_proxy(
         )
     )
     stopped: list[int] = []
-    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+    monkeypatch.setattr(proxy, "_terminate", _stopper(spawned, stopped))
     spawned.pop("argv", None)
 
     result = runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
@@ -487,3 +504,134 @@ def test_the_key_fingerprint_is_not_the_key(configured: None) -> None:
     assert _KEY not in fingerprint
     assert len(fingerprint) == 12
     assert fingerprint != proxy.key_fingerprint(_KEY + "x")
+
+
+def test_a_failed_stop_does_not_start_a_replacement(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The subtle one, and the reason a failed stop must be fatal.
+
+    If the old proxy survives, it keeps the port AND ANSWERS THE NEW CHILD'S
+    STARTUP POLL. `up` then records the new pid and reports the new deployment as
+    managed while every span still goes to the old gateway. The health poll cannot
+    tell two proxies on one port apart; only refusing to proceed can.
+
+    The record is retained deliberately: the process it names is alive and is
+    still ours to stop.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True,
+                gateway_url="https://other-deployment.example",
+                proxy_url="http://127.0.0.1:9090",
+                target="prod",
+            )
+        )
+    )
+    monkeypatch.setattr(proxy, "_terminate", lambda _pid: False)
+    spawned.pop("argv", None)
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"])
+
+    assert result.exit_code != 0, result.output
+    assert "argv" not in spawned, "spawned a replacement over a proxy that would not stop"
+    assert paths.explainability_proxy_state_path().exists(), (
+        "dropped the record of a process that is still alive and still ours"
+    )
+
+
+def test_a_port_that_stays_occupied_does_not_start_a_replacement(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """A stop that reports success is not proof the listener is gone.
+
+    Same failure one step later: something still answers, the replacement's own
+    startup poll is satisfied by it, and the spans go where this CLI cannot see.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True,
+                gateway_url="https://other-deployment.example",
+                proxy_url="http://127.0.0.1:9090",
+                target="prod",
+            )
+        )
+    )
+    stopped: list[int] = []
+    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+    monkeypatch.setattr(proxy, "_port_went_quiet", lambda _url, timeout=0.0: False)
+    spawned.pop("argv", None)
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"])
+
+    assert result.exit_code != 0, result.output
+    assert stopped == [424242], "the test's premise is gone: it must have tried to stop"
+    assert "argv" not in spawned, "spawned into a port that was still answering"
+
+
+def test_a_broken_new_target_does_not_stop_the_working_proxy(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Preflight has to happen BEFORE anything running is touched.
+
+    The checks used to sit below the replacement, so a cutover to a target with
+    no gateway stopped a working proxy and only then discovered it could not
+    start another — trading a proxy on the wrong deployment for no proxy at all.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True, gateway_url="", proxy_url="http://127.0.0.1:9090", target="prod"
+            )
+        )
+    )
+    monkeypatch.setattr(proxy, "_terminate", lambda pid: pytest.fail(f"stopped pid {pid}"))
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"])
+
+    assert result.exit_code != 0
+    assert "no gateway URL" in result.output
+
+
+def test_up_refuses_rather_than_leaving_an_unidentifiable_orphan(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """A process we can never recognise again is worse than no process.
+
+    `_owns` rejects a null identity, so recording one produced a proxy that was
+    foreign to `status` and `down` from the moment it booted — an orphan holding
+    the port, announced as a success. It is stopped instead, and the operator is
+    handed the manual command.
+    """
+    stopped: list[int] = []
+    monkeypatch.setattr(proxy, "_identity_token", lambda _pid: None)
+    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"])
+
+    assert result.exit_code != 0, result.output
+    assert stopped == [424242], "left a proxy it could never identify again"
+    assert not paths.explainability_proxy_state_path().exists()
+    assert "Run the sidecar yourself" in result.output, "refused without a way forward"
+
+
+def test_the_identity_token_is_scoped_to_this_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`starttime` is ticks SINCE boot, and the record outlives a reboot.
+
+    Without the boot id the token repeats across the exact boundary it exists to
+    protect: same pid, same tick, same basename — and for a console script that
+    basename is usually `python`, so the collision is not even unlikely.
+    """
+    token = proxy._identity_token(os.getpid())
+
+    assert token is not None, "this platform must produce a token for the test to mean anything"
+    assert proxy._boot_id() in token, f"token is not boot-scoped: {token}"
+
+    monkeypatch.setattr(proxy, "_boot_id", lambda: "a-different-boot")
+
+    assert proxy._identity_token(os.getpid()) != token

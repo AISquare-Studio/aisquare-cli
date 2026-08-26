@@ -36,6 +36,18 @@ target, starts the sidecar detached, and waits until it answers `/health`.
   proxy prints `Application startup complete` *before* it binds, so a live pid
   is not evidence — an occupied port used to look like success. `up` polls
   `/health` and stops what it started if that never comes.
+- **Reuse is validated against the deployment, not just the port.** Staging and
+  production normally share one loopback proxy URL, so matching on the URL alone
+  meant a target switch left the old proxy running with the old gateway and key —
+  `up` returned a green ✓ and production-labelled sessions went to staging. The
+  record now carries the target, the gateway and a non-secret key fingerprint,
+  and `up` restarts a proxy of ours that no longer serves this configuration.
+- **A recycled pid is never signalled.** The record outlives a reboot by design
+  and pids are reused, so `os.kill(pid, 0)` proved only that *something* held
+  that number — `down` could SIGTERM a stranger. Ownership now requires a
+  process-identity token (`/proc/<pid>/stat` start time plus argv[0]; `ps
+  -o lstart=,comm=` elsewhere), and an identity that cannot be verified counts
+  as not-ours rather than ours.
 - Not on the launch path. Nothing here runs in front of a waiting developer.
 
 **`aisquare-cli[explainability]` now installs the proxy's own runtime**
@@ -141,6 +153,13 @@ the onboarding runbook.
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **Two test fixtures read the developer's real machine, and a running proxy
+  broke both.** `test_json_stdout_is_machine_readable`'s proxy-down state
+  asserted its own premise against the *configured* proxy URL — which is 9090,
+  the port its own docstring says to avoid because it is "somebody else's
+  long-running proxy". It now points that state at a privileged port nothing can
+  be listening on. Both leaks were invisible on CI and fire on any machine that
+  has followed the onboarding runbook, which is now a single command.
 - **`tests/test_runbook_json_paths.py` read the developer's real
   `~/.aisquare`.** Its payload fixture was module-scoped, which runs outside the
   function-scoped `isolated_home` isolation, so it sampled whatever the machine

@@ -134,6 +134,14 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"
     ),
+    "aisquare/services/explainability_proxy.py::_identity_token": Seam(
+        EXCLUDED,
+        "`ps -p <pid> -o lstart=,comm=` — reads the process table to prove a "
+        "recorded pid is still the proxy we started, on platforms without "
+        "/proc. Touches no network and no model API, and passing it a tracing "
+        "environment would be meaningless: it is a fallback for `os.kill(pid, 0)` "
+        "being unable to tell a recycled pid from ours",
+    ),
     "aisquare/services/explainability_proxy.py::up": Seam(
         EXCLUDED,
         "the SDK's `aisquare-proxy` sidecar. Deliberately NOT stripped, and it is "

@@ -882,12 +882,38 @@ the junk-run behaviour returns silently as extra Runs in the dataset — but the
 `bb88bb5` checkout itself also self-reports `1.0.6`, so do not use the version
 string to decide; run the check below. (Measured block after it.)
 
+**Since 0.5.0, prefer the CLI.** It resolves the gateway, key and port from the
+target configured in §1–§5, records what it started, and waits until `/health`
+answers before reporting success:
+
+```bash
+aisquare explainability proxy up
+aisquare explainability proxy status     # exits 0 when up, 1 when not
+aisquare explainability proxy down
+```
+
+`status` is the only thing that answers **whose** proxy is on the port. The
+`explainability proxy` doctor row goes green for any service replying as
+`aisquare-proxy` in `claude_code` mode — including a proxy left running against
+the *previous* target after a cutover, whose Runs go to the old deployment.
+`proxy status` reports `managed: false` in that case and names the stale target;
+`proxy up` stops it and starts one for the current target. Branch scripts on
+`managed`, not on `healthy`.
+
+The manual form below still works, and is the right one when the SDK lives in a
+different environment from the CLI. It is also what produced the receipts in this
+runbook:
+
 ```bash
 set -a; source /home/work/.config/aisquare/explainability-prod.env; set +a
 export AISQUARE_PROXY_PORT=9190
 python -m pip install 'aisquare>=1.1.0'
 python -m aisquare.explainability.claude_proxy
 ```
+
+> A proxy started this way is **foreign** to `proxy status` and `proxy down` by
+> design: the CLI has no record of it, cannot know its gateway or key, and will
+> not signal a process it did not start. Stop it where you started it.
 
 > ⚠️ **[verified-train, @9bbc8ed7 2026-08-18] If something already holds the
 > port, this fails — but it says `Application startup complete` first.**

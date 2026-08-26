@@ -84,6 +84,16 @@ def in_both_proxy_states(
     documents that port as somebody else's long-running proxy.
     """
     if request.param == "proxy-down":
+        # "Nothing listening" has to be MADE true, not assumed. The docstring
+        # above says never 9090 because it is somebody else's long-running
+        # proxy — and then this branch inherited the configured default, which
+        # is exactly 9090. Any developer with a proxy up (which is now one
+        # command, and what the onboarding runbook tells them to do) got a
+        # collection ERROR here from a fixture asserting its own premise.
+        #
+        # Port 1 is privileged, so an unprivileged process cannot be listening
+        # on it and connection-refused is guaranteed.
+        runner.invoke(app, ["explainability", "enable", "--proxy-url", "http://127.0.0.1:1"])
         # The premise, asserted: with nothing listening, env must REFUSE.
         # Without this the two params could quietly be the same state twice.
         assert runner.invoke(app, ["explainability", "env", "coder"]).exit_code == 1

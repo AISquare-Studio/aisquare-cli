@@ -87,6 +87,10 @@ def configured(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXPLAINABILITY_API_KEY", _KEY)
     monkeypatch.setattr(_WHICH, lambda _name: "/usr/local/bin/aisquare-proxy")
     monkeypatch.setattr(proxy, "_alive", lambda _pid: True)
+    # Ownership now needs a verifiable identity, so the fake OS must supply a
+    # stable one. A None here means "cannot verify", which is correctly treated
+    # as not-ours — the conservative direction, and not the case under test.
+    monkeypatch.setattr(proxy, "_identity_token", lambda _pid: "proc:1234:aisquare-proxy")
 
 
 @pytest.fixture
@@ -346,3 +350,140 @@ def test_up_will_not_start_a_proxy_for_a_remote_url(
 
     assert result.exit_code != 0
     assert "loopback" in result.output
+
+
+def test_a_target_switch_does_not_reuse_the_previous_deployments_proxy(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """THE reuse defect, and the reason the record carries target/gateway/key.
+
+    Staging and production normally share one loopback proxy URL, so a target
+    switch changes nothing the URL can see. Matching on the URL alone left the
+    old proxy running with the old gateway and the old key, and `up` returned a
+    green ✓ — production-labelled sessions going to staging, silently.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    first_gateway = json.loads(
+        runner.invoke(
+            app, ["--json", "explainability", "proxy", "status"], catch_exceptions=False
+        ).output
+    )["gateway"]
+    assert first_gateway == _GATEWAY
+
+    # Same loopback URL, different deployment — exactly the runbook's cutover.
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True,
+                gateway_url="https://other-deployment.example",
+                proxy_url="http://127.0.0.1:9090",
+                target="prod",
+            )
+        )
+    )
+    stopped: list[int] = []
+    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+    spawned.pop("argv", None)
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert stopped == [424242], "kept the previous deployment's proxy"
+    assert "argv" in spawned, "did not start a proxy for the new deployment"
+    assert spawned["env"]["EXPLAINABILITY_GATEWAY_URL"] == "https://other-deployment.example"
+
+
+def test_status_names_the_stale_deployment_rather_than_reporting_healthy(
+    configured: None, spawned: dict[str, Any], runner: CliRunner
+) -> None:
+    """A proxy serving the wrong deployment must not read as managed."""
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True,
+                gateway_url="https://other-deployment.example",
+                proxy_url="http://127.0.0.1:9090",
+                target="prod",
+            )
+        )
+    )
+
+    payload = json.loads(
+        runner.invoke(
+            app, ["--json", "explainability", "proxy", "status"], catch_exceptions=False
+        ).output
+    )
+
+    assert payload["managed"] is False, "a proxy on the old deployment reported as managed"
+    assert "OLD deployment" in payload["summary"], payload["summary"]
+
+
+def test_up_does_not_call_a_wedged_process_a_success(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Ownership alone used to satisfy the early return, so `up` printed
+
+    "✓ not running (nothing answers at …)" immediately followed by "Sessions
+    launched from now on are traced." Both lines from one run: the process is
+    ours, and it is not serving anything.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    spawned.pop("live", None)  # the process stays alive; the port goes quiet
+    stopped: list[int] = []
+    monkeypatch.setattr(proxy, "_terminate", _recorder(stopped))
+    spawned.pop("argv", None)
+
+    result = runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+
+    assert stopped == [424242], "left a wedged proxy in place"
+    assert "argv" in spawned, "did not replace the wedged proxy"
+    assert "not running" not in result.output, result.output
+
+
+def test_down_will_not_signal_a_recycled_pid(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """The record outlives a reboot on purpose, and pids are reused.
+
+    `os.kill(pid, 0)` proves only that SOMETHING holds that number, so liveness
+    was never evidence of ownership — it was a SIGTERM aimed at a stranger.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    # Same pid, different process: exactly what a recycled pid looks like.
+    monkeypatch.setattr(proxy, "_identity_token", lambda _pid: "proc:99999:something-else")
+    monkeypatch.setattr(proxy, "_terminate", lambda pid: pytest.fail(f"signalled pid {pid}"))
+
+    result = runner.invoke(app, ["explainability", "proxy", "down"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert "NOT the proxy we started" in result.output
+    assert not paths.explainability_proxy_state_path().exists(), "kept a record it distrusted"
+
+
+def test_an_unverifiable_pid_is_never_signalled(
+    configured: None, spawned: dict[str, Any], monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """No /proc and no usable `ps` means "cannot verify", not "verified".
+
+    The conservative direction costs an operator one manual stop; the other
+    direction kills a process we cannot name.
+    """
+    runner.invoke(app, ["explainability", "proxy", "up"], catch_exceptions=False)
+    monkeypatch.setattr(proxy, "_identity_token", lambda _pid: None)
+    monkeypatch.setattr(proxy, "_terminate", lambda pid: pytest.fail(f"signalled pid {pid}"))
+
+    result = runner.invoke(app, ["explainability", "proxy", "down"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert "NOT the proxy we started" in result.output
+
+
+def test_the_key_fingerprint_is_not_the_key(configured: None) -> None:
+    """It is recorded in a plain file beside the join log, so it must not carry
+    the credential — only enough to notice that it changed."""
+    fingerprint = proxy.key_fingerprint(_KEY)
+
+    assert _KEY not in fingerprint
+    assert len(fingerprint) == 12
+    assert fingerprint != proxy.key_fingerprint(_KEY + "x")

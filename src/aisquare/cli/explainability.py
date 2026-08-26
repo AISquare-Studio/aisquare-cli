@@ -576,7 +576,15 @@ def proxy_status() -> None:
     if get_state().json_output:
         typer.echo(json.dumps(_proxy_payload(state)))
     else:
-        mark = "✓" if state.probe.healthy else "✗"
+        # Three states, not two. The mark used to follow `probe.healthy`, which
+        # put a ✓ on a proxy serving the PREVIOUS deployment — the exact case
+        # this command exists to surface, rendered as though nothing was wrong.
+        if state.managed:
+            mark = "✓"
+        elif state.probe.healthy:
+            mark = "⚠"
+        else:
+            mark = "✗"
         typer.echo(f"{mark} {state.summary}")
         if state.probe.healthy and not state.managed:
             typer.echo(f"  → this machine's config points at {state.url} (target '{state.target}')")

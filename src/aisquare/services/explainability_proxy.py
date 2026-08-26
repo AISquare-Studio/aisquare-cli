@@ -33,6 +33,7 @@ the hot path. ``up`` is a thing an operator types.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -52,7 +53,7 @@ from aisquare.services.explainability import (
     ProxyProbe,
     probe_proxy,
 )
-from aisquare.services.explainability_ops import resolve_target
+from aisquare.services.explainability_ops import ResolvedTarget, resolve_target
 
 #: The SDK console script that runs the sidecar. Reached by name on PATH rather
 #: than by importing the SDK: the proxy pulls FastAPI and uvicorn, and this
@@ -84,15 +85,96 @@ class ProxyError(RuntimeError):
     """
 
 
+def key_fingerprint(key: str) -> str:
+    """A short, non-secret witness that two keys are the same key.
+
+    Recorded so a deployment switch can be DETECTED. Rotating the key under one
+    target changes it too, which is correct: the running proxy is holding the old
+    credential and the gateway will reject it, so it needs replacing either way.
+
+    Twelve hex characters of SHA-256. Never the key, never enough of it to
+    shorten a search for it, and it lands in a mode-644 file beside the join log.
+    """
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
+def _identity_token(pid: int) -> str | None:
+    """A token that changes if this pid stops being the process we started.
+
+    PIDs ARE REUSED, and the record deliberately outlives a reboot, so
+    ``os.kill(pid, 0)`` proves only that *something* holds that number. Without
+    this, a stale record plus a recycled pid means SIGTERM to a stranger.
+
+    Two sources, both reading the OS rather than guessing:
+
+    * Linux — field 22 of ``/proc/<pid>/stat`` is the process start time in
+      clock ticks since boot, paired here with argv[0]. The field is counted
+      from after the LAST ``)`` because ``comm`` sits in parentheses and may
+      itself contain spaces and parentheses; splitting from the left is the
+      classic way to misparse this file.
+    * Elsewhere — ``ps -o lstart=,comm=``, which carries the same two facts.
+
+    Returns None when neither is available, and every caller treats that as
+    "cannot verify" rather than "verified". Refusing to act on an unverifiable
+    pid is the only safe direction: the cost is an operator stopping a proxy by
+    hand, and the cost of guessing wrong is killing something else.
+    """
+    stat = Path(f"/proc/{pid}/stat")
+    try:
+        raw = stat.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raw = ""
+    if raw:
+        tail = raw.rpartition(")")[2].split()
+        # tail[0] is `state`, i.e. field 3, so starttime (field 22) is tail[19].
+        if len(tail) > 19:
+            try:
+                argv0 = (
+                    Path(f"/proc/{pid}/cmdline")
+                    .read_bytes()
+                    .split(b"\0")[0]
+                    .decode("utf-8", "replace")
+                )
+            except OSError:
+                argv0 = ""
+            return f"proc:{tail[19]}:{Path(argv0).name}"
+
+    ps = shutil.which("ps")
+    if ps is None:
+        return None
+    try:
+        # Resolved path from shutil.which, fixed argv, no shell.
+        completed = subprocess.run(
+            [ps, "-p", str(pid), "-o", "lstart=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return None
+    return "ps:" + " ".join(completed.stdout.split())
+
+
 @dataclass(frozen=True)
 class ProxyRecord:
-    """What ``up`` started, as it was recorded."""
+    """What ``up`` started, as it was recorded.
+
+    ``target``, ``gateway_url`` and ``key_fp`` are not diagnostics — they are the
+    reuse check. Staging and production normally share one loopback URL, so
+    matching on the URL alone would hand a prod-labelled session to a proxy still
+    holding staging's gateway and key. ``identity`` is the same idea applied to
+    the process: it answers "is this still the thing we started".
+    """
 
     pid: int
     port: int
     url: str
     gateway_url: str
     target: str
+    key_fp: str
+    identity: str | None
     started_at: float
 
     def to_json(self) -> dict[str, Any]:
@@ -102,6 +184,8 @@ class ProxyRecord:
             "url": self.url,
             "gateway_url": self.gateway_url,
             "target": self.target,
+            "key_fp": self.key_fp,
+            "identity": self.identity,
             "started_at": self.started_at,
         }
 
@@ -111,7 +195,14 @@ class ProxyStatus:
     """The answer to "is a proxy up, and is it ours"."""
 
     running: bool
+    #: Ours, healthy, AND serving the deployment this machine names. The field
+    #: to branch on; `probe.healthy` alone never answered "whose proxy is that".
     managed: bool
+    #: Started by this CLI and still the same process — true even when it is
+    #: wedged or pointed at a target we have since switched away from, because
+    #: those are exactly the cases `up` must be allowed to replace and `down`
+    #: must be allowed to stop.
+    owned: bool
     url: str
     probe: ProxyProbe
     record: ProxyRecord | None
@@ -119,6 +210,9 @@ class ProxyStatus:
     age_seconds: float | None
     gateway_url: str
     target: str
+    #: The target the RUNNING proxy was started for, when we own it. Differs
+    #: from `target` exactly when someone switched deployment without restarting.
+    recorded_target: str | None
 
     @property
     def summary(self) -> str:
@@ -130,6 +224,18 @@ class ProxyStatus:
         if self.managed:
             age = _humanise(self.age_seconds)
             return f"running (pid {self.pid}, started {age} ago) at {self.url} → {self.gateway_url}"
+        if self.owned and self.recorded_target and self.recorded_target != self.target:
+            return (
+                f"running (pid {self.pid}) at {self.url}, but it was started for target "
+                f"'{self.recorded_target}' → {self.gateway_url}, and this machine now names "
+                f"'{self.target}'. Its Runs are going to the OLD deployment — restart it: "
+                "aisquare explainability proxy up"
+            )
+        if self.owned:
+            return (
+                f"our proxy (pid {self.pid}) is running at {self.url} but not serving this "
+                f"machine's configuration — restart it: aisquare explainability proxy up"
+            )
         # The case doctor cannot distinguish, said out loud.
         return (
             f"running at {self.url}, but NOT started by this CLI — its gateway and key "
@@ -174,6 +280,8 @@ def read_record() -> ProxyRecord | None:
             url=str(raw["url"]),
             gateway_url=str(raw["gateway_url"]),
             target=str(raw["target"]),
+            key_fp=str(raw["key_fp"]),
+            identity=(str(raw["identity"]) if raw.get("identity") is not None else None),
             started_at=float(raw["started_at"]),
         )
     except (KeyError, TypeError, ValueError):
@@ -205,6 +313,41 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _owns(record: ProxyRecord | None, url: str) -> bool:
+    """Whether the recorded process is still the one this CLI started.
+
+    Deliberately three conditions and not one. `_alive` alone was the original
+    bug: the record outlives a reboot on purpose, pids are recycled, and
+    `os.kill(pid, 0)` cannot tell a recycled pid from ours — so `down` could
+    SIGTERM a stranger that happened to inherit the number.
+
+    An UNVERIFIABLE identity counts as not-ours. That is the conservative
+    direction: the cost is telling an operator to stop a proxy by hand, and the
+    cost of the other direction is killing somebody else's process.
+    """
+    if record is None or record.url != url or not _alive(record.pid):
+        return False
+    if record.identity is None:
+        return False
+    return _identity_token(record.pid) == record.identity
+
+
+def _serves_this_deployment(record: ProxyRecord, target: ResolvedTarget) -> bool:
+    """Whether a proxy we own is pointed where this machine is now pointed.
+
+    THE REASON THIS EXISTS. Staging and production normally share one loopback
+    proxy URL, so a target switch changes nothing the URL can see: the old proxy
+    keeps running, holding the old gateway and the old key, and reusing it sends
+    prod-labelled sessions to staging. Matching on the URL alone made that
+    outcome a green ✓.
+    """
+    return (
+        record.target == target.name
+        and record.gateway_url == target.gateway_url
+        and record.key_fp == key_fingerprint(target.api_key or "")
+    )
+
+
 def status() -> ProxyStatus:
     """Describe the proxy: up or not, ours or not, and pointed where."""
     settings = load_config().explainability
@@ -212,20 +355,26 @@ def status() -> ProxyStatus:
     url = target.proxy_url
     probe = probe_proxy(url)
     record = read_record()
-    # `managed` needs BOTH halves. A live record whose process has gone is a
-    # stale file, and a healthy proxy with no record is somebody else's — the
-    # distinction doctor's row cannot draw.
-    managed = bool(record and _alive(record.pid) and record.url == url)
+    owned = _owns(record, url)
+    # `managed` is the strong claim, and every conjunct is load-bearing. Ours,
+    # AND still pointed at the deployment this machine names, AND actually
+    # answering. Dropping the last one let `up` print "✓ … sessions are traced"
+    # directly beneath "not running" for a wedged process; dropping the middle
+    # one let a stale staging proxy serve production.
+    matches = bool(record and owned and _serves_this_deployment(record, target))
+    managed = bool(matches and probe.healthy)
     return ProxyStatus(
         running=probe.healthy or "unreachable" not in probe.reason,
         managed=managed,
+        owned=owned,
         url=url,
         probe=probe,
-        record=record if managed else None,
-        pid=record.pid if managed and record else None,
-        age_seconds=(time.time() - record.started_at) if managed and record else None,
-        gateway_url=record.gateway_url if managed and record else target.gateway_url,
+        record=record if owned else None,
+        pid=record.pid if owned and record else None,
+        age_seconds=(time.time() - record.started_at) if owned and record else None,
+        gateway_url=record.gateway_url if owned and record else target.gateway_url,
         target=target.name,
+        recorded_target=record.target if owned and record else None,
     )
 
 
@@ -240,9 +389,22 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
     target = resolve_target(settings)
 
     existing = status()
+    # Idempotent ONLY on the strong claim: ours, healthy, and serving this
+    # deployment. The early return used to fire on ownership alone, which made
+    # two different failures print success — a wedged process ("✓ … sessions are
+    # traced" directly under "not running"), and a proxy still holding the
+    # previous target's gateway and key after a deployment switch, quietly
+    # sending prod-labelled sessions to staging.
     if existing.managed:
         return existing
-    if existing.probe.healthy:
+    if existing.owned:
+        # Ours, so we may replace it — and must, because neither remaining state
+        # is usable: it is either not answering, or answering for the wrong
+        # deployment. Stopping first keeps the port free for the new one.
+        if existing.pid:
+            _terminate(existing.pid)
+        _clear_record()
+    elif existing.probe.healthy:
         raise ProxyError(
             f"a proxy is already answering at {target.proxy_url}, and this CLI did not "
             "start it. Stop it yourself, or point this machine at it with: "
@@ -325,6 +487,11 @@ def up(*, log_path: Path | None = None) -> ProxyStatus:
                 url=target.proxy_url,
                 gateway_url=target.gateway_url,
                 target=target.name,
+                key_fp=key_fingerprint(target.api_key),
+                # Taken HERE rather than right after Popen: until /health answers
+                # the child may not have finished exec'ing, and a token read from
+                # the interpreter that preceded the exec would never match again.
+                identity=_identity_token(process.pid),
                 started_at=time.time(),
             )
             _write_record(record)
@@ -380,6 +547,16 @@ def down() -> str:
     if not _alive(record.pid):
         _clear_record()
         return f"proxy (pid {record.pid}) was already gone — cleared the stale record"
+    if not _owns(record, record.url):
+        # Alive, but not the process we started: the record outlives a reboot and
+        # pids get recycled, so this number now belongs to something else — or to
+        # something we cannot identify on this platform. Either way, not ours to
+        # signal.
+        _clear_record()
+        return (
+            f"pid {record.pid} is alive but is NOT the proxy we started (pids are reused) "
+            "— cleared the stale record and left that process alone"
+        )
     if not _terminate(record.pid):
         raise ProxyError(
             f"could not stop pid {record.pid} — it is running as another user, or "

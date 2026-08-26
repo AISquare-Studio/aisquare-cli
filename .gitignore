@@ -20,3 +20,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# The SDK proxy writes its local span inbox wherever it is started.
+explainability_inbox.db

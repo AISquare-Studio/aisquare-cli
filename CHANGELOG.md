@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-26
+
+First release carrying the explainability integration. 0.4.0rc2 shipped from
+`main` before any of it landed, so this is the first version a developer can
+`pip install` and connect. Verified end to end against the production gateway:
+a real Claude Code session traced through the local proxy (`202 Accepted` on
+every span batch) and a board note shipped through the client lane.
+
+**`aisquare-cli[explainability]` now installs the proxy's own runtime**
+(`fastapi`, `uvicorn`). It did not, and no other extra did either, so
+`aisquare-proxy` was on PATH and died at import — a hard stop on step one of
+the onboarding runbook.
+
 ### Added
 - **`docs/planner-findings-loop.md` — the find→fix loop, and the one thing
   that blocks it.** The write half is done: a traced session opens a Run keyed

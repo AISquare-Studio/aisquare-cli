@@ -11,8 +11,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 First release carrying the explainability integration. 0.4.0rc2 shipped from
 `main` before any of it landed, so this is the first version a developer can
 `pip install` and connect. Verified end to end against the production gateway:
-a real Claude Code session traced through the local proxy (`202 Accepted` on
-every span batch) and a board note shipped through the client lane.
+a real Claude Code session traced through a proxy started by
+`explainability proxy up` (`202 Accepted` on every span batch) and a board note
+shipped through the client lane.
+
+**`aisquare explainability proxy up | down | status`.** The proxy stays a
+separate process holding its own key — that design is deliberate and unchanged.
+What is gone is assembling four environment variables by hand out of config the
+CLI already holds. `up` resolves the gateway, key and port from the active
+target, starts the sidecar detached, and waits until it answers `/health`.
+
+- **`status` says whether the proxy is OURS**, which is the question `doctor`
+  cannot answer: its proxy row goes green for any service answering as
+  `aisquare-proxy` in `claude_code` mode, including one left running against
+  another deployment, whose Runs land somewhere else entirely. `managed` is the
+  field to branch on; `healthy` alone was never enough.
+- **`down` refuses to stop a proxy it did not start.** Killing on the strength
+  of "something is on port 9090" ends a colleague's session on a shared box, or
+  a hosted proxy this machine was pointed at deliberately.
+- **The key travels in the child's environment and never in argv.**
+  `/proc/<pid>/cmdline` is world-readable, and a key in a `ps` line is a key in
+  every screen-share and every scrollback.
+- **A start that never answers is a failure, and leaves nothing behind.** The
+  proxy prints `Application startup complete` *before* it binds, so a live pid
+  is not evidence — an occupied port used to look like success. `up` polls
+  `/health` and stops what it started if that never comes.
+- Not on the launch path. Nothing here runs in front of a waiting developer.
 
 **`aisquare-cli[explainability]` now installs the proxy's own runtime**
 (`fastapi`, `uvicorn`). It did not, and no other extra did either, so
@@ -117,6 +141,13 @@ the onboarding runbook.
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **`tests/test_runbook_json_paths.py` read the developer's real
+  `~/.aisquare`.** Its payload fixture was module-scoped, which runs outside the
+  function-scoped `isolated_home` isolation, so it sampled whatever the machine
+  happened to hold while its docstring claimed "a machine with nothing
+  configured". Cold on CI, which is why it stayed green — and on a machine that
+  had followed the onboarding runbook, a stopped proxy made `status` exit 1 and
+  errored three tests that have nothing to do with proxies.
 - **`doctor --fix` could brick the checkout it was run in — including the test
   suite's own interpreter.** The entry below documents that hazard and warns
   about it; `apply_fixes` then went ahead and performed exactly that install,

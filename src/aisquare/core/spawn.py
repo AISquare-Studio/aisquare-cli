@@ -134,6 +134,16 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"
     ),
+    "aisquare/services/explainability_proxy.py::up": Seam(
+        EXCLUDED,
+        "the SDK's `aisquare-proxy` sidecar. Deliberately NOT stripped, and it is "
+        "the one seam where stripping would be actively wrong: this process IS the "
+        "tracing destination, and it needs EXPLAINABILITY_GATEWAY_URL and the "
+        "workspace key in its environment to reach the gateway at all. Handing it "
+        "an untraced environment would start a proxy that records nothing, which "
+        "is the failure mode `up` exists to prevent. The key travels here and "
+        "never in argv",
+    ),
     "aisquare/services/explainability_ops.py::sdk_doctor": Seam(
         EXCLUDED,
         "the SDK's own `explainability-doctor` console script. Deliberately NOT "

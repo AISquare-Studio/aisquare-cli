@@ -126,6 +126,17 @@ def explainability_joins_path() -> Path:
     return explainability_dir() / "joins.jsonl"
 
 
+def explainability_proxy_state_path() -> Path:
+    """Path of the record describing the proxy ``proxy up`` started.
+
+    Beside ``joins.jsonl`` rather than under ``cache/`` for a different reason
+    than that file's: this one is how ``down`` and ``status`` find a process
+    they are responsible for, and a disposable directory would turn a routine
+    cache clear into an orphaned proxy nobody can stop by name.
+    """
+    return explainability_dir() / "proxy.json"
+
+
 def truncation_marker_path() -> Path:
     """Records that ``context.db`` was found emptied and rebuilt.
 

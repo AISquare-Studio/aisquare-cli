@@ -23,3 +23,5 @@ htmlcov/
 
 # The SDK proxy writes its local span inbox wherever it is started.
 explainability_inbox.db
+# ...and SQLite's WAL sidecars, which appear only while the proxy is running.
+explainability_inbox.db-*

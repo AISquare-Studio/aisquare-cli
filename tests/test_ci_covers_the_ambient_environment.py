@@ -63,6 +63,14 @@ _STEP = re.compile(r"^      - name: (.+)$", re.MULTILINE)
 #: of the guards below are about, so it is named once.
 SUITE = "pytest -ra"
 
+#: An ASSIGNMENT of the ambient home, in either form — ``AISQUARE_HOME=`` in a
+#: shell line (including inside an ``echo`` bound for ``$GITHUB_ENV``) and
+#: ``AISQUARE_HOME:`` in a step-level YAML ``env:``. Counting only the first form
+#: let a duplicate be re-added as step-level YAML with the guard green, which is
+#: the very failure the test using this is about. A bare ``"$AISQUARE_HOME"`` USE
+#: does not match, which is what keeps the count at the definitions.
+_ASSIGNS_HOME = r"AISQUARE_HOME\s*[:=]"
+
 #: The shell function the ambient job asserts its premise with. Named here so a
 #: rename fails these guards loudly instead of leaving them quietly satisfied.
 PREMISE = "assert_proxy"
@@ -170,20 +178,36 @@ def test_both_proxy_states_are_covered(ambient: str) -> None:
         )
 
 
-def test_the_ambient_home_is_declared_where_no_step_can_miss_it(ambient: str) -> None:
+def test_the_ambient_environment_is_declared_exactly_once(ambient: str) -> None:
     """A per-step ``AISQUARE_HOME`` can be dropped from the step that matters.
 
     Found by review, by mutation: delete it from the step that runs pytest — or
     typo it to a path the configure step never populated — and the populated home
     becomes invisible to the suite, the job degrades to "``check``, twice, one of
-    them with a listener", and it all stays green. That is the home-axis twin of
-    the proxy bug this job exists for, so the variable belongs to the JOB.
-    """
-    header = ambient[: ambient.index("    steps:")]
+    them with a listener", and it all stays green.
 
-    assert "env:" in header and "AISQUARE_HOME" in header, (
-        "AISQUARE_HOME is no longer declared at job level, so a step can be "
-        "missing it and this job silently becomes a duplicate of `check`"
+    So there is ONE definition, exported through ``$GITHUB_ENV``. Not a job-level
+    ``env:`` block: ``runner.temp`` is unavailable there and GitHub rejects the
+    whole FILE for it — measured, and the failure is near-silent, a run with zero
+    jobs and no log that reads as "CI has not started".
+    """
+    # Both assignment forms: `AISQUARE_HOME=` in a shell line and
+    # `AISQUARE_HOME:` in a step-level YAML `env:`. Counting only the first let a
+    # duplicate be re-added as step-level YAML with the guard green — measured,
+    # which is the whole failure this test is about.
+    defined = [line for line in _commands(ambient) if re.search(_ASSIGNS_HOME, line)]
+
+    assert defined, "nothing declares AISQUARE_HOME for the ambient job"
+    assert len(defined) == 1, (
+        f"AISQUARE_HOME is declared {len(defined)} times — one of them can be "
+        "dropped or typo'd while the other keeps the guards green"
+    )
+    assert "GITHUB_ENV" in ambient, (
+        "the ambient environment is no longer exported through $GITHUB_ENV, so it "
+        "is not guaranteed to reach the step that runs the suite"
+    )
+    assert ambient.index(defined[0]) < ambient.index(SUITE), (
+        "the ambient environment is declared after the suite runs"
     )
 
 
@@ -206,6 +230,28 @@ def test_the_ambient_job_populates_that_home(ambient: str) -> None:
     )
 
 
+def test_the_configured_home_asserts_its_own_premise(ambient: str) -> None:
+    """The proxy axis is not the only premise that can fail to hold.
+
+    ``set -e`` catches an ``enable`` that FAILS. It cannot catch one that succeeds
+    while leaving a home the suite reads as unconfigured — and observed while
+    building this job, that state is worse than a hard failure: ``status`` exits 0
+    whatever the proxy is doing when tracing is off, so ``proxy-up`` goes
+    VACUOUSLY GREEN and ``proxy-down`` fails for the wrong reason. Both variants
+    are meaningless without the home, so the home is asserted, not assumed.
+    """
+    configure = ambient[: ambient.index(SUITE)]
+
+    assert '"enabled", True' in configure, (
+        "nothing asserts that the ambient home actually has tracing enabled — a "
+        "home that quietly failed to configure makes proxy-up vacuously green"
+    )
+    assert '"key_source", "file"' in configure, (
+        "nothing asserts the key resolves from the FILE, which is the state the "
+        "leaked fixture was sampling"
+    )
+
+
 def test_the_ambient_environment_variables_are_set(ambient: str) -> None:
     """The variables ``conftest`` goes out of its way to clear.
 
@@ -215,10 +261,10 @@ def test_the_ambient_environment_variables_are_set(ambient: str) -> None:
     module- or session-scoped fixture reads them straight out of ``os.environ``,
     and nothing on a pristine runner would notice.
     """
-    header = ambient[: ambient.index("    steps:")]
+    exported = "\n".join(_commands(ambient)[: len(_commands(ambient))])
 
-    for name in ("AISQUARE_EXPLAINABILITY_TARGET", "EXPLAINABILITY_GATEWAY_URL"):
-        assert name in header, (
+    for name in ("AISQUARE_EXPLAINABILITY_TARGET=", "EXPLAINABILITY_GATEWAY_URL="):
+        assert name in exported, (
             f"{name} is no longer set for the ambient job, so an axis conftest "
             "itself flags as dangerous is unreproduced again"
         )

@@ -93,32 +93,6 @@ jobs:
       fail-fast: false
       matrix:
         ambient: [proxy-down, proxy-up]
-    # ONE definition of the ambient environment, inherited by every step.
-    # AISQUARE_HOME used to be declared per-step, which meant the Test step could
-    # lose it — to a delete or a typo — and this job would quietly degrade to
-    # "`check`, twice, one of them with a listener": green, with every guard in
-    # tests/test_ci_covers_the_ambient_environment.py still passing. That is the
-    # home-axis twin of the proxy bug this job exists for, so the variable is
-    # declared once where no step can be missing it.
-    env:
-      AISQUARE_HOME: ${{ runner.temp }}/aisquare-home
-      # The variables tests/conftest.py goes out of its way to CLEAR, whose own
-      # comment says "an operator's shell has these sourced from their
-      # explainability env file". Exactly the same escape hatch as the home: a
-      # module- or session-scoped fixture reads them straight out of os.environ.
-      # Set to values consistent with the configured home, because the axis being
-      # reproduced is "these are present at all", not a second, contradictory
-      # configuration for a reader to untangle.
-      AISQUARE_EXPLAINABILITY_TARGET: prod
-      EXPLAINABILITY_GATEWAY_URL: https://gateway.invalid
-      # NOT EXPLAINABILITY_API_KEY, and deliberately: key resolution is env-first,
-      # so setting it would make the key FILE unreachable — and the file is both
-      # the case the setup guide documents and the state (`key_set`,
-      # `key_source: file`) the leaked fixture was sampling. The env-var branch of
-      # that resolver is covered by unit tests; the file branch is what needs a
-      # populated home to be real.
-      # Set for anyone running the suite from inside a Claude session.
-      CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config
     steps:
       - uses: actions/checkout@v7
 
@@ -133,6 +107,43 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+
+      # ONE definition of the ambient environment, and $GITHUB_ENV rather than a
+      # job-level `env:` block for a measured reason: `runner.temp` is NOT
+      # available in a job-level env — only `github`, `needs`, `strategy`,
+      # `matrix`, `vars`, `inputs` and `secrets` are — and GitHub rejects the
+      # WHOLE FILE for it. That failure is near-silent from the outside: the run
+      # has zero jobs, no log, and `gh pr checks` reports nothing at all, so it
+      # reads as "CI has not started yet" rather than as an error.
+      #
+      # A per-step `env:` was the other option and is worse: duplicated across
+      # the configure and test steps, the test step could lose it — to a delete
+      # or a typo — and this job would degrade to "`check`, twice, one of them
+      # with a listener", green, with every guard still passing. That is the
+      # home-axis twin of the proxy bug this job exists for.
+      - name: Declare the ambient environment
+        run: |
+          {
+            echo "AMBIENT=${{ matrix.ambient }}"
+            echo "AISQUARE_HOME=$RUNNER_TEMP/aisquare-home"
+            # The variables tests/conftest.py goes out of its way to CLEAR, whose
+            # own comment says "an operator's shell has these sourced from their
+            # explainability env file". Exactly the same escape hatch as the
+            # home: a module- or session-scoped fixture reads them straight out
+            # of os.environ. Set consistent with the configured home, because the
+            # axis being reproduced is "these are present at all", not a second,
+            # contradictory configuration for a reader to untangle.
+            echo "AISQUARE_EXPLAINABILITY_TARGET=prod"
+            echo "EXPLAINABILITY_GATEWAY_URL=https://gateway.invalid"
+            # NOT EXPLAINABILITY_API_KEY, and deliberately: key resolution is
+            # env-first, so setting it would make the key FILE unreachable — and
+            # the file is both the case the setup guide documents and the state
+            # (`key_set`, `key_source: file`) the leaked fixture was sampling.
+            # The env-var branch of that resolver is covered by unit tests; the
+            # file branch is what needs a populated home to be real.
+            # Set for anyone running the suite from inside a Claude session.
+            echo "CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config"
+          } >> "$GITHUB_ENV"
 
       - name: Configure an aisquare home, the way a developer's machine is
         run: |
@@ -152,6 +163,25 @@ jobs:
           printf '%s' 'not-a-real-ci-key' > "$AISQUARE_HOME/explainability-key"
           chmod 600 "$AISQUARE_HOME/explainability-key"
 
+          # THE HOME AXIS'S OWN PREMISE, asserted — the proxy axis is not the only
+          # one that can silently fail to hold. `set -e` catches an `enable` that
+          # FAILS; nothing catches one that succeeds while leaving a home the suite
+          # would read as unconfigured. Observed while building this job: a home
+          # that had not taken reported `enabled: false`, and `status` exits 0
+          # whatever the proxy is doing when tracing is off — so proxy-up went
+          # vacuously GREEN and proxy-down failed for the wrong reason. Both
+          # variants are meaningless without this, so it is checked once here
+          # rather than trusted.
+          #
+          # `|| true` for the same reason as in the next step: the proxy is down at
+          # this point by definition, which is exactly when `status` exits non-zero.
+          # One line on purpose: a `python -c` script written across lines has to
+          # start at column 0, which ENDS this block scalar and makes the whole
+          # workflow file invalid.
+          settings=$(aisquare explainability status --json || true)
+          printf '%s' "$settings" \
+            | python -c 'import json, sys; s = json.load(sys.stdin); bad = [(k, s.get(k), w) for k, w in (("enabled", True), ("key_source", "file")) if s.get(k) != w]; sys.exit(f"::error::ambient home is not what this job requires, got/wanted: {bad}" if bad else 0)'
+
       # ONE STEP, and the reason was measured rather than reasoned about. A `&`
       # background process started in its own step is killed when that step's
       # process group ends, so a separate "occupy the port" step left the port
@@ -160,8 +190,6 @@ jobs:
       # same commit. Starting the listener and running the suite in one shell is
       # what keeps them in the same process group.
       - name: Test (pytest)
-        env:
-          AMBIENT: ${{ matrix.ambient }}
         run: |
           # THE CONFIGURED PROXY, read back out of the config — never a literal.
           # The configure step above explains that hardcoding the port would let

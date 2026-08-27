@@ -181,7 +181,17 @@ def test_the_failure_names_the_resolved_path_not_the_link(tmp_path: Path) -> Non
         save_config(_changed(), link)
 
     message = str(caught.value)
-    assert str(real) in message, f"the resolved path is not named: {message}"
+    # The resolved FILE is asserted through the structured `filename` attribute
+    # rather than as a substring of the rendered message, because `OSError`
+    # renders that field through `repr()` — which DOUBLES every backslash in a
+    # Windows path. The path is genuinely there and an operator reads it fine;
+    # it is simply never there as `str(real)`. POSIX paths contain no
+    # backslashes, so the escaping is a no-op and hid this completely.
+    assert caught.value.filename == str(real), (
+        f"the resolved path is not named: {caught.value.filename!r} != {str(real)!r}"
+    )
+    # The DIRECTORY needing permission is in the detail text, which is not
+    # escaped, so this one is a plain substring on every platform.
     assert str(real.parent) in message, "the directory needing permission is not named"
     assert "symlink" in message, "nothing explains why a different path is involved"
     assert caught.value.errno is not None, "errno was dropped"

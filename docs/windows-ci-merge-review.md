@@ -167,6 +167,52 @@ to do with the quoting under test. Git Bash's real `bash.exe` is on the same
 PATH. Only *running* one distinguishes them, so shell discovery is now a
 functional probe.
 
+## 4a. The one that got through, and why
+
+The first push of this work went red on Windows with two failures, and the
+honest summary is that my verification method had a hole I had already
+described and then pushed anyway. Recording it because the hole is structural,
+not a slip.
+
+Both failures were the same bug, and it is a good one:
+
+```
+assert str(real) in str(caught.value)          # False on Windows
+assert str(vault) in json.dumps(payload)       # False on Windows
+```
+
+Both compare a raw path against an **escaped rendering** of itself.
+`OSError.__str__` puts its `filename` through `repr()`, and `json.dumps`
+escapes backslashes — so a Windows path is present in both outputs, with every
+separator doubled, and never as `str(path)`. **POSIX paths contain no
+backslashes, so the escaping is a no-op and the bug is completely invisible
+there.** It is the same shape as everything in §4: an idiom that silently
+stops meaning what it says once the platform changes.
+
+The product was correct in both cases. The fixes assert against the structured
+value instead of a rendered string — `caught.value.filename` rather than a
+substring of the message, and `payload["hint"]` rather than
+`json.dumps(payload)`, since `json.loads` had already handed back the real
+string.
+
+**Why local verification missed it.** Both tests need a symlink, this machine
+cannot create one, so both skipped locally and the only place that surface ever
+met a Windows path was CI. Two things now close that:
+
+- `test_a_windows_path_survives_the_json_surface_unescaped` drives
+  `expected_config_write_errors` through a raised `PermissionError` instead of
+  through a real denied symlink. It reaches the identical handler with **no
+  filesystem privilege at all**, so the JSON contract is pinned on every
+  platform rather than only where symlinks happen to work.
+- The remaining symlink-only assertions are now structural (`filename`,
+  `payload[...]`) rather than substring matches against rendered text, which is
+  what made them platform-sensitive in the first place.
+
+**If you can enable Developer Mode on the machine running this suite, do.** It
+grants `SeCreateSymbolicLinkPrivilege` to an ordinary account, which drops the
+12 local symlink skips to zero and would have caught this before it ever
+reached CI. It needs administrator rights once.
+
 ## 5. Verification
 
 Run before pushing, at your request. The Ubuntu legs mirror the CI `check` job
@@ -176,10 +222,10 @@ would have hidden the `can_deny_writes` problem entirely.
 
 | Lane | Result |
 |---|---|
-| Ubuntu 24.04, Python 3.11 | **1777 passed, 3 skipped** |
-| Ubuntu 24.04, Python 3.12 | **1777 passed, 3 skipped** |
-| Ubuntu 24.04, Python 3.13 | **1777 passed, 3 skipped** |
-| Windows 11, Python 3.12 (local) | **1748 passed, 22 skipped** |
+| Ubuntu 24.04, Python 3.11 | **1778 passed, 3 skipped** |
+| Ubuntu 24.04, Python 3.12 | **1778 passed, 3 skipped** |
+| Ubuntu 24.04, Python 3.13 | **1778 passed, 3 skipped** |
+| Windows 11, Python 3.12 (local) | **1749 passed, 22 skipped** |
 
 `ruff check`, `ruff format --check` and `mypy` pass on all four; the three
 Ubuntu legs were re-run for those three steps alone to confirm it directly
@@ -195,12 +241,26 @@ Windows skips 22 against Ubuntu's 3. The difference is **not** deferred work:
   counterpart asserted separately where one exists.
 - the rest are pre-existing (`no SDK installed`).
 
-### What is NOT proven locally
+### What is NOT proven locally, stated precisely
 
-The combination of *symlink + denied directory on Windows* runs only on CI: this
-machine cannot create symlinks, so those 12 skip here. Both halves are verified
-independently — `tests/test_fsperms.py` exercises the Windows DENY ace and its
-restoration, and the Ubuntu legs exercise the symlink logic — but the
-intersection is first exercised on the runner. That is the residual risk in this
-change, and it is the reason `unwritable` raises instead of yielding when its
-denial does not take: if it is wrong on CI, it will say so rather than go green.
+The 12 symlink-dependent tests still skip on this machine and run on the
+runner. That gap is what produced the failure in §4a, so it is worth being
+exact about what is and is not covered now:
+
+- **Covered locally:** the Windows DENY ace and its restoration
+  (`tests/test_fsperms.py`), and the JSON error surface against a real Windows
+  path with no symlink required
+  (`test_a_windows_path_survives_the_json_surface_unescaped`). The specific
+  rendering behaviour that broke — `OSError.__str__` using `repr()` — was
+  reproduced directly on Windows before the fix was written.
+- **Covered on Ubuntu:** every symlink-dependent test, end to end, on all three
+  interpreters.
+- **First exercised on the runner:** the intersection of a real symlink with a
+  denied directory on Windows. The assertions inside those tests are no longer
+  substring matches against rendered text, which is what made them
+  platform-sensitive; they now compare structured values that carry no
+  escaping. `unwritable` also raises rather than yielding if its denial does
+  not take, so a wrong assumption there fails loudly instead of going green.
+
+Enabling Developer Mode on the machine running this suite removes the gap
+entirely, and is worth doing before the next change to this area.

@@ -83,6 +83,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   either), and creating a symlink needs a privilege the CI runner holds and a
   developer account does not.
 
+  One class of assertion needed changing rather than skipping, and it is the
+  subtlest of the lot: `str(path) in str(some_error)` and `str(path) in
+  json.dumps(payload)` are both a raw path compared against an ESCAPED
+  rendering of itself — `OSError` renders its filename through `repr()`, and
+  JSON escapes backslashes. A Windows path is present in both outputs with
+  every separator doubled, and matches neither. POSIX paths carry no
+  backslashes, so the escaping is a no-op and the mistake is invisible there.
+  Those now assert against the structured value (`exc.filename`,
+  `payload["hint"]`) instead of a rendered string.
+
   Three skips remain, all structural rather than deferred. The stdio-daemon
   leak probe needs each process's ENVIRONMENT to tell our daemons from a
   sibling checkout's and `Win32_Process` carries only the command line, so it

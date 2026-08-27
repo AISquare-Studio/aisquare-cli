@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **CI runs the suite against a machine that looks like a developer's.** The
+  `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
+  nothing listening on any port, no optional extra — while anyone who followed
+  the setup guide has all three. Three fixtures in this repo were green here and
+  red for them, and the third was introduced while fixing the second, which is
+  what moves this from "be careful" to "have a job".
+  - **Two variants, because the leaks need opposite proxy states.** Measured, not
+    assumed: with a configured home and the proxy DOWN the ambient-home leak
+    fires and the proxy-down-premise leak does not; with it UP it is the other
+    way round. One configuration would have covered half the class and looked
+    like it covered the class.
+  - The `proxy-up` variant **asserts its own premise** with an unredirected
+    `curl`. A stub that failed to bind would otherwise turn it into a silent
+    second `proxy-down` — the same shape as a fixture asserting a premise it
+    never established.
+  - It reuses `tests/proxy_stub.py` rather than inlining a server: `probe_proxy`
+    checks `service` and `mode`, so a stub is a contract, and the copy nobody
+    runs locally is the one that drifts.
+- **The packaging job installs the extra.** `pip install
+  "aisquare-cli[explainability]"` is the line the setup guide gives people and
+  nothing tested it. The SDK shares this package's top-level import name, so both
+  distributions land in one `site-packages/aisquare/` and the last writer wins
+  the shared `__init__.py` — a build that read `__version__` off that module died
+  at import with the extra installed, and no job would have caught it. The job
+  asserts both packages import and names the six `explainability` subcommands,
+  because `--version` cannot distinguish a build that has this integration from
+  one that does not.
+- `tests/test_ci_covers_the_ambient_environment.py` pins all of the above, and
+  every one of its six checks is verified to fail when its condition is removed.
+
+
 ## [0.5.0] - 2026-08-27
 
 First release carrying the explainability integration. 0.4.0rc2 shipped from

@@ -49,6 +49,95 @@ jobs:
       - name: Test (pytest)
         run: pytest -ra
 
+  ambient:
+    # WHY THIS JOB EXISTS.
+    #
+    # `check` installs `.[dev]` into a pristine runner: no ~/.aisquare, nothing
+    # listening on any port, no optional extra. A developer who has followed
+    # docs/connecting-your-agents-to-explainability.md has all three. Three
+    # separate bugs in this repo were green here and red for them, and the third
+    # was introduced while fixing the second — so the class is worth a job rather
+    # than vigilance:
+    #
+    #   * a module-scoped fixture read the developer's REAL ~/.aisquare, while
+    #     its docstring claimed "a machine with nothing configured";
+    #   * a "proxy is down" premise was asserted against the CONFIGURED proxy
+    #     URL, which is 9090 — the port its own docstring says to avoid because
+    #     something is usually on it;
+    #   * a fixture patched the PATH lookup for a console script and not the
+    #     lookup beside the interpreter, so the real script won over the stub.
+    #
+    # TWO VARIANTS, BECAUSE THE LEAKS NEED OPPOSITE PROXY STATES. Measured, not
+    # assumed: with a configured home and the proxy DOWN the first bug fires and
+    # the second does not; with it UP the second fires and the first does not. A
+    # single ambient configuration would have caught one of the two and looked
+    # like it covered the class.
+    #
+    # A properly isolated suite is green in both. Anything that reads ambient
+    # machine state fails in one of them.
+    name: ambient (${{ matrix.ambient }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ambient: [proxy-down, proxy-up]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Configure an aisquare home, the way a developer's machine is
+        env:
+          AISQUARE_HOME: ${{ runner.temp }}/aisquare-home
+        run: |
+          # Deliberately NOT the default location: the point is a POPULATED home
+          # that the suite must ignore, and a runner's real ~ stays empty so a
+          # leak is unambiguous rather than accidental.
+          mkdir -p "$AISQUARE_HOME"
+          cd "$(mktemp -d)"        # so `init` does not pack the checkout
+          aisquare init --yes
+          # No --proxy-url: the DEFAULT is 9090, and the default is what the
+          # proxy-up variant collides with. Hardcoding it here would let the
+          # default drift out from under this job.
+          aisquare explainability enable --target prod --gateway-url https://gateway.invalid
+          # A key so `status` resolves one and reports `key_set` — the state the
+          # leaked fixture was sampling. Not credential-shaped: this repo's push
+          # protection has rejected realistic-looking literals before.
+          printf '%s' 'not-a-real-ci-key' > "$AISQUARE_HOME/explainability-key"
+          chmod 600 "$AISQUARE_HOME/explainability-key"
+
+      - name: Occupy the configured proxy port
+        if: matrix.ambient == 'proxy-up'
+        run: |
+          # `tests/proxy_stub.py`, not an inline server: `probe_proxy` checks the
+          # `service` and `mode` fields, so a hand-rolled stub in this file would
+          # be a second copy of a contract that has to match — and the copy
+          # nobody runs locally is the one that drifts.
+          python -m tests.proxy_stub 9090 &
+          for _ in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:9090/health >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+          # Assert the premise rather than assuming it: a variant whose
+          # distinguishing condition silently failed to start is a job that
+          # reports the other variant twice.
+          curl -fsS http://127.0.0.1:9090/health
+
+      - name: Test (pytest)
+        env:
+          AISQUARE_HOME: ${{ runner.temp }}/aisquare-home
+        run: pytest -ra
+
   package:
     name: package (build + install)
     runs-on: ubuntu-latest
@@ -74,3 +163,33 @@ jobs:
           /tmp/smoke/bin/aisquare --version
           /tmp/smoke/bin/asq --version
           /tmp/smoke/bin/aisquare --help
+
+      # THE INSTALL LINE THE SETUP GUIDE ACTUALLY GIVES PEOPLE, which nothing
+      # tested until now. It is a different environment from every other job
+      # here: the SDK shares this package's top-level import name, so the two
+      # distributions land in ONE site-packages/aisquare/ directory and the
+      # last writer wins the shared __init__.py. That has already broken the
+      # CLI once — a build that read `__version__` off the top-level package
+      # died at import with the extra installed, and no job would have seen it.
+      #
+      # A separate venv from the one above so the plain install stays proven
+      # too: an extra that starts pulling something harmful must not be able to
+      # hide behind an earlier green step.
+      - name: Install the wheel WITH the explainability extra
+        run: |
+          python -m venv /tmp/extra
+          /tmp/extra/bin/pip install "$(echo dist/*.whl)[explainability]"
+      - name: Smoke-test the extra
+        run: |
+          # Survives the shared-__init__ collision, whichever distribution won it.
+          /tmp/extra/bin/aisquare --version
+          # The extra's whole job: the SDK importable in the CLI's environment.
+          /tmp/extra/bin/python -c "import aisquare.explainability, aisquare.cli.app"
+          # And the surface the guide sends people to. Six subcommands, asserted
+          # by name — `--version` cannot distinguish a build with this
+          # integration from one without it, which is exactly how a release
+          # shipped that could not connect.
+          for cmd in status enable disable register ship env; do
+            /tmp/extra/bin/aisquare explainability "$cmd" --help >/dev/null \
+              || { echo "explainability $cmd is missing"; exit 1; }
+          done

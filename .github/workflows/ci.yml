@@ -67,6 +67,18 @@ jobs:
     #   * a fixture patched the PATH lookup for a console script and not the
     #     lookup beside the interpreter, so the real script won over the stub.
     #
+    # TWO OF THE THREE CONDITIONS ARE REPRODUCED HERE, not three. This job
+    # installs `.[dev]`, so "no optional extra" is NOT one of them: the extra
+    # shadows an editable checkout (tests/test_contributing_editable_extra.py) and
+    # conftest.pytest_sessionstart refuses to grade a non-editable one, so the
+    # suite cannot run with the extra installed. The `package` job covers that
+    # axis at IMPORT level instead — both distributions importable, the six
+    # subcommands present — which is where the bug it caused actually lived. The
+    # visible consequence of the gap: test_live_checks_say_what_they_skipped skips
+    # in all six jobs, so test_the_local_sdk_rows_survive_a_gateway_failure
+    # asserts nothing on CI. Said out loud because a reader who counts three
+    # conditions above will otherwise assume three are covered.
+    #
     # TWO VARIANTS, BECAUSE THE LEAKS NEED OPPOSITE PROXY STATES. Measured, not
     # assumed: with a configured home and the proxy DOWN the first bug fires and
     # the second does not; with it UP the second fires and the first does not. A
@@ -81,6 +93,32 @@ jobs:
       fail-fast: false
       matrix:
         ambient: [proxy-down, proxy-up]
+    # ONE definition of the ambient environment, inherited by every step.
+    # AISQUARE_HOME used to be declared per-step, which meant the Test step could
+    # lose it — to a delete or a typo — and this job would quietly degrade to
+    # "`check`, twice, one of them with a listener": green, with every guard in
+    # tests/test_ci_covers_the_ambient_environment.py still passing. That is the
+    # home-axis twin of the proxy bug this job exists for, so the variable is
+    # declared once where no step can be missing it.
+    env:
+      AISQUARE_HOME: ${{ runner.temp }}/aisquare-home
+      # The variables tests/conftest.py goes out of its way to CLEAR, whose own
+      # comment says "an operator's shell has these sourced from their
+      # explainability env file". Exactly the same escape hatch as the home: a
+      # module- or session-scoped fixture reads them straight out of os.environ.
+      # Set to values consistent with the configured home, because the axis being
+      # reproduced is "these are present at all", not a second, contradictory
+      # configuration for a reader to untangle.
+      AISQUARE_EXPLAINABILITY_TARGET: prod
+      EXPLAINABILITY_GATEWAY_URL: https://gateway.invalid
+      # NOT EXPLAINABILITY_API_KEY, and deliberately: key resolution is env-first,
+      # so setting it would make the key FILE unreachable — and the file is both
+      # the case the setup guide documents and the state (`key_set`,
+      # `key_source: file`) the leaked fixture was sampling. The env-var branch of
+      # that resolver is covered by unit tests; the file branch is what needs a
+      # populated home to be real.
+      # Set for anyone running the suite from inside a Claude session.
+      CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config
     steps:
       - uses: actions/checkout@v7
 
@@ -97,13 +135,11 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Configure an aisquare home, the way a developer's machine is
-        env:
-          AISQUARE_HOME: ${{ runner.temp }}/aisquare-home
         run: |
           # Deliberately NOT the default location: the point is a POPULATED home
           # that the suite must ignore, and a runner's real ~ stays empty so a
           # leak is unambiguous rather than accidental.
-          mkdir -p "$AISQUARE_HOME"
+          mkdir -p "$AISQUARE_HOME" "$CLAUDE_CONFIG_DIR"
           cd "$(mktemp -d)"        # so `init` does not pack the checkout
           aisquare init --yes
           # No --proxy-url: the DEFAULT is 9090, and the default is what the
@@ -116,43 +152,90 @@ jobs:
           printf '%s' 'not-a-real-ci-key' > "$AISQUARE_HOME/explainability-key"
           chmod 600 "$AISQUARE_HOME/explainability-key"
 
-      # ONE STEP, and the reason is measured. A `&` background process started in
-      # its own step is killed when that step's process group ends, so a
-      # separate "occupy the port" step left the port FREE during pytest —
-      # proxy-up silently became a second proxy-down. Proven in CI before this
-      # was fixed: both variants failed identically on the same commit, which is
-      # precisely the "variant that reports the other variant twice" failure the
-      # comment below warns about. Starting the listener and running the suite in
-      # one shell is what keeps them in the same process group.
+      # ONE STEP, and the reason was measured rather than reasoned about. A `&`
+      # background process started in its own step is killed when that step's
+      # process group ends, so a separate "occupy the port" step left the port
+      # FREE during pytest and proxy-up silently became a second proxy-down.
+      # Proven in CI before it was fixed: both variants failed IDENTICALLY on the
+      # same commit. Starting the listener and running the suite in one shell is
+      # what keeps them in the same process group.
       - name: Test (pytest)
         env:
-          AISQUARE_HOME: ${{ runner.temp }}/aisquare-home
           AMBIENT: ${{ matrix.ambient }}
         run: |
+          # THE CONFIGURED PROXY, read back out of the config — never a literal.
+          # The configure step above explains that hardcoding the port would let
+          # the default drift out from under this job, and a literal here would do
+          # precisely that: the stub would bind a port the CLI no longer probes,
+          # every premise check would still pass, and proxy-up would be a silent
+          # second proxy-down. That is leak #2 from this job's own list, so
+          # spelling `9090` anywhere below would re-create it inside the job
+          # written to prevent it.
+          #
+          # `|| true` is load-bearing, and NOT a swallowed error. `status` exits
+          # non-zero exactly when the configured proxy would not take a session —
+          # which is every proxy-down run, and the first moment of every proxy-up
+          # run, since the port has to be read BEFORE the stub can bind it. Under
+          # `set -eo pipefail` the read therefore killed the step before pytest in
+          # both variants. Measured by running this script, not by reading it. The
+          # exit code is tolerated HERE and asserted on LATER; the read failing for
+          # a real reason still fails the step, on the numeric check below.
+          settings=$(aisquare explainability status --json || true)
+          port=$(printf '%s' "$settings" | python -c \
+            'import json,sys; from urllib.parse import urlparse; print(urlparse(json.load(sys.stdin)["proxy"]).port or 80)')
+          case "$port" in
+            ''|*[!0-9]*)
+              echo "::error::could not read the configured proxy port out of \`explainability status --json\`"
+              exit 1
+              ;;
+          esac
+          echo "configured proxy port: $port"
+
+          # `aisquare explainability status` IS the premise assertion, on both
+          # variants and on both sides of the suite. It beats a `curl` twice over:
+          # it probes whatever the config says (so it cannot drift from what the
+          # suite reads), and it checks the `service`/`mode` contract rather than
+          # "something answered 200 on a port". Its exit-code rule — non-zero only
+          # when tracing is on and the proxy would not take a session — is pinned
+          # by tests/test_proxy_state_wording.py, so this is not leaning on an
+          # incidental behaviour.
+          assert_proxy() {
+            if [ "$AMBIENT" = "proxy-up" ]; then
+              aisquare explainability status >/dev/null \
+                || { echo "::error::proxy-up: the configured proxy on port $port is NOT answering ($1 the suite) — this variant is a silent duplicate of proxy-down"; exit 1; }
+            else
+              # Asserted on proxy-down too. Nothing holds this port on
+              # ubuntu-latest today, so it is the asymmetry that is the bug: a PR
+              # whose thesis is "assert the premise rather than assuming it" must
+              # not leave one variant assuming. It becomes real the day this runs
+              # on a self-hosted or container runner with a leftover listener.
+              if aisquare explainability status >/dev/null 2>&1; then
+                echo "::error::proxy-down: something IS answering on port $port ($1 the suite) — this variant is a silent duplicate of proxy-up"
+                exit 1
+              fi
+            fi
+          }
+
           if [ "$AMBIENT" = "proxy-up" ]; then
-            # `tests/proxy_stub.py`, not an inline server: `probe_proxy` checks
-            # the `service` and `mode` fields, so a hand-rolled stub in this file
-            # would be a second copy of a contract that has to match — and the
-            # copy nobody runs locally is the one that drifts.
-            python -m tests.proxy_stub 9090 &
+            # tests/proxy_stub.py, not an inline server: `probe_proxy` checks the
+            # `service` and `mode` fields, so a stub is a CONTRACT, and a copy in
+            # this file would be the copy nobody runs locally — the one that
+            # drifts.
+            python -m tests.proxy_stub "$port" &
             stub=$!
             trap 'kill "$stub" 2>/dev/null || true' EXIT
             for _ in $(seq 1 40); do
-              curl -fsS http://127.0.0.1:9090/health >/dev/null 2>&1 && break
+              aisquare explainability status >/dev/null 2>&1 && break
               sleep 0.25
             done
-            # Assert the premise rather than assuming it. Unredirected on
-            # purpose: this must fail the step, because a variant whose
-            # distinguishing condition never started is a job reporting the other
-            # variant twice.
-            curl -fsS http://127.0.0.1:9090/health
           fi
+
+          assert_proxy before
           pytest -ra
-          if [ "$AMBIENT" = "proxy-up" ]; then
-            # And still listening AFTER the suite, so a stub that died midway
-            # cannot leave a green run that silently tested the wrong ambient.
-            curl -fsS http://127.0.0.1:9090/health
-          fi
+          # Re-asserted on the far side, because a listener that died mid-suite
+          # would otherwise leave a GREEN run that silently tested the other
+          # ambient — and a job cannot notice that it tested the wrong thing.
+          assert_proxy after
 
   package:
     name: package (build + install)
@@ -172,13 +255,14 @@ jobs:
 
       - name: Install the wheel in a clean environment
         run: |
-          python -m venv /tmp/smoke
-          /tmp/smoke/bin/pip install dist/*.whl
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP"/smoke/bin/pip install dist/*.whl
+
       - name: Smoke-test the console scripts
         run: |
-          /tmp/smoke/bin/aisquare --version
-          /tmp/smoke/bin/asq --version
-          /tmp/smoke/bin/aisquare --help
+          "$RUNNER_TEMP"/smoke/bin/aisquare --version
+          "$RUNNER_TEMP"/smoke/bin/asq --version
+          "$RUNNER_TEMP"/smoke/bin/aisquare --help
 
       # THE INSTALL LINE THE SETUP GUIDE ACTUALLY GIVES PEOPLE, which nothing
       # tested until now. It is a different environment from every other job
@@ -193,19 +277,31 @@ jobs:
       # hide behind an earlier green step.
       - name: Install the wheel WITH the explainability extra
         run: |
-          python -m venv /tmp/extra
-          /tmp/extra/bin/pip install "$(echo dist/*.whl)[explainability]"
+          python -m venv "$RUNNER_TEMP/extra"
+          # Exactly one wheel, asserted: `$(echo dist/*.whl)[explainability]`
+          # collapses two paths into ONE argument if dist/ ever holds a second
+          # wheel, and pip would then fail on a nonsense requirement rather than
+          # on the real problem.
+          wheels=(dist/*.whl)
+          [ "${#wheels[@]}" -eq 1 ] || { echo "expected one wheel, found ${wheels[*]}"; exit 1; }
+          # This resolves aisquare[explainability] from PyPI UNPINNED, on purpose:
+          # the SDK shares our top-level import name, so an SDK release that
+          # breaks the collision should turn CI red here rather than turn a
+          # developer's install red after a merge. The cost is a merge-time
+          # external dependency.
+          "$RUNNER_TEMP"/extra/bin/pip install "${wheels[0]}[explainability]"
+
       - name: Smoke-test the extra
         run: |
           # Survives the shared-__init__ collision, whichever distribution won it.
-          /tmp/extra/bin/aisquare --version
+          "$RUNNER_TEMP"/extra/bin/aisquare --version
           # The extra's whole job: the SDK importable in the CLI's environment.
-          /tmp/extra/bin/python -c "import aisquare.explainability, aisquare.cli.app"
+          "$RUNNER_TEMP"/extra/bin/python -c "import aisquare.explainability, aisquare.cli.app"
           # And the surface the guide sends people to. Six subcommands, asserted
           # by name — `--version` cannot distinguish a build with this
           # integration from one without it, which is exactly how a release
           # shipped that could not connect.
           for cmd in status enable disable register ship env; do
-            /tmp/extra/bin/aisquare explainability "$cmd" --help >/dev/null \
+            "$RUNNER_TEMP"/extra/bin/aisquare explainability "$cmd" --help >/dev/null \
               || { echo "explainability $cmd is missing"; exit 1; }
           done

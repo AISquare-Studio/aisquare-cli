@@ -13,18 +13,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the setup guide has all three. Three fixtures in this repo were green here and
   red for them, and the third was introduced while fixing the second, which is
   what moves this from "be careful" to "have a job".
-  - **Two variants, because the leaks need opposite proxy states.** Measured, not
-    assumed: with a configured home and the proxy DOWN the ambient-home leak
-    fires and the proxy-down-premise leak does not; with it UP it is the other
-    way round. One configuration would have covered half the class and looked
-    like it covered the class.
-  - The `proxy-up` variant **asserts its own premise** with an unredirected
-    `curl`. A stub that failed to bind would otherwise turn it into a silent
-    second `proxy-down` — the same shape as a fixture asserting a premise it
-    never established.
+  - **Two variants, because the leaks need opposite proxy states.** Measured in
+    CI, not assumed: with both regressions reintroduced on a throwaway branch,
+    `proxy-down` errored on the three `test_runbook_json_paths.py` tests and
+    `proxy-up` on `test_json_stdout_is_empty_or_parseable[proxy-down]` — disjoint,
+    neither catching the other's, while all three `check` variants stayed green.
+    One configuration would have covered half the class and looked like it
+    covered the class.
+  - **Both variants assert their own premise, on both sides of the suite**, using
+    `aisquare explainability status` rather than a `curl` at a literal port: it
+    probes whatever the config says, so it cannot drift from what the suite
+    reads, and it checks the `service`/`mode` contract rather than "something
+    answered 200". A variant whose distinguishing condition never held, or which
+    lost it midway, is a job reporting the other variant twice — so it fails
+    instead, before or after the suite, saying which.
+  - The ambient environment is declared once at **job** level: `AISQUARE_HOME`
+    plus the explainability variables `tests/conftest.py` goes out of its way to
+    clear, whose own comment notes an operator's shell has them sourced. A
+    per-step home could be dropped from the step that runs pytest, degrading the
+    job to `check` twice, green.
   - It reuses `tests/proxy_stub.py` rather than inlining a server: `probe_proxy`
     checks `service` and `mode`, so a stub is a contract, and the copy nobody
     runs locally is the one that drifts.
+  - Two of the three conditions above are reproduced, and the job says so: the
+    extra cannot be installed where the suite runs (it shadows an editable
+    checkout), so `package` covers that axis at import level instead.
 - **The packaging job installs the extra.** `pip install
   "aisquare-cli[explainability]"` is the line the setup guide gives people and
   nothing tested it. The SDK shares this package's top-level import name, so both
@@ -34,8 +47,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asserts both packages import and names the six `explainability` subcommands,
   because `--version` cannot distinguish a build that has this integration from
   one that does not.
-- `tests/test_ci_covers_the_ambient_environment.py` pins all of the above, and
-  every one of its six checks is verified to fail when its condition is removed.
+- `tests/test_ci_covers_the_ambient_environment.py` pins all of the above. Its
+  twelve checks assert the **order and placement** of things inside the job
+  rather than the presence of a string in the file, because an independent review
+  mutated the literal version and found five ways to make the job vacuous with
+  every guard green — drop the home from the step that matters, hardcode the
+  stub's port, delete either premise assertion, run pytest ahead of the listener,
+  or invert the variant condition so the two run under each other's names. All
+  twenty-one mutations now behave as intended: eighteen are caught, and the three
+  a maintainer would legitimately make — reordering the variants, adding a third,
+  rewriting the matrix in block style — no longer cause a false failure.
 
 
 ## [0.5.0] - 2026-08-27

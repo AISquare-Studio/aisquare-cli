@@ -1,15 +1,143 @@
-"""Shared fixtures: isolated home directory, fresh runtime state, CLI runner."""
+"""Shared fixtures: isolated home directory, fresh runtime state, CLI runner.
+
+Also the session-start check that this run is judging THIS tree — see
+``_foreign_package_reason``. It lives here rather than in a test file because a
+test only runs when it is selected, and the invocation that gets this wrong is
+the narrow one nobody selects it with.
+"""
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as metadata_version
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+import aisquare
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+
+
+def _foreign_package_reason(module_file: str | Path | None, src: Path) -> str | None:
+    """Why this run is not judging `src`, or None when it is.
+
+    With the src layout, a pytest from a sibling interpreter resolves
+    ``aisquare`` out of that interpreter's site-packages, so the suite grades a
+    stale snapshot while appearing to grade the checkout. Both directions of
+    that lie have now cost this project time: a false RED on 2026-08-07, when
+    tests for new code failed against an old install; and a false GREEN, when a
+    run against an installed copy passed and was reported as a gate.
+
+    Measured on 2026-08-17 at 8fafdd4, in a fresh worktree with no ``.venv``:
+    `PATH=$PWD/.venv/bin:$PATH` expands to a directory that does not exist, so
+    PATH falls through to the pyenv shim. The FULL suite still fails loudly —
+    17 collection errors, and `tests/test_packaging.py` asserts this same
+    property — but `pytest tests/test_config.py` reported **5 passed** against
+    the stale package, because that file does not select the guard. A subset run
+    is what everyone types while iterating, so that is the hole this closes.
+
+    ``module_file`` is ``aisquare.__file__``, which is ``None`` when the package
+    resolved as a PEP 420 NAMESPACE package rather than a real one. @9bbc8ed7
+    spotted that `Path(None)` raises, which in a session-start hook means pytest
+    dies with a raw TypeError traceback — the least explanatory failure in the
+    repo, produced by the one function whose whole job is to explain a failure.
+    They could not construct a route to it; it is constructible, and the route is
+    worth knowing. PEP 420 only forms a namespace package when NO regular
+    ``aisquare/__init__.py`` exists anywhere on ``sys.path``, so an editable
+    checkout can never reach it — the real package always wins, verified by
+    putting a bare ``aisquare/`` directory FIRST on the path and watching
+    ``__file__`` still resolve to ``src``. It takes no real package on the path
+    at all, plus a namespace tree supplying the two modules this file imports at
+    module level. Reproduced under ``python -S`` with exactly that: ``__file__``
+    is None, these imports succeed, and the hook raises.
+    """
+    if module_file is None:
+        return (
+            "aisquare has no __file__, which means it resolved as a namespace "
+            "package rather than a real one: there is no aisquare/__init__.py "
+            f"anywhere on sys.path, and something is supplying its submodules.\n"
+            f"This run cannot be grading {src}. Install the checkout — "
+            'python3 -m venv .venv && ./.venv/bin/python -m pip install -e ".[dev]" '
+            "— and check sys.path for a stray directory named aisquare."
+        )
+    resolved = Path(module_file).resolve()
+    if resolved.is_relative_to(src):
+        return None
+    return (
+        f"aisquare imported from {resolved}, not from {src}.\n"
+        "This run would grade an installed copy rather than this checkout, so "
+        "both a pass and a failure would be meaningless.\n"
+        "Fix: create the venv and install into it — python3 -m venv .venv && "
+        './.venv/bin/python -m pip install -e ".[dev]" — then run '
+        "PATH=$PWD/.venv/bin:$PATH make check.\n"
+        "Note that PATH=$PWD/.venv/bin:$PATH is NOT enough on its own: if "
+        ".venv does not exist yet, that prefix is a non-existent directory and "
+        "PATH falls through to whatever python comes next."
+    )
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Refuse to grade the wrong tree, before a single test runs.
+
+    The raw ``__file__`` is handed over unresolved on purpose: it can be None,
+    and the checker is where that is handled and tested. Resolving here would put
+    the one unguarded conversion outside everything that tests it.
+    """
+    reason = _foreign_package_reason(aisquare.__file__, SRC)
+    if reason is not None:
+        pytest.exit(reason, returncode=4)
+
+
+def _sdk_installed() -> bool:
+    """Whether the SDK distribution is present in THIS interpreter."""
+    try:
+        metadata_version("aisquare")
+    except PackageNotFoundError:
+        return False
+    return True
+
+
+_SDK_AT_START = _sdk_installed()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Refuse to end a run that installed something into its own interpreter.
+
+    ``sessionstart`` proves the run is grading this tree. Nothing proved it was
+    still grading it at the end, and it was not: ``doctor --fix --yes`` used to
+    reach ``pip install aisquare[explainability]``, three tests invoke that
+    command, and the SDK shares this package's import name. The install landed
+    in site-packages, which precedes the editable ``src`` on ``sys.path``, so
+    from that moment every subprocess got a CLI with no ``aisquare.cli`` — 15
+    failures, none of them in the test that caused it, and the venv stayed
+    broken after pytest exited.
+
+    Checked at the END rather than per-test because the mechanism is not
+    specific to pip or to that command: anything that writes a distribution
+    into ``sys.executable``'s environment invalidates the whole run, and the
+    honest report is "these results do not describe this tree" rather than one
+    unlucky test's traceback. Stated as a warning plus a non-zero status: the
+    per-test failures are already loud, and this is the sentence that explains
+    them.
+    """
+    if _sdk_installed() and not _SDK_AT_START:
+        session.exitstatus = max(exitstatus, 1)
+        print(
+            "\nFATAL: this run installed the 'aisquare' distribution into "
+            f"{sys.executable}.\n"
+            "It shares this package's import name, so every result after the "
+            "install graded a shadowed CLI, and this environment is now broken "
+            "for ordinary use.\n"
+            "Recover with: pip uninstall aisquare\n"
+            "Then find the caller — a test reaching a real install rather than "
+            "a patched one."
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +181,13 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        # An operator's shell has these sourced from their explainability env
+        # file; leaving them set would resolve THEIR gateway and key inside the
+        # suite, so "this target is unconfigured" would pass or fail depending
+        # on whose terminal ran it.
+        "AISQUARE_EXPLAINABILITY_TARGET",
+        "EXPLAINABILITY_GATEWAY_URL",
+        "EXPLAINABILITY_API_KEY",
     ):
         monkeypatch.delenv(knob, raising=False)
     return home

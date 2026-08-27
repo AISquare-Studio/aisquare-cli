@@ -22,6 +22,7 @@ branch is the gate:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
@@ -62,6 +63,12 @@ def lease_minutes() -> int:
     return value if value > 0 else DEFAULT_LEASE_MINUTES
 
 
+#: Relative hub values already reported, so a command that resolves the board
+#: from several call sites says it once rather than three times. Per process:
+#: the variable does not change under a running command.
+_WARNED_HUBS: set[str] = set()
+
+
 def team_project(cwd: Path | None = None) -> ProjectInfo:
     """The project this directory's team traffic belongs to.
 
@@ -72,6 +79,30 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
     regardless of which worktree a session sits in.
     """
     hub = os.environ.get("AISQUARE_TEAM_HUB", "").strip()
+    if hub and not Path(hub).expanduser().is_absolute():
+        # A RELATIVE hub inverts the feature. `Path('./').resolve()` is the
+        # process cwd, so "one board for sessions in several repositories"
+        # becomes "a different board per directory" — and it overrides even the
+        # `cwd` argument, so this function can be asked about one directory and
+        # answer about another. Nobody can mean that: "the board is wherever I
+        # am" is what NOT setting the variable does, and the two lines below do
+        # it correctly, worktrees included. So a relative value is always a
+        # mistake and ignoring it is safe.
+        #
+        # Loud, per this repo's fail-open doctrine — silence is how this
+        # survived thirty hours and cost two board incidents in one shift.
+        # stderr, so `--json` stdout stays machine-readable, and the exit code
+        # is untouched: a bad hub costs a warning, never a command.
+        if hub not in _WARNED_HUBS:
+            _WARNED_HUBS.add(hub)
+            print(
+                f"⚠ AISQUARE_TEAM_HUB={hub!r} is a RELATIVE path, so it resolves to "
+                "whatever directory each command runs in — the opposite of one shared "
+                "board. Ignoring it and resolving from the checkout instead; set an "
+                "absolute path to pin a hub.",
+                file=sys.stderr,
+            )
+        hub = ""
     if hub:
         root = Path(hub).expanduser().resolve()
         return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

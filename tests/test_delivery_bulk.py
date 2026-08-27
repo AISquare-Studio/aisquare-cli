@@ -30,6 +30,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from aisquare.core.paths import HOME_ENV_VAR
 
 WRITERS = 8
@@ -170,36 +172,49 @@ def _reader_loop(project: Path, env: dict[str, str], iterations: int) -> subproc
     )
 
 
-def _stdio_daemon_count() -> int:
-    """How many ``aisquare serve --stdio`` daemons are alive right now."""
-    if sys.platform == "win32":
-        # No pgrep; Win32_Process is the only place a full command line lives.
-        proc = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "@(Get-CimInstance Win32_Process | "
-                "Where-Object { $_.CommandLine -like '*aisquare serve --stdio*' }).Count",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-            check=False,
-        )
-    else:
-        proc = subprocess.run(
-            ["pgrep", "-fc", "aisquare serve --stdio"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    if proc.returncode != 0:
-        return 0
-    return int(proc.stdout.strip() or "0")
+class _ProbeUnavailable(RuntimeError):
+    """This platform cannot answer "whose daemon is that?"."""
+
+
+def _stdio_daemon_pids(home: Path) -> list[int]:
+    """PIDs of ``aisquare serve --stdio`` daemons belonging to ``home``.
+
+    The obvious version of this — ``pgrep -fc "aisquare serve --stdio"`` —
+    counts the wrong things, in two ways that both fired in practice:
+
+    1. It is MACHINE-GLOBAL. Another checkout running its own suite has its own
+       daemons, and they are not this test's business. With several sessions on
+       one box the count moves under you and the assertion fails for a reason
+       that has nothing to do with the code under test.
+    2. ``-f`` matches the whole command line as a STRING, so any process that
+       merely mentions the phrase matches — including the shell that runs the
+       probe. Measured: two matches with no daemon running at all.
+
+    So both questions are asked properly. Is it really a daemon: ``serve`` and
+    ``--stdio`` must appear as separate entries in argv, which a shell holding
+    the phrase as one argument can never satisfy. And is it OURS: the process
+    environment must carry this test's ``AISQUARE_HOME``.
+
+    Both answers come from ``/proc``, so this is Linux-only; the caller skips
+    rather than silently counting nothing, because an assertion that cannot
+    observe its subject is worse than one that is merely awkward.
+    """
+    if not Path("/proc").is_dir():
+        raise _ProbeUnavailable("/proc is required to tell our daemons from anyone else's")
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = [a for a in (entry / "cmdline").read_bytes().split(b"\0") if a]
+            if b"serve" not in argv or b"--stdio" not in argv:
+                continue
+            environ = (entry / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue  # the process exited between listdir and read; not ours to mourn
+        if f"{HOME_ENV_VAR}={home}".encode() in environ:
+            found.append(int(entry.name))
+    return found
 
 
 def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> None:
@@ -211,7 +226,10 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
     activated = _cli(["team", "on"], cwd=project, env=env)
     assert activated.returncode == 0, activated.stderr
 
-    daemons_before = _stdio_daemon_count()
+    try:
+        daemons_before = _stdio_daemon_pids(home)
+    except _ProbeUnavailable as exc:
+        pytest.skip(str(exc))
     started = time.monotonic()
     readers = [_reader_loop(project, env, iterations=20) for _ in range(READERS)]
     try:
@@ -270,8 +288,100 @@ def test_bulk_concurrent_writes_never_lose_a_confirmed_write(tmp_path: Path) -> 
             assert reviewed_ids.count(result.marker) == 1, result.marker
             assert status_by_id[result.marker] == "review"
 
-    # (c) the storm strands no stdio daemons.
-    assert _stdio_daemon_count() <= daemons_before
+    # (c) the storm strands no stdio daemons OF OURS. Scoped to this test's
+    # home, so a sibling checkout running its own suite cannot fail this.
+    assert _stdio_daemon_pids(home) == daemons_before
 
     # (d) bounded runtime — the whole point is that this stays in CI.
     assert elapsed < TIME_BOX_SECONDS, f"bulk run took {elapsed:.1f}s"
+
+
+# ── the probe itself ─────────────────────────────────────────────────────────
+#
+# A leak detector nobody trusts is worse than none: it costs a re-run to
+# dismiss, and it teaches the team to dismiss failures. So the probe is tested
+# from both ends — it must not see what is not ours, and it must still see a
+# real leak.
+#
+# Both ends are asserted against `/proc`, `/bin/sh` and `pgrep`, so they are
+# Linux-only — not by preference but by construction: telling OUR daemon from a
+# sibling checkout's needs each process's ENVIRONMENT, and Win32_Process does
+# not carry it (only the command line). The storm above skips its own leak
+# check the same way, via `_ProbeUnavailable`, so nothing silently asserts
+# against a probe that cannot see.
+
+_needs_proc = pytest.mark.skipif(not Path("/proc").is_dir(), reason="the daemon probe reads /proc")
+
+
+@_needs_proc
+def test_the_probe_ignores_a_shell_that_merely_mentions_the_daemon(tmp_path: Path) -> None:
+    """The self-match that made the old probe flaky, reproduced deliberately.
+
+    ``pgrep -f`` matches a command line as a string, so a shell holding the
+    phrase — a grep, a comment, this very test's own harness — counted as a
+    daemon. Requiring ``serve`` and ``--stdio`` as SEPARATE argv entries is
+    what makes that impossible: a shell carries the whole phrase as one
+    argument and can never satisfy it.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    # `sleep 30; :` rather than `sleep 30`, and the trailing no-op is the whole
+    # point. Given a script that is ONE command, dash execs it and the shell's
+    # own argv — the part carrying the phrase — is replaced: /proc/<pid>/cmdline
+    # reads `sleep 30`, `pgrep -f` cannot match it, and the decoy stops being a
+    # false positive, so this test fails while asserting its own setup. Whether
+    # it fails is a race between pgrep and the exec, which is why it passed on
+    # CI and not on a developer's box. A second command makes the optimisation
+    # illegal, so the shell survives holding its argv.
+    decoy = subprocess.Popen(
+        ["/bin/sh", "-c", "sleep 30; :  # aisquare serve --stdio"],
+        env={**os.environ, HOME_ENV_VAR: str(home)},
+    )
+    try:
+        # The old probe's own matcher would have found it; ours must not.
+        naive = subprocess.run(
+            ["pgrep", "-f", "aisquare serve --stdio"], capture_output=True, text=True
+        )
+        assert str(decoy.pid) in naive.stdout.split(), "the decoy must be a real false positive"
+
+        assert _stdio_daemon_pids(home) == [], "a shell is not a daemon"
+    finally:
+        decoy.kill()
+        decoy.wait(timeout=10)
+
+
+@_needs_proc
+def test_the_probe_still_catches_a_daemon_that_is_really_ours(tmp_path: Path) -> None:
+    """And it must still fail the storm if a daemon genuinely leaks.
+
+    A probe that can no longer detect the leak is worse than a flaky one — it
+    reports green forever. So this starts a REAL ``aisquare serve --stdio``
+    under this test's home and asserts the probe sees exactly it, then that it
+    stops seeing it once the daemon is gone.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _base_env(home)
+    daemon = subprocess.Popen(
+        [sys.executable, "-m", "aisquare", "serve", "--stdio"],
+        cwd=str(tmp_path),
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:  # no sleep-to-green: poll the fact itself
+            if _stdio_daemon_pids(home) == [daemon.pid]:
+                break
+        assert _stdio_daemon_pids(home) == [daemon.pid], "a real daemon of ours must be seen"
+
+        # …and it is scoped: another home does not see our daemon.
+        other = tmp_path / "someone-else"
+        other.mkdir()
+        assert _stdio_daemon_pids(other) == []
+    finally:
+        daemon.kill()
+        daemon.wait(timeout=10)
+    assert _stdio_daemon_pids(home) == [], "and it stops counting once the daemon is gone"

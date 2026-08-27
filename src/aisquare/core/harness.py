@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from aisquare.core import spawn
 from aisquare.core.paths import aisquare_home
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
@@ -322,9 +323,16 @@ def _probe_env() -> dict[str, str]:
     child, and the model-selection vars that would defeat the probe's whole
     purpose (they can silently redirect the alias) are stripped. Credentials
     and PATH are inherited — the probe has to authenticate as this account.
+
+    It must not inherit a tracing IDENTITY either. This starts a real
+    ``claude -p``, so a probe run from inside a traced session would post a
+    Run wearing that session's agent name — junk data attributed to a teammate
+    who never asked a question. Stripped here rather than left to the proxy's
+    junk-run suppression: the traffic is ours not to send in the first place.
     """
     keep = {"AISQUARE_HOME"}  # a relocated tree must stay relocated in the child
-    env = {k: v for k, v in os.environ.items() if k in keep or not k.startswith("AISQUARE_")}
+    ambient = spawn.untraced_env()
+    env = {k: v for k, v in ambient.items() if k in keep or not k.startswith("AISQUARE_")}
     for name in (
         "ANTHROPIC_MODEL",
         "CLAUDE_CODE_SUBAGENT_MODEL",

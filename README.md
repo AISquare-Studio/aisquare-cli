@@ -41,6 +41,13 @@ aisquare has **two halves, and they are independent**:
 
 If you only ever read Part 1, you are using aisquare correctly.
 
+**Optionally, on top of either:** send your sessions to an
+[AISquare Explainability](https://aisquare.studio) workspace, so every session
+becomes a Run you can read back — prompts, tool calls, tokens and cost, plus your
+own prompts and board events. Off unless you ask for it, and it never blocks a
+launch: if anything in the path is down the session starts untraced and says so.
+See **[Connecting your agents to Explainability](docs/connecting-your-agents-to-explainability.md)**.
+
 ---
 
 # Part 1 — Memory (start here)
@@ -370,22 +377,40 @@ Orchestration has no config files — a handful of env knobs:
 ### Several accounts, one team
 
 Running parallel Claude installs for separate rate limits? Connect each
-config dir once, then launch roles against them with `--account`:
+config dir once, then **bind** each seat to the environment it launches with:
 
 ```sh
 aisquare agents connect claude-code --config-dir ~/.claude-account1
 aisquare agents connect claude-code --config-dir ~/.claude-account2
 
-aisquare launch planner                              # your default account
-aisquare launch coder --account ~/.claude-account1
-aisquare launch coder --account ~/.claude-account2
+aisquare team bind coder1 \
+  --env CLAUDE_CONFIG_DIR='$HOME/.claude-account1' \
+  --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account1'
+aisquare team bind coder2 \
+  --env CLAUDE_CONFIG_DIR='$HOME/.claude-account2' \
+  --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account2'
+
+aisquare launch planner            # your default account
+aisquare launch coder1             # bound above — nothing to retype
+aisquare launch coder2
 ```
 
-`--account` sets `CLAUDE_CONFIG_DIR` for the launched session and fails
-loudly on a directory that doesn't exist — a typo would otherwise start a
-fresh, unauthenticated profile. Note that shell aliases (`alias
-claude1='CLAUDE_CONFIG_DIR=… claude'`) can **not** be passed to `--command`:
-aliases aren't executables, so target the config directory instead.
+A binding is a **launch profile**: a binary, a set of env vars and extra args,
+carried through verbatim. `~` and `$VAR` expand at launch, so one binding
+follows you across machines with different homes, and an undefined variable is
+left as written rather than blanked — a silently empty `CLAUDE_CONFIG_DIR`
+starts a fresh unauthenticated profile that reads as a login failure hours
+later instead of the typo it is.
+
+Set **both** variables. `CLAUDE_CONFIG_DIR` alone gives a session the right
+credentials and the *default* scratch directory, silently shared with every
+other account; it looks correctly isolated right up until two parallel sessions
+collide in temp.
+
+For a one-off, `aisquare launch <role> --env KEY=VALUE` merges over the
+binding per key. Shell aliases (`alias claude1='CLAUDE_CONFIG_DIR=… claude'`)
+can **not** be passed to `--command` — an alias is not an executable — but an
+alias is only env vars around a binary, which is exactly what `--env` sets.
 
 Each session records **which config dir it runs under**, and the board labels
 sessions with it once more than one account is in play:
@@ -460,12 +485,16 @@ aisquare
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness
+│                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
+│                               [--unset KEY] [--clear]
 ├── task            add · list · show · next [--role R] [--status S] [--claim]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
-├── launch <planner|coder|runner> [--account DIR] [--command CMD] [… agent args]
+├── launch <role> [--command CMD] [--env KEY=VALUE]… [… agent args]
+│                   role = planner|coder|runner, a numbered seat (coder1), or
+│                   any role you have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```

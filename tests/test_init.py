@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import credentials
 from aisquare.core.paths import config_path, credentials_path, db_path
 
 
@@ -63,9 +64,17 @@ def test_init_no_onboard(runner: CliRunner, work_dir: Path) -> None:
 
 
 def test_init_stores_api_key_and_notes_it(runner: CliRunner) -> None:
+    """Asserts the key is RETRIEVABLE, not the bytes it is stored in.
+
+    This asserted the file equalled the bare key, which pinned the format that
+    was the defect: `serve` keeps its bearer token in the same file, so a
+    whole-file bare write erased it and a JSON write erased this key. The
+    behaviour that matters to a caller is that the key comes back.
+    """
     result = runner.invoke(app, ["init", "--api-key", "sk-test-123"])
     assert result.exit_code == 0, result.output
-    assert credentials_path().read_text(encoding="utf-8") == "sk-test-123"
+    assert credentials.load_all()[credentials.API_KEY] == "sk-test-123"
+    assert credentials_path().exists()
     assert "Stored API key" in result.stdout
 
 

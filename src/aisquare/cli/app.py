@@ -6,7 +6,6 @@ from typing import Annotated
 
 import typer
 
-from aisquare import __version__
 from aisquare.cli import (
     agents,
     auth,
@@ -27,6 +26,7 @@ from aisquare.cli import (
 from aisquare.cli import config as config_cli
 from aisquare.cli.global_flags import GlobalFlagsGroup
 from aisquare.core.state import RuntimeState, set_state
+from aisquare.core.version import __version__
 
 app = typer.Typer(
     cls=GlobalFlagsGroup,
@@ -116,9 +116,11 @@ app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
 app.add_typer(hook.app, name="hook", hidden=True)
-# Hidden while explainability.enabled defaults to off; flips visible with the
-# tracing rollout (prod cutover), same pattern as the roadmap groups above.
-app.add_typer(explainability.app, name="explainability", hidden=True)
+# Visible: unlike the roadmap groups above, every leaf here does something on a
+# stock machine — `enable` is the one command that turns tracing on, and the
+# rest report or wire it. A surface an operator has to be told exists is not an
+# operator surface, and the cutover is done by a human reading --help.
+app.add_typer(explainability.app, name="explainability")
 
 
 def main() -> None:

@@ -36,6 +36,7 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any, cast
 
+from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
 from aisquare.core.store import is_locked_error
 from aisquare.models import TaskStatus, TeamSession
@@ -341,27 +342,19 @@ def recall(query: str) -> str:
 
 
 def serve_token() -> str:
-    """The static bearer token for HTTP serving (created on first use, 0600)."""
-    path = paths.credentials_path()
-    data: dict[str, Any] = {}
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except json.JSONDecodeError:
-            data = {}
-    token = data.get(_TOKEN_KEY)
+    """The static bearer token for HTTP serving, created on first use, owner-only."""
+    # Read-merge-write through the shared helper: this file also holds the API
+    # key that `init --api-key` stores, and reading a non-JSON file as "no data"
+    # is what silently discarded it.
+    token = credentials_store.load_all().get(_TOKEN_KEY)
     if not isinstance(token, str) or not token:
-        paths.ensure_home()
         token = secrets.token_urlsafe(32)
-        data[_TOKEN_KEY] = token
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        if not paths.restrict_to_owner(path):
+        _, restricted = credentials_store.store(**{_TOKEN_KEY: token})
+        if not restricted:
             # The token is the only thing standing in front of the HTTP
             # server, so an unrestricted file is worth a word on stderr.
             print(
-                f"warning: could not restrict {path} to your account — "
+                f"warning: could not restrict {paths.credentials_path()} to your account — "
                 "other users on this machine may be able to read the serve token.",
                 file=sys.stderr,
             )

@@ -17,18 +17,60 @@ from typing import Annotated, NoReturn
 
 import typer
 
-from aisquare.cli.common import fail, local_time
+from aisquare.cli.common import expected_config_write_errors, fail, local_time
 from aisquare.core import harness, orchestrator
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
-from aisquare.core.store import AmbiguousIdError, is_locked_error
+from aisquare.core.store import (
+    AmbiguousIdError,
+    StoreUnopenable,
+    damaged_data_message,
+    damaged_store_message,
+    damaged_store_recovery,
+    is_corrupt_error,
+    is_locked_error,
+)
 from aisquare.services import explainability as explainability_service
+from aisquare.services import explainability_ops
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
 app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no_args_is_help=True)
+
+#: Appended to a PRINTED spawn command so the session the human pastes starts
+#: on the very id its Run is keyed by. Expands to ``--session-id <uuid>`` when
+#: the ``explainability env`` eval in front of it minted one, and to NOTHING
+#: when that eval refused — which is the whole fail-open premise: an empty
+#: ``--session-id ''`` would be a broken launch, no flag at all is a normal
+#: one. Deliberately unquoted: the value is a UUID, so word splitting produces
+#: exactly the two words intended, and ``sh``/``bash``/``zsh`` agree on it.
+_SESSION_ID_SUBSTITUTION = (
+    f"${{{explainability_service.PIPELINE_ID_ENV_VAR}:+"
+    f"--session-id ${explainability_service.PIPELINE_ID_ENV_VAR}}}"
+)
+
+#: Clears the PREVIOUS paste's tracing out of this shell, and only ever the
+#: previous paste's.
+#:
+#: A terminal keeps what ``eval`` exported, so running a printed spawn command
+#: twice (the up-arrow flow, every time an agent exits) finds ANTHROPIC_* still
+#: set. ``wire_session`` then correctly refuses to clobber what looks like the
+#: user's own routing — and the second agent silently inherits the FIRST one's
+#: ``X-Pipeline-Id`` and merges into its Run. Observed, not theorised: two
+#: pastes, one Run.
+#:
+#: ``AISQUARE_PIPELINE_ID`` is the discriminator, because nothing but our own
+#: wiring sets it. Present ⇒ the ANTHROPIC_* beside it are ours to clear.
+#: Absent ⇒ they are the operator's real gateway and stay untouched, so the
+#: "not overriding your routing" guard keeps working exactly as before.
+_CLEAR_PREVIOUS_TRACE = (
+    f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
+    f"unset {explainability_service.PIPELINE_ID_ENV_VAR} "
+    f"{explainability_service.TRACE_AGENT_NAME_ENV_VAR} "
+    f"{' '.join(explainability_service.RESERVED_ENV_VARS)}; fi"
+)
 
 SessionRef = Annotated[
     str | None,
@@ -65,9 +107,29 @@ def _fail_team(exc: Exception, ref: str | None = None) -> NoReturn:
             error="store_locked",
             detail=str(exc),
         )
+    if isinstance(exc, StoreUnopenable):
+        # Legible since it was written, and a dead end until now: "context
+        # store error: file is not a database" named no file and no next step.
+        # Same sentence doctor prints, from one function.
+        fail(
+            damaged_store_message(exc),
+            error="store_unopenable",
+            hint=damaged_store_recovery(),
+            detail=str(exc),
+        )
+    if isinstance(exc, sqlite3.Error) and is_corrupt_error(exc):
+        # Reached when a SELECT finds the damage: the store opened, so the
+        # StoreUnopenable branch above never fires. Ordered AFTER is_locked_error
+        # so contention keeps its own answer.
+        fail(
+            damaged_data_message(exc),
+            error="store_damaged",
+            hint=damaged_store_recovery(),
+            detail=str(exc),
+        )
     if isinstance(exc, sqlite3.DatabaseError):
-        # NOT retryable (no such table, readonly, disk full, corruption):
-        # a distinct code, with the real cause preserved for --json callers.
+        # NOT retryable (no such table, readonly, disk full): a distinct code,
+        # with the real cause preserved for --json callers.
         fail(f"context store error: {exc}", error="store_error", detail=str(exc))
     if isinstance(exc, KeyError):
         missing = ref if ref is not None else str(exc)
@@ -358,7 +420,17 @@ def spawn(
         # eval mints a fresh id per run instead; if tracing is down at run
         # time, the substitution comes back empty with the reason on stderr
         # and the session starts untraced — the same fail-open as --exec.
-        command = f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
+        #
+        # That same eval also exports the id it minted, so the agent can be
+        # STARTED on it and its board row joins the Run (the correlation
+        # spine). The clear-out leads because what a previous paste exported
+        # outlives it — see _CLEAR_PREVIOUS_TRACE for the merge it prevents.
+        if explainability_service.accepts_session_id(binary.binary):
+            command = f"{command} {_SESSION_ID_SUBSTITUTION}"
+        command = (
+            f"{_CLEAR_PREVIOUS_TRACE}; "
+            f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
+        )
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -412,10 +484,56 @@ def spawn(
         env.update(launch_profile.env)
         if tracing is not None and tracing.enabled:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
-            # dead or wrong proxy costs the trace, never the spawn.
-            wiring = explainability_service.wire_session(tracing, role_name, base_env=env)
+            # dead or wrong proxy costs the trace, never the spawn. The id is
+            # planned from the args this spawn will really run with — a role
+            # whose profile already carries --session-id or --resume owns its
+            # own id and must not be handed a second one.
+            # Disown a parent's identity before wiring, for the reason spelled
+            # out in `aisquare launch`: a spawn from inside a traced session
+            # would otherwise inherit that session's Run, or be stood down and
+            # launch untraced. The operator's own gateway carries no marker,
+            # so it survives this untouched.
+            parent_run = explainability_service.disown_inherited_trace(env)
+            if parent_run:
+                typer.echo(
+                    f"explainability: spawned from a session traced as {parent_run} — "
+                    "this one takes its own identity",
+                    err=True,
+                )
+            identity = explainability_service.plan_session_identity(
+                binary.binary, launch_profile.args
+            )
+            # Same fail-open bar as `launch`: an unreadable target costs the
+            # overrides and the key — so the trace — and never the spawn.
+            # `resolve_target` is effectively total today; the guard is here so
+            # the two launch paths do not differ on a question a reader has to
+            # re-prove.
+            try:
+                effective = explainability_ops.effective_settings(tracing)
+                spawn_key = explainability_ops.resolve_target(tracing).api_key
+            except Exception as exc:
+                effective, spawn_key = tracing, None
+                typer.echo(f"explainability: target unreadable ({exc})", err=True)
+            wiring = explainability_service.wire_session(
+                effective,
+                role_name,
+                session_id=identity.session_id,
+                base_env=env,
+                api_key=spawn_key,
+            )
             env.update(wiring.env)
             typer.echo(f"explainability: {wiring.reason}", err=True)
+            if wiring.traced:
+                # Pinned only on a spawn that is really traced: an untraced one
+                # has no Run to join, so touching its argv would be risk with
+                # no correlation to show for it.
+                argv = [*argv, *identity.inject_args]
+                # Same marker `aisquare launch` sets: it tells a spawn command
+                # run from INSIDE this session that the ANTHROPIC_* it can see
+                # are ours to clear, not the operator's own gateway — and it
+                # is what the hook inside the agent reads to record the join.
+                env.update(explainability_service.trace_marker(wiring))
+
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)
@@ -555,7 +673,8 @@ def bind(
         _show_bindings()
         return
     if clear:
-        settings_service.clear_role_binding(role_name)
+        with expected_config_write_errors():
+            settings_service.clear_role_binding(role_name)
         bound = None
     else:
         if not any((agent_bin, env_pairs, extra_args, unset)):
@@ -563,13 +682,14 @@ def bind(
                 "nothing to bind — pass --bin, --env, --arg, --unset or --clear",
                 error="nothing_to_bind",
             )
-        bound = settings_service.bind_role(
-            role_name,
-            agent_bin=agent_bin,
-            env=_parse_env(env_pairs or []),
-            unset=unset or [],
-            args=extra_args or [],
-        )
+        with expected_config_write_errors():
+            bound = settings_service.bind_role(
+                role_name,
+                agent_bin=agent_bin,
+                env=_parse_env(env_pairs or []),
+                unset=unset or [],
+                args=extra_args or [],
+            )
     path = settings_service.config_path()
     if get_state().json_output:
         typer.echo(
@@ -621,6 +741,24 @@ def _show_bindings() -> None:
         console.print(f"{name:<12} {_describe(profiles[name]) or '(empty)'}", markup=False)
 
 
+def warn_board_scope(as_session: str | None) -> None:
+    """Say which board a cwd-resolved read answered for, when it may not be yours.
+
+    STDERR, always — a note on stdout would corrupt `--json` output that gets
+    piped into jq, which is exactly how these commands are used when someone is
+    debugging the thing this note exists for.
+
+    Silent when `--as` was given: that routes board resolution through the
+    session's own row (`log_events`, "exactly like attributed writes (#20)"),
+    so the answer is already anchored to something other than the directory.
+    """
+    if as_session is not None:
+        return
+    note = team_service.board_scope_note()
+    if note:
+        typer.echo(note, err=True)
+
+
 @app.command("log")
 def log(
     limit: Annotated[int, typer.Option("--limit", "-n", help="How many events to show.")] = 30,
@@ -664,6 +802,7 @@ def log(
         )
     except STORE_ERRORS as exc:
         _fail_team(exc, task or by or as_session)
+    warn_board_scope(as_session)
     if get_state().json_output:
         typer.echo(json.dumps([event.as_envelope().model_dump(mode="json") for event in events]))
         return
@@ -1002,6 +1141,7 @@ def board(
         project, sessions, tasks, events = team_service.board_data()
     except STORE_ERRORS as exc:
         _fail_team(exc)
+    warn_board_scope(None)
     if get_state().json_output:
         typer.echo(
             json.dumps(

@@ -737,17 +737,27 @@ def test_concurrent_first_opens_migrate_safely(work_dir: Path) -> None:
     for thread in threads:
         thread.join()
     # The invariant is SAFETY — no corruption, no half-applied schema, no
-    # non-transient error, and the race makes progress. A straggler that
-    # exhausts the (bounded, honest) retry budget because the whole box is
-    # starved is not a store defect: open_store promises a bounded wait then
-    # a clean locked error, never a lie. Observed once in ~50 full-suite runs
-    # with three agent sessions gating concurrently; every locked timeout is
-    # tolerated ONLY as a minority verdict — the schema asserts below run
-    # unconditionally and still demand a fully-migrated, intact database.
+    # non-transient error, and a store that is usable when the storm passes.
+    # A straggler that exhausts the (bounded, honest) retry budget because the
+    # whole box is starved is not a store defect: open_store promises a bounded
+    # wait then a clean locked error, never a lie.
+    #
+    # This DELIBERATELY no longer asserts that some opener won. That assertion
+    # counted this test's own threads and compared them against contention that
+    # is machine-wide: the retry budget is wall-clock, so on a box running
+    # several suites at once every opener can be descheduled past it while the
+    # lock itself was free. It made a claim about the MACHINE while reading as
+    # a claim about the STORE, and it fired on a database that was merely busy.
+    # "Wedged" is not something to infer from who lost the race — it is
+    # something to ask the store directly, below, once nothing is competing.
     timeouts = [e for e in errors if isinstance(e, sqlite3.OperationalError) and is_locked_error(e)]
     real_errors = [e for e in errors if e not in timeouts]
     assert real_errors == [], real_errors
-    assert len(timeouts) < len(threads), "every open timed out — wedged, not merely busy"
+
+    # The real question, and it is load-independent: is the store COMPLETE and
+    # USABLE now? A wedged store fails both of these — see
+    # test_a_wedged_store_still_fails_the_race_invariant, which holds the write
+    # lock for real and proves this pair still detects it.
     import sqlite3 as raw
 
     from aisquare.core import paths
@@ -758,6 +768,52 @@ def test_concurrent_first_opens_migrate_safely(work_dir: Path) -> None:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         conn.close()
+    # Not a retry of the race: one uncontended open, through the store's own
+    # path, asking the only question the race cannot answer for itself.
+    with store_session() as store:
+        store.entries("user")
+
+
+def test_a_wedged_store_still_fails_the_race_invariant(work_dir: Path) -> None:
+    """Prove the loosened race test can still detect the fault it guards.
+
+    Dropping "some opener won" is only safe if what remains catches a genuinely
+    wedged store. So wedge one for real — a second connection holding BEGIN
+    EXCLUSIVE on a fresh database, which is the shape that would leave a
+    half-applied schema behind — and assert that the checks the race test now
+    relies on both fail. A probe that can no longer see the fault is worse than
+    a flaky one, so this is asserted rather than reasoned about.
+    """
+    import sqlite3
+
+    from aisquare.core import paths
+    from aisquare.core.store import store_session
+
+    # Fail fast rather than sitting out the default budget; the store documents
+    # this knob for exactly this case.
+    monkey = pytest.MonkeyPatch()
+    monkey.setenv("AISQUARE_DB_BUSY_MS", "50")
+    try:
+        paths.ensure_home()
+        sqlite3.connect(str(paths.db_path())).close()
+        hog = sqlite3.connect(str(paths.db_path()))
+        hog.isolation_level = None
+        hog.execute("BEGIN EXCLUSIVE")
+        try:
+            with pytest.raises(sqlite3.OperationalError), store_session() as store:
+                store.entries("user")
+
+            reader = sqlite3.connect(str(paths.db_path()))
+            try:
+                with pytest.raises(sqlite3.OperationalError):
+                    reader.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                reader.close()
+        finally:
+            hog.execute("ROLLBACK")
+            hog.close()
+    finally:
+        monkey.undo()
 
 
 def test_concurrent_notifications_emit_one_attention_event(

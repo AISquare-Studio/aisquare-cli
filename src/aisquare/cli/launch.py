@@ -10,6 +10,12 @@ as if you had run the agent yourself.
 
 Anything after the role is forwarded untouched: ``aisquare launch coder
 --model opus`` runs ``claude --model opus``.
+
+One exception, and only when tracing is on AND actually succeeded: the launch
+appends ``--session-id <uuid>`` so the agent's session id, the board row and
+the gateway Run's ``X-Pipeline-Id`` are one key (see
+``services.explainability``). With tracing off — the default — the argv is
+byte-identical to what it always was.
 """
 
 from __future__ import annotations
@@ -20,12 +26,14 @@ import shutil
 from typing import Annotated
 
 import typer
+from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.services import explainability as explainability_service
+from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -69,22 +77,6 @@ def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     os.execve(binary, argv, env)
 
 
-def _forwarded_session_id(args: list[str]) -> str | None:
-    """The agent's own ``--session-id``, when the caller passed one.
-
-    Reusing it as the trace's pipeline id gives the board row and the
-    dashboard Run the same key. We only ever read the forwarded args — never
-    inject flags into them, because ``--command`` may name an agent that does
-    not speak claude's CLI.
-    """
-    for position, arg in enumerate(args):
-        if arg == "--session-id" and position + 1 < len(args):
-            return args[position + 1]
-        if arg.startswith("--session-id="):
-            return arg.split("=", 1)[1]
-    return None
-
-
 def launch(
     ctx: typer.Context,
     role: Annotated[
@@ -92,9 +84,15 @@ def launch(
         typer.Argument(help=f"Team role for this session: {', '.join(ROLES)}."),
     ],
     command: Annotated[
-        str,
-        typer.Option("--command", "-c", help="Agent command to launch.", metavar="CMD"),
-    ] = DEFAULT_AGENT,
+        str | None,
+        typer.Option(
+            "--command",
+            "-c",
+            help="Agent command to launch. Overrides the role's bound `bin`; "
+            f"defaults to that, then to `{DEFAULT_AGENT}`.",
+            metavar="CMD",
+        ),
+    ] = None,
     env_pairs: Annotated[
         list[str] | None,
         typer.Option(
@@ -112,9 +110,11 @@ def launch(
     an explicit opt-in for the repo. Extra arguments are passed to the agent.
 
     The role's bound profile (``aisquare team bind``) supplies its binary, env
-    and extra args; ``--env KEY=VALUE`` adds to or overrides that for one
-    launch. Parallel agent installs are reached through shell aliases, which
-    ``--command`` cannot resolve — aliases are not executables — so set the
+    and extra args. ``--command`` overrides the binary and ``--env KEY=VALUE``
+    adds to or overrides the environment, both for one launch only.
+
+    Parallel agent installs are usually reached through shell aliases, which
+    ``--command`` cannot resolve — an alias is not an executable — so bind the
     variables the alias sets and keep the ordinary binary.
     """
     if not _role_ok(role):
@@ -124,10 +124,19 @@ def launch(
             "bound with `aisquare team bind`",
             error="unknown_role",
         )
-    binary = shutil.which(command)
+    # Resolve WHICH executable on the same ladder `team spawn` uses, so a role
+    # bound to a wrapper launches on it here too. This used to read `--command`
+    # alone and ignore the binding entirely, which is worse than not supporting
+    # it: the docstring promised the profile supplied the binary, so `launch`
+    # silently started the DEFAULT agent under the right role name and exited 0.
+    resolution = harness.resolve_binary(role, override=command)
+    binary = shutil.which(resolution.binary)
     if binary is None:
+        # Name the candidate AND who chose it — a bare "not on your PATH" sends
+        # the reader hunting through flag, env and config to learn which won.
         fail(
-            f"{command!r} is not on your PATH — install it, or pass --command",
+            f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) "
+            "— install it, pass --command, or change the role's binding",
             error="agent_not_found",
         )
     # A role launch is the opt-in for this repo (same contract the hooks use),
@@ -136,6 +145,18 @@ def launch(
         project = team_service.activate()
     except TeamDisabledError as exc:
         fail(str(exc), error="team_disabled")
+    except Exception as exc:  # the board is an observer too: an unreadable
+        # context.db must cost the board ROW, never the launch — the same
+        # fail-open bar as the config read above and as a dead proxy below.
+        # Measured before this existed: a corrupt store raised
+        # sqlite3.DatabaseError straight through this call, the agent was never
+        # handed control, and the operator got a stack trace. "You turned team
+        # off" stays a refusal; "your database is damaged" must not be one.
+        project = None
+        stderr_console().print(
+            f"board: context.db unreadable ({exc}) — launching without a board row",
+            style="dim",
+        )
 
     env = {**os.environ, "AISQUARE_ROLE": role}
     # The role's bound spec plus this launch's overrides, carried verbatim.
@@ -150,7 +171,8 @@ def launch(
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
         stderr_console().print(
-            f"[dim]role bindings: config unreadable ({profile.notice}) — launching unbound[/dim]"
+            f"role bindings: config unreadable ({profile.notice}) — launching unbound",
+            style="dim",
         )
     env.update(profile.env)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
@@ -161,25 +183,107 @@ def launch(
         # proxy. `aisquare doctor` still reports the config error loudly.
         tracing = None
         stderr_console().print(
-            f"[dim]explainability: config unreadable ({exc}) — launching untraced[/dim]"
+            f"explainability: config unreadable ({exc}) — launching untraced",
+            style="dim",
         )
+    #: Appended to the agent's argv, and empty unless a trace actually happened.
+    pinned_id: list[str] = []
     if tracing is not None and tracing.enabled:
         # Fail-open by contract: wire_session returns an empty env delta (plus
         # the reason) rather than raising, so a dead or wrong proxy can only
         # ever cost the trace, never the launch. Disabled config skips even
         # this block — the default launch stays byte-identical.
+        # The EFFECTIVE binary, not the flag: post-#57 `command` is None unless
+        # the caller typed --command, and the role's binding decides what runs.
+        # Passing the flag here would hand `None` to os.path.basename (a crash,
+        # i.e. tracing costing a launch) and would ask "does claude accept
+        # --session-id?" about a role bound to a wrapper that does not.
+        # Agents spawn agents, and a traced parent's environment carries the
+        # wiring that traced it. Keeping it hands this child the PARENT's Run;
+        # standing down on it — what happened before this line existed —
+        # dropped every agent below the first off the trace entirely. So ours
+        # is disowned and the child wires its own. A gateway the operator set
+        # up has no marker beside it, is not ours, and still makes us stand
+        # down at the reserved-var guard exactly as before.
+        parent_run = explainability_service.disown_inherited_trace(env)
+        if parent_run:
+            stderr_console().print(
+                f"explainability: launched from a session traced as {parent_run} — "
+                "this one takes its own identity",
+                style="dim",
+            )
+        # The EFFECTIVE argument list, not just what this invocation typed.
+        # `argv` below is `[binary, *profile.args, *ctx.args, *pinned_id]`, so a
+        # role bound with `--session-id`, `--resume` or `--continue` via
+        # `team bind --arg` carries it here without appearing in `ctx.args`.
+        # Planning on `ctx.args` alone therefore read those launches as fresh:
+        # a bound `--session-id X` got a SECOND `--session-id` appended after
+        # it, and a bound `--continue`/`--resume` defeated the deliberate
+        # refusal to pin — the one this module's own comment calls "pure risk
+        # for no correlation", because guessing an id merges two agents onto one
+        # board row and one Run. `team spawn` already passes its profile args
+        # (cli/team.py), so this path was the asymmetric one.
+        identity = explainability_service.plan_session_identity(
+            resolution.binary, [*profile.args, *ctx.args]
+        )
+        # The ACTIVE target's overrides folded onto the settings the wiring
+        # reads. `explainability enable --target prod --proxy-url …` writes
+        # them per target, and wire_session only ever looks at the top level —
+        # so without this fold a launch silently uses the wrong proxy while
+        # reporting success, which is worse than config that is simply absent.
+        # `effective` folds the active target's overrides onto the settings the
+        # wiring reads; `api_key` is the key a HOSTED proxy authenticates on,
+        # resolved through that same target and never from a hardcoded variable.
+        # ONE guard for both, because they have one failure story: a broken
+        # target definition costs the overrides and the key — so the trace — and
+        # never the launch.
+        try:
+            effective = explainability_ops.effective_settings(tracing)
+            api_key = explainability_ops.resolve_target(tracing).api_key
+        except Exception as exc:
+            effective, api_key = tracing, None
+            stderr_console().print(
+                f"explainability: target unreadable ({exc}) — using the top-level "
+                "settings, untraced if that proxy needs a key",
+                style="dim",
+            )
         wiring = explainability_service.wire_session(
-            tracing,
+            effective,
             role,
-            session_id=_forwarded_session_id(ctx.args),
+            session_id=identity.session_id,
             base_env=env,
+            api_key=api_key,
         )
         env.update(wiring.env)
-        stderr_console().print(f"[dim]explainability: {wiring.reason}[/dim]")
-    argv = [command, *profile.args, *ctx.args]
+        stderr_console().print(f"explainability: {wiring.reason}", style="dim")
+        if wiring.traced:
+            # Only pin the id on a launch that is REALLY traced. An untraced
+            # launch has no Run to join, so touching its argv would be pure
+            # risk for no correlation — and it keeps the fallback identical to
+            # the launch the user would have got before any of this existed.
+            pinned_id = list(identity.inject_args)
+            # Marks the ANTHROPIC_* beside it as OURS rather than the
+            # operator's own gateway, which is what lets a spawn command run
+            # from inside this session clear them and take its own identity
+            # instead of silently inheriting this one's Run.
+            # Carried INTO the agent, because the hook that runs inside it is
+            # the only place that knows the board session id. That seam records
+            # the join for EVERY binary, wrapper or not — which is why nothing
+            # here needs to write one, and why an unpinnable launch still joins.
+            env.update(explainability_service.trace_marker(wiring))
+    argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
+    # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
+    # styles a single token instead of the whole line, and it interpolates a
+    # role name, a binary path and a project name. A Text carries its styling
+    # as structure, so the parser never sees the data at all.
     stderr_console().print(
-        f"Launching {command}{whose} as [bold]{role}[/bold] on the "
-        f"{project.root.name or project.id} board…"
+        Text.assemble(
+            f"Launching {resolution.binary}{whose} as ",
+            (role, "bold"),
+            f" on the {project.root.name or project.id} board…"
+            if project is not None
+            else " with no board row (context.db unreadable)…",
+        )
     )
     _exec(binary, argv, env)
 

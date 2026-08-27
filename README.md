@@ -41,6 +41,13 @@ aisquare has **two halves, and they are independent**:
 
 If you only ever read Part 1, you are using aisquare correctly.
 
+**Optionally, on top of either:** send your sessions to an
+[AISquare Explainability](https://aisquare.studio) workspace, so every session
+becomes a Run you can read back — prompts, tool calls, tokens and cost, plus your
+own prompts and board events. Off unless you ask for it, and it never blocks a
+launch: if anything in the path is down the session starts untraced and says so.
+See **[Connecting your agents to Explainability](docs/connecting-your-agents-to-explainability.md)**.
+
 ---
 
 # Part 1 — Memory (start here)

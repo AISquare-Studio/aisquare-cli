@@ -882,10 +882,37 @@ the junk-run behaviour returns silently as extra Runs in the dataset — but the
 `bb88bb5` checkout itself also self-reports `1.0.6`, so do not use the version
 string to decide; run the check below. (Measured block after it.)
 
+**A LOCAL PROXY IS USUALLY UNNECESSARY — read this before starting one.** A
+hosted proxy is deployed for both deployments and answers as `claude_code`:
+
+```
+https://explainability-api.aisquare.studio:9443/health        (prod)
+https://stg-explainability.api.aisquare.studio:9443/health    (staging)
+```
+
+Since 0.5.0 the CLI sends `X-AISquare-Key` alongside the identity headers, which
+is what a hosted proxy authenticates on. Pointing at one needs no local process:
+
+```bash
+aisquare explainability enable --target prod \
+  --proxy-url https://explainability-api.aisquare.studio:9443
+aisquare doctor --live | grep explainab      # proxy, gateway and ingest all ✓
+```
+
+Verified end to end on 2026-08-27: three real `claude` sessions traced through the
+hosted prod proxy with nothing listening on 9090.
+
+Start a **local** sidecar only when model traffic must not leave the machine, or
+when a self-hosted deployment has no proxy tier. The CLI does not manage that
+process — point it at one with `--proxy-url` and stop it where you started it:
+
 ```bash
 set -a; source /home/work/.config/aisquare/explainability-prod.env; set +a
 export AISQUARE_PROXY_PORT=9190
-python -m pip install 'aisquare>=1.1.0'
+# fastapi/uvicorn are NOT in the `explainability` extra — that carries the
+# tracing client, not a server. The SDK ships them only under `gateway`,
+# which is the full server image, so name them directly.
+python -m pip install 'aisquare>=1.1.0' 'fastapi>=0.111,<1.0' 'uvicorn>=0.30,<1.0'
 python -m aisquare.explainability.claude_proxy
 ```
 

@@ -102,6 +102,7 @@ REPO = Path(__file__).resolve().parents[1]
 # in it should be added here; the test that guards this list is below.
 DOCUMENTED = (
     "README.md",
+    "docs/connecting-your-agents-to-explainability.md",
     "docs/explainability-tracing-boundary.md",
     "docs/runbooks/explainability-prod-cutover.md",
     # Found by widening the staleness sweep past root-plus-`docs/`. The template
@@ -849,6 +850,7 @@ CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
     "README.md": (55, 5),
+    "docs/connecting-your-agents-to-explainability.md": (11, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
 }

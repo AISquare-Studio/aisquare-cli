@@ -473,12 +473,22 @@ def env(
     (``claude --session-id "$AISQUARE_PIPELINE_ID"``) and have its board row
     join the Run. Exported rather than printed as a comment because the
     output's only job is to be eval'd.
+
+    THIS OUTPUT NOW CONTAINS A CREDENTIAL. ``ANTHROPIC_CUSTOM_HEADERS`` carries
+    the workspace key when the active target resolves one, because that is what a
+    hosted proxy authenticates on. The output is meant to be piped into ``eval``,
+    not read aloud: it is not safe for scrollback, a screen-share or CI logs. It
+    is a write-scoped ingest key — it sends spans and reads nothing — which is
+    what makes printing it acceptable at all. A loopback proxy needs no key and
+    the header is omitted entirely there.
     """
+    settings = load_config().explainability
     wiring = wire_session(
-        ops.effective_settings(load_config().explainability, target_name),
+        ops.effective_settings(settings, target_name),
         role,
         session_id=session_id,
         base_env=dict(os.environ),
+        api_key=ops.resolve_target(settings, target_name).api_key,
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")

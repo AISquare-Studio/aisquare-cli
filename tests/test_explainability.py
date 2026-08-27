@@ -108,6 +108,102 @@ def test_wire_session_builds_the_identity_pair() -> None:
     assert wiring.agent_name == "aisquare-coder"
 
 
+def test_wire_session_sends_the_workspace_key_when_given_one() -> None:
+    """A HOSTED proxy authenticates on this header and IS the tenant for it.
+
+    Without it the CLI could only ever trace against a loopback sidecar — which
+    is the entire reason one had to be installed, started and kept alive. The
+    ~900-line lifecycle that managed that process was deleted once this header
+    existed.
+    """
+    key = "-".join(["not", "a", "real", "workspace", "key"])
+
+    headers = wire_session(_settings(), "coder", api_key=key, prober=_healthy).env[
+        "ANTHROPIC_CUSTOM_HEADERS"
+    ]
+
+    assert f"X-AISquare-Key: {key}" in headers
+    # The identity pair is still load-bearing: a key without them routes the Run
+    # to the proxy's default identity.
+    assert "X-Agent-Name: aisquare-coder" in headers
+    assert "X-Pipeline-Id: " in headers
+
+
+def test_a_loopback_proxy_still_traces_with_no_key_and_no_key_header() -> None:
+    """The local sidecar needs no key, so nothing here may start requiring one.
+
+    With ``AISQUARE_PROXY_INBOUND_KEYS`` unset the proxy skips its auth gate
+    entirely. Sending an EMPTY header instead of none would also be wrong — that
+    is a header a correct proxy has to decide what to do with.
+    """
+    wiring = wire_session(_settings(), "coder", api_key=None, prober=_healthy)
+
+    assert wiring.traced is True
+    headers = wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+    assert "X-AISquare-Key" not in headers
+    assert headers.count("\n") == 1, f"expected exactly the identity pair: {headers!r}"
+
+
+def test_a_hosted_proxy_without_a_key_refuses_rather_than_killing_the_session() -> None:
+    """THE failure this guards, and the probe cannot see it.
+
+    The SDK exempts ``/health`` from its auth gate, so a hosted proxy answers the
+    probe 200 with no key while denying every ``/v1/messages``. Wiring
+    ``ANTHROPIC_BASE_URL`` to it on the strength of that probe does not cost a
+    trace — it costs the SESSION, which is the one thing tracing may never do.
+
+    Reproduced against the real hosted URL before this existed: `traced=True`,
+    "traced as aisquare-coder", and no key header.
+    """
+    settings = _settings()
+    settings.proxy_url = "https://proxy.example:9443"
+
+    wiring = wire_session(settings, "coder", api_key=None, prober=_healthy)
+
+    assert wiring.traced is False, "wired a session that would 401 on every model call"
+    assert "no workspace key" in wiring.reason
+    assert wiring.env == {}, "left ANTHROPIC_BASE_URL pointing at a proxy that denies us"
+
+
+def test_a_hosted_proxy_with_a_key_traces() -> None:
+    """The positive control: the refusal above must not be unconditional."""
+    settings = _settings()
+    settings.proxy_url = "https://proxy.example:9443"
+
+    wiring = wire_session(settings, "coder", api_key="k", prober=_healthy)
+
+    assert wiring.traced is True
+    assert "X-AISquare-Key: k" in wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+
+
+def test_the_key_is_not_sent_in_cleartext_to_another_host() -> None:
+    """A credential on the wire, which this hop never carried before.
+
+    Before the key header existed nothing secret crossed CLI→proxy, so the URL
+    check had no reason to care about the scheme.
+    """
+    settings = _settings()
+    settings.proxy_url = "http://proxy.internal:9090"
+
+    wiring = wire_session(settings, "coder", api_key="k", prober=_healthy)
+
+    assert wiring.traced is False
+    assert "cleartext" in wiring.reason
+
+
+def test_a_key_with_a_newline_cannot_inject_a_header() -> None:
+    """The environment path does not sanitise what was exported.
+
+    `stored_api_key` strips its file; `environ.get(target.api_key_env)` hands
+    back whatever is there, and this format is newline-delimited.
+    """
+    trailing = wire_session(_settings(), "coder", api_key="k\n", prober=_healthy)
+    assert trailing.env["ANTHROPIC_CUSTOM_HEADERS"].endswith("X-AISquare-Key: k")
+
+    embedded = wire_session(_settings(), "coder", api_key="k\nX-Evil: 1", prober=_healthy)
+    assert "X-Evil" not in embedded.env["ANTHROPIC_CUSTOM_HEADERS"]
+
+
 def test_wire_session_keys_the_run_to_a_given_session_id() -> None:
     wiring = wire_session(_settings(), "planner", session_id="sess-42", prober=_healthy)
     assert wiring.pipeline_id == "sess-42"
@@ -375,14 +471,21 @@ def test_the_check_refuses_the_value_rather_than_repairing_it() -> None:
 
 def test_a_usable_base_url_still_traces_normally() -> None:
     """The guard must not become a new way to lose a trace. Shapes an operator
-    legitimately configures all still pass."""
-    for good in (
-        "http://127.0.0.1:9190",
-        "https://proxy.example.com",
-        "http://localhost:9190/",
-        "https://proxy.example.com:8443/base",
+    legitimately configures all still pass.
+
+    The non-loopback shapes now carry a key, because a hosted proxy without one
+    is refused deliberately — every model call would be denied, and the probe
+    cannot see it since the SDK exempts `/health` from its auth gate. That is a
+    behaviour change to this list, not a shape falling out of it: each URL below
+    still traces, it just has to be given the credential the topology requires.
+    """
+    for good, key in (
+        ("http://127.0.0.1:9190", None),
+        ("https://proxy.example.com", "k"),
+        ("http://localhost:9190/", None),
+        ("https://proxy.example.com:8443/base", "k"),
     ):
-        wiring = wire_session(_settings(proxy_url=good), "coder", prober=_healthy)
+        wiring = wire_session(_settings(proxy_url=good), "coder", api_key=key, prober=_healthy)
         assert wiring.traced is True, good
         assert wiring.env["ANTHROPIC_BASE_URL"] == good, good
 

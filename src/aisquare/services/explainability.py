@@ -369,6 +369,18 @@ def join_records(path: Path | None = None) -> list[dict[str, object]]:
     return records
 
 
+def _is_loopback(url: str) -> bool:
+    """Whether ``url`` names this machine.
+
+    The discriminator between the two proxy topologies. A loopback sidecar with
+    ``AISQUARE_PROXY_INBOUND_KEYS`` unset skips its auth gate entirely, so it
+    needs no workspace key; anything else is a hosted proxy that REQUIRES one and
+    denies every request without it.
+    """
+    host = (urlparse(url.strip()).hostname or "").lower()
+    return host in ("127.0.0.1", "localhost", "::1", "") or host.startswith("127.")
+
+
 def _usable_base_url(value: str) -> bool:
     """Whether ``value`` is something an agent can actually use as a base URL.
 
@@ -427,12 +439,48 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
     return ProxyProbe(True, "proxy healthy")
 
 
+def _custom_headers(agent_name: str, pipeline_id: str, api_key: str | None) -> str:
+    """The identity headers, plus the workspace key when the caller supplied one.
+
+    A LOOPBACK sidecar needs no key: with ``AISQUARE_PROXY_INBOUND_KEYS`` unset
+    the proxy skips its auth gate entirely. A HOSTED proxy REQUIRES it and is the
+    tenant — so without this header the CLI could only ever trace against a local
+    sidecar, which is the entire reason one had to be started.
+
+    ``api_key`` is PASSED IN, never resolved here. Resolving it locally means
+    ``resolve_api_key()``, which is env-first over a hardcoded
+    ``EXPLAINABILITY_API_KEY`` — correct only when the active target names that
+    variable, and the source of the incident where a staging key reached a prod
+    gateway. The caller has the target-aware answer; this only formats it.
+
+    Enforced, not merely asked for: the AST guard in
+    ``tests/test_one_key_resolver.py`` fails if any function outside its allow
+    list resolves a key, and it caught the first version of this one doing
+    exactly that. No second guard here — that one already covers this module.
+
+    Omitted rather than sent empty when there is no key, so the loopback case is
+    byte-identical to before.
+    """
+    pairs = [f"X-Agent-Name: {agent_name}", f"X-Pipeline-Id: {pipeline_id}"]
+    # Stripped because this format is newline-delimited and the environment path
+    # does not sanitise: `stored_api_key` strips its file, but
+    # `environ.get(target.api_key_env)` hands back whatever was exported, and a
+    # trailing newline there would append a header nobody wrote. Operator-owned
+    # input, so not an attack — but this is the function that turns config into
+    # headers, and it is one call.
+    key = (api_key or "").strip()
+    if key and "\n" not in key and "\r" not in key:
+        pairs.append(f"X-AISquare-Key: {key}")
+    return "\n".join(pairs)
+
+
 def wire_session(
     settings: ExplainabilitySettings,
     role: str,
     *,
     session_id: str | None = None,
     base_env: dict[str, str] | None = None,
+    api_key: str | None = None,
     prober: Callable[[str], ProxyProbe] | None = None,
 ) -> SessionWiring:
     """Build the env delta that traces one session, or explain why not.
@@ -441,6 +489,11 @@ def wire_session(
     agent session id so board rows and dashboard Runs share a key; otherwise a
     fresh UUID keeps concurrent sessions from merging into one Run. ``base_env``
     is consulted (never mutated) for vars the user already owns.
+
+    ``api_key`` is the ACTIVE TARGET's resolved workspace key, or None. Supplied
+    by the caller because only the caller knows which variable the target names;
+    it becomes the ``X-AISquare-Key`` header a hosted proxy authenticates on, and
+    is omitted entirely when absent so a loopback sidecar is unaffected.
 
     ``prober`` resolves HERE rather than as a default argument. A default binds
     the function object at def time, so patching ``probe_proxy`` on this module
@@ -516,15 +569,51 @@ def wire_session(
     if not verdict.healthy:
         return SessionWiring(traced=False, reason=f"{verdict.reason} — launching untraced")
 
+    # A HOSTED proxy with no key is a DEAD SESSION, not a lost trace, and the
+    # probe cannot see it: the SDK exempts /health, /ready and /metrics from its
+    # auth gate, so `/health` answers 200 with no key while every
+    # `/v1/messages` is denied. Wiring ANTHROPIC_BASE_URL to it anyway is exactly
+    # the failure `_usable_base_url` exists to prevent, arriving by a different
+    # route — and the fail-open doctrine says tracing may cost a trace and never
+    # a launch.
+    #
+    # Loopback is unaffected: that proxy needs no key, so this cannot make a
+    # working local setup refuse.
+    # A key over plaintext to another host is a credential on the wire. Before
+    # this header existed nothing secret crossed that hop, so the URL check had
+    # no reason to care about the scheme; now it does. Loopback over http is
+    # fine — it does not leave the machine, and it is the documented local shape.
+    if (
+        api_key
+        and not _is_loopback(settings.proxy_url)
+        and urlparse(settings.proxy_url).scheme != "https"
+    ):
+        return SessionWiring(
+            traced=False,
+            reason=(
+                f"{settings.proxy_url} is not https and not local, so the workspace key "
+                "would cross the network in cleartext — launching untraced. Use https, or "
+                "point at a local proxy"
+            ),
+        )
+
+    if not api_key and not _is_loopback(settings.proxy_url):
+        return SessionWiring(
+            traced=False,
+            reason=(
+                f"{settings.proxy_url} is not a local proxy and no workspace key resolved, "
+                "so every model call would be denied — launching untraced. Set the key: "
+                f"export {KEY_ENV_VAR}=… or write {key_path()}"
+            ),
+        )
+
     pipeline_id = session_id or str(uuid.uuid4())
     return SessionWiring(
         traced=True,
         reason=f"traced as {agent_name} (pipeline {pipeline_id})",
         env={
             "ANTHROPIC_BASE_URL": settings.proxy_url,
-            "ANTHROPIC_CUSTOM_HEADERS": (
-                f"X-Agent-Name: {agent_name}\nX-Pipeline-Id: {pipeline_id}"
-            ),
+            "ANTHROPIC_CUSTOM_HEADERS": _custom_headers(agent_name, pipeline_id, api_key),
         },
         agent_name=agent_name,
         pipeline_id=pipeline_id,

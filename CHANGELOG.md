@@ -6,6 +6,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-27
+
+First release carrying the explainability integration. 0.4.0rc2 shipped from
+`main` before any of it landed, so this is the first version a developer can
+`pip install` and connect.
+
+**The CLI sends `X-AISquare-Key`, so a hosted proxy works and no local one is
+needed.** Session wiring emitted `X-Agent-Name` and `X-Pipeline-Id` and never the
+workspace key — which a hosted proxy authenticates on and *is* the tenant for. So
+tracing could only ever reach a loopback sidecar, and every developer had to
+install the SDK, start a process, and keep it alive across reboots.
+
+A hosted proxy is already deployed for both deployments
+(`explainability-api.aisquare.studio:9443`, and the `stg-` equivalent). Pointing
+at one is now a flag — `enable --proxy-url
+https://explainability-api.aisquare.studio:9443`.
+
+Verified end to end against production: three real `claude` sessions traced
+through the hosted prod proxy with nothing listening on 9090, a board note
+shipped through the client lane, and `doctor --live` green on proxy, gateway and
+ingest.
+
+The key is resolved through the ACTIVE TARGET and passed into `wire_session`,
+never resolved inside it. Resolving locally means `resolve_api_key()`, which is
+env-first over a hardcoded `EXPLAINABILITY_API_KEY` — correct only when the
+target names that variable, and the source of the incident where a staging key
+reached a prod gateway. `tests/test_one_key_resolver.py`'s AST guard caught the
+first attempt doing exactly that.
+
+**Where the key ends up is a deliberate trade, recorded here rather than left to
+be discovered.** The header is exported into the launched agent's environment, so
+the agent and every subprocess, MCP server and tool it starts can read it, and
+`explainability env` prints it because its output exists to be `eval`'d. It is a
+write-scoped ingest credential — it sends spans and reads nothing — which is what
+makes that acceptable. Three things bound it: the proxy strips the header before
+forwarding upstream, `spawn.TRACING_ENV_VARS` already keeps it out of aisquare's
+own subprocesses, and a non-loopback proxy without `https` is refused rather than
+traced. A local proxy needs no key at all.
+
+Onboarding drops from eleven steps to ten, and daily use to `aisquare launch`.
+A local sidecar is still fully supported — `--proxy-url http://127.0.0.1:9090`,
+which needs no code — for model traffic that must not leave the machine, or a
+self-hosted deployment with no proxy tier.
+
 ### Added
 - **`docs/planner-findings-loop.md` — the find→fix loop, and the one thing
   that blocks it.** The write half is done: a traced session opens a Run keyed
@@ -104,6 +148,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compares the two views so one cannot quietly gain a field the other lacks.
 
 ### Fixed
+- **Two test fixtures read the developer's real machine, and a running proxy
+  broke both.** `test_json_stdout_is_machine_readable`'s proxy-down state
+  asserted its own premise against the *configured* proxy URL — which is 9090,
+  the port its own docstring says to avoid because it is "somebody else's
+  long-running proxy". It now points that state at a privileged port nothing can
+  be listening on. Both leaks were invisible on CI and fire on any machine that
+  has followed the onboarding runbook, which is now a single command.
+- **`tests/test_runbook_json_paths.py` read the developer's real
+  `~/.aisquare`.** Its payload fixture was module-scoped, which runs outside the
+  function-scoped `isolated_home` isolation, so it sampled whatever the machine
+  happened to hold while its docstring claimed "a machine with nothing
+  configured". Cold on CI, which is why it stayed green — and on a machine that
+  had followed the onboarding runbook, a stopped proxy made `status` exit 1 and
+  errored three tests that have nothing to do with proxies.
 - **`doctor --fix` could brick the checkout it was run in — including the test
   suite's own interpreter.** The entry below documents that hazard and warns
   about it; `apply_fixes` then went ahead and performed exactly that install,
@@ -717,7 +775,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
 [0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
 [0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1
 [0.2.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.1.0...v0.2.0

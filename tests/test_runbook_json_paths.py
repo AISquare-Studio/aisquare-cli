@@ -60,13 +60,22 @@ def runbook() -> str:
     return RUNBOOK.read_text(encoding="utf-8")
 
 
-@pytest.fixture(scope="module")
-def payload() -> dict[str, object]:
+@pytest.fixture
+def payload(isolated_home: Path) -> dict[str, object]:
     """The real payload, from the CLI, on a machine with nothing configured.
 
     Cold is the right state to assert against: the runbook's reader runs these
     commands *while* configuring, so a key that only appears once shipping is on
     is not a key they can script against.
+
+    ``isolated_home`` ESTABLISHES that premise rather than assuming it, and the
+    scope changed from ``module`` to function to get it. Module scope runs outside
+    the function-scoped autouse isolation, so this fixture read the developer's
+    REAL ``~/.aisquare`` — cold on CI, which is why it stayed green, and
+    configured on the machine of anyone who had followed the onboarding runbook.
+    Their proxy being down then made `status` exit 1 and errored three tests that
+    have nothing to do with proxies. The fixture asserted a cold machine in its
+    docstring and sampled whatever the developer happened to have.
     """
     result = CliRunner().invoke(app, ["--json", "explainability", "status"])
     assert result.exit_code == 0, result.output

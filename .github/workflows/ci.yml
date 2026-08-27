@@ -242,6 +242,11 @@ jobs:
                 exit 1
               fi
             fi
+            # Says so out loud, on success, twice per run. The premise checks are
+            # otherwise silent, and "did this variant test the ambient its name
+            # claims?" is precisely the question this job exists to make
+            # answerable — from the log, without re-deriving it.
+            echo "ambient premise holds: $AMBIENT, port $port, $1 the suite"
           }
 
           if [ "$AMBIENT" = "proxy-up" ]; then

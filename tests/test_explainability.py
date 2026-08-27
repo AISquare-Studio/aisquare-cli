@@ -108,6 +108,73 @@ def test_wire_session_builds_the_identity_pair() -> None:
     assert wiring.agent_name == "aisquare-coder"
 
 
+def test_wire_session_sends_the_workspace_key_when_given_one() -> None:
+    """A HOSTED proxy authenticates on this header and IS the tenant for it.
+
+    Without it the CLI could only ever trace against a loopback sidecar — which
+    is the entire reason one had to be installed, started and kept alive. The
+    ~900-line lifecycle that managed that process was deleted once this header
+    existed.
+    """
+    key = "-".join(["not", "a", "real", "workspace", "key"])
+
+    headers = wire_session(_settings(), "coder", api_key=key, prober=_healthy).env[
+        "ANTHROPIC_CUSTOM_HEADERS"
+    ]
+
+    assert f"X-AISquare-Key: {key}" in headers
+    # The identity pair is still load-bearing: a key without them routes the Run
+    # to the proxy's default identity.
+    assert "X-Agent-Name: aisquare-coder" in headers
+    assert "X-Pipeline-Id: " in headers
+
+
+def test_wire_session_omits_the_key_header_entirely_without_one() -> None:
+    """The loopback case has to stay byte-identical to before this existed.
+
+    A sidecar with `AISQUARE_PROXY_INBOUND_KEYS` unset skips its auth gate, so a
+    key is not merely unnecessary there — sending an EMPTY one would be a header
+    a correct proxy has to decide what to do with.
+    """
+    headers = wire_session(_settings(), "coder", api_key=None, prober=_healthy).env[
+        "ANTHROPIC_CUSTOM_HEADERS"
+    ]
+
+    assert "X-AISquare-Key" not in headers
+    assert headers.count("\n") == 1, f"expected exactly the identity pair: {headers!r}"
+
+
+def test_the_key_is_never_resolved_inside_the_header_builder() -> None:
+    """It is PASSED IN, and that is a correctness property rather than a style.
+
+    The first version of this called `resolve_api_key()`, which is env-first over
+    a hardcoded `EXPLAINABILITY_API_KEY` — right only when the active target names
+    that variable, and the source of the incident where a staging key reached a
+    prod gateway. Only the caller has the target-aware answer.
+
+    `tests/test_one_key_resolver.py`'s AST guard is what caught it; this states
+    the same rule where someone editing this function will read it.
+    """
+    import ast
+    import inspect
+
+    from aisquare.services import explainability as service
+
+    tree = ast.parse(inspect.getsource(service._custom_headers).strip())
+    # CALLS, not text: the docstring names both resolvers on purpose, to explain
+    # why they must not be called. A substring check would flag the explanation.
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert not called & {"resolve_api_key", "stored_api_key"}, (
+        f"the header builder resolves a key itself ({called}) — it must take the "
+        "target-aware answer from its caller"
+    )
+
+
 def test_wire_session_keys_the_run_to_a_given_session_id() -> None:
     wiring = wire_session(_settings(), "planner", session_id="sess-42", prober=_healthy)
     assert wiring.pipeline_id == "sess-42"

@@ -105,6 +105,32 @@ def test_the_proxy_up_variant_asserts_its_own_premise(workflow: str) -> None:
     )
 
 
+def test_the_listener_starts_in_the_same_step_as_the_suite(workflow: str) -> None:
+    """A `&` background process does not survive its own step.
+
+    GitHub kills a step's process group when the step ends, so starting the stub
+    in an "occupy the port" step left the port FREE during pytest — `proxy-up`
+    silently became a second `proxy-down`.
+
+    PROVEN IN CI, not reasoned about: with both regressions reintroduced, the two
+    variants failed IDENTICALLY on the same commit, which is only possible if
+    they ran the same ambient state. That is the exact failure this file's other
+    guard warns about, committed anyway, and caught by running the proof instead
+    of trusting the local measurement.
+
+    So the stub start and the suite have to share one shell.
+    """
+    blocks = workflow.split("- name:")
+    suite = [b for b in blocks if "pytest -ra" in b]
+
+    assert suite, "no step runs the suite any more"
+    assert any("tests.proxy_stub" in block for block in suite), (
+        "the proxy stub is started in a different step from `pytest`, so it is "
+        "killed before the suite runs and proxy-up tests the same state as "
+        "proxy-down"
+    )
+
+
 def test_the_workflow_reuses_the_test_suites_proxy_stub(workflow: str) -> None:
     """`probe_proxy` checks `service` and `mode`, so a stub is a CONTRACT.
 

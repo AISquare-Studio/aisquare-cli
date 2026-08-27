@@ -116,27 +116,43 @@ jobs:
           printf '%s' 'not-a-real-ci-key' > "$AISQUARE_HOME/explainability-key"
           chmod 600 "$AISQUARE_HOME/explainability-key"
 
-      - name: Occupy the configured proxy port
-        if: matrix.ambient == 'proxy-up'
-        run: |
-          # `tests/proxy_stub.py`, not an inline server: `probe_proxy` checks the
-          # `service` and `mode` fields, so a hand-rolled stub in this file would
-          # be a second copy of a contract that has to match — and the copy
-          # nobody runs locally is the one that drifts.
-          python -m tests.proxy_stub 9090 &
-          for _ in $(seq 1 40); do
-            curl -fsS http://127.0.0.1:9090/health >/dev/null 2>&1 && break
-            sleep 0.25
-          done
-          # Assert the premise rather than assuming it: a variant whose
-          # distinguishing condition silently failed to start is a job that
-          # reports the other variant twice.
-          curl -fsS http://127.0.0.1:9090/health
-
+      # ONE STEP, and the reason is measured. A `&` background process started in
+      # its own step is killed when that step's process group ends, so a
+      # separate "occupy the port" step left the port FREE during pytest —
+      # proxy-up silently became a second proxy-down. Proven in CI before this
+      # was fixed: both variants failed identically on the same commit, which is
+      # precisely the "variant that reports the other variant twice" failure the
+      # comment below warns about. Starting the listener and running the suite in
+      # one shell is what keeps them in the same process group.
       - name: Test (pytest)
         env:
           AISQUARE_HOME: ${{ runner.temp }}/aisquare-home
-        run: pytest -ra
+          AMBIENT: ${{ matrix.ambient }}
+        run: |
+          if [ "$AMBIENT" = "proxy-up" ]; then
+            # `tests/proxy_stub.py`, not an inline server: `probe_proxy` checks
+            # the `service` and `mode` fields, so a hand-rolled stub in this file
+            # would be a second copy of a contract that has to match — and the
+            # copy nobody runs locally is the one that drifts.
+            python -m tests.proxy_stub 9090 &
+            stub=$!
+            trap 'kill "$stub" 2>/dev/null || true' EXIT
+            for _ in $(seq 1 40); do
+              curl -fsS http://127.0.0.1:9090/health >/dev/null 2>&1 && break
+              sleep 0.25
+            done
+            # Assert the premise rather than assuming it. Unredirected on
+            # purpose: this must fail the step, because a variant whose
+            # distinguishing condition never started is a job reporting the other
+            # variant twice.
+            curl -fsS http://127.0.0.1:9090/health
+          fi
+          pytest -ra
+          if [ "$AMBIENT" = "proxy-up" ]; then
+            # And still listening AFTER the suite, so a stub that died midway
+            # cannot leave a green run that silently tested the wrong ambient.
+            curl -fsS http://127.0.0.1:9090/health
+          fi
 
   package:
     name: package (build + install)

@@ -34,6 +34,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The single credentials writer reports whether the restriction actually
   landed, so `init` and `serve` say so explicitly when it did not, rather than
   implying a protection that is not there. POSIX behaviour is unchanged.
+- **A config write no longer fails because someone was reading the file.**
+  `os.replace` is atomic on POSIX and a concurrent reader keeps its own inode;
+  on NTFS `MoveFileEx` refuses to replace a file that ANY other handle has
+  open, including one opened purely for reading, and for the width of that
+  rename the reader takes an `Access is denied` of its own. Both directions
+  were measured under a read/write storm. The reader half was the more
+  expensive: `cli/launch.py` treats an unreadable config as "launch untraced"
+  by design, so a config write racing a launch silently cost tracing with
+  nothing raised anywhere to say so. Both sides now retry through one bounded
+  helper (~1.1s, then the original error unchanged). The two paths report
+  contention DIFFERENTLY — `os.replace` sets `winerror` 5/32, `Path.open`
+  goes through the C runtime and sets `errno` 13 with `winerror` **None** —
+  and matching only the obvious one covered just the writer.
+- **The explainability workspace key is restricted on Windows too.** The third
+  secret file to have this bug and the first that landed after the fix for the
+  other two: `store_api_key` used `chmod(0o600)`, which is the whole story on
+  POSIX and nothing on NTFS, leaving the key readable by every other account
+  on the machine. Now through `paths.restrict_to_owner` like the credentials
+  file and the serve token, and it says so when the restriction cannot be
+  applied.
+- **The spawn-seam registry is no longer separator-dependent.** `core.spawn.SEAMS`
+  is keyed by `<path>::<function>` with forward slashes; the guard built its
+  keys with `str(Path)`, so on Windows every call site read as undecided AND
+  every ruling read as stale, against a registry that was entirely correct.
+
 
 ### Changed
 
@@ -45,20 +70,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gbrain fake is now reachable through `PATHEXT`, the #20 bulk-delivery storm
   and both printed-command shell tests are ported instead of skipped, test
   file reads no longer go through the locale codec, and the #56 tilde test
-  sets the variable `expanduser` actually reads on each platform. Every test
-  this branch touches is green on Windows.
+  sets the variable `expanduser` actually reads on each platform.
 
-  Two skips remain, and both are structural rather than deferred work: the
-  stdio-daemon leak probe needs each process's ENVIRONMENT to tell our
-  daemons from a sibling checkout's, and `Win32_Process` carries only the
-  command line — so the probe and its two self-tests are `/proc`-only, and
-  say so rather than asserting against a probe that cannot see.
+  Merging 0.5.0 brought ~130 test files that no Windows runner had ever
+  executed, and 26 of them were red. They are ported here rather than left for
+  later, because a lane that is red on arrival is a lane nobody reads. The
+  recurring shape is a POSIX idiom used as a test PREMISE that silently stops
+  being one on Windows — which does not fail the test, it makes it pass for
+  the wrong reason. `tests/fsperms.py` now owns the two that recur, and
+  verifies its own effect rather than trusting the syscall's return:
+  `os.chmod(dir, 0o500)` denies nothing on Windows (and nothing under root
+  either), and creating a symlink needs a privilege the CI runner holds and a
+  developer account does not.
 
-  The explainability work that landed on `main` in 0.5.0 arrived with ~130
-  new test files that no Windows runner ever executed; 26 of them assume
-  POSIX (symlink creation, `/proc/self/mountinfo`, hardcoded `/repo`-style
-  paths, mode-bit permissions). They are untouched here and still red on the
-  Windows leg. Porting them is its own change, not a merge resolution.
+  Three skips remain, all structural rather than deferred. The stdio-daemon
+  leak probe needs each process's ENVIRONMENT to tell our daemons from a
+  sibling checkout's and `Win32_Process` carries only the command line, so it
+  and its two self-tests are `/proc`-only. Mount-table matching needs POSIX
+  path semantics, and Windows has no mount table — the Windows answer
+  (`None`, through the existing fail-open) is asserted separately so the
+  behaviour is pinned rather than merely skipped.
 
 ## [0.5.0] - 2026-08-27
 

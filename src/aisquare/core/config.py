@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
+import time
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import uuid4
 
 import tomli_w
@@ -18,6 +21,8 @@ from pydantic import BaseModel, Field
 
 from aisquare.core import paths
 from aisquare.models import Pool, RedactionLevel
+
+_T = TypeVar("_T")
 
 
 class CaptureSettings(BaseModel):
@@ -213,9 +218,92 @@ def load_config(path: Path | None = None) -> AppConfig:
     target = path or paths.config_path()
     if not target.exists():
         return AppConfig()
-    with target.open("rb") as fh:
-        data: dict[str, Any] = tomllib.load(fh)
+
+    def _read() -> dict[str, Any]:
+        with target.open("rb") as fh:
+            loaded: dict[str, Any] = tomllib.load(fh)
+            return loaded
+
+    data = _despite_windows_contention(_read)
     return AppConfig.model_validate(data)
+
+
+#: Windows error codes meaning "someone else has this file open right now":
+#: ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION.
+_WINDOWS_BUSY = frozenset({5, 32})
+
+
+def _is_contention(exc: PermissionError) -> bool:
+    """Whether ``exc`` is Windows saying "busy" rather than "you may not".
+
+    The two sides report it DIFFERENTLY, which is worth writing down because
+    matching only the obvious one silently disables half the retry:
+
+    * ``os.replace`` raises through the Win32 layer and carries ``winerror``
+      5 or 32.
+    * ``Path.open`` raises through the C runtime, which sets ``errno`` 13 and
+      leaves ``winerror`` as **None** — measured, 122 of 122 racing reads.
+
+    A genuine "you may not read this" is indistinguishable from the second
+    form, so it is retried too and then raised unchanged. That costs ~1.1s on a
+    path that was going to fail anyway, and buys the reader case being covered
+    at all.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _WINDOWS_BUSY
+    return exc.errno == errno.EACCES
+
+
+#: Backoff for :func:`_despite_windows_contention`. Bounded on purpose — these
+#: are operator commands, so a slow failure is nearly as bad as a wrong one.
+#: Ten tries over ~1.1s clears the contention that actually occurs (both the
+#: read and the rename hold the file for microseconds) without turning a
+#: genuine permission problem into a hang.
+_BUSY_ATTEMPTS = 10
+_BUSY_BACKOFF_SECONDS = 0.02
+
+
+def _despite_windows_contention(action: Callable[[], _T]) -> _T:
+    """Run ``action``, retrying while Windows reports the file as busy.
+
+    On POSIX this is a plain call: a rename over an existing name always
+    succeeds, and a reader that already has the file open keeps its own inode,
+    so neither side can observe the other.
+
+    NTFS shares no such guarantee, and BOTH sides of this module hit it:
+
+    * ``MoveFileEx`` refuses to replace a file that any other handle has open —
+      including one opened purely for reading — so a second session merely
+      READING the config failed a write with a bare ``Access is denied``.
+    * and for the width of that rename, opening the destination fails too, so
+      the reader takes an ``Access is denied`` of its own.
+
+    Measured directly, not inferred: a replace over a target held open for read
+    raises WinError 5, and a as-fast-as-possible read/write storm produces both
+    directions. The second one is the more expensive of the two, because
+    ``cli/launch.py`` treats an unreadable config as "launch untraced" by
+    design — so on Windows a config write racing a launch silently cost
+    tracing, with nothing raised anywhere to say so.
+
+    Every window here is microseconds wide, which is what makes retrying the
+    right remedy rather than a papering-over. The last failure is re-raised
+    unchanged once the attempts run out, so a genuine permission problem still
+    surfaces as itself rather than as a timeout, and the caller's
+    symlink-aware wrapping still applies.
+    """
+    if sys.platform != "win32":
+        return action()
+    for attempt in range(_BUSY_ATTEMPTS):
+        try:
+            return action()
+        except PermissionError as exc:
+            if not _is_contention(exc):
+                raise
+            if attempt == _BUSY_ATTEMPTS - 1:
+                raise
+            time.sleep(_BUSY_BACKOFF_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable: the loop either returns or raises")
 
 
 def save_config(config: AppConfig, path: Path | None = None) -> Path:
@@ -328,7 +416,7 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, written)
+        _despite_windows_contention(lambda: os.replace(temp, written))
     except OSError as exc:
         temp.unlink(missing_ok=True)
         if written == target:

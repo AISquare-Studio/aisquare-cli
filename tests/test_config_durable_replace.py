@@ -27,6 +27,8 @@ launch, session or heartbeat path.
 from __future__ import annotations
 
 import os
+import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +48,11 @@ def _record(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
         real_replace(src, dst, **kwargs)
 
     def _fsync(fd: int) -> None:
-        kind = "dir" if os.path.isdir(f"/proc/self/fd/{fd}") else "file"
+        # `os.fstat`, not `/proc/self/fd/<fd>`: the fd itself already carries
+        # its type, and asking `/proc` made the classifier Linux-only — every
+        # descriptor read as "file" anywhere else, which is the answer that
+        # quietly satisfies the ordering assertion below.
+        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
         events.append(("fsync", kind))
         real_fsync(fd)
 
@@ -70,12 +76,27 @@ def test_the_parent_directory_is_flushed_after_the_rename(
     save_config(AppConfig(), target)
     monkeypatch.undo()
 
-    assert ("fsync", "dir") in events, (
-        f"the parent directory was never flushed after the rename: {events}"
-    )
     kinds = [f"{what}:{detail}" for what, detail in events]
     file_sync = kinds.index("fsync:file")
     renamed = next(i for i, k in enumerate(kinds) if k.startswith("replace:"))
+
+    if sys.platform == "win32":
+        # Windows has no directory-flush equivalent, and `save_config` already
+        # says so by construction: `os.open(parent, O_RDONLY)` raises there and
+        # the documented fail-open path returns. So the assertion is the half of
+        # the recipe that DOES exist, plus the fail-open itself — the write
+        # completed and the file is readable. Asserting `fsync:dir` here would
+        # only ever pin that Windows is not Linux.
+        assert ("fsync", "dir") not in events, (
+            f"a directory flush unexpectedly succeeded on Windows: {events}"
+        )
+        assert file_sync < renamed, f"durable-replace out of order: {kinds}"
+        assert load_config(target).profile == "default", "the fail-open cost the write"
+        return
+
+    assert ("fsync", "dir") in events, (
+        f"the parent directory was never flushed after the rename: {events}"
+    )
     dir_sync = kinds.index("fsync:dir")
     assert file_sync < renamed < dir_sync, f"durable-replace out of order: {kinds}"
 

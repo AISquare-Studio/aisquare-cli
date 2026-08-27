@@ -646,7 +646,15 @@ def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type
     command exists to prevent, which is why the assertion is the round trip
     through a real shell and not the quoting style.
     """
+    import shutil
     import subprocess
+
+    # `/bin/sh` does not exist on Windows, where the POSIX shell is Git Bash
+    # under Program Files — the hardcoded path raised FileNotFoundError, which
+    # read as the exports failing rather than as the shell being absent.
+    shell = shutil.which("sh") or shutil.which("bash")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; these exports are a sh construct")
 
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
@@ -664,7 +672,7 @@ def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type
     assert result.exit_code == 0, result.output
     read_back = 'printf "%s" "$ANTHROPIC_BASE_URL|$ANTHROPIC_CUSTOM_HEADERS|$AISQUARE_PIPELINE_ID"'
     echoed = subprocess.run(
-        ["/bin/sh", "-c", f"{result.output}\n{read_back}"],
+        [shell, "-c", f"{result.output}\n{read_back}"],
         capture_output=True,
         text=True,
         timeout=60,

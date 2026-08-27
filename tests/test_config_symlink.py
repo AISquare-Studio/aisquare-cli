@@ -31,8 +31,22 @@ from typing import Any
 import pytest
 
 from aisquare.core.config import AppConfig, load_config, save_config
+from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 CHANGED = "https://after.example"
+
+# A capability probe, not a platform check: creating a symlink on Windows needs
+# SeCreateSymbolicLinkPrivilege, which the CI runner holds and an ordinary
+# developer account does not. Applied per test rather than to the module,
+# because the two tests guarding the COMMON path (a plain file, and a first
+# write into a missing home) need no link and are the last ones that should
+# stop running on a developer's machine.
+_can_deny = pytest.mark.skipif(
+    not can_deny_writes(), reason="writes cannot be denied here (running as root?)"
+)
+_needs_symlink = pytest.mark.skipif(
+    not can_symlink(), reason="this machine cannot create symlinks (needs privilege on Windows)"
+)
 
 
 def _linked(tmp_path: Path) -> tuple[Path, Path]:
@@ -54,6 +68,7 @@ def _changed() -> AppConfig:
     return config
 
 
+@_needs_symlink
 def test_a_symlinked_config_survives_a_write(tmp_path: Path) -> None:
     """The defect: against the unresolved write this FAILS on the first assert."""
     link, real = _linked(tmp_path)
@@ -70,6 +85,7 @@ def test_a_symlinked_config_survives_a_write(tmp_path: Path) -> None:
     assert load_config(link).explainability.gateway_url == CHANGED
 
 
+@_needs_symlink
 def test_the_write_is_still_atomic_through_the_link(tmp_path: Path) -> None:
     """Following the link must not cost the property the temp file exists for.
 
@@ -94,6 +110,7 @@ def test_the_write_is_still_atomic_through_the_link(tmp_path: Path) -> None:
     assert real.read_text(encoding="utf-8"), "the real file is empty"
 
 
+@_needs_symlink
 def test_the_returned_path_is_the_one_the_caller_asked_for(tmp_path: Path) -> None:
     """Commands echo this back to an operator.
 
@@ -106,6 +123,7 @@ def test_the_returned_path_is_the_one_the_caller_asked_for(tmp_path: Path) -> No
     assert save_config(_changed(), link) == link
 
 
+@_needs_symlink
 def test_a_symlinked_home_directory_is_unaffected(tmp_path: Path) -> None:
     """The other dotfiles shape, and it never had the problem.
 
@@ -126,6 +144,8 @@ def test_a_symlinked_home_directory_is_unaffected(tmp_path: Path) -> None:
     assert CHANGED in (real_home / "config.toml").read_text(encoding="utf-8")
 
 
+@_needs_symlink
+@_can_deny
 def test_an_unwritable_link_target_fails_loudly_and_changes_nothing(tmp_path: Path) -> None:
     """The cost of following the link, pinned so it is a decision and not a surprise.
 
@@ -137,17 +157,15 @@ def test_an_unwritable_link_target_fails_loudly_and_changes_nothing(tmp_path: Pa
     """
     link, real = _linked(tmp_path)
     before = real.read_text(encoding="utf-8")
-    os.chmod(real.parent, 0o500)
-    try:
-        with pytest.raises(OSError):
-            save_config(_changed(), link)
-    finally:
-        os.chmod(real.parent, 0o700)
+    with unwritable(real.parent), pytest.raises(OSError):
+        save_config(_changed(), link)
 
     assert link.is_symlink(), "a failed write severed the link anyway"
     assert real.read_text(encoding="utf-8") == before, "a failed write modified the original"
 
 
+@_needs_symlink
+@_can_deny
 def test_the_failure_names_the_resolved_path_not_the_link(tmp_path: Path) -> None:
     """@dfd9a883's condition on the ruling, and it is the difference between an
     honest error and a confusing one.
@@ -159,12 +177,8 @@ def test_the_failure_names_the_resolved_path_not_the_link(tmp_path: Path) -> Non
     anything matching on PermissionError or errno still does.
     """
     link, real = _linked(tmp_path)
-    os.chmod(real.parent, 0o500)
-    try:
-        with pytest.raises(PermissionError) as caught:
-            save_config(_changed(), link)
-    finally:
-        os.chmod(real.parent, 0o700)
+    with unwritable(real.parent), pytest.raises(PermissionError) as caught:
+        save_config(_changed(), link)
 
     message = str(caught.value)
     assert str(real) in message, f"the resolved path is not named: {message}"
@@ -199,6 +213,7 @@ def test_a_first_write_still_creates_a_missing_aisquare_home(tmp_path: Path) -> 
     assert load_config(target).profile == "default"
 
 
+@_needs_symlink
 def test_a_link_into_an_existing_directory_still_writes_there(tmp_path: Path) -> None:
     """The "cloned my dotfiles, config not written yet" case.
 
@@ -222,6 +237,7 @@ def test_a_link_into_an_existing_directory_still_writes_there(tmp_path: Path) ->
     assert all(path.is_file() for path in created), f"a directory was invented: {created}"
 
 
+@_needs_symlink
 def test_a_link_into_a_missing_directory_refuses_to_invent_it(tmp_path: Path) -> None:
     """The decision: follow the link, do not materialise what it points at.
 
@@ -250,6 +266,7 @@ def test_a_link_into_a_missing_directory_refuses_to_invent_it(tmp_path: Path) ->
     assert caught.value.errno is not None, "errno was dropped"
 
 
+@_needs_symlink
 def test_the_refusal_says_what_to_do_about_it(tmp_path: Path) -> None:
     """A refusal that does not name the remedy just relocates the confusion."""
     home = tmp_path / "home"

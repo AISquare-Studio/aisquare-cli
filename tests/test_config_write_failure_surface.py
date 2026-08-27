@@ -32,6 +32,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, save_config
+from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 
 def _config_symlinked_into_an_unwritable_directory(tmp_path: Path) -> Path:
@@ -45,16 +46,25 @@ def _config_symlinked_into_an_unwritable_directory(tmp_path: Path) -> Path:
     link.parent.mkdir(parents=True, exist_ok=True)
     link.unlink(missing_ok=True)
     link.symlink_to(real)
-
-    vault.chmod(0o500)
     return vault
 
 
 @pytest.fixture
 def unwritable_vault(tmp_path: Path) -> Iterator[Path]:
+    """The vault, genuinely unwritable — which `chmod` alone does not achieve.
+
+    `vault.chmod(0o500)` is a no-op against a directory on Windows, so the write
+    these tests require to FAIL was succeeding and every assertion here read as
+    "exit 0, expected 1". `unwritable` applies a DENY ace there and the mode
+    bits on POSIX, so the premise actually holds on both.
+    """
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
+    if not can_deny_writes():
+        pytest.skip("writes cannot be denied here (running as root?)")
     vault = _config_symlinked_into_an_unwritable_directory(tmp_path)
-    yield vault
-    vault.chmod(0o700)
+    with unwritable(vault):
+        yield vault
 
 
 def test_config_set_reports_the_convention_not_a_traceback(

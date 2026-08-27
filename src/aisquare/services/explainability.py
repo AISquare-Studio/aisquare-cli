@@ -61,6 +61,7 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import uuid
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
@@ -746,11 +747,23 @@ def resolve_api_key() -> str | None:
 
 
 def store_api_key(key: str) -> Path:
-    """Write the workspace key at mode 600 and return where it landed."""
+    """Write the workspace key owner-only and return where it landed.
+
+    Through ``paths.restrict_to_owner`` rather than ``chmod(0o600)``: the mode
+    bits are the whole story on POSIX and nothing on NTFS, where group/other
+    have no equivalent — so this file joined the credentials file and the serve
+    token in being readable by every other account on a Windows box, with
+    nothing raised to say so. Same guard, same reporting, third secret.
+    """
     target = key_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(key.strip(), encoding="utf-8")
-    target.chmod(0o600)
+    if not paths.restrict_to_owner(target):
+        print(
+            f"warning: could not restrict {target} to your account — "
+            "other users on this machine may be able to read the workspace key.",
+            file=sys.stderr,
+        )
     return target
 
 

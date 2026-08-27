@@ -112,7 +112,11 @@ class _Sites(ast.NodeVisitor):
 def _spawn_sites() -> set[str]:
     sites: set[str] = set()
     for path in sorted(_PACKAGE.rglob("*.py")):
-        visitor = _Sites(str(path.relative_to(_SRC)))
+        # `.as_posix()`, not `str()`: the keys in `core.spawn.SEAMS` are a
+        # written-down artefact with forward slashes, and `str()` yields
+        # backslashes on Windows — so every site read as undecided AND every
+        # ruling read as stale, on a registry that was perfectly correct.
+        visitor = _Sites(path.relative_to(_SRC).as_posix())
         visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
         sites |= visitor.found
     return sites

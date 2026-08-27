@@ -38,8 +38,42 @@ from aisquare.core.config import (
     save_config,
 )
 
+
 #: Every POSIX shell on this machine, not just the developer's login shell.
-SHELLS = [path for path in ("/bin/sh", "bash", "dash", "ash", "zsh") if shutil.which(path)]
+def _is_a_working_posix_shell(candidate: str) -> bool:
+    r"""Whether ``candidate`` really evaluates a POSIX script.
+
+    `shutil.which` is not enough, and the counter-example is on the CI runner:
+    `C:\Windows\System32\bash.exe` is the WSL LAUNCHER, not a shell. It is on
+    PATH on every Windows box, `which` finds it, and on a runner with no distro
+    installed it exits 1 having evaluated nothing — so every parametrised case
+    for "bash" failed with a CalledProcessError that had nothing to do with the
+    quoting under test. Git Bash's `bash.exe` sits on the same PATH and IS a
+    real shell, so only running one can tell them apart.
+    """
+    try:
+        done = subprocess.run(
+            [candidate, "-c", 'printf "%s" ok'],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0 and done.stdout.strip() == "ok"
+
+
+SHELLS = [
+    path
+    for path in ("/bin/sh", "bash", "dash", "ash", "zsh")
+    if shutil.which(path) and _is_a_working_posix_shell(path)
+]
+
+#: For the cases that need A shell rather than EVERY shell. None when this
+#: machine has no POSIX shell at all, which is a skip and not a failure — the
+#: property under test is about quoting, not about what is installed.
+ANY_SHELL = SHELLS[0] if SHELLS else None
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -202,10 +236,16 @@ def _name_lines(script_text: str) -> set[str]:
 
 
 def _shell_value(name: str, script_text: str) -> str:
-    """Eval ``script_text`` in ``/bin/sh`` and print ``$name`` byte for byte."""
+    """Eval ``script_text`` in a POSIX shell and print ``$name`` byte for byte.
+
+    Through ``ANY_SHELL`` rather than a hardcoded ``/bin/sh``: that path does
+    not exist on Windows, where the shell is Git Bash under Program Files, and
+    the resulting FileNotFoundError read as a failure of the exports.
+    """
+    assert ANY_SHELL is not None, "guarded by the skipif on the caller"
     assert re.fullmatch(r"[A-Z_][A-Z0-9_]*", name), name
     completed = subprocess.run(
-        ["/bin/sh", "-c", f'eval "$1"; printf "%s" "${name}"', "sh", script_text],
+        [ANY_SHELL, "-c", f'eval "$1"; printf "%s" "${name}"', "sh", script_text],
         capture_output=True,
         text=True,
         check=True,
@@ -213,6 +253,7 @@ def _shell_value(name: str, script_text: str) -> str:
     return completed.stdout
 
 
+@pytest.mark.skipif(ANY_SHELL is None, reason="no POSIX shell on PATH")
 def test_the_json_form_carries_the_same_exports(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

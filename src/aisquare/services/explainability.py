@@ -95,7 +95,7 @@ RESERVED_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 #: mode mismatch means "some other listener owns that port" (e.g. a creator-mode
 #: proxy), and pointing a Claude Code session at it is not a risk worth taking.
 _EXPECTED_SERVICE = "aisquare-proxy"
-EXPECTED_MODE = "claude_code"
+_EXPECTED_MODE = "claude_code"
 #: The proxy's own health field. `governance` is deliberately NOT checked: its
 #: contract is unknown from one sample, and the governance blocker belongs to
 #: the workspace rather than to this probe.
@@ -409,10 +409,10 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
     # reading a healthy proxy's internals.
     if service != _EXPECTED_SERVICE:
         return ProxyProbe(False, f"{url} answers as {service!r}, not the explainability proxy")
-    if mode != EXPECTED_MODE:
+    if mode != _EXPECTED_MODE:
         return ProxyProbe(
             False,
-            f"proxy at {url} runs mode {mode!r}, need {EXPECTED_MODE!r} — "
+            f"proxy at {url} runs mode {mode!r}, need {_EXPECTED_MODE!r} — "
             "point explainability.proxy_url at the claude_code proxy",
         )
     if status is not None and status != _EXPECTED_STATUS:
@@ -439,9 +439,12 @@ def _custom_headers(agent_name: str, pipeline_id: str, api_key: str | None) -> s
     ``resolve_api_key()``, which is env-first over a hardcoded
     ``EXPLAINABILITY_API_KEY`` — correct only when the active target names that
     variable, and the source of the incident where a staging key reached a prod
-    gateway. The caller has the target-aware answer; this only formats it. The
-    AST guard in ``tests/test_one_key_resolver.py`` caught the first version of
-    this function doing it the wrong way.
+    gateway. The caller has the target-aware answer; this only formats it.
+
+    Enforced, not merely asked for: the AST guard in
+    ``tests/test_one_key_resolver.py`` fails if any function outside its allow
+    list resolves a key, and it caught the first version of this one doing
+    exactly that. No second guard here — that one already covers this module.
 
     Omitted rather than sent empty when there is no key, so the loopback case is
     byte-identical to before.

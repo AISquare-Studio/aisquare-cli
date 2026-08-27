@@ -87,8 +87,7 @@ def in_both_proxy_states(
         # "Nothing listening" has to be MADE true, not assumed. The docstring
         # above says never 9090 because it is somebody else's long-running
         # proxy — and then this branch inherited the configured default, which
-        # is exactly 9090. Any developer with a proxy up (which is now one
-        # command, and what the onboarding runbook tells them to do) got a
+        # is exactly 9090. Any developer with a proxy running there got a
         # collection ERROR here from a fixture asserting its own premise.
         #
         # Port 1 is privileged, so an unprivileged process cannot be listening

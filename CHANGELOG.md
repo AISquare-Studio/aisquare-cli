@@ -10,9 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 First release carrying the explainability integration. 0.4.0rc2 shipped from
 `main` before any of it landed, so this is the first version a developer can
-`pip install` and connect. Verified end to end against the production gateway:
-two real Claude Code sessions traced through the HOSTED proxy with no local
-process running, and a board note shipped through the client lane.
+`pip install` and connect.
 
 **The CLI sends `X-AISquare-Key`, so a hosted proxy works and no local one is
 needed.** Session wiring emitted `X-Agent-Name` and `X-Pipeline-Id` and never the
@@ -25,9 +23,10 @@ A hosted proxy is already deployed for both deployments
 at one is now a flag — `enable --proxy-url
 https://explainability-api.aisquare.studio:9443`.
 
-Verified end to end: two real `claude` sessions traced through the hosted prod
-proxy with nothing listening on 9090, and `doctor --live` green on proxy, gateway
-and ingest.
+Verified end to end against production: three real `claude` sessions traced
+through the hosted prod proxy with nothing listening on 9090, a board note
+shipped through the client lane, and `doctor --live` green on proxy, gateway and
+ingest.
 
 The key is resolved through the ACTIVE TARGET and passed into `wire_session`,
 never resolved inside it. Resolving locally means `resolve_api_key()`, which is

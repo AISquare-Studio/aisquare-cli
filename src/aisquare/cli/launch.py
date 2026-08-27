@@ -231,24 +231,22 @@ def launch(
         # them per target, and wire_session only ever looks at the top level —
         # so without this fold a launch silently uses the wrong proxy while
         # reporting success, which is worse than config that is simply absent.
+        # `effective` folds the active target's overrides onto the settings the
+        # wiring reads; `api_key` is the key a HOSTED proxy authenticates on,
+        # resolved through that same target and never from a hardcoded variable.
+        # ONE guard for both, because they have one failure story: a broken
+        # target definition costs the overrides and the key — so the trace — and
+        # never the launch.
         try:
             effective = explainability_ops.effective_settings(tracing)
-        except Exception as exc:  # same bar as everything else here: a broken
-            # target definition costs the OVERRIDE, never the launch.
-            effective = tracing
+            api_key = explainability_ops.resolve_target(tracing).api_key
+        except Exception as exc:
+            effective, api_key = tracing, None
             stderr_console().print(
-                f"explainability: target overrides unreadable ({exc}) — "
-                "using the top-level settings",
+                f"explainability: target unreadable ({exc}) — using the top-level "
+                "settings, untraced if that proxy needs a key",
                 style="dim",
             )
-        # The key a HOSTED proxy authenticates on. Resolved through the target,
-        # never from a hardcoded variable, and behind the same fail-open bar as
-        # the overrides above: an unreadable target costs the KEY, which costs
-        # the trace, and never the launch.
-        try:
-            api_key = explainability_ops.resolve_target(tracing).api_key
-        except Exception:
-            api_key = None
         wiring = explainability_service.wire_session(
             effective,
             role,

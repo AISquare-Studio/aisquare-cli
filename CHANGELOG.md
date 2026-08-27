@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-08-26
+## [0.5.0] - 2026-08-27
 
 First release carrying the explainability integration. 0.4.0rc2 shipped from
 `main` before any of it landed, so this is the first version a developer can
@@ -34,6 +34,16 @@ env-first over a hardcoded `EXPLAINABILITY_API_KEY` — correct only when the
 target names that variable, and the source of the incident where a staging key
 reached a prod gateway. `tests/test_one_key_resolver.py`'s AST guard caught the
 first attempt doing exactly that.
+
+**Where the key ends up is a deliberate trade, recorded here rather than left to
+be discovered.** The header is exported into the launched agent's environment, so
+the agent and every subprocess, MCP server and tool it starts can read it, and
+`explainability env` prints it because its output exists to be `eval`'d. It is a
+write-scoped ingest credential — it sends spans and reads nothing — which is what
+makes that acceptable. Three things bound it: the proxy strips the header before
+forwarding upstream, `spawn.TRACING_ENV_VARS` already keeps it out of aisquare's
+own subprocesses, and a non-loopback proxy without `https` is refused rather than
+traced. A local proxy needs no key at all.
 
 Onboarding drops from eleven steps to ten, and daily use to `aisquare launch`.
 A local sidecar is still fully supported — `--proxy-url http://127.0.0.1:9090`,
@@ -765,7 +775,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
 [0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
 [0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1
 [0.2.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.1.0...v0.2.0

@@ -84,6 +84,29 @@ umask 077 && printf '%s' '...' > ~/.aisquare/explainability-key
 (`env`, `file` or `unset`) and `key_origin`. **Branch scripts on `key_source`,
 not on `key_env`** — the latter is the variable your target *names*, set or not.
 
+### Where the key ends up
+
+A hosted proxy authenticates on this key, so it is sent as a request header —
+which means it is exported into the launched agent's environment
+(`ANTHROPIC_CUSTOM_HEADERS`). Worth knowing, and a deliberate trade rather than
+an accident:
+
+- **The agent and anything it starts can read it.** Subprocesses, MCP servers,
+  tools. It is a write-scoped ingest credential — it can send spans and read
+  nothing — which is what makes that acceptable, but it is not nothing.
+- **`aisquare explainability env <role>` prints it**, by design: the output
+  exists to be `eval`'d. Treat that output as secret — it is not safe for
+  scrollback, a screen-share, or CI logs.
+- It is **not** forwarded upstream: the proxy strips the header before the
+  request reaches the model provider.
+- aisquare's own internal subprocesses do not receive it — the tracing variables
+  are stripped from those environments.
+- Over a non-loopback hop it is sent only over `https`; a plaintext URL with a
+  key resolved is refused rather than traced.
+
+A local proxy needs no key at all, so if none of that is acceptable, that is the
+topology to use.
+
 ---
 
 ## 4. Point at your deployment

@@ -369,6 +369,18 @@ def join_records(path: Path | None = None) -> list[dict[str, object]]:
     return records
 
 
+def _is_loopback(url: str) -> bool:
+    """Whether ``url`` names this machine.
+
+    The discriminator between the two proxy topologies. A loopback sidecar with
+    ``AISQUARE_PROXY_INBOUND_KEYS`` unset skips its auth gate entirely, so it
+    needs no workspace key; anything else is a hosted proxy that REQUIRES one and
+    denies every request without it.
+    """
+    host = (urlparse(url.strip()).hostname or "").lower()
+    return host in ("127.0.0.1", "localhost", "::1", "") or host.startswith("127.")
+
+
 def _usable_base_url(value: str) -> bool:
     """Whether ``value`` is something an agent can actually use as a base URL.
 
@@ -450,8 +462,15 @@ def _custom_headers(agent_name: str, pipeline_id: str, api_key: str | None) -> s
     byte-identical to before.
     """
     pairs = [f"X-Agent-Name: {agent_name}", f"X-Pipeline-Id: {pipeline_id}"]
-    if api_key:
-        pairs.append(f"X-AISquare-Key: {api_key}")
+    # Stripped because this format is newline-delimited and the environment path
+    # does not sanitise: `stored_api_key` strips its file, but
+    # `environ.get(target.api_key_env)` hands back whatever was exported, and a
+    # trailing newline there would append a header nobody wrote. Operator-owned
+    # input, so not an attack — but this is the function that turns config into
+    # headers, and it is one call.
+    key = (api_key or "").strip()
+    if key and "\n" not in key and "\r" not in key:
+        pairs.append(f"X-AISquare-Key: {key}")
     return "\n".join(pairs)
 
 
@@ -549,6 +568,44 @@ def wire_session(
     verdict = ask(settings.proxy_url)
     if not verdict.healthy:
         return SessionWiring(traced=False, reason=f"{verdict.reason} — launching untraced")
+
+    # A HOSTED proxy with no key is a DEAD SESSION, not a lost trace, and the
+    # probe cannot see it: the SDK exempts /health, /ready and /metrics from its
+    # auth gate, so `/health` answers 200 with no key while every
+    # `/v1/messages` is denied. Wiring ANTHROPIC_BASE_URL to it anyway is exactly
+    # the failure `_usable_base_url` exists to prevent, arriving by a different
+    # route — and the fail-open doctrine says tracing may cost a trace and never
+    # a launch.
+    #
+    # Loopback is unaffected: that proxy needs no key, so this cannot make a
+    # working local setup refuse.
+    # A key over plaintext to another host is a credential on the wire. Before
+    # this header existed nothing secret crossed that hop, so the URL check had
+    # no reason to care about the scheme; now it does. Loopback over http is
+    # fine — it does not leave the machine, and it is the documented local shape.
+    if (
+        api_key
+        and not _is_loopback(settings.proxy_url)
+        and urlparse(settings.proxy_url).scheme != "https"
+    ):
+        return SessionWiring(
+            traced=False,
+            reason=(
+                f"{settings.proxy_url} is not https and not local, so the workspace key "
+                "would cross the network in cleartext — launching untraced. Use https, or "
+                "point at a local proxy"
+            ),
+        )
+
+    if not api_key and not _is_loopback(settings.proxy_url):
+        return SessionWiring(
+            traced=False,
+            reason=(
+                f"{settings.proxy_url} is not a local proxy and no workspace key resolved, "
+                "so every model call would be denied — launching untraced. Set the key: "
+                f"export {KEY_ENV_VAR}=… or write {key_path()}"
+            ),
+        )
 
     pipeline_id = session_id or str(uuid.uuid4())
     return SessionWiring(

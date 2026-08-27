@@ -899,7 +899,7 @@ aisquare explainability enable --target prod \
 aisquare doctor --live | grep explainab      # proxy, gateway and ingest all ✓
 ```
 
-Verified end to end on 2026-08-27: two real `claude` sessions traced through the
+Verified end to end on 2026-08-27: three real `claude` sessions traced through the
 hosted prod proxy with nothing listening on 9090.
 
 Start a **local** sidecar only when model traffic must not leave the machine, or
@@ -909,7 +909,10 @@ process — point it at one with `--proxy-url` and stop it where you started it:
 ```bash
 set -a; source /home/work/.config/aisquare/explainability-prod.env; set +a
 export AISQUARE_PROXY_PORT=9190
-python -m pip install 'aisquare>=1.1.0'
+# fastapi/uvicorn are NOT in the `explainability` extra — that carries the
+# tracing client, not a server. The SDK ships them only under `gateway`,
+# which is the full server image, so name them directly.
+python -m pip install 'aisquare>=1.1.0' 'fastapi>=0.111,<1.0' 'uvicorn>=0.30,<1.0'
 python -m aisquare.explainability.claude_proxy
 ```
 

@@ -503,12 +503,23 @@ def spawn(
             identity = explainability_service.plan_session_identity(
                 binary.binary, launch_profile.args
             )
+            # Same fail-open bar as `launch`: an unreadable target costs the
+            # overrides and the key — so the trace — and never the spawn.
+            # `resolve_target` is effectively total today; the guard is here so
+            # the two launch paths do not differ on a question a reader has to
+            # re-prove.
+            try:
+                effective = explainability_ops.effective_settings(tracing)
+                spawn_key = explainability_ops.resolve_target(tracing).api_key
+            except Exception as exc:
+                effective, spawn_key = tracing, None
+                typer.echo(f"explainability: target unreadable ({exc})", err=True)
             wiring = explainability_service.wire_session(
-                explainability_ops.effective_settings(tracing),
+                effective,
                 role_name,
                 session_id=identity.session_id,
                 base_env=env,
-                api_key=explainability_ops.resolve_target(tracing).api_key,
+                api_key=spawn_key,
             )
             env.update(wiring.env)
             typer.echo(f"explainability: {wiring.reason}", err=True)

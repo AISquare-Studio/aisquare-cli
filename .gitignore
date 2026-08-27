@@ -21,7 +21,9 @@ htmlcov/
 .idea/
 .vscode/
 
-# The SDK proxy writes its local span inbox wherever it is started.
+# A hand-started SDK proxy writes its local span inbox into whatever directory
+# it was launched from, which is usually a checkout. Kept after the managed
+# lifecycle was removed, because running one by hand is still supported.
 explainability_inbox.db
 # ...and SQLite's WAL sidecars, which appear only while the proxy is running.
 explainability_inbox.db-*

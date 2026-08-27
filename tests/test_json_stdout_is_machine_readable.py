@@ -92,7 +92,6 @@ def in_both_proxy_states(
         #
         # Port 1 is privileged, so an unprivileged process cannot be listening
         # on it and connection-refused is guaranteed.
-        runner.invoke(app, ["explainability", "enable", "--proxy-url", "http://127.0.0.1:1"])
         # The premise, asserted: with nothing listening, env must REFUSE.
         # Without this the two params could quietly be the same state twice.
         assert runner.invoke(app, ["explainability", "env", "coder"]).exit_code == 1

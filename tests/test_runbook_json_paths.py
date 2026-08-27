@@ -60,8 +60,8 @@ def runbook() -> str:
     return RUNBOOK.read_text(encoding="utf-8")
 
 
-@pytest.fixture
-def payload(isolated_home: Path) -> dict[str, object]:
+@pytest.fixture(scope="module")
+def payload() -> dict[str, object]:
     """The real payload, from the CLI, on a machine with nothing configured.
 
     Cold is the right state to assert against: the runbook's reader runs these

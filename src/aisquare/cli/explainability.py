@@ -35,7 +35,6 @@ from aisquare.core import outbox
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
 from aisquare.services import explainability_ops as ops
-from aisquare.services import explainability_proxy as proxy_service
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
     ship_once,
@@ -475,11 +474,13 @@ def env(
     join the Run. Exported rather than printed as a comment because the
     output's only job is to be eval'd.
     """
+    settings = load_config().explainability
     wiring = wire_session(
-        ops.effective_settings(load_config().explainability, target_name),
+        ops.effective_settings(settings, target_name),
         role,
         session_id=session_id,
         base_env=dict(os.environ),
+        api_key=ops.resolve_target(settings, target_name).api_key,
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")
@@ -504,109 +505,3 @@ def env(
         return
     for key, value in exports.items():
         typer.echo(f"export {key}={shlex.quote(value)}")
-
-
-proxy_app = typer.Typer(
-    help="Run the local claude_code proxy the launcher points sessions at.",
-    no_args_is_help=True,
-)
-app.add_typer(proxy_app, name="proxy")
-
-
-@proxy_app.command("up")
-def proxy_up() -> None:
-    """Start the proxy from this machine's configured gateway, key and port.
-
-    Everything it needs is already in config — this exists so that starting a
-    sidecar is one command rather than four exported variables assembled by
-    hand, which is what the runbook asked for and what people got wrong.
-
-    Exits non-zero when it could not start one. That is the opposite of the
-    launch path's fail-open rule and deliberately so: nothing here runs in front
-    of a waiting developer, and a `up` that quietly started nothing would be
-    discovered as untraced sessions hours later.
-    """
-    try:
-        state = proxy_service.up()
-    except proxy_service.ProxyError as exc:
-        fail(str(exc), error="proxy_not_started")
-    if get_state().json_output:
-        typer.echo(json.dumps(_proxy_payload(state)))
-        return
-    # `up` only returns on a managed state now — it rolls back and raises
-    # otherwise — so this line is no longer an unconditional claim. It used to be
-    # printed beside a summary reading "not running", because `up` returned
-    # `status()` whatever it said.
-    typer.echo(f"✓ {state.summary}")
-    typer.echo(
-        "  Sessions launched from now on are traced. Stop it with: "
-        "aisquare explainability proxy down"
-    )
-
-
-@proxy_app.command("down")
-def proxy_down() -> None:
-    """Stop the proxy this CLI started.
-
-    Leaves a proxy it did not start alone, and says so. Stopping a process
-    because something is listening on the port is how you end a colleague's
-    session on a shared box, or kill a hosted proxy this machine was pointed at
-    deliberately.
-    """
-    try:
-        outcome = proxy_service.down()
-    except proxy_service.ProxyError as exc:
-        fail(str(exc), error="proxy_not_stopped")
-    if get_state().json_output:
-        typer.echo(json.dumps({"result": outcome}))
-        return
-    typer.echo(outcome)
-
-
-@proxy_app.command("status")
-def proxy_status() -> None:
-    """Say whether a proxy is up, and whether it is one we started.
-
-    The distinction is the point. ``doctor``'s proxy row goes green when *a*
-    service answers as ``aisquare-proxy`` in ``claude_code`` mode — it cannot
-    tell this machine's sidecar from one left running last week against another
-    deployment, and Runs recorded by the wrong proxy are attributed to the wrong
-    place. This command answers that question specifically.
-
-    Exit code follows the useful predicate: 0 when a healthy proxy is answering,
-    1 when nothing is, so a timer or a shell `&&` can depend on it.
-    """
-    state = proxy_service.status()
-    if get_state().json_output:
-        typer.echo(json.dumps(_proxy_payload(state)))
-    else:
-        # Three states, not two. The mark used to follow `probe.healthy`, which
-        # put a ✓ on a proxy serving the PREVIOUS deployment — the exact case
-        # this command exists to surface, rendered as though nothing was wrong.
-        if state.managed:
-            mark = "✓"
-        elif state.probe.healthy:
-            mark = "⚠"
-        else:
-            mark = "✗"
-        typer.echo(f"{mark} {state.summary}")
-        if state.probe.healthy and not state.managed:
-            typer.echo(f"  → this machine's config points at {state.url} (target '{state.target}')")
-    if not state.probe.healthy:
-        raise typer.Exit(code=1)
-
-
-def _proxy_payload(state: proxy_service.ProxyStatus) -> dict[str, object]:
-    """One shape for both proxy commands, so a script reads them the same way."""
-    return {
-        "healthy": state.probe.healthy,
-        # `managed` is the field worth branching on: healthy alone cannot tell
-        # you the proxy is the one this machine configured.
-        "managed": state.managed,
-        "url": state.url,
-        "target": state.target,
-        "gateway": state.gateway_url,
-        "pid": state.pid,
-        "age_seconds": round(state.age_seconds, 1) if state.age_seconds is not None else None,
-        "summary": state.summary,
-    }

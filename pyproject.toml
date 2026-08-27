@@ -59,16 +59,6 @@ explainability = [
   # >=1.1 is where AgentRunTracer accepts run_id, which is how a session's spans
   # join the proxy's Run instead of fragmenting into one Run per drain.
   "aisquare[explainability]>=1.1",
-  # The claude_code SIDECAR's own runtime, and no other extra supplies it.
-  # `aisquare[explainability]` carries httpx/aiosqlite/OpenTelemetry — the
-  # tracing client — but the proxy is a FastAPI app, and the only SDK extra with
-  # fastapi is `gateway`: the full server image (neo4j, asyncpg, grpcio, openai,
-  # reportlab). Without these two, `aisquare-proxy` is on PATH and dies at
-  # import with "No module named 'fastapi'", which is a hard stop on step one of
-  # the onboarding runbook. Declared here rather than upstream because this is
-  # the extra whose install line an operator actually types.
-  "fastapi>=0.111,<1.0",
-  "uvicorn>=0.30,<1.0",
 ]
 tui = [
   "textual>=1.0",

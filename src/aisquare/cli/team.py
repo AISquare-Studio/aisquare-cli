@@ -508,6 +508,7 @@ def spawn(
                 role_name,
                 session_id=identity.session_id,
                 base_env=env,
+                api_key=explainability_ops.resolve_target(tracing).api_key,
             )
             env.update(wiring.env)
             typer.echo(f"explainability: {wiring.reason}", err=True)

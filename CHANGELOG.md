@@ -11,132 +11,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 First release carrying the explainability integration. 0.4.0rc2 shipped from
 `main` before any of it landed, so this is the first version a developer can
 `pip install` and connect. Verified end to end against the production gateway:
-a real Claude Code session traced through a proxy started by
-`explainability proxy up` (`202 Accepted` on every span batch) and a board note
-shipped through the client lane.
+two real Claude Code sessions traced through the HOSTED proxy with no local
+process running, and a board note shipped through the client lane.
 
-**`aisquare explainability proxy up | down | status`.** The proxy stays a
-separate process holding its own key — that design is deliberate and unchanged.
-What is gone is assembling four environment variables by hand out of config the
-CLI already holds. `up` resolves the gateway, key and port from the active
-target, starts the sidecar detached, and waits until it answers `/health`.
+**The CLI sends `X-AISquare-Key`, so a hosted proxy works and no local one is
+needed.** Session wiring emitted `X-Agent-Name` and `X-Pipeline-Id` and never the
+workspace key — which a hosted proxy authenticates on and *is* the tenant for. So
+tracing could only ever reach a loopback sidecar, and every developer had to
+install the SDK, start a process, and keep it alive across reboots.
 
-- **`status` says whether the proxy is OURS**, which is the question `doctor`
-  cannot answer: its proxy row goes green for any service answering as
-  `aisquare-proxy` in `claude_code` mode, including one left running against
-  another deployment, whose Runs land somewhere else entirely. `managed` is the
-  field to branch on; `healthy` alone was never enough.
-- **`down` refuses to stop a proxy it did not start.** Killing on the strength
-  of "something is on port 9090" ends a colleague's session on a shared box, or
-  a hosted proxy this machine was pointed at deliberately.
-- **The key travels in the child's environment and never in argv.**
-  `/proc/<pid>/cmdline` is world-readable, and a key in a `ps` line is a key in
-  every screen-share and every scrollback.
-- **A start that never answers is a failure, and leaves nothing behind.** The
-  proxy prints `Application startup complete` *before* it binds, so a live pid
-  is not evidence — an occupied port used to look like success. `up` polls
-  `/health` and stops what it started if that never comes.
-- **Reuse is validated against the deployment, not just the port.** Staging and
-  production normally share one loopback proxy URL, so matching on the URL alone
-  meant a target switch left the old proxy running with the old gateway and key —
-  `up` returned a green ✓ and production-labelled sessions went to staging. The
-  record now carries the target, the gateway and a non-secret key fingerprint,
-  and `up` restarts a proxy of ours that no longer serves this configuration.
-- **A recycled pid is never signalled.** The record outlives a reboot by design
-  and pids are reused, so `os.kill(pid, 0)` proved only that *something* held
-  that number — `down` could SIGTERM a stranger. Ownership now requires a
-  process-identity token (`/proc/<pid>/stat` start time plus argv[0]; `ps
-  -o lstart=,comm=` elsewhere), and an identity that cannot be verified counts
-  as not-ours rather than ours.
-- **A stop that fails aborts the replacement.** Ignoring the terminate result
-  let the old proxy survive, keep the port, and *answer the new child's startup
-  poll* — so `up` recorded the new pid and reported the new deployment while
-  every span still went to the old gateway. The health poll cannot tell two
-  proxies on one port apart, so only refusing to proceed can. `up` also confirms
-  the port went quiet before spawning, and preflights the new target, key and
-  script *before* stopping a working proxy — the checks used to sit after it,
-  trading a proxy on the wrong deployment for no proxy at all.
-- **A proxy whose identity cannot be read is stopped, not recorded.** `_owns`
-  rejects a null identity, so writing one produced a process that was foreign to
-  `status` and `down` from the moment it booted: an orphan holding the port,
-  announced as a success. `up` now fails non-zero and prints the manual command
-  instead.
-- **The identity token is scoped to the boot.** `starttime` is ticks *since*
-  boot and the record outlives a reboot, so without the boot id the token
-  repeated across the exact boundary it exists to protect — and for a console
-  script the recorded basename is usually `python`, so a collision was not even
-  unlikely. Signals now go through a **pidfd** where the kernel offers one,
-  which closes the window between verifying a pid and signalling it.
-- **The whole lifecycle is serialised across processes.** `up` reads status,
-  decides, spawns and commits — a check-then-act that assumed it was alone. Two
-  concurrent calls both passed the idempotence check, both spawned and both
-  reported managed, and with real sockets one child can satisfy the *other's*
-  health poll, so the surviving record may name the child that lost the bind and
-  exited. The platform lock primitive moved out of `core/brain.py` into
-  `core/filelock.py` rather than being copied.
-- **The sidecar is found beside this interpreter, not only on `PATH`.** The extra
-  installs `aisquare-proxy` next to the CLI, and that directory need not be on
-  `PATH` — pipx exposes the main distribution's apps and not a dependency's, and
-  invoking the CLI by absolute path does the same. `up` reported the extra as
-  missing on an installation that had it.
-- **Post-spawn failures are transactional.** An unwritable state directory used
-  to let the exception escape with the proxy running and nothing recording it.
-  Every rollback now goes through the `Popen` handle — no pid-reuse question, and
-  `wait` confirms the exit — and a rollback that *cannot* stop the child says so
-  and names the pid instead of claiming it stopped. `up` also requires the
-  committed final status to be managed: one healthy sample during the poll is not
-  a healthy proxy.
-- **The child binds the address the URL names.** `::1` was accepted by the
-  loopback preflight and then not honoured, because the SDK defaults its host to
-  IPv4 — so a validated `http://[::1]:…` started a proxy that never answered it.
-  An ambient `AISQUARE_PROXY_HOST` was inherited too. Host and `claude_code` mode
-  are now both set explicitly from the validated configuration.
-- **The pidfd actually closes the race now.** It was opened *inside* the
-  terminate call, after ownership had been verified, so a successor that
-  inherited the number in between was exactly what it attached to. It is opened
-  before verification and the same handle carries the signal — through
-  `_owned_handle`, which binds and only then checks identity; the previous
-  attempt opened it inside the stop call, after verification, which merely moved
-  the window rather than closing it. `pidfd_open` raising ESRCH is terminal
-  rather than a fall-through to a numeric `os.kill` —
-  "this pid is gone" is precisely when the number may belong to someone else.
-- **An unreadable boot id no longer becomes a token.** `_boot_id` returned `"?"`
-  and that was accepted, producing `proc:?:…` — a string that looks boot-scoped
-  and compares equal across reboots. It now declines, leaving `ps`, whose
-  `lstart` is absolute.
-- **The manual recovery command names the key source in use** and shell-quotes
-  every value. It always printed `$(cat ~/.aisquare/explainability-key)`, while
-  the production runbook sources the key from the target's named variable and
-  that file may not exist.
-- **Ownership is about the process, not the configuration.** `_owns` used to
-  short-circuit on the proxy URL, so `enable --proxy-url` made a running proxy
-  stop being ours: `up` spawned a second and clobbered the only record of the
-  first, which then ran forever on the old port with the old gateway and key,
-  unstoppable by `down`. The URL moved to the deployment check, where a mismatch
-  means "restart it" rather than "not ours".
-- **`managed` describes the machine, not the shell that asked.** The key
-  fingerprint was compared against `key_fingerprint(None or "")` when no key was
-  resolvable, so asking from a shell without the key exported reported a healthy,
-  correctly-pointed proxy as misconfigured and told the operator to restart it.
-  The key is compared only when this shell can resolve one.
-- **A zombie is not alive.** `os.kill(pid, 0)` succeeds for an exited-but-unreaped
-  process, so a stop would wait out its timeout on something already gone and
-  report failure, and `status` would call it running.
-- **`ProcessLookupError` no longer escapes as a traceback** where there is no
-  pidfd (macOS, Windows, pre-5.3 kernels). It is an `OSError` and was neither
-  `_Gone` nor `PermissionError`, so a proxy exiting between the liveness check
-  and the SIGTERM — the SDK's own handler finishing between poll iterations is
-  enough — gave a traceback instead of "was already gone".
-- Not on the launch path. Nothing here runs in front of a waiting developer.
+A hosted proxy is already deployed for both deployments
+(`explainability-api.aisquare.studio:9443`, and the `stg-` equivalent). Pointing
+at one is now a flag — `enable --proxy-url
+https://explainability-api.aisquare.studio:9443`.
 
-  *Upgrade note:* a proxy started by a pre-0.5.0 build has a record without the
-  new fields, so it reads as absent and the process is treated as foreign — left
-  alone rather than signalled. Stop it by hand once, then `proxy up`.
+Verified end to end: two real `claude` sessions traced through the hosted prod
+proxy with nothing listening on 9090, and `doctor --live` green on proxy, gateway
+and ingest.
 
-**`aisquare-cli[explainability]` now installs the proxy's own runtime**
-(`fastapi`, `uvicorn`). It did not, and no other extra did either, so
-`aisquare-proxy` was on PATH and died at import — a hard stop on step one of
-the onboarding runbook.
+The key is resolved through the ACTIVE TARGET and passed into `wire_session`,
+never resolved inside it. Resolving locally means `resolve_api_key()`, which is
+env-first over a hardcoded `EXPLAINABILITY_API_KEY` — correct only when the
+target names that variable, and the source of the incident where a staging key
+reached a prod gateway. `tests/test_one_key_resolver.py`'s AST guard caught the
+first attempt doing exactly that.
+
+Onboarding drops from eleven steps to ten, and daily use to `aisquare launch`.
+A local sidecar is still fully supported — `--proxy-url http://127.0.0.1:9090`,
+which needs no code — for model traffic that must not leave the machine, or a
+self-hosted deployment with no proxy tier.
 
 ### Added
 - **`docs/planner-findings-loop.md` — the find→fix loop, and the one thing

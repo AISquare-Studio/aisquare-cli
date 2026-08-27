@@ -241,11 +241,20 @@ def launch(
                 "using the top-level settings",
                 style="dim",
             )
+        # The key a HOSTED proxy authenticates on. Resolved through the target,
+        # never from a hardcoded variable, and behind the same fail-open bar as
+        # the overrides above: an unreadable target costs the KEY, which costs
+        # the trace, and never the launch.
+        try:
+            api_key = explainability_ops.resolve_target(tracing).api_key
+        except Exception:
+            api_key = None
         wiring = explainability_service.wire_session(
             effective,
             role,
             session_id=identity.session_id,
             base_env=env,
+            api_key=api_key,
         )
         env.update(wiring.env)
         stderr_console().print(f"explainability: {wiring.reason}", style="dim")

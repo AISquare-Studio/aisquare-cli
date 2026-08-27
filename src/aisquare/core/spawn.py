@@ -134,24 +134,6 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"
     ),
-    "aisquare/services/explainability_proxy.py::_ps_identity": Seam(
-        EXCLUDED,
-        "`ps -p <pid> -o lstart=,comm=` — reads the process table to prove a "
-        "recorded pid is still the proxy we started, on platforms without "
-        "/proc. Touches no network and no model API, and passing it a tracing "
-        "environment would be meaningless: it is a fallback for `os.kill(pid, 0)` "
-        "being unable to tell a recycled pid from ours",
-    ),
-    "aisquare/services/explainability_proxy.py::_up_locked": Seam(
-        EXCLUDED,
-        "the SDK's `aisquare-proxy` sidecar. Deliberately NOT stripped, and it is "
-        "the one seam where stripping would be actively wrong: this process IS the "
-        "tracing destination, and it needs EXPLAINABILITY_GATEWAY_URL and the "
-        "workspace key in its environment to reach the gateway at all. Handing it "
-        "an untraced environment would start a proxy that records nothing, which "
-        "is the failure mode `up` exists to prevent. The key travels here and "
-        "never in argv",
-    ),
     "aisquare/services/explainability_ops.py::sdk_doctor": Seam(
         EXCLUDED,
         "the SDK's own `explainability-doctor` console script. Deliberately NOT "

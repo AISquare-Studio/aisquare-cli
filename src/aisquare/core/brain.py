@@ -26,12 +26,48 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
-from aisquare.core import filelock, paths, spawn
+from aisquare.core import paths, spawn
+
+# The exclusive-lock primitive, per platform. ``fcntl`` is POSIX-only and
+# ``msvcrt`` is Windows-only, so the import is branched on ``sys.platform``
+# rather than wrapped in ``try``/``except ImportError``: mypy narrows on
+# ``sys.platform`` and type-checks only the branch that is real for the
+# platform it runs on, which a ``try`` block would not do.
+if sys.platform == "win32":
+    import msvcrt
+
+    def _lock_exclusive(handle: IO[str]) -> None:
+        """Take the lock without blocking; raise ``OSError`` if held."""
+        # Windows byte-range locks are per handle and mandatory, so locking
+        # one byte at offset 0 is exclusive across processes just like flock.
+        # The region may sit past EOF, which is what keeps this working on the
+        # empty lock file.
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(handle: IO[str]) -> None:
+        """Release the lock taken by :func:`_lock_exclusive`."""
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_exclusive(handle: IO[str]) -> None:
+        """Take the lock without blocking; raise ``OSError`` if held."""
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(handle: IO[str]) -> None:
+        """Release the lock taken by :func:`_lock_exclusive`."""
+        fcntl.flock(handle, fcntl.LOCK_UN)
+
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 _ON_VALUES = {"1", "true", "yes", "on"}
@@ -146,7 +182,7 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
     try:
         while True:
             try:
-                filelock.lock_exclusive(handle)
+                _lock_exclusive(handle)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -156,7 +192,7 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
         try:
             yield True
         finally:
-            filelock.unlock(handle)
+            _unlock(handle)
     finally:
         handle.close()
 

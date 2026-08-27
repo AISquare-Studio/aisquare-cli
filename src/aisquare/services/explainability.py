@@ -427,12 +427,38 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
     return ProxyProbe(True, "proxy healthy")
 
 
+def _custom_headers(agent_name: str, pipeline_id: str, api_key: str | None) -> str:
+    """The identity headers, plus the workspace key when the caller supplied one.
+
+    A LOOPBACK sidecar needs no key: with ``AISQUARE_PROXY_INBOUND_KEYS`` unset
+    the proxy skips its auth gate entirely. A HOSTED proxy REQUIRES it and is the
+    tenant — so without this header the CLI could only ever trace against a local
+    sidecar, which is the entire reason one had to be started.
+
+    ``api_key`` is PASSED IN, never resolved here. Resolving it locally means
+    ``resolve_api_key()``, which is env-first over a hardcoded
+    ``EXPLAINABILITY_API_KEY`` — correct only when the active target names that
+    variable, and the source of the incident where a staging key reached a prod
+    gateway. The caller has the target-aware answer; this only formats it. The
+    AST guard in ``tests/test_one_key_resolver.py`` caught the first version of
+    this function doing it the wrong way.
+
+    Omitted rather than sent empty when there is no key, so the loopback case is
+    byte-identical to before.
+    """
+    pairs = [f"X-Agent-Name: {agent_name}", f"X-Pipeline-Id: {pipeline_id}"]
+    if api_key:
+        pairs.append(f"X-AISquare-Key: {api_key}")
+    return "\n".join(pairs)
+
+
 def wire_session(
     settings: ExplainabilitySettings,
     role: str,
     *,
     session_id: str | None = None,
     base_env: dict[str, str] | None = None,
+    api_key: str | None = None,
     prober: Callable[[str], ProxyProbe] | None = None,
 ) -> SessionWiring:
     """Build the env delta that traces one session, or explain why not.
@@ -441,6 +467,11 @@ def wire_session(
     agent session id so board rows and dashboard Runs share a key; otherwise a
     fresh UUID keeps concurrent sessions from merging into one Run. ``base_env``
     is consulted (never mutated) for vars the user already owns.
+
+    ``api_key`` is the ACTIVE TARGET's resolved workspace key, or None. Supplied
+    by the caller because only the caller knows which variable the target names;
+    it becomes the ``X-AISquare-Key`` header a hosted proxy authenticates on, and
+    is omitted entirely when absent so a loopback sidecar is unaffected.
 
     ``prober`` resolves HERE rather than as a default argument. A default binds
     the function object at def time, so patching ``probe_proxy`` on this module
@@ -522,9 +553,7 @@ def wire_session(
         reason=f"traced as {agent_name} (pipeline {pipeline_id})",
         env={
             "ANTHROPIC_BASE_URL": settings.proxy_url,
-            "ANTHROPIC_CUSTOM_HEADERS": (
-                f"X-Agent-Name: {agent_name}\nX-Pipeline-Id: {pipeline_id}"
-            ),
+            "ANTHROPIC_CUSTOM_HEADERS": _custom_headers(agent_name, pipeline_id, api_key),
         },
         agent_name=agent_name,
         pipeline_id=pipeline_id,

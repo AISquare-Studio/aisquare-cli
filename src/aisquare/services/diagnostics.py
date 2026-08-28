@@ -884,6 +884,11 @@ def _check_fleet(
             )
         return _ok(name, f"no fleet agents; the private tmux server '{socket}' is not running")
     except Exception as exc:  # diagnostics must never crash
-        # A store that will not open is the database check's verdict; failing
-        # open here costs only this line, and says what it could not read.
-        return _ok(name, f"not evaluated ({exc})")
+        # A store that will not open is the database check's verdict. Failing
+        # open here costs the stale-row report — a label can stay taken and a
+        # project can look staffed until the store opens — and the line says so.
+        return _ok(
+            name,
+            f"not evaluated ({exc}) — stale fleet rows, if any, go unreported until "
+            "the store opens",
+        )

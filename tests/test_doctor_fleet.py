@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -490,10 +491,11 @@ def test_fleet_check_fails_open_on_a_damaged_store(home: Path) -> None:
     check = diagnostics._check_fleet(lambda socket: FakeServer(socket=socket))
 
     assert check.status is CheckStatus.ok
-    assert check.detail.startswith("not evaluated (")
-    assert len(check.detail) > len("not evaluated ()"), (
-        "failing open must say what it could not read"
+    reason = re.match(r"^not evaluated \((.+?)\) — ", check.detail)
+    assert reason is not None and reason.group(1), (
+        f"failing open must say what it could not read: {check.detail!r}"
     )
+    assert "go unreported" in check.detail, "failing open must say what it cost"
 
 
 def test_fleet_check_does_not_write_the_tmux_conf(home: Path) -> None:

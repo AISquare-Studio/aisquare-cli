@@ -1,31 +1,272 @@
-"""The Project view: Manager · Board · Doctor · Explainability · Settings tabs."""
+"""The Project view: Manager · Board · Doctor · Explainability · Settings tabs.
+
+One ``TabbedContent`` per selected project (docs/plans/fleet-tui.md §4.2). The
+Manager tab is where goal intake happens — the user types to the manager's real
+Claude Code session exactly as they would to any other, so the tab is the
+manager's ``TerminalPane`` and nothing more, plus a **Start manager** button
+while the project has none. The Board tab is ``cli.ui.board.BoardPanel``, the
+widgets of ``aisquare board -w``; Doctor is the scaffold ``DoctorView`` the
+shell fills; Explainability and Settings are the two forms in this package.
+
+The shell pushes fresh data with :meth:`ProjectView.refresh_status`. The plan
+names that push ``refresh(status_snapshot)``, and Textual owns ``refresh`` on
+every widget — it is the repaint, called with ``Region``s from inside the
+framework — so :meth:`ProjectView.refresh` accepts a snapshot too and routes it
+to ``refresh_status`` before repainting; either spelling works. On its own the
+view reads the fleet service once at mount, so it also works standalone — which
+is how the tests drive it.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import ClassVar, Self
+
+from rich.text import Text
+from textual import on
 from textual.app import ComposeResult
-from textual.widgets import Static, TabbedContent, TabPane
+from textual.containers import Vertical
+from textual.geometry import Region
+from textual.widgets import Button, Static, TabbedContent, TabPane
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.models import ProjectInfo
+from aisquare.cli.ui.views.explainability import ExplainabilityView
+from aisquare.cli.ui.views.settings import SettingsView
+from aisquare.core.tmux import TmuxServer
+from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.services import fleet as fleet_service
+
+SPAWN_WORKER = "spawn-manager"
+"""Name of the worker that starts the manager; how its result is told apart."""
+
+_STATE_CHIP: dict[str, tuple[str, str]] = {
+    "working": ("▶", "green"),
+    "waiting": ("⏸", "yellow"),
+    "attention": ("🔔 NEEDS YOU", "bold red"),
+    "exited": ("💤", "dim"),
+    "lost": ("✗", "red"),
+    "unknown": ("·", "dim"),
+}
+
+
+def manager_text(status: FleetAgentStatus) -> Text:
+    """The Manager tab's header: who is running, in what state, where."""
+    agent = status.agent
+    text = Text()
+    text.append("🧭 manager", style="bold")
+    chip, style = _STATE_CHIP.get(status.state, ("·", "dim"))
+    text.append(f"  {chip} {status.state}", style=style)
+    if status.state == "exited" and agent.exit_status is not None:
+        text.append(f"({agent.exit_status})", style=style)
+    if status.detail:
+        text.append(f"  {status.detail}", style="dim")
+    if status.session is not None and status.session.model:
+        text.append(f"  {status.session.model}", style="dim cyan")
+    text.append(f"  {agent.pane_id}", style="dim")
+    if status.tmux_session:
+        text.append(
+            f"  ·  tmux -L {agent.tmux_socket} attach -t ={status.tmux_session}", style="dim"
+        )
+    text.append(
+        "\ntype to the manager as you would to any Claude session · F12 returns to the sidebar",
+        style="dim",
+    )
+    return text
+
+
+def no_manager_text(project: ProjectInfo, unavailable: str | None) -> Text:
+    """The Manager tab's header when the project has no live manager."""
+    name = project.root.name or project.id
+    text = Text()
+    text.append(f"{name} has no manager yet.\n", style="bold")
+    text.append(
+        "Start one to task this project in prose: it plans, spawns coders, testers and "
+        "reviewers on the board, and reports back when the goal is met.",
+    )
+    if unavailable:
+        text.append(f"\nfleet unavailable: {unavailable}", style="bold red")
+    return text
+
+
+def manager_status(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | None:
+    """The live manager among ``agents``, if any."""
+    for status in agents:
+        if status.agent.label == fleet_service.MANAGER_LABEL and status.agent.ended_at is None:
+            return status
+    return None
+
+
+class ManagerTab(Vertical):
+    """The manager's live session — or the button that starts one."""
+
+    DEFAULT_CSS = """
+    ManagerTab { height: 1fr; }
+    ManagerTab #manager-header { height: auto; padding: 0 1; }
+    ManagerTab #start-manager { margin: 1 1; }
+    ManagerTab #manager-pane { height: 1fr; }
+    """
+
+    def __init__(self, project: ProjectInfo, *, escape_key: str, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.project = project
+        self.escape_key = escape_key
+        self.status: FleetAgentStatus | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="manager-header")
+        yield Button("Start manager", id="start-manager", variant="primary")
+        yield TerminalPane(None, escape_key=self.escape_key, id="manager-pane")
+
+    def on_mount(self) -> None:
+        self.refresh_from_service()
+
+    def refresh_from_service(self) -> None:
+        """Ask the fleet service who the manager is (the standalone path)."""
+        try:
+            manager = fleet_service.manager_of(self.project)
+        except fleet_service.FleetError as exc:
+            self.show(None, unavailable=str(exc))
+            return
+        if manager is None:
+            self.show(None)
+            return
+        try:
+            status = fleet_service.status_of(manager)
+        except fleet_service.FleetError:
+            status = FleetAgentStatus(agent=manager)
+        self.show(status)
+
+    def show(self, status: FleetAgentStatus | None, *, unavailable: str | None = None) -> None:
+        """Render ``status`` — the pane when there is a manager, the button when not."""
+        self.status = status
+        header = self.query_one("#manager-header", Static)
+        button = self.query_one("#start-manager", Button)
+        pane = self.query_one("#manager-pane", TerminalPane)
+        if status is None:
+            header.update(no_manager_text(self.project, unavailable))
+            button.display = True
+            pane.display = False
+            if pane.pane_id is not None:
+                pane.attach(None)
+            return
+        header.update(manager_text(status))
+        button.display = False
+        pane.display = True
+        if pane.pane_id != status.agent.pane_id:
+            pane.server = TmuxServer(status.agent.tmux_socket)
+            pane.attach(status.agent.pane_id)
+
+    @on(Button.Pressed, "#start-manager")
+    def _start_manager(self) -> None:
+        """Spawn the manager off the UI thread; the result arrives as a worker state."""
+        self.query_one("#start-manager", Button).disabled = True
+        # exit_on_error=False: a FleetError is an answer to show, not a crash.
+        self.run_worker(self._spawn_manager, name=SPAWN_WORKER, thread=True, exit_on_error=False)
+
+    def _spawn_manager(self) -> fleet_service.SpawnReceipt:
+        return fleet_service.spawn(self.project, "manager")
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != SPAWN_WORKER:
+            return
+        if event.state is WorkerState.SUCCESS:
+            receipt = event.worker.result
+            if isinstance(receipt, fleet_service.SpawnReceipt):
+                agent = receipt.agent
+                where = f"{receipt.tmux_session} {agent.pane_id}"
+                self.notify(f"✓ spawned {agent.label} ({agent.id}) → {where}", timeout=6)
+                for note in receipt.notes:
+                    self.notify(note, severity="warning", timeout=8)
+            self.refresh_from_service()
+        elif event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not start the manager: {event.worker.error}", severity="error", timeout=8
+            )
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            self.query_one("#start-manager", Button).disabled = False
 
 
 class ProjectView(TabbedContent):
-    """One project: its manager's pane first, then the board, doctor and settings."""
+    """One project: its manager's pane first, then the board, doctor, tracing and settings."""
 
-    def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
+    TAB_IDS: ClassVar[tuple[str, ...]] = (
+        "tab-manager",
+        "tab-board",
+        "tab-doctor",
+        "tab-explainability",
+        "tab-settings",
+    )
+
+    def __init__(
+        self, project: ProjectInfo, *, id: str | None = None, refresh_seconds: float = 2.0
+    ) -> None:
         super().__init__(id=id)
         self.project = project
+        self.refresh_seconds = refresh_seconds
+        # TabbedContent composes ITSELF from the panes handed to it — this is
+        # what `with TabbedContent(): yield TabPane(...)` does at compose time,
+        # so a subclass adds its panes here rather than overriding compose().
+        escape_key = fleet_service.settings().escape_key
+        panes = (
+            TabPane(
+                "Manager",
+                ManagerTab(project, escape_key=escape_key, id="manager-tab"),
+                id="tab-manager",
+            ),
+            TabPane(
+                "Board",
+                BoardPanel(project, interval=refresh_seconds, id="board-panel"),
+                id="tab-board",
+            ),
+            TabPane("Doctor", DoctorView(id="project-doctor"), id="tab-doctor"),
+            TabPane(
+                "Explainability",
+                ExplainabilityView(id="project-explainability"),
+                id="tab-explainability",
+            ),
+            TabPane("Settings", SettingsView(project, id="project-settings"), id="tab-settings"),
+        )
+        for pane in panes:
+            self.compose_add_child(pane)
+        self._pending: list[FleetAgentStatus] | None = None
+        """A snapshot pushed before the tabs mounted, applied at mount."""
 
-    def compose(self) -> ComposeResult:
-        with TabPane("Manager", id="tab-manager"):
-            yield TerminalPane(None, id="manager-pane")
-        with TabPane("Board", id="tab-board"):
-            yield BoardPanel(self.project, id="board-panel")
-        with TabPane("Doctor", id="tab-doctor"):
-            yield DoctorView(id="project-doctor")
-        with TabPane("Explainability", id="tab-explainability"):
-            yield Static("(explainability — lands in Phase 6)", classes="dim")
-        with TabPane("Settings", id="tab-settings"):
-            yield Static("(settings — lands in Phase 6)", classes="dim")
+    def refresh_status(self, agents: Sequence[FleetAgentStatus]) -> None:
+        """Take the shell's fresh snapshot of this project's agents.
+
+        Safe before mount: the snapshot waits for the tabs and lands then.
+        """
+        tabs = self.query(ManagerTab)
+        if not tabs:
+            self._pending = list(agents)
+            return
+        tabs.first().show(manager_status(agents))
+
+    def on_mount(self) -> None:
+        if self._pending is not None:
+            pending, self._pending = self._pending, None
+            self.refresh_status(pending)
+
+    def refresh(
+        self,
+        *regions: Region | Sequence[FleetAgentStatus],
+        repaint: bool = True,
+        layout: bool = False,
+        recompose: bool = False,
+    ) -> Self:
+        """Textual's repaint — and the shell's push, when handed an agent snapshot.
+
+        ``Region`` is a tuple, so it is told apart first; anything else in
+        ``regions`` is a snapshot for :meth:`refresh_status`. A bare
+        ``refresh()`` stays exactly the framework's.
+        """
+        real: list[Region] = []
+        for item in regions:
+            if isinstance(item, Region):
+                real.append(item)
+            else:
+                self.refresh_status(item)
+        return super().refresh(*real, repaint=repaint, layout=layout, recompose=recompose)

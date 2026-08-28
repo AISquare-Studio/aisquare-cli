@@ -1,0 +1,12 @@
+{
+  "contract": 2,
+  "trigger": "prompt_submit",
+  "run_id": "run_kernel0001",
+  "session_id": "ses_kernel0001",
+  "trace_id": "trc_0af1c2d3e4f5",
+  "project_ref": "AISquare-Studio/aisquare-ci@worktree/kernel",
+  "snapshot_ref": "3fe161fa51cad3f5da22b97afa0e7383a25b8e47",
+  "prompt": null,
+  "client_safety_ms": 60000,
+  "client_observed_at": "2026-08-22T15:00:00Z"
+}

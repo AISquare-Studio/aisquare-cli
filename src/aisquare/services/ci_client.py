@@ -1,141 +1,119 @@
-"""The single transport between aisquare's hooks and the CI endpoint.
+"""The single transport between aisquare and the CI server, and its switches.
 
-One client, four triggers, one method. A new server-side capability must cost
-zero CLI changes, so nothing here branches on what a response *means* — that is
-:mod:`aisquare.services.ci_contract`'s job, and this module only gets bytes to
-it and reports how long that took.
+One client, one method, one attempt. Nothing here branches on what a response
+*means* — that is :mod:`aisquare.services.ci_contract`'s job; this module gets
+bytes to it under a deadline and reports how long that took.
 
-Three properties, in the order they matter:
+Four properties, in the order they matter:
 
-**Off costs nothing.** ``experiment.enabled`` is False by default, and in that
-state :func:`call` returns before touching the network, the config's URL, or
-this module's imports of it. The ``prompt_submit`` call runs synchronously in
-front of a developer who has just hit enter, so "disabled" has to mean zero
-measurable latency rather than a fast failure.
+**Off costs nothing.** With ``AISQUARE_CI`` unset or off, :func:`enabled` is
+the only thing that runs, and it reads one environment variable. No config, no
+network, no imports beyond this module's own. The ``prompt_submit`` call runs
+synchronously in front of a developer who has just hit enter, so "disabled" has
+to mean zero measurable latency rather than a fast failure. **Any unrecognised
+value is off**: ``AISQUARE_CI=disabled`` is the kill switch someone reaches for
+in a hurry, and a kill switch that fails open on a plausible spelling is not one.
 
-**Failure is never visible to the session.** Everything resolves to an allow
-outcome carrying the reason it degraded. Callers persist that reason: a
-timeout and a server deliberately saying "nothing to add" are both
-``action=allow``, and recorded without the reason they are the same row.
+**The deadline is wall-clock, not per-socket-operation.** ``urlopen``'s
+``timeout`` resets on every successful read, so a server dribbling one byte per
+second holds the hook forever while never tripping it. The ceiling here — the
+descriptor's ``client_safety_ms`` — bounds the whole exchange: the request runs
+in a worker thread the caller waits on for exactly that long, the body is read
+in bounded chunks against the same clock, and a response that lands after the
+ceiling is ``deadline_exceeded`` even though it arrived.
 
-**No retries.** A retry on this path doubles the latency being measured, which
-turns a slow endpoint into a slower one and contaminates the very number the
-experiment exists to collect. One attempt, then degrade.
+**Failure is never visible to the session and never silent in the data.**
+Every failure resolves to an outcome carrying the :class:`ClientReason` for it.
+A dead endpoint and a server with nothing to say both inject nothing; recorded
+without the reason they are the same row, and the experiment measures its own
+plumbing while looking healthy.
 
-The transport is :mod:`urllib` rather than ``httpx`` deliberately. The base
-install must stay unchanged and this path has to work without the
-``[experiment]`` extra present, which rules out a hard third-party import on
-the hot path; :mod:`aisquare.services.explainability` already probes over
-:mod:`urllib` for the same reason.
+**No retries, no client cache.** A retry doubles the latency being measured and
+contaminates the number the experiment exists to collect (``retry_policy:
+none``). A client-side response cache would make a cached turn's timing describe
+a network call it never made; the server caches and reports it in
+``briefing.cache``.
+
+The transport is :mod:`urllib` rather than a third-party client deliberately:
+the base install must stay unchanged and this path has to work without the
+``[experiment]`` extra present.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
-import urllib.request
 from dataclasses import dataclass
+from typing import Any
+from urllib.request import Request, urlopen
 
-from aisquare.core.config import load_config
-from aisquare.services import ci_cache
+from aisquare.core.config import ExperimentSettings, load_config
+from aisquare.models import BriefingStatus, ClientReason, HookAction
 from aisquare.services.ci_contract import (
-    ADVISORY_BUDGET_MS,
-    CLIENT_BACKSTOP_SECONDS,
-    CONTRACT_HEADER,
-    CONTRACT_VERSION,
-    Action,
-    DegradationReason,
+    RUN_ID,
+    Briefing,
     HookRequest,
     Outcome,
-    ToolRef,
-    Trigger,
+    clip,
     degraded,
     parse_response,
 )
 
-_ON_VALUES = {"1", "true", "yes", "on"}
-_OFF_VALUES = {"0", "false", "no", "off"}
-
+ENABLED_ENV_VAR = "AISQUARE_CI"
 URL_ENV_VAR = "AISQUARE_CI_URL"
 KEY_ENV_VAR = "AISQUARE_CI_KEY"
-ENABLED_ENV_VAR = "AISQUARE_CI"
+RUN_ENV_VAR = "AISQUARE_CI_RUN"
 
-_HOOK_PATH = "/v1/hook"
+_ON_VALUES = frozenset({"1", "true", "yes", "on"})
+
+MAX_BODY_BYTES = 8 * 1_048_576
+"""The most a hook response may be. Past it the body is ``malformed_body``.
+
+A briefing is a few kilobytes of items plus a context the CLI caps at 16 KB
+before injecting it, so anything near this is a server bug — but a bug worth
+*recording*: an oversized ``rendered_context`` that fits under this cap is read,
+capped at injection, and the row keeps both sizes, which is how the server team
+learns it happened. Past eight megabytes the cost of reading in front of a
+waiting developer outweighs the diagnostic, and the read stops."""
+
+_CHUNK_BYTES = 65_536
 
 
-@dataclass(frozen=True)
-class Call:
-    """One attempted call, and everything a metrics row needs from it.
-
-    Timing is reported as two numbers rather than one. ``round_trip_ms`` minus
-    the response's ``server_ms`` is the network cost; folded together, a slow
-    link is indistinguishable from a slow server, and the wrong team spends a
-    week on it.
-    """
-
-    outcome: Outcome
-    round_trip_ms: int
-    cache_hit: bool = False
-
-    @property
-    def action(self) -> Action:
-        """What the CLI should do. ``allow`` whenever the call degraded."""
-        return self.outcome.response.action
-
-    @property
-    def reason(self) -> DegradationReason:
-        """Why there is no server decision, or ``none``."""
-        return self.outcome.reason
-
-    @property
-    def degraded(self) -> bool:
-        return self.outcome.degraded
-
-    @property
-    def server_ms(self) -> int | None:
-        return self.outcome.response.server_ms
-
-    @property
-    def network_ms(self) -> int | None:
-        """Round trip minus the server's own timing, when it reported any."""
-        server_ms = self.server_ms
-        return None if server_ms is None else max(0, self.round_trip_ms - server_ms)
+# --- switches -----------------------------------------------------------------
 
 
 def enabled() -> bool:
-    """Whether the CI test bed is switched on. Off unless explicitly enabled.
+    """Whether the test bed is switched on. Off unless explicitly enabled.
 
-    ``AISQUARE_CI`` wins over config in both directions so a run can be turned
-    on for one session without editing a file, and off again just as fast when
-    it misbehaves — the state you want reachable in a hurry.
+    ``AISQUARE_CI`` wins over config in both directions. An unset or empty
+    variable defers to ``experiment.enabled``; a recognised on-value enables;
+    **anything else is off** — the safe state, and the one a typo must land in.
     """
     override = os.environ.get(ENABLED_ENV_VAR, "").strip().lower()
-    if override in _ON_VALUES:
-        return True
-    if override in _OFF_VALUES:
-        return False
-    return _settings_enabled()
+    if not override:
+        return _settings().enabled
+    return override in _ON_VALUES
 
 
-def _settings_enabled() -> bool:
-    """``experiment.enabled`` from config, False if the config is unreadable."""
-    try:
-        return load_config().experiment.enabled
-    except Exception:  # a broken config must not enable anything
-        return False
+def raw_endpoint() -> str:
+    """The configured base URL as written, or ``""``. For diagnostics."""
+    from_env = os.environ.get(URL_ENV_VAR, "").strip()
+    return from_env or _settings().url.strip()
 
 
 def endpoint() -> str:
-    """The configured base URL, or ``""`` when there is none."""
-    from_env = os.environ.get(URL_ENV_VAR, "").strip()
-    if from_env:
-        return from_env.rstrip("/")
-    try:
-        return load_config().experiment.url.strip().rstrip("/")
-    except Exception:
-        return ""
+    """The base URL requests go to, or ``""`` when there is no usable one.
+
+    ``http(s)://`` only. A scheme-less ``example.com`` used to raise out of the
+    request constructor, past every reason the ladder knows — and a hook that
+    raises loses its whole output, saved context included. It is now simply
+    "not configured", and ``doctor`` names the missing scheme.
+    """
+    url = raw_endpoint().rstrip("/")
+    return url if url.lower().startswith(("http://", "https://")) else ""
 
 
 def api_key() -> str:
@@ -143,117 +121,277 @@ def api_key() -> str:
     return os.environ.get(KEY_ENV_VAR, "").strip()
 
 
-def call(
-    trigger: Trigger,
-    *,
-    session_id: str,
-    trace_id: str,
-    project_id: str,
-    prompt: str | None = None,
-    tool: ToolRef | None = None,
-    run_id: str | None = None,
-    arm: str | None = None,
-    snapshot_ref: str | None = None,
-    budget_ms: int = ADVISORY_BUDGET_MS,
-    cache_key: str | None = None,
-) -> Call:
-    """Ask the endpoint what to do. Never raises, never retries.
+def raw_run_id() -> str:
+    """The configured run id as written, or ``""``. For diagnostics."""
+    from_env = os.environ.get(RUN_ENV_VAR, "").strip()
+    return from_env or _settings().run.strip()
 
-    ``cache_key`` is consulted before any request is made and is the mechanism
-    behind the ``session_start`` prefetch: a hit costs a small local file read
-    instead of a synchronous round trip. Which key a given trigger should use
-    is a server-side decision — see the cache-scoping entry in
-    ``docs/ci-contract.md``.
+
+def run_id() -> str:
+    """The ``run_…`` id whose descriptor drives this session, or ``""``.
+
+    Validated against the contract's pattern so a malformed value is "no run"
+    rather than a request the server rejects on shape. The CLI never mints one.
     """
-    if not enabled():
-        return Call(degraded(DegradationReason.disabled), round_trip_ms=0)
-    base = endpoint()
-    if not base:
-        return Call(degraded(DegradationReason.not_configured), round_trip_ms=0)
+    value = raw_run_id()
+    return value if RUN_ID.match(value) else ""
 
-    if cache_key:
-        cached = ci_cache.read(session_id, cache_key)
-        if cached is not None:
-            started = time.monotonic()
-            outcome = parse_response(status=200, body=cached)
-            return Call(outcome, round_trip_ms=_ms_since(started), cache_hit=True)
 
-    request = HookRequest(
-        trigger=trigger,
-        session_id=session_id,
-        trace_id=trace_id,
-        project_id=project_id,
-        budget_ms=budget_ms,
-        run_id=run_id,
-        arm=arm,
-        snapshot_ref=snapshot_ref,
-        prompt=prompt,
-        tool=tool,
-    )
+def _settings() -> ExperimentSettings:
+    """``experiment`` from config; the defaults when the config is unreadable.
+
+    A broken config must not enable anything, and must not cost the hook its
+    output either.
+    """
+    try:
+        return load_config().experiment
+    except Exception:
+        return ExperimentSettings()
+
+
+# --- one HTTP exchange under a wall-clock deadline ----------------------------
+
+
+@dataclass(frozen=True)
+class Exchange:
+    """What one HTTP exchange produced, before any interpretation.
+
+    ``reason`` is ``None`` when a response — any status — actually arrived
+    inside the deadline; otherwise it names the client-side failure and
+    ``status``/``body`` are empty.
+    """
+
+    status: int | None
+    body: str
+    elapsed_ms: int
+    reason: ClientReason | None = None
+    detail: str = ""
+
+
+def exchange(
+    url: str,
+    *,
+    method: str,
+    deadline_ms: int,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+    max_body: int = MAX_BODY_BYTES,
+) -> Exchange:
+    """One request, one attempt, bounded by ``deadline_ms`` of wall clock.
+
+    Never raises. The work runs in a daemon thread the caller joins for the
+    deadline; if the thread has not finished the exchange is
+    ``deadline_exceeded`` and the thread is abandoned (a short-lived hook
+    process takes it down on exit). A result that arrives late — the thread
+    finished, but the clock says the ceiling passed — is a breach too: the
+    hook has already waited too long, and counting it would hide exactly the
+    latency being measured.
+    """
     started = time.monotonic()
-    outcome = _post(base + _HOOK_PATH, request)
-    round_trip_ms = _ms_since(started)
+    deadline_s = max(deadline_ms, 1) / 1000.0
+    box: list[Exchange] = []
 
-    # A response that arrived only after the backstop is not a usable decision:
-    # the hook has already been waiting too long, and counting it would hide
-    # exactly the latency this measures. Report the breach, keep the timing.
-    if round_trip_ms >= CLIENT_BACKSTOP_SECONDS * 1000 and not outcome.degraded:
-        return Call(
-            degraded(DegradationReason.backstop_exceeded, f"{round_trip_ms}ms"),
-            round_trip_ms=round_trip_ms,
+    def work() -> None:
+        box.append(
+            _blocking_exchange(
+                url,
+                method=method,
+                headers=headers or {},
+                body=body,
+                started=started,
+                deadline_s=deadline_s,
+                max_body=max_body,
+            )
         )
 
-    _maybe_cache(session_id, outcome)
-    return Call(outcome, round_trip_ms=round_trip_ms)
+    worker = threading.Thread(target=work, name="aisquare-ci-exchange", daemon=True)
+    worker.start()
+    worker.join(deadline_s)
+    elapsed_ms = _ms_since(started)
+    if not box or late(elapsed_ms, deadline_ms):
+        return Exchange(
+            status=None,
+            body="",
+            elapsed_ms=elapsed_ms,
+            reason=ClientReason.deadline_exceeded,
+            detail=(
+                f"no response within {deadline_ms} ms"
+                if not box
+                else f"response arrived at {elapsed_ms} ms, after the {deadline_ms} ms ceiling"
+            ),
+        )
+    result = box[0]
+    return Exchange(
+        status=result.status,
+        body=result.body,
+        elapsed_ms=elapsed_ms,
+        reason=result.reason,
+        detail=result.detail,
+    )
 
 
-def _post(url: str, request: HookRequest) -> Outcome:
-    """One POST, one attempt, every failure mapped to a reason."""
-    body = json.dumps(request.to_wire()).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        CONTRACT_HEADER: str(CONTRACT_VERSION),
-    }
-    key = api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    http_request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+def late(elapsed_ms: int, deadline_ms: int) -> bool:
+    """Whether a response that did arrive still counts as a deadline breach."""
+    return elapsed_ms >= deadline_ms
+
+
+def _blocking_exchange(
+    url: str,
+    *,
+    method: str,
+    headers: dict[str, str],
+    body: bytes | None,
+    started: float,
+    deadline_s: float,
+    max_body: int,
+) -> Exchange:
+    """The socket work, with every failure mapped to a reason. Runs off-thread."""
     try:
-        with urllib.request.urlopen(http_request, timeout=CLIENT_BACKSTOP_SECONDS) as response:
-            payload = response.read().decode("utf-8", errors="replace")
-            return parse_response(status=response.status, body=payload)
+        request = Request(url, data=body, headers=headers, method=method)
+        with urlopen(request, timeout=deadline_s) as response:
+            return _read(response, response.status, started, deadline_s, max_body)
     except urllib.error.HTTPError as exc:
         # An HTTPError *is* a response: read it so a server that explains
         # itself in the body of a 429 is not thrown away as a bare status.
         try:
-            payload = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            payload = ""
-        return parse_response(status=exc.code, body=payload)
+            return _read(exc, exc.code, started, deadline_s, max_body)
+        except Exception as inner:
+            return _failed(started, ClientReason.http_error, f"status {exc.code}: {inner}")
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
-            return degraded(DegradationReason.backstop_exceeded, "connect timed out")
-        return degraded(DegradationReason.transport_error, str(exc.reason))
+            return _failed(started, ClientReason.deadline_exceeded, "connect timed out")
+        return _failed(started, ClientReason.transport_error, str(exc.reason))
     except TimeoutError:
-        return degraded(DegradationReason.backstop_exceeded, "read timed out")
+        return _failed(started, ClientReason.deadline_exceeded, "read timed out")
     except Exception as exc:  # the hot path must have no uncaught failure mode
-        return degraded(DegradationReason.transport_error, f"{type(exc).__name__}: {exc}")
+        return _failed(started, ClientReason.transport_error, f"{type(exc).__name__}: {exc}")
 
 
-def _maybe_cache(session_id: str, outcome: Outcome) -> None:
-    """Store a usable response under the key and TTL the server chose."""
-    if outcome.degraded:
-        return
-    hint = outcome.response.cache_hint
-    if hint is None:
-        return
-    ci_cache.write(
-        session_id,
-        hint.key,
-        outcome.response.model_dump_json(),
-        hint.ttl_s,
+def _read(response: Any, status: int, started: float, deadline_s: float, max_body: int) -> Exchange:
+    """Read a body in bounded chunks under the deadline and the size cap."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_body:
+            return _failed(started, ClientReason.malformed_body, f"body exceeds {max_body} bytes")
+        chunks.append(chunk)
+        if time.monotonic() - started >= deadline_s:
+            return _failed(
+                started, ClientReason.deadline_exceeded, "body still arriving at the ceiling"
+            )
+    return Exchange(
+        status=status,
+        body=b"".join(chunks).decode("utf-8", errors="replace"),
+        elapsed_ms=_ms_since(started),
+    )
+
+
+def _failed(started: float, reason: ClientReason, detail: str) -> Exchange:
+    return Exchange(
+        status=None, body="", elapsed_ms=_ms_since(started), reason=reason, detail=clip(detail)
     )
 
 
 def _ms_since(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+def headers_for(key: str, *, json_body: bool) -> dict[str, str]:
+    """The request headers: JSON in and out, and the bearer when there is one.
+
+    No contract header — v2 carries ``contract`` in the body, where the schema
+    can check it.
+    """
+    headers = {"Accept": "application/json"}
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+# --- the hook call ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Call:
+    """One attempted hook call, and everything a metrics row needs from it.
+
+    Timing is two numbers rather than one. ``round_trip_ms`` minus the
+    response's ``server_ms`` is the network cost; folded together, a slow link
+    is indistinguishable from a slow server and the wrong team spends a week
+    on it.
+    """
+
+    outcome: Outcome
+    round_trip_ms: int
+    request: HookRequest | None = None
+
+    @property
+    def action(self) -> HookAction:
+        """What the CLI should do. ``noop`` whenever the call degraded."""
+        return self.outcome.action
+
+    @property
+    def reason(self) -> ClientReason:
+        return self.outcome.reason
+
+    @property
+    def degraded(self) -> bool:
+        return self.outcome.degraded
+
+    @property
+    def status(self) -> BriefingStatus | None:
+        """The server's own verdict, when one arrived."""
+        return None if self.outcome.response is None else self.outcome.response.status
+
+    @property
+    def briefing(self) -> Briefing | None:
+        return self.outcome.briefing
+
+    @property
+    def server_ms(self) -> int | None:
+        return None if self.outcome.response is None else self.outcome.response.server_ms
+
+    @property
+    def network_ms(self) -> int | None:
+        """Round trip minus the server's own timing, when it reported any."""
+        server_ms = self.server_ms
+        return None if server_ms is None else self.round_trip_ms - server_ms
+
+    @property
+    def deadline_breached(self) -> bool | None:
+        if self.outcome.response is None:
+            return True if self.reason is ClientReason.deadline_exceeded else None
+        return self.outcome.response.deadline.breached
+
+    @property
+    def error_codes(self) -> list[str]:
+        if self.outcome.response is None:
+            return []
+        return [error.code for error in self.outcome.response.errors]
+
+
+def call(request: HookRequest, *, url: str) -> Call:
+    """POST ``request`` to ``url``. Never raises, never retries.
+
+    The deadline is the request's own ``client_safety_ms`` — the same number
+    the server is told — enforced as wall clock by :func:`exchange`.
+    """
+    payload = json.dumps(request.to_wire()).encode("utf-8")
+    result = exchange(
+        url,
+        method="POST",
+        deadline_ms=request.client_safety_ms,
+        headers=headers_for(api_key(), json_body=True),
+        body=payload,
+        max_body=MAX_BODY_BYTES,
+    )
+    if result.reason is not None:
+        return Call(degraded(result.reason, result.detail), result.elapsed_ms, request)
+    outcome = parse_response(status=result.status or 0, body=result.body)
+    return Call(outcome, result.elapsed_ms, request)

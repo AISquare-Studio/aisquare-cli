@@ -27,7 +27,7 @@ import sys
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -222,25 +222,36 @@ ALTER TABLE team_session ADD COLUMN model TEXT;
 ALTER TABLE team_session ADD COLUMN effort TEXT;
 """
 
-# v11: the CI test bed's per-turn metrics. One row per turn, opened by the
-# UserPromptSubmit hook and closed by Stop, so a row exists whether or not CI
-# was consulted — which is what makes the stretch before the endpoint goes
-# live a usable baseline rather than a gap in the record.
+# v11: the Collective Intelligence test bed's per-turn metrics. One row per
+# turn, opened by the UserPromptSubmit hook and closed by Stop, so a row exists
+# whether or not CI was consulted — which is what makes the stretch before the
+# endpoint goes live a usable baseline rather than a gap in the record.
 #
-# degradation_reason is here from creation, not bolted on later, because
-# ci_action cannot carry what it encodes: a timed-out call and a server
-# deliberately answering "nothing to add" are both `allow`. A table recording
-# only the action makes an endpoint failing every single request look exactly
-# like a clean baseline, and every aggregate over it measures plumbing rather
-# than retrieval.
+# client_reason is here from creation, not bolted on later, because status and
+# action cannot carry what it encodes: a timed-out call and a server answering
+# `empty` both inject nothing. A table recording only the action makes an
+# endpoint failing every single request look exactly like a clean baseline,
+# and every aggregate over it measures plumbing rather than retrieval.
 #
-# Token and tool columns are nullable and stay unwritten until the OTel work
-# lands: hook payloads do not carry counts, and a fabricated number here is
-# worse than a null because it survives into a published comparison.
+# The CHECKs pin the closed vocabularies — the server's (status, action,
+# trigger, cache_status) are fixed by hook contract v2 and change only with a
+# contract revision; client_reason and run_kind are ours, and a new value is a
+# deliberate act that arrives with a migration. tests/test_store.py holds each
+# list equal to the Python vocabulary it mirrors.
 #
-# `run` is created now though nothing fills it until T4 — run_id is server-
-# minted and null throughout Phase 1. Creating it here costs one CREATE and
-# saves a migration against a table that will already hold real data.
+# There is no arm, no architecture, no flags hash and no run table: the client
+# never sees an arm (the descriptor is blinding by construction), and a column
+# for one here would be a place to leak it into. opaque_config_id is the only
+# handle on which configuration served a turn, and it is recorded verbatim.
+#
+# Token and tool columns are nullable and stay unwritten until they come from
+# real evidence (Explainability spans): hook payloads do not carry counts, and
+# a fabricated number here is worse than a null because it survives into a
+# published comparison.
+#
+# Rewritten in place before it ever shipped in a release: the earlier v11 on
+# this branch recorded hook contract v1 columns, and a v12 for a schema that
+# reached no user would be a migration with no one to migrate.
 _SCHEMA_V11 = """
 CREATE TABLE metric (
     trace_id TEXT PRIMARY KEY,
@@ -249,16 +260,36 @@ CREATE TABLE metric (
     started_at TEXT NOT NULL,
     ended_at TEXT,
     wall_ms INTEGER,
-    ci_action TEXT NOT NULL DEFAULT 'allow',
-    degradation_reason TEXT NOT NULL DEFAULT 'disabled',
-    cache_hit INTEGER NOT NULL DEFAULT 0,
-    server_ms INTEGER,
-    round_trip_ms INTEGER,
-    budget_breach INTEGER NOT NULL DEFAULT 0,
-    injected_chars INTEGER,
     run_id TEXT,
-    arm TEXT,
-    flags_hash TEXT,
+    run_kind TEXT CHECK (run_kind IN ('live', 'replay')),
+    opaque_config_id TEXT,
+    trigger TEXT CHECK (trigger IN ('session_start', 'prompt_submit', 'agent_request')),
+    client_reason TEXT NOT NULL DEFAULT 'disabled' CHECK (client_reason IN (
+        'none', 'disabled', 'not_configured', 'no_run',
+        'trigger_not_in_descriptor', 'no_prompt', 'no_session',
+        'descriptor_unavailable', 'transport_error', 'deadline_exceeded', 'http_error',
+        'malformed_body', 'contract_mismatch', 'schema_mismatch')),
+    status TEXT CHECK (status IN ('served', 'empty', 'degraded', 'unavailable')),
+    action TEXT CHECK (action IN ('inject', 'noop')),
+    query_id TEXT,
+    briefing_id TEXT,
+    config_fingerprint TEXT,
+    input_checkpoint TEXT,
+    resolved_scope_version INTEGER,
+    round_trip_ms INTEGER,
+    server_ms INTEGER,
+    deadline_breached INTEGER,
+    token_count INTEGER,
+    items_count INTEGER,
+    cache_status TEXT CHECK (cache_status IN ('hit', 'miss', 'bypass')),
+    error_codes TEXT NOT NULL DEFAULT '[]',
+    rendered_chars INTEGER,
+    injected_chars INTEGER,
+    frame_version TEXT,
+    instruction_version TEXT,
+    redaction_level TEXT,
+    snapshot_ref TEXT,
+    snapshot_untracked_excluded INTEGER,
     tokens_in INTEGER,
     tokens_out INTEGER,
     tool_calls INTEGER
@@ -266,14 +297,6 @@ CREATE TABLE metric (
 
 CREATE INDEX metric_project_started ON metric (project_id, started_at);
 CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_at IS NULL;
-
-CREATE TABLE run (
-    id TEXT PRIMARY KEY,
-    arm TEXT,
-    flags_hash TEXT,
-    started_at TEXT NOT NULL,
-    note TEXT
-);
 """
 
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
@@ -294,12 +317,52 @@ SCHEMA_VERSION = len(_MIGRATIONS)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
-_METRIC_COLUMNS = (
-    "trace_id, project_id, session_id, started_at, ended_at, wall_ms, "
-    "ci_action, degradation_reason, cache_hit, server_ms, round_trip_ms, "
-    "budget_breach, injected_chars, run_id, arm, flags_hash, "
-    "tokens_in, tokens_out, tool_calls"
+_METRIC_FIELDS = (
+    "trace_id",
+    "project_id",
+    "session_id",
+    "started_at",
+    "ended_at",
+    "wall_ms",
+    "run_id",
+    "run_kind",
+    "opaque_config_id",
+    "trigger",
+    "client_reason",
+    "status",
+    "action",
+    "query_id",
+    "briefing_id",
+    "config_fingerprint",
+    "input_checkpoint",
+    "resolved_scope_version",
+    "round_trip_ms",
+    "server_ms",
+    "deadline_breached",
+    "token_count",
+    "items_count",
+    "cache_status",
+    "error_codes",
+    "rendered_chars",
+    "injected_chars",
+    "frame_version",
+    "instruction_version",
+    "redaction_level",
+    "snapshot_ref",
+    "snapshot_untracked_excluded",
+    "tokens_in",
+    "tokens_out",
+    "tool_calls",
 )
+_METRIC_COLUMNS = ", ".join(_METRIC_FIELDS)
+
+MAX_OPEN_TURN = timedelta(hours=24)
+"""How old an open turn row may be and still be closed by a ``Stop``.
+
+An orphaned row — a killed terminal, an ``open_turn`` that failed — would
+otherwise absorb the whole gap to the next ``Stop`` as a 72-hour turn and land
+in the wall-clock median. Older than this it stays open and is excluded
+instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
     "transcript_path, account, model, effort"
@@ -453,6 +516,11 @@ def _maybe_dt(value: str | None) -> datetime | None:
 
 
 def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
+    def flag(name: str) -> bool | None:
+        value = row[name]
+        return None if value is None else bool(value)
+
+    codes = json.loads(row["error_codes"] or "[]")
     return TurnMetric(
         trace_id=row["trace_id"],
         project_id=row["project_id"],
@@ -460,16 +528,32 @@ def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
         started_at=datetime.fromisoformat(row["started_at"]),
         ended_at=_maybe_dt(row["ended_at"]),
         wall_ms=row["wall_ms"],
-        ci_action=row["ci_action"],
-        degradation_reason=row["degradation_reason"],
-        cache_hit=bool(row["cache_hit"]),
-        server_ms=row["server_ms"],
-        round_trip_ms=row["round_trip_ms"],
-        budget_breach=bool(row["budget_breach"]),
-        injected_chars=row["injected_chars"],
         run_id=row["run_id"],
-        arm=row["arm"],
-        flags_hash=row["flags_hash"],
+        run_kind=row["run_kind"],
+        opaque_config_id=row["opaque_config_id"],
+        trigger=row["trigger"],
+        client_reason=row["client_reason"],
+        status=row["status"],
+        action=row["action"],
+        query_id=row["query_id"],
+        briefing_id=row["briefing_id"],
+        config_fingerprint=row["config_fingerprint"],
+        input_checkpoint=row["input_checkpoint"],
+        resolved_scope_version=row["resolved_scope_version"],
+        round_trip_ms=row["round_trip_ms"],
+        server_ms=row["server_ms"],
+        deadline_breached=flag("deadline_breached"),
+        token_count=row["token_count"],
+        items_count=row["items_count"],
+        cache_status=row["cache_status"],
+        error_codes=codes if isinstance(codes, list) else [],
+        rendered_chars=row["rendered_chars"],
+        injected_chars=row["injected_chars"],
+        frame_version=row["frame_version"],
+        instruction_version=row["instruction_version"],
+        redaction_level=row["redaction_level"],
+        snapshot_ref=row["snapshot_ref"],
+        snapshot_untracked_excluded=flag("snapshot_untracked_excluded"),
         tokens_in=row["tokens_in"],
         tokens_out=row["tokens_out"],
         tool_calls=row["tool_calls"],
@@ -1144,65 +1228,108 @@ class SqliteStore:
         return {row["id"]: row["status"] for row in rows}
 
     def open_turn(self, metric: TurnMetric) -> TurnMetric:
-        """Record the start of a turn. One INSERT — this is the hot path."""
+        """Record the start of a turn. One INSERT — this is the hot path.
+
+        A plain INSERT, not ``INSERT OR REPLACE``: the trace id is freshly
+        minted, so a collision is a bug, and a bug should raise rather than
+        silently destroy the row it collided with.
+        """
+
+        def flag(value: bool | None) -> int | None:
+            return None if value is None else int(value)
+
+        values = (
+            metric.trace_id,
+            metric.project_id,
+            metric.session_id,
+            metric.started_at.isoformat(),
+            metric.ended_at.isoformat() if metric.ended_at else None,
+            metric.wall_ms,
+            metric.run_id,
+            metric.run_kind,
+            metric.opaque_config_id,
+            metric.trigger,
+            metric.client_reason.value,
+            metric.status,
+            metric.action,
+            metric.query_id,
+            metric.briefing_id,
+            metric.config_fingerprint,
+            metric.input_checkpoint,
+            metric.resolved_scope_version,
+            metric.round_trip_ms,
+            metric.server_ms,
+            flag(metric.deadline_breached),
+            metric.token_count,
+            metric.items_count,
+            metric.cache_status,
+            json.dumps(list(metric.error_codes)),
+            metric.rendered_chars,
+            metric.injected_chars,
+            metric.frame_version,
+            metric.instruction_version,
+            metric.redaction_level.value if metric.redaction_level else None,
+            metric.snapshot_ref,
+            flag(metric.snapshot_untracked_excluded),
+            metric.tokens_in,
+            metric.tokens_out,
+            metric.tool_calls,
+        )
+        placeholders = ", ".join("?" for _ in _METRIC_FIELDS)
         self._conn.execute(
-            f"INSERT OR REPLACE INTO metric ({_METRIC_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                metric.trace_id,
-                metric.project_id,
-                metric.session_id,
-                metric.started_at.isoformat(),
-                metric.ended_at.isoformat() if metric.ended_at else None,
-                metric.wall_ms,
-                metric.ci_action,
-                metric.degradation_reason,
-                int(metric.cache_hit),
-                metric.server_ms,
-                metric.round_trip_ms,
-                int(metric.budget_breach),
-                metric.injected_chars,
-                metric.run_id,
-                metric.arm,
-                metric.flags_hash,
-                metric.tokens_in,
-                metric.tokens_out,
-                metric.tool_calls,
-            ),
+            f"INSERT INTO metric ({_METRIC_COLUMNS}) VALUES ({placeholders})", values
         )
         self._conn.commit()
         return metric
 
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None:
-        """Close this session's newest open turn; ``None`` when there is none.
+        """Close this session's newest open turn; ``None`` when nothing was closed.
 
         Matched on the session rather than carried through the agent, because
         the Stop hook payload has no trace id in it — only the session. The
-        newest open row is the turn that just finished; a turn that never
-        received a Stop (a killed terminal) simply stays open and is excluded
-        from wall-clock aggregates rather than being closed with a fabricated
-        end time.
+        newest open row is the turn that just finished. A turn that never
+        received a Stop (a killed terminal) stays open and is excluded from
+        wall-clock aggregates rather than closed with a fabricated end time;
+        an open row older than :data:`MAX_OPEN_TURN` is left alone for the same
+        reason, so an orphan cannot absorb a three-day gap into the median.
+
+        The UPDATE is a compare-and-set on ``ended_at IS NULL``: two Stops that
+        both saw the row open cannot both write it, and the loser reports
+        ``None`` rather than overwriting the first close. A negative clock
+        delta is stored as ``NULL``, not clamped to a zero that would read as
+        a real instant turn.
         """
         row = self._conn.execute(
-            f"SELECT {_METRIC_COLUMNS} FROM metric "
+            "SELECT trace_id, started_at FROM metric "
             "WHERE session_id = ? AND ended_at IS NULL "
             "ORDER BY started_at DESC, trace_id DESC LIMIT 1",
             (session_id,),
         ).fetchone()
         if row is None:
             return None
-        metric = _row_to_metric(row)
-        wall_ms = max(0, int((ended_at - metric.started_at).total_seconds() * 1000))
-        self._conn.execute(
-            "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ?",
-            (ended_at.isoformat(), wall_ms, metric.trace_id),
+        started_at = datetime.fromisoformat(row["started_at"])
+        delta = ended_at - started_at
+        if delta > MAX_OPEN_TURN:
+            return None
+        wall_ms = int(delta.total_seconds() * 1000) if delta >= timedelta(0) else None
+        cursor = self._conn.execute(
+            "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ? AND ended_at IS NULL",
+            (ended_at.isoformat(), wall_ms, row["trace_id"]),
         )
         self._conn.commit()
-        return metric.model_copy(update={"ended_at": ended_at, "wall_ms": wall_ms})
+        if cursor.rowcount == 0:
+            return None
+        closed = self._conn.execute(
+            f"SELECT {_METRIC_COLUMNS} FROM metric WHERE trace_id = ?", (row["trace_id"],)
+        ).fetchone()
+        return _row_to_metric(closed) if closed is not None else None
 
     def turn_metrics(
         self, *, project_id: str | None = None, session_id: str | None = None, limit: int = 500
     ) -> list[TurnMetric]:
+        """Recorded turns, newest first. ``limit`` is clamped to at least one:
+        SQLite reads a negative LIMIT as unbounded, and the whole table is not
+        what anyone asked for."""
         clauses: list[str] = []
         params: list[Any] = []
         if project_id is not None:
@@ -1212,7 +1339,7 @@ class SqliteStore:
             clauses.append("session_id = ?")
             params.append(session_id)
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
-        params.append(limit)
+        params.append(max(1, int(limit)))
         rows = self._conn.execute(
             f"SELECT {_METRIC_COLUMNS} FROM metric {where}"
             "ORDER BY started_at DESC, trace_id DESC LIMIT ?",

@@ -5,12 +5,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
-import socket
 import sys
 from importlib import metadata
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
@@ -29,7 +29,7 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import ci_client, explainability_ops
+from aisquare.services import ci_client, ci_descriptor, explainability_ops
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 
@@ -53,10 +53,6 @@ def status() -> StatusReport:
             shipping=_shipping_status(),
         )
     return report
-
-
-_CI_PROBE_TIMEOUT_SECONDS = 1.5
-"""Doctor must stay fast; an unreachable endpoint is the common case here."""
 
 
 def _shipping_status() -> ShippingStatus | None:
@@ -104,7 +100,7 @@ def doctor(*, live: bool = False, target: str | None = None) -> list[DoctorCheck
         _check_snapshot(),
         _check_brain(),
         _check_harness(),
-        _check_experiment(),
+        *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
     ]
 
@@ -517,57 +513,150 @@ def _check_brain() -> DoctorCheck:
     return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
 
 
-def _check_experiment() -> DoctorCheck:
-    """The CI test bed's state, and whether its endpoint can be reached.
+def _experiment_checks() -> list[DoctorCheck]:
+    """The CI test bed's state, one line per question a developer would ask.
 
     Off is reported as ``ok`` rather than as a warning: off is the intended
     state for everyone who has not been asked to run the experiment, and a
     permanent warning trains people to ignore the one line that matters.
+
+    Switched on, the questions are asked in the order the hooks would hit
+    them: is the URL usable, is there a token, is there a run; can the server
+    be reached at all (``GET /ready``, public); and does the descriptor come
+    back — which is the real question, because it is where a bad token, an
+    unknown run, an expired run or a contract skew each show up with their own
+    answer. The descriptor is fetched without caching it: a diagnostic must not
+    create state. Every probe is bounded by the transport's own deadline.
     """
+    name = "ci test bed"
     if not ci_client.enabled():
-        return _ok("ci test bed", "off — no requests, no added latency (AISQUARE_CI=1 enables)")
-    url = ci_client.endpoint()
-    if not url:
-        return _warn(
-            "ci test bed",
-            "enabled but no endpoint configured — every prompt records not_configured",
-            "Point it at the endpoint: export AISQUARE_CI_URL=https://…",
+        return [_ok(name, "off — no requests, no added latency (AISQUARE_CI=1 enables)")]
+    raw = ci_client.raw_endpoint()
+    if not raw:
+        return [
+            _warn(
+                name,
+                "enabled but no endpoint configured — every prompt records not_configured",
+                "Point it at the server: export AISQUARE_CI_URL=https://…",
+            )
+        ]
+    base = ci_client.endpoint()
+    if not base:
+        return [
+            _warn(
+                name,
+                f"enabled, but {_display_url(raw)} is not a usable URL — it needs an "
+                "http(s):// scheme; every prompt records not_configured",
+                "Give it a scheme: export AISQUARE_CI_URL=https://…",
+            )
+        ]
+    shown = _display_url(base)
+    key = ci_client.api_key()
+    raw_run = ci_client.raw_run_id()
+    run = ci_client.run_id()
+    checks: list[DoctorCheck] = []
+    if not key:
+        checks.append(
+            _warn(
+                name,
+                f"enabled for {shown}, but no bearer token — the server will reject every request",
+                "Set the experiment token: export AISQUARE_CI_KEY=…",
+            )
         )
-    if not ci_client.api_key():
-        return _warn(
-            "ci test bed",
-            f"enabled for {url}, but no bearer token — requests will be rejected",
-            "Set the token: export AISQUARE_CI_KEY=…",
+    elif not raw_run:
+        checks.append(
+            _warn(
+                name,
+                f"enabled for {shown}, but no run id — every prompt records no_run",
+                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
+            )
         )
-    reachable, why = _probe_endpoint(url)
-    if not reachable:
-        return _warn(
-            "ci test bed",
-            f"enabled for {url}, but it is not reachable ({why}) — "
-            "prompts still work, every turn records transport_error",
-            "Check the endpoint is up, or turn it off: export AISQUARE_CI=0",
+    elif not run:
+        checks.append(
+            _warn(
+                name,
+                f"enabled for {shown}, but {raw_run!r} is not a run id (run_…) — "
+                "every prompt records no_run",
+                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
+            )
         )
-    return _ok("ci test bed", f"enabled for {url} — endpoint reachable")
+    else:
+        checks.append(_ok(name, f"enabled for {shown}, run {run}"))
+    checks.append(_check_ci_endpoint(base, shown))
+    if key and run:
+        checks.append(_check_ci_descriptor(base, key, run))
+    return checks
 
 
-def _probe_endpoint(url: str) -> tuple[bool, str]:
-    """Whether something is listening at ``url``. Never raises, always bounded.
+_CI_PROBE_MS = 3_000
+"""Doctor must stay fast; an unreachable endpoint is the common case here, and
+the transport's wall-clock deadline is what bounds each probe."""
 
-    A TCP connect rather than a request: the contract defines one route and it
-    is a POST that does work, so probing it would mean sending the endpoint
-    real traffic every time someone runs ``doctor``. Whether it should expose a
-    health route is bilateral decision #6 in docs/ci-contract.md.
+
+def _check_ci_endpoint(base: str, shown: str) -> DoctorCheck:
+    """``GET /ready`` — public, cheap, and proof of a live server rather than a
+    listener. It follows the same proxies the hook does, because it is the
+    same transport."""
+    result = ci_client.exchange(
+        f"{base}/ready", method="GET", deadline_ms=_CI_PROBE_MS, max_body=4096
+    )
+    if result.reason is None and result.status == 200:
+        return _ok("ci endpoint", f"{shown}/ready answered 200 in {result.elapsed_ms} ms")
+    why = result.detail if result.reason is not None else f"http {result.status}"
+    return _warn(
+        "ci endpoint",
+        f"{shown}/ready did not answer ({why}) — prompts still work; every turn records "
+        "descriptor_unavailable or transport_error",
+        "Check the server is up, or turn the test bed off: export AISQUARE_CI=0",
+    )
+
+
+def _check_ci_descriptor(base: str, key: str, run: str) -> DoctorCheck:
+    """The question that matters: will the hooks be told how to deliver?"""
+    result = ci_descriptor.fetch(run, base=base, key=key, cache=False, deadline_ms=_CI_PROBE_MS)
+    descriptor = result.descriptor
+    if descriptor is None:
+        detail = result.detail
+        if "token" in detail:
+            fix = "Check AISQUARE_CI_KEY is the experiment token for this server"
+        elif "not found" in detail:
+            fix = "Check AISQUARE_CI_RUN names a run this server has published"
+        elif "contract_version" in detail:
+            fix = "Upgrade aisquare-cli, or ask for a run published for this contract"
+        elif "expired" in detail:
+            fix = "Ask the experiment controller for a fresh run"
+        else:
+            fix = "Check the server, or turn the test bed off: export AISQUARE_CI=0"
+        return _warn(
+            "ci descriptor", f"run {run}: {detail} — every turn records descriptor_unavailable", fix
+        )
+    modes = []
+    push = descriptor.hook_push
+    if push is not None:
+        modes.append(f"hook_push on {', '.join(push.triggers)}")
+    if descriptor.mcp_pull is not None:
+        modes.append(f"mcp_pull ({descriptor.mcp_pull.tool})")
+    if not modes:
+        modes.append("direct_api only — the hooks will not call")
+    return _ok(
+        "ci descriptor",
+        f"run {run}: {'; '.join(modes)}; ceiling {descriptor.client_safety_ms} ms; "
+        f"expires {descriptor.expires_at}",
+    )
+
+
+def _display_url(url: str) -> str:
+    """A URL as ``doctor`` may print it: scheme and host, never ``user:secret@``.
+
+    ``doctor`` output is the most pasteable artefact there is, and a credential
+    in the URL would leak by being ordinary.
     """
-    parsed = urlparse(url)
-    host = parsed.hostname
-    if not host:
-        return False, "unparseable url"
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        with socket.create_connection((host, port), timeout=_CI_PROBE_TIMEOUT_SECONDS):
-            return True, ""
-    except OSError as exc:
-        return False, type(exc).__name__
+        parts = urlsplit(url if "://" in url else f"//{url}", scheme="")
+    except ValueError:
+        return re.sub(r"[^@/]*@", "", url)
+    host = parts.netloc.rsplit("@", 1)[-1]
+    return f"{parts.scheme}://{host}" if parts.scheme else host
 
 
 def _has_module(name: str) -> bool:

@@ -472,3 +472,22 @@ def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert command == "'/opt/my tools/bin/aisquare'"
     assert agents._is_aisquare_hook_command(f"{command} hook stop")
+
+
+def test_connect_gives_the_context_hooks_room_for_the_ci_ceiling(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """Claude Code cancels a command hook at 60 s by default and discards its
+    output; the CI test bed's prompt call may wait up to the descriptor's
+    ceiling (60 s today) before degrading. The two context hooks therefore
+    carry a longer timeout, and the bookkeeping hooks keep the default."""
+    from aisquare.core.agents import CONTEXT_HOOK_TIMEOUT_SECONDS
+
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    for event in ("SessionStart", "UserPromptSubmit"):
+        entry = settings["hooks"][event][0]["hooks"][0]
+        assert entry["timeout"] == CONTEXT_HOOK_TIMEOUT_SECONDS, event
+    for event in ("Stop", "SessionEnd", "Notification"):
+        assert "timeout" not in settings["hooks"][event][0]["hooks"][0], event
+    assert CONTEXT_HOOK_TIMEOUT_SECONDS > 60

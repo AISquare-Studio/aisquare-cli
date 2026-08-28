@@ -188,6 +188,14 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_EXPLAINABILITY_TARGET",
         "EXPLAINABILITY_GATEWAY_URL",
         "EXPLAINABILITY_API_KEY",
+        # The CI test bed's switches. An operator who has them exported would
+        # otherwise run the suite's hooks against THEIR endpoint, with THEIR
+        # token — measured once: four real POSTs to a listener during a green
+        # run. Off is the state every test starts from; tests opt in.
+        "AISQUARE_CI",
+        "AISQUARE_CI_URL",
+        "AISQUARE_CI_KEY",
+        "AISQUARE_CI_RUN",
     ):
         monkeypatch.delenv(knob, raising=False)
     return home

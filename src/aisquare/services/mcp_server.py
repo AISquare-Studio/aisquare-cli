@@ -382,6 +382,15 @@ def build_server() -> FastMCP:
     ):
         server.add_tool(tool)
 
+    # The Collective Intelligence recall tool, only when the experiment is on
+    # and the run's delivery descriptor lists ``mcp_pull``. The descriptor
+    # decides exposure — a client flag here would be a second place the
+    # experiment's shape lives. ``ci_recall`` never imports ``mcp``.
+    from aisquare.services import ci_recall
+
+    if ci_recall.available():
+        server.add_tool(ci_recall.collective_intelligence_recall)
+
     async def call_tool_with_exact_errors(
         name: str, arguments: dict[str, Any]
     ) -> Sequence[ContentBlock] | dict[str, Any] | CallToolResult:

@@ -36,21 +36,23 @@ def test_the_base_install_gains_no_dependencies() -> None:
     """The experiment must not change what a normal `pip install aisquare-cli`
     pulls in. Pinned as a set, so adding one is a deliberate act with a
     conversation attached rather than a line that slipped through review."""
+    import re
     import tomllib
 
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    required = {dep.split(">")[0].split("=")[0].strip() for dep in data["project"]["dependencies"]}
+    # Split on every specifier character, so a future `foo<2` upper bound reads
+    # as `foo` rather than failing with a confusing diff.
+    required = {re.split(r"[<>=!~\[; ]", dep)[0].strip() for dep in data["project"]["dependencies"]}
     assert required == {"typer", "rich", "pydantic", "tomli-w"}
 
 
-def test_the_experiment_extra_exists_and_is_installable() -> None:
+def test_the_experiment_extra_is_a_real_extra_in_the_built_metadata() -> None:
     """`pip install 'aisquare-cli[experiment]'` has to be a real command even
-    while the extra adds nothing — the transport is stdlib on purpose."""
-    import tomllib
+    while the extra adds nothing — the transport is stdlib on purpose. Asserted
+    on the BUILT metadata rather than on the pyproject table, so a build backend
+    that dropped empty extras would fail this, and so the extra may later take
+    the OpenTelemetry dependency without failing it."""
+    from importlib.metadata import metadata
 
-    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    extras = data["project"]["optional-dependencies"]
-    assert "experiment" in extras
-    assert extras["experiment"] == []
+    assert "experiment" in (metadata("aisquare-cli").get_all("Provides-Extra") or [])

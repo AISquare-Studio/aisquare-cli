@@ -1,0 +1,28 @@
+{
+  "contract": 2,
+  "status": "degraded",
+  "action": "block",
+  "briefing": null,
+  "config_fingerprint": "sha256:5ec00ab3c0095d9b919047dcfd43e475cf2321b62810b4df3dd72f3e403eb6e7",
+  "server_ms": 63,
+  "deadline": {
+    "server_ms": 55000,
+    "client_safety_ms": 60000,
+    "breached": false
+  },
+  "errors": [
+    {
+      "schema_version": "error/v1",
+      "code": "deadline_exceeded",
+      "http_status": 503,
+      "message": "Briefing cache bypassed after Redis failed post-admission; partial result returned.",
+      "subject_ref": "redis",
+      "retryable": true,
+      "detail": {
+        "cache_policy": "bypass_cache_mark_degraded",
+        "omitted_capability": "briefing_cache"
+      },
+      "occurred_at": "2026-08-22T15:00:05Z"
+    }
+  ]
+}

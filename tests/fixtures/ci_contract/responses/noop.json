@@ -1,7 +1,0 @@
-{
-  "contract": 1,
-  "action": "noop",
-  "flags_applied": ["ci_retrieval"],
-  "server_ms": 41,
-  "cache_hint": {"ttl_s": 60, "key": "prj_8f333d29:empty"}
-}

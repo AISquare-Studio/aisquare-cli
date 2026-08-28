@@ -106,7 +106,7 @@ class ExplainabilitySettings(BaseModel):
 
 
 class ExperimentSettings(BaseModel):
-    """Settings for the CI test bed — the retrieval experiment.
+    """Settings for the Collective Intelligence test bed.
 
     ``enabled`` is False, and stays False for everyone who has not deliberately
     opted in. That is not caution about a half-built feature: the
@@ -116,9 +116,13 @@ class ExperimentSettings(BaseModel):
     the client safe to land on ``main`` while the endpoint is still being
     built, instead of accruing on a branch.
 
-    ``push`` and ``pull`` are sub-flags *of* ``enabled``. Both default true, as
-    T4 specifies — which is only true once someone has opted in; with
-    ``enabled`` False neither is ever consulted.
+    ``url`` is the server's base URL; ``run`` is the ``run_…`` id whose delivery
+    descriptor drives this machine's sessions. There is deliberately nothing
+    else: which hooks call the server and whether the recall tool is exposed
+    are decided by the descriptor the server publishes, not by a flag here —
+    a client-side switch would be a second place the experiment's shape lives.
+    ``AISQUARE_CI``, ``AISQUARE_CI_URL`` and ``AISQUARE_CI_RUN`` override each
+    field from the environment.
 
     There is deliberately no key field. The bearer token is read from
     ``AISQUARE_CI_KEY`` and nowhere else: ``config.toml`` is a file people
@@ -128,8 +132,7 @@ class ExperimentSettings(BaseModel):
 
     enabled: bool = False
     url: str = ""
-    push: bool = True
-    pull: bool = True
+    run: str = ""
 
 
 class RoleLaunchProfile(BaseModel):

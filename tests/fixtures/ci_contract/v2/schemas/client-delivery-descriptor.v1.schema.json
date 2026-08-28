@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/delivery/client-delivery-descriptor.v1.schema.json",
+  "title": "client-delivery-descriptor.v1",
+  "description": "The only run document a delivery client ever fetches. Specified verbatim by 02-contracts-and-data.md section 6 and returned by GET /v1/experiment/runs/{run_id} (02 section 5). THIS SCHEMA IS A BLINDING CONTROL, not a convenience. Its defining property is stated in one sentence of canon: 'This descriptor contains no architecture, source, reader, storage, or arm-label field. The experiment controller alone publishes and seals the full manifest' (02 section 6), restated as 'The delivery CLI and dummy transport client know no architecture names beyond an opaque run configuration ID' (02 section 1) and as decision A-13 in 05-open-decisions.md. The experiment measures a difference between graph architectures using an agent-facing client; a client that can read which arm it is in is a client whose behavior can vary with the arm, and every number the run produces afterwards is confounded by a mechanism nobody recorded. WHY additionalProperties: false IS DOING REAL WORK HERE, and not just tidiness as it is elsewhere in this contract set. The blinding guarantee is a statement about which fields are ABSENT. An open object cannot make that statement: 'architecture', 'store_count', 'reader_id', 'arm', 'arm_kind', 'sources' and 'partition_key' would all validate, the descriptor would still look canon-shaped in review, and the leak would be invisible until someone diffed two arms' descriptors byte for byte. Closed at the root AND inside every delivery[] member, the leak becomes a validation failure at the moment the controller tries to publish it - which is the only moment anyone is looking. The invalid fixture for this schema is exactly that case. WHAT IT STILL CANNOT STOP, stated plainly because a control whose limits are unwritten gets trusted past them: closing the FIELD channel does not close the VALUE channel. A descriptive opaque_config_id (cfg_public_r3_federated) or a descriptive run_id (run_r1_arm_b_007) leaks the arm through a perfectly legal field, and no pattern can tell an opaque token from a meaningful one. Minting genuinely opaque identifiers is a controller obligation - NOT EXPRESSIBLE IN JSON SCHEMA, controller-enforced - and it is the residual risk this schema leaves behind.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "run_id",
+    "opaque_config_id",
+    "delivery",
+    "client_safety_ms",
+    "retry_policy",
+    "expires_at"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 2,
+      "description": "The hook/delivery contract version this run speaks. Note the field is named contract_version here and contract on the request and response - that asymmetry is canon's (02 section 6) and is preserved rather than normalized, because a client written against the canon text should validate against these schemas without a translation step."
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "The immutable run. The client echoes it on every hook request and MCP call. Subject to the value-channel caveat in the root description: a run ID that encodes the arm defeats the blinding through a legal field."
+    },
+    "opaque_config_id": {
+      "type": "string",
+      "pattern": "^cfg_public_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "The public handle for a sealed configuration. The 'public' segment of the prefix is the whole point and is why it is pinned in the pattern rather than left as a bare cfg_: it makes a sealed-manifest configuration ID structurally unable to appear in this field, so the mistake of publishing the internal ID fails validation instead of shipping. 'Delivery clients receive only an opaque configuration ID' (02 section 1); the controller alone holds the mapping from this handle to an architecture."
+    },
+    "delivery": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "direct_api"
+              }
+            },
+            "description": "Pre-CLI mode: the harness calls the experiment endpoints directly (03 section 4.1, 'Pre-CLI delivery: modes=[direct_api]'). It carries no endpoint or tool field because it adds nothing the caller does not already have - the experiment API surface is 02 section 5 and the caller holds an experiment token for it. CANON UNDERSPECIFICATION: 02 section 6 shows member shapes only for hook_push and mcp_pull, so this member's shape is drafted, not quoted."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "triggers",
+              "endpoint"
+            ],
+            "properties": {
+              "kind": {
+                "const": "hook_push"
+              },
+              "triggers": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "session_start",
+                    "prompt_submit",
+                    "agent_request"
+                  ]
+                },
+                "description": "Which client events this run wants pushed. Same closed catalog as hook-request.experimental-v2.trigger, so the descriptor cannot advertise a trigger no request can carry. Required and non-empty here rather than optional: 03 section 4 says 'hook_triggers is forbidden without hook_push', and the mirror rule - hook_push with no triggers - is a push mode that pushes nothing, which is an arm silently reduced to CI-off while still being counted as a delivery arm."
+              },
+              "endpoint": {
+                "type": "string",
+                "pattern": "^/[A-Za-z0-9._~/-]{0,200}$",
+                "description": "Server-relative path the client POSTs a hook-request.experimental-v2 to, for example /v1/hook. Relative by construction: an absolute URL here would let a descriptor redirect a client's prompts to another host, and 02 section 7's prohibition on URLs as authority is the same concern seen from the other direction."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "tool"
+            ],
+            "properties": {
+              "kind": {
+                "const": "mcp_pull"
+              },
+              "tool": {
+                "type": "string",
+                "enum": [
+                  "collective_intelligence_recall"
+                ],
+                "description": "The MCP tool this run exposes. Single-member closed enum, matching the discipline error.v1 uses for its reason catalog: 02 section 7 says 'The initial MCP surface contains one read-only tool', and the optional collective_intelligence_explain(item_id) tool 'may be added after provenance retrieval is stable'. Adding it is therefore a visible schema-version diff rather than a value that quietly starts appearing in production descriptors."
+              }
+            }
+          }
+        ]
+      },
+      "description": "The delivery surfaces this run offers, as a mathematical set (03 section 4: 'delivery.modes is a mathematical set ... Duplicate modes, irrelevant fields, disabled-but-configured source bodies, and unknown properties fail schema validation'). Set semantics are enforced per kind by the contains/maxContains clauses in allOf below, because uniqueItems alone only rejects byte-identical members and would happily admit two hook_push entries with different trigger lists - which is not a set, and which makes 'the arm delivered by hook_push' ambiguous."
+    },
+    "client_safety_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The safety ceiling the client should apply, published so both sides agree on it before the first call. 01 section 11: 'A configurable client safety ceiling prevents hangs; latency remains a measured outcome' - it bounds hangs, it is not a performance gate."
+    },
+    "retry_policy": {
+      "type": "string",
+      "enum": [
+        "none"
+      ],
+      "description": "What the client does with a failed delivery call. Single-member closed enum: 02 section 6 shows only 'none' and 03 section 4 pins manifest runtime.retries: 0. That pairing is not incidental - a retried hook call produces a second delivery attempt for one developer event, and the ledger would then carry two attempts for one unit of work with no way to pair them. CANON UNDERSPECIFICATION: no catalog of alternative policies is published anywhere, so widening this is a schema-version change and a joint decision (04 section 8 lists retry semantics as jointly owned)."
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "description": "When this descriptor stops being valid, RFC3339 as canon writes it. A descriptor without an expiry is a cached blinding decision that outlives the run it described. NOT EXPRESSIBLE IN JSON SCHEMA, adapter-enforced: that expires_at is in the future relative to the serving clock."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "delivery"
+        ],
+        "properties": {
+          "delivery": {
+            "contains": {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "direct_api"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "delivery": {
+            "maxItems": 1
+          }
+        },
+        "description": "03 section 4: 'direct_api is mutually exclusive with agent-facing modes.' A run that is simultaneously pre-CLI direct and agent-facing has two different delivery mechanisms contributing to one measured effect, so the delivery estimand is not identified. [hook_push, mcp_pull] remains legal - canon names it as the later combined arm."
+      }
+    },
+    {
+      "properties": {
+        "delivery": {
+          "contains": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "direct_api"
+              }
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      },
+      "description": "At most one direct_api member. minContains: 0 is what makes this a cap rather than a requirement - without it, contains would demand at least one match and every hook-only descriptor would fail."
+    },
+    {
+      "properties": {
+        "delivery": {
+          "contains": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "hook_push"
+              }
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      },
+      "description": "At most one hook_push member."
+    },
+    {
+      "properties": {
+        "delivery": {
+          "contains": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "mcp_pull"
+              }
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      },
+      "description": "At most one mcp_pull member."
+    }
+  ]
+}

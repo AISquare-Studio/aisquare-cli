@@ -1,0 +1,55 @@
+{
+  "contract": 2,
+  "status": "served",
+  "action": "inject",
+  "briefing": {
+    "briefing_id": "brf_kernel0001",
+    "run_id": "run_kernel0001",
+    "query_id": "qry_kernel0001",
+    "config_fingerprint": "sha256:5ec00ab3c0095d9b919047dcfd43e475cf2321b62810b4df3dd72f3e403eb6e7",
+    "input_checkpoint": "ckp_0007",
+    "resolved_scope_version": 19,
+    "items": [
+      {
+        "item_id": "ki_trace_pool_guard",
+        "item_version": 3,
+        "text": "A pool-reset net must cover both sides of the yield; guarding only the entry side leaves the pool leaked on the exception path.",
+        "structured_facts": {
+          "symbol": "pool_guard",
+          "file": "app/db/pool.py"
+        },
+        "evidence_ids": [
+          "ed3b4ca0-d233-5014-bd45-d4af87eb03d2"
+        ],
+        "freshness": {
+          "status": "current",
+          "basis": "git_ancestry",
+          "action": "include"
+        }
+      }
+    ],
+    "rendered_context": "## Collective intelligence\n\n- A pool-reset net must cover both sides of the yield; guarding only the entry side leaves the pool leaked on the exception path.\n  (ki_trace_pool_guard v3, evidence ed3b4ca0-d233-5014-bd45-d4af87eb03d2)\n",
+    "token_count": 92,
+    "cache": {
+      "status": "miss",
+      "key_hash": "sha256:9b53c9aa57e868470cad7a13bc0376e1c0e7b597cae620bedb18eb8fd9e44e04",
+      "age_ms": 0
+    },
+    "timing_ms": {
+      "scope": 3,
+      "candidate": 41,
+      "rank": 12,
+      "compose": 7,
+      "total": 63
+    },
+    "status": "served"
+  },
+  "config_fingerprint": "sha256:5ec00ab3c0095d9b919047dcfd43e475cf2321b62810b4df3dd72f3e403eb6e7",
+  "server_ms": 63,
+  "deadline": {
+    "server_ms": 55000,
+    "client_safety_ms": 60000,
+    "breached": false
+  },
+  "errors": []
+}

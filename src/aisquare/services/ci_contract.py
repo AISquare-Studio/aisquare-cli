@@ -1,283 +1,555 @@
-"""The wire contract between aisquare's hooks and the CI experiment endpoint.
+"""Hook contract v2: the wire between aisquare's hooks and the CI server.
 
-One endpoint, one payload shape, four triggers. The CLI never learns which
-architecture serves it — a new server-side capability must require zero CLI
-changes, so nothing here branches on what came back beyond the four actions.
+The authority for every field here is the server's schema, vendored byte for
+byte under ``tests/fixtures/ci_contract/v2/schemas`` together with its
+fixtures. These models mirror those schemas exactly — every pattern, every
+cross-field rule, ``additionalProperties: false`` at every level — and the
+suite proves the mirror against the schemas themselves with ``jsonschema``,
+not against a second reading of them. A scorer with its own predicate can only
+ever agree with itself.
 
-Everything in this module is total. :func:`parse_response` has no failure mode
-that reaches its caller: a 500, a truncated body, a field that changed type, or
-a contract revision this build has never heard of all resolve to :data:`ALLOW`,
-carrying a :class:`DegradationReason` that says which one happened.
+Three things this module is structurally unable to do, on purpose:
 
-That reason is not diagnostics — it is load-bearing experimental data.
-``action == "allow"`` is both what a healthy server returns when it has nothing
-useful to add *and* what a dead one looks like from the outside. Recorded
-without the reason beside it, an endpoint failing every single call is
-indistinguishable from a clean baseline, and the experiment measures nothing
-while appearing perfectly healthy. Callers persist :attr:`Outcome.reason`; they
-do not merely log it.
+**It cannot learn which arm it is in.** The delivery descriptor is the only run
+document the client fetches, and it carries no architecture, source, reader or
+arm field. Nothing here has a slot for one, so nothing downstream can branch on
+one.
 
-Versioning is checked before interpretation. A response whose ``contract`` is
-not :data:`CONTRACT_VERSION` degrades rather than being read under this build's
-assumptions, because guessing across a schema change produces results that are
-wrong instead of absent — and wrong results are the ones that get published.
+**It cannot grant scope.** The request carries no workspace, studio, project or
+principal id — ``project_ref`` selects context and grants nothing. The server
+resolves authority from the bearer token.
+
+**It cannot block, substitute or fabricate a tool result.** ``inject`` and
+``noop`` are the only actions. ``allow``, ``block``, ``substitute`` and
+``tool_result`` are named by canon as *not* contract-v2 actions and are
+rejected at the enum.
+
+Everything is total. :func:`parse_response` has no failure mode that reaches
+its caller: a 500, a truncated body, 20 000 levels of nesting, a field that
+changed type, or a contract revision this build has never heard of all resolve
+to an :class:`Outcome` with no response and a :class:`ClientReason` saying
+which one happened. That reason is load-bearing experimental data, not
+diagnostics — a dead endpoint and a server with nothing to add both inject
+nothing, and recorded without the reason beside it, an endpoint failing every
+call is indistinguishable from a clean baseline.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
-from enum import StrEnum
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-CONTRACT_VERSION = 1
-"""The contract revision this build speaks; bumped only by a breaking change."""
+from aisquare.models import (
+    BriefingStatus,
+    CacheStatus,
+    ClientReason,
+    HookAction,
+    HookTrigger,
+)
 
-CONTRACT_HEADER = "X-CI-Contract"
-"""Request header carrying :data:`CONTRACT_VERSION`."""
+CONTRACT_VERSION = 2
+"""The hook contract this build speaks. A body whose ``contract`` is anything
+else — including ``true``, which ``== 1`` in Python — is a mismatch."""
 
-ADVISORY_BUDGET_MS = 400
-"""The deadline declared to the server as ``budget_ms``.
+RECALL_TOOL = "collective_intelligence_recall"
+"""The one read-only MCP tool, named by the descriptor and by canon."""
 
-Advisory. The server owns its own timing; this says what the client would like
-so a slow path can be shed server-side, where there is enough information to
-shed the right thing.
-"""
+MAX_PROMPT_CHARS = 100_000
+"""``hook-request.prompt`` ``maxLength``. Longer prompts are clipped before they leave."""
 
-CLIENT_BACKSTOP_SECONDS = 10.0
-"""The only deadline the client actually enforces.
+MAX_DETAIL_CHARS = 200
+"""Cap on any server-controlled text interpolated into an outcome's ``detail``,
+so a 200 KB ``contract`` value costs 200 characters, not 200 KB per call."""
 
-This deviates from the original spec deliberately. §02 made ``budget_ms`` a
-hard client-side deadline — exceed it, treat as allow — but at 400ms a server
-needing 300ms over a 100ms network fails open on most calls, and per the module
-docstring that failure is invisible in the recorded action. A tight client
-clamp converts a latency problem into silently absent data.
+# The three prefixed id shapes and the two hash shapes the schemas pin. A
+# ``ws_`` or ``std_`` value cannot ride in through an id field, because the
+# prefix is part of the pattern.
+_ID_TAIL = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+RUN_ID = re.compile(r"^run_" + _ID_TAIL)
+SESSION_ID = re.compile(r"^ses_" + _ID_TAIL)
+TRACE_ID = re.compile(r"^trc_" + _ID_TAIL)
+QUERY_ID = re.compile(r"^qry_" + _ID_TAIL)
+BRIEFING_ID = re.compile(r"^brf_" + _ID_TAIL)
+CHECKPOINT_ID = re.compile(r"^ckp_" + _ID_TAIL)
+ITEM_ID = re.compile(r"^ki_" + _ID_TAIL)
+CONFIG_ID = re.compile(r"^cfg_public_" + _ID_TAIL)
+SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_OBJECT = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+_UUID5 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+RFC3339_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$")
+_ENDPOINT = re.compile(r"^/[A-Za-z0-9._~/-]{0,200}$")
 
-So the client keeps only a backstop against a hung endpoint holding a
-developer's prompt hostage. Ten seconds sits under Claude Code's 30s
-``UserPromptSubmit`` cancellation, so the hook always returns a decision of its
-own instead of having its output discarded — which would degrade with no
-reason recorded at all.
-"""
+_STRICT = ConfigDict(extra="forbid", frozen=True, strict=True)
+"""Every wire model: unknown keys fail (``additionalProperties: false``), values
+are immutable once parsed (a shared outcome can never be mutated by one caller
+and read by the next), and no type coercion — the schema says ``integer`` and
+``"63"`` is not one."""
 
 
-class Trigger(StrEnum):
-    """Why the CLI is calling; the only field that varies the request shape."""
-
-    session_start = "session_start"
-    prompt_submit = "prompt_submit"
-    tool_intercept = "tool_intercept"
-    agent_request = "agent_request"
+def _match(pattern: re.Pattern[str], value: str, what: str) -> str:
+    if not pattern.match(value):
+        raise ValueError(f"{what} does not match {pattern.pattern}")
+    return value
 
 
-class Action(StrEnum):
-    """What the server asks the CLI to do."""
+def wire_session_id(session_id: str) -> str:
+    """The ``ses_…`` form of an agent session id, always schema-valid.
 
-    inject = "inject"
-    """Add ``context`` to what the agent sees. The Phase 1 workhorse."""
-
-    substitute = "substitute"
-    """Return ``tool_result`` instead of running the tool.
-
-    No consumer in Phase 1, and its delivery mechanism is unsettled: Claude
-    Code's ``PreToolUse`` hook cannot fabricate a tool result. It exposes
-    ``permissionDecision`` (allow/deny/ask), ``permissionDecisionReason`` and
-    ``updatedInput`` — and a call with ``updatedInput`` still executes. The
-    nearest approximation is a deny carrying the payload in its reason, which
-    reaches the agent framed as a refusal rather than as a result. Kept in the
-    contract so the server can express the intent; read the bilateral decisions
-    in ``docs/ci-contract.md`` before wiring it to anything.
+    Seam decision J2: ``ses_`` + the Claude Code session id (a UUID, which fits
+    the pattern's 64-character tail). Kept in one function so the rule is one
+    edit if the ids are settled differently. Any character the pattern cannot
+    carry becomes ``-`` and the tail is clipped, so a value the agent hands us
+    can never produce a request the server rejects on shape alone.
     """
-
-    allow = "allow"
-    """Proceed untouched. Also the value every degraded call resolves to."""
-
-    noop = "noop"
-    """The server ran and had nothing to add. Distinct from ``allow`` only by
-    intent, and distinguishable from a degraded call only via
-    :class:`DegradationReason`."""
+    raw = session_id.removeprefix("ses_")
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", raw)[:64]
+    if not safe or not re.match(r"[A-Za-z0-9]", safe[0]):
+        safe = "x" + safe[:63]
+    return "ses_" + safe
 
 
-class DegradationReason(StrEnum):
-    """Why a call carries no server decision.
-
-    Persisted beside the action on every recorded call. :attr:`none` means the
-    server genuinely decided; everything else means it did not, and any
-    aggregate that mixes the two is measuring its own plumbing.
-    """
-
-    none = "none"
-    """The server answered and this build understood it."""
-
-    not_configured = "not_configured"
-    """No endpoint configured — the default state. No request was made."""
-
-    disabled = "disabled"
-    """Configured but switched off. No request was made."""
-
-    transport_error = "transport_error"
-    """Connection refused, DNS failure, TLS failure, socket reset."""
-
-    backstop_exceeded = "backstop_exceeded"
-    """:data:`CLIENT_BACKSTOP_SECONDS` elapsed. A server-side bug, not a result."""
-
-    http_error = "http_error"
-    """A response arrived with a status other than 200."""
-
-    malformed_body = "malformed_body"
-    """The body was not JSON, or was JSON but not an object."""
-
-    contract_mismatch = "contract_mismatch"
-    """``contract`` names a revision this build does not speak."""
-
-    unknown_action = "unknown_action"
-    """``action`` is absent or names something outside :class:`Action`."""
-
-    schema_mismatch = "schema_mismatch"
-    """Right contract and known action, but a field failed validation."""
+def observed_now() -> str:
+    """The client clock as the schema wants it: UTC, RFC 3339, millisecond, ``Z``."""
+    now = datetime.now(tz=UTC)
+    return f"{now:%Y-%m-%dT%H:%M:%S}.{now.microsecond // 1000:03d}Z"
 
 
-class ToolRef(BaseModel):
-    """The tool call a ``tool_intercept`` request is about."""
-
-    name: str
-    args: dict[str, Any] = Field(default_factory=dict)
+# --- request ------------------------------------------------------------------
 
 
 class HookRequest(BaseModel):
-    """One call to ``POST {AISQUARE_CI_URL}/v1/hook``."""
+    """``hook-request.experimental-v2`` — one push-delivery call to the server.
 
-    trigger: Trigger
-    session_id: str
-    trace_id: str
-    project_id: str
-    budget_ms: int = ADVISORY_BUDGET_MS
-
-    run_id: str | None = None
-    """Server-minted run key; ``None`` outside an experiment.
-
-    Never generated here. The format in §02 (``r-20260819-0134``) is the
-    server's, and a CLI that mints its own would silently fork the run space.
+    All ten fields are required and sent, nulls included; the schema has no
+    optional key. Construction validates every pattern and the two conditional
+    rules, so a request that could not pass the server's validator is never
+    built, let alone sent.
     """
 
-    arm: str | None = None
-    """Opaque to the CLI, by design. Branching on it here would put experiment
-    logic in the client, where changing it costs a release."""
+    model_config = _STRICT
 
+    contract: Literal[2] = 2
+    trigger: HookTrigger
+    run_id: str
+    session_id: str
+    trace_id: str
+    project_ref: str | None = Field(default=None, min_length=1, max_length=500)
+    """``<owner/repo>@<branch>`` — a selector for context. Grants nothing."""
     snapshot_ref: str | None = None
-    prompt: str | None = None
-    """``prompt_submit`` only."""
+    """A git object id (40 hex), a content hash (64 hex) or a ``ckp_`` checkpoint.
+    Never a ref *name*: ``refs/aisquare/wip/…`` is where the CLI keeps the
+    object alive locally, the id is what travels."""
+    prompt: str | None = Field(default=None, min_length=1, max_length=MAX_PROMPT_CHARS)
+    client_safety_ms: int = Field(ge=1)
+    client_observed_at: str
 
-    tool: ToolRef | None = None
-    """``tool_intercept`` only."""
+    @model_validator(mode="after")
+    def _shape(self) -> HookRequest:
+        _match(RUN_ID, self.run_id, "run_id")
+        _match(SESSION_ID, self.session_id, "session_id")
+        _match(TRACE_ID, self.trace_id, "trace_id")
+        _match(RFC3339_Z, self.client_observed_at, "client_observed_at")
+        if self.snapshot_ref is not None and not (
+            _GIT_OBJECT.match(self.snapshot_ref)
+            or _SHA256_HEX.match(self.snapshot_ref)
+            or CHECKPOINT_ID.match(self.snapshot_ref)
+        ):
+            raise ValueError("snapshot_ref must be a git object id, a sha256 hex or a ckp_ id")
+        if self.trigger == "session_start":
+            if self.prompt is not None:
+                raise ValueError("prompt must be null on session_start")
+        elif self.prompt is None:
+            raise ValueError(f"prompt is required on {self.trigger}")
+        return self
 
     def to_wire(self) -> dict[str, Any]:
-        """The JSON-ready body, nulls included as §02 shows them."""
+        """The JSON-ready body, nulls included as the schema requires them."""
         return self.model_dump(mode="json")
 
 
-class Provenance(BaseModel):
-    """Where one piece of returned context came from."""
-
-    node_id: str
-    source: str
+# --- response -----------------------------------------------------------------
 
 
-class CacheHint(BaseModel):
-    """How long the caller may reuse this response, and under what key."""
+class Freshness(BaseModel):
+    model_config = _STRICT
 
-    ttl_s: int
-    key: str
+    status: Literal["current", "stale", "unknown"]
+    basis: str = Field(min_length=1, max_length=200)
+    action: Literal["include", "rank_penalty"]
+
+
+class BriefingItem(BaseModel):
+    """One knowledge item in a briefing. Closed: a ``source_kind`` here would
+    name the arm, which is exactly what the client must not be able to read."""
+
+    model_config = _STRICT
+
+    item_id: str
+    item_version: int = Field(ge=1)
+    text: str = Field(min_length=1)
+    structured_facts: dict[str, Any]
+    evidence_ids: list[str] = Field(min_length=1)
+    freshness: Freshness
+
+    @model_validator(mode="after")
+    def _shape(self) -> BriefingItem:
+        _match(ITEM_ID, self.item_id, "item_id")
+        if len(set(self.evidence_ids)) != len(self.evidence_ids):
+            raise ValueError("evidence_ids must be unique")
+        for evidence in self.evidence_ids:
+            _match(_UUID5, evidence, "evidence_id")
+        return self
+
+
+class CacheReport(BaseModel):
+    model_config = _STRICT
+
+    status: CacheStatus
+    key_hash: str
+    age_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _shape(self) -> CacheReport:
+        _match(SHA256, self.key_hash, "cache.key_hash")
+        return self
+
+
+class TimingReport(BaseModel):
+    model_config = _STRICT
+
+    scope: int = Field(ge=0)
+    candidate: int = Field(ge=0)
+    rank: int = Field(ge=0)
+    compose: int = Field(ge=0)
+    total: int = Field(ge=0)
+
+
+class Briefing(BaseModel):
+    """``mcp-tool-output.v1`` — the reader's complete answer, including its own
+    failure. The same object rides inside a hook response as ``briefing`` and
+    is the MCP recall tool's result, which is what lets push and pull be
+    compared at all.
+    """
+
+    model_config = _STRICT
+
+    briefing_id: str | None
+    run_id: str
+    query_id: str
+    config_fingerprint: str
+    input_checkpoint: str
+    resolved_scope_version: int = Field(ge=0)
+    items: list[BriefingItem]
+    rendered_context: str
+    """Server-rendered, byte-identical across arms by construction. The CLI
+    frames it; it never rewrites it."""
+    token_count: int = Field(ge=0)
+    cache: CacheReport
+    timing_ms: TimingReport
+    status: BriefingStatus
+
+    @model_validator(mode="after")
+    def _shape(self) -> Briefing:
+        _match(RUN_ID, self.run_id, "run_id")
+        _match(QUERY_ID, self.query_id, "query_id")
+        _match(SHA256, self.config_fingerprint, "config_fingerprint")
+        _match(CHECKPOINT_ID, self.input_checkpoint, "input_checkpoint")
+        if self.briefing_id is not None:
+            _match(BRIEFING_ID, self.briefing_id, "briefing_id")
+        if self.status == "served":
+            if not self.items:
+                raise ValueError("a served briefing must carry at least one item")
+            if self.briefing_id is None:
+                raise ValueError("a served briefing must carry a briefing_id")
+        elif self.status == "empty":
+            if self.items:
+                raise ValueError("an empty briefing must carry no items")
+        elif self.status == "unavailable":
+            if self.items or self.rendered_context or self.token_count:
+                raise ValueError("an unavailable briefing must carry nothing")
+        return self
+
+
+class ErrorRecord(BaseModel):
+    """``error.v1`` — one server-reported failure.
+
+    ``code`` and ``http_status`` are deliberately looser than the schema's
+    closed catalog: that catalog is the server's, and a code this build has
+    never seen is data to record verbatim, not a reason to throw away a
+    response that is otherwise valid (seam doc J15). Everything else mirrors
+    the schema, and the shape stays closed.
+    """
+
+    model_config = _STRICT
+
+    schema_version: Literal["error/v1"]
+    code: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
+    http_status: int
+    message: str = Field(min_length=1, max_length=2000)
+    subject_ref: str | None = Field(default=None, min_length=1, max_length=500)
+    retryable: bool
+    detail: dict[str, Any]
+    occurred_at: str
+
+    @model_validator(mode="after")
+    def _shape(self) -> ErrorRecord:
+        _match(RFC3339_Z, self.occurred_at, "occurred_at")
+        return self
+
+
+class Deadline(BaseModel):
+    model_config = _STRICT
+
+    server_ms: int = Field(ge=1)
+    client_safety_ms: int = Field(ge=1)
+    breached: bool
 
 
 class HookResponse(BaseModel):
-    """A server decision, already known to be contract-compatible."""
+    """``hook-response.experimental-v2`` — a server decision, contract-checked.
 
-    contract: int
-    action: Action
-    context: str | None = None
-    """``inject`` only: the markdown block to put in front of the agent."""
+    The seven cross-field rules are the part a permissive parser would lose:
+    ``inject`` with no briefing is not "inject nothing", it is a broken server,
+    and it must land as ``schema_mismatch`` rather than as a healthy row that
+    injected nothing.
+    """
 
-    tool_result: str | None = None
-    """``substitute`` only."""
+    model_config = _STRICT
 
-    provenance: list[Provenance] = Field(default_factory=list)
-    flags_applied: list[str] = Field(default_factory=list)
-    server_ms: int | None = None
-    """The server's own timing, so network cost can be reported separately
-    rather than silently folded into the comparison."""
+    contract: Literal[2]
+    status: BriefingStatus
+    action: HookAction
+    briefing: Briefing | None
+    config_fingerprint: str | None
+    server_ms: int = Field(ge=0)
+    deadline: Deadline
+    errors: list[ErrorRecord]
 
-    cache_hint: CacheHint | None = None
+    @model_validator(mode="after")
+    def _shape(self) -> HookResponse:
+        if self.config_fingerprint is not None:
+            _match(SHA256, self.config_fingerprint, "config_fingerprint")
+        if self.status in ("empty", "unavailable") and self.action != "noop":
+            raise ValueError(f"status {self.status} requires action noop")
+        if self.status == "served" and self.action != "inject":
+            raise ValueError("status served requires action inject")
+        if self.action == "inject" and (self.briefing is None or self.config_fingerprint is None):
+            raise ValueError("action inject requires a briefing and a config_fingerprint")
+        if self.action == "noop" and self.briefing is not None:
+            raise ValueError("action noop requires briefing null")
+        if self.status in ("degraded", "unavailable") and not self.errors:
+            raise ValueError(f"status {self.status} requires at least one error")
+        if self.status in ("served", "empty") and self.errors:
+            raise ValueError(f"status {self.status} requires errors to be empty")
+        if self.deadline.breached and self.status != "unavailable":
+            raise ValueError("a breached deadline requires status unavailable")
+        return self
 
 
-ALLOW = HookResponse(contract=CONTRACT_VERSION, action=Action.allow)
-"""The response every degraded call resolves to. Never mutate it."""
+# --- descriptor ---------------------------------------------------------------
+
+
+class DirectApiDelivery(BaseModel):
+    model_config = _STRICT
+
+    kind: Literal["direct_api"]
+
+
+class HookPushDelivery(BaseModel):
+    model_config = _STRICT
+
+    kind: Literal["hook_push"]
+    triggers: list[HookTrigger] = Field(min_length=1)
+    endpoint: str
+
+    @model_validator(mode="after")
+    def _shape(self) -> HookPushDelivery:
+        if len(set(self.triggers)) != len(self.triggers):
+            raise ValueError("triggers must be unique")
+        _match(_ENDPOINT, self.endpoint, "endpoint")
+        return self
+
+
+class McpPullDelivery(BaseModel):
+    model_config = _STRICT
+
+    kind: Literal["mcp_pull"]
+    tool: Literal["collective_intelligence_recall"]
+
+
+DeliveryMode = DirectApiDelivery | HookPushDelivery | McpPullDelivery
+
+
+class DeliveryDescriptor(BaseModel):
+    """``client-delivery-descriptor.v1`` — the only run document a client fetches.
+
+    Blinding by construction: the descriptor says *how* to deliver and never
+    *what* is serving. A client that can read which arm it is in is a client
+    whose behaviour can vary with the arm, and this model has no field for it
+    (the vendored invalid fixture is exactly an ``arm_kind`` being refused).
+    """
+
+    model_config = _STRICT
+
+    contract_version: Literal[2]
+    run_id: str
+    opaque_config_id: str
+    delivery: list[DeliveryMode] = Field(min_length=1)
+    client_safety_ms: int = Field(ge=1)
+    """The client's hang ceiling for this run, enforced as wall-clock. It
+    replaces any constant the client might have had."""
+    retry_policy: Literal["none"]
+    expires_at: str
+
+    @model_validator(mode="after")
+    def _shape(self) -> DeliveryDescriptor:
+        _match(RUN_ID, self.run_id, "run_id")
+        _match(CONFIG_ID, self.opaque_config_id, "opaque_config_id")
+        _match(RFC3339_Z, self.expires_at, "expires_at")
+        kinds = [mode.kind for mode in self.delivery]
+        if len(set(kinds)) != len(kinds):
+            raise ValueError("at most one delivery member per kind")
+        if "direct_api" in kinds and len(kinds) != 1:
+            raise ValueError("direct_api must be the only delivery member when present")
+        return self
+
+    @property
+    def hook_push(self) -> HookPushDelivery | None:
+        return next((m for m in self.delivery if isinstance(m, HookPushDelivery)), None)
+
+    @property
+    def mcp_pull(self) -> McpPullDelivery | None:
+        return next((m for m in self.delivery if isinstance(m, McpPullDelivery)), None)
+
+    def pushes(self, trigger: HookTrigger) -> bool:
+        """Whether the descriptor asks the CLI to call the hook on ``trigger``."""
+        push = self.hook_push
+        return push is not None and trigger in push.triggers
+
+    def expires(self) -> datetime:
+        """``expires_at`` as an aware datetime."""
+        return datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+
+    def expired(self, now: datetime | None = None) -> bool:
+        return (now or datetime.now(tz=UTC)) >= self.expires()
+
+
+# --- MCP tool input -----------------------------------------------------------
+
+
+class RecallInput(BaseModel):
+    """``mcp-tool-input.v1`` — the recall tool's arguments, and nothing else.
+
+    Closed so a ``workspace_id`` offered as authority is a validation failure
+    naming the key, not a field the server accepts and ignores while the
+    caller's code reads as if it scoped the request.
+    """
+
+    model_config = _STRICT
+
+    prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
+    session_id: str
+    run_id: str | None = None
+    token_budget: int | None = Field(default=None, ge=1)
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _shape(self) -> RecallInput:
+        _match(SESSION_ID, self.session_id, "session_id")
+        if self.run_id is not None:
+            _match(RUN_ID, self.run_id, "run_id")
+        return self
+
+
+# --- outcome ------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Outcome:
-    """A response together with why it is the response.
+    """A parsed response together with why it is — or is not — usable.
 
-    Returned by :func:`parse_response` and by every client call, so a caller
-    cannot record the action without having the reason in hand.
+    ``response`` is ``None`` exactly when ``reason`` is not :attr:`ClientReason.none`,
+    so a caller cannot record an action without having the reason in hand, and
+    cannot read a decision out of a call that did not produce one.
     """
 
-    response: HookResponse
-    reason: DegradationReason
+    response: HookResponse | None
+    reason: ClientReason
     detail: str = ""
-    """Free text for logs. Never parsed, never aggregated on."""
+    """Free text for logs, clipped. Never parsed, never aggregated on."""
 
     @property
     def degraded(self) -> bool:
-        """Whether the server failed to decide this call."""
-        return self.reason is not DegradationReason.none
+        return self.reason is not ClientReason.none
+
+    @property
+    def action(self) -> HookAction:
+        """What the CLI should do. ``noop`` whenever the call degraded."""
+        return "noop" if self.response is None else self.response.action
+
+    @property
+    def briefing(self) -> Briefing | None:
+        return None if self.response is None else self.response.briefing
 
 
-def degraded(reason: DegradationReason, detail: str = "") -> Outcome:
-    """An allow outcome carrying why the server did not produce one."""
-    return Outcome(response=ALLOW, reason=reason, detail=detail)
+def degraded(reason: ClientReason, detail: str = "") -> Outcome:
+    """An outcome with no server decision, carrying why."""
+    if reason is ClientReason.none:
+        raise ValueError("a degraded outcome needs a reason other than none")
+    return Outcome(response=None, reason=reason, detail=clip(detail))
+
+
+def clip(text: str, limit: int = MAX_DETAIL_CHARS) -> str:
+    """``text`` bounded to ``limit`` characters, marked when cut."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def is_contract_current(value: object) -> bool:
+    """Exactly the integer :data:`CONTRACT_VERSION` — not ``True``, not ``2.0``."""
+    return type(value) is int and value == CONTRACT_VERSION
 
 
 def parse_response(*, status: int, body: str) -> Outcome:
     """Turn a raw HTTP response into an :class:`Outcome`. Never raises.
 
-    Reasons are checked in the order that keeps each one reachable and exact:
-    contract before action, action before full validation. Validating first
-    would report every skewed response as ``schema_mismatch`` and lose the
-    distinction between "we do not speak this revision" — recoverable by
-    upgrading — and "this build and this server disagree about a field", which
-    is a bug in one of them.
+    The ladder runs in the order that keeps each reason reachable and exact:
+    status, then JSON, then the contract version, then the full shape.
+    Checking the version before validating the shape is what separates "this
+    build does not speak that revision" — fixed by upgrading — from "these two
+    builds disagree about a field", which is a bug in one of them.
     """
     if status != 200:
-        return degraded(DegradationReason.http_error, f"status {status}")
+        return degraded(ClientReason.http_error, f"status {status}")
     try:
         raw = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return degraded(DegradationReason.malformed_body, "body is not JSON")
+    except Exception:  # RecursionError on deep nesting is not a ValueError
+        return degraded(ClientReason.malformed_body, "body is not JSON")
     if not isinstance(raw, dict):
-        return degraded(DegradationReason.malformed_body, f"body is {type(raw).__name__}")
-    if raw.get("contract") != CONTRACT_VERSION:
+        return degraded(ClientReason.malformed_body, f"body is {type(raw).__name__}")
+    if not is_contract_current(raw.get("contract")):
         return degraded(
-            DegradationReason.contract_mismatch,
-            f"server speaks {raw.get('contract')!r}, this build speaks {CONTRACT_VERSION}",
+            ClientReason.contract_mismatch,
+            f"server speaks {clip(repr(raw.get('contract')), 80)}, this build speaks "
+            f"{CONTRACT_VERSION}",
         )
-    action = raw.get("action")
-    if not isinstance(action, str) or action not in set(Action):
-        return degraded(DegradationReason.unknown_action, f"action {action!r}")
     try:
         response = HookResponse.model_validate(raw)
     except ValidationError as exc:
-        return degraded(DegradationReason.schema_mismatch, _first_error(exc))
-    return Outcome(response=response, reason=DegradationReason.none)
+        return degraded(ClientReason.schema_mismatch, first_error(exc))
+    return Outcome(response=response, reason=ClientReason.none)
 
 
-def _first_error(exc: ValidationError) -> str:
-    """The first validation failure as ``field: message``, for the log line."""
+def first_error(exc: ValidationError) -> str:
+    """The first validation failure as ``field: message``, clipped, for the log line."""
     errors = exc.errors()
     if not errors:  # pragma: no cover - pydantic always reports at least one
         return "validation failed"
     first = errors[0]
     location = ".".join(str(part) for part in first.get("loc", ())) or "<root>"
-    return f"{location}: {first.get('msg', 'invalid')}"
+    return clip(f"{location}: {first.get('msg', 'invalid')}")

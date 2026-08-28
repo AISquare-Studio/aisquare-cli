@@ -72,8 +72,25 @@ def cache_dir() -> Path:
 
 
 def ci_cache_dir() -> Path:
-    """Directory for cached CI endpoint responses, one file per session."""
+    """Directory for the CI test bed's cached delivery descriptors.
+
+    Descriptors only — the client keeps no cache of hook responses. The server
+    caches and reports what it did in ``briefing.cache``; a second cache here
+    would make a cached turn's timing describe a network call it never made.
+    """
     return cache_dir() / "ci"
+
+
+def ci_descriptor_path(run_id: str) -> Path:
+    """Where the delivery descriptor for ``run_id`` is cached until it expires.
+
+    The run id comes from the environment, so it is treated as a filename
+    the way any outside string is: anything outside the id alphabet becomes
+    ``_`` and the name is bounded, so no value can name a path outside the
+    cache directory.
+    """
+    safe = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in run_id)[:96]
+    return ci_cache_dir() / f"descriptor-{safe or 'unknown'}.json"
 
 
 def log_dir() -> Path:

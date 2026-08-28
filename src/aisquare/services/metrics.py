@@ -7,15 +7,21 @@ before the endpoint goes live is not a gap in the record, it is the **baseline**
 else produces the noise floor, and without it the first "CI helped 8%" has
 nothing to be compared against.
 
-Two rules hold everything else up:
+Three rules hold everything else up:
 
 **Recording never disrupts a session.** Every entry point here swallows its own
 failures. A metrics write is the least important thing happening when a
 developer submits a prompt, and it is not permitted to be the thing that breaks
 it.
 
-**A degradation reason is always recorded with the action.** The two travel
-together or the data is unreadable later — see :class:`TurnMetric`.
+**The client reason is always recorded beside the server status.** The two
+travel together or the data is unreadable later — see :class:`TurnMetric`.
+
+**Aggregates keep the three reason groups apart.** Baseline rows (the client
+never asked), by-design skips (it chose not to) and failures (it tried) are
+counted separately and never summed; round-trip percentiles are taken over
+consulted rows only, because a row that made no round trip has no round trip,
+and its zero would make a 300 ms endpoint read as instant.
 """
 
 from __future__ import annotations
@@ -24,32 +30,43 @@ from datetime import UTC, datetime
 
 from aisquare.core.ids import new_trace_id
 from aisquare.core.store import ContextStore, store_session
-from aisquare.models import MetricsSummary, TurnMetric
-from aisquare.services.ci_client import Call
+from aisquare.core.workspace import active_project
+from aisquare.models import (
+    BASELINE_REASONS,
+    BY_DESIGN_REASONS,
+    FAILURE_REASONS,
+    ClientReason,
+    HookTrigger,
+    MetricsSummary,
+    TurnMetric,
+)
 
 
-def open_turn(
+def baseline_turn(
     project_id: str,
     *,
     session_id: str | None,
-    call: Call | None = None,
-    injected_chars: int | None = None,
-    store: ContextStore | None = None,
-) -> str | None:
-    """Record the start of a turn; returns its trace id, or ``None`` on failure.
+    reason: ClientReason,
+    trigger: HookTrigger = "prompt_submit",
+) -> TurnMetric:
+    """A row for a turn the client never consulted CI about.
 
-    ``call`` is the CI outcome for this turn when one was attempted. Passing
-    ``None`` records a turn CI never saw, which is what every row looks like
-    until the endpoint is live.
+    ``reason`` says why — ``disabled`` for every ordinary user, ``not_configured``
+    or ``no_run`` for a half-configured machine. It is deliberately not a
+    failure: nothing was tried.
     """
-    metric = TurnMetric(
+    return TurnMetric(
         trace_id=new_trace_id(),
         project_id=project_id,
         session_id=session_id,
         started_at=datetime.now(tz=UTC),
-        injected_chars=injected_chars,
-        **_call_fields(call),
+        trigger=trigger,
+        client_reason=reason,
     )
+
+
+def open_turn(metric: TurnMetric, *, store: ContextStore | None = None) -> str | None:
+    """Record ``metric``; returns its trace id, or ``None`` when the write failed."""
     try:
         if store is not None:
             store.open_turn(metric)
@@ -76,26 +93,33 @@ def close_turn(session_id: str | None, *, store: ContextStore | None = None) -> 
         return
 
 
-def _call_fields(call: Call | None) -> dict[str, object]:
-    """The CI columns for ``call``, or the "never asked" defaults."""
-    if call is None:
-        return {}
-    return {
-        "ci_action": call.action.value,
-        "degradation_reason": call.reason.value,
-        "cache_hit": call.cache_hit,
-        "server_ms": call.server_ms,
-        "round_trip_ms": call.round_trip_ms,
-        "budget_breach": call.reason.value == "backstop_exceeded",
-    }
-
-
 def recent(
     *, project_id: str | None = None, session_id: str | None = None, limit: int = 500
 ) -> list[TurnMetric]:
     """Recorded turns, newest first."""
     with store_session() as store:
         return store.turn_metrics(project_id=project_id, session_id=session_id, limit=limit)
+
+
+def resolve_scope(project: str | None, *, all_projects: bool) -> str | None:
+    """The project id ``metrics`` commands report on, or ``None`` for every project.
+
+    The default is the active project of the current directory — the unit an
+    experiment compares — rather than every turn on the machine; ``--all`` widens
+    it and ``--project`` names another by name or id prefix.
+    """
+    if all_projects:
+        return None
+    with store_session() as store:
+        if project is None:
+            return active_project(store).id
+        matches = store.find_projects(project)
+    if len(matches) == 1:
+        return matches[0].id
+    if not matches:
+        raise ValueError(f"no project matches {project!r}")
+    names = ", ".join(sorted(f"{match.root.name} ({match.id})" for match in matches))
+    raise ValueError(f"{project!r} is ambiguous: {names}")
 
 
 def summarize(turns: list[TurnMetric], *, project_id: str | None = None) -> MetricsSummary:
@@ -105,46 +129,50 @@ def summarize(turns: list[TurnMetric], *, project_id: str | None = None) -> Metr
         return summary
 
     for turn in turns:
-        summary.by_action[turn.ci_action] = summary.by_action.get(turn.ci_action, 0) + 1
-        reason = turn.degradation_reason
-        summary.by_reason[reason] = summary.by_reason.get(reason, 0) + 1
-        if reason == "none":
-            summary.ci_consulted += 1
-        elif reason not in ("disabled", "not_configured"):
-            # "off" and "unconfigured" are not degradations of anything — the
-            # client was never asked. Counting them would report a baseline run
-            # as one where every call failed.
-            summary.degraded += 1
-        if turn.cache_hit:
-            summary.cache_hits += 1
-        if turn.budget_breach:
-            summary.budget_breaches += 1
+        reason = turn.client_reason
+        _count(summary.by_reason, reason.value)
+        if turn.status is not None:
+            _count(summary.by_status, turn.status)
+        if turn.action is not None:
+            _count(summary.by_action, turn.action)
+        if turn.trigger is not None:
+            _count(summary.by_trigger, turn.trigger)
+        if reason is ClientReason.none:
+            summary.consulted += 1
+        elif reason in BASELINE_REASONS:
+            summary.baseline += 1
+        elif reason in BY_DESIGN_REASONS:
+            summary.skipped += 1
+        elif reason in FAILURE_REASONS:
+            summary.failed += 1
+        if turn.deadline_breached:
+            summary.deadline_breaches += 1
         if turn.injected_chars:
             summary.injected_turns += 1
         if turn.tokens_in is not None or turn.tokens_out is not None:
             summary.turns_with_tokens += 1
 
-    summary.median_wall_ms = _percentile([t.wall_ms for t in turns], 50)
-    round_trips = [t.round_trip_ms for t in turns if t.degradation_reason != "disabled"]
-    summary.median_round_trip_ms = _percentile(round_trips, 50)
-    summary.p95_round_trip_ms = _percentile(round_trips, 95)
+    summary.median_wall_ms = percentile([t.wall_ms for t in turns], 50)
+    consulted = [t.round_trip_ms for t in turns if t.client_reason is ClientReason.none]
+    summary.median_round_trip_ms = percentile(consulted, 50)
+    summary.p95_round_trip_ms = percentile(consulted, 95)
     return summary
 
 
-def _percentile(values: list[int | None], percentile: int) -> int | None:
-    """The ``percentile``th value, ignoring rows that never recorded one.
+def _count(bucket: dict[str, int], key: str) -> None:
+    bucket[key] = bucket.get(key, 0) + 1
+
+
+def percentile(values: list[int | None], rank_percent: int) -> int | None:
+    """The nearest-rank ``rank_percent``th value, ignoring rows that never recorded one.
 
     Nearest-rank rather than interpolated: these are millisecond counts read by
     people deciding whether an endpoint is too slow, and a real observed value
-    is easier to trust than an average of two that never happened.
+    is easier to trust than an average of two that never happened. For
+    ``[10, 20, 30, 400]`` the median is ``20`` — ``ceil(0.5 * 4) = 2``nd value.
     """
     present = sorted(value for value in values if value is not None)
     if not present:
         return None
-    rank = max(1, (percentile * len(present) + 99) // 100)
+    rank = max(1, (rank_percent * len(present) + 99) // 100)
     return present[min(rank, len(present)) - 1]
-
-
-def summary_for(project_id: str | None = None, *, limit: int = 500) -> MetricsSummary:
-    """Summarise the most recent turns, optionally scoped to one project."""
-    return summarize(recent(project_id=project_id, limit=limit), project_id=project_id)

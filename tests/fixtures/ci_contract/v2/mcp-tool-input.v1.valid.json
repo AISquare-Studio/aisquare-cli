@@ -1,0 +1,7 @@
+{
+  "prompt": "Why did the pool guard still leak after the yield?",
+  "session_id": "ses_kernel0001",
+  "run_id": "run_kernel0001",
+  "token_budget": 1800,
+  "reason": "Pre-edit recall before touching app/db/pool.py"
+}

@@ -27,6 +27,7 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
+from aisquare.models import ProjectInfo
 from aisquare.services import ci_augment
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
@@ -88,10 +89,42 @@ def session_start_context(
         if session_id
         else ""
     )
-    # Last, and only when the experiment is on: retrieved material sits closest
-    # to what the agent is about to do, and is the part it should weigh least.
-    retrieved = ci_augment.for_session_start(project_id=project.id, session_id=session_id).block
-    return "\n\n".join(part for part in (directive, block, team_block, retrieved) if part)
+    # Last, and only when the experiment is on: the standing instruction to
+    # consult the recall tool, then any retrieved material — closest to what
+    # the agent is about to do, and the part it should weigh least.
+    instruction, retrieved = _session_start_ci(project, session_id, cwd)
+    return "\n\n".join(
+        part for part in (directive, block, team_block, instruction, retrieved) if part
+    )
+
+
+def _session_start_ci(
+    project: ProjectInfo, session_id: str | None, cwd: Path | None
+) -> tuple[str, str]:
+    """Consult CI at session start and RECORD the outcome; never raises.
+
+    The row is closed at creation — a session start is a call, not a turn.
+    Nothing is written while the experiment is off or unconfigured: those
+    machines record their baseline per prompt, and a row per session start
+    would only say "off" again. A failure anywhere here costs the CI part of
+    the context and nothing else — the saved entries and the board must reach
+    the agent whatever the test bed does.
+    """
+    try:
+        augmentation = ci_augment.for_session_start(project=project, session_id=session_id, cwd=cwd)
+        if not augmentation.configured:
+            return "", ""
+        metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=True))
+        if augmentation.run_id:
+            insights.record_turn(
+                augmentation.join_facts(session_id), session_id=session_id, project_id=project.id
+            )
+        instruction = ""
+        if session_id and augmentation.descriptor and augmentation.descriptor.mcp_pull:
+            instruction = ci_augment.instruction_for(session_id)
+        return instruction, augmentation.block
+    except Exception:  # the experiment may never cost a session its context
+        return "", ""
 
 
 def prompt_submitted(
@@ -137,22 +170,20 @@ def needs_attention(
 
 
 def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
-    """Record the prompt, consult CI, open this turn's row — in one store open.
+    """Record the prompt, consult CI, open this turn's row.
 
-    Both halves need the active project, and this runs synchronously in front
-    of a developer who has just hit enter — resolving it twice would double the
-    only unavoidable cost on the path.
-
-    A turn is opened even when the prompt is empty and even when CI never ran:
-    a row per turn from the day this ships is what turns the stretch before the
+    Three steps, deliberately separated. The store is opened for the prompt
+    record and closed again BEFORE the server is consulted, so a slow endpoint
+    holds no database handle and a CI-side failure cannot take the store work
+    with it; the row is written afterwards in its own short transaction. A turn
+    is opened even when the prompt is empty and even when CI never ran: a row
+    per turn from the day this ships is what turns the stretch before the
     endpoint goes live into a baseline rather than a gap.
 
     Failures are swallowed here rather than in the caller so that a store
     problem costs the record, not the teammate delta the hook still owes the
-    session.
-
-    Returns the retrieved block to inject, or ``""`` — which is what every turn
-    returns while the experiment is off.
+    session. Returns the retrieved block to inject, or ``""`` — which is what
+    every turn returns while the experiment is off.
     """
     try:
         with store_session() as store:
@@ -160,21 +191,24 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             if prompt is not None and prompt.strip():
                 store.ensure_project(project)
                 store.add_prompt(prompt, project.id, source="claude-code")
-            augmentation = ci_augment.for_prompt(
-                prompt, project_id=project.id, session_id=session_id
-            )
-            metrics_service.open_turn(
-                project.id,
-                session_id=session_id,
-                call=augmentation.call,
-                injected_chars=len(augmentation.block) or None,
-                store=store,
-            )
-        if prompt is not None and prompt.strip():
-            insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
     except Exception:  # never disrupt the session to record it
         return ""
-    return augmentation.block
+    block = ""
+    try:
+        augmentation = ci_augment.for_prompt(
+            prompt, project=project, session_id=session_id, cwd=cwd
+        )
+        block = augmentation.block
+        metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=False))
+        if prompt is not None and prompt.strip():
+            insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
+        if augmentation.run_id:
+            insights.record_turn(
+                augmentation.join_facts(session_id), session_id=session_id, project_id=project.id
+            )
+    except Exception:  # recording may never cost the agent its context
+        return block
+    return block
 
 
 def _directive(project_id: str, *, has_prompts: bool) -> str:

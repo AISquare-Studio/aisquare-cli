@@ -1,5 +1,0 @@
-{
-  "contract": 1,
-  "action": "rewrite_history",
-  "context": "an action from a newer server, on the current contract"
-}

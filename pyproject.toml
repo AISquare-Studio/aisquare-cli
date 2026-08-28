@@ -84,6 +84,14 @@ dev = [
   # named mcp.server.fastmcp" -- a red typecheck job on a tree nobody touched.
   "mcp>=1.10,<2",
   "textual>=1.0",
+  # The CI test bed validates what it EMITS against the server's vendored JSON
+  # Schemas (tests/fixtures/ci_contract/v2/schemas), not against a mirror it
+  # wrote itself — a scorer with its own predicate can only ever agree with
+  # itself. Dev-only: the runtime models are pydantic, and the hot path must
+  # work in a base install. types-jsonschema because jsonschema ships no
+  # py.typed and mypy runs strict over tests.
+  "jsonschema>=4.18",
+  "types-jsonschema>=4.18",
 ]
 
 [project.scripts]

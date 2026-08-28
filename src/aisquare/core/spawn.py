@@ -44,6 +44,10 @@ narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
   * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
     ``git rev-parse``.
+  * ``services/ci_snapshot.py::_git`` — the CI test bed's snapshot plumbing
+    (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
+    model; stripped anyway because it runs inside a traced session's hook and
+    a child of a hook is not the agent.
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
@@ -125,6 +129,11 @@ SEAMS: dict[str, Seam] = {
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
     "aisquare/core/workspace.py::git_common_root": Seam(EXCLUDED, "`git rev-parse`"),
+    "aisquare/services/ci_snapshot.py::_git": Seam(
+        EXCLUDED,
+        "git plumbing for the CI turn snapshot — a child of a traced hook is not the agent",
+        strips_identity=True,
+    ),
     "aisquare/core/editor.py::edit_text": Seam(
         EXCLUDED, "the operator's $EDITOR — it is theirs, it gets their environment"
     ),

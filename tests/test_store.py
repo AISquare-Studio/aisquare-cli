@@ -228,6 +228,96 @@ def test_migrations_reach_the_current_schema_version() -> None:
     assert version == SCHEMA_VERSION == 11
 
 
+def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
+    """Each closed vocabulary is spelled twice — once in SQL, once in Python —
+    because SQLite cannot read an enum. Held equal here so neither can drift:
+    a value the model accepts that the CHECK refuses would lose the row
+    silently, on every prompt, with nothing raising."""
+    import re
+
+    from aisquare.core.store import _SCHEMA_V11
+    from aisquare.models import ClientReason
+
+    def sql_set(column: str) -> set[str]:
+        match = re.search(rf"{column} TEXT[^,]*?IN \(([^)]*)\)", _SCHEMA_V11, re.DOTALL)
+        assert match is not None, column
+        return {value.strip().strip("'") for value in match.group(1).split(",")}
+
+    assert sql_set("client_reason") == {reason.value for reason in ClientReason}
+    assert sql_set("status") == {"served", "empty", "degraded", "unavailable"}
+    assert sql_set("action") == {"inject", "noop"}
+    assert sql_set("trigger") == {"session_start", "prompt_submit", "agent_request"}
+    assert sql_set("cache_status") == {"hit", "miss", "bypass"}
+    assert sql_set("run_kind") == {"live", "replay"}
+
+
+def test_the_metric_table_has_no_column_that_could_name_an_arm() -> None:
+    from aisquare.core.store import _SCHEMA_V11
+
+    for forbidden in ("arm", "flags_hash", "architecture", "CREATE TABLE run"):
+        assert forbidden not in _SCHEMA_V11, forbidden
+
+
+def test_a_populated_v10_database_migrates_to_v11_with_its_rows_intact() -> None:
+    """The migration real machines take: every row that existed before the
+    metric table survives it, the table arrives with the v2 columns, and no
+    ``run`` table comes along."""
+    from aisquare.core.store import _MIGRATIONS
+
+    db = _db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(db))
+    try:
+        for migration in _MIGRATIONS[:10]:
+            raw.executescript(migration)
+        raw.execute("PRAGMA user_version = 10")
+        raw.execute(
+            "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("prj_old", "/tmp/old", "old", "[]", "2026-01-01T00:00:00+00:00"),
+        )
+        raw.execute(
+            "INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "ctx_old",
+                "project",
+                "prj_old",
+                "survives",
+                "[]",
+                "test",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert (
+            raw.execute("SELECT text FROM entry WHERE id = 'ctx_old'").fetchone()[0] == "survives"
+        )
+        columns = {row[1] for row in raw.execute("PRAGMA table_info(metric)")}
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        raw.close()
+    assert {
+        "client_reason",
+        "status",
+        "action",
+        "query_id",
+        "opaque_config_id",
+        "run_kind",
+    } <= columns
+    assert "arm" not in columns and "run" not in tables
+
+
 def test_data_persists_across_reopen() -> None:
     first = open_store()
     first.ensure_project(PROJECT)

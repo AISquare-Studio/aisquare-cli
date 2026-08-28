@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/delivery/mcp-tool-input.v1.schema.json",
+  "title": "mcp-tool-input.v1",
+  "description": "Arguments to the one read-only MCP tool, collective_intelligence_recall(prompt, session_id, run_id?, token_budget?, reason?) -> Briefing. Specified verbatim by 02-contracts-and-data.md section 7. THE PROHIBITION IS STRUCTURAL, NOT DOCUMENTARY. Canon states it as a rule about the tool: 'The connection identity determines the principal and allowed scopes' and 'The tool cannot accept workspace IDs, arbitrary studio IDs, Cypher, SQL, URLs, filesystem paths, shell commands, or credentials as authority' (02 section 7). A schema that wrote that sentence into a description and then left the object open would be strictly weaker than one that cannot express the forbidden thing, because the failure mode of a documented prohibition is a server that accepts the field and ignores it: the caller's code reads as if it scoped the request, review reads as if it scoped the request, and nothing scoped the request. Three mechanisms make it structural instead. (1) The property set is exactly canon's five arguments and additionalProperties is false, so workspace_id, studio_id, studio_ids, principal_id, grant_ids, token, api_key, cypher, sql, url, path and command are not fields this contract has - sending one is a validation failure naming the offending key. The invalid fixture is exactly that: a workspace ID offered as authority. (2) The two identifier arguments are pattern-pinned to their own prefixes, so a ws_ or std_ value cannot ride in through session_id or run_id either - the closed key set and the pinned patterns are separate holes and both need plugging. (3) token_budget is an integer, so the one remaining non-string argument cannot carry a payload at all. WHAT REMAINS OPEN, and must: prompt and reason are free text and cannot be pattern-constrained without breaking the tool. A caller CAN type Cypher into prompt. That is harmless precisely because nothing downstream executes it - the prompt reaches the reader as a query key (03 section 4.1, reader.query_key=raw_prompt) and never a query language, and 02 section 7's 'The server does not invoke arbitrary external MCP tools' closes the other end. The word that matters in canon's sentence is 'as authority': the schema's job is that no argument can BE authority, not that no argument can contain a string that looks like a query. NARROWER THAN THE HTTP SURFACE, deliberately: query-request.v1 requires seven fields including query_id and project_ref; this tool has neither. query_id is minted server-side ('All calls receive a query_id', section 7), and there is no context selector at all - the MCP surface resolves context from connection identity and the trusted session mapping alone, so an MCP caller has strictly fewer levers than an HTTP caller. Making the pull surface the narrowest one is the right default for the surface an agent drives autonomously.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "prompt",
+    "session_id"
+  ],
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100000,
+      "description": "The raw prompt. Required - canon's signature marks it non-optional, and a recall with no prompt has no query key. maxLength matches query-request.v1 so identical text passes both surfaces. Grants nothing; see the root description on why free text here is not a hole."
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^ses_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "Caller session identity, required. A SELECTOR into the trusted server-side session mapping, never a claim: the mapping resolves scope, and a session the server does not recognize resolves EMPTY rather than to every grant (02 section 2.2). Pattern-pinned so a workspace or studio ID cannot be passed here instead."
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "Optional run this call belongs to; canon's signature marks it run_id?. When absent the server resolves the run from the connection's active binding. CANON UNDERSPECIFICATION: section 7 does not say what happens when it is absent and no run is bound, nor whether a run_id naming a run the connection is not bound to is an error or is ignored. Both need an answer before the MCP adapter is written - the second one is an authority question wearing a routing question's clothes."
+    },
+    "token_budget": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional caller budget. ADVISORY: the server-owned packet token budget remains authoritative, identically to query-request.v1.token_budget. Typed as an integer rather than a string so the one numeric argument cannot carry text."
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Optional free-text caller reason, recorded for analysis. Grants nothing, selects nothing, and changes no retrieval behavior - it exists so a ledger row can say why a voluntary pull happened. maxLength matches query-request.v1.reason."
+    }
+  }
+}

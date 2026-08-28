@@ -96,6 +96,26 @@ def test_the_pipe_and_json_answers_are_the_same_usage(runner: CliRunner) -> None
     assert bare.output == machine.output
 
 
+def test_the_usage_printed_is_the_whole_help_page(runner: CliRunner) -> None:
+    """What ``no_args_is_help`` printed was the full help page — every command
+    listed — so that is what the dispatch must print, not a one-line ``Usage:``
+    hint. Pinned against ``--help`` up to trailing newlines, and the "up to" is
+    a measured gap, not slack: Typer's rich help renders itself inside
+    ``ctx.get_help()`` and returns ``""``, so ``typer.echo`` of that adds one
+    ``"\\n"`` the old ``no_args_is_help`` path never printed (typer 0.27.2:
+    the old output ended ``╯\\n``; ``--help`` and today's dispatch end
+    ``╯\\n\\n``). The byte-exact pin belongs beside the dispatch in
+    ``cli/app.py`` once it echoes only a non-empty ``get_help()``; the content
+    pin lives here."""
+    bare = runner.invoke(app, [])
+    helped = runner.invoke(app, ["--help"])
+
+    assert bare.exit_code == 2 and helped.exit_code == 0
+    page = bare.output.rstrip("\n")
+    assert page  # a comparison of two empty strings would pin nothing
+    assert page == helped.output.rstrip("\n")
+
+
 def test_a_terminal_free_shell_never_opens_the_ui(
     runner: CliRunner, ui_calls: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

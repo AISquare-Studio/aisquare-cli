@@ -831,18 +831,27 @@ def test_rename_to_a_taken_or_invalid_codename_is_refused_with_the_reason(
 def test_pause_and_resume_set_the_signal_as_the_acting_session(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """``--as`` names who flipped the switch (a manager passes its own session);
+    without it the user did, and the service is told ``None`` — never a value
+    the CLI invented. Both directions, for both verbs."""
     pause = _install(monkeypatch, "pause", None)
     resume = _install(monkeypatch, "resume", None)
 
     paused = runner.invoke(app, ["fleet", "pause", "--as", "mgr"])
     assert paused.exit_code == 0, paused.output
     assert "⏸ fleet paused for api" in _plain(paused.stdout)
-    assert pause.args == (PROJECT,) and pause.kwargs == {"session_ref": "mgr"}
+    assert runner.invoke(app, ["fleet", "pause"]).exit_code == 0
 
     resumed = runner.invoke(app, ["fleet", "resume"])
     assert resumed.exit_code == 0, resumed.output
     assert "▶ fleet resumed for api" in _plain(resumed.stdout)
-    assert resume.args == (PROJECT,) and resume.kwargs == {"session_ref": None}
+    assert runner.invoke(app, ["fleet", "resume", "--as", "mgr"]).exit_code == 0
+
+    # One service call per invocation, the acting session exactly as given.
+    as_manager = ((PROJECT,), {"session_ref": "mgr"})
+    as_user = ((PROJECT,), {"session_ref": None})
+    assert pause.calls == [as_manager, as_user]
+    assert resume.calls == [as_user, as_manager]
 
 
 def test_pause_and_resume_json_say_which_way_the_switch_went(

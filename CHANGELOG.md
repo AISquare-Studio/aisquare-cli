@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`docs/plans/fleet-tui.md` — the plan for the Fleet TUI.** `asq` with no
+  arguments is to open a two-pane, mouse-driven view over every onboarded
+  project, its manager agent and the agents the manager spawns — each surfaced
+  as its *real* Claude Code / Codex session through a private tmux server,
+  never a chat relayed through us. Onboarding, doctor, the board and the
+  Explainability wiring all move inside that one view. Plan only: nothing in
+  the CLI changes with this entry; the open decisions are listed in its §12.
+
 ## [0.5.0] - 2026-08-27
 
 First release carrying the explainability integration. 0.4.0rc2 shipped from

@@ -191,6 +191,28 @@ jobs:
       # what keeps them in the same process group.
       - name: Test (pytest)
         run: |
+          # THE VARIANT NAME, checked before anything dispatches on it. Every
+          # dispatch below is `if [ "$AMBIENT" = "proxy-up" ] … else <proxy-down>`,
+          # so ANY other value — the empty string included — takes the proxy-down
+          # branch and the job reports BOTH matrix names having run the SAME
+          # ambient. That is the failure the stub's own gate is guarded against,
+          # reached through a different door.
+          #
+          # Two ordinary edits produce the empty string: deleting the `AMBIENT=`
+          # line from the Declare step, or renaming the matrix key without updating
+          # it. Neither is caught by anything else — an unknown `matrix` property
+          # expands to "" with NO error, and `check-jsonschema` does not type
+          # matrix properties. Measured: with `$AMBIENT` empty the step runs
+          # proxy-down, logs `ambient premise holds: , port 9090` on both sides,
+          # and exits 0. A closed set is the only thing that catches both edits.
+          case "$AMBIENT" in
+            proxy-up|proxy-down) ;;
+            *)
+              echo "::error::unknown ambient variant '$AMBIENT' — everything below treats anything that is not proxy-up as proxy-down, so this run would test ONE ambient under BOTH matrix names"
+              exit 1
+              ;;
+          esac
+
           # THE CONFIGURED PROXY, read back out of the config — never a literal.
           # The configure step above explains that hardcoding the port would let
           # the default drift out from under this job, and a literal here would do

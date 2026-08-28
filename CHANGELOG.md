@@ -27,11 +27,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     answered 200". A variant whose distinguishing condition never held, or which
     lost it midway, is a job reporting the other variant twice — so it fails
     instead, before or after the suite, saying which.
-  - The ambient environment is declared once at **job** level: `AISQUARE_HOME`
-    plus the explainability variables `tests/conftest.py` goes out of its way to
-    clear, whose own comment notes an operator's shell has them sourced. A
-    per-step home could be dropped from the step that runs pytest, degrading the
-    job to `check` twice, green.
+  - The ambient environment has **one definition**, exported through
+    `$GITHUB_ENV`: `AISQUARE_HOME` plus the explainability variables
+    `tests/conftest.py` goes out of its way to clear, whose own comment notes an
+    operator's shell has them sourced. A per-step home could be dropped from the
+    step that runs pytest, degrading the job to `check` twice, green. Deliberately
+    NOT a job-level `env:` block — that was tried and rejected: `runner.temp` is
+    unavailable there and GitHub rejects the whole workflow file for it, a
+    near-silent failure that yields a run with zero jobs and no log, and reads
+    from outside as "CI has not started".
+  - **The variant name is checked against a closed set** before anything
+    dispatches on it. Every dispatch is `[ "$AMBIENT" = "proxy-up" ]`, so any
+    other value — including the empty string, which is what deleting the export
+    or renaming the matrix key produces, since an unknown `matrix` property
+    expands to `""` with no error — is silently proxy-down, and the matrix reports
+    both of its names having run one ambient.
   - It reuses `tests/proxy_stub.py` rather than inlining a server: `probe_proxy`
     checks `service` and `mode`, so a stub is a contract, and the copy nobody
     runs locally is the one that drifts.
@@ -48,15 +58,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   because `--version` cannot distinguish a build that has this integration from
   one that does not.
 - `tests/test_ci_covers_the_ambient_environment.py` pins all of the above. Its
-  twelve checks assert the **order and placement** of things inside the job
-  rather than the presence of a string in the file, because an independent review
-  mutated the literal version and found five ways to make the job vacuous with
-  every guard green — drop the home from the step that matters, hardcode the
-  stub's port, delete either premise assertion, run pytest ahead of the listener,
-  or invert the variant condition so the two run under each other's names. All
-  twenty-one mutations now behave as intended: eighteen are caught, and the three
-  a maintainer would legitimately make — reordering the variants, adding a third,
-  rewriting the matrix in block style — no longer cause a false failure.
+  checks assert the **order and placement** of things inside the job rather than
+  the presence of a string in the file, because an independent review mutated the
+  literal version and found five ways to make the job vacuous with every guard
+  green — drop the home from the step that matters, hardcode the stub's port,
+  delete either premise assertion, run pytest ahead of the listener, or invert
+  the variant condition so the two run under each other's names. Each of those is
+  caught now, and the edits a maintainer would legitimately make — reordering the
+  variants, adding a third, rewriting the matrix in block style — do not cause a
+  false failure.
 
 
 ## [0.5.0] - 2026-08-27

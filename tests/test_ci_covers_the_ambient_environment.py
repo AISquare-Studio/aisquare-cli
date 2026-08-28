@@ -71,6 +71,12 @@ SUITE = "pytest -ra"
 #: does not match, which is what keeps the count at the definitions.
 _ASSIGNS_HOME = r"AISQUARE_HOME\s*[:=]"
 
+#: An ASSIGNMENT of the variant name, in either form. The lookbehind keeps a
+#: longer name that merely ENDS in ``AMBIENT`` from standing in for it, and a bare
+#: ``"$AMBIENT"`` USE does not match — which is what keeps the guard using this
+#: about the definition rather than about any mention of the name.
+_ASSIGNS_VARIANT = r"(?<![A-Z_])AMBIENT\s*[:=]"
+
 #: The shell function the ambient job asserts its premise with. Named here so a
 #: rename fails these guards loudly instead of leaving them quietly satisfied.
 PREMISE = "assert_proxy"
@@ -372,6 +378,82 @@ def test_the_listener_is_gated_on_the_proxy_up_variant(suite_step: str) -> None:
     assert suite_step[gate:].split('"')[0] == "proxy-up", (
         "the stub is no longer started under the proxy-up branch, so the two "
         "variants may be running under each other's names"
+    )
+
+
+def test_the_variant_name_is_declared_and_closed(ambient: str, suite_step: str) -> None:
+    """The guard above catches an INVERTED gate. This catches an ABSENT value.
+
+    They reach the same place. Every dispatch in the suite step is ``if [
+    "$AMBIENT" = "proxy-up" ] … else``, so anything that is not exactly
+    ``proxy-up`` — the empty string included — takes the proxy-down branch, and
+    the matrix reports BOTH of its names having run ONE ambient.
+
+    Measured, and the reason this needs a guard of its own: with ``AMBIENT`` empty
+    the step logs ``ambient premise holds: , port 9090`` before AND after the
+    suite and exits 0. The premise assertions this whole job is built on do not
+    notice, because they dispatch on the same value they would have to doubt.
+
+    Two ordinary edits produce it: deleting the ``AMBIENT=`` line from the declare
+    step, or renaming the matrix key without updating it — an unknown ``matrix``
+    property expands to ``""`` with no error, and ``check-jsonschema`` does not
+    type matrix properties. So both halves are pinned: the DECLARATION, which
+    catches the deleted line here, and the CLOSED SET, which catches both on the
+    runner.
+    """
+    declared = [line for line in _commands(ambient) if re.search(_ASSIGNS_VARIANT, line)]
+
+    assert declared, (
+        "nothing declares AMBIENT for the ambient job, so every dispatch in the "
+        "suite step falls through to proxy-down and the matrix runs one ambient "
+        "under both of its names"
+    )
+    assert ambient.index(declared[0]) < ambient.index(SUITE), (
+        "the variant name is declared after the suite runs"
+    )
+
+    commands = _commands(suite_step)
+    closed = [i for i, line in enumerate(commands) if line.startswith('case "$AMBIENT"')]
+    dispatched = [i for i, line in enumerate(commands) if '"$AMBIENT" = "' in line]
+
+    assert closed, (
+        "the suite step no longer checks $AMBIENT against a closed set, so an "
+        "unknown or empty variant silently runs proxy-down under whatever name "
+        "the matrix gave it"
+    )
+    assert dispatched, "nothing in the step dispatches on $AMBIENT any more"
+    assert closed[0] < dispatched[0], (
+        "$AMBIENT is checked only after something has already dispatched on it"
+    )
+
+    tail = commands[closed[0] :]
+    assert "esac" in tail, "the closed set is not terminated inside this step"
+    body = tail[: tail.index("esac")]
+
+    # The ACCEPTED patterns and the catch-all are checked separately, and that
+    # split is load-bearing rather than tidy. Measured: dropping `proxy-down` from
+    # the accepted arm passed a version of this guard that searched the whole
+    # block, because the catch-all's own ERROR MESSAGE names both variants while
+    # explaining the failure. Prose satisfying a guard the code no longer does is
+    # the bug class this module exists for, so it does not get to happen here.
+    assert any(line.startswith("*)") for line in body), (
+        "the closed set has no catch-all, so an unknown variant falls through it "
+        "and every dispatch below still reads as proxy-down"
+    )
+    catchall = next(i for i, line in enumerate(body) if line.startswith("*)"))
+    accepted = "\n".join(body[:catchall])
+
+    # Asserted per name rather than as the literal arm, so adding a third variant
+    # or reformatting the case is not a false failure — the same reason
+    # `test_both_proxy_states_are_covered` does not pin the matrix list.
+    for variant in ("proxy-down", "proxy-up"):
+        assert variant in accepted, (
+            f"{variant} is not an accepted value of the closed set, so a variant "
+            "the matrix really does run would fail the job instead of running it"
+        )
+    assert "exit 1" in "\n".join(body[catchall:]), (
+        "an unknown variant no longer FAILS the step — anything short of that "
+        "leaves the run green, which is the state this guard exists to prevent"
     )
 
 

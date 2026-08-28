@@ -143,6 +143,7 @@ def test_a_turn_that_never_stopped_stays_open(store: ContextStore) -> None:
 
 def test_closing_an_unknown_session_is_silent(store: ContextStore) -> None:
     metrics_service.close_turn("ses_never_seen", store=store)
+    assert store.turn_metrics() == []
 
 
 def test_sessions_close_their_own_turns(store: ContextStore) -> None:

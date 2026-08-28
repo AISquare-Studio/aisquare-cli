@@ -146,6 +146,7 @@ def test_clear_drops_one_session() -> None:
 
 def test_clearing_an_absent_session_is_silent() -> None:
     ci_cache.clear("ses_never_existed")
+    assert not (paths.ci_cache_dir() / "ses_never_existed.json").exists()
 
 
 def test_gc_removes_only_stale_session_files() -> None:

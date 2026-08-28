@@ -189,7 +189,8 @@ def test_no_body_can_make_parsing_raise(body: str) -> None:
 
 @pytest.mark.parametrize("status", [200, 204, 301, 400, 401, 429, 500, 503])
 def test_no_status_can_make_parsing_raise(status: int) -> None:
-    parse_response(status=status, body='{"contract": 1, "action": "noop"}')
+    outcome = parse_response(status=status, body='{"contract": 1, "action": "noop"}')
+    assert (outcome.reason is DegradationReason.none) is (status == 200)
 
 
 def test_every_degradation_reason_resolves_to_allow() -> None:

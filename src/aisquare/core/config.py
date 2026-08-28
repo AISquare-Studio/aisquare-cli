@@ -99,7 +99,20 @@ class ExplainabilitySettings(BaseModel):
     proxy_url: str = "http://127.0.0.1:9090"
     agent_name_template: str = "aisquare-{role}"
     target: str = "stg"
-    roles: list[str] = Field(default_factory=lambda: ["planner", "coder", "runner"])
+    # Every role the harness can launch, so every identity the fleet can emit is
+    # registered (docs/plans/fleet-tui.md §3.3). The first three keep their order:
+    # the runbooks quote them as a list.
+    roles: list[str] = Field(
+        default_factory=lambda: [
+            "planner",
+            "coder",
+            "runner",
+            "manager",
+            "tester",
+            "reviewer",
+            "validator",
+        ]
+    )
     targets: dict[str, ExplainabilityTarget] = Field(default_factory=dict)
     ship: bool = False
     gateway_url: str = ""

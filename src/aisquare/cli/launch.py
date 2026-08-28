@@ -37,13 +37,17 @@ from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
-ROLES = ("planner", "coder", "runner")
-"""Roles with a standing work cycle the orchestrator injects on every prompt."""
+ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager")
+"""Roles with a standing work cycle the orchestrator injects on every prompt.
+
+``tester``, ``reviewer`` and ``manager`` are the fleet's roles
+(docs/plans/fleet-tui.md §3.3); ``tester`` shares ``runner``'s cycle.
+"""
 
 #: A numbered SEAT of a first-class role — ``coder1``, ``coder2``. Crews run
 #: several agents in the same role and need to tell them apart on the board;
 #: the work cycle is the role's, so the number is an identity, not a new role.
-_SEAT = re.compile(rf"^({'|'.join(ROLES)}|validator)\d+$")
+_SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
 

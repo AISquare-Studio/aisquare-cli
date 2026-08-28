@@ -132,6 +132,24 @@ ROLE_PROFILES: dict[str, RoleProfile] = {
         effort_offset=1,
         mission="final accountability gate, once, on the assembled deliverable",
     ),
+    # The fleet's roles (docs/plans/fleet-tui.md §3.3). `manager` is the planner
+    # with fleet authority and rides the planner's ladder; `tester` is the
+    # fleet's name for `runner` and shares its shape; `reviewer` reads the PR.
+    "manager": RoleProfile(
+        role="manager",
+        ladder=["fable", "opus", "sonnet"],
+        mission="turns a goal into a fleet that ships it — plans, spawns, steers, reports",
+    ),
+    "tester": RoleProfile(
+        role="tester",
+        ladder=["sonnet", "opus"],
+        mission="fresh-context verifier — tries to make reviewed work fail before it ships",
+    ),
+    "reviewer": RoleProfile(
+        role="reviewer",
+        ladder=["sonnet", "opus"],
+        mission="reads the PR as the stranger who will maintain it — read-only findings",
+    ),
 }
 
 
@@ -669,9 +687,9 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             f'--note "how to verify + evidence" --as {sid}`,',
             "and pick up the next one.",
         ]
-    if role == "runner":
+    if role in ("runner", "tester"):
         return [
-            "Your standing cycle (runner): `aisquare task next --status review`; if nothing,",
+            f"Your standing cycle ({role}): `aisquare task next --status review`; if nothing,",
             "tell the user and stop. You are the adversarial verifier: run the FULL check the",
             "acceptance criteria name — not a smoke test — and try to make the change fail",
             "(edge inputs, a counterexample) before you trust it. Verdicts cite evidence you",
@@ -690,6 +708,31 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             'Verdict as a note: `aisquare note "GATE: PASS|PASS-WITH-FIXES|FAIL — …"'
             f" --kind result --as {sid}`,",
             "with findings severity-ordered (critical|major|minor|nit) and evidence per finding.",
+        ]
+    if role == "manager":
+        return [
+            "Your standing cycle (manager): you run this project's fleet. Turn the goal into",
+            'contract-carrying tasks — `aisquare task add "<title>" --role coder --detail',
+            '"<contract>"` (objective · why · known/ruled out · acceptance criteria a tester',
+            "can execute · boundaries), `--needs` for ordering. Then get help instead of doing",
+            "the work: `aisquare fleet spawn coder --label coder-<purpose> --task <id> "
+            f"--as {sid}` per parallelisable task (respect the agent cap), `fleet spawn tester`",
+            "when work reaches review, `fleet spawn reviewer` once a PR exists, `fleet spawn",
+            "validator` once every task is done. Board updates reach you on every turn — reopen",
+            "with reasons, re-spec or split. When the validator's gate is PASS:",
+            f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
+            "Never write code yourself. Never merge. Blocked twice on one task? Ask the human:",
+            f'`aisquare note "…" --kind question --as {sid}`. Keep labels unique and descriptive.',
+        ]
+    if role == "reviewer":
+        return [
+            "Your standing cycle (reviewer): `aisquare task next --status review`; if nothing,",
+            "tell the user and stop. Read the PR as the stranger who will maintain it —",
+            "`gh pr diff`, the task's contract, the tests. You are READ-ONLY: never edit, never",
+            "push. Findings go on the PR (`gh pr review --comment` or `--request-changes`),",
+            "severity-ordered (critical|major|minor|nit) with evidence, plus one summary note:",
+            f'`aisquare note "REVIEW <pr>: …" --kind result --as {sid}`. Approve only what you',
+            "would merge yourself. Repeat.",
         ]
     return []
 

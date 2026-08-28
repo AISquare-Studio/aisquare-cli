@@ -155,6 +155,53 @@ class TeamSettings(BaseModel):
     profiles: dict[str, RoleLaunchProfile] = Field(default_factory=dict)
 
 
+class FleetRoleSettings(BaseModel):
+    """How the fleet launches one role — every field is a DEFAULT the user may change.
+
+    ``permission_mode`` is any Claude Code ``--permission-mode`` value (``auto``,
+    ``acceptEdits``, ``bypassPermissions``, ``manual``, ``dontAsk``, ``plan``); the
+    empty string means "pass no flag". ``worktree`` puts the agent in its own git
+    worktree; ``extra_args`` are appended to the agent command verbatim.
+    Precedence everywhere: per-spawn flag > environment > this config > built-in.
+    """
+
+    permission_mode: str = "auto"
+    worktree: bool = False
+    extra_args: list[str] = Field(default_factory=list)
+
+
+def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
+    """The five fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6)."""
+    return {
+        "manager": FleetRoleSettings(),
+        "coder": FleetRoleSettings(worktree=True),
+        "tester": FleetRoleSettings(),
+        "reviewer": FleetRoleSettings(worktree=True, extra_args=["--restricted"]),
+        "validator": FleetRoleSettings(),
+    }
+
+
+class FleetSettings(BaseModel):
+    """The fleet: one private tmux server, one session per project, agents as windows.
+
+    ``tmux_socket`` names the private server (``tmux -L``); ``escape_key`` is the
+    key that hands focus from an embedded agent pane back to the sidebar;
+    ``worktree_dir`` is relative to the repo root and kept out of git through
+    ``.git/info/exclude``; ``disable_native_agent_teams`` exports
+    ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0`` into fleet launches so a manager
+    cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
+    how often the manager's Stop hook may keep it going on new board events.
+    """
+
+    tmux_socket: str = "asq"
+    escape_key: str = "f12"
+    max_agents_per_project: int = 4
+    worktree_dir: str = ".aisquare-worktrees"
+    disable_native_agent_teams: bool = True
+    max_continuations_per_hour: int = 30
+    roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -165,6 +212,7 @@ class AppConfig(BaseModel):
     redaction: RedactionSettings = Field(default_factory=RedactionSettings)
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)
+    fleet: FleetSettings = Field(default_factory=FleetSettings)
 
 
 def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:

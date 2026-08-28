@@ -76,7 +76,8 @@ def test_launch_activates_the_project(
 def test_launch_rejects_an_unknown_role(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
-    result = runner.invoke(app, ["launch", "reviewer"])
+    # `reviewer` became a real (fleet) role; `codr` is the typo the whitelist exists for.
+    result = runner.invoke(app, ["launch", "codr"])
 
     assert result.exit_code == 1
     assert "unknown role" in result.output

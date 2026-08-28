@@ -29,6 +29,22 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("recall",),
     ("launch",),
     ("serve",),
+    ("ui",),
+    *(
+        ("fleet", command)
+        for command in (
+            "spawn",
+            "ls",
+            "status",
+            "tell",
+            "stop",
+            "attach",
+            "reap",
+            "rename",
+            "pause",
+            "resume",
+        )
+    ),
     ("explainability", "status"),
     ("explainability", "env"),
     ("explainability", "enable"),

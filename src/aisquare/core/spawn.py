@@ -53,6 +53,14 @@ narrowing their environment would be change without a reason:
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
     diagnose the machine it is running on.
 
+Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
+  * ``core/tmux.py::_tmux`` — every tmux command, stripped: the private server
+    outlives every agent and would hand an inherited identity to all of them.
+  * ``core/selfcli.py::run`` — our own CLI as a subprocess for the fleet UI's
+    onboarding (``init``, ``doctor``); no model process; not stripped, for the
+    same reason ``sdk_doctor`` is not.
+  * ``cli/fleet.py::_exec_attach`` — ``tmux attach``, a terminal client.
+
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
     nothing itself; it is a caller of ``core/snapshot.py``'s seams.
@@ -140,6 +148,27 @@ SEAMS: dict[str, Seam] = {
         "stripped: it talks to the GATEWAY, not the model API, and it needs the "
         "EXPLAINABILITY_* environment to answer at all — stripping would make "
         "the diagnostic lie about the machine it is diagnosing",
+    ),
+    # --- the fleet (docs/plans/fleet-tui.md §3.4) ---------------------------------
+    "aisquare/core/tmux.py::_tmux": Seam(
+        EXCLUDED,
+        "every tmux command, including the one that starts the fleet's private "
+        "server. The server outlives every agent and hands its environment to all "
+        "of them, so an inherited identity here would become EVERY agent's identity; "
+        "each window's agent takes its own through `aisquare launch` instead",
+        strips_identity=True,
+    ),
+    "aisquare/core/selfcli.py::run": Seam(
+        EXCLUDED,
+        "our own CLI as a subprocess (`init`, `doctor`, `project onboard` for the "
+        "fleet UI, run with cwd=<project>). Starts no model process. NOT stripped: "
+        "`doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
+        "machine it is on, the same reason `sdk_doctor` is not",
+    ),
+    "aisquare/cli/fleet.py::_exec_attach": Seam(
+        EXCLUDED,
+        "`tmux attach` — a terminal client on the fleet server, not an agent; "
+        "the agents inside already have their identities",
     ),
 }
 

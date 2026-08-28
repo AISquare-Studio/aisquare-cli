@@ -35,6 +35,7 @@ from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
     ContextEntry,
+    FleetAgent,
     Pool,
     ProjectInfo,
     PromptRecord,
@@ -221,6 +222,36 @@ ALTER TABLE team_session ADD COLUMN model TEXT;
 ALTER TABLE team_session ADD COLUMN effort TEXT;
 """
 
+# v11: the fleet — one row per agent the fleet started (a tmux pane + the role it
+# runs + the board session id minted for it), and the project's fleet codename.
+# The label is unique only among LIVE agents (partial index), so an ended agent
+# frees its name. ``ALTER TABLE`` cannot add a UNIQUE constraint in SQLite, so the
+# codename's uniqueness is an index too.
+_SCHEMA_V11 = """
+CREATE TABLE fleet_agent (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    binary        TEXT NOT NULL DEFAULT 'claude',
+    tmux_socket   TEXT NOT NULL DEFAULT 'asq',
+    pane_id       TEXT NOT NULL,
+    session_id    TEXT,
+    cwd           TEXT NOT NULL,
+    worktree      INTEGER NOT NULL DEFAULT 0,
+    task_id       TEXT,
+    spawned_by    TEXT,
+    created_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    exit_status   INTEGER
+);
+CREATE INDEX fleet_agent_project ON fleet_agent (project_id, created_at);
+CREATE UNIQUE INDEX fleet_agent_live_label ON fleet_agent (project_id, label)
+    WHERE ended_at IS NULL;
+ALTER TABLE project ADD COLUMN codename TEXT;
+CREATE UNIQUE INDEX project_codename ON project (codename);
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -233,6 +264,7 @@ _MIGRATIONS = (
     _SCHEMA_V8,
     _SCHEMA_V9,
     _SCHEMA_V10,
+    _SCHEMA_V11,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -247,6 +279,10 @@ _TASK_COLUMNS = (
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
+_FLEET_AGENT_COLUMNS = (
+    "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
+    "task_id, spawned_by, created_at, ended_at, exit_status"
+)
 
 
 class AmbiguousIdError(LookupError):
@@ -341,6 +377,15 @@ class ContextStore(Protocol):
     ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
+    def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def codenames_in_use(self) -> set[str]: ...
+    def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
+    def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
+    def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agent_by_label(
+        self, project_id: str, label: str, *, live_only: bool = True
+    ) -> FleetAgent | None: ...
+    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
     def close(self) -> None: ...
 
 
@@ -368,6 +413,27 @@ def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
         id=row["id"],
         root=Path(row["root"]),
         linked_repos=json.loads(row["linked_repos"]),
+        codename=row["codename"],
+    )
+
+
+def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
+    return FleetAgent(
+        id=row["id"],
+        project_id=row["project_id"],
+        label=row["label"],
+        role=row["role"],
+        binary=row["binary"],
+        tmux_socket=row["tmux_socket"],
+        pane_id=row["pane_id"],
+        session_id=row["session_id"],
+        cwd=Path(row["cwd"]),
+        worktree=bool(row["worktree"]),
+        task_id=row["task_id"],
+        spawned_by=row["spawned_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        ended_at=_maybe_dt(row["ended_at"]),
+        exit_status=row["exit_status"],
     )
 
 
@@ -600,20 +666,21 @@ class SqliteStore:
 
     def list_projects(self) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos FROM project ORDER BY name"
+            "SELECT id, root, linked_repos, codename FROM project ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
     def get_project(self, project_id: str) -> ProjectInfo | None:
         row = self._conn.execute(
-            "SELECT id, root, linked_repos FROM project WHERE id = ?", (project_id,)
+            "SELECT id, root, linked_repos, codename FROM project WHERE id = ?", (project_id,)
         ).fetchone()
         return _row_to_project(row) if row is not None else None
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos FROM project WHERE id GLOB ? OR name = ? ORDER BY name",
-            (_glob_prefix(term), term),
+            "SELECT id, root, linked_repos, codename FROM project "
+            "WHERE id GLOB ? OR name = ? OR codename = ? ORDER BY name",
+            (_glob_prefix(term), term, term),
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
@@ -1227,6 +1294,103 @@ class SqliteStore:
             (project_id,),
         ).fetchone()
         return int(row[0])
+
+    # --- fleet -----------------------------------------------------------------
+
+    def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
+        """Give a project its fleet codename (unique: the index raises on a clash)."""
+        self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
+        self._conn.commit()
+        project = self.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        return project
+
+    def codenames_in_use(self) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT codename FROM project WHERE codename IS NOT NULL"
+        ).fetchall()
+        return {str(row["codename"]) for row in rows}
+
+    def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent:
+        """Insert a fleet agent, or update the mutable facts of one already known.
+
+        A second LIVE agent with the same label in the same project trips the
+        partial unique index and raises ``sqlite3.IntegrityError`` — the service
+        layer picks the suffixed label and retries; the store never guesses.
+        """
+        self._conn.execute(
+            f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET "
+            "pane_id = excluded.pane_id, session_id = excluded.session_id, "
+            "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
+            "ended_at = excluded.ended_at, exit_status = excluded.exit_status",
+            (
+                agent.id,
+                agent.project_id,
+                agent.label,
+                agent.role,
+                agent.binary,
+                agent.tmux_socket,
+                agent.pane_id,
+                agent.session_id,
+                str(agent.cwd),
+                int(agent.worktree),
+                agent.task_id,
+                agent.spawned_by,
+                agent.created_at.isoformat(),
+                agent.ended_at.isoformat() if agent.ended_at else None,
+                agent.exit_status,
+            ),
+        )
+        self._conn.commit()
+        stored = self.get_fleet_agent(agent.id)
+        assert stored is not None  # just written
+        return stored
+
+    def get_fleet_agent(self, ref: str) -> FleetAgent | None:
+        """A fleet agent by id or unambiguous id prefix (git-style)."""
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
+            (_glob_prefix(ref),),
+        ).fetchall()
+        if len(rows) > 1:
+            raise AmbiguousIdError(ref)
+        return _row_to_fleet_agent(rows[0]) if rows else None
+
+    def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
+        clause = " AND ended_at IS NULL" if live_only else ""
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"WHERE project_id = ?{clause} ORDER BY created_at, id",
+            (project_id,),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agent_by_label(
+        self, project_id: str, label: str, *, live_only: bool = True
+    ) -> FleetAgent | None:
+        clause = " AND ended_at IS NULL" if live_only else ""
+        row = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
+            (project_id, label),
+        ).fetchone()
+        return _row_to_fleet_agent(row) if row is not None else None
+
+    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
+        """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
+        self._conn.execute(
+            "UPDATE fleet_agent SET ended_at = ?, exit_status = ? "
+            "WHERE id = ? AND ended_at IS NULL",
+            (_now_iso(), exit_status, agent_id),
+        )
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
 
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
         """The latest done/dropped event per task — archive attribution.

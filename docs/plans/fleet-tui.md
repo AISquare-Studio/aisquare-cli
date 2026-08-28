@@ -2,7 +2,8 @@
 
 > **Status: plan, nothing implemented yet.** This is a living document: update it
 > in the same PR as the code it describes, and keep the *Decisions log* at the
-> bottom current. Branch `plan/fleet-tui`; the draft PR is linked from the log.
+> bottom current. Branch `plan/fleet-tui`; draft PR
+> <https://github.com/AISquare-Studio/aisquare-cli/pull/71>.
 >
 > Verified against `main` @ `905c68b` (0.5.0) on 2026-08-28 with Textual 8.2.8,
 > tmux 3.7c, Claude Code 2.1.250, Codex CLI installed, Python 3.14 locally and
@@ -811,4 +812,4 @@ driven headless with `App.run_test()` / `Pilot`, as `test_watch.py` already does
 
 | Date | Decision / change | By |
 | --- | --- | --- |
-| 2026-08-28 | First version of the plan. Approach D (tmux substrate) proposed; §12 open. | plan PR |
+| 2026-08-28 | First version of the plan. Approach D (tmux substrate) proposed; §12 open. Draft PR #71; suite on the branch: 1767 passed, 1 skipped. | PR #71 |

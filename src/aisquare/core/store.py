@@ -23,6 +23,7 @@ import os
 import random
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -856,8 +857,22 @@ class SqliteStore:
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None:
-        """Heartbeat: bump ``last_seen_at`` (and advance the cursor / flip state)."""
-        sets, params = ["last_seen_at = ?"], [_now_iso()]
+        """Heartbeat: bump ``last_seen_at``, un-retire the row, advance cursor/state.
+
+        ``ended_at = NULL`` is the repair :meth:`end_session` already promises in
+        its own docstring, and until #47 nothing performed it: ``upsert_session``
+        clears the field, but it only runs at ``SessionStart``, while every
+        subsequent proof of life arrives here. A session retired on a cadence
+        artifact therefore kept working — notes delivered with verifiable
+        receipts, roles set, claims held — while being invisible to ``board``,
+        ``team status``, ``watch`` and ``doctor``, every one of which reads
+        liveness as ``ended_at IS NULL``. Operators read row-absence as death.
+
+        A heartbeat is EVIDENCE; prune's retirement was an inference from
+        silence. The evidence wins. Nothing resurrects on its own — only a
+        signal from the session itself reaches this method.
+        """
+        sets, params = ["last_seen_at = ?", "ended_at = NULL"], [_now_iso()]
         if cursor is not None:
             sets.append("cursor = ?")
             params.append(str(cursor))
@@ -876,6 +891,12 @@ class SqliteStore:
         Returns True only for the transition — concurrent Notification hooks
         (parallel permission prompts happen) must produce exactly one feed
         event, so the read and the write are one conditional UPDATE.
+
+        The unconditional second statement carries the un-retirement (#47), not
+        the first: a session already parked in ``attention`` must still have a
+        wrongly retired row repaired, and the first statement deliberately does
+        not match it. A session waiting on a permission prompt is the most alive
+        it ever is, and the one a human is most likely hunting for on the board.
         """
         cursor = self._conn.execute(
             "UPDATE team_session SET state = 'attention', last_seen_at = ? "
@@ -883,7 +904,7 @@ class SqliteStore:
             (_now_iso(), session_id),
         )
         self._conn.execute(
-            "UPDATE team_session SET last_seen_at = ? WHERE id = ?",
+            "UPDATE team_session SET last_seen_at = ?, ended_at = NULL WHERE id = ?",
             (_now_iso(), session_id),
         )
         self._conn.commit()
@@ -1442,31 +1463,168 @@ def is_locked_error(exc: sqlite3.Error) -> bool:
     return "locked" in text or "busy" in text
 
 
+def is_corrupt_error(exc: sqlite3.Error) -> bool:
+    """True when SQLite says the FILE is damaged, whenever it noticed.
+
+    Needed at query time, where nothing has raised ``StoreUnopenable`` because
+    nothing failed to open: a zeroed page with an intact header opens fine and
+    a ``SELECT`` finds it later. So the decision has to be made from the error
+    rather than from where it came from.
+
+    Narrow, and the narrowness is the point. ``OperationalError`` IS a
+    ``DatabaseError``, so a widening keyed on the base class would sweep up
+    "database is locked" — transient contention, which five sessions hit
+    nightly — and tell those operators their board is damaged. It would also
+    sweep up "no such table", which is a defect in OUR migrations and must keep
+    its traceback. Errorcode first, message only as the fallback for
+    hand-constructed exceptions, exactly as ``is_locked_error`` does.
+
+    This helper existed, was deleted as dead code when ``StoreUnopenable``
+    replaced its only caller, and is back because the query-time seam cannot be
+    written without it.
+    """
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in (sqlite3.SQLITE_NOTADB, sqlite3.SQLITE_CORRUPT)
+    text = str(exc).lower()
+    return "not a database" in text or "disk image is malformed" in text
+
+
+class StoreUnopenable(sqlite3.DatabaseError):
+    """The store could not be opened at all — whatever the cause.
+
+    Subclasses ``sqlite3.DatabaseError`` deliberately: every existing catcher
+    (``_fail_team``'s ``STORE_ERRORS``, diagnostics' bare ``except``) keeps
+    working unchanged, while the one boundary that wants to translate it can
+    name it precisely.
+
+    Raised ONLY from ``open_store``'s setup phase, which is what makes it safe
+    to act on: at that point nothing in the file is reachable by this CLI, so
+    recommending the operator move it aside costs them no history they still
+    had. A ``DatabaseError`` from a later query is a different animal and is
+    left alone — it may be a bug in our SQL against a perfectly good store.
+
+    A lock timeout is NOT wrapped: it stays an ``OperationalError`` so
+    ``is_locked_error`` still routes it to "store busy — retry shortly", which
+    is transient and must never be dressed up as damage.
+    """
+
+
+def damaged_store_recovery() -> str:
+    """The one recovery for a corrupt store, worded once and shared.
+
+    ``doctor`` prints this as its remediation and every command that hits a
+    corrupt store prints it as its error, because the defect this replaces was
+    precisely that those were two different sentences and only one of them
+    worked: doctor said "Re-initialise: aisquare init", and ``aisquare init``
+    crashed on the same corrupt file without repairing it.
+
+    MOVED, not deleted, and not repaired. ``context.db`` holds the board's
+    whole history; a diagnostic that destroys it is unrecoverable, so the
+    operator performs the move and the broken file stays on disk for whoever
+    wants to look at it. What the move costs is named here rather than left to
+    be discovered afterwards.
+    """
+    db = paths.db_path()
+    return (
+        f"Move it aside and re-create: mv {db} {db}.broken && aisquare init "
+        f"— the board history in it is lost; config.toml and credentials are untouched"
+    )
+
+
+def damaged_store_message(exc: sqlite3.Error) -> str:
+    """The whole operator-facing sentence for a corrupt store: what and how.
+
+    Built here rather than at each boundary because there are three of them —
+    ``init``/``status`` via ``expected_store_errors`` and every team command
+    via ``_fail_team`` — and three copies of a sentence is how doctor's
+    remediation drifted from a working one in the first place.
+    """
+    return (
+        f"the context store cannot be opened: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
+    )
+
+
+def damaged_data_message(exc: sqlite3.Error) -> str:
+    """For damage a QUERY found, where the file opened perfectly well.
+
+    Deliberately not ``damaged_store_message``: that one says the store "cannot
+    be opened", which is false here and would send the reader looking for the
+    wrong thing — and §0b of the cutover runbook quotes it verbatim, so editing
+    it in place would falsify an operator document nobody touched.
+
+    The recovery is the same function, because the two sentences drifting apart
+    is the defect this whole family exists to prevent.
+    """
+    return f"the context store is damaged: {paths.db_path()} ({exc}). {damaged_store_recovery()}"
+
+
+def _statements(script: str) -> Iterator[str]:
+    """Split a migration script into statements, using SQLite's own parser.
+
+    ``sqlite3.complete_statement`` is the C tokenizer, so a semicolon inside a
+    string literal or a ``CREATE TRIGGER … BEGIN … END`` body does not split
+    the statement — which a regex would get wrong exactly once, on the day
+    someone adds a trigger.
+    """
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if buffer.strip() and sqlite3.complete_statement(buffer):
+            yield buffer
+            buffer = ""
+    if buffer.strip():
+        yield buffer
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Bring the schema to the current version, safely under concurrency.
 
-    Hooks race: several sessions can open (and try to migrate) the store in
-    the same instant. Each migration runs as ONE ``BEGIN IMMEDIATE``
-    transaction that also bumps ``user_version`` — so a rebuild like v4 can
-    never be observed half-done, and the write lock serialises racers. A
-    loser whose script then fails re-reads the version: if another process
+    Hooks race: several sessions can open (and try to migrate) the store in the
+    same instant. Each migration runs as ONE ``BEGIN IMMEDIATE`` transaction
+    that also bumps ``user_version`` — so a rebuild like v4 can never be
+    observed half-done, and the write lock serialises racers.
+
+    THE VERSION IS READ UNDER THE LOCK, and that ordering is the whole fix.
+    Reading it first and then starting the transaction is a time-of-check /
+    time-of-use gap: between the read and the ``BEGIN IMMEDIATE`` another opener
+    can advance the schema, and this one then applies an OLD migration to a
+    NEWER database. Measured before the fix, 12 concurrent first opens on a
+    fresh store: 27 failures in 15 runs, ``duplicate column name: account`` —
+    and instrumentation caught a thread running migration index 9 against a
+    database that read version 8 on two independent connections. Nothing about
+    it needed unusual load; it needed openers.
+
+    ``executescript`` cannot be used for the transactional part, and that is the
+    trap that makes the naive fix worse rather than better: it issues an
+    implicit COMMIT *before* running its script, so a ``BEGIN IMMEDIATE`` taken
+    beforehand is released instantly. The statements are therefore run one at a
+    time under our own transaction. ``_statements`` splits them with SQLite's
+    own parser, and a test pins that the schema this produces is byte-identical
+    to what ``executescript`` produced.
+
+    A loser whose script still fails re-reads the version: if another process
     advanced it, that's victory by other means; otherwise the error is real.
     """
     while True:
-        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version >= len(_MIGRATIONS):
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= len(_MIGRATIONS):
             return
-        script = _MIGRATIONS[version]
         try:
-            connection.executescript(
-                f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version + 1};\nCOMMIT;"
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version >= len(_MIGRATIONS):
+                connection.execute("COMMIT")
+                return
+            for statement in _statements(_MIGRATIONS[version]):
+                connection.execute(statement)
+            connection.execute(f"PRAGMA user_version = {version + 1}")
+            connection.execute("COMMIT")
         except sqlite3.Error:
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
-            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if current <= version:
-                raise  # a genuine migration failure, not a lost race
+            raise
 
 
 def open_store() -> ContextStore:
@@ -1483,7 +1641,41 @@ def open_store() -> ContextStore:
     iterates.
     """
     paths.ensure_home()
-    connection = sqlite3.connect(str(paths.db_path()))
+    database = paths.db_path()
+    # SQLite treats a ZERO-LENGTH file as a brand-new empty database, so a
+    # truncated store is rebuilt, migrated, and reported healthy — measured:
+    # `status` exits 0 in six lines and `doctor` says "✓ database: context.db is
+    # readable", while every task, note and session it held is gone. It is the
+    # only damage shape with no signal; the other four raise loudly.
+    #
+    # ABSENT IS NOT TRUNCATED. A new machine has no file at all and creating one
+    # is correct. A file that EXISTS at zero length means something made it and
+    # it lost what it held, which is the one moment that fact is knowable —
+    # after this open the schema is back and the evidence is gone.
+    #
+    # Written straight to stderr rather than through the console helper: this
+    # module is the data layer and imports nothing from the CLI, and the
+    # doctrine for an observer that cannot fix what it sees is to say so on
+    # stderr and carry on. Nothing is repaired, refused or deleted.
+    if database.exists() and database.stat().st_size == 0:
+        print(
+            f"board: {database} exists but is empty — it was truncated, and the "
+            "tasks, notes and sessions it held are gone. A new store is being "
+            "created; this is not a fresh machine.",
+            file=sys.stderr,
+        )
+        # That line goes to whoever opened the file — on a working machine a
+        # HOOK, whose stderr neither the agent nor the operator reads. Record it
+        # so `doctor` can answer the question the runbook teaches people to ask.
+        # Fail-open: an observer may cost its own record, never the open.
+        try:
+            marker = paths.truncation_marker_path()
+            marker.write_text(
+                datetime.now(UTC).isoformat(timespec="seconds") + "\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
+    connection = sqlite3.connect(str(database))
     connection.row_factory = sqlite3.Row
     busy_ms = _busy_timeout_ms()
     connection.execute(f"PRAGMA busy_timeout = {busy_ms}")
@@ -1495,10 +1687,20 @@ def open_store() -> ContextStore:
             _migrate(connection)
             return SqliteStore(connection)
         except sqlite3.OperationalError as exc:
-            if not is_locked_error(exc) or time.monotonic() >= deadline:
-                connection.close()
-                raise
-            time.sleep(0.05 + random.random() * 0.1)
+            if is_locked_error(exc):
+                if time.monotonic() >= deadline:
+                    connection.close()
+                    raise  # transient: keeps its type, and its "retry shortly"
+                time.sleep(0.05 + random.random() * 0.1)
+                continue
+            connection.close()
+            raise StoreUnopenable(str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            # Corruption (SQLITE_NOTADB) and a store wedged mid-migration both
+            # land here. Measured before this existed: 59-75 lines of traceback
+            # from ELEVEN commands, because they all die in this one place.
+            connection.close()
+            raise StoreUnopenable(str(exc)) from exc
 
 
 @contextmanager

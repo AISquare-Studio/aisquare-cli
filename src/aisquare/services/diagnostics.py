@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import shutil
 import socket
 import sys
+from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -15,12 +18,20 @@ from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
-from aisquare.core.store import store_session
+from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import active_project
-from aisquare.models import CheckStatus, DoctorCheck, InjectionRecord, PromptRecord, StatusReport
-from aisquare.services import ci_client
+from aisquare.models import (
+    CheckStatus,
+    DoctorCheck,
+    InjectionRecord,
+    PromptRecord,
+    ShippingStatus,
+    StatusReport,
+)
+from aisquare.services import ci_client, explainability_ops
 from aisquare.services import distill as distill_service
+from aisquare.services import explainability as explainability_service
 
 
 def status() -> StatusReport:
@@ -39,6 +50,7 @@ def status() -> StatusReport:
             project_count=len(store.list_projects()),
             agents_detected=[agent.name for agent in agents if agent.detected],
             agents_connected=[agent.name for agent in agents if agent.connected],
+            shipping=_shipping_status(),
         )
     return report
 
@@ -47,12 +59,43 @@ _CI_PROBE_TIMEOUT_SECONDS = 1.5
 """Doctor must stay fast; an unreachable endpoint is the common case here."""
 
 
-def doctor() -> list[DoctorCheck]:
-    """Run health checks over the install, dependencies and integration."""
+def _shipping_status() -> ShippingStatus | None:
+    """Explainability shipping, or ``None`` when this install never opted in.
+
+    Silent by construction on an untouched machine: the line only appears once
+    someone configured shipping, or while records from a previous configuration
+    are still buffered — a queue that is quietly filling must never be
+    invisible. Never raises; ``status`` reporting on a broken spool is more
+    useful than ``status`` dying with it.
+    """
+    try:
+        state = explainability_service.shipping_state()
+    except Exception:  # diagnostics must never crash
+        return None
+    if not state.configured and not (state.queued or state.dead):
+        return None
+    return ShippingStatus(
+        configured=state.configured,
+        queued=state.queued,
+        sent=state.sent,
+        dead=state.dead,
+        reason=state.reason,
+    )
+
+
+def doctor(*, live: bool = False, target: str | None = None) -> list[DoctorCheck]:
+    """Run health checks over the install, dependencies and integration.
+
+    ``live`` opts into the checks that leave this machine (today: the
+    explainability gateway round-trip). Everything else stays offline, so a
+    plain ``aisquare doctor`` still answers on a train.
+    """
     return [
         _check_python(),
         _check_install(),
+        _check_provenance(),
         _check_home(),
+        _check_home_filesystem(),
         _check_config(),
         _check_database(),
         _check_repomix(),
@@ -62,6 +105,7 @@ def doctor() -> list[DoctorCheck]:
         _check_brain(),
         _check_harness(),
         _check_experiment(),
+        *explainability_ops.checks(live=live, target_name=target),
     ]
 
 
@@ -100,11 +144,165 @@ def _check_install() -> DoctorCheck:
     return _ok("install", f"aisquare at {binary}")
 
 
+def _check_provenance() -> DoctorCheck:
+    """Which SOURCE the installed build came from, not just which binary runs.
+
+    ``--version`` cannot answer this: a build from this checkout and a build
+    from a sibling worktree both report the same version string, which is how a
+    stale install survived on this machine for a whole shift while five separate
+    mechanisms were blamed for "which build am I running". pip records the answer
+    in ``direct_url.json`` for anything installed from a path, and nothing was
+    reading it.
+
+    A DETECTOR: it reports so an operator can decide, and it never fails a
+    machine. The one case worth a warning is a source directory that no longer
+    exists — the install cannot be verified against it, cannot be reinstalled
+    from it, and is by definition not the tree anyone is working in.
+    """
+    try:
+        record = metadata.distribution("aisquare-cli").read_text("direct_url.json")
+    except Exception:
+        return _ok("provenance", "install source not recorded")
+    if not record:
+        return _ok("provenance", "installed from a package index")
+    try:
+        parsed = json.loads(record)
+        url = str(parsed.get("url", ""))
+        editable = bool(parsed.get("dir_info", {}).get("editable"))
+    except (ValueError, AttributeError):
+        return _ok("provenance", "install source not readable")
+    if not url.startswith("file://"):
+        return _ok("provenance", f"installed from {url}")
+
+    source = Path(url[len("file://") :])
+    kind = "editable" if editable else "non-editable"
+    if not source.exists():
+        return _warn(
+            "provenance",
+            f"installed ({kind}) from {source}, WHICH NO LONGER EXISTS",
+            "This build cannot be checked against its source or reinstalled from "
+            "it, and it is not the tree you are working in. Reinstall from the "
+            "repo by absolute path: python3 -m pip install '/path/to/aisquare-cli[dev]'",
+        )
+    return _ok("provenance", f"installed ({kind}) from {source}")
+
+
 def _check_home() -> DoctorCheck:
     home = paths.aisquare_home()
     if home.exists():
         return _ok("home", f"{home} exists")
     return _fail("home", f"{home} is missing", "Set it up: aisquare init")
+
+
+#: Filesystems where ``os.replace`` is the kernel's own rename and the
+#: durable-replace guarantee in ``core.config.save_config`` holds as measured.
+_NATIVE_FILESYSTEMS = frozenset(
+    {"ext2", "ext3", "ext4", "btrfs", "xfs", "zfs", "f2fs", "apfs", "hfs", "tmpfs", "overlay"}
+)
+
+#: Filesystems reached through a translation layer or a network. Nothing here is
+#: known-broken; the point is that the atomicity of a rename is somebody else's
+#: promise and this project has never measured it. 9p is how WSL exposes Windows
+#: drives (/mnt/c), which is the reachable case: AISQUARE_HOME is taken verbatim.
+_TRANSLATED_FILESYSTEMS = frozenset({"9p", "cifs", "smb3", "nfs", "nfs4", "fuseblk", "virtiofs"})
+
+_MOUNTINFO = Path("/proc/self/mountinfo")
+
+
+def filesystem_of(path: Path, mountinfo: Path = _MOUNTINFO) -> str | None:
+    """Filesystem type ``path`` lives on, or None when it cannot be determined.
+
+    Reads ``/proc/self/mountinfo`` and takes the LONGEST mount point that is a
+    prefix of the path — mounts nest, and the first match is not the deepest, so
+    a shorter match would report the parent's filesystem for anything mounted
+    underneath it.
+
+    Never raises. This feeds a diagnostic line, and a machine must not fail
+    ``doctor`` because it has no /proc or an unreadable one; unknown is an
+    honest answer and is reported as such.
+    """
+    try:
+        target = path.resolve()
+        best: tuple[int, str] | None = None
+        for line in mountinfo.read_text(encoding="utf-8").splitlines():
+            head, _, tail = line.partition(" - ")
+            fields = head.split()
+            rest = tail.split()
+            if len(fields) < 5 or not rest:
+                continue
+            point = Path(fields[4])
+            if target == point or point in target.parents:
+                depth = len(point.parts)
+                if best is None or depth > best[0]:
+                    best = (depth, rest[0])
+        return best[1] if best else None
+    except Exception:
+        return None
+
+
+def _config_file_kind() -> str:
+    """How config.toml exists: a plain file, a symlink and where to, or absent.
+
+    Offered by @9bbc8ed7 into this same line rather than as a separate check, and
+    it belongs here for the reason the filesystem does: it is invisible, chosen by
+    the user, and it changes how a write behaves. Since save_config follows links,
+    this is also the line that tells an operator their dotfiles link IS being
+    honoured — the fact is only reassuring once it is visible.
+
+    Never raises; a path we cannot stat is reported as unknown.
+    """
+    config = paths.config_path()
+    try:
+        if config.is_symlink():
+            destination = os.path.realpath(config)
+            if not os.path.exists(destination):
+                # A dangling link is the one shape that makes a write reach
+                # outside anything the operator named: save_config follows the
+                # link and CREATES the missing directories at the target —
+                # measured at four levels deep, and on a mounted Windows drive
+                # if that is where the link points. Saying so before the write
+                # is the whole value of this line.
+                return f"symlink -> {destination} (TARGET MISSING)"
+            return f"symlink -> {destination}"
+        if config.is_file():
+            return "regular file"
+        return "not created yet"
+    except OSError:
+        return "unreadable"
+
+
+def _check_home_filesystem() -> DoctorCheck:
+    """Say out loud which filesystem the config lives on.
+
+    ``save_config`` publishes changes with write-temp/fsync/rename/fsync-parent,
+    and the atomicity of that rename is a property of the FILESYSTEM. It was
+    measured on a native disk, which is where the default ``~/.aisquare`` sits.
+    ``AISQUARE_HOME`` is taken verbatim, so a Windows-backed path is one export
+    away — and until now nothing in the code could tell an operator which kind of
+    path they were on.
+
+    A DETECTOR, not a checker: it reports so the operator can decide, and it
+    never fails. Being on a translated filesystem is not known-broken, it is
+    unmeasured, and turning "unmeasured" into "broken" would be the mandate this
+    project has been careful not to write into its own tools.
+    """
+    home = paths.aisquare_home()
+    shape = _config_file_kind()
+    kind = filesystem_of(home)
+    if kind is None:
+        return _ok("filesystem", f"{home} — filesystem not determined; config: {shape}")
+    if kind in _TRANSLATED_FILESYSTEMS:
+        return _warn(
+            "filesystem",
+            f"{home} is on {kind}, where atomic config writes are unverified (config: {shape})",
+            "Config writes rely on os.replace being atomic. That holds on a local "
+            "disk and has never been measured through a translation layer. If two "
+            "sessions may write config at once, point AISQUARE_HOME at a native "
+            "filesystem.",
+        )
+    if kind in _NATIVE_FILESYSTEMS:
+        return _ok("filesystem", f"{home} on {kind}, config: {shape} — atomic writes hold")
+    return _ok("filesystem", f"{home} on {kind} ({shape}) — atomicity unmeasured here")
 
 
 def _check_config() -> DoctorCheck:
@@ -117,13 +315,70 @@ def _check_config() -> DoctorCheck:
     return _ok("config", "config.toml is valid")
 
 
+def _uncreated_home(name: str) -> DoctorCheck | None:
+    """``None`` when the store can be opened without bringing a home into being.
+
+    ``store_session`` calls ``ensure_home``, so a check that opens the store on
+    a machine with no home CREATES the thing the ``home`` check is at that
+    moment reporting as missing — and makes the next run exit 0 for no reason
+    but that this one ran. Diagnosis must not be a side effect.
+
+    Reported at ok status because ``home`` owns that verdict and already fails:
+    a second failure here would send an operator to look at the database when
+    the answer is that nothing has been set up yet.
+    """
+    if paths.aisquare_home().exists():
+        return None
+    return _ok(name, "not created yet — set it up: aisquare init")
+
+
 def _check_database() -> DoctorCheck:
+    absent = _uncreated_home("database")
+    if absent is not None:
+        return absent
     try:
         with store_session() as store:
             count = len(store.entries("user"))
     except Exception as exc:  # diagnostics must never crash
-        return _fail("database", f"context.db is unreadable: {exc}", "Re-initialise: aisquare init")
+        # "Re-initialise: aisquare init" was measured CRASHING on every state
+        # that reaches this line — 59 lines of traceback on a corrupt file, 72
+        # on a store wedged mid-migration — and repairing neither. It is not
+        # narrowed to corruption because THIS LINE HAS ALREADY ESTABLISHED THAT
+        # THE STORE WILL NOT OPEN: whatever the cause, no history in it is
+        # reachable by this CLI, and the recovery MOVES the file rather than
+        # deleting it, so the bytes survive for a later fix. Shared with the
+        # error the CLI prints, so the two cannot drift apart again — a
+        # remediation nobody re-runs is how this one rotted.
+        return _fail("database", f"context.db is unreadable: {exc}", damaged_store_recovery())
+    marker = paths.truncation_marker_path()
+    if marker.exists():
+        # The store opens and is perfectly valid — it is simply not the one this
+        # machine had. §0b teaches "an empty board with a green doctor means the
+        # file was truncated"; without this, doctor is the green half of that
+        # sentence and can never supply the other half, because by the time it
+        # runs the schema is back and nothing distinguishes the two cases.
+        when = _read_line(marker) or "an earlier run"
+        return _warn(
+            "database",
+            f"context.db is readable ({count} user entries) — but it was found "
+            f"TRUNCATED and rebuilt at {when}; the sessions, tasks and notes it "
+            "held are gone",
+            f"Nothing to repair — the history was lost before this. "
+            f"Acknowledge it with: rm {marker}",
+        )
     return _ok("database", f"context.db is readable ({count} user entries)")
+
+
+def _read_line(path: Path) -> str:
+    """First line of a small marker file, or empty when unreadable.
+
+    Never raises: a diagnostic that crashes on its own breadcrumb is worse than
+    one that says a little less.
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
 
 
 def _check_repomix() -> DoctorCheck:
@@ -182,6 +437,9 @@ def _check_claude_code() -> DoctorCheck:
 
 
 def _check_snapshot() -> DoctorCheck:
+    absent = _uncreated_home("snapshot")
+    if absent is not None:
+        return absent
     try:
         with store_session() as store:
             project = active_project(store)
@@ -203,6 +461,9 @@ def _check_snapshot() -> DoctorCheck:
 
 def _check_brain() -> DoctorCheck:
     """The team's long-term memory: gbrain presence, brain state, distill lag."""
+    absent = _uncreated_home("brain")
+    if absent is not None:
+        return absent
     if not brain_core.brain_enabled():
         return _ok("brain", "brain layer disabled (AISQUARE_BRAIN=0)")
     version = brain_core.gbrain_version()
@@ -341,6 +602,9 @@ def _check_harness() -> DoctorCheck:
     ``aisquare team spawn <role>``. Warns, never fails — a stale cache or an
     off-ladder session is advice, not breakage.
     """
+    absent = _uncreated_home("harness")
+    if absent is not None:
+        return absent
     name = "agent harness"
     try:
         # Not-applicable = ok: a repo that never opted into the orchestrator must

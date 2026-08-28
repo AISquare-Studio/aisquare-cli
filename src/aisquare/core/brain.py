@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
 
-from aisquare.core import paths
+from aisquare.core import paths, spawn
 
 # The exclusive-lock primitive, per platform. ``fcntl`` is POSIX-only and
 # ``msvcrt`` is Windows-only, so the import is branched on ``sys.platform``
@@ -154,7 +154,14 @@ def brain_embeds(project_id: str) -> bool:
 
 
 def _env(home: Path) -> dict[str, str]:
-    env = dict(os.environ)
+    """The environment one gbrain command runs with.
+
+    Never a tracing identity: gbrain is a store, not an agent session, and the
+    ``ANTHROPIC_API_KEY`` guard below is the tell that an Anthropic path exists
+    at all — with an inherited ``ANTHROPIC_BASE_URL`` that path would run
+    through our proxy and post a Run under whichever role was distilling.
+    """
+    env = spawn.untraced_env()
     env["GBRAIN_HOME"] = str(home)
     if not embeddings_enabled():
         env.pop("OPENAI_API_KEY", None)

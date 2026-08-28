@@ -120,6 +120,22 @@ class SetupReport(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ShippingStatus(BaseModel):
+    """How the explainability client lane is doing, for ``status``.
+
+    ``sent`` counts records handed to the SDK's durable inbox, which is where
+    delivery guarantees live from that point on — not an acknowledgement from
+    the gateway. ``dead`` is ours: records this CLI gave up on before the SDK
+    ever saw them.
+    """
+
+    configured: bool
+    queued: int
+    sent: int
+    dead: int
+    reason: str
+
+
 class StatusReport(BaseModel):
     """A snapshot of installation health for ``status``."""
 
@@ -131,6 +147,10 @@ class StatusReport(BaseModel):
     project_count: int
     agents_detected: list[str] = Field(default_factory=list)
     agents_connected: list[str] = Field(default_factory=list)
+    shipping: ShippingStatus | None = None
+    """Present only once shipping is configured, or while something is still
+    buffered from when it was. An install that declined the step reports
+    exactly what it reported before — that is acceptance clause one."""
 
 
 class CheckStatus(StrEnum):

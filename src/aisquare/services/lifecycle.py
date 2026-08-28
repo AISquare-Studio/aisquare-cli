@@ -4,14 +4,57 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
-from aisquare.core.config import AppConfig, save_config
+from aisquare.core.config import (
+    AppConfig,
+    ExplainabilitySettings,
+    load_config,
+    save_config,
+)
 from aisquare.core.store import store_session
 from aisquare.core.stubs import stub
 from aisquare.core.workspace import current_project
 from aisquare.models import SetupReport
 from aisquare.services import agents as agents_service
+from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
+
+
+class ExplainabilityResetRefused(RuntimeError):
+    """``--reinit`` would discard a configured explainability section.
+
+    Raised rather than warned because the loss is not recoverable from anything
+    on the machine: ``[explainability.targets]`` holds a gateway URL and the
+    NAME of the environment variable holding the key, both configured out of
+    band. Afterwards ``status`` reads as a plausible *unconfigured* machine
+    rather than a broken one, so nothing downstream reports it.
+
+    Not raised when the config cannot be parsed: ``doctor`` sends an operator
+    here to reset an invalid file, and a refusal built on a section we cannot
+    read would strand exactly that person.
+    """
+
+    def __init__(self, summary: str) -> None:
+        super().__init__(summary)
+        self.summary = summary
+
+
+def _configured_explainability(settings: ExplainabilitySettings) -> str | None:
+    """What a reset would take, or None if there is nothing configured.
+
+    Keys on three fields rather than one: a machine mid-cutover may have any of
+    them set, and checking only ``targets`` would let a half-configured machine
+    be reset in silence.
+    """
+    parts: list[str] = []
+    if settings.targets:
+        parts.append("targets " + ", ".join(sorted(settings.targets)))
+    if settings.enabled:
+        parts.append("tracing enabled")
+    if settings.gateway_url:
+        parts.append(f"gateway {settings.gateway_url}")
+    return "; ".join(parts) or None
 
 
 def initialize(
@@ -23,6 +66,7 @@ def initialize(
     onboard: bool,
     reinit: bool,
     assume_yes: bool,
+    explainability: bool | None = None,
 ) -> SetupReport:
     """Set up ``~/.aisquare``, register & snapshot the project, and connect agents.
 
@@ -35,6 +79,17 @@ def initialize(
     already_initialized = paths.config_path().exists() or paths.db_path().exists()
     paths.ensure_home()
 
+    discarded: str | None = None
+    if reinit and paths.config_path().exists():
+        try:
+            existing = load_config().explainability
+        except Exception:
+            existing = None  # unreadable: --reinit is the documented recovery
+        if existing is not None:
+            discarded = _configured_explainability(existing)
+            if discarded and not assume_yes:
+                raise ExplainabilityResetRefused(discarded)
+
     if reinit or not paths.config_path().exists():
         save_config(AppConfig())
 
@@ -43,15 +98,22 @@ def initialize(
         store.ensure_project(project)
 
     notes: list[str] = []
+    if discarded:
+        # Consent was given, so the reset happened — but say what went, because
+        # nothing downstream reports a missing targets table.
+        notes.append(f"reset discarded the configured explainability section ({discarded})")
     if api_key:
-        credentials = paths.credentials_path()
-        credentials.write_text(api_key, encoding="utf-8")
-        credentials.chmod(0o600)
+        # Merged rather than replaced: `serve` keeps its bearer token in the same
+        # file, and a whole-file write erased it (and, in the other order, this
+        # key). One helper owns the format so the two cannot diverge again.
+        credentials_store.store(**{credentials_store.API_KEY: api_key})
         notes.append("Stored API key in ~/.aisquare/credentials.")
     elif not local:
         notes.append(
             "No API key given — running local-only; re-run with --api-key to connect later."
         )
+
+    notes.extend(_explainability_step(explainability))
 
     onboarded = 0
     if onboard:
@@ -81,6 +143,46 @@ def initialize(
         onboarded=onboarded,
         notes=notes,
     )
+
+
+def _explainability_step(decision: bool | None) -> list[str]:
+    """The optional explainability step: offer it, take it, or leave no trace.
+
+    Three outcomes, and the middle one is the important one:
+
+    * ``True``  — the user opted in; configure and say what will be captured.
+    * ``None``  — not asked or not answered. Mention the step exists, if and
+      only if it could actually be accepted here, and change nothing.
+    * ``False`` — declined. Say nothing, do nothing. #50's first acceptance
+      clause is that declining leaves ZERO behavioural change, and a decline
+      that still wrote a config key or printed a nag would not be zero.
+
+    Never raises: a machine with a broken gateway config must still finish
+    ``init``.
+    """
+    if decision is False:
+        return []
+    try:
+        offer = explainability_service.shipping_offer()
+    except Exception:  # setup must not die of an optional step
+        return []
+    if decision is None:
+        if not offer.available:
+            return []
+        return [
+            "Explainability: this machine can ship "
+            f"{explainability_service.ShippingOffer.CAPTURES} to {offer.gateway_url}. "
+            "Off until you ask for it: aisquare init --explainability"
+        ]
+    if not offer.available:
+        return [f"Explainability not configured — {offer.reason}"]
+    state = explainability_service.configure_shipping()
+    if not state.configured:
+        return [f"Explainability not configured — {state.reason}"]
+    return [
+        f"Explainability on: shipping {explainability_service.ShippingOffer.CAPTURES} "
+        f"to {state.gateway_url}. Drain with: aisquare explainability ship"
+    ]
 
 
 def upgrade() -> None:

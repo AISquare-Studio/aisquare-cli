@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import brain, harness, orchestrator
+from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
@@ -154,7 +154,15 @@ def _emit(
     task_id: str | None = None,
     to_role: str | None = None,
 ) -> TeamEvent:
-    return store.add_team_event(
+    """Write one board event — and, when configured, spool it for the gateway.
+
+    Every board write funnels through here, which is why the spool call lives
+    here and not at each of the twenty call sites: an insight the board records
+    but the gateway never hears about is exactly the gap #50 exists to close.
+    It runs after the commit and cannot raise, so a full disk costs a span, not
+    a note.
+    """
+    stored = store.add_team_event(
         TeamEvent(
             id=new_event_id(),
             project_id=project_id,
@@ -166,6 +174,16 @@ def _emit(
             created_at=_now(),
         )
     )
+    insights.record_team_event(
+        event_kind=stored.kind,
+        text=stored.text,
+        event_id=stored.id,
+        session_id=stored.session_id,
+        project_id=stored.project_id,
+        task_id=stored.task_id,
+        seq=stored.seq,
+    )
+    return stored
 
 
 def _project_root(store: ContextStore, project_id: str) -> Path | None:
@@ -322,6 +340,43 @@ def board_data(
             store.team_tasks(resolved.id),
             fetched,
         )
+
+
+def board_scope_note(cwd: Path | None = None) -> str | None:
+    """Name the board a cwd-resolved read answers for, when it may not be yours.
+
+    Board reads resolve from the current directory. A session in a linked
+    worktree, or anywhere outside a repository, silently reads a DIFFERENT
+    board — and the harmful case is not the empty one. Measured while this team
+    was live: the project directory returned 200 events, a worktree 0, and
+    ``$HOME`` TWELVE. Empty invites suspicion; a populated wrong board reads as
+    a successful answer.
+
+    Silent when the caller sits in a repository whose team project matches it,
+    which is every ordinary invocation — a banner on those is how people learn
+    to ignore banners.
+
+    Never raises. This is a diagnostic about a read, and the doctrine is that an
+    observer may cost its own output and never the command.
+    """
+    start = cwd or Path.cwd()
+    try:
+        board = orchestrator.team_project(start)
+        common = workspace.git_common_root(start)
+    except OSError:  # a diagnostic must not break a read; git or the fs, not a typo
+        return None
+    name = (board.root.name if board.root else "") or board.id
+    if common is None:
+        return (
+            f"reading board {name} — {start} is not a git repository, so the board "
+            "follows your directory; pass --as <session> to read your own"
+        )
+    if board.root is not None and board.root != common:
+        return (
+            f"reading board {name}, not {common.name} — this directory resolves "
+            "elsewhere; pass --as <session> to read your own"
+        )
+    return None
 
 
 def resolve_project(cwd: Path | None = None) -> ProjectInfo:
@@ -701,6 +756,54 @@ def show_task(ref: str) -> TeamTask:
         if task is None:
             raise KeyError(ref)
         return task
+
+
+#: Which event kind puts a task into each status. The lookup below is keyed on
+#: the task's CURRENT status rather than on "does a task_blocked exist for this
+#: task", and that is the whole stale-note defence: nothing deletes an event, so
+#: a task blocked yesterday and claimed today still HAS its task_blocked. Asking
+#: what produced the status it is in now cannot go stale, and needs nothing
+#: cleared on claim — which is what the first version of this task's contract
+#: proposed and would have duplicated state that already exists.
+#:
+#: ``doing`` and ``dropped`` are deliberately absent: a claim carries no note,
+#: and nothing asked for the dropped case. An unmapped status renders nothing.
+_STATUS_EVENT_KIND = {
+    "blocked": "task_blocked",
+    "done": "task_done",
+    "todo": "task_reopened",
+}
+
+
+def stopped_because(task: TeamTask) -> str | None:
+    """The note attached to whatever put ``task`` in its current status.
+
+    A READ, not a new column. `task block --reason`, `task reopen --reason` and
+    `task done --note` all persist their note as an event whose text is
+    ``"<title> — <note>"``; none of them was readable through `task show`, so
+    one join answers for all three.
+
+    Returns ``None`` rather than an empty string when no note was given, because
+    the event text is then the title alone and a caller must be able to tell
+    "none given" from "given and empty".
+
+    FAILS OPEN. This is decoration on a read command: a store that cannot be
+    queried, or an event shaped differently by some future writer, costs the
+    note and never the exit code.
+    """
+    kind = _STATUS_EVENT_KIND.get(task.status)
+    if kind is None:
+        return None
+    try:
+        with store_session() as store:
+            events = store.filtered_events(task.project_id, kind=kind, task_id=task.id, limit=1)
+    except Exception:
+        return None
+    if not events:
+        return None
+    prefix = f"{task.title} — "
+    text = events[-1].text
+    return text[len(prefix) :] if text.startswith(prefix) else None
 
 
 def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:

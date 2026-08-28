@@ -31,12 +31,11 @@ import json
 import os
 import secrets
 import sqlite3
-import stat
 import sys
 import time
 from typing import TYPE_CHECKING, Any, cast
 
-from aisquare.core import paths
+from aisquare.core import credentials as credentials_store
 from aisquare.core.store import is_locked_error
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
@@ -342,22 +341,13 @@ def recall(query: str) -> str:
 
 def serve_token() -> str:
     """The static bearer token for HTTP serving (created on first use, 0600)."""
-    path = paths.credentials_path()
-    data: dict[str, Any] = {}
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except json.JSONDecodeError:
-            data = {}
-    token = data.get(_TOKEN_KEY)
+    # Read-merge-write through the shared helper: this file also holds the API
+    # key that `init --api-key` stores, and reading a non-JSON file as "no data"
+    # is what silently discarded it.
+    token = credentials_store.load_all().get(_TOKEN_KEY)
     if not isinstance(token, str) or not token:
-        paths.ensure_home()
         token = secrets.token_urlsafe(32)
-        data[_TOKEN_KEY] = token
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        credentials_store.store(**{_TOKEN_KEY: token})
     return token
 
 

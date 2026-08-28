@@ -3,10 +3,12 @@
 > **Status: plan, nothing implemented yet.** This is a living document: update it
 > in the same PR as the code it describes, and keep the *Decisions log* at the
 > bottom current. Branch `plan/fleet-tui`; draft PR
-> <https://github.com/AISquare-Studio/aisquare-cli/pull/71>.
+> <https://github.com/AISquare-Studio/aisquare-cli/pull/71>. The owner's decisions
+> of 2026-08-28 (§12) are folded into the text; every default named below is a
+> *default* — changeable in config, in the Settings tab and per spawn (§3.10).
 >
 > Verified against `main` @ `905c68b` (0.5.0) on 2026-08-28 with Textual 8.2.8,
-> tmux 3.7c, Claude Code 2.1.250, Codex CLI installed, Python 3.14 locally and
+> tmux 3.7c, Claude Code 2.1.250, Python 3.14 locally and
 > 3.11–3.13 in CI. Paths marked **(new)** do not exist yet.
 >
 > Every fenced block in this file is tagged `text`, `toml` or `mermaid` on
@@ -41,7 +43,7 @@ From the owner's brief. Each line is something the finished feature must do.
 7. Sub-agents appear indented under the project with a per-role icon; the
    manager keeps their names unique.
 8. Clicking an agent — or the manager — shows **the real session**: the actual
-   Claude Code / Codex TUI, `screen`-style. We started it in the background and
+   Claude Code TUI, `screen`-style. We started it in the background and
    are monitoring it; the UI surfaces it. **Not** a chat relayed through us.
 9. `+` on a project lets the user spawn their own agent.
 10. Onboarding a project, connecting agents, wiring Explainability, watching and
@@ -54,8 +56,8 @@ From the owner's brief. Each line is something the finished feature must do.
 - Replacing the agent's own UI with ours (that is Toad's project, §3.1).
 - Remote or multi-machine fleets. The cloud roadmap is unchanged.
 - Windows native (§3.9). WSL2 is the Windows story, as it already is.
-- Codex parity with Claude Code's board integration — Codex has no lifecycle
-  hooks (§8.3).
+- Codex, or any agent other than Claude Code. v1 is Claude Code only; the
+  substrate is agent-agnostic and Codex is the first candidate afterwards (§8.5).
 - Auto-merging PRs. A human merges in v1 (§3.5).
 
 ---
@@ -88,11 +90,11 @@ existing code is the manager's `Stop` hook (§7.3) and the no-args entry (§3.8)
 ```text
   asq  — one Textual process, a VIEW                       tmux server  -L asq  — the SUBSTRATE
  ┌──────────────────────────────────────────────┐          ┌────────────────────────────────────────────────┐
- │ left : Fleet ▸ projects ▸ agents ▸ Doctor    │ capture  │ session asq-aisquare-cli                        │
+ │ left : Fleet ▸ projects ▸ agents ▸ Doctor    │ capture  │ session asq-amber-otter                         │
  │ right: onboard · manager · agent · board ·   │◄─────────│  ├─ window manager    : aisquare launch manager │
  │        doctor · explainability · settings    │ send-keys│  ├─ window coder-auth : aisquare launch coder … │
- └───────────────────┬──────────────────────────┘─────────►│  └─ window runner-1   : aisquare launch runner  │
-                     │ reads (polls, like board -w)        │ session asq-explainability-sdk …                │
+ └───────────────────┬──────────────────────────┘─────────►│  └─ window tester-1   : aisquare launch tester  │
+                     │ reads (polls, like board -w)        │ session asq-quiet-lynx …                        │
                      ▼                                     └───────────────────────┬────────────────────────┘
         ~/.aisquare/context.db                                                     │ hooks, inside every agent:
         project · team_session · team_task · team_event                            │ SessionStart · UserPromptSubmit
@@ -158,12 +160,20 @@ not by a supervisor loop. The TUI polls the store the way `board -w` does.
 - It talks to sub-agents only through the board (tasks, notes, signals) and
   `fleet tell` nudges. It does not write code; the briefing says so and
   `fleet spawn` is cheap enough that it has no reason to.
-- Sub-agents are the existing roles — `coder` (implements in its own worktree
-  and opens a PR), `runner` (adversarial verification), `validator` (final
-  gate) — plus one new one, **`reviewer`** (PR review through `gh pr diff` /
-  `gh pr review`), because "review the PR" is in the brief and neither runner nor
-  validator owns it. Five roles total; each one added is a briefing to maintain,
-  so the bar for a sixth is high.
+- The fleet's roles, as the owner thinks of them, mapped onto what the repo
+  already has (decided 2026-08-28):
+
+  | Fleet role | Repo role | Job in the loop |
+  | --- | --- | --- |
+  | **manager** | new: `planner` + fleet authority | intake → contracts → spawn → steer → report. Never codes, never merges. |
+  | **coder** | `coder` (existing) | implements one task in its own worktree; opens the PR |
+  | **tester** | `runner` (existing; `tester` becomes a first-class alias) | adversarial verification: runs the full check the contract names, tries to break the change, `done` / `reopen` with evidence |
+  | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`; read-only |
+  | **validator** | `validator` (existing) | one final gate over the assembled deliverable before the manager says READY |
+
+  `planner` stays available for standalone use outside a fleet; `runner` stays
+  accepted wherever `tester` is. Five fleet roles; each one is a briefing to
+  maintain, so the bar for a sixth is high.
 
 ### 3.4 One launch seam, reused
 
@@ -178,42 +188,49 @@ correlation spine) apply unchanged. New process-start sites are confined to
 already mints the UUID the agent is started on when tracing is enabled. Fleet
 launches do it unconditionally, so a `fleet_agent` row knows its
 `team_session.id` before the agent's first hook fires — no heuristics to join a
-tmux window to a board row. (Codex has no `--session-id`; its rows have none.)
+tmux window to a board row.
 
 ### 3.5 Worktree per coder; PRs through `gh`; a human merges
 
 Parallel coders on one working tree corrupt each other. Each `coder` (and
 `reviewer`) runs in a git worktree under `<repo>/.aisquare-worktrees/<label>` —
 excluded via `.git/info/exclude`, never committed — on branch
-`fleet/<task-short-id>-<slug>`. Worktrees already resolve to the principal
+`fleet/<codename>/<task-short-id>-<slug>` (§5.7). Worktrees already resolve to the principal
 repo's board: this is the feature the repo built for exactly this situation.
 
 Default flow: coder pushes and opens a PR (`gh pr create`); runner and reviewer
-report against it; the manager reports *ready to merge*; **a human merges**.
-Auto-merge is a later, opt-in policy knob, not a v1 default. Claude Code's own
-`--worktree` (v2.1.49+) exists, but we manage worktrees ourselves so Codex agents
-and cleanup (`fleet reap`, §5.3) behave identically.
+report against it; the manager reports *ready to merge*; **a human merges**
+(decided 2026-08-28; auto-merge on green is a later, opt-in policy knob).
+Claude Code's own `--worktree` (v2.1.49+) exists, but we manage worktrees
+ourselves so a later non-Claude agent and cleanup (`fleet reap`, §5.3) behave
+identically.
 
 ### 3.6 Permission posture per role
 
 Autonomy means answering permission prompts. Claude Code 2.1.250 offers
 `--permission-mode acceptEdits | auto | bypassPermissions | manual | dontAsk | plan`
-plus `--restricted`. Defaults, configurable per role in `[fleet.roles.<role>]`:
+plus `--restricted`. **Default for every fleet role: `auto`** (decided
+2026-08-28) — Claude Code's classifier-based mode, which approves routine tool
+calls itself and still stops for the risky ones, so the loop runs unattended and
+the fleet UI is where the remaining prompts surface (🔔 on the row, bell, one
+click to answer). Per role on top of that:
 
-| Role | Default | Why |
+| Role | Default | Note |
 | --- | --- | --- |
-| manager | no flag (Claude's default prompting) | it should rarely need tools |
-| coder, runner | `acceptEdits` + a project allowlist for the project's own check commands (`make check`, `pytest`, `git`, `gh`) | edits flow; anything unusual still prompts — and the fleet UI is exactly where that prompt becomes visible (🔔 on the row, bell) and is answered with one click |
-| reviewer | `acceptEdits` + `--restricted` | read-only by construction |
-| validator | `acceptEdits` | as runner |
+| manager | `auto` | its tool use is board and fleet CLI calls |
+| coder, tester, validator | `auto` | plus a project allowlist for the project's own check commands (`make check`, `pytest`, `git`, `gh`) so they never reach the classifier |
+| reviewer | `auto` + `--restricted` | read-only by construction |
 
-`bypassPermissions` is available and never a default. `auto` (the classifier)
-is worth evaluating once the loop works; it is a knob, not a design dependency.
+Changeable per role in `[fleet.roles.<role>]`, in the Settings tab, and per
+spawn with `fleet spawn --permission-mode …`. `acceptEdits` is the fallback
+where `auto` is unavailable to the account: the spawn detects the refusal and
+says which mode it fell back to. `bypassPermissions` is available and never a
+default.
 
-### 3.7 Textual: from extra to core dependency — recommendation
+### 3.7 Textual becomes a core dependency (decided 2026-08-28)
 
 `asq` opening a UI is the headline promise; a headline that says "install the
-extra first" is a poor first minute. Recommend moving `textual` from the `[tui]`
+extra first" is a poor first minute. `textual` moves from the `[tui]`
 extra (`>=1.0`) to `dependencies`, pinned `>=8.2,<9`. The code already relies on
 8.2.x internals (`watch.py` cites `DataTable._on_click` in 8.2.8), so the pin
 is honest. Keep `[tui]` as a no-op alias for one release.
@@ -225,7 +242,7 @@ take. Import stays lazy: `import textual` only inside the UI entry, never at
 `aisquare.cli.app` import — the hook path's import cost is what
 `tests/test_import_cost_of_the_integration.py` pins by module identity and what
 `test_no_network_on_the_primary_path.py` measured at ~326 ms of CLI import per
-hook. The UI must add nothing to `aisquare hook …`. **Owner decision** (§12).
+hook. The UI must add nothing to `aisquare hook …`.
 
 ### 3.8 The no-args entry
 
@@ -249,6 +266,18 @@ on Windows (PR #65's suite runs there) and `asq` on Windows-native prints a
 one-line "the fleet needs tmux — run inside WSL2" instead of a traceback; every
 other command is untouched.
 
+### 3.10 Every default is a default
+
+Everything this plan calls a default — permission mode, model and effort per
+role, worktree-per-coder, the escape key, `max_agents_per_project`, the
+native-agent-teams switch, project names and codenames, labels — is
+user-changeable in three places under one precedence rule, the one the harness
+already uses: **per-spawn flag > environment > `[fleet]` config > built-in
+default**. The Settings tab writes config through the existing `save_config`
+path; the CLI flags exist so a manager or a script can override one spawn
+without touching anyone's config. Nothing is hardcoded that a user could
+reasonably want otherwise.
+
 ---
 
 ## 4. UI specification
@@ -258,7 +287,7 @@ other command is untouched.
 │ ▾ 🗂 aisquare-cli   3 · 🔔1 ││                                                                           │
 │    🧭 manager       ⏸       ││   (the manager's live Claude Code session, rendered from its tmux pane)   │
 │    🔨 coder-auth    ▶       ││                                                                           │
-│    🧪 runner-1      🔔      ││   > add fleet spawn --worktree; make the runner verify on py3.11 too       │
+│    🧪 tester-1      🔔      ││   > add fleet spawn --worktree; make the runner verify on py3.11 too       │
 │    👀 reviewer-1    ▶       ││   ● Planning… spawned coder-auth on tsk_01k…, runner-1 waits on review    │
 │    ＋ spawn agent            ││                                                                           │
 │ ▾ 🗂 explainability-sdk  1  ││                                                                           │
@@ -278,19 +307,22 @@ other command is untouched.
 - **Fleet** header with `+` → opens the Onboard view.
 - One `ProjectCard` per registered project (`store.list_projects()`), with
   alternating `.odd` / `.even` background. Header row: disclosure ▾/▸, name
-  (root basename), chips (agents alive · tasks open · 🔔 count). Click → Project
+  (root basename), the fleet codename as a dim badge (§5.7), chips (agents alive
+  · tasks open · 🔔 count); when two projects share a basename, the parent path
+  as a dim subtitle. Click → Project
   view. A `…` menu: Board, Doctor, Explainability, Open in tmux, Remove from
   fleet (unregisters nothing destructive — the project row stays; only the card
   hides).
 - Under it, one `AgentRow` per `fleet_agent` (manager first, then by
-  `created_at`): role icon (🧭 manager · 🔨 coder · 🧪 runner · 👀 reviewer ·
+  `created_at`): role icon (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer ·
   🛡 validator · 🤖 custom · 📡 remote — extends `watch._ROLE_EMOJI`), label,
   state chip (▶ working · ⏸ waiting · 🔔 NEEDS YOU · 💤 exited(N) · ✗ lost),
   account/model badge when several are in play (reuse `_session_lines` rules,
   including ⚠ off-ladder). Click → Agent view. Terminal bell on a transition
   into 🔔 (reuse `_ring_on_attention`).
-- `＋ spawn agent` row → Spawn dialog: role, label (prefilled unique), binary
-  (claude / codex / custom), model + effort (from the harness matrix, editable),
+- `＋ spawn agent` row → Spawn dialog: role, label (prefilled per §5.7, 🎲 for a
+  random one), binary
+  (claude, or a custom binary), model + effort (from the harness matrix, editable),
   worktree yes/no, permission mode, optional first prompt.
 - **Doctor** section at the bottom: counts for the selected project (global
   when none) and the top three ⚠/✗ lines. Click → Doctor view.
@@ -298,7 +330,7 @@ other command is untouched.
 ### 4.2 Right pane — `ContentSwitcher`
 
 - **Welcome** (no projects yet): what this is, `+` to add a project, inline
-  presence check for `tmux`, `claude`, `codex`, `gh` with install hints.
+  presence check for `tmux`, `claude`, `gh` with install hints.
 - **Onboard**: a `DirectoryTree` rooted at `~` plus a path `Input` (`~` and
   `$VAR` expanded; validation: exists, is a directory, `find_project_root`
   shows which root will be registered, "already registered" notice). Button
@@ -352,6 +384,7 @@ other command is untouched.
 | --- | --- |
 | `core/tmux.py` | The **only** tmux call site — one `subprocess.run` seam. `server()`, `version()`, `ensure_session`, `new_window`, `capture`, `send_keys`, `send_literal`, `paste`, `resize`, `pane_facts`, `list_windows`, `kill_window`. Pure functions returning dataclasses; imports nothing from Textual. Registered in `SEAMS` as EXCLUDED with `strips_identity=True` — the tmux **server** must never carry a Run identity (it outlives every agent and would hand it to all of them); each window's agent takes its own through `aisquare launch`. |
 | `core/keys.py` | Textual key → tmux key-name table, pure and unit-tested (§6). |
+| `core/codenames.py` | The adjective and animal word lists behind fleet codenames, and the deterministic picker (§5.7). |
 | `services/fleet.py` | `fleet_agent` lifecycle: `spawn`, `list_agents`, `state` (merges `team_session` with pane facts), `tell`, `stop`, `reap`, worktree create/remove, label uniqueness, `max_agents` enforcement, the wake-up nudge (§7.3). |
 | `cli/fleet.py` | The `aisquare fleet` group (§5.3). |
 | `cli/ui/` (package, lazy-imported) | `app.py` (`FleetApp`), `sidebar.py`, `terminal.py` (`TerminalPane`), `views/onboard.py`, `views/project.py`, `views/agent.py`, `views/doctor.py`, `board.py` (widgets moved out of `watch.py`; `watch.py` keeps `run_watch` and re-exports). |
@@ -364,8 +397,9 @@ other command is untouched.
 | `cli/app.py` | `no_args_is_help=False`, the no-args dispatch (§3.8), `ui` command, `fleet` group. |
 | `core/store.py` | Migration `_SCHEMA_V11` (§5.1); `ContextStore` protocol + `SqliteStore` methods for `fleet_agent`. |
 | `core/config.py` | `FleetSettings` on `AppConfig` (§5.2). Older builds keep unknown keys through `_keep_unknown`, as designed. |
-| `core/harness.py` | `manager` and `reviewer` in `ROLE_PROFILES`; `role_cycle` texts for both. |
+| `core/harness.py` | `manager`, `tester`, `reviewer` in `ROLE_PROFILES`; `role_cycle` texts (tester shares runner's). |
 | `core/ids.py` | `AGENT_PREFIX = "agt_"`. |
+| `models.py`, `services/project.py` | `ProjectInfo.codename`; `find_projects` / `project switch` also match a codename; the ambiguity error lists codenames (§5.7). |
 | `services/team.py`, `cli/hook.py` | Manager continuation in `hook_stop` (§7.3); everything else byte-identical. |
 | `services/diagnostics.py` | `_check_tmux`, `_check_gh`, `_check_fleet`. |
 | `core/spawn.py` | `SEAMS` entries for `core/tmux.py::_tmux`, the onboarding subprocesses, `fleet attach`. |
@@ -381,12 +415,10 @@ CREATE TABLE fleet_agent (
     project_id    TEXT NOT NULL,
     label         TEXT NOT NULL,              -- the manager names it; the CLI suffixes -2, -3 on collision
     role          TEXT NOT NULL,              -- manager | coder | runner | reviewer | validator | <custom>
-    binary        TEXT NOT NULL,              -- claude | codex | <path>, as resolved by harness.resolve_binary
+    binary        TEXT NOT NULL,              -- claude | <path>, as resolved by harness.resolve_binary
     tmux_socket   TEXT NOT NULL,              -- 'asq' (config)
-    tmux_session  TEXT NOT NULL,              -- asq-<slug>
-    tmux_window   TEXT NOT NULL,              -- @N
-    pane_id       TEXT NOT NULL,              -- %N (stable for the pane's life)
-    session_id    TEXT,                       -- team_session.id, minted before launch; NULL for codex
+    pane_id       TEXT NOT NULL,              -- %N, stable for the pane's life; the session name derives from the codename (§5.7)
+    session_id    TEXT,                       -- team_session.id, minted before launch; NULL for a binary without --session-id
     cwd           TEXT NOT NULL,              -- repo root, or the worktree path
     worktree      INTEGER NOT NULL DEFAULT 0,
     task_id       TEXT,
@@ -397,12 +429,16 @@ CREATE TABLE fleet_agent (
     UNIQUE (project_id, label)
 );
 CREATE INDEX fleet_agent_project ON fleet_agent (project_id, created_at);
+
+-- the fleet codename (§5.7); ALTER TABLE cannot add UNIQUE, so uniqueness is an index
+ALTER TABLE project ADD COLUMN codename TEXT;
+CREATE UNIQUE INDEX project_codename ON project (codename);
 ```
 
 **State is derived, never stored.** Precedence: a fresh `team_session` row →
 its `state`; else pane facts (`pane_dead` → exited(N), `window_activity_flag` →
-working, otherwise waiting); no pane → lost. Codex agents only ever have the
-second source, and their rows say so ("no hooks").
+working, otherwise waiting); no pane → lost. An agent binary without our hooks
+only ever has the second source, and its row says so ("no hooks").
 
 ### 5.2 Config additions
 
@@ -414,21 +450,25 @@ max_agents_per_project = 4
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches (§7.6)
 
+[fleet.roles.manager]
+permission_mode = "auto"                  # any Claude Code mode; "" = no flag
+
 [fleet.roles.coder]
-permission_mode = "acceptEdits"
+permission_mode = "auto"
 worktree = true
 
-[fleet.roles.runner]
-permission_mode = "acceptEdits"
+[fleet.roles.tester]                      # `runner` is accepted as an alias
+permission_mode = "auto"
 worktree = false                          # verifies in the coder's worktree, named by the task
 
 [fleet.roles.reviewer]
-permission_mode = "acceptEdits"
+permission_mode = "auto"
 worktree = true
 extra_args = ["--restricted"]
 
-[fleet.roles.manager]
-permission_mode = ""                      # empty = no flag
+[fleet.roles.validator]
+permission_mode = "auto"
+worktree = false
 ```
 
 Model, effort and binary per role stay in `team harness` / `team bind` /
@@ -439,11 +479,12 @@ Model, effort and binary per role stay in `team harness` / `team bind` /
 
 | Command | Does |
 | --- | --- |
-| `fleet spawn <role> [--label L] [--task ID] [--worktree/--no-worktree] [--bin B] [--prompt TEXT] [-- agent args]` | Ensures the project's tmux session, creates the window running `aisquare launch <role> …` with the role's permission flags and a minted `--session-id`, records the row, prints a receipt (`✓ spawned coder-auth (agt_…) → asq-aisquare-cli:@3`). Refuses past `max_agents_per_project` with the count in the message. |
+| `fleet spawn <role> [--label L] [--task ID] [--worktree/--no-worktree] [--permission-mode M] [--bin B] [--prompt TEXT] [-- agent args]` | Ensures the project's tmux session, creates the window running `aisquare launch <role> …` with the role's permission flags and a minted `--session-id`, records the row, prints a receipt (`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`). Refuses past `max_agents_per_project` with the count in the message. |
 | `fleet ls` / `fleet status` | Rows with derived state; `--json` is what the TUI and any automation read. |
 | `fleet tell <label> <text>` | Injects text into an agent's pane — **only** when its state is `waiting` and the pane is alive. Otherwise files a board `note --to <label>` and says which happened. |
 | `fleet stop <label> [--force]` | Sends `/exit`, waits a grace period, then kills the window; the agent's own `SessionEnd` hook releases its claims. |
-| `fleet attach [<project>]` | Execs `tmux -L asq attach -t asq-<slug>` — the full-fidelity escape hatch. An EXCLUDED seam: attaching is not an agent. |
+| `fleet attach [<project>]` | Execs `tmux -L asq attach -t asq-<codename>` — the full-fidelity escape hatch. An EXCLUDED seam: attaching is not an agent. |
+| `fleet rename <project> <codename>` | Sets the fleet codename (§5.7) and renames the tmux session to match. |
 | `fleet reap` | Marks dead panes ended, records exit codes, removes worktrees of ended agents **whose branch is merged**. Never deletes unmerged work. |
 | `fleet pause <project>` / `fleet resume <project>` | Sets a named signal the manager's cycle respects (no new spawns). |
 | `ui` | The app — what bare `asq` runs. |
@@ -452,9 +493,13 @@ Model, effort and binary per role stay in `team harness` / `team bind` /
 
 - `manager`: ladder `fable → opus → sonnet`, offset 0 (as planner), mission
   "turn a goal into a fleet that ships it". Cycle text in §7.1.
-- `reviewer`: `sonnet`, as coder and runner (the README's measured sweet spot
+- `tester`: a first-class name sharing `runner`'s profile and cycle (`sonnet`,
+  offset 0); `runner` keeps working everywhere. `watch._ROLE_EMOJI` already
+  knows `tester`.
+- `reviewer`: `sonnet`, as coder and tester (the README's measured sweet spot
   for agentic work), offset 0. Mission "review the PR as the stranger who has
   to maintain it".
+- `planner`, `coder`, `validator`: unchanged.
 
 ### 5.5 Hook changes
 
@@ -480,6 +525,86 @@ diagnose the machine it is on (the same reasoning as `sdk_doctor`).
 A small refactor is still worth doing for the *read-only* doctor:
 `diagnostics.doctor(cwd=...)` threading `cwd` into the three cwd-sensitive
 checks, so the Doctor tab can refresh in-process without a subprocess per tick.
+
+### 5.7 Names: projects, codenames, tmux sessions, labels, branches
+
+Worked out by a forked planning agent against the code and adopted as written.
+Measured first: `find_project_root` returns a **non-git directory as its own
+root** (a parent holding several repos is one project); `ensure_project` writes
+`project.name` but nothing reads it back — all ten display sites recompute
+`root.name or project.id`; tmux *creates* sessions named `a.b` or `a:b` but
+cannot *target* them, because `.` and `:` are target separators — so slug-safety
+is a targeting requirement, not a creation one.
+
+**Project display name.** `root.name` — the directory basename — for git repos
+and non-git directories alike; fallback `project.id` when the basename is empty.
+The ten existing CLI sites are not touched.
+
+**Fleet codename.** Every project that enters the fleet gets an
+`adjective-animal` codename (`amber-otter`): lowercase ASCII,
+`^[a-z]{3,7}-[a-z]{3,7}$`, from two hand-curated lists of ~96 words each in
+`core/codenames.py` (new) — ~9,200 combinations, family-friendly, with a test
+that every word matches the charset and the lists are sorted and unique.
+**Deterministic from `project.id`** (`sha256`, walking to the next pair on a
+collision) rather than random: the id is already a stable hash of the resolved
+root, so the same checkout gets the same codename on every machine and after a
+`context.db` loss — and the tmux session and branch names below derive from it.
+The user still cannot predict it, which keeps the fun. Stored in a new nullable
+`project.codename` column (migration v11, alongside `fleet_agent`; SQLite cannot
+add a UNIQUE constraint through `ALTER TABLE`, so uniqueness is a
+`CREATE UNIQUE INDEX`), returned as `ProjectInfo.codename`, and assigned lazily
+the first time a project enters the fleet — never at `init`, so a memory-only
+user never sees one. Renamable: `fleet rename <project> <codename>` (same regex,
+uniqueness enforced), the Settings tab, and click-to-rename in the sidebar; a
+rename calls tmux `rename-session`. `find_projects` gains `OR codename = ?` so
+`project switch amber-otter` works, and the ambiguity error lists codenames,
+because basenames are what collide.
+
+**Display.** Basename primary, codename as a dim badge beside it; pane titles
+read `aisquare-cli · manager`. Two projects sharing a basename additionally show
+the parent segment as a dim subtitle (`~/work/api`, `~/oss/api`). The codename is
+primary only where a stable token is needed: the tmux session, the attach hint,
+branch names, `fleet` command arguments.
+
+**tmux.** Session `asq-<codename>`, always targeted exactly (`=asq-amber-otter`)
+so `asq-ruby-fox` never prefix-matches an `asq-ruby-foxhound`. Window name =
+agent label; panes are addressed by `%id`, never by name, so window renames are
+harmless. `fleet_agent` therefore stores `project_id` + `pane_id` (+
+`tmux_socket`) and *derives* the session name from the current codename — the
+`tmux_session` / `tmux_window` columns first proposed are dropped. If tmux is
+unreachable during a rename, the row is renamed anyway and `fleet reap`
+reconciles from `list-sessions`.
+
+**Agent labels.** `manager` — always, one per project (a second is refused).
+Manager-spawned: `<role>-<purpose>` matching `^[a-z][a-z0-9-]{1,23}$` (≤ 24
+chars, no `.`, `:` or spaces), with the manager briefed to make the purpose
+descriptive (`coder-auth`, `tester-py311`, not `coder-2`). Unique per project
+among **live** agents; an ended agent frees its label. Collision → append `-2`,
+`-3` and print the label actually used (`✓ spawned coder-auth-2 (asked:
+coder-auth)`) rather than fail — a manager mid-plan must not stall on a name.
+`--label` omitted → `<role>-<task short id>` with `--task`, else `<role>-<n>`.
+User-spawned agents get the same role-based default prefilled, plus a 🎲 button
+offering `<role>-<adjective>-<animal>` from the same lists (still matches the
+regex).
+
+**Branches and worktrees.** Branch `fleet/<codename>/<task-short-id>-<slug>`
+(`fleet/amber-otter/01k9q8p3-wire-auth`; checked with
+`git check-ref-format --branch`): the codename segment groups one fleet's
+branches and disambiguates two machines pushing to one remote; the short id is
+`team_service.short_id`'s length, imported rather than hardcoded; the slug is the
+title lowercased, `[^a-z0-9]+` → `-`, ≤ 32 chars, trailing `-` stripped. Worktree
+directory `<repo>/.aisquare-worktrees/<label>`. A user spawn without a task uses
+`fleet/<codename>/<label>`. **A non-git project cannot have worktrees**:
+`fleet spawn coder --worktree` there refuses with "not a git repository — spawn
+without --worktree or pick a repo inside it", and the Spawn dialog greys the
+option out.
+
+**Worked examples.** `~/Code/AISquare/ws2/aisquare-cli` → `aisquare-cli`,
+codename `amber-otter`, session `asq-amber-otter`, branches
+`fleet/amber-otter/…`. `~/Code/AISquare` (a non-git parent of several repos) →
+`AISquare`, `quiet-lynx`, `asq-quiet-lynx`, no worktrees. `~/work/api` and
+`~/oss/api` → `api · amber-otter` (subtitle `~/work/api`) and `api · ruby-fox`
+(subtitle `~/oss/api`).
 
 ---
 
@@ -564,11 +689,11 @@ Intake the goal (ask until the acceptance criteria are executable) → write
 contract tasks (`task add … --role coder --detail <objective · why · known ·
 acceptance · boundaries>`, `--needs` for ordering) → `fleet spawn coder --label
 <name> --task <id>` per parallelisable task, within `max_agents_per_project` →
-`fleet spawn runner` once work reaches review → `fleet spawn reviewer` once a PR
+`fleet spawn tester` once work reaches review → `fleet spawn reviewer` once a PR
 exists → read results as they arrive (the per-prompt delta already does this)
-→ reopen with reasons, re-spec or split → when every task is done and the
-validator's gate is PASS → `note "READY: <PRs + evidence>" --kind result` and
-stop. **Never write code. Never merge.** Ask the human with a `question` note
+→ reopen with reasons, re-spec or split → `fleet spawn validator` once every
+task is done → when its gate is PASS → `note "READY: <PRs + evidence>" --kind
+result` and stop. **Never write code. Never merge.** Ask the human with a `question` note
 when blocked twice on one task (it surfaces as 🔔 on the project). Keep labels
 unique and descriptive (`coder-auth`, not `coder-2`).
 
@@ -581,7 +706,7 @@ sequenceDiagram
     participant B as context.db (board)
     participant F as fleet CLI
     participant C as coder-auth (claude, worktree)
-    participant R as runner-1
+    participant R as tester-1
     U->>M: goal in prose
     M->>B: task add x N (contracts, --needs)
     M->>F: fleet spawn coder --task tsk_1 / tsk_2
@@ -589,8 +714,8 @@ sequenceDiagram
     C->>B: task next --claim … work … task review --note evidence
     C-->>M: nudge via send-keys (only if M is waiting)  §7.3
     M->>B: reads delta on its next turn
-    M->>F: fleet spawn runner
-    F->>R: tmux new-window: aisquare launch runner …
+    M->>F: fleet spawn tester
+    F->>R: tmux new-window: aisquare launch tester …
     R->>B: task done (evidence) | task reopen --reason
     R-->>M: nudge
     M->>M: Stop hook sees new events → continues; else waits
@@ -656,13 +781,23 @@ continuation cap.
 
 ### 7.6 Coexistence with Claude Code's native agent teams
 
-With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the user's environment, a
-manager might spawn *native* teammates instead of using `fleet spawn`, and those
-would not appear in the sidebar. The manager's briefing says to use
-`fleet spawn`, and by default the fleet exports
+Claude Code has its own experimental feature called **agent teams**
+(`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`): a Claude session can spawn *teammate*
+Claude sessions — in-process, or as tmux split panes — that coordinate through
+Claude's own task list and mailboxes under `~/.claude/teams/`. It is Claude-only,
+experimental, one team per session, and the lead is Claude's, not ours.
+
+The question was whether our fleet should switch that feature **off** for the
+agents it launches. Decided yes (2026-08-28): if it were on, a manager asked to
+"spawn a coder" might use Claude's native mechanism instead of `fleet spawn`,
+and those teammates would run outside our tmux server — invisible to the
+sidebar, the board and the wake-up rules. So by default the fleet exports
 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0` into its launches
-(`disable_native_agent_teams`, §5.2), so the two mechanisms never compete.
-Cross-session messaging (native) is untouched.
+(`disable_native_agent_teams`, §5.2) and the manager's briefing names
+`fleet spawn` as the one way to get help. This affects only sessions the fleet
+starts — a user's own `claude` sessions keep whatever they had — and it is
+configurable like every other default. Cross-session messaging (native) is
+untouched.
 
 ---
 
@@ -691,21 +826,28 @@ Cross-session messaging (native) is untouched.
 | `gh` | PR flow (coder, reviewer) | any current | new warn-level check |
 | `node` / `npx` / `repomix` | snapshots | existing | existing |
 | `claude` | agents | 2.1.x (`--name`, `--session-id`, `--permission-mode`, `--restricted`, `--effort`, Stop-hook block) | existing check; add the version to its detail |
-| `codex` | optional agents | current | detection only |
 
 ### 8.3 Agent capabilities relied on
 
 Claude Code: the five hooks (already installed by `agents connect`),
 `--session-id`, `--name`, `--permission-mode`, `--restricted`, `--effort`,
 `--model`, the Stop-hook block decision, bracketed paste, extended keys.
-Codex: surfacing only in v1 — no lifecycle hooks, so no board state and no
-nudges (`codex exec` / `codex queue` exist for a headless lane later).
+v1 is Claude Code only (decided 2026-08-28); see §8.5.
 
 ### 8.4 Python and CI
 
 CI stays 3.11–3.13. The local 3.14 venv installs and runs the suite today. CI
 gains `apt-get install tmux` so the real-tmux integration tests run there (they
 skip when tmux is absent).
+
+### 8.5 Later: other agents, Codex first
+
+The substrate is agent-agnostic — a fleet window runs whatever binary the role
+is bound to — so *surfacing* a Codex session needs nothing new. What Codex lacks
+is our lifecycle hooks, so it would have no board state and no wake-ups until an
+equivalent exists (`codex exec` / `codex queue` are its headless entry points).
+Out of scope for v1 (decided 2026-08-28); nothing in the schema blocks it
+(`fleet_agent.binary`, nullable `session_id`).
 
 ---
 
@@ -718,7 +860,7 @@ skip when tmux is absent).
 | **2 — Onboarding** | Onboard view (DirectoryTree + Input + validation) → background `init` + `doctor` subprocesses → card appears; Doctor view with fix buttons | M | worker tested with a fake runner; seams registered; the UI process never `chdir`s |
 | **3 — Fleet core** | migration v11; `services/fleet.py`; `fleet spawn/ls/status/stop/tell/attach/reap/pause/resume`; private server + bundled conf; worktrees; labels; limits; doctor checks | L | fake tmux backend for units; real-tmux tests marked; JSON sweep; no-traceback sweep |
 | **4 — Surfacing** | agent rows (icons, chips, bell); Agent view = `TerminalPane`; F12 / click focus; paste; scrollback; selection; resize; open-in-tmux; stop / restart | L | key table tests; paste path; scroll offsets; focus rules with Pilot |
-| **5 — Manager** | roles `manager` + `reviewer`; Stop-hook continuation; nudges from board writes; Manager tab; `fleet pause`; guardrails | L | `hook stop` silent for non-managers; block only on new events; `stop_hook_active` honoured; nudge gating; an end-to-end run with a fake agent script standing in for `claude` |
+| **5 — Manager** | roles `manager`, `tester` (alias of runner), `reviewer`; Stop-hook continuation; nudges from board writes; Manager tab; `fleet pause`; guardrails | L | `hook stop` silent for non-managers; block only on new events; `stop_hook_active` honoured; nudge gating; an end-to-end run with a fake agent script standing in for `claude` |
 | **6 — Tabs** | Board tab (widgets lifted from `watch.py`, `board -w` kept); Explainability tab; Settings tab | M | existing `test_watch` still passes through the re-export |
 | **7 — Polish & docs** | spawn dialog, menus, empty states; `docs/fleet.md` (+ `DOCUMENTED`); README section + tree; CHANGELOG; SVG screenshots | M | doc guards green; README tree flags valid |
 
@@ -767,24 +909,31 @@ driven headless with `App.run_test()` / `Pilot`, as `test_watch.py` already does
 | Parallel coders conflict | high without worktrees | correctness | worktree per coder by default; PR per task |
 | Autonomy vs permissions | high | friction or risk | `acceptEdits` + allowlist; 🔔 surfaced; bypass never a default |
 | Textual major bump breaks internals we lean on | medium | maintenance | pin `<9`; Dependabot; Pilot tests |
-| Codex agents show no state | certain | UX | derive from tmux activity; label "no hooks" |
+| `auto` permission mode unavailable to an account, or the classifier blocks a routine command | medium | friction | spawn detects the refusal and falls back to `acceptEdits`, saying so; project allowlist for its own check commands |
 | Scope creep into "a whole IDE" | high | delivery | phases with exit criteria; v1 = surface + onboard + manager loop |
 | Dual identity if a fleet launch inherits a traced parent's env | low | data | `disown_inherited_trace` already runs in `launch`; the tmux server env is stripped by the seam ruling |
 
 ---
 
-## 12. Decisions needed from the owner
+## 12. Decisions from the owner (2026-08-28)
 
-1. **textual as a core dependency** (recommended) — or keep the extra and have
-   bare `asq` print an install hint?
-2. **Default permission mode for autonomous coders**: `acceptEdits` + allowlist
-   (recommended) · `auto` · `bypassPermissions`.
-3. **Merge policy**: a human merges (recommended for v1) · auto-merge on green.
-4. **Names**: the `fleet` group and bare `asq` opening the UI — confirm.
-   `board -w` stays.
-5. **`reviewer` as a fifth role** — or fold PR review into `validator`?
-6. **Native agent teams off** in fleet launches by default — confirm.
-7. **Codex depth in v1**: surfacing only — confirm.
+1. **textual is a core dependency** — yes (§3.7).
+2. **Permission mode** — `auto` for every fleet role by default (§3.6);
+   changeable per role and per spawn.
+3. **Merge policy** — a human merges; auto-merge on green is a later opt-in (§3.5).
+4. **Names** — fleets are per project. Project display name, fleet codename,
+   tmux and label rules are in §5.7 (worked out by a forked planning agent and
+   adopted as written).
+5. **Roles** — manager, coder, tester, reviewer, validator (§3.3). The owner's
+   manager/planner/coder/tester map onto the repo's planner/coder/runner, with
+   `tester` as the fleet's name for `runner`, `reviewer` new, and `validator`
+   kept as the one final gate.
+6. **Native agent teams off** in fleet launches — yes; what the question meant
+   is explained in §7.6.
+7. **Codex** — later; v1 is Claude Code only (§8.5).
+
+All of the above are defaults (§3.10). Nothing is blocking; the §6 fidelity
+matrix is filled in Phase 0.
 
 ---
 
@@ -813,3 +962,4 @@ driven headless with `App.run_test()` / `Pilot`, as `test_watch.py` already does
 | Date | Decision / change | By |
 | --- | --- | --- |
 | 2026-08-28 | First version of the plan. Approach D (tmux substrate) proposed; §12 open. Draft PR #71; suite on the branch: 1767 passed, 1 skipped. | PR #71 |
+| 2026-08-28 | Owner decisions folded in: textual core; `auto` permissions; human merges; roles manager / coder / tester / reviewer / validator; native agent teams off in fleet launches; Codex deferred; every default configurable (§3.10). Naming scheme in §5.7 from a forked planning agent. | owner + PR #71 |

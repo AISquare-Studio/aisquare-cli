@@ -7,6 +7,11 @@ scripts and the manager's own ``fleet spawn`` calls read one shape.
 
 ``ui`` is what bare ``asq`` runs at a terminal (docs/plans/fleet-tui.md §3.8);
 it refuses without a TTY rather than starting a full-screen app into a pipe.
+
+Flags are what the docs are written from, so they are uniform on purpose: every
+command takes the project as ``--project/-P`` (codename, name or id prefix;
+default the active one) rather than a positional, and ``--as SESSION`` names the
+acting session wherever the service records who asked.
 """
 
 from __future__ import annotations
@@ -54,7 +59,13 @@ _STATE_CHIP = {
 
 
 def _fail_fleet(exc: Exception) -> NoReturn:
-    """The service's reason, on stderr for a human and as ``detail`` under ``--json``."""
+    """The service's reason, on stderr for a human and as ``detail`` under ``--json``.
+
+    Four codes, most specific first — every subclass is also a ``FleetError``,
+    so the order here IS the mapping: ``fleet_unavailable`` (no usable tmux),
+    ``not_found`` (the project reference), ``no_such_agent`` (the label), and
+    ``fleet_error`` for everything else the service refused with a reason.
+    """
     if isinstance(exc, fleet_service.FleetUnavailable):
         fail(str(exc), error="fleet_unavailable", detail=str(exc))
     if isinstance(exc, fleet_service.NoSuchProject):
@@ -71,10 +82,15 @@ def _project(ref: str | None) -> ProjectInfo:
         _fail_fleet(exc)
 
 
+def _display_name(project: ProjectInfo) -> str:
+    """Basename primary, ``project.id`` when the basename is empty (§5.7)."""
+    return project.root.name or project.id
+
+
 def _project_json(project: ProjectInfo) -> dict[str, object]:
     return {
         "project": project.model_dump(mode="json"),
-        "name": project.root.name or project.id,
+        "name": _display_name(project),
         "codename": project.codename,
         "tmux_session": fleet_service.session_name(project.codename) if project.codename else None,
     }
@@ -97,7 +113,7 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
         typer.echo(json.dumps(payload))
         return
     console = stdout_console()
-    title = project.root.name or project.id
+    title = _display_name(project)
     if project.codename:
         title = f"{title} · {project.codename} · {fleet_service.session_name(project.codename)}"
     console.print(title)
@@ -149,7 +165,9 @@ def spawn(
 ) -> None:
     """Start an agent in the project's fleet (a tmux window running `aisquare launch`).
 
-    Arguments after the options are passed to the agent, as with `aisquare launch`.
+    Arguments after the options are passed to the agent, as with `aisquare launch`
+    — which is also why `--json` must come BEFORE `spawn`: after the role it
+    belongs to the agent.
     """
     target = _project(project)
     try:
@@ -179,17 +197,20 @@ def spawn(
             )
         )
         return
+    # The label the fleet ACTUALLY used comes first; the one that was asked for
+    # is shown only when they differ (§5.7: a collision suffixes, never fails).
     asked = (
         f" (asked: {receipt.asked_label})"
         if receipt.asked_label and receipt.asked_label != receipt.agent.label
         else ""
     )
-    stdout_console().print(
+    console = stdout_console()
+    console.print(
         f"✓ spawned {receipt.agent.label}{asked} ({receipt.agent.id}) → "
         f"{receipt.tmux_session} {receipt.agent.pane_id}"
     )
     for note in receipt.notes:
-        stdout_console().print(f"  ⚠ {note}")
+        console.print(f"  ⚠ {note}")
 
 
 @app.command("ls")
@@ -233,7 +254,7 @@ def tell(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(json.dumps({"delivered": result.delivered, "how": result.how}))
+        typer.echo(json.dumps({"label": label, "delivered": result.delivered, "how": result.how}))
         return
     mark = "✓" if result.delivered else "→"
     stdout_console().print(f"{mark} {label}: {result.how}")
@@ -273,7 +294,14 @@ def attach(project: ProjectRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"argv": argv}))
         return
-    _exec_attach(argv)
+    try:
+        _exec_attach(argv)
+    except OSError as exc:  # tmux vanished between the service's check and the exec
+        fail(
+            f"could not run {argv[0]}: {exc} — is tmux installed and on PATH?",
+            error="fleet_unavailable",
+            detail=str(exc),
+        )
 
 
 @app.command("reap")
@@ -300,10 +328,19 @@ def reap(
             )
         )
         return
-    stdout_console().print(
+    console = stdout_console()
+    console.print(
         f"✓ reaped: {len(report.ended)} ended, {len(report.lost)} lost, "
         f"{len(report.worktrees_removed)} worktrees removed"
     )
+    # Counts alone do not tell a human WHICH agent went — name them.
+    for agent in report.ended:
+        code = f" (exit {agent.exit_status})" if agent.exit_status is not None else ""
+        console.print(f"  💤 {agent.label}{code}")
+    for agent in report.lost:
+        console.print(f"  ✗ {agent.label}  pane {agent.pane_id} gone")
+    for path in report.worktrees_removed:
+        console.print(f"  🗑 {path}")
 
 
 @app.command("rename")
@@ -321,7 +358,7 @@ def rename(
         typer.echo(json.dumps(_project_json(updated)))
         return
     stdout_console().print(
-        f"✓ {updated.root.name or updated.id} is now {updated.codename} "
+        f"✓ {_display_name(updated)} is now {updated.codename} "
         f"({fleet_service.session_name(updated.codename or '')})"
     )
 
@@ -337,7 +374,7 @@ def pause(project: ProjectRef = None, as_session: SessionRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"paused": True, **_project_json(target)}))
         return
-    stdout_console().print(f"⏸ fleet paused for {target.root.name or target.id}")
+    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}")
 
 
 @app.command("resume")
@@ -351,26 +388,52 @@ def resume(project: ProjectRef = None, as_session: SessionRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"paused": False, **_project_json(target)}))
         return
-    stdout_console().print(f"▶ fleet resumed for {target.root.name or target.id}")
+    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}")
+
+
+def not_interactive_reason() -> str | None:
+    """Why a full-screen UI cannot run here, or ``None`` when it can.
+
+    The three conditions of docs/plans/fleet-tui.md §3.8, each named so the
+    refusal says which one it was — "not a TTY" is a poor answer to someone
+    whose only problem is ``TERM=dumb``.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return "stdin is not a TTY"
+        if not sys.stdout.isatty():
+            return "stdout is not a TTY"
+    except (AttributeError, ValueError):  # a detached or closed stream
+        return "stdin or stdout is closed"
+    term = os.environ.get("TERM", "")
+    if term == "":
+        return "TERM is not set"
+    if term == "dumb":
+        return "TERM=dumb"
+    return None
 
 
 def interactive_terminal() -> bool:
     """Whether a full-screen UI can run here: a TTY on both ends and a real TERM."""
-    try:
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            return False
-    except (AttributeError, ValueError):
-        return False
-    return os.environ.get("TERM", "") not in ("", "dumb")
+    return not_interactive_reason() is None
 
 
 def ui() -> None:
     """Open the fleet UI — every project, agent and session in one view."""
-    if get_state().json_output or not interactive_terminal():
+    if get_state().json_output:
         fail(
-            "the fleet UI needs an interactive terminal (a TTY on stdin and stdout, and "
-            "TERM set) — run `aisquare` in a terminal, or use `aisquare fleet ls --json`",
+            "the fleet UI has no --json form — for machine-readable fleet state use "
+            "`aisquare fleet ls --json`",
             error="not_a_tty",
+            detail="--json was given; a full-screen app has no machine-readable output",
+        )
+    if not interactive_terminal():
+        reason = not_interactive_reason() or "not an interactive terminal"
+        fail(
+            f"the fleet UI needs an interactive terminal ({reason}) — run `aisquare` "
+            "in a terminal, or use `aisquare fleet ls --json`",
+            error="not_a_tty",
+            detail=reason,
         )
     from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 

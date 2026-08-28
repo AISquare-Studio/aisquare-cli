@@ -26,30 +26,35 @@ WORD = re.compile(r"^[a-z]{3,7}$")
 
 # fmt: off
 ADJECTIVES: tuple[str, ...] = (
-    "amber", "azure", "bold", "brave", "bright", "brisk", "calm", "cedar",
-    "civic", "clear", "clever", "coral", "cosmic", "crisp", "dapper", "deft",
-    "dusky", "eager", "early", "ember", "fair", "frosty", "gentle", "gilded",
-    "golden", "grand", "happy", "hardy", "hazel", "humble", "indigo", "ivory",
-    "jade", "jolly", "keen", "kind", "lively", "lucky", "lunar", "maple",
-    "mellow", "merry", "misty", "nimble", "noble", "olive", "opal", "pearl",
-    "plucky", "polar", "proud", "quick", "quiet", "rapid", "ready", "rosy",
-    "ruby", "rustic", "sable", "sandy", "scarlet", "sharp", "silver", "sleek",
-    "snowy", "solar", "spry", "steady", "stellar", "sturdy", "sunny", "swift",
-    "tidy", "topaz", "trusty", "velvet", "vivid", "warm", "wild", "witty",
-    "zesty",
+    "agile", "amber", "ardent", "azure", "balmy", "bold", "brave", "breezy", "bright", "brisk",
+    "calm", "candid", "cedar", "cheery", "civic", "clear", "clever", "coral", "cosmic", "crisp",
+    "dapper", "deft", "dusky", "eager", "early", "earnest", "ember", "fair", "frosty", "gentle",
+    "gilded", "golden", "grand", "happy", "hardy", "hazel", "hearty", "humble", "indigo",
+    "ivory", "jade", "jaunty", "jolly", "keen", "kind", "lively", "loyal", "lucid", "lucky",
+    "lunar", "maple", "mellow", "merry", "mighty", "misty", "modest", "nimble", "noble",
+    "olive", "opal", "pearl", "plucky", "polar", "proud", "quick", "quiet", "rapid", "ready",
+    "regal", "rosy", "ruby", "rustic", "sable", "sandy", "scarlet", "sharp", "silver", "sleek",
+    "snowy", "solar", "spry", "steady", "stellar", "sturdy", "sunny", "sweet", "swift", "tidy",
+    "topaz", "trusty", "velvet", "vivid", "warm", "wild", "witty", "zesty",
 )
+"""Ninety-six adjectives: colours, temperaments and textures that read well beside
+an animal. Sorted, unique, three to seven lowercase letters — ``tests/test_codenames.py``
+pins all three so a careless edit cannot slip in a proper noun or a duplicate."""
 
 ANIMALS: tuple[str, ...] = (
-    "badger", "beaver", "bison", "bobcat", "condor", "crane", "dolphin", "eagle",
-    "egret", "falcon", "ferret", "finch", "fox", "gecko", "gibbon", "hare",
-    "hawk", "heron", "ibis", "iguana", "jackal", "jaguar", "kestrel", "kiwi",
-    "koala", "lemur", "leopard", "lion", "llama", "lynx", "macaw", "magpie",
-    "marmot", "marten", "meerkat", "moose", "narwhal", "newt", "ocelot", "octopus",
-    "oriole", "osprey", "otter", "owl", "panda", "parrot", "pelican", "penguin",
-    "pika", "puffin", "quokka", "rabbit", "raven", "robin", "salmon", "seal",
-    "sparrow", "stoat", "swan", "tapir", "tiger", "toucan", "turtle", "walrus",
-    "wombat", "wren", "yak", "zebra",
+    "alpaca", "badger", "beaver", "bison", "bobcat", "camel", "cheetah", "civet", "condor",
+    "coyote", "crane", "dingo", "dolphin", "donkey", "dove", "eagle", "egret", "elk", "emu",
+    "falcon", "ferret", "finch", "fox", "gannet", "gazelle", "gecko", "gibbon", "giraffe",
+    "goose", "grouse", "hare", "hawk", "heron", "hoopoe", "ibex", "ibis", "iguana", "impala",
+    "jackal", "jaguar", "kestrel", "kiwi", "koala", "lark", "lemur", "leopard", "lion",
+    "lizard", "llama", "lynx", "macaw", "magpie", "manatee", "marmot", "marten", "meerkat",
+    "mole", "moose", "narwhal", "newt", "ocelot", "octopus", "oriole", "osprey", "otter", "owl",
+    "panda", "parrot", "pelican", "penguin", "pika", "plover", "puffin", "puma", "quail",
+    "quokka", "rabbit", "raven", "robin", "salmon", "seal", "serval", "sparrow", "stoat",
+    "swan", "tapir", "tiger", "toucan", "turtle", "vole", "walrus", "weasel", "wombat", "wren",
+    "yak", "zebra",
 )
+"""Ninety-six animals under the same rules. 96 by 96 gives 9,216 codenames."""
 # fmt: on
 
 

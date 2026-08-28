@@ -60,6 +60,9 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
     onboarding (``init``, ``doctor``); no model process; not stripped, for the
     same reason ``sdk_doctor`` is not.
   * ``cli/fleet.py::_exec_attach`` — ``tmux attach``, a terminal client.
+  * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
+    branch queries behind ``fleet reap`` (§3.5); no model, not stripped, like
+    the other git seams.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -169,6 +172,12 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "`tmux attach` — a terminal client on the fleet server, not an agent; "
         "the agents inside already have their identities",
+    ),
+    "aisquare/services/fleet.py::_git": Seam(
+        EXCLUDED,
+        "`git worktree add/remove/list` and `git branch --merged` for the fleet's "
+        "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; not "
+        "stripped, like the other git seams",
     ),
 }
 

@@ -1,7 +1,8 @@
 """``FleetApp`` — the two-pane shell, and ``run_ui`` which bare ``asq`` calls.
 
 docs/plans/fleet-tui.md §4, §4.2, §4.3, §3.8. Left: the ``Sidebar``. Right: a
-``ContentSwitcher`` over the views — Welcome, Onboard and Doctor from the start,
+``ContentSwitcher`` over the views — Welcome and Doctor from the start, Onboard on
+the first ``+``,
 one ``ProjectView`` / ``AgentView`` per selection, created the first time it is
 asked for and kept (a view hosts a live terminal pane; re-creating it on every
 click would restart that pane's render loop).
@@ -174,7 +175,9 @@ class FleetApp(App[None], inherit_bindings=False):
             yield Sidebar(id="sidebar")
             with ContentSwitcher(id="content", initial="welcome"):
                 yield WelcomeView(escape_key=self.escape_key, id="welcome")
-                yield OnboardView(id="onboard")
+                # The Onboard view is built on the first `+` (on_add_project): its
+                # DirectoryTree scans the home directory and keeps a loader worker
+                # alive for its whole life — not a cost to pay at every start-up.
                 yield DoctorView(id="doctor")
         yield Footer()
 
@@ -278,17 +281,15 @@ class FleetApp(App[None], inherit_bindings=False):
         for agent_view in self.query(AgentView):
             fresh = snapshot.agent(agent_view.status.agent.project_id, agent_view.status.agent.id)
             if fresh is not None and fresh != agent_view.status:
-                agent_view.status = fresh
-                show = getattr(agent_view, "show", None)
-                if callable(show):
-                    show(fresh)
+                agent_view.refresh_status(fresh)
         for project_view in self.query(ProjectView):
             fresh_project = snapshot.project(project_view.project.id)
             if fresh_project is not None and fresh_project != project_view.project:
+                # A new codename or root: the view re-reads what depends on it.
                 project_view.project = fresh_project
-                show = getattr(project_view, "show", None)
-                if callable(show):
-                    show(fresh_project)
+            # ProjectView.show() is the MANAGER status renderer; the snapshot
+            # goes through refresh_status, which picks the manager out of it.
+            project_view.refresh_status(snapshot.agents.get(project_view.project.id, []))
 
     # --- doctor -------------------------------------------------------------------------
 
@@ -296,8 +297,21 @@ class FleetApp(App[None], inherit_bindings=False):
         """Run the checks off the UI thread; ``on_worker_state_changed`` paints them."""
         if self._doctor is None:
             return
+        runner: Callable[[], list[DoctorCheck]] = self._doctor
+        snapshot = self.snapshot
+        project = (
+            snapshot.project(self.doctor_scope)
+            if snapshot is not None and self.doctor_scope
+            else None
+        )
+        if project is not None and self._doctor is diagnostics.doctor:
+            # Per-project checks: the real doctor takes the project's root as
+            # cwd (services.diagnostics.doctor(cwd=...)); an injected fake keeps
+            # its own signature and stays global.
+            root = project.root
+            runner = lambda: diagnostics.doctor(cwd=root)  # noqa: E731 — a worker target
         self.run_worker(
-            self._doctor,
+            runner,
             name=_DOCTOR_WORKER,
             group=_DOCTOR_WORKER,
             exclusive=True,
@@ -365,7 +379,7 @@ class FleetApp(App[None], inherit_bindings=False):
             switcher.current = view_id
 
     async def on_add_project(self, event: AddProject) -> None:
-        await self._show("onboard")
+        await self._show("onboard", lambda: OnboardView(id="onboard"))
         self.sidebar.select(None)
 
     async def on_project_selected(self, event: ProjectSelected) -> None:

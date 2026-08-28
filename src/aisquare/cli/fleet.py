@@ -294,6 +294,15 @@ def attach(project: ProjectRef = None) -> None:
     if get_state().json_output:
         typer.echo(json.dumps({"argv": argv}))
         return
+    if not interactive_terminal():
+        # `tmux attach` cannot work without a terminal anyway — and refusing
+        # here keeps the exec unreachable from every non-TTY harness (a test
+        # sweep that reached it replaced the pytest process mid-run).
+        fail(
+            "fleet attach needs an interactive terminal — run it in a terminal, or use "
+            "`aisquare fleet attach --json` to see the command",
+            error="not_a_tty",
+        )
     try:
         _exec_attach(argv)
     except OSError as exc:  # tmux vanished between the service's check and the exec

@@ -668,11 +668,17 @@ def test_register_prints_each_identity_with_its_publication_id(
     # Run the board cannot attribute. Registering is idempotent, so adding it
     # costs nothing and its absence costs the spans permanently (409
     # no_agent_identity is not retryable).
+    # The fleet roles (manager, tester, reviewer, validator) joined the default
+    # roster so every identity a fleet session can emit is registered too.
     assert posted["body"] == {
         "agents": [
             "aisquare-planner",
             "aisquare-coder",
             "aisquare-runner",
+            "aisquare-manager",
+            "aisquare-tester",
+            "aisquare-reviewer",
+            "aisquare-validator",
             "aisquare-cli",
         ]
     }
@@ -791,6 +797,10 @@ def test_register_renders_the_same_verdict_in_both_forms(
         "aisquare-planner": "101",
         "aisquare-coder": "102",
         "aisquare-runner": None,
+        "aisquare-manager": None,
+        "aisquare-tester": None,
+        "aisquare-reviewer": None,
+        "aisquare-validator": None,
         "aisquare-cli": None,
     }, payload
 

@@ -29,8 +29,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   teams off in fleet launches — overridable per spawn, in the environment or
   in config. Scripts, pipes and `--json` callers of bare `aisquare` still get
   usage and exit 2. User guide: `docs/fleet.md`; the plan and its decisions
-  log: `docs/plans/fleet-tui.md`. Delivered in phases (plan §9): the lifecycle
-  behind `fleet spawn` and friends is Phase 3 and says so until it lands.
+  log: `docs/plans/fleet-tui.md`. Delivered in phases (plan §9); the plan's
+  Decisions log records what has landed.
 
 ## [0.5.0] - 2026-08-27
 

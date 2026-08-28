@@ -58,6 +58,7 @@ def run(
         argv,
         cwd=str(cwd) if cwd is not None else None,
         env=dict(env) if env is not None else dict(os.environ),
+        stdin=subprocess.DEVNULL,  # the child must never wait on the TUI's terminal
         capture_output=True,
         text=True,
         encoding="utf-8",

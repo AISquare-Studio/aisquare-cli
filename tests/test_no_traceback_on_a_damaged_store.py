@@ -67,6 +67,7 @@ UNINVOKED = {
     "serve": "binds a port and blocks",
     "launch": "spawns a real agent process",
     "team spawn": "spawns a real agent process",
+    "fleet attach": "replaces the process with `tmux attach` (os.execvp)",
     "login": "waits on interactive input",
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",

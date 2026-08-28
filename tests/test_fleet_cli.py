@@ -665,6 +665,7 @@ def test_attach_execs_the_argv_the_service_hands_back(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, exec_spy: list[list[str]]
 ) -> None:
     attach_argv = _install(monkeypatch, "attach_argv", list(ATTACH_ARGV))
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)  # a real terminal
 
     result = runner.invoke(app, ["fleet", "attach", "-P", "amber-otter"])
 
@@ -672,6 +673,25 @@ def test_attach_execs_the_argv_the_service_hands_back(
     assert exec_spy == [ATTACH_ARGV]
     assert attach_argv.args == (PROJECT,)
     assert resolved.args == ("amber-otter",)
+
+
+def test_attach_without_a_terminal_refuses_before_the_exec(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch, exec_spy: list[list[str]]
+) -> None:
+    """`tmux attach` cannot work without a terminal — and the refusal is what keeps
+    the exec unreachable from every non-TTY harness (a test sweep once reached it
+    and replaced the pytest process). CliRunner IS the non-TTY case."""
+    _install(monkeypatch, "attach_argv", list(ATTACH_ARGV))
+
+    human = runner.invoke(app, ["fleet", "attach"])
+    assert human.exit_code == 1, human.output
+    assert "interactive terminal" in _plain(human.stderr)
+    assert exec_spy == []
+
+    machine = runner.invoke(app, ["--json", "fleet", "attach"])
+    assert machine.exit_code == 0  # --json reports the argv instead; never a refusal
+    assert json.loads(machine.stdout) == {"argv": ATTACH_ARGV}
+    assert exec_spy == []
 
 
 def test_attach_under_json_prints_the_argv_and_does_not_exec(
@@ -712,6 +732,7 @@ def test_attach_whose_exec_fails_is_legible_not_a_traceback(
         raise FileNotFoundError(2, "No such file or directory", argv[0])
 
     monkeypatch.setattr(fleet_cli, "_exec_attach", broken)
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)  # a real terminal
 
     human = runner.invoke(app, ["fleet", "attach"])
     assert human.exit_code == 1, human.output

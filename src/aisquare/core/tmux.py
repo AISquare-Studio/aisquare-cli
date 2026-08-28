@@ -625,8 +625,15 @@ class TmuxServer:
             self.run("send-keys", "-t", pane_id, *keys)
 
     def send_literal(self, pane_id: str, text: str) -> None:
-        """Literal text, exactly as typed (``-l``), even when it starts with ``-``."""
+        """Literal text, exactly as typed (``-l``), even when it starts with ``-``.
+
+        A TRAILING ``;`` is tmux's command separator even after ``-l`` — measured
+        on 3.7c: ``send-keys -l -- ';'`` sends nothing and ``'a;'`` sends ``a``,
+        while ``'a\\;'`` arrives as ``a;``. So the last ``;`` is escaped.
+        """
         if text:
+            if text.endswith(";"):
+                text = text[:-1] + "\\;"
             self.run("send-keys", "-t", pane_id, "-l", "--", text)
 
     def paste(self, pane_id: str, text: str) -> None:

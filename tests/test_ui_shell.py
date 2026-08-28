@@ -133,6 +133,19 @@ def shown(widget: Static) -> str:
     return plain
 
 
+async def settle(app: FleetApp) -> None:
+    """Wait for the app's own workers — not Textual's ``_loader``.
+
+    ``DirectoryTree`` (the Onboard view) keeps a ``_loader`` worker running for
+    its whole life, so ``workers.wait_for_complete()`` would never return once
+    that view exists. The doctor worker and any fix/spawn worker are what a test
+    actually waits for.
+    """
+    ours = [worker for worker in app.workers if worker.group != "_loader"]
+    if ours:
+        await app.workers.wait_for_complete(ours)
+
+
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
     app = pilot.app
     assert isinstance(app, FleetApp)
@@ -375,13 +388,13 @@ def test_doctor_section_opens_the_doctor_view_and_paints_the_summary(
 
     async def go(pilot: Pilot[None]) -> tuple[int, str | None, str, str, list[str], int]:
         app = fleet_app(pilot)
-        await app.workers.wait_for_complete()
+        await settle(app)
         await pilot.pause()
         calls_after_mount = len(calls)
         before = app.content.current
         await pilot.click(app.query_one(DoctorSection))
         await pilot.pause()
-        await app.workers.wait_for_complete()
+        await settle(app)
         await pilot.pause()
         report = shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
         summary = shown(app.query_one(DoctorTitle))
@@ -412,7 +425,7 @@ def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script
 
     async def go(pilot: Pilot[None]) -> tuple[bool, str, str, int | None]:
         app = fleet_app(pilot)
-        await app.workers.wait_for_complete()
+        await settle(app)
         await pilot.pause()
         notice = app.query_one(DoctorSection).query_one(".doctor-notice", Static)
         report = shown(app.query_one("#doctor", DoctorView).query_one("#doctor-report", Static))
@@ -425,7 +438,7 @@ def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script
 
     async def healthy(pilot: Pilot[None]) -> bool:
         app = fleet_app(pilot)
-        await app.workers.wait_for_complete()
+        await settle(app)
         await pilot.pause()
         return app.query_one(DoctorSection).query_one(".doctor-notice", Static).display
 

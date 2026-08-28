@@ -72,8 +72,8 @@ tmux can see and its row says so (`no hooks`).
 ## The first five minutes
 
 1. **Run `asq`** (or `aisquare`) in a terminal. The UI opens: the navigator on
-   the left, a Welcome page on the right that checks `tmux`, `claude` and `gh`
-   are on this machine. In a pipe, under `--json`, or with `TERM=dumb` there is
+   the left and, until you add a project, a Welcome page on the right that
+   checks `tmux`, `claude` and `gh` are on this machine. In a pipe, under `--json`, or with `TERM=dumb` there is
    no UI — you get usage and exit 2, byte for byte as before, so no script ever
    meets a full-screen app.
 2. **Click `+` beside Fleet.** Onboarding opens on the right: browse or type a
@@ -119,8 +119,9 @@ aisquare --json fleet ls                  # what the UI and any automation read
 Five roles, each a briefing the harness injects at launch and a place in the
 manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
-ladder (`fable → opus → sonnet`), coder, tester and reviewer run on `sonnet`,
-the validator one effort tier above the work it gates.
+ladder (`fable → opus → sonnet`); coder, tester and reviewer start on `sonnet`
+with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
+tier above the work it gates.
 
 | Fleet role | Repo role | Job in the loop | Runs in |
 | --- | --- | --- | --- |
@@ -198,7 +199,10 @@ have ended. `status` is the same data, always live only.
 
 State is **derived, never stored**: a fresh board session row wins (working ·
 waiting · attention); otherwise tmux's facts (a dead pane → exited with its
-code; activity → working; else waiting); no pane at all → lost.
+code; activity → working; else waiting); no pane at all → lost; `· unknown`
+when neither source can answer. The detail beside the chip says why when that
+is not obvious — an exit code, `no hooks` for a binary without our lifecycle
+hooks, `pane gone`.
 
 ### `fleet tell`
 
@@ -313,7 +317,8 @@ Three places to change one:
   the file directly;
 - **in the UI** — the project's *Settings* tab writes the same config (Phase 6).
 
-The whole `[fleet]` section of `~/.aisquare/config.toml`, at its defaults:
+The whole `[fleet]` section of `~/.aisquare/config.toml` at its defaults, as
+`aisquare config set` writes it:
 
 ```toml
 [fleet]
@@ -331,20 +336,23 @@ extra_args = []
 
 [fleet.roles.coder]
 permission_mode = "auto"
-worktree = true
+worktree = true                           # one worktree per coder: parallel coders never share a tree
+extra_args = []
 
 [fleet.roles.tester]                      # `runner` is accepted as an alias
 permission_mode = "auto"
 worktree = false                          # verifies in the coder's worktree, named by the task
+extra_args = []
 
 [fleet.roles.reviewer]
 permission_mode = "auto"
 worktree = true
-extra_args = ["--restricted"]
+extra_args = ["--restricted"]             # read-only by construction
 
 [fleet.roles.validator]
 permission_mode = "auto"
 worktree = false
+extra_args = []
 ```
 
 A role the file omits gets the built-in shape (`auto`, no worktree, no extra
@@ -543,11 +551,12 @@ one per project), the agent cap (`max_agents_per_project`, with the count),
 `--worktree` in a non-git project, an unknown role, an invalid label. A label
 that was merely *taken* is not refused — it is suffixed, and the receipt says so.
 
-**A `fleet` command says the service is not wired yet.** This checkout carries
-the fleet's contracts (the CLI, the config, the schema, the names) but not yet
-the Phase 3 lifecycle — `spawn`, `ls`, `tell`, `stop`, `reap`, `attach`,
-`rename`, `pause` and `resume` land together in that phase and say so until
-then.
+**A `fleet` command says the service is not wired yet.** The checkout predates
+Phase 3 (plan §9): it carries the fleet's contracts — the CLI, the config, the
+schema, the names — but not the lifecycle behind `spawn`, `ls`, `tell`, `stop`,
+`reap`, `attach`, `rename`, `pause` and `resume`, which land together in that
+phase and say so until then. Update, or read the plan's Decisions log for what
+has landed.
 
 **Two projects match `--project`.** Basenames collide; codenames do not. The
 error lists both with their codenames — use the codename.

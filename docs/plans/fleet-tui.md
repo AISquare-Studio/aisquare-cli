@@ -143,8 +143,10 @@ immediately) · `history-limit 50000` · `window-size manual` (so we can size a
 window nobody is attached to) · `remain-on-exit on` · `mouse off` (we own the
 mouse) · `default-terminal tmux-256color` · `terminal-overrides ',*:Tc'` ·
 `extended-keys on` (CSI-u / modifyOtherKeys reach Claude Code — shift+enter and
-friends) · `set-clipboard off` · `focus-events on` · `monitor-activity on` (for
-the ▶ pulse without capturing every pane).
+friends) · `set-clipboard off` · `focus-events on` · `monitor-activity on` (kept
+for an attached `tmux -L asq attach` client; headless the flag is always set, so
+the ▶ pulse comes from `history_size`/cursor changing between frames — measured
+on tmux 3.7c, pinned by `tests/test_tmux.py`).
 
 ### 3.2 The TUI is a view; there is no daemon
 
@@ -351,8 +353,10 @@ reasonably want otherwise.
   - **Doctor**: this project's checks, with fix buttons.
   - **Explainability**: status · enable/disable · register roster · ship · the
     `env` block, through the services behind `cli/explainability.py`.
-  - **Settings**: role → model / effort / permission mode / binary
-    (`team harness`, `team bind`), max agents, worktree root, escape key.
+  - **Settings**: per role permission mode and worktree, escape key, max agents,
+    worktree root, the native-agent-teams switch, the codename (rename). Model,
+    effort and binary per role stay in `team harness` / `team bind` — one home per
+    concept — and the tab says so.
 - **Agent** view: header (label, role, state, model, cwd or worktree, task) +
   actions (stop, restart, open in tmux, open transcript — reuse
   `_transcript_command`) + the `TerminalPane`.
@@ -543,8 +547,8 @@ The ten existing CLI sites are not touched.
 
 **Fleet codename.** Every project that enters the fleet gets an
 `adjective-animal` codename (`amber-otter`): lowercase ASCII,
-`^[a-z]{3,7}-[a-z]{3,7}$`, from two hand-curated lists of ~96 words each in
-`core/codenames.py` (new) — ~9,200 combinations, family-friendly, with a test
+`^[a-z]{3,7}-[a-z]{3,7}$`, from two hand-curated lists (96 adjectives × 96 animals) in
+`core/codenames.py` — 9,216 combinations, family-friendly, with a test
 that every word matches the charset and the lists are sorted and unique.
 **Deterministic from `project.id`** (`sha256`, walking to the next pair on a
 collision) rather than random: the id is already a stable hash of the resolved
@@ -964,4 +968,5 @@ matrix is filled in Phase 0.
 | --- | --- | --- |
 | 2026-08-28 | First version of the plan. Approach D (tmux substrate) proposed; §12 open. Draft PR #71; suite on the branch: 1767 passed, 1 skipped. | PR #71 |
 | 2026-08-28 | Owner decisions folded in: textual core; `auto` permissions; human merges; roles manager / coder / tester / reviewer / validator; native agent teams off in fleet launches; Codex deferred; every default configurable (§3.10). Naming scheme in §5.7 from a forked planning agent. | owner + PR #71 |
+| 2026-08-28 | Implementation landed on this branch: scaffold f0a818c (contracts), then ten siloed work packages (tmux, fleet-service, fleet-cli, terminal, shell, onboard, doctor, manager, board, docs) built in parallel worktrees and merged without a conflict, plus an integration pass. Deviations, all recorded in code: the `auto`→`acceptEdits` permission fallback (§3.6) is documented, not automated; drag-select/copy inside an agent pane (§6) is not implemented (Line-API widget); a dead/vanished pane is read BEFORE the board row when deriving state (§5.1) because a killed agent fires no SessionEnd; `window_activity_flag` is not a signal on a headless server (§3.1), the frame diff is; the Settings tab omits model/effort/binary (one home per concept); the Onboard view is built on the first `+`; `ExplainabilitySettings.roles` now lists all seven roles. The §6 per-terminal key matrix still needs a human at each terminal. | PR #71 |
 | 2026-08-28 | Implementation started from the scaffold (`f0a818c`: store v11, `[fleet]` config, the roles, `core/tmux.py`, `cli/fleet.py`, the UI skeleton) with the work packages in parallel. User documentation written from the scaffolded CLI: `docs/fleet.md` (listed in `DOCUMENTED`), the README fleet section and command-tree lines, the CHANGELOG entry — saying plainly where a piece lands in a later phase. | WP docs |

@@ -32,6 +32,23 @@ breaks without it.
 
 That's the whole setup — you are done. Everything below is reference.
 
+## The fleet UI
+
+Run `asq` (or `aisquare`) with no arguments at a terminal and you get a
+full-screen, mouse-driven view over every project you have registered: a
+navigator on the left — projects, the agents running in each, a Doctor summary
+— and on the right whatever you clicked: onboarding for a new directory, a
+project's **manager** (an agent you task in prose; it plans, spawns coders,
+testers and reviewers, loops until the goal is met, and reports), or any
+agent's *real* Claude Code session, live. Agents run inside a private tmux
+server, so they outlive the UI, and `aisquare fleet attach` shows the same
+session from any terminal. Needs `tmux` 3.2+. Scripts, pipes and `--json`
+callers of bare `aisquare` still get usage and exit 2, exactly as before.
+
+**[The fleet](docs/fleet.md)** has the first five minutes, the roles, the
+`aisquare fleet …` command reference and every default you can change. It is a
+view over both halves below; neither needs it.
+
 aisquare has **two halves, and they are independent**:
 
 | | What it is | Who it's for |
@@ -458,6 +475,7 @@ concurrency-tested against racing parallel sessions):
 ~/.aisquare/
 ├── context.db    # context entries, projects, prompt history, tasks, events, sessions
 ├── config.toml   # typed configuration
+├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
 ├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
@@ -493,9 +511,16 @@ aisquare
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [… agent args]
-│                   role = planner|coder|runner, a numbered seat (coder1), or
-│                   any role you have bound; env merges over `team bind`
+│                   role = planner|coder|runner|validator, a fleet role (manager,
+│                   tester, reviewer), a numbered seat (coder1), or any role you
+│                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
+├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
+├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
+│                             [--permission-mode M] [--bin B] [--prompt TEXT] [-- agent args]
+│                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
+│                   attach · reap [--all] · rename <codename> · pause · resume
+│                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```
 

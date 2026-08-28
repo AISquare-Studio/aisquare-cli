@@ -7,13 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **`docs/plans/fleet-tui.md` — the plan for the Fleet TUI.** `asq` with no
-  arguments is to open a two-pane, mouse-driven view over every onboarded
-  project, its manager agent and the agents the manager spawns — each surfaced
-  as its *real* Claude Code / Codex session through a private tmux server,
-  never a chat relayed through us. Onboarding, doctor, the board and the
-  Explainability wiring all move inside that one view. Plan only: nothing in
-  the CLI changes with this entry; the open decisions are listed in its §12.
+- **The fleet: `asq` with no arguments opens one view over every project,
+  agent and session.** A two-pane, mouse-driven UI — a navigator of projects,
+  the agents running in each and a Doctor summary on the left; onboarding, a
+  project's **manager** (an agent you task in prose, which plans, spawns and
+  steers the others), any agent's *real* Claude Code session, the board and
+  doctor findings with their fixes on the right. Never a chat relayed through
+  us: agents run as windows of a per-project session on a private tmux server
+  (`tmux -L asq`, bundled config, tmux ≥ 3.2), so they outlive the UI and
+  `aisquare fleet attach` shows the same session from any terminal. New `fleet`
+  group — `spawn · ls · status · tell · stop · attach · reap · rename · pause ·
+  resume`, `--json` everywhere — and an explicit `ui` command. Fleet roles
+  `manager` (the planner with fleet authority), `tester` (the fleet's name for
+  `runner`) and `reviewer` (read-only PR review), which `launch` accepts too.
+  Store schema v11: `fleet_agent`, and a per-project `codename`
+  (`adjective-animal`, deterministic from the project id; `fleet rename`
+  changes it) that names the tmux session and the `fleet/<codename>/…`
+  branches. A `[fleet]` config section in which every value is a default —
+  permission mode `auto` for every role, a worktree per coder and reviewer,
+  four agents per project, `F12` as the escape key, Claude's native agent
+  teams off in fleet launches — overridable per spawn, in the environment or
+  in config. Scripts, pipes and `--json` callers of bare `aisquare` still get
+  usage and exit 2. User guide: `docs/fleet.md`; the plan and its decisions
+  log: `docs/plans/fleet-tui.md`. Delivered in phases (plan §9): the lifecycle
+  behind `fleet spawn` and friends is Phase 3 and says so until it lands.
 
 ## [0.5.0] - 2026-08-27
 

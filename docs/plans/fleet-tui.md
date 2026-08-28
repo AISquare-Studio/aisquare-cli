@@ -1,6 +1,7 @@
 # Fleet TUI — one `asq` view over every project, agent and session
 
-> **Status: plan, nothing implemented yet.** This is a living document: update it
+> **Status: implementation in progress** (scaffold f0a818c; work packages landing
+> on this branch). This is a living document: update it
 > in the same PR as the code it describes, and keep the *Decisions log* at the
 > bottom current. Branch `plan/fleet-tui`; draft PR
 > <https://github.com/AISquare-Studio/aisquare-cli/pull/71>. The owner's decisions

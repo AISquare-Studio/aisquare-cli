@@ -122,7 +122,12 @@ DOCUMENTED = (
 #: is swept, because "which directories hold documentation" is precisely the
 #: judgement that was wrong before: `.github/ISSUE_TEMPLATE` holds a page that
 #: asks a user to run a command and sat outside a root-plus-docs sweep.
-_SWEEP_EXCLUDES = frozenset({".venv", ".git", "node_modules", "site-packages", "build", "dist"})
+#: `.claude` holds Claude Code's own worktrees (`.claude/worktrees/<name>` — full
+#: checkouts of this repo), so without it every document would be swept once per
+#: live worktree and reported as an unlisted copy of itself.
+_SWEEP_EXCLUDES = frozenset(
+    {".venv", ".git", ".claude", "node_modules", "site-packages", "build", "dist"}
+)
 
 FENCE = re.compile(r"^\s*(?:>\s*)*```+\s*([A-Za-z0-9_-]*)\s*$")
 SHELL_LANGUAGES = {"", "sh", "bash", "shell", "console", "zsh"}

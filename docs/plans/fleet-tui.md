@@ -963,3 +963,4 @@ matrix is filled in Phase 0.
 | --- | --- | --- |
 | 2026-08-28 | First version of the plan. Approach D (tmux substrate) proposed; §12 open. Draft PR #71; suite on the branch: 1767 passed, 1 skipped. | PR #71 |
 | 2026-08-28 | Owner decisions folded in: textual core; `auto` permissions; human merges; roles manager / coder / tester / reviewer / validator; native agent teams off in fleet launches; Codex deferred; every default configurable (§3.10). Naming scheme in §5.7 from a forked planning agent. | owner + PR #71 |
+| 2026-08-28 | Implementation started from the scaffold (`f0a818c`: store v11, `[fleet]` config, the roles, `core/tmux.py`, `cli/fleet.py`, the UI skeleton) with the work packages in parallel. User documentation written from the scaffolded CLI: `docs/fleet.md` (listed in `DOCUMENTED`), the README fleet section and command-tree lines, the CHANGELOG entry — saying plainly where a piece lands in a later phase. | WP docs |

@@ -46,28 +46,29 @@ prompts and board events to the gateway, and `record_join` pairs the Claude Code
 with the pipeline id. Hooks (`SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`,
 `Notification`) are installed by `aisquare agents connect` and removed by `disconnect`.
 
-On the consolidated branch (formerly the #60–#64 stack; one draft PR into `main`, where CI runs): a **contract v1** client — `POST /v1/hook`
-with `trigger`/`session_id`/`trace_id`/`project_id`/`budget_ms`/`run_id`/`arm`/`snapshot_ref`/
-`prompt`/`tool`, response `action: inject|substitute|allow|noop` + `context` + `provenance` +
-`cache_hint`; a per-session response cache; a per-turn SQLite `metric` row; `UserPromptSubmit`
-injection framed as candidate material; `doctor` + `[experiment]` extra.
+On `feat/collective-intelligence` (PR #72, draft), **as of 2026-08-28 the CLI side speaks contract
+v2 and is built as far as it can be without the server.** Built and tested against the vendored
+schemas and a local v2 stub:
 
-**The v1 stack was written against the §02 draft, and the server has since frozen v2. The two
-are not compatible, in either direction:**
+| Surface | State on the branch |
+|---|---|
+| Hook contract v2 models | `services/ci_contract.py` — closed, frozen, strict; every pattern and cross-field rule; the seven server schemas + fixtures vendored byte-for-byte from `fff5646` under `tests/fixtures/ci_contract/v2/`, validated with `jsonschema`; a drift test compares against a sibling `aisquare-ci` checkout |
+| Descriptor client | `services/ci_descriptor.py` — `GET /v1/experiment/runs/{run}`, cached until `expires_at`, refuses skew / expiry / 401 / 404 with distinct detail, never raises |
+| Transport | `services/ci_client.py` — `urllib`, one attempt, **wall-clock deadline** from `client_safety_ms` (thread + join, chunked reads, late arrival is a breach), body cap, no client cache |
+| Hooks | `session_start` / `prompt_submit` only when the descriptor lists them; outcome of every call recorded; `trace_id` sent = `trace_id` recorded |
+| Snapshot | `services/ci_snapshot.py` — `git stash create` → `refs/aisquare/wip/<trace_id>`, object id on the wire, `untracked_excluded` on the row; `project_ref` from `origin` with credentials stripped |
+| Injection | `core/injection.py` — `aisquare-ci-frame/1`: caveat before and after, delimited region the payload cannot close, control characters stripped, 16 KB cap, both sizes recorded |
+| Metric row | `metric` table v11 rewritten in place: the §5 join keys, `status` + `action` beside a closed `client_reason` vocabulary in three groups, `run_kind` (local), `opaque_config_id`, `redaction_level`, `frame_version`, `instruction_version`; no `arm`, no `run` table |
+| Join record | `insights.record_turn` spools a `ci_turn` record through the client lane; the sweeper emits it as a `ci.turn` span in the session's Run |
+| Pull | `services/ci_recall.py` — `collective_intelligence_recall` registered in `aisquare serve` when the descriptor lists `mcp_pull`; standing instruction (`aisquare-ci-instruction/1`) at `SessionStart`; forwards as `agent_request` via the hook route (J7 default) |
+| `doctor` | switch → URL (scheme required, credentials never echoed) → token → run → `GET /ready` → descriptor fetch without caching, each its own line; every probe bounded |
+| Installed hooks | `SessionStart` / `UserPromptSubmit` carry `timeout: 120` so Claude Code's 60 s default cannot discard a hook still inside the ceiling (J4) |
+| Stub | `tests/stub_ci_server.py` speaks v2 (`/ready`, descriptor route, programmable `/v1/hook` with delay and drip); runnable by hand for a real-session smoke |
 
-- A v1 request body fails v2 validation outright (`additionalProperties: false`; `project_id`,
-  `budget_ms`, `arm`, `tool` are unknown; `contract`, `client_safety_ms`, `client_observed_at`
-  are missing).
-- A v2 response parses in the v1 client as `contract_mismatch` → every call degrades.
-- `allow` and `substitute` — half of v1's action set — are named by canon as *not* v2 actions.
-- `arm` on the wire violates the blinding rule the descriptor exists to enforce.
-
-So the v1 contract, its 13 golden fixtures and `docs/ci-contract.md` are being replaced, not
-patched. Most of the existing code carries over (transport, degradation ladder, metrics store,
-hook wiring, framing, doctor); the wire models, fixtures and a handful of fields change. §3 is
-the field-level map.
-
----
+Not built, by design: client metrics from spans (tokens, active wall time, idle exclusion —
+columns stay `NULL`, reported as "not measured"); `aisquare replay` (Slice 13). §3 below is the
+wire as implemented; §4 is the v1→v2 field map that was applied; §6 the decisions still open,
+each coded as a default assumption listed in `docs/ci-contract.md`.
 
 ## 2. Ownership, restated for this integration
 

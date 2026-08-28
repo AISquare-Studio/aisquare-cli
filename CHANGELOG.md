@@ -7,31 +7,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **CI test bed — retrieval in front of the agent, off by default (experimental).**
-  When a prompt is submitted, aisquare can ask a retrieval endpoint whether it
-  knows anything relevant and hand those documents to the agent *before* it
-  starts exploring, through the `UserPromptSubmit` hook that has been installed
-  since day one. **Nothing runs unless `AISQUARE_CI=1` and an endpoint are set:**
-  with the master switch off there is no request, no connection and no
-  measurable latency, which is what makes it shippable while the endpoint is
-  still being built.
-  - `aisquare metrics show|list` (hidden) — one row per turn, written whether or
-    not the endpoint was consulted. That is deliberate: the period before it goes
-    live is the baseline, not a gap.
-  - Every row records **why** there was no server decision alongside what was
-    decided. A timed-out call and a server deliberately answering "nothing to
-    add" are both `allow`; without the reason beside it, an endpoint failing
-    every request is indistinguishable from a clean baseline.
-  - Retrieved material is framed as candidate reference with its sources
-    attached, so a bad retrieval shows up in the transcript instead of being
-    absorbed into the answer. `aisquare why` accounts for it.
-  - `doctor` reports the state and whether the endpoint is reachable; the
-    `[experiment]` extra adds no dependencies (the transport is stdlib, so the
-    hot path works in a base install).
+- **Collective Intelligence test bed — retrieval in front of the agent, off by
+  default (experimental).** When a prompt is submitted, aisquare can ask a CI
+  server whether the workspace already knows something relevant and hand that to
+  the agent *before* it starts exploring, through the `UserPromptSubmit` hook
+  installed since day one. **Nothing runs unless `AISQUARE_CI=1`, a URL, a token
+  and a run id are set:** with the switch off there is no request, no connection
+  and no measurable latency, and any unrecognised value of the switch is off.
+  - The CLI speaks **hook contract v2**, the server's frozen contract. Its seven
+    schemas and their fixtures are vendored byte for byte
+    (`tests/fixtures/ci_contract/v2/`); every request the CLI can emit is
+    validated against the server's schema with `jsonschema` in the suite, and
+    the models refuse what the schemas refuse — an unknown key, a scope id in an
+    id field, `allow`/`block`/`substitute`, an `inject` with no briefing.
+  - **The server's delivery descriptor decides delivery.** Fetched once per
+    session and cached until it expires, it says which hooks call the server,
+    where, under what ceiling, and whether the `collective_intelligence_recall`
+    MCP tool is exposed in `aisquare serve`. It carries no architecture or arm,
+    so the CLI is structurally unable to know which arm it is running.
+  - **The ceiling is wall clock.** The descriptor's `client_safety_ms` bounds the
+    whole exchange — a server dribbling bytes cannot hold the hook past it, a
+    response that lands late is a breach, bodies are capped, and nothing retries.
+    `agents connect` gives the two context hooks a 120 s Claude Code timeout so
+    the agent does not discard the hook's answer first.
+  - `aisquare metrics show|list` (hidden) — one row per hook event, scoped to the
+    current project (`--project`, `--all`). The row carries the join keys the
+    server ledger pairs on (`run_id`, `session_id`, `trace_id`, `query_id`), the
+    server's `status`/`action`, and a **client reason** in three groups that are
+    never summed: baseline (never asked), by design (chose not to), failure
+    (tried). Round-trip percentiles cover consulted turns only.
+  - Each turn snapshots the working tree (`git stash create`, kept alive under
+    `refs/aisquare/wip/<trace_id>`) so it can be replayed later; the object id
+    travels, the ref name does not, and the row records that untracked files are
+    excluded.
+  - Retrieved material is framed as candidate reference — caveat before and
+    after, a delimited region the payload cannot close, control characters
+    stripped, a 16 KB cap with both sizes recorded. `aisquare why` names the
+    items shown without clobbering the entry counts.
+  - The prompt is scrubbed at the configured `redaction` level before it leaves,
+    and the level is recorded. A `ci_turn` join record is spooled through the
+    Explainability client lane when shipping is configured, so server rows and
+    CLI rows meet through the pipeline id.
+  - `doctor` reports the switch, the URL (scheme required, credentials never
+    echoed), the token and run, `GET /ready`, and the descriptor fetch — a
+    rejected token, an unknown run, an expired run and a contract skew each get
+    their own line and fix. Every probe is bounded.
   - Token counts are **not** recorded — hook payloads do not carry them, and
     `metrics show` says so rather than reporting a zero that reads as "no tokens
-    were used". The wire protocol and its open bilateral decisions are in
-    `docs/ci-contract.md`.
+    were used". The contract pointer and the CLI's standing assumptions are in
+    `docs/ci-contract.md`; the server seam is `docs/ci-integration-handoff.md`.
+  - `tests/stub_ci_server.py` speaks v2 and can be run by hand
+    (`python -m tests.stub_ci_server --port 8765`) to point a real session at it.
 
 ## [0.5.0] - 2026-08-27
 

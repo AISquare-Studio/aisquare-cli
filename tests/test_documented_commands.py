@@ -112,6 +112,9 @@ DOCUMENTED = (
     # is the rule, not because this command is likely to drift.
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "docs/runbooks/MORNING-HANDOFF.md",
+    # The CI test bed's smoke: `aisquare doctor` and `aisquare metrics list`
+    # against the stub server, meant to be typed.
+    "docs/ci-contract.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -853,6 +856,9 @@ CENSUS = {
     "docs/connecting-your-agents-to-explainability.md": (11, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
+    # Two commands in the smoke block; the export line is upper-case and is not a
+    # mention this audit sees.
+    "docs/ci-contract.md": (2, 0),
 }
 
 

@@ -1,275 +1,127 @@
-# CI hook contract — version 1
+# CI hook contract v2 — what this CLI speaks, and what it assumes
 
-The wire protocol between the `aisquare` CLI and the CI experiment endpoint.
-Both sides build against this document and against the golden fixtures in
-[`tests/fixtures/ci_contract/`](../tests/fixtures/ci_contract), which are
-executable: `tests/test_ci_contract.py` fails if this build and those fixtures
-drift apart.
+The wire protocol between the `aisquare` CLI and the Collective Intelligence
+server is **hook contract v2**, owned by the server repository (`aisquare-ci`,
+`contracts/jsonschema/delivery/`). This file is not a second copy of it. It says
+where the authoritative bytes live in this repository, what the CLI does with
+each surface, and which decisions the CLI has coded a *default assumption* for
+while the two sides settle them (the joint list is
+[`ci-integration-handoff.md`](ci-integration-handoff.md) §6).
 
-The CLI-side implementation is [`src/aisquare/services/ci_contract.py`](../src/aisquare/services/ci_contract.py).
+> **Status.** The CLI side is built and tested against the server's schemas and
+> a local stub. `POST /v1/hook` is not yet served by `aisquare-ci`, so nothing
+> here has exchanged a real turn. When it does, integration is a config change
+> plus the smoke at the end of this file.
 
-> **Status.** The contract is frozen at version 1. The endpoint is not live
-> yet; the client is written against these fixtures and a local stub. See
-> [Bilateral decisions](#bilateral-decisions) for the questions that need an
-> answer from the server side before integration.
+## The authoritative bytes, vendored
 
-## Endpoint
-
-```http
-POST {AISQUARE_CI_URL}/v1/hook
-Authorization: Bearer {AISQUARE_CI_KEY}
-X-CI-Contract: 1
-Content-Type: application/json
-```
-
-### Header casing — read this before matching on it
-
-The client sends the contract header over `urllib`, which **title-cases header
-names**. `X-CI-Contract` goes out on the wire as:
-
-```
-X-Ci-Contract: 1
-```
-
-HTTP field names are case-insensitive and any correct server handles this, but
-a server matching the literal string `X-CI-Contract` will see no contract
-version at all — and then guess, which is the one thing this header exists to
-prevent. Match case-insensitively. Pinned CLI-side by
-`test_the_contract_header_arrives_case_normalised`.
-
-## Request
-
-```json
-{
-  "trigger": "session_start" | "prompt_submit" | "tool_intercept" | "agent_request",
-  "session_id": "ses_01k…",
-  "trace_id": "trc_01k…",
-  "project_id": "prj_01k…",
-  "budget_ms": 400,
-  "run_id": "r-20260819-0134",
-  "arm": "B",
-  "snapshot_ref": "refs/aisquare/wip/trc_01k…",
-  "prompt": "…",
-  "tool": {"name": "Grep", "args": {}}
-}
-```
-
-Nulls are sent explicitly rather than omitted. `prompt` is populated on
-`prompt_submit` only, `tool` on `tool_intercept` only; `run_id`, `arm` and
-`snapshot_ref` are null outside an experiment.
-
-`trace_id` identifies **one turn**, not one session — a session spans many
-turns, and keying on `session_id` would collapse them into a single trace and
-make per-turn comparison impossible.
-
-## Response
-
-```json
-{
-  "contract": 1,
-  "action": "inject" | "substitute" | "allow" | "noop",
-  "context": "…markdown block…",
-  "tool_result": "…",
-  "provenance": [{"node_id": "…", "source": "…"}],
-  "flags_applied": ["ci_retrieval", "graphify"],
-  "server_ms": 118,
-  "cache_hint": {"ttl_s": 900, "key": "…"}
-}
-```
-
-`server_ms` is required for any response you want counted. Round-trip minus
-`server_ms` is the network cost; without it the two fold together and a slow
-link is indistinguishable from a slow server.
-
-## Timing — deviates from the original spec
-
-The §02 draft made `budget_ms` **a hard client-side deadline**: exceed it,
-treat as allow. That is reversed here.
-
-| | Draft §02 | Contract v1 |
+| What | Where in this repository | Source |
 | --- | --- | --- |
-| `budget_ms` | hard client deadline | **advisory**, declared to the server |
-| Client enforcement | 400 ms | **10 s backstop only** |
-| Who owns shedding | client | **server** |
+| The seven schemas the CLI consumes | `tests/fixtures/ci_contract/v2/schemas/*.schema.json` | `aisquare-ci/contracts/jsonschema/{delivery,kernel}/` |
+| One valid and one invalid fixture per schema | `tests/fixtures/ci_contract/v2/*.{valid,invalid}.json` | `aisquare-ci/contracts/fixtures/{valid,invalid}/` |
 
-The reason is that a tight client clamp converts a latency problem into
-silently absent data. At 400 ms, a server needing 300 ms over a 100 ms network
-fails open on most calls — and a failed-open call records `action: "allow"`,
-which is exactly what a healthy server returns when it has nothing to add. The
-experiment would then measure nothing while appearing perfectly healthy.
+Copied byte for byte from `aisquare-ci` `main` @ `fff5646`. `tests/test_ci_contract.py`
+validates the fixtures against the schemas with `jsonschema` (proving the `$ref`
+resolver, not just the files), round-trips every fixture through the CLI's
+pydantic models unchanged, and validates **every request this build can emit**
+against `hook-request.experimental-v2` — via the server's schema, never via a
+Python reading of it. When the server repository is cloned beside this one, a
+further test fails if any vendored file differs from the server's; re-vendor
+rather than edit.
 
-So: **shed load server-side, where there is enough information to shed the
-right thing.** The client keeps only a backstop against a hung endpoint holding
-a developer's prompt hostage.
+The pydantic mirror is [`src/aisquare/services/ci_contract.py`](../src/aisquare/services/ci_contract.py):
+`additionalProperties: false` at every level, frozen, strict (no coercion), with
+every pattern and cross-field rule as a validator. One deliberate deviation,
+tested as such: `error.v1.code` is an opaque string rather than the closed
+catalog, because the catalog is the server's and a code this build has never
+seen is data to record verbatim, not a reason to discard an otherwise valid
+response.
 
-Ten seconds is not a latency target — it is a crash guard. It sits under Claude
-Code's 30 s `UserPromptSubmit` cancellation so the hook always returns a
-decision of its own; past 30 s the hook's output is discarded by the agent and
-the call degrades with *no reason recorded at all*.
+## The surfaces, and what the CLI does with each
 
-**`prompt_submit` is synchronous.** The developer has hit enter and is watching
-a cursor. Every millisecond spent here is one they wait. Treat a high
-`backstop_exceeded` rate as a server-side bug, never as an experimental result.
+**Descriptor — `GET /v1/experiment/runs/{run_id}`** (`client-delivery-descriptor.v1`).
+Fetched at `SessionStart`, cached under `~/.aisquare/cache/ci/` until
+`expires_at`, refetched on expiry. It is the only run document the CLI reads and
+it decides everything: `delivery[].hook_push.triggers` says which hooks call the
+server and `.endpoint` where; `mcp_pull` says whether the recall tool is exposed;
+`client_safety_ms` is the wall-clock ceiling for every call; `retry_policy: none`
+is honoured literally. The descriptor carries no architecture, source, reader or
+arm field, so the CLI is structurally unable to know its arm.
 
-## Degradation
+**Push — `POST {endpoint}`** (`hook-request.experimental-v2` → `hook-response.experimental-v2`).
+Sent on `session_start` and `prompt_submit` when the descriptor lists them. All
+ten request fields, nulls included; `prompt` null on `session_start`, required
+otherwise. On `action: inject` the CLI frames `briefing.rendered_context` and
+appends it **after** any team delta; on `noop` it injects nothing. Every field a
+ledger join needs is recorded on the local row (below).
 
-Any failure resolves to `action: "allow"` — the session continues untouched.
-The CLI never raises on this path; there is no response it can receive that
-does.
+**Pull — `collective_intelligence_recall`** (`mcp-tool-input.v1` → `mcp-tool-output.v1`).
+Registered in `aisquare serve`'s MCP server only when the descriptor lists
+`mcp_pull`. A standing instruction naming the tool and the exact `ses_…` to pass
+is injected at `SessionStart`. The tool forwards as `trigger: agent_request`
+through the hook endpoint (assumption J7, below) and returns the `briefing`
+object as its result.
 
-Because a degraded call and a deliberate `allow` are the same action, the CLI
-records a **`degradation_reason`** beside every call. Aggregates that mix the
-two are measuring plumbing, not retrieval.
+**Observation.** Tool activity does not go through the hook. Sessions are traced
+into Explainability by the proxy lane; the CLI's part of the join is the
+`ci_turn` record it spools through the client lane, keyed by pipeline id.
 
-| Reason | Cause |
-| --- | --- |
-| `none` | The server answered and this build understood it |
-| `not_configured` | No endpoint configured — the default. No request made |
-| `disabled` | Configured but switched off. No request made |
-| `transport_error` | Connection refused, DNS, TLS, reset |
-| `backstop_exceeded` | 10 s elapsed. A server-side bug |
-| `http_error` | Status other than 200 |
-| `malformed_body` | Not JSON, or JSON but not an object |
-| `contract_mismatch` | `contract` names a revision this build does not speak |
-| `unknown_action` | `action` absent or outside the four |
-| `schema_mismatch` | Known action, but a field failed validation |
+## The client-side reason, beside the server's status
 
-Checks run in that order deliberately. Contract is verified **before** action,
-and action **before** full validation, so a skewed server reports the skew —
-which an upgrade fixes — rather than a schema error, which implies a bug in one
-of the two builds.
+Every turn writes one row (`aisquare metrics list`) whether or not the server
+was called. `status`/`action` are the server's words; `client_reason` is the
+CLI's, in three groups that aggregates never mix:
 
-## Enablement — off by default
-
-CI is opt-in and ships disabled.
-
-| Knob | Default | Meaning |
+| Group | Values | Meaning |
 | --- | --- | --- |
-| `AISQUARE_CI` | *off* | Master switch. Must be explicitly enabled |
-| `AISQUARE_CI_URL` | unset | Endpoint. Unset ⇒ `not_configured`, no request |
-| `AISQUARE_CI_KEY` | unset | Bearer token |
+| baseline | `disabled` `not_configured` `no_run` | the client never asked — control data |
+| by design | `trigger_not_in_descriptor` `no_prompt` `no_session` | the experiment was on and the client chose not to call |
+| failures | `descriptor_unavailable` `transport_error` `deadline_exceeded` `http_error` `malformed_body` `contract_mismatch` `schema_mismatch` | the client tried; treated like the server's `unavailable`, never as "nothing to add" |
 
-With the master switch off — the state every existing user is in — the client
-issues no request, adds no latency, and records `disabled`. That is what makes
-this safe to land on `main` before the endpoint is live.
+`none` means the server answered and this build understood it. Round-trip
+percentiles are taken over `none` rows only.
 
-The `ci_push` / `ci_pull` flags described in T4 are **sub-flags of this master
-switch**. The task list says both default true; that is true only once someone
-has opted in.
+## Assumptions coded as defaults (joint decisions still open)
 
-## Phase 1 is push-only
+Each is one constant or one function so the settlement is a small change.
 
-The contract carries four triggers. Phase 1 implements **two**:
-
-| Trigger | Phase 1 | Notes |
+| Seam | Assumption in this build | Where |
 | --- | --- | --- |
-| `session_start` | ✅ | Warms the cache |
-| `prompt_submit` | ✅ | The augmentation path |
-| `tool_intercept` | ❌ | Needs `PreToolUse` (T2, Phase 2) |
-| `agent_request` | ❌ | No consumer specified anywhere yet |
+| J2 ids | `ses_` + the Claude Code session id; `trc_` + ULID per turn, minted here; the CLI never mints `run_` or `qry_` | `ci_contract.wire_session_id`, `core.ids.new_trace_id` |
+| J3 snapshot | 40-hex object id from `git stash create` (dirty) or `HEAD` (clean); the object is kept alive under `refs/aisquare/wip/<trace_id>`; untracked files are excluded and the row says so | `services/ci_snapshot.py` |
+| J4 ceiling | `client_safety_ms` from the descriptor, enforced as wall clock; the installed `SessionStart`/`UserPromptSubmit` hooks carry `timeout: 120` so Claude Code does not discard the hook first | `ci_client.exchange`, `core.agents.CONTEXT_HOOK_TIMEOUT_SECONDS` |
+| J7 pull | recall forwards as `agent_request` via the hook endpoint; `token_budget` and `reason` have no field on that request and are reported as `not_forwarded` | `ci_recall.forward_recall` |
+| J10 config | `AISQUARE_CI`, `_URL`, `_KEY`, `_RUN` (and `[experiment].enabled/url/run`); nothing about arms anywhere | `ci_client` |
+| J12 `run_kind` | not sent; recorded locally as `live` on every row, `replay` reserved for the runner | `ci_augment.RUN_KIND` |
+| J13 redaction | the configured `redaction.level` scrubs the prompt before it leaves; the level is recorded on the row | `ci_augment.outbound_prompt` |
+| J14 frame | on, `aisquare-ci-frame/1`: caveat before and after, delimited region the payload cannot close, 16 KB cap, both sizes recorded | `core.injection.build_retrieved_block` |
+| J15 error codes | recorded verbatim as an opaque list on the row | `ErrorRecord.code` |
+| J16 health | `doctor` probes `GET /ready`, then fetches the descriptor without caching it | `services/diagnostics.py` |
 
-This matters for reading early results: **injection makes the agent better
-informed; it does not stop it grepping out of habit.** Exploration calls
-avoided — the headline metric — needs interception, which is Phase 2. Do not
-expect Phase 1 numbers to show it.
+Also assumed, not a joint item: a `session_start` or `agent_request` row is
+closed at creation (it is a call, not a turn); an open prompt row older than 24 h
+is left open rather than closed by a late `Stop`.
 
-### On `substitute`
+## The stub, and the smoke
 
-`substitute` is in the contract so the server can express the intent, but it
-has no working delivery mechanism today. Claude Code's `PreToolUse` hook
-**cannot fabricate a tool result**. It exposes `permissionDecision`
-(`allow`/`deny`/`ask`), `permissionDecisionReason` and `updatedInput` — and a
-call carrying `updatedInput` still executes.
+`tests/stub_ci_server.py` speaks v2 — `GET /ready`, the descriptor route, and a
+programmable `POST /v1/hook` (status, body, a delay before headers, a drip that
+sends the body in slow pieces). It is what every client test runs against, and
+a human can run it too:
 
-The nearest approximation is `deny` with the payload in
-`permissionDecisionReason`, which does reach the agent and does prevent the
-real tool running — but arrives framed as a refusal rather than as a result,
-which is a confound for any experiment measuring tool behaviour. Settle this
-before wiring it.
+```sh
+python -m tests.stub_ci_server --port 8765
+```
 
-## Before you compare anything
+In another shell, with the exports it prints:
 
-No comparative claim — "CI helped N%" — until the T7 discrimination self-test
-exists and the baseline variance band is published. Phase 1 is plumbing and
-nothing is being compared, but numbers become visible and tempting the moment
-the endpoint goes live. An effect smaller than the noise floor is not an
-effect, and the noise floor is not known until it is measured.
+```sh
+export AISQUARE_CI=1 AISQUARE_CI_URL=http://127.0.0.1:8765 AISQUARE_CI_KEY=x AISQUARE_CI_RUN=run_kernel0001
+aisquare doctor            # three green "ci …" lines
+aisquare metrics list      # one row per hook event, once a Claude Code session has run
+```
 
-## Bilateral decisions
-
-Open questions that cannot be resolved by one side alone. Answer here rather
-than in either team's private notes — this file is the seam.
-
-### 1. `run_id` ownership — *proposed, needs confirmation*
-
-The CLI **never mints `run_id`**. The format in §02 (`r-20260819-0134`) is the
-server's, and a client generating its own would fork the run space silently.
-The CLI sends `null` until a server response tells it otherwise.
-
-**Needed:** how does a `run_id` first reach the CLI? Options: returned in a
-`session_start` response and held for the session, or pushed via run config.
-Until this is answered, every Phase 1 metrics row carries a null `run_id` and
-cannot be attributed to an experiment.
-
-### 2. `cache_hint.key` scoping — *blocking the prefetch*
-
-`session_start` warms the cache; `prompt_submit` reads it. **If the two are
-scoped differently, the warm is dead weight and every prompt pays a full
-synchronous round trip** — the exact cost this design is trying to avoid.
-
-The CLI treats `cache_hint.key` as opaque and honours whatever it is given, so
-this is entirely a server-side decision. Session-scoped is cheaper and simpler;
-prompt-scoped is more precise and may lift the hit rate enough to pay for
-itself. Either is fine — but they must agree.
-
-**Needed:** confirmation that a `session_start` warm produces keys a subsequent
-`prompt_submit` can hit. There is a CLI-side fixture asserting warm-then-read
-is a hit; it is written against our assumption, and will need updating if
-yours differs.
-
-### 3. Contract version bumps
-
-Any change to a field's type or meaning is a version bump, not an edit. This
-build degrades to `allow` on an unrecognised `contract`, so a silent change
-does not fail loudly — it produces a run where every call quietly did nothing.
-
-**Needed:** agreement that the server never ships a schema change under
-`contract: 1`, and a channel for announcing a bump before it deploys.
-
-### 6. A health route for `doctor` — *proposed*
-
-`aisquare doctor` reports whether the endpoint is reachable. It currently does
-a **TCP connect** rather than a request, because the contract defines exactly
-one route and it is a `POST` that does real work — probing it would send the
-endpoint live traffic every time anyone runs `doctor`.
-
-A TCP connect proves a listener exists and nothing more: a process that is up
-but failing every request reads as healthy.
-
-**Proposed:** `GET /v1/health` returning `{"contract": 1, "ok": true}`, cheap
-enough to call freely. **Needed:** agreement, or confirmation that a TCP
-connect is all `doctor` should ever do.
-
-### 5. Cache lifetime vs. run boundaries — *proposed*
-
-The CLI caches per **session**, under the server's `cache_hint.key`, and sweeps
-session files older than 24 h. It has no notion of a run ending, so a long
-session spanning an arm switch would serve entries minted under the previous
-arm.
-
-**Proposed:** any response whose `arm` differs from the request's is not
-cacheable, and the server omits `cache_hint` on it. Cheaper than teaching the
-client about arms, and keeps arm assignment entirely server-side.
-
-**Needed:** confirmation, or a different rule. Until then, do not switch arms
-inside a live session.
-
-### 4. `arm` opacity
-
-`arm` is opaque to the CLI by design — branching on it client-side would put
-experiment logic where changing it costs a release. The CLI records it and
-sends it back, nothing more.
-
-**Needed:** confirmation that arm assignment is entirely server-side, including
-for replay (T6), where the CLI will need to *request* a specific arm rather
-than be assigned one. That is the one place the opacity has to bend.
+The same commands against the real server are the joint smoke: one
+`prompt_submit` round trip whose server ledger row and CLI metric row share
+`(run_id, session_id, trace_id, query_id)`, and one deliberately mismatched
+request recorded on both sides as a mismatch rather than as baseline.

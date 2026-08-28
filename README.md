@@ -497,7 +497,7 @@ aisquare
 │                   any role you have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
-└── metrics         show [-n N] [--session S] · list        (CI test bed; hidden)
+└── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
 ```
 
 Everything `aisquare --help` lists is implemented. Roadmap commands are
@@ -521,12 +521,12 @@ still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in
 [issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
 
-## CI test bed (experimental, off by default)
+## Collective Intelligence test bed (experimental, off by default)
 
-An opt-in experiment: when you submit a prompt, aisquare can ask a retrieval
-endpoint whether it knows anything relevant and hand those documents to the
-agent **before** it starts exploring. The hypothesis is that an agent which
-starts better informed reads fewer files to get to the same answer.
+An opt-in experiment: when you submit a prompt, aisquare can ask a Collective
+Intelligence server whether this workspace already knows something relevant and
+put it in front of the agent **before** it starts exploring. The hypothesis is
+that an agent which starts better informed explores less.
 
 **It is off unless you turn it on**, and off costs nothing — no request, no
 connection, no measurable latency. Nothing below runs for a normal install.
@@ -534,34 +534,49 @@ connection, no measurable latency. Nothing below runs for a normal install.
 ```sh
 pip install 'aisquare-cli[experiment]'   # the extra adds no dependencies today
 export AISQUARE_CI=1
-export AISQUARE_CI_URL=https://…
-export AISQUARE_CI_KEY=…
-aisquare doctor                          # reports state and reachability
-aisquare metrics show                    # what was recorded, per turn
+export AISQUARE_CI_URL=https://…          # the server's base URL
+export AISQUARE_CI_KEY=…                  # the experiment token
+export AISQUARE_CI_RUN=run_…              # the run the controller published
+aisquare doctor                           # the switch, the endpoint, and the run's descriptor
+aisquare metrics show                     # what was recorded, per turn, for this project
 ```
 
 | Knob | Default | Meaning |
 | --- | --- | --- |
-| `AISQUARE_CI` | off | Master switch; overrides config in both directions |
-| `AISQUARE_CI_URL` | unset | Endpoint. Unset ⇒ no request is made |
+| `AISQUARE_CI` | off | Master switch; overrides `[experiment].enabled` both ways. **Any unrecognised value is off** |
+| `AISQUARE_CI_URL` | unset | The server's base URL, `http(s)://` only. Or `[experiment].url` |
 | `AISQUARE_CI_KEY` | unset | Bearer token. **Environment only** — never read from `config.toml` |
+| `AISQUARE_CI_RUN` | unset | The `run_…` whose delivery descriptor drives this machine. Or `[experiment].run`. No run ⇒ no calls |
 
-Three things worth knowing before you enable it:
+What the CLI does with a run is decided by the server, not by a flag here. At
+session start it fetches the run's **delivery descriptor** (cached until it
+expires) and honours only what that lists: which hooks call the server, where,
+under what ceiling, and whether the `collective_intelligence_recall` tool is
+exposed in `aisquare serve`. The descriptor names no architecture or arm, so the
+CLI cannot know which arm it is running — by design.
 
-- **The prompt hook is synchronous.** You are waiting on it. A client-side
-  backstop caps that wait, but the endpoint owns its own latency.
-- **Retrieved material is labelled as candidate reference, not fact**, with its
-  sources attached, so a bad retrieval is visible in the transcript rather than
-  silently absorbed into the answer.
-- **Every turn is recorded whether or not the endpoint answered**, along with
-  *why* it did not. A timeout and a server with nothing to add both look like
-  "allow", and telling them apart afterwards is the difference between a result
-  and a coincidence.
+Four things worth knowing before you enable it:
+
+- **The prompt hook is synchronous.** It waits up to the descriptor's ceiling
+  (60 s today) for a slow server, as wall clock — a server dribbling bytes cannot
+  hold it past that — and every breach is recorded.
+- **Retrieved material is framed as candidate reference, not fact**, inside a
+  delimited region the payload cannot close, capped at 16 KB, with the caveat
+  repeated after it, so a bad retrieval is visible in the transcript rather than
+  silently absorbed. `aisquare why` names what was shown.
+- **Every turn is recorded whether or not the server answered**, with *why* it
+  did not kept apart from what the server said. A switched-off machine, a
+  timeout and a server with nothing to add are three different rows.
+- **What leaves the machine:** the prompt (scrubbed at the configured `redaction`
+  level), a `project_ref` selector, and a git object id of the working tree —
+  kept under `refs/aisquare/wip/<trace_id>` so a turn can be replayed later;
+  untracked files are not in it. Nothing about scope, and no credentials.
 
 Token counts are **not** recorded yet — hook payloads do not carry them — so
-`metrics show` reports round-trip latency and injection rates, and says
-plainly that token savings cannot be read from it. The wire protocol is
-[`docs/ci-contract.md`](docs/ci-contract.md).
+`metrics show` says plainly that token savings cannot be read from it. The wire
+contract and the CLI's standing assumptions are in
+[`docs/ci-contract.md`](docs/ci-contract.md); the server-side seam is
+[`docs/ci-integration-handoff.md`](docs/ci-integration-handoff.md).
 
 ## Development
 

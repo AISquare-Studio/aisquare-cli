@@ -114,10 +114,18 @@ def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
         team_service.hook_session_end(session_id, cwd)
 
 
-def turn_stopped(cwd: Path | None, *, session_id: str | None = None) -> None:
-    """Mark the session as waiting for input (its turn just ended)."""
-    if session_id is not None:
-        team_service.hook_stop(session_id, cwd)
+def turn_stopped(
+    cwd: Path | None, *, session_id: str | None = None, stop_hook_active: bool = False
+) -> team_service.StopDecision | None:
+    """Mark the session as waiting for input (its turn just ended).
+
+    A manager with fresh board decisions gets a :class:`~aisquare.services.team.StopDecision`
+    back instead, which the hook prints so Claude Code keeps its turn going
+    (docs/plans/fleet-tui.md §7.3). Everyone else: ``None``, as before.
+    """
+    if session_id is None:
+        return None
+    return team_service.hook_stop(session_id, cwd, stop_hook_active=stop_hook_active)
 
 
 def needs_attention(

@@ -688,6 +688,8 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             "and pick up the next one.",
         ]
     if role in ("runner", "tester"):
+        # `tester` is the fleet's name for `runner` (docs/plans/fleet-tui.md §3.3):
+        # one cycle, two labels, so the two can never drift apart.
         return [
             f"Your standing cycle ({role}): `aisquare task next --status review`; if nothing,",
             "tell the user and stop. You are the adversarial verifier: run the FULL check the",
@@ -710,29 +712,37 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             "with findings severity-ordered (critical|major|minor|nit) and evidence per finding.",
         ]
     if role == "manager":
+        # docs/plans/fleet-tui.md §7.1 — the planner's contract cycle plus the fleet
+        # verbs and the loop protocol. Sub-agents are reached ONLY through the board
+        # and `fleet spawn|tell` (§3.3, §7.6): native agent teams are off in fleet
+        # launches, and a manager that codes is a coder nobody is steering.
         return [
-            "Your standing cycle (manager): you run this project's fleet. Turn the goal into",
-            'contract-carrying tasks — `aisquare task add "<title>" --role coder --detail',
-            '"<contract>"` (objective · why · known/ruled out · acceptance criteria a tester',
-            "can execute · boundaries), `--needs` for ordering. Then get help instead of doing",
-            "the work: `aisquare fleet spawn coder --label coder-<purpose> --task <id> "
-            f"--as {sid}` per parallelisable task (respect the agent cap), `fleet spawn tester`",
-            "when work reaches review, `fleet spawn reviewer` once a PR exists, `fleet spawn",
-            "validator` once every task is done. Board updates reach you on every turn — reopen",
-            "with reasons, re-spec or split. When the validator's gate is PASS:",
+            "Your standing cycle (manager): you run this project's fleet; you never do its",
+            "work. Intake: ask until the acceptance criteria are executable. Contracts:",
+            '`aisquare task add "<title>" --role coder --detail "<objective · why · known ·',
+            'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
+            f"`aisquare fleet spawn coder --label coder-<purpose> --task <id> --as {sid}` —",
+            "one per parallelisable task, within the agent cap; `fleet spawn tester` once work",
+            "reaches review, `fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
+            "once every task is done. Board updates reach you every turn: reopen with reasons,",
+            '`aisquare fleet tell <label> "…"` to steer, re-spec or split what bounces. Spawn',
+            "nothing while the `fleet-paused` signal is set. When the validator's gate is PASS:",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
-            "Never write code yourself. Never merge. Blocked twice on one task? Ask the human:",
-            f'`aisquare note "…" --kind question --as {sid}`. Keep labels unique and descriptive.',
+            "Never write code. Never merge. Blocked twice on one task? Ask the human:",
+            f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
+            "(coder-auth, not coder-2).",
         ]
     if role == "reviewer":
+        # §3.3 — reads the PR as the stranger who will maintain it; findings on the
+        # PR through `gh pr review`; read-only (the fleet launches it --restricted).
         return [
             "Your standing cycle (reviewer): `aisquare task next --status review`; if nothing,",
             "tell the user and stop. Read the PR as the stranger who will maintain it —",
             "`gh pr diff`, the task's contract, the tests. You are READ-ONLY: never edit, never",
-            "push. Findings go on the PR (`gh pr review --comment` or `--request-changes`),",
-            "severity-ordered (critical|major|minor|nit) with evidence, plus one summary note:",
-            f'`aisquare note "REVIEW <pr>: …" --kind result --as {sid}`. Approve only what you',
-            "would merge yourself. Repeat.",
+            "push, never merge. Findings go on the PR (`gh pr review --comment` or",
+            "`--request-changes`), severity-ordered (critical|major|minor|nit), each with",
+            'evidence, then one summary note: `aisquare note "REVIEW <pr>: …" --kind result',
+            f"--as {sid}`. Approve only what you would merge yourself. Repeat.",
         ]
     return []
 

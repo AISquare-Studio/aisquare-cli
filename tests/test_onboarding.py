@@ -314,6 +314,100 @@ def test_failure_reason_reads_the_exception_out_of_a_wrapped_traceback() -> None
     assert framed == "init failed (exit 1): the actual last line"
 
 
+#: The path CI could not create, quoted as the exception quotes it — 74 columns, so
+#: it is one word too long for an 80-column row and gets folded below 74. Sliced
+#: rather than retyped, so a rendering cannot disagree with the answer it must give.
+_FAILED_PATH = "'/tmp/pytest-of-runner/pytest-0/test_onboard_reports_the_real_0/not-a-dir'"
+
+#: The exception line as the child writes it once it has been told it is at a
+#: terminal: the same words, each run of them wrapped in SGR sequences.
+_STYLED = (
+    "\x1b[1mFileExistsError: \x1b[0m\x1b[1m[\x1b[0mErrno "
+    "\x1b[1m17\x1b[0m\x1b[1m]\x1b[0m File exists: "
+)
+
+
+def _boxed(width: int, *summary: str, ascii_box: bool = False) -> str:
+    """A Rich traceback abridged to the border that closes it and the lines under it.
+
+    The frames are what an abridgement can drop; the closing border is not,
+    because its length IS the width Rich wrapped the exception line to, and
+    reassembling that line correctly is the whole job. ``ascii_box`` is the
+    substitute Rich draws when the child's stderr encoding is not UTF-8.
+    """
+    rule = f"+{'-' * (width - 2)}+" if ascii_box else f"╰{'─' * (width - 2)}╯"
+    return "\n".join([rule, *summary]) + "\n"
+
+
+#: ONE failure — ``init`` with ``AISQUARE_HOME`` on a file — rendered every way the
+#: child's environment makes Rich render it, each measured from a real run:
+#:
+#: - ``GITHUB_ACTIONS`` (or ``FORCE_COLOR``, or ``PY_COLORS``) makes
+#:   ``typer.rich_utils`` force a terminal onto a PIPE, so every line arrives
+#:   styled. This is what CI sets, and reading the first character of a line to
+#:   decide whether it is an exception is what it defeated: the reason collapsed
+#:   to the bare path on the next line.
+#: - ``COLUMNS`` moves where the line breaks, and at 40 folds the PATH itself
+#:   mid-word — so the pieces must go back together with nothing between them.
+#: - a non-UTF-8 stderr encoding (a C locale) swaps the box for ASCII.
+#:
+#: None of the three is anything we chose, and all three must read the same.
+_RENDERINGS = {
+    "a pipe, 80 columns": _boxed(80, "FileExistsError: [Errno 17] File exists: ", _FAILED_PATH),
+    "GitHub Actions, 80 columns": _boxed(80, _STYLED, _FAILED_PATH),
+    "60 columns": _boxed(
+        60, "FileExistsError: [Errno 17] File exists: ", _FAILED_PATH[:60], _FAILED_PATH[60:]
+    ),
+    "40 columns, the path folded": _boxed(
+        40, "FileExistsError: [Errno 17] File exists:", _FAILED_PATH[:40], _FAILED_PATH[40:]
+    ),
+    "GitHub Actions, 40 columns": _boxed(
+        40, _STYLED.rstrip(), _FAILED_PATH[:40], _FAILED_PATH[40:]
+    ),
+    "120 columns, no wrap at all": _boxed(
+        120, f"FileExistsError: [Errno 17] File exists: {_FAILED_PATH}"
+    ),
+    "a C locale, 80 columns": _boxed(
+        80, "FileExistsError: [Errno 17] File exists: ", _FAILED_PATH, ascii_box=True
+    ),
+}
+
+
+def test_failure_reason_reads_one_traceback_the_same_way_however_it_was_rendered() -> None:
+    """Every rendering of one failure is one reason — the exception, whole.
+
+    The live control below runs the real CLI and so reads whatever THIS machine
+    makes Rich do; this pins the answer for the renderings it cannot produce
+    here, CI's included, with no dependence on the ambient terminal.
+    """
+    expected = f"init failed (exit 1): FileExistsError: [Errno 17] File exists: {_FAILED_PATH}"
+    for rendering, stderr in _RENDERINGS.items():
+        reason = failure_reason(_result("", code=1, stderr=stderr), "init")
+        assert reason == expected, rendering
+        assert "\x1b" not in reason, f"{rendering}: styling must not reach the user"
+        assert not {"╰", "❱", "│", "+"} & set(reason), f"{rendering}: the box is not the reason"
+
+
+def test_failure_reason_unstyles_output_that_is_not_a_traceback_too() -> None:
+    """Negative control: no box, so the last line — but never with the escapes on it."""
+    styled_usage = _result("", code=2, stderr="Usage: x\n\x1b[1;31mError: no such option\x1b[0m\n")
+    assert failure_reason(styled_usage, "init") == "init failed (exit 2): Error: no such option"
+    empty_box = _result("", code=1, stderr="╭── Traceback ──╮\n│ frame │\n╰───────────────╯\n")
+    assert failure_reason(empty_box, "init") == "init failed (exit 1): frame", (
+        "a box with nothing under it is still read for what it says, not dropped"
+    )
+
+
+def test_the_log_never_carries_the_styling_a_child_wrote(tmp_path: Path) -> None:
+    """The log is shown in a Textual pane, where an SGR sequence is noise, not colour."""
+    run = Scripted(
+        {"init": _result("", code=1, stderr="\x1b[1;33mwarning: slow disk\x1b[0m\nboom\n")}
+    )
+    outcome = onboard(tmp_path, run=run)
+    assert "  warning: slow disk" in outcome.log
+    assert not any("\x1b" in line for line in outcome.log), outcome.log
+
+
 def test_summary_line_counts_each_status() -> None:
     assert summary_line([OK, WARN_CONNECT, WARN_SNAPSHOT, FAIL_HOME]) == "✓ 1 · ⚠ 2 · ✗ 1"
     assert summary_line([]) == "✓ 0 · ⚠ 0 · ✗ 0"
@@ -627,13 +721,26 @@ def test_onboard_reports_the_real_cli_failing_in_its_own_words(tmp_path: Path) -
     CLI's bug and reported to its owners — and the outcome carries the
     exception, not the box or a wrapped path tail. A clean ``fail()`` there
     would still satisfy this: both say what could not be created.
+
+    ``GITHUB_ACTIONS`` is set for the child deliberately, and is the reason this
+    control failed only where it mattered: ``typer.rich_utils`` reads it (and
+    ``FORCE_COLOR``, and ``PY_COLORS``) and forces a terminal onto our pipe, so
+    the traceback comes back wrapped in SGR sequences. CI always sets it and no
+    developer machine does, which is exactly how a green suite here shipped a
+    red one there. Setting it makes every machine run CI's case.
     """
     proj = tmp_path / "proj"
     proj.mkdir()
     not_a_dir = tmp_path / "not-a-dir"
     not_a_dir.write_text("", encoding="utf-8")
     run = Live(
-        _hermetic_env(**{HOME_ENV_VAR: str(not_a_dir), "CLAUDE_CONFIG_DIR": str(tmp_path / "c")})
+        _hermetic_env(
+            **{
+                HOME_ENV_VAR: str(not_a_dir),
+                "CLAUDE_CONFIG_DIR": str(tmp_path / "c"),
+                "GITHUB_ACTIONS": "true",
+            }
+        )
     )
 
     outcome = onboard(proj, run=run)
@@ -643,6 +750,10 @@ def test_onboard_reports_the_real_cli_failing_in_its_own_words(tmp_path: Path) -
     assert outcome.reason is not None and outcome.reason.startswith("init failed")
     assert "File exists" in outcome.reason or "directory" in outcome.reason.lower(), outcome.reason
     assert "╰" not in outcome.reason and "❱" not in outcome.reason
+    assert "\x1b" not in outcome.reason, "the child styled it; the reason is text"
+    assert str(not_a_dir) in outcome.reason, (
+        "the path is whole, however narrow the child's terminal"
+    )
 
 
 def _is_process_site(node: ast.AST) -> bool:

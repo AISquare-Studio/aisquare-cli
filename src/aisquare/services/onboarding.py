@@ -234,32 +234,96 @@ def _json_object(stdout: str) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
-_BOX_DRAWING = frozenset("─━│┃╭╮╰╯┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬ ")
-_EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Refused|Unavailable)\b")
+#: Every character Rich draws a box out of, plus the space that pads a row and the
+#: ``+-|`` it substitutes for all of them when the child's stderr encoding is not
+#: UTF-8 (``rich.box.Box.substitute``) — a C locale renders the SAME traceback in
+#: ASCII, and a border we do not recognise is a border that reaches the user.
+_BOX_DRAWING = frozenset("─━│┃╭╮╰╯┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬+-| ")
+
+#: CSI (``\x1b[…m``), OSC and the two-character escapes, so a styled line can be
+#: read as the text it is. See :func:`_plain` for why a child on a PIPE styles.
+_ANSI = re.compile(r"\x1b\[[0-9;:?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+def _plain(text: str) -> str:
+    r"""``text`` with the terminal control sequences a child may have written removed.
+
+    Our children write to a pipe, so by rights nothing they say is styled — but
+    ``typer.rich_utils`` forces a terminal whenever ``GITHUB_ACTIONS``,
+    ``FORCE_COLOR`` or ``PY_COLORS`` is set in the environment we hand them, and
+    on GitHub Actions the first of those is always set. The traceback then
+    arrives as ``\x1b[1mFileExistsError: \x1b[0m…``: the same words wrapped in
+    SGR sequences, invisible in a log and fatal to anything that reads the first
+    character of a line. ``NO_COLOR`` is no defence — it drops the colours and
+    keeps the bold. So stderr is un-styled ONCE, here, before it is read or
+    shown, and every environment reduces to the same text.
+    """
+    return _ANSI.sub("", text)
 
 
 def _stderr_lines(result: CliResult) -> list[str]:
-    """stderr as lines worth showing: blank lines and Rich's box borders dropped."""
+    """stderr as lines worth showing: styling, blank lines and Rich's box borders dropped."""
     lines: list[str] = []
-    for raw in result.stderr.splitlines():
-        line = raw.strip().strip("│┃║").strip()
+    for raw in _plain(result.stderr).splitlines():
+        line = raw.strip().strip("│┃║|").strip()
         if line and not set(line) <= _BOX_DRAWING:
             lines.append(line)
     return lines
 
 
-def _stderr_verdict(lines: Sequence[str]) -> str | None:
+def _is_border(line: str) -> bool:
+    """Whether ``line`` is one of Rich's box rules — nothing but border and padding."""
+    stripped = line.strip()
+    return bool(stripped) and set(stripped) <= _BOX_DRAWING
+
+
+def _unwrap(lines: Sequence[str], width: int) -> str:
+    """Rich's soft wrap undone: the paragraph it broke over ``width`` columns, whole.
+
+    Rich leaves the space it broke at on the line it broke (``Text.rstrip_end``
+    removes only the whitespace that would reach BEYOND the width), so the
+    pieces concatenate straight back into the original. Two cases have no space
+    to carry, and the line lengths tell them apart: a row that fills the width
+    and holds no space at all is a chunk of a single word too long to fit —
+    those halves belong together with nothing between them, which is how a path
+    survives a narrow terminal intact; any other row that does not already end
+    in a space was broken between two words and gets exactly one back.
+    """
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        if index:
+            previous = lines[index - 1]
+            folded = len(previous) >= width and " " not in previous
+            if not (previous.endswith(" ") or folded):
+                out.append(" ")
+        out.append(line)
+    return "".join(out).strip()
+
+
+def _stderr_verdict(result: CliResult) -> str | None:
     """The one line of stderr that says what went wrong.
 
-    A traceback ends with ``ExcType: message``, and Rich wraps that at 80
-    columns when stderr is not a terminal — so the LAST line of a real failure
-    was measured to be the tail of a path, not the exception. The exception line
-    and everything after it is the answer; the plain last line otherwise.
+    A Rich traceback is a BOX of frames followed by the ``ExcType: message`` the
+    exception actually is, soft-wrapped to the console width — 80 whenever the
+    child is on a pipe, which is always. So the answer is neither the last line
+    (measured: the tail of a path) nor the last line that LOOKS like an
+    exception (a guess about how the type is spelt, which a styled line or an
+    ``Abort`` defeats): it is everything after the last border the box drew,
+    with the wrap undone. The LAST border, so a chained traceback reports the
+    exception that actually escaped rather than the one it was raised from.
+
+    Anything that is not a traceback — a usage error, one ``✗`` line — has no
+    box, and is read by its last line as before.
     """
-    for index in range(len(lines) - 1, -1, -1):
-        if _EXCEPTION_LINE.match(lines[index]):
-            return " ".join(lines[index:])
-    return lines[-1] if lines else None
+    lines = _plain(result.stderr).splitlines()
+    borders = [index for index, line in enumerate(lines) if _is_border(line)]
+    if borders:
+        closing = borders[-1]
+        summary = [line for line in lines[closing + 1 :] if line.strip()]
+        if summary:
+            return _unwrap(summary, len(lines[closing].strip()))
+    shown = _stderr_lines(result)
+    return shown[-1] if shown else None
 
 
 def failure_reason(result: CliResult, step: str) -> str:
@@ -278,7 +342,7 @@ def failure_reason(result: CliResult, step: str) -> str:
             if isinstance(value, str) and value:
                 parts.append(value)
         return f"{step} failed: {' — '.join(parts)}"
-    verdict = _stderr_verdict(_stderr_lines(result))
+    verdict = _stderr_verdict(result)
     if verdict is not None:
         return f"{step} failed (exit {result.returncode}): {verdict}"
     return f"{step} failed with exit {result.returncode} and said nothing"

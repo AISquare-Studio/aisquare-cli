@@ -660,6 +660,67 @@ def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) 
     assert fake.captures and all(scrollback == 0 for _, scrollback in fake.captures)
 
 
+def test_a_cleared_history_retires_the_scroll_offset_and_the_view_stays_live(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """History vanishing under a scrolled-back reader must not leave the offset behind.
+
+    An agent that runs ``clear`` clears the pane's HISTORY, not just its screen:
+    ncurses' ``clear`` emits the ``E3`` capability (``ESC [ 3 J``) after the
+    erase, and the fleet's ``default-terminal tmux-256color`` defines ``E3``
+    where bare ``screen`` leaves it empty. Measured against the real tmux 3.4 —
+    the version ubuntu-latest ships — on 2026-08-29: a process writing
+    ``ESC [ 3 J`` takes ``history_size`` from 31 to 0, and ``capture-pane -S -k``
+    past the top of history is CLAMPED rather than refused (``-S -1000`` against
+    a 31-line history returns the same 41 rows as ``-S -32``), so the frame
+    quietly becomes the live screen while the request stays 3.
+
+    That surviving request is the bug, and it only shows itself later: as soon as
+    the agent prints enough to refill history the dead offset comes back to life
+    and drags the view three lines off the live output — no wheel notch, no
+    keypress, just whichever poll tick landed next. So the negative half here is
+    the third step, not the second: it is not enough that the view is live right
+    after the clear, it has to STAY live while history regrows.
+    """
+    state = fake.panes["%1"]
+    state.history = [f"old {n}" for n in range(5)]
+    Reading = tuple[int, str, bool]
+
+    async def drive() -> tuple[Reading, Reading, Reading, list[tuple[str, int]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: synced(pane))
+
+            def reading() -> Reading:
+                # The cursor is drawn only on a live frame, so it reads back the
+                # liveness the widget decided from the offset tmux HONOURED.
+                return (pane.scrollback, screen_text(pane)[0], reverse_anywhere(rows(pane)[0], 40))
+
+            pane.scroll_history(TerminalPane.WHEEL_LINES)  # what the wheel calls
+            await pilot.pause()
+            scrolled = reading()
+
+            state.history = []  # the agent ran `clear`
+            frames = pane.frames
+            await wait_until(pilot, lambda: pane.frames > frames)
+            cleared = reading()
+
+            fake.captures.clear()
+            state.history = [f"new {n}" for n in range(5)]  # its output refills history
+            frames = pane.frames
+            await wait_until(pilot, lambda: pane.frames > frames + 1)
+            return scrolled, cleared, reading(), list(fake.captures)
+
+    scrolled, cleared, regrown, refills = run(drive())
+    assert scrolled == (3, "old 2", False)  # three lines back; no cursor off the live screen
+    assert cleared == (0, "red plain", True)  # the offset is retired the frame it dies
+    assert regrown == (0, "red plain", True)  # and it does NOT come back as history refills
+    # The widget also stops ASKING tmux for history that is not there.
+    assert refills and all(scrollback == 0 for _, scrollback in refills)
+
+
 # --- size -----------------------------------------------------------------------------------
 
 
@@ -814,7 +875,21 @@ def test_header_text_carries_every_field_as_data() -> None:
 def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
-    fake.panes["%2"] = FakePane(screen=["restarted"])
+    """A poll redraws the header; only a pane_id that CHANGED costs the user their view.
+
+    Both panes are given a history because the scroll offset has to be a position
+    the widget can really be in. ``scrollback`` is not free-form state: every
+    writer clamps it to the history the last frame reported, and
+    :meth:`TerminalPane.refresh_frame` writes back the offset tmux honoured, so
+    on a pane with no history it can only ever be 0 — asserting that a poll
+    "kept" a 2 there would assert nothing. With two history lines on ``%1`` one
+    wheel notch lands exactly on 2 and stays there, so ``kept == 2`` fails the
+    moment a poll re-attaches, because :meth:`TerminalPane.attach` resets it.
+    The history on ``%2`` is what makes ``reset == 0`` a claim about attach
+    rather than about the clamp: without it 0 is the only value possible.
+    """
+    fake.panes["%1"].history = ["old one", "old two"]
+    fake.panes["%2"] = FakePane(screen=["restarted"], history=["other one", "other two"])
     server = fake.server(tmp_path)
 
     class ViewHost(App[None]):
@@ -828,7 +903,9 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
             header = host.query_one("#agent-header", Static)
             await wait_until(pilot, lambda: view.pane.frames >= 1)
             first = view.pane.pane_id or ""
-            view.pane.scrollback = 2
+            # What ``on_mouse_scroll_up`` calls: one notch, clamped to the two
+            # lines of history that exist.
+            view.pane.scroll_history(TerminalPane.WHEEL_LINES)
             view.refresh_status(_status(state="waiting"))  # same pane: no re-attach
             await pilot.pause()
             kept, waiting = view.pane.scrollback, str(header.content)
@@ -845,8 +922,8 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
 
     first, second, kept, waiting, working, reset = run(drive())
     assert (first, second) == ("%1", "%2")
-    assert kept == 2  # the same pane keeps its view
-    assert reset == 0  # a new pane starts live
+    assert kept == 2  # the same pane keeps its view: a notch clamped to history_size
+    assert reset == 0  # a new pane starts live, though %2 has history of its own
     assert "coder-1" in waiting and "waiting" in waiting
     assert "working" in working and "waiting" not in working
 

@@ -11,8 +11,10 @@ so Textual's Line API (:meth:`render_line`) is asked for exactly those. A row
 string becomes a :class:`Strip` through ``rich.text.Text.from_ansi``, cached by
 the string, so a row that scrolled by one line is a dict lookup. The cursor is
 a reverse-video cell (underline while the pane is unfocused) when tmux says it
-is visible and the view is live — the offset tmux HONOURED is 0, not the one
-that was asked for, so a pane with no history still shows its cursor.
+is visible and the view is live — live meaning the offset tmux HONOURED is 0,
+not the one that was asked for, so a pane whose history vanished under a
+scrolled-back reader draws its cursor again on the frame that retires the
+stranded offset.
 
 Cadence. A one-shot timer re-arms itself after every frame: :attr:`FAST_INTERVAL`
 (50 ms) while the last frame changed something, :attr:`IDLE_INTERVAL` (500 ms)
@@ -116,9 +118,13 @@ class TerminalPane(Widget, can_focus=True):
         self.scrollback = 0
         """How many history lines above the live screen the view starts at (``k``).
 
-        A REQUEST, and whoever is reading the pane owns it: :meth:`scroll_history`
-        clamps it to the history the last frame reported and :meth:`attach` puts it
-        back to 0, but the render loop only ever reads it — see :meth:`refresh_frame`.
+        Kept equal to the offset tmux HONOURED, so that reading it answers "where
+        is the view" and not merely "what was last asked for". Four writers move
+        it deliberately — :meth:`scroll_history` clamps a wheel notch to the
+        history the last frame reported, and :meth:`attach`, :meth:`on_key` and
+        :meth:`on_paste` put it back to 0 — and :meth:`refresh_frame` writes back
+        what tmux gave it, which is what retires an offset that a shrinking
+        history stranded.
         """
         self.facts: PaneFacts | None = None
         """What the last frame's ``display-message`` said; ``None`` before the first."""
@@ -220,16 +226,23 @@ class TerminalPane(Widget, can_focus=True):
             return self._fail(f"(capture failed: {type(error).__name__})")
         self.frames += 1
         facts = capture.facts
-        # Reading a frame must NOT move the view. tmux clamps a request deeper
-        # than the history to its top itself, and ``Capture.scrollback`` reports
-        # the offset it honoured, so the rows below are right whatever was asked
-        # for — clamping :attr:`scrollback` back here buys no correctness and
-        # hands the user's position to a timer: an offset set between frames (a
-        # caller restoring a view, a wheel notch racing a tick) would be thrown
-        # away by whichever of the 20 poll ticks a second landed next. Nor does a
-        # stale offset linger — :meth:`scroll_history` clamps against the history
-        # the last frame reported, so the next notch lands inside it — and it is
-        # the HONOURED offset, not the asked-for one, that says whether this
+        # ``Capture.scrollback`` is the offset tmux HONOURED, which is not always
+        # the one asked for: a request deeper than the history is clamped to the
+        # top of history rather than refused (measured on tmux 3.4 — the version
+        # ubuntu-latest ships — on 2026-08-29: ``capture-pane -S -1000`` against a
+        # 31-line history returns the same 41 rows as ``-S -32``). Writing it back
+        # is what retires a request the pane can no longer honour, and history
+        # does shrink under a reader: ``ESC [ 3 J`` drops it to 0, which is what
+        # ncurses' ``clear`` emits whenever ``E3`` is defined — the fleet's
+        # ``default-terminal tmux-256color`` defines it (measured the same day:
+        # history_size 31 -> 0). Left alone the dead offset would come back to
+        # life as history regrew, dragging the view off the live screen the user
+        # was returned to; it would also lie to the two readers that treat
+        # :attr:`scrollback` as where the view IS — :meth:`scroll_history`, which
+        # would spend a wheel notch closing the gap, and :meth:`on_key`, which
+        # would fork tmux for a frame that changes nothing.
+        self.scrollback = capture.scrollback
+        # The HONOURED offset, not the asked-for one, is what says whether this
         # frame is the live screen and so whether the cursor belongs on it.
         live = capture.scrollback == 0
         # A pane taller than the widget shows its LAST rows — the prompt lives

@@ -11,7 +11,8 @@ so Textual's Line API (:meth:`render_line`) is asked for exactly those. A row
 string becomes a :class:`Strip` through ``rich.text.Text.from_ansi``, cached by
 the string, so a row that scrolled by one line is a dict lookup. The cursor is
 a reverse-video cell (underline while the pane is unfocused) when tmux says it
-is visible and the view is live (scrollback 0).
+is visible and the view is live — the offset tmux HONOURED is 0, not the one
+that was asked for, so a pane with no history still shows its cursor.
 
 Cadence. A one-shot timer re-arms itself after every frame: :attr:`FAST_INTERVAL`
 (50 ms) while the last frame changed something, :attr:`IDLE_INTERVAL` (500 ms)
@@ -113,7 +114,12 @@ class TerminalPane(Widget, can_focus=True):
         self.server = server
         self.escape_key = escape_key
         self.scrollback = 0
-        """How many history lines above the live screen the view starts at (``k``)."""
+        """How many history lines above the live screen the view starts at (``k``).
+
+        A REQUEST, and whoever is reading the pane owns it: :meth:`scroll_history`
+        clamps it to the history the last frame reported and :meth:`attach` puts it
+        back to 0, but the render loop only ever reads it — see :meth:`refresh_frame`.
+        """
         self.facts: PaneFacts | None = None
         """What the last frame's ``display-message`` said; ``None`` before the first."""
         self.notice: str | None = None
@@ -214,15 +220,25 @@ class TerminalPane(Widget, can_focus=True):
             return self._fail(f"(capture failed: {type(error).__name__})")
         self.frames += 1
         facts = capture.facts
-        if self.scrollback > facts.history_size:
-            self.scrollback = facts.history_size
+        # Reading a frame must NOT move the view. tmux clamps a request deeper
+        # than the history to its top itself, and ``Capture.scrollback`` reports
+        # the offset it honoured, so the rows below are right whatever was asked
+        # for — clamping :attr:`scrollback` back here buys no correctness and
+        # hands the user's position to a timer: an offset set between frames (a
+        # caller restoring a view, a wheel notch racing a tick) would be thrown
+        # away by whichever of the 20 poll ticks a second landed next. Nor does a
+        # stale offset linger — :meth:`scroll_history` clamps against the history
+        # the last frame reported, so the next notch lands inside it — and it is
+        # the HONOURED offset, not the asked-for one, that says whether this
+        # frame is the live screen and so whether the cursor belongs on it.
+        live = capture.scrollback == 0
         # A pane taller than the widget shows its LAST rows — the prompt lives
         # at the bottom — until the debounced resize brings the two in line.
         offset = max(0, len(capture.lines) - height)
         lines = capture.lines[offset:]
         lines += [""] * (height - len(lines))
         cursor: tuple[int, int] | None = None
-        if facts.cursor_visible and self.scrollback == 0 and not facts.dead:
+        if facts.cursor_visible and live and not facts.dead:
             cursor = (facts.cursor_x, facts.cursor_y - offset)
         notice: str | None = None
         if facts.dead:

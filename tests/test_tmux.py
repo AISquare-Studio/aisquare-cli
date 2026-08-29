@@ -5,8 +5,10 @@ the CONTRACT — which arguments reach tmux for each method and how tmux's
 answers are read — and run everywhere, tmux or not. The live tests (skipped
 where tmux is absent) pin the ASSUMPTIONS the contract rests on: that ``=name``
 is exact, that a dead pane keeps its exit status, that ``display-message`` on a
-gone pane succeeds with empty fields, that every bundled option is accepted by
-this tmux with the value written. Each live server runs on its own private
+gone pane succeeds with empty fields, that every option the fleet sets — the
+file at server start and the per-window ones after it — is accepted by this
+tmux with the value written, and that the server survives reading that file and
+then holding the windows it exists for. Each live server runs on its own private
 socket (``asq-test-<pid>-<n>``) and is killed in teardown, so a failing test
 cannot leave a server behind or touch a real ``asq`` fleet.
 
@@ -39,6 +41,7 @@ from aisquare.core.tmux import (
     CONF_NAME,
     MIN_VERSION,
     PASTE_BUFFER,
+    WINDOW_OPTIONS,
     Capture,
     Completed,
     PaneFacts,
@@ -53,6 +56,8 @@ from aisquare.core.tmux import (
 OK = Completed(0, "", "")
 FACTS_FIELDS = 13
 WINDOW_FIELDS = 7
+#: One ``set`` line of BUNDLED_CONF: the flag, the option and its value.
+_SET = re.compile(r"^set (-g|-s|-ga) (\S+) (.+)$")
 
 
 # --- the fake runner -----------------------------------------------------------------
@@ -242,39 +247,91 @@ def test_an_explicit_conf_is_used_verbatim_and_never_written(fake_bin: Path, con
     assert not conf.exists()
 
 
-def test_check_conf_sources_the_file_on_a_throwaway_server(fake_bin: Path, conf: Path) -> None:
+def test_no_window_option_is_written_into_the_file_the_server_starts_with() -> None:
+    """The split that keeps tmux alive, pinned where a future edit would undo it.
+
+    ``window-size manual`` among the GLOBAL window options segfaults every tmux
+    below 3.7 the next time a window is created — from the ``-f`` file it is the
+    first ``new-session``, from a ``set -g`` on a running server it is the next
+    spawn (module docstring). The fleet sets it on each window instead, so an
+    option in WINDOW_OPTIONS must never also be a line of BUNDLED_CONF.
+    """
+    lines = [line for line in BUNDLED_CONF.splitlines() if line and not line.startswith("#")]
+    rules = [_SET.match(line) for line in lines]
+    assert rules and all(rules), f"every line is a `set`: {lines}"
+    in_conf = {rule.group(2) for rule in rules if rule is not None}
+
+    assert "window-size" not in in_conf, "a global window-size is what killed the server"
+    assert in_conf.isdisjoint({option for option, _ in WINDOW_OPTIONS})
+    # Negative control on the reading: the conf's other options ARE found this way.
+    assert {"status", "remain-on-exit", "history-limit"} <= in_conf
+
+
+def test_check_conf_starts_a_throwaway_server_with_the_file_and_gives_it_a_window(
+    fake_bin: Path, conf: Path
+) -> None:
+    """The check runs the conf the way the fleet does, which is the only way it can fail.
+
+    ``-f <file>`` at server start, then a session — because a file that kills
+    the server takes it down when the first WINDOW is created, not at start, and
+    a check that only sourced the file onto an ``-f /dev/null`` server would
+    watch the fatal line load without a word (module docstring). The per-window
+    options ride along on the probe window, and ``source-file`` last is what
+    turns tmux's swallowed complaints into stderr. The kill on BOTH sides is
+    what makes the started server the one under test: tmux reads ``-f`` only
+    when it starts one, so a throwaway left behind by a killed run would take
+    the commands and answer for a configuration nobody asked about.
+    """
     fake = FakeTmux()
     server = _server(fake, fake_bin, conf, socket="asq")
     assert _completes(server.check_conf)
-    check = _prefix(fake_bin, Path(os.devnull), "asq" + CHECK_SOCKET_SUFFIX)
+    checking = _prefix(fake_bin, conf, "asq" + CHECK_SOCKET_SUFFIX)
+    tidying = _prefix(fake_bin, Path(os.devnull), "asq" + CHECK_SOCKET_SUFFIX)
     assert fake.calls == [
-        ([*check, "start-server", ";", "source-file", str(conf)], None),
-        ([*check, "kill-server"], None),
-    ]
+        ([*tidying, "kill-server"], None),
+        ([*checking,
+          "new-session", "-d", "-s", "asq-conf-check", "-c", "/", "--", "true",
+          ";", "set-option", "-w", "-t", "=asq-conf-check:", "window-size", "manual",
+          ";", "source-file", str(conf)], None),
+        ([*tidying, "kill-server"], None),
+    ]  # fmt: skip
 
     other = conf.with_name("other.conf")
     fake = FakeTmux()
     _server(fake, fake_bin, conf, socket="asq").check_conf(other)
-    assert fake.calls[0][0][-1] == str(other)
+    assert fake.calls[1][0][:5] == _prefix(fake_bin, other, "asq" + CHECK_SOCKET_SUFFIX)
+    assert fake.calls[1][0][-1] == str(other), "…and the same file is what source-file reads"
 
 
 def test_check_conf_reports_what_tmux_rejected(fake_bin: Path, conf: Path) -> None:
-    # tmux 3.7c: `start-server ; source-file bad` exits 1 with the complaint on stderr.
-    loud = FakeTmux(Completed(1, "", "invalid option: no-such-option\n"))
+    # The first answer is the kill that clears the socket; the second is the check.
+    # tmux 3.7c: `source-file bad` exits 1 with the complaint on stderr.
+    loud = FakeTmux(OK, Completed(1, "", "invalid option: no-such-option\n"))
     with pytest.raises(TmuxError, match="invalid option: no-such-option"):
         _server(loud, fake_bin, conf).check_conf()
-    assert len(loud.calls) == 2, "the throwaway server is still killed after a rejection"
+    assert len(loud.calls) == 3, "the throwaway server is still killed after a rejection"
 
     # A complaint with status 0 is still a rejection: tmux 3.7c was seen to print
     # `<file>:185: syntax error` and exit 0 when the file also held valid commands
     # (a Python module fed to source-file), so the status alone does not decide.
-    quiet_rc = FakeTmux(Completed(0, "", "bad.conf:185: syntax error\n"))
+    quiet_rc = FakeTmux(OK, Completed(0, "", "bad.conf:185: syntax error\n"))
     with pytest.raises(TmuxError, match="185: syntax error"):
         _server(quiet_rc, fake_bin, conf).check_conf()
 
-    mute = FakeTmux(Completed(1, "", ""))
+    # The failure the old shape could not see at all: a conf that KILLS the
+    # server it starts. Every command after the death answers this, status 1.
+    dead = FakeTmux(OK, Completed(1, "", "server exited unexpectedly\n"))
+    with pytest.raises(TmuxError, match="server exited unexpectedly"):
+        _server(dead, fake_bin, conf).check_conf()
+
+    mute = FakeTmux(OK, Completed(1, "", ""))
     with pytest.raises(TmuxError, match="without saying why"):
         _server(mute, fake_bin, conf).check_conf()
+
+    # …and the kill before it cannot itself fail the check: "no server running"
+    # is the ordinary answer there, and it is not the conf's fault.
+    stale = FakeTmux(Completed(1, "", "no server running on /tmp/tmux-1000/asq-check\n"))
+    assert _completes(_server(stale, fake_bin, conf).check_conf)
 
 
 # --- sessions and windows -------------------------------------------------------------------
@@ -324,6 +381,9 @@ def test_spawn_window_creates_the_session_when_it_is_absent(
         "-e", "AISQUARE_ROLE=coder", "-e", "X=a=b",
         "--", "claude", "--name", "coder-1", "-p", "--dangerously-skip",
     ]  # fmt: skip
+    assert fake.commands()[2:] == [["set-option", "-w", "-t", "@4", "window-size", "manual"]], (
+        "the new window is pinned by its own id, once, right after it exists"
+    )
     assert info == WindowInfo(
         session="asq-amber-fox",
         window_id="@4",
@@ -350,6 +410,9 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
         "--", "sh", "-c", "exit 3",
     ]  # fmt: skip
     assert "-x" not in new_window, "an existing session's size is the session's"
+    assert fake.commands()[2:] == [["set-option", "-w", "-t", "@5", "window-size", "manual"]], (
+        "the window just added is pinned — @5, never the session's current window"
+    )
     assert (info.window_id, info.pane_id, info.current_command) == ("@5", "%10", "sh")
 
 
@@ -383,7 +446,8 @@ def test_spawn_and_rename_refuse_a_session_name_tmux_could_not_target(
 def test_spawn_window_refuses_a_cwd_tmux_would_replace_with_home(
     fake_bin: Path, conf: Path, tmp_path: Path
 ) -> None:
-    fake = FakeTmux()
+    # Answers for the negative control at the end; a refusal consumes none.
+    fake = FakeTmux(OK, Completed(0, f"@1{_SEP}%1\n", ""))
     server = _server(fake, fake_bin, conf)
     missing = tmp_path / "worktree-not-yet-created"
     with pytest.raises(TmuxError, match="is not a directory"):
@@ -398,6 +462,24 @@ def test_spawn_window_refuses_a_cwd_tmux_would_replace_with_home(
     missing.mkdir()
     server.spawn_window("asq-amber-fox", name="w", cwd=missing, command=["cat"])
     assert fake.commands()[0] == ["has-session", "-t", "=asq-amber-fox"]
+
+
+@pytest.mark.parametrize("answer", ["", "@4", f"{_SEP}%9", f"@4{_SEP}"])
+def test_spawn_window_refuses_an_answer_that_names_no_window(
+    answer: str, fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """A half-read ``-P -F`` line must not become a ``set-option`` with an empty target.
+
+    ``-t ''`` is not a no-op to tmux: it resolves to whatever window is current,
+    so pinning one with an id tmux did not give would size somebody else's agent
+    — and the caller would get a WindowInfo it could never target either.
+    """
+    fake = FakeTmux(OK, Completed(0, answer + "\n", ""))
+    with pytest.raises(TmuxError, match="did not name the new window"):
+        _server(fake, fake_bin, conf).spawn_window(
+            "asq-amber-fox", name="w", cwd=tmp_path, command=["cat"]
+        )
+    assert len(fake.calls) == 2, "nothing was set on a window the answer did not name"
 
 
 def test_list_windows_parses_each_pane_and_skips_a_malformed_line(
@@ -983,20 +1065,69 @@ def test_live_check_conf_accepts_the_bundled_conf_and_rejects_a_bad_one(
         live.check_conf(bad)
     assert TmuxServer(live.socket + CHECK_SOCKET_SUFFIX).list_sessions() == []
 
+    # A throwaway server a killed run left behind is not a bad conf: it would
+    # answer for a file nobody asked about (tmux reads `-f` only when it starts
+    # a server) and refuse the probe session by name, so the check clears it.
+    stale = TmuxServer(live.socket + CHECK_SOCKET_SUFFIX)
+    stale.run("new-session", "-d", "-s", "asq-conf-check", "-c", "/tmp", "--", "cat")
+    assert stale.list_sessions() == ["asq-conf-check"]
+    assert _completes(live.check_conf)
+    assert stale.list_sessions() == []
 
-_SET = re.compile(r"^set (-g|-s|-ga) (\S+) (.+)$")
+
+@requires_tmux
+def test_live_the_conf_the_server_starts_with_survives_the_windows_it_is_there_to_hold(
+    live: TmuxServer,
+) -> None:
+    """The regression: ``set -g window-size manual`` in that file killed the server.
+
+    Below tmux 3.7 a GLOBAL ``window-size manual`` segfaults the server the next
+    time any window is created — so a fleet whose ``-f`` file carried it died on
+    the very first ``new-session`` (tmux 3.4, what ``ubuntu-latest`` ships) and
+    every command after that answered ``server exited unexpectedly``. Moving the
+    option onto a running server only moves the crash to the next spawn, which
+    is why this walks the whole sequence: the server is born, takes a second
+    window, then a second session, and every pane is still there.
+
+    The option still has to end up ``manual``, so the test also pins where it
+    now is (each window's own options) and where it must never be again (the
+    server's globals).
+    """
+    first = _spawn(live, "asq-test-fox", "w0", CAT)  # the server comes into existence here
+    second = _spawn(live, "asq-test-fox", "w1", CAT)  # …and survives another window
+    third = _spawn(live, "asq-test-owl", "w0", CAT)  # …and another session
+    windows = (first, second, third)
+
+    assert live.list_sessions() == ["asq-test-fox", "asq-test-owl"]
+    assert all(live.pane_facts(w.pane_id) is not None for w in windows)
+    assert live.run("show-options", "-gv", "window-size").strip() != "manual", (
+        "the global option is the one that kills tmux below 3.7 — the fleet never sets it"
+    )
+    assert [
+        live.run("show-options", "-wv", "-t", w.window_id, "window-size").strip() for w in windows
+    ] == ["manual", "manual", "manual"], "…and every window the fleet made is pinned"
+
+    # Control on the instrument: a dead server does not quietly agree with any
+    # of it — without which "every pane is still there" would prove nothing.
+    live.kill_server()
+    assert live.pane_facts(first.pane_id) is None
+    with pytest.raises(TmuxError, match="no server running"):
+        live.run("show-options", "-gv", "window-size")
 
 
 @requires_tmux
 def test_live_every_bundled_option_is_applied_with_its_value(live: TmuxServer) -> None:
-    """Task (c) of the spike: each option in BUNDLED_CONF loads on this tmux.
+    """Task (c) of the spike: every option the fleet sets is live on this tmux.
 
-    Asserted on the server's own view of each option, not on the exit status of
-    ``-f`` — which is 0 whatever the file says (module docstring). Every
-    non-comment line must parse, so a line this test does not understand fails
-    it rather than escaping it.
+    Two halves, because they are applied two ways (module docstring): BUNDLED_CONF,
+    which the server reads at start, read back from its global options; and
+    WINDOW_OPTIONS, which go on each window as it is created, read back from that
+    window's own. Asserted on the server's view of each option, never on the exit
+    status of ``-f`` — which is 0 whatever the file says. Every non-comment line
+    must parse, so a line this test does not understand fails it rather than
+    escaping it.
     """
-    _spawn(live, "asq-test-fox", "w0", CAT)
+    window = _spawn(live, "asq-test-fox", "w0", CAT)
     lines = [line for line in BUNDLED_CONF.splitlines() if line and not line.startswith("#")]
     rules = [_SET.match(line) for line in lines]
     assert rules and all(rules), f"every line is a `set`: {lines}"
@@ -1010,6 +1141,20 @@ def test_live_every_bundled_option_is_applied_with_its_value(live: TmuxServer) -
             assert value.lstrip(",") in shown, f"{option}: {value!r} not among {shown}"
         else:
             assert shown == [value], f"{option}: wanted {value!r}, server has {shown}"
+
+    for option, value in WINDOW_OPTIONS:
+        shown = live.run("show-options", "-wv", "-t", window.window_id, option).splitlines()
+        assert shown == [value], f"{option}: wanted {value!r} on {window.window_id}, got {shown}"
+
+    # Negative control on the second half: a window this module did NOT create
+    # has the option unset — so `manual` above is spawn_window's doing and not
+    # something every window on this tmux would have said.
+    raw = live.run(
+        "new-window", "-d", "-P", "-F", "#{window_id}", "-t", "=asq-test-fox:",
+        "-n", "raw", "-c", "/tmp", "--", *CAT,
+    ).strip()  # fmt: skip
+    for option, _ in WINDOW_OPTIONS:
+        assert live.run("show-options", "-wv", "-t", raw, option).splitlines() == []
 
     # Negative control on the instrument: an option that does not exist is an error.
     with pytest.raises(TmuxError, match="invalid option"):

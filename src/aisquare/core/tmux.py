@@ -18,7 +18,8 @@ stripped: the server inherits the environment of whoever starts it and hands it
 to every window, so an inherited tracing identity here would become every
 agent's identity. Each window's agent takes its own through ``aisquare launch``.
 
-Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
+Verified against tmux 3.7c, and on 3.4 where a version is named below
+(``tests/test_tmux.py`` re-verifies the live ones on whichever tmux is here):
 
 * ``new-session``/``new-window`` accept ``-e KEY=VALUE`` and a multi-argument
   command after ``--``; ``send-keys -l --`` takes literal text that starts with
@@ -41,6 +42,21 @@ Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
   for the first attached client, which the fleet never has, and the command
   exits 0. ``source-file`` on a running server reports them on stderr with
   status 1 — so that, on a throwaway server, is :meth:`TmuxServer.check_conf`.
+* ``window-size manual`` in the GLOBAL window options is FATAL below tmux 3.7,
+  whether the ``-f`` file sets it at server start or a ``set -g`` sets it on a
+  running server. Creating a window reads that global (``default_window_size``,
+  which has no window yet) and ``clients_calculate_size`` then reads
+  ``w->manual_sx`` through the window pointer it was never given: the server
+  segfaults and the client says ``server exited unexpectedly``. tmux 3.7 added
+  the ``w != NULL`` guard; 3.4 — what ``ubuntu-latest`` ships — dies on the
+  first ``new-session``, and on every later ``new-window`` if the option is set
+  once the server is up. So the fleet sets ``window-size`` on each window it
+  creates instead (:data:`WINDOW_OPTIONS`): a WINDOW's own option is what pins
+  its size anyway (``recalculate_size`` reads it, measured on 3.4 — a window
+  left at the default ``latest`` is resized to an attaching client's terminal
+  the moment that client looks at it, a pinned one is not), it is what tmux's
+  own ``resize-window`` sets, and it arms nothing for the next window — the
+  fleet's, or one a user opens in the ``tmux -L asq attach`` escape hatch.
 * ``window_activity_flag`` is set the moment a window exists — before its
   command has written a byte — and nothing clears it on a server nobody is
   attached to (not output, not a capture, not ``select-window``), so
@@ -83,14 +99,15 @@ _COMMAND_TIMEOUT = 30.0
 
 #: The bundled server configuration. Applied with ``-f`` when the server starts
 #: (harmless afterwards). Every line has a reason: docs/plans/fleet-tui.md §3.1.
-#: Every option is verified to load, with this value, on tmux 3.7c by
-#: ``tests/test_tmux.py::test_live_every_bundled_option_is_applied``.
+#: Every option is verified to load, with this value, on the tmux running the
+#: tests by ``tests/test_tmux.py::test_live_every_bundled_option_is_applied_with_its_value``.
+#: ``window-size`` is NOT here and must never be: a global one kills the server
+#: below tmux 3.7 (module docstring). It lives in :data:`WINDOW_OPTIONS`.
 BUNDLED_CONF = """\
 # aisquare fleet — private tmux server configuration (regenerated; do not edit)
 set -g status off
 set -s escape-time 0
 set -g history-limit 50000
-set -g window-size manual
 set -g remain-on-exit on
 set -g mouse off
 set -g default-terminal tmux-256color
@@ -104,6 +121,26 @@ set -g allow-rename off
 set -g automatic-rename off
 set -g renumber-windows off
 """
+
+#: What the fleet sets on each window it creates, the moment that window exists
+#: — the rest of its configuration, and the half that cannot be in a file the
+#: server reads at start (module docstring: a global ``window-size`` is a
+#: segfault waiting for the next window on tmux below 3.7).
+#:
+#: ``window-size manual`` is the fleet's sizing model: a window keeps the size
+#: it was born with — its session's, from ``new-session -x -y`` — until
+#: :meth:`TmuxServer.resize` says otherwise, and a user who opens the escape
+#: hatch on an 80x24 terminal does not shrink every agent's screen under the UI.
+#: Applied by :meth:`TmuxServer.spawn_window` and checked, with the file, by
+#: :meth:`TmuxServer.check_conf`.
+WINDOW_OPTIONS: tuple[tuple[str, str], ...] = (("window-size", "manual"),)
+
+#: Where :meth:`TmuxServer.check_conf` proves the configuration survives a real
+#: server: one session, one window running ``true``, in the one directory POSIX
+#: guarantees. The name obeys :func:`_require_targetable`.
+_CHECK_SESSION = "asq-conf-check"
+_CHECK_COMMAND = ("true",)
+_CHECK_CWD = "/"
 
 #: Separator for multi-field ``display-message`` output. Never appears in a pane
 #: id, a size or a flag; a command name or title containing it would be perverse.
@@ -311,6 +348,33 @@ def _require_directory(cwd: Path) -> None:
         )
 
 
+def _chain(*commands: Sequence[str]) -> list[str]:
+    """Several tmux commands as ONE argument list, separated by tmux's own ``;``.
+
+    One invocation is one fork and one round trip, and tmux runs the commands in
+    order, stopping at the first that fails (module docstring) — so a chain is
+    also how two steps that must not be interleaved by another process stay
+    together.
+    """
+    argv: list[str] = []
+    for command in commands:
+        if argv:
+            argv.append(";")
+        argv.extend(command)
+    return argv
+
+
+def _window_option_commands(target: str) -> list[list[str]]:
+    """:data:`WINDOW_OPTIONS` as ``set-option -w`` commands against one window.
+
+    ``target`` must name a window exactly — a ``@id`` from ``-P -F``, or
+    ``=session:`` where the session has the one window. An EMPTY target is not a
+    no-op to tmux: it resolves to whatever window is current, which on a server
+    holding several agents is somebody else's. Callers make sure it is not.
+    """
+    return [["set-option", "-w", "-t", target, option, value] for option, value in WINDOW_OPTIONS]
+
+
 class TmuxServer:
     """A handle on one private tmux server (``-L socket``).
 
@@ -407,25 +471,55 @@ class TmuxServer:
         return completed.stdout
 
     def check_conf(self, conf: Path | None = None) -> None:
-        """Prove THIS tmux accepts the configuration, or raise with tmux's complaint.
+        """Prove THIS tmux RUNS the fleet's configuration, or raise with its complaint.
 
-        ``-f`` at server start swallows configuration errors (see the module
-        docstring), so the check that can actually fail is ``source-file`` on a
-        running server. It runs on a throwaway server — ``-L <socket>-check``,
-        started with ``-f /dev/null`` — so the fleet's own server is never
-        touched and never accumulates a second ``-ga`` append. That server has
-        no session and exits on its own (``exit-empty``); a best-effort
-        ``kill-server`` follows so nothing is left behind if it has not yet.
+        Two different failures, caught on one throwaway server in one command:
+
+        * a configuration that KILLS the server. ``-f`` at server start reports
+          nothing (it exits 0 whatever the file says), and the death does not
+          come at start either: it comes when the first WINDOW is created —
+          which is why the server here is started with the file under test and
+          immediately asked for a session, and why a check that only sourced the
+          file onto an empty server never saw ``window-size manual`` take tmux
+          3.4 down (module docstring). A dead server answers
+          ``server exited unexpectedly`` with status 1.
+        * a configuration tmux does not ACCEPT. Those errors ``-f`` queues for
+          the first attached client, which the fleet never has; ``source-file``
+          on the now-running server reports them on stderr with status 1.
+
+        :data:`WINDOW_OPTIONS` go on the probe window in between, so the half of
+        the configuration that is applied after a window is born is proved here
+        too instead of at the first spawn.
+
+        The throwaway server (``-L <socket>-check``) is never the fleet's own,
+        so re-sourcing a file it already read — which appends
+        ``terminal-overrides`` a second time — costs nothing, and neither does
+        the window running ``true``. The check must OWN that server, though, so
+        it is killed on both sides: one left running by a killed run would
+        absorb the ``-f`` (tmux reads it only when it STARTS a server) and then
+        refuse the session by name, turning a stale socket into a rejected
+        configuration. Both kills are best effort — ``no server running`` is the
+        ordinary answer to the first, and this server holds a session, so
+        ``exit-empty`` will not end it by itself.
 
         The doctor's "private server starts" check is exactly this call.
         """
         path = conf if conf is not None else self.conf_path()
         socket = self.socket + CHECK_SOCKET_SUFFIX
-        completed = self._runner(
-            self._argv_on(socket, os.devnull, "start-server", ";", "source-file", str(path)),
-            None,
+        probe = ["new-session", "-d", "-s", _CHECK_SESSION, "-c", _CHECK_CWD, "--", *_CHECK_COMMAND]
+        argv = self._argv_on(
+            socket,
+            str(path),
+            *_chain(
+                probe,
+                *_window_option_commands(f"={_CHECK_SESSION}:"),
+                ["source-file", str(path)],
+            ),
         )
-        self._runner(self._argv_on(socket, os.devnull, "kill-server"), None)
+        tidy = self._argv_on(socket, os.devnull, "kill-server")
+        self._runner(tidy, None)
+        completed = self._runner(argv, None)
+        self._runner(tidy, None)
         complaint = completed.stderr.strip()
         if completed.returncode != 0 or complaint:
             raise TmuxError(complaint or f"tmux rejected {path} without saying why")
@@ -459,10 +553,17 @@ class TmuxServer:
         ``env`` pairs are set for the new window only (``-e``); the command is
         passed as separate arguments and executed directly, never through a
         shell, so nothing in it is re-interpreted. ``width``/``height`` size a
-        NEW session's first window; a window added to an existing session takes
-        the session's size (``window-size manual``) until :meth:`resize`.
+        NEW session's first window and become that session's ``default-size``,
+        which is the size a window added to it later is born at; from there
+        :data:`WINDOW_OPTIONS` pins the window and only :meth:`resize` moves it.
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
+
+        The pin is a second command, against the ``@id`` tmux just printed, so
+        it reaches that window and no other — the option cannot be given at
+        creation, and it cannot be left standing globally for the next window to
+        walk into (module docstring). The window is unpinned only between the
+        two commands, when no client can yet be looking at it.
         """
         _require_targetable(session)
         _require_directory(cwd)
@@ -481,7 +582,14 @@ class TmuxServer:
                 "-c", str(cwd), "-x", str(width), "-y", str(height), *env_flags,
                 "--", *command,
             )  # fmt: skip
-        window_id, _, pane_id = out.strip().partition(_SEP)
+        window_id, separator, pane_id = out.strip().partition(_SEP)
+        if not window_id or not separator or not pane_id:
+            # Not pedantry: an empty id would send the pin below to whatever
+            # window is current, and the caller a WindowInfo it cannot target.
+            raise TmuxError(f"tmux did not name the new window and pane: {out!r}")
+        pin = _chain(*_window_option_commands(window_id))
+        if pin:  # an empty WINDOW_OPTIONS must not become `tmux` with no command
+            self.run(*pin)
         return WindowInfo(
             session=session,
             window_id=window_id,
@@ -644,7 +752,12 @@ class TmuxServer:
         self.run("paste-buffer", "-p", "-d", "-b", PASTE_BUFFER, "-t", pane_id)
 
     def resize(self, pane_id: str, width: int, height: int) -> None:
-        """Size the pane's window to the pane the UI is showing it in."""
+        """Size the pane's window to the pane the UI is showing it in.
+
+        ``resize-window`` sets that window's ``window-size`` to ``manual`` as it
+        goes — tmux's own doing, and the same pin :data:`WINDOW_OPTIONS` already
+        put there when the window was created.
+        """
         self.run(
             "resize-window", "-t", pane_id, "-x", str(max(1, width)), "-y", str(max(1, height))
         )

@@ -87,7 +87,18 @@ class AgentView(Vertical):
         return self.query_one("#agent-pane", TerminalPane)
 
     def refresh_status(self, status: FleetAgentStatus) -> None:
-        """New facts about the same agent: redraw the header, re-attach on a new pane."""
+        """New facts about the same agent: redraw the header, re-attach on a new pane.
+
+        The header is rebuilt every time — it is one :class:`Text` and the state
+        chip is the whole point of the poll. The pane is NOT: the shell calls
+        this on its poll, and :meth:`TerminalPane.attach` throws away everything
+        the pane knows (the last frame, the notice, where in the history the user
+        is reading), so re-attaching to the pane already on screen would make a
+        background poll cost the user their scroll position. Only a pane_id that
+        actually changed — a restart, or an agent that gained or lost its pane —
+        is a reason to re-attach, and then that reset is exactly right, because
+        none of that state describes the new pane.
+        """
         previous = self.status
         self.status = status
         if not self.is_mounted:

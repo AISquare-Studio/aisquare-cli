@@ -32,7 +32,7 @@ Three ideas carry the whole feature:
 
 | Tool | Needed for | Minimum |
 | --- | --- | --- |
-| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.4+ recommended**, where shift+enter reaches the agent |
+| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys) — the whole floor. A newer tmux is fine, but it is not what decides whether shift+enter reaches the agent (**Keys**, below) |
 | **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--restricted`, `--effort` |
 | `git` | worktrees for coders and reviewers | 2.20+ |
 | `gh` | *optional* — the coder opens PRs and the reviewer reviews them with it | any current release |
@@ -460,9 +460,9 @@ codename `amber-otter`, session `asq-amber-otter`, branches
 config is bundled and regenerated (do not edit it): status line off,
 `escape-time 0` so Esc interrupts Claude immediately, 50,000 lines of history,
 `remain-on-exit on` so a crashed agent's last screen stays readable, truecolor,
-extended keys on so shift+enter and friends reach Claude Code, mouse off (the
-UI owns the mouse), monitor-activity on. One server for every project; one
-session per project; one window per agent.
+extended keys on (CSI-u, which is what lets a modifier chord reach Claude Code
+at all — see **Keys**), mouse off (the UI owns the mouse), monitor-activity on.
+One server for every project; one session per project; one window per agent.
 
 **The UI holds no state that matters.** What must keep running lives in tmux
 (the processes) and `~/.aisquare/context.db` (the `fleet_agent` rows, the
@@ -472,8 +472,12 @@ agent takes its own through `aisquare launch`.
 
 **Attach from any terminal.** `aisquare fleet attach` is the escape hatch, and
 it is a feature: the UI's rendering of a pane is a convenience, and the raw
-session is always one command away. The equivalent by hand, for a project whose
-codename is `amber-otter`:
+session is always one command away. Each agent's window is pinned to a size the
+fleet chose, so attaching does not reshape the other agents in that session —
+and a terminal smaller than that window shows you its top-left corner and no
+more.
+
+The equivalent by hand, for a project whose codename is `amber-otter`:
 
 ```sh
 tmux -L asq attach -t asq-amber-otter
@@ -490,6 +494,14 @@ keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+Underneath that, tmux has a limit of its own: its key encoding has no room for
+a modifier on Enter, Escape, Tab, Space, Backspace or an ordinary character, and
+a chord asked for by *name* lands in the pane as the name — the literal text
+`S-Enter` — rather than as the key. There is no tmux version to upgrade past
+this; what decides it is the keyboard mode the agent's own program puts the pane
+in, which tmux neither reports nor lets us change. So the fleet does not forward
+those chords by name.
 
 ---
 

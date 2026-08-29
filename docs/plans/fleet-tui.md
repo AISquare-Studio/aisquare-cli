@@ -139,14 +139,40 @@ because it is fifty lines and measurable.
 **A private server, never the user's.** `tmux -L asq -f <bundled conf>`. We do
 not read `~/.tmux.conf`, touch the user's sessions, or change their prefix key.
 Bundled options: `status off` · `escape-time 0` (Esc must interrupt Claude
-immediately) · `history-limit 50000` · `window-size manual` (so we can size a
-window nobody is attached to) · `remain-on-exit on` · `mouse off` (we own the
-mouse) · `default-terminal tmux-256color` · `terminal-overrides ',*:Tc'` ·
-`extended-keys on` (CSI-u / modifyOtherKeys reach Claude Code — shift+enter and
-friends) · `set-clipboard off` · `focus-events on` · `monitor-activity on` (kept
-for an attached `tmux -L asq attach` client; headless the flag is always set, so
-the ▶ pulse comes from `history_size`/cursor changing between frames — measured
-on tmux 3.7c, pinned by `tests/test_tmux.py`).
+immediately) · `history-limit 50000` · `remain-on-exit on` · `mouse off` (we own
+the mouse) · `default-terminal tmux-256color` · `terminal-overrides ',*:Tc'` ·
+`extended-keys on` (CSI-u / modifyOtherKeys, so modifier chords can reach Claude
+Code — §6 on the ones tmux cannot encode) · `set-clipboard off` ·
+`focus-events on` · `monitor-activity on` (kept for an attached
+`tmux -L asq attach` client; headless the flag is always set, so the ▶ pulse
+comes from `history_size`/cursor changing between frames — measured on tmux
+3.7c, pinned by `tests/test_tmux.py`).
+
+**`window-size` is not in that file, and no window option may be.** A window
+nobody is attached to still needs a size we choose, and `window-size manual` is
+what holds one — but only as a *window* option. Set globally it kills the
+server below tmux 3.7: creating a window reads that global through
+`default_window_size`, which has no window yet, and `clients_calculate_size()`
+then dereferences the window pointer it was never given — upstream added the
+`w != NULL` guard in 3.7. Measured here on 3.4, the version `ubuntu-latest`
+ships, both ways in: the option in the `-f` file kills the first `new-session`,
+and a `set -g` on a running server kills the next `new-window`, each leaving the
+client with `server exited unexpectedly`. That is 19 of the 22 CI failures on
+this branch, and the rule it leaves is general: a window-scoped option goes on
+each window as it is created, never into the `-f` file and never `-g`.
+
+**So the fleet pins each window and sizes it explicitly.** The pin alone is not
+a sizing model, it is a freeze on whatever size tmux already chose — and without
+the global, the birth size is tmux's default `window-size latest`, which
+measures the most recent *client* on the server rather than the session's
+`-x`/`-y`. Measured on 3.4 with one 80x24 client attached: a `new-window` in a
+200x50 session is born 80x24, so is a brand-new `new-session -x 200 -y 50`, and
+the 200x50 window that was already there is pulled down to 80x24 too. Each
+window therefore gets `window-size manual` and a `resize-window` on the `@id`
+tmux just printed, the moment it exists (`new-window` has no `-x`/`-y` of its
+own on 3.4: `unknown flag -x`). That is also what makes the escape hatch safe:
+someone running `tmux -L asq attach` from an 80x24 terminal cannot reshape the
+agents in the session they attach to.
 
 ### 3.2 The TUI is a view; there is no daemon
 
@@ -643,7 +669,7 @@ otherwise map `Key.key`:
 | `home` `end` | `Home` `End` | `pageup` `pagedown` | `PPage` `NPage` |
 | `f1` … `f12` | `F1` … `F12` | `ctrl+<x>` | `C-<x>` |
 | `alt+<x>` | `M-<x>` | `ctrl+shift+<x>` | `C-S-<x>` |
-| `shift+enter` | `S-Enter` (tmux ≥ 3.4 with extended keys) | anything else | dropped, one-line notice |
+| `shift+enter` | `S-Enter`, with the caveat below | anything else | dropped, one-line notice |
 
 The escape hatch key is consumed by us and never forwarded. Textual 8.2.7 /
 8.2.8 speak the kitty keyboard protocol, so modifier-rich chords arrive **when
@@ -651,6 +677,24 @@ the outer terminal supports it** (kitty, ghostty, wezterm, foot, recent
 alacritty). In VTE-based terminals and Windows Terminal, shift+enter is
 indistinguishable from enter — we document that per terminal and never fake it
 (`\` + Enter works everywhere in Claude Code).
+
+**tmux is a second gate, and naming the key is only half of it.** tmux must also
+ENCODE the chord for the pane, and its legacy (vt10x) encoding has nowhere to
+put a shift: the keys tmux parameterises into a CSI sequence carry every
+modifier (`S-Up` is `ESC [ 1 ; 2 A`), but Enter, Escape, Tab, BSpace, Space and
+every ordinary character are single bytes with no room for one. When tmux cannot
+encode a chord it does not fail — `cmd-send-keys` TYPES THE NAME as text, so
+`send-keys S-Enter` puts those seven characters in front of the agent. Measured
+on tmux 3.4 — what `ubuntu-latest` ships — under the fleet's own configuration.
+Raising the tmux floor is not the fix and there is no version to raise it to:
+3.4 knows the name (`bind-key S-Enter` is accepted; only a name like
+`bind-key Bogus` is refused) and encodes it correctly the moment the pane's own
+application turns extended keys on — `printf '\033[>4;2m'` before `cat` and
+`S-Enter` arrives as `ESC [ 13 ; 2 u`. Which mode a pane is in is the agent's
+business, and tmux publishes no format variable for it, so the fleet can neither
+ask nor switch it. Shift+enter is a key Claude Code uses, so the affected chords
+cannot be forwarded by name: `src/aisquare/core/keys.py` owns what is sent
+instead, and `tests/test_keys.py` checks it against the running binary.
 
 **Paste.** `Paste.text` → `load-buffer -b asq-paste -` (stdin) →
 `paste-buffer -p -d -b asq-paste -t %pane`. `-p` gives bracketed paste when
@@ -826,7 +870,7 @@ untouched.
 
 | Tool | Needed for | Minimum | Doctor |
 | --- | --- | --- | --- |
-| `tmux` | the fleet (spawning and surfacing) | 3.2 (`new-window -e`, `extended-keys`); 3.4+ recommended (`S-Enter`) | new `tmux` check: present, version, private server starts; absent → fleet disabled with per-OS install hints (`apt`, `dnf`, `brew`), everything else works |
+| `tmux` | the fleet (spawning and surfacing) | 3.2 (`new-window -e`, `extended-keys`); no higher floor buys shift+enter (§6) | new `tmux` check: present, version, private server starts; absent → fleet disabled with per-OS install hints (`apt`, `dnf`, `brew`), everything else works |
 | `git` | worktrees | 2.20+ | existing |
 | `gh` | PR flow (coder, reviewer) | any current | new warn-level check |
 | `node` / `npx` / `repomix` | snapshots | existing | existing |
@@ -970,3 +1014,4 @@ matrix is filled in Phase 0.
 | 2026-08-28 | Owner decisions folded in: textual core; `auto` permissions; human merges; roles manager / coder / tester / reviewer / validator; native agent teams off in fleet launches; Codex deferred; every default configurable (§3.10). Naming scheme in §5.7 from a forked planning agent. | owner + PR #71 |
 | 2026-08-28 | Implementation landed on this branch: scaffold f0a818c (contracts), then ten siloed work packages (tmux, fleet-service, fleet-cli, terminal, shell, onboard, doctor, manager, board, docs) built in parallel worktrees and merged without a conflict, plus an integration pass. Deviations, all recorded in code: the `auto`→`acceptEdits` permission fallback (§3.6) is documented, not automated; drag-select/copy inside an agent pane (§6) is not implemented (Line-API widget); a dead/vanished pane is read BEFORE the board row when deriving state (§5.1) because a killed agent fires no SessionEnd; `window_activity_flag` is not a signal on a headless server (§3.1), the frame diff is; the Settings tab omits model/effort/binary (one home per concept); the Onboard view is built on the first `+`; `ExplainabilitySettings.roles` now lists all seven roles. The §6 per-terminal key matrix still needs a human at each terminal. | PR #71 |
 | 2026-08-28 | Implementation started from the scaffold (`f0a818c`: store v11, `[fleet]` config, the roles, `core/tmux.py`, `cli/fleet.py`, the UI skeleton) with the work packages in parallel. User documentation written from the scaffolded CLI: `docs/fleet.md` (listed in `DOCUMENTED`), the README fleet section and command-tree lines, the CHANGELOG entry — saying plainly where a piece lands in a later phase. | WP docs |
+| 2026-08-29 | CI on `ubuntu-latest`, which runs tmux 3.4, failed 22 tests, and the repair changed two mechanisms this plan described. **§3.1:** `window-size manual` has left the bundled `-f` file. A GLOBAL one kills the server on every tmux below 3.7 — `clients_calculate_size()` dereferences a window pointer `default_window_size` never had — which was 19 of the 22 failures; it is now set on each window as that window is created, together with an explicit `resize-window`, because without the global the birth size falls back to `window-size latest`, i.e. the most recent attached client's terminal. The intent is unchanged (every fleet window pinned to a size the fleet chose) and the general rule is new: a window-scoped option must never go in the `-f` file. **§6:** `S-Enter` and the other single-byte chords are not a version gap. tmux 3.4 knows those names and cannot ENCODE them for a pane in legacy mode, typing the name as text instead — so §8.2's "3.4+ recommended (`S-Enter`)" was wrong and is gone, and `src/aisquare/core/keys.py` owns what those chords send. | PR #71 |

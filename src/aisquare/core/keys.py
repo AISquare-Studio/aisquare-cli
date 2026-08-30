@@ -4,79 +4,133 @@ The fleet UI forwards every key the embedded pane receives to the agent
 running inside tmux. Printable characters travel as literal text
 (``send-keys -l``); everything else must be spelled in tmux's own key
 vocabulary (``Enter``, ``BSpace``, ``C-c``, ``M-x``, ``BTab``…), or — for the
-chords tmux can name but cannot send (below) — as the bytes that key means,
-again as literal text. A key this table does not know is dropped and the caller
-says so once: silently sending the wrong thing to a running agent is worse than
-sending nothing.
+chords tmux can name but cannot deliver (THE MEASUREMENT below) — as the bytes
+that key means, again as literal text. A key this table does not know is dropped
+and the caller says so once: silently sending the wrong thing to a running agent
+is worse than sending nothing.
 
 Why the table is conservative: tmux TYPES AN UNKNOWN KEY NAME LITERALLY.
-Measured against tmux 3.7c on 2026-08-28, and re-measured on 3.4 with a
-raw-mode ``cat`` pane: ``send-keys Bogus`` puts those five characters into the
-agent's input, and so do ``F13``, ``C-Bogus`` and ``S-F13``. What tmux does with
-a name it parses but cannot encode is worse, because it varies: ``C-BSpace`` and
-``C-Escape`` were typed out on 3.7c and VANISH on 3.4; ``S-a`` arrived as a
-lowercase ``a`` on 3.7c and as the three characters ``S-a`` on 3.4; ``C-1`` as a
-bare ``1`` on 3.7c and as nothing on 3.4. An argument ending in ``;`` is tmux's
-command separator on both, so ``M-;`` types ``M-`` and starts a new command.
-Every ``None`` below is one of those: a chord no tmux the fleet supports can put
-in front of an agent honestly, dropped where the caller can say so once.
+``send-keys Bogus`` puts those five characters into the agent's input, and so do
+``C-Bogus``, ``F13`` and ``S-F13`` — on every build measured below. tmux's own
+parser is the tell: on 3.2, 3.4 and 3.5a alike, ``bind-key Bogus`` and
+``bind-key F13`` answer ``unknown key``, while ``bind-key S-Enter``, ``C-S-a``,
+``M-S-Tab`` and ``C-Enter`` are accepted. What tmux does with a name it PARSES
+but cannot encode is worse, because it varies by version. Measured 2026-08-29 on
+builds of 3.2, 3.2a, 3.3a, 3.4 and 3.5a, each name sent into a
+``stty raw -echo; cat > file`` pane with the file's bytes read back:
+
+* ``C-BSpace`` — nothing on 3.2 through 3.4; typed out on 3.5a.
+* ``C-Escape`` — typed out on 3.2, nothing on 3.2a/3.3a/3.4, typed out on 3.5a.
+* ``S-a`` — typed out on 3.2 through 3.4; the bare ``a`` on 3.5a.
+* ``C-1`` — nothing on 3.2 through 3.4; the bare ``1`` on 3.5a.
+* ``C-,`` ``C-.`` ``C-=`` — nothing on 3.2 through 3.4; the bare character on 3.5a.
+
+(A reST grid would be the natural shape for that, but its ``=`` rules read as
+merge-conflict markers to ``tests/test_no_unresolved_conflicts.py``.)
+
+An argument ending in ``;`` is tmux's command separator on all of them, so
+``send-keys M-;`` puts ``M-`` in the pane and starts a new command (and
+``bind-key M-;`` answers ``unknown key: M-``). Every ``None`` below is one of
+those: a chord no tmux the fleet supports can put in front of an agent honestly,
+dropped where the caller can say so once.
 
 Naming a key is only half of it: tmux must also ENCODE it for the pane, and its
 legacy (vt10x) encoding has nowhere to put a shift. The keys tmux parameterises
 into a CSI sequence take every modifier (``S-Up`` is ``ESC [ 1 ; 2 A``,
-``C-S-DC`` is ``ESC [ 3 ; 6 ~``), but Enter, Escape, Tab, BSpace, Space and
-every ordinary character are single bytes with no room for one. When tmux cannot
-encode the key it does not fail — ``cmd-send-keys`` falls back to typing the NAME
-as text. Measured on tmux 3.4 (what ``ubuntu-latest`` ships, and the tmux this
-repository runs) with the fleet's own configuration, by sending every one of the
-473 names this module built BEFORE this fix into a ``stty raw -echo; cat`` pane
-and reading the file back: 117 arrived spelled out — ``send-keys S-Enter`` put
-the seven characters ``S-Enter`` in the pane — ``C-Enter`` and ``C-BTab``
-arrived as nothing at all, and ``C-Tab`` arrived as a bare TAB, which the agent
-cannot tell from the Tab key. Shift+Enter is a key Claude Code uses. Nothing is
-added to the vocabulary here and nothing taken out of it: the 122 chords this
+``C-S-DC`` is ``ESC [ 3 ; 6 ~``, ``S-F1`` is ``ESC [ 1 ; 2 P``), but Enter,
+Escape, Tab, BSpace, Space and every ordinary character are single bytes with no
+room for one. When tmux cannot encode the key it does not fail —
+``cmd-send-keys`` falls back to typing the NAME as text.
+
+THE MEASUREMENT. This is the one count the rest of the module quotes; anything
+below that states a number states THIS one, and ``tests/test_keys.py`` re-takes
+it (``test_the_vocabulary_is_the_one_the_module_docstring_counts`` and the
+real-tmux tests) so it cannot drift. Taken 2026-08-29 against tmux 3.4
+(``/usr/bin/tmux`` — what ``ubuntu-latest`` ships, and the tmux this repository
+runs) with the fleet's own configuration, by sending every name into a raw
+``cat`` pane and comparing the FILE'S bytes:
+
+* The vocabulary. :func:`translate` is swept over 1785 Textual chords —
+  Textual 8.2.8's ``Keys`` enum plus this module's own base names, each with
+  every one-, two- and three-modifier combination. 1179 of them translate to
+  something, and between them they name 471 distinct tmux keys.
+* Sent BY NAME into a pane in tmux's legacy mode, 121 of those 471 do not
+  arrive as themselves: 116 arrive as their own letters (``send-keys S-Enter``
+  puts the seven characters ``S-Enter`` in the pane), ``C-Enter`` arrives as
+  nothing at all, and four arrive as ANOTHER key's bytes — ``C-Tab`` as a bare
+  TAB, ``C-S-Tab`` as ``ESC [ Z`` (a plain back-tab), ``C-M-Tab`` as
+  ``ESC TAB``, ``C-M-S-Tab`` as ``ESC ESC [ Z``. Shift+Enter is a key Claude
+  Code uses.
+* So this module spells those 121 names itself (:func:`extended_bytes`), as 112
+  distinct CSI-u sequences. The other 350 travel as names, which is what tmux
+  and the agent both prefer.
+* In a pane that HAS extended keys on, tmux encodes 118 of the 121 as exactly
+  the bytes written here; the three exceptions are the ctrl-on-Tab family
+  below.
+
+Nothing is added to the vocabulary and nothing taken out of it: the chords this
 module already claimed to send are simply sent.
 
 That is NOT a version gap, and raising :data:`aisquare.core.tmux.MIN_VERSION`
-would not close it. tmux 3.4 knows every one of those names (``bind-key
-S-Enter`` takes them; only ``Bogus`` is refused) and encodes all 117 correctly
-the moment the PANE'S application turns extended keys on: with
-``printf '\\033[>4;2m'`` — xterm's modifyOtherKeys — before ``cat``, ``S-Enter``
-arrives as ``ESC [ 13 ; 2 u``. What tmux 3.4 does not understand is the OTHER
-request: the kitty keyboard protocol's ``ESC [ > 1 u``, measured here to leave
-the pane in legacy mode, is the one Claude Code makes. tmux publishes no format
-variable for a pane's key mode either (``display-message -a`` is identical for
-both panes on 3.4), so the fleet cannot ask and cannot switch it on.
+would not close it. tmux 3.4 knows every one of those names (``bind-key`` takes
+them; only a name like ``Bogus`` is refused) and encodes all 121 the moment the
+PANE'S application turns extended keys on: with ``printf '\\033[>4;2m'`` —
+xterm's modifyOtherKeys — before ``cat``, ``S-Enter`` arrives as
+``ESC [ 13 ; 2 u``. What tmux 3.4 does not understand is the OTHER request, the
+kitty keyboard protocol's ``ESC [ > 1 u`` (nor ``ESC [ > 5 u``): measured here,
+a pane that sends either still gets the seven characters ``S-Enter``. tmux
+publishes no format variable for a pane's key mode either — ``display-message
+-a`` prints the same 120 variables for a legacy and a modifyOtherKeys pane,
+differing only in the ones that identify the pane (``pane_id``, ``pane_pid``,
+``pane_tty``, the session and window names, the layout), and its only two
+key-ish variables, ``keypad_flag`` and ``keypad_cursor_flag``, are ``0`` in
+both. So the fleet can neither ask nor switch it on.
 
 So this module writes those bytes itself — :func:`extended_bytes`, sent as
 literal text — and the pane's mode stops mattering. The encoding is tmux's own,
 byte for byte: ``ESC [ <codepoint> ; <1 + shift + 2·alt + 4·ctrl> u``, with the
-codepoint tmux uses, verified against the running binary for all 122 sequences
-by ``tests/test_keys.py``. tmux's quirks are part of that: ctrl folds into the
+codepoint TMUX uses. tmux's quirks are part of that: ctrl folds into the
 character before the codepoint is taken, so ``C-S-a`` is ``ESC [ 65 ; 6 u`` (the
 UPPERCASE A, not 97) and ``C-S-Space`` is 64 (``C-@``), while ``C-S-i`` is
-``ESC [ 9 ; 2 u`` — ctrl+i IS Tab, and tmux spends the ctrl on saying so. Where
-tmux and the kitty protocol disagree (kitty would spell ctrl+shift+a with the
-unshifted 97), tmux's is the spelling an agent inside tmux already gets from a
-modifyOtherKeys terminal, and the one that can be checked against the binary.
-Three chords are ours alone: tmux keeps a legacy form for ctrl on Tab even in
-extended mode (``C-M-Tab`` → ``ESC TAB``, ``C-S-Tab`` → ``ESC [ 1 ; 5 Z``),
-which is a plain Tab or a plain back-tab to the agent, so we send the CSI-u that
-carries the ctrl instead.
+``ESC [ 9 ; 2 u`` — ctrl+i IS Tab, and tmux spends the ctrl on saying so. All
+three were read back out of tmux 3.4's own extended pane, not reasoned about.
+Where tmux and the kitty protocol disagree (kitty would spell ctrl+shift+a with
+the unshifted 97), tmux's is the spelling an agent inside tmux already gets from
+a modifyOtherKeys terminal, and the one that can be checked against the binary.
+
+Three chords are ours alone, and they are the whole gap between 121 and 118:
+tmux 3.4 keeps a legacy form for ctrl on Tab even in an extended pane
+(``C-M-Tab`` → ``ESC TAB``, ``C-S-Tab`` → ``ESC [ 1 ; 5 Z``, ``C-M-S-Tab`` →
+``ESC ESC [ Z``), and a legacy form has nowhere to put the ctrl, so the agent
+gets a plain Tab or a plain back-tab and cannot tell those chords from Tab and
+back-tab. We send the CSI-u that carries the ctrl instead — which is, byte for
+byte, what tmux 3.3a produces for all three, so this is 3.4 losing them rather
+than us inventing something.
+
+ESC is what makes this transport work at all. ``send-keys -l`` is not always
+transparent: measured on tmux 3.5a, in a pane with extended keys on, of the 32
+control bytes 0x01-0x1f plus DEL only FOUR survive — TAB (0x09), CR (0x0d), ESC
+(0x1b) and DEL (0x7f); the other 28 are silently dropped. (On 3.4, in either
+pane mode, and on 3.5a in a legacy pane, all 32 arrive.) Every sequence here is
+ESC followed by printable ASCII, so it crosses that intact.
 
 An agent that speaks neither dialect sees an unrecognised CSI sequence, which is
-what it saw before minus the letters: in a ``bash`` pane on 3.4, Shift+Enter
-after ``echo A`` left ``echo AS-EnterB`` on the line when it was sent by name
-and ``echo A;2uB`` when it was sent as bytes. The agent the fleet actually runs
-speaks both — the Claude Code binary carries the kitty requests (``ESC [ > 1 u``,
-``ESC [ > 5 u``, ``ESC [ < u``) and xterm's ``ESC [ > 4 ; 2 m`` — and
-``ESC [ 13 ; 2 u`` is Shift+Enter in either.
+what it saw before minus the letters: in a ``bash --norc -i`` pane on 3.4,
+Shift+Enter after ``echo A`` left ``echo AS-EnterB`` on the line when it was
+sent by name and ``echo A;2uB`` when it was sent as bytes — both measured.
+``ESC [ 13 ; 2 u`` is Shift+Enter to a terminal application that has asked for
+either protocol. Which of them the Claude Code binary asks for is NOT measured
+here, and is the one claim in this docstring that is not: scanning its 214 MB
+compiled bundle found the word ``kitty`` 43 times and none of the four request
+sequences as bytes, which in a compiled bundle settles nothing either way.
 
 Modifier chords beyond ctrl/alt on letters depend on the OUTER terminal
-speaking the kitty keyboard protocol (Textual 8.2.7+ does); where it does not,
-``shift+enter`` simply arrives as ``enter`` and there is nothing to translate.
-Textual names chords with the modifiers sorted alphabetically
-(``alt+ctrl+x``, ``ctrl+shift+a``); the order is irrelevant here.
+speaking the kitty keyboard protocol. Textual asks for it — the 8.2.8 installed
+here writes ``ESC [ > <flags> u`` when its Linux driver starts and ``ESC [ < u``
+when it stops (``textual/drivers/linux_driver.py``) — but where the terminal
+does not answer, ``shift+enter`` simply arrives as ``enter`` and there is
+nothing to translate. Textual names chords with the modifiers sorted
+alphabetically (``alt+ctrl+x``, ``ctrl+shift+a``); the order is irrelevant here.
 See docs/plans/fleet-tui.md §6.
 """
 
@@ -144,18 +198,41 @@ CHORDS: dict[str, str] = {
 #: tmux spelling and make the whole chord untranslatable.
 MODIFIERS: dict[str, str] = {"ctrl": "C-", "alt": "M-", "meta": "M-", "shift": "S-"}
 
-#: Named keys no tmux puts a ctrl on: ``C-Escape`` and ``C-BSpace`` come out as
-#: those literal strings on 3.7c and as nothing at all on 3.4. They are refused
-#: rather than spelled in bytes — the user is told the chord went nowhere, which
-#: is the honest answer for a key the fleet was never able to send.
+#: Named keys no tmux puts a ctrl on. Measured across the five builds: on 3.4
+#: (and 3.2a, 3.3a) ``C-Escape`` and ``C-BSpace`` both reach the pane as NOTHING
+#: at all; on 3.5a both are typed out as their own letters, and ``C-Escape`` is
+#: typed out on 3.2 too. Refused rather than spelled in bytes — the user is told
+#: the chord went nowhere, which is the honest answer for a key the fleet was
+#: never able to send on any tmux it supports.
 NO_CTRL: frozenset[str] = frozenset({"Escape", "BSpace"})
 
+#: ctrl on ``-``, ``/`` and ``_``: three different keys, ONE byte. Measured in a
+#: raw pane on 3.2a, 3.3a, 3.4 and 3.5a, ``C--``, ``C-/`` and ``C-_`` all arrive
+#: as US (``0x1f``), so an agent cannot tell which of the three was pressed.
+#: Recorded here, deliberately not closed, and it is NOT the ``C-Tab`` case:
+#: ``C-Tab`` arrived as a bare TAB — the byte of a DIFFERENT key the user can
+#: also press on its own — whereas ``0x1f`` is the byte this ctrl actually
+#: means. tmux keeps that byte even where it CAN spell CSI-u: in an extended
+#: pane on 3.4, ``C--`` is ``ESC [ 45 ; 5 u`` and ``C-/`` is ``ESC [ 47 ; 5 u``,
+#: but ``C-_`` is STILL ``0x1f``. Spelling the first two in bytes would buy two
+#: thirds of a distinction and take ``0x1f`` — which every one of those builds
+#: delivers today — away from an agent that does not decode CSI-u, for a chord
+#: tmux is not mistyping. docs/plans/fleet-tui.md §6 also specifies ``C-<x>``.
+#:
+#: One build is worse, and this is the cost of the decision: on tmux 3.2 —
+#: :data:`aisquare.core.tmux.MIN_VERSION` — ``C-/`` is not in the key table at
+#: all (``bind-key C-/`` answers ``unknown key: C-/``), so ``send-keys C-/``
+#: TYPES those three characters. Of the 350 names this module sends as names,
+#: that is the only one mistyped by any of the five builds measured (3.2, 3.2a,
+#: 3.3a, 3.4, 3.5a), and only by 3.2; 3.2a is where tmux learned the name.
+CTRL_US_ALIASES: frozenset[str] = frozenset("-/_")
+
 #: Punctuation tmux can put a control modifier on (the classic C0 mappings:
-#: ``C-@`` → NUL … ``C-_`` → US, ``C-?`` → DEL; ``C-/`` and ``C--`` are ``C-_``).
+#: ``C-@`` → NUL … ``C-_`` → US, ``C-?`` → DEL, and :data:`CTRL_US_ALIASES`).
 #: Everything else — ``C-,``, ``C-.``, ``C-=`` … — tmux sends as the bare
-#: character (3.7c) or not at all (3.4), so those chords are dropped, with the
-#: notice, rather than mistyped or invented.
-CTRL_PUNCTUATION: frozenset[str] = frozenset("@[\\]^_?/-")
+#: character (3.5a) or not at all (3.2 through 3.4), so those chords are
+#: dropped, with the notice, rather than mistyped or invented.
+CTRL_PUNCTUATION: frozenset[str] = frozenset("@[\\]^?") | CTRL_US_ALIASES
 
 #: Textual's spelled-out names for punctuation that arrives without a character
 #: (a kitty-protocol chord such as ``alt+left_square_bracket``). Textual applies
@@ -207,7 +284,9 @@ MAX_FUNCTION_KEY = 12
 _FUNCTION = re.compile(r"f([1-9]\d?)")
 
 #: tmux treats an argument that ends in ``;`` as the end of one command and the
-#: start of the next, so no key NAME may end in it (``M-;`` sends nothing).
+#: start of the next, so no key NAME may end in it: ``send-keys M-;`` puts the
+#: two characters ``M-`` in the pane and starts a second command (measured on
+#: 3.2, 3.4 and 3.5a).
 ARGV_SEPARATOR = ";"
 
 # --- the chords tmux cannot hand to a pane ----------------------------------------------
@@ -235,21 +314,24 @@ CONTROL_CODEPOINT: dict[str, int] = {
 
 #: The two of those five tmux cannot put a ctrl on. Measured on 3.4:
 #: ``send-keys C-Enter`` reaches the pane as NOTHING, and ``C-Tab`` as a bare
-#: ``TAB`` — the agent cannot tell it from the Tab key. ``C-Space`` is real
-#: (NUL), and ctrl on Escape or BSpace never gets here (:data:`NO_CTRL`).
+#: ``TAB`` (0x09) — the agent cannot tell it from the Tab key, which arrives as
+#: the same byte. ``C-Space`` is real (NUL, measured), and ctrl on Escape or
+#: BSpace never gets here (:data:`NO_CTRL`).
 CTRL_UNSENDABLE: frozenset[str] = frozenset({"Enter", "Tab"})
 
 #: Characters whose ctrl chord tmux folds into a key it has a NAME for, with
 #: that key's codepoint: ctrl+i IS Tab, ctrl+m Enter, ctrl+[ Escape, ctrl+?
 #: BSpace. The ctrl is spent on the fold, so ``C-S-i`` is ``ESC [ 9 ; 2 u`` —
-#: Tab with shift — and not ``I`` with ctrl and shift. Measured, all four.
+#: Tab with shift — and not ``I`` with ctrl and shift. All four were read back
+#: out of tmux 3.4's own extended pane, which spells them exactly this way.
 CTRL_FOLDS_TO_KEY: dict[str, int] = {"i": 9, "m": 13, "[": 27, "?": 127}
 
 #: Characters tmux folds a ctrl INTO, to the C0 byte (``C-a`` → 0x01, ``C-\``
 #: → 0x1c): the letters, ``@`` through ``_``, and ``?``. ``-`` and ``/`` are
-#: NOT in it — tmux maps those to US (0x1f) later, in the encoder, which then
-#: has nothing left for an alt, so ``C-M--`` and ``C-M-/`` are among the names
-#: it types out as text while ``C-M-@`` and ``C-M-a`` are sent properly.
+#: NOT in it (:data:`CTRL_US_ALIASES`) — tmux maps those to US (0x1f) later, in
+#: the encoder, which then has nothing left for an alt, so on 3.4 ``C-M--`` and
+#: ``C-M-/`` arrive as their own five characters while ``C-M-@`` arrives as
+#: ``ESC NUL`` and ``C-M-a`` as ``ESC 0x01``.
 CTRL_FOLDED: frozenset[str] = frozenset(
     "abcdefghijklmnopqrstuvwxyz?" + "".join(chr(code) for code in range(64, 96))
 )
@@ -273,20 +355,30 @@ def extended_bytes(name: str) -> str | None:
 
     ``None`` is the ordinary answer — the 350 names this module still builds
     reach the agent correctly as names, and a name is what tmux and the agent
-    both prefer. The other 122 are the chords tmux's legacy encoding has no room
-    for (the module docstring): shift on anything that is not a
-    :data:`CSI_PARAMETERISED` key, ctrl on Enter or Tab, and ctrl+alt on a
-    character tmux does not fold a ctrl into. Sending one of those by name puts
-    its own letters in the agent's prompt, or nothing at all.
+    both prefer. The other 121 are the chords tmux's legacy encoding has no room
+    for (THE MEASUREMENT in the module docstring, which is where every count
+    here comes from): shift on anything that is not a :data:`CSI_PARAMETERISED`
+    key, ctrl on Enter or Tab, and ctrl+alt on a character tmux does not fold a
+    ctrl into. Sending one of those by name puts its own letters in the agent's
+    prompt, nothing at all, or another key's bytes.
 
     The sequence is CSI-u — ``ESC [ <codepoint> ; <modifier> u`` — where the
     modifier is 1 plus :data:`SHIFT_BIT`, :data:`ALT_BIT` and :data:`CTRL_BIT`
     for the modifiers held, and the codepoint is the one TMUX uses, fold and all
     (:data:`CTRL_FOLDS_TO_KEY`, and ctrl+Space → 64 because tmux reads it as
-    ``C-@``). That is not decoration: 119 of these 122 sequences are byte for
-    byte what the same ``send-keys <name>`` delivers when the pane has extended
-    keys on, so the fleet's fallback puts nothing new in front of the agent.
-    ``tests/test_keys.py`` re-measures every one against the running tmux.
+    ``C-@``). That is not decoration: 118 of these 121 names are spelled by tmux
+    3.4 itself, byte for byte, when the same ``send-keys <name>`` goes to a pane
+    that has extended keys on, so the fleet's fallback puts nothing new in front
+    of the agent. The three that are not are the ctrl-on-Tab family, where 3.4
+    keeps a legacy form that loses the ctrl.
+
+    ``tests/test_keys.py`` re-measures that against whatever tmux is on PATH:
+    ``test_our_sequences_are_the_ones_this_tmux_sends_when_it_can`` sends all
+    121 of these names — plus ``S-Space`` and ``S-Tab``, which the encoder must
+    get right even though :func:`translate` never builds them — into an extended
+    pane and compares the bytes. The expectations there are tmux 3.4's; tmux's
+    own encoder has changed across versions and that test says so with its
+    measurements.
     """
     ctrl, alt, shift, base = _split_modifiers(name)
     if base in CSI_PARAMETERISED:

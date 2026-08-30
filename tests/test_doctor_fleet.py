@@ -232,12 +232,23 @@ def test_tmux_too_old_warns_with_the_minimum_and_an_install_hint() -> None:
     assert check.fix and "install tmux" in check.fix
 
 
-def test_tmux_below_the_recommended_version_is_ok_but_says_what_is_missing() -> None:
-    older = diagnostics._check_tmux(FakeServer(version=(3, 3)))
-    current = diagnostics._check_tmux(FakeServer(version=(3, 7)))
+def test_tmux_at_the_floor_reads_exactly_like_a_newer_one_and_advises_no_upgrade() -> None:
+    """A tmux at ``MIN_VERSION`` is a healthy tmux, and the line must not hint otherwise.
 
-    assert older.status is CheckStatus.ok and "Shift+Enter" in older.detail
-    assert current.status is CheckStatus.ok and "Shift+Enter" not in current.detail
+    This replaces an assertion that the 3.2-to-3.3 range is told "3.4+ adds
+    Shift+Enter in agent panes", which no build ever did: ``send-keys S-Enter``
+    types the NAME into the pane on 3.4 exactly as on 3.2, and ``core/keys.py``
+    is what delivers the chord on both (``_check_tmux`` carries the measurement).
+    So every version from the floor up gets the same sentence, and an operator
+    reading it is never sent to upgrade tmux for something an upgrade cannot buy.
+    """
+    floor = diagnostics._check_tmux(FakeServer(version=tmux_core.MIN_VERSION))
+    newer = diagnostics._check_tmux(FakeServer(version=(3, 5)))
+
+    assert floor.status is CheckStatus.ok and newer.status is CheckStatus.ok
+    assert floor.detail == "tmux 3.2 — fleet available"
+    assert newer.detail == "tmux 3.5 — fleet available"
+    assert floor.fix is None, "a tmux at the floor is not something to fix"
 
 
 def test_tmux_with_an_unreadable_version_fails_open_and_says_so() -> None:

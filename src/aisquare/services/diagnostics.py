@@ -486,8 +486,6 @@ def _check_claude_code() -> DoctorCheck:
 _OS_RELEASE = Path("/etc/os-release")
 _APT_FAMILY = frozenset({"debian", "ubuntu", "linuxmint", "pop", "raspbian", "kali", "elementary"})
 _DNF_FAMILY = frozenset({"fedora", "rhel", "centos", "rocky", "almalinux", "amzn", "nobara", "ol"})
-_RECOMMENDED_TMUX = (3, 4)
-"""``S-Enter`` reaches an agent pane from 3.4; below it the fleet works without it."""
 
 
 def install_hint(
@@ -527,6 +525,30 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
     unhealthy. ``version()`` reads ``tmux -V`` through the one tmux seam and
     never touches the home, so this runs on an uninitialised machine too.
     ``server`` is for tests; the default is the real binary on PATH.
+
+    This line RECOMMENDS NOTHING above ``tmux_core.MIN_VERSION``, and that is a
+    measurement rather than an omission. It used to advise 3.4, on the claim
+    that ``S-Enter`` "reaches an agent pane from 3.4" — false in both halves:
+    ``send-keys S-Enter`` puts the seven characters ``S-Enter`` into a raw pane
+    on 3.4 exactly as it does on 3.2 (on 3.5a it arrives as a bare CR, which an
+    agent cannot tell from Enter), and the chord reaches an agent on every one
+    of them because ``aisquare.core.keys`` writes ``ESC [ 13 ; 2 u`` itself and
+    :meth:`~aisquare.core.tmux.TmuxServer.send_literal` delivers those bytes
+    unchanged. Everything else the fleet asks of tmux answered identically too:
+    the bundled conf applies and ``source-file`` re-reads it clean,
+    ``new-session -e``, per-window ``window-size manual`` plus ``resize-window``,
+    ``capture-pane -e``, and ``load-buffer -`` + ``paste-buffer -p`` bracketed
+    paste — as did the two answers :func:`_check_fleet` reads, a dead pane's
+    ``pane_dead``/``pane_dead_status`` and a vanished target's exit 0 with every
+    field empty. Measured 2026-08-30 on builds of tmux 3.2, 3.2a, 3.3a, 3.4 and
+    3.5a, under the fleet's own configuration.
+
+    The one difference those builds did show at the floor cannot be reported
+    from here anyway: tmux 3.2 has no ``C-/`` in its key table and types those
+    three characters into the pane, which 3.2a fixed
+    (``aisquare.core.keys.CTRL_US_ALIASES``) — and ``tmux -V`` for 3.2 and 3.2a
+    both parse to ``(3, 2)``, so no version test on this side could tell the two
+    users apart.
     """
     name = "tmux"
     try:
@@ -552,11 +574,6 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
                 f"tmux {found} is too old — the fleet needs {minimum} or newer; "
                 "everything else works",
                 f"Upgrade it: {install_hint('tmux')}",
-            )
-        if version < _RECOMMENDED_TMUX:
-            wanted = f"{_RECOMMENDED_TMUX[0]}.{_RECOMMENDED_TMUX[1]}"
-            return _ok(
-                name, f"tmux {found} — fleet available ({wanted}+ adds Shift+Enter in agent panes)"
             )
         return _ok(name, f"tmux {found} — fleet available")
     except Exception as exc:  # diagnostics must never crash

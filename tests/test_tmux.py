@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import itertools
 import os
 import pty
@@ -33,6 +34,7 @@ import signal
 import statistics
 import struct
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -66,6 +68,56 @@ FACTS_FIELDS = 13
 WINDOW_FIELDS = 7
 #: One ``set`` line of BUNDLED_CONF: the flag, the option and its value.
 _SET = re.compile(r"^set (-g|-s|-ga) (\S+) (.+)$")
+
+
+@pytest.fixture(autouse=True, scope="module")
+def private_socket_directory() -> Iterator[Path]:
+    """Send every socket path this module can compute into a directory of its own.
+
+    A guard, not a convenience. :meth:`TmuxServer.check_conf` now sweeps tmux's
+    socket directory for probe servers an earlier run abandoned and UNLINKS what
+    it reclaims, and the fake-runner tests below call it with a runner that
+    cannot actually kill anything. Aimed at a developer's real
+    ``/tmp/tmux-<uid>``, one of those tests would unlink the socket file of a
+    live probe server nobody had killed — leaving exactly the unaddressable
+    server the sweep exists to remove. tmux reads ``$TMUX_TMPDIR`` and so does
+    :meth:`TmuxServer.socket_path`, freshly on each call, and ``untraced_env``
+    copies the variable into every real tmux the live tests start, so one
+    redirection covers both layers.
+
+    ``autouse`` at MODULE scope is the point: no test has to remember it, and a
+    test added later cannot forget it. Short on purpose too — an AF_UNIX address
+    has about 100 bytes and pytest's own ``tmp_path`` spends most of them on the
+    test's name.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="asq-tmux-"))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TMUX_TMPDIR", str(directory))
+        yield directory
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def _socket_directory(server: TmuxServer) -> Path:
+    """tmux's socket directory for ``server``, created if tmux has not made it yet.
+
+    ``0o700`` because that is what tmux makes it and what it insists on finding:
+    a directory this module created more permissively fails every live test on
+    the same socket root with ``has unsafe permissions``.
+    """
+    directory = server.socket_path().parent
+    directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o700)
+    return directory
+
+
+def _plant(directory: Path, name: str, *, age: float = 0.0) -> Path:
+    """A stand-in for the socket file tmux leaves behind, ``age`` seconds old."""
+    path = directory / name
+    path.touch()
+    if age:
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+    return path
 
 
 # --- the fake runner -----------------------------------------------------------------
@@ -296,7 +348,8 @@ def test_check_conf_starts_a_throwaway_server_with_the_file_and_gives_it_a_windo
     watch the fatal line load without a word (module docstring). The probe
     window then gets what a real one gets, ``set-option`` before
     ``resize-window``, and ``source-file`` last is what turns tmux's swallowed
-    complaints into stderr.
+    complaints into stderr — with ``kill-session`` behind it, which empties the
+    server so tmux's own ``exit-empty`` ends it without anybody asking.
 
     The socket is the fleet's plus a RANDOM tail, and both calls are aimed at
     the same one: a fixed name is shared state between concurrent checks, and
@@ -316,15 +369,24 @@ def test_check_conf_starts_a_throwaway_server_with_the_file_and_gives_it_a_windo
           "--", "true",
           ";", "set-option", "-w", "-t", "=asq-conf-check:", "window-size", "manual",
           ";", "resize-window", "-t", "=asq-conf-check:", "-x", "80", "-y", "24",
-          ";", "source-file", str(conf)], None),
+          ";", "source-file", str(conf),
+          ";", "kill-session", "-t", "=asq-conf-check"], None),
         ([*_prefix(fake_bin, Path(os.devnull), socket), "kill-server"], None),
     ]  # fmt: skip
+    # The order inside the chain is load-bearing: a kill-session before
+    # source-file would end the server before it could be asked anything.
+    chained = fake.calls[0][0]
+    assert chained.index("source-file") < chained.index("kill-session")
 
     other = conf.with_name("other.conf")
     fake = FakeTmux()
     _server(fake, fake_bin, conf, socket="asq").check_conf(other)
-    assert fake.calls[0][0][:5] == _prefix(fake_bin, other, _sockets_used(fake)[0])
-    assert fake.calls[0][0][-1] == str(other), "…and the same file is what source-file reads"
+    argv = fake.calls[0][0]
+    assert argv[:5] == _prefix(fake_bin, other, _sockets_used(fake)[0])
+    # The argument source-file READS, by its position after that word — not
+    # merely "appears somewhere in argv", which the -f above already guarantees.
+    assert argv[argv.index("source-file") + 1] == str(other), "…the same file, sourced"
+    assert str(conf) not in argv, "…and the conf the server was built with is nowhere in it"
 
 
 def test_check_conf_invents_a_new_socket_every_call_so_two_at_once_cannot_meet(
@@ -443,8 +505,10 @@ def test_check_conf_removes_its_socket_file_but_only_once_the_kill_has_answered(
     for answer in (OK, Completed(1, "", "no server running on /tmp/tmux-0/asq-check-0")):
         fake = FakeTmux(OK, answer)
         checked = _server(fake, fake_bin, conf, socket="asq")
-        touched = sockets / f"asq{CHECK_SOCKET_SUFFIX}-placeholder"
-        touched.touch()
+        # Not a placeholder of some other shape: a socket file exactly like the
+        # one this check makes, so "only its own" is a real claim and not one
+        # the sweep's name rule would have granted anyway.
+        touched = _plant(sockets, f"asq{CHECK_SOCKET_SUFFIX}-1234abcd")
         checked.check_conf()
         assert not leftover(fake).exists(), f"the socket file survived a kill answering {answer}"
         assert touched.exists(), "…and only its OWN file: nothing else was swept up"
@@ -465,6 +529,146 @@ def test_check_conf_removes_its_socket_file_but_only_once_the_kill_has_answered(
     stranded.touch()  # stands in for the file tmux left for a server still up
     stubborn._discard_server(stranded.name)
     assert stranded.exists(), "a server that may still be running keeps its address"
+
+
+#: Comfortably past the age at which the sweep may touch a probe socket.
+_ABANDONED = tmux_module._PROBE_ABANDONED_AFTER + 5.0
+
+
+def _servers_killed(fake: FakeTmux) -> list[str]:
+    """The socket of every ``kill-server`` the run made, in order."""
+    return [argv[argv.index("-L") + 1] for argv, _ in fake.calls if "kill-server" in argv]
+
+
+def test_check_conf_reclaims_a_probe_socket_no_run_can_name_any_more(
+    fake_bin: Path, conf: Path
+) -> None:
+    """SIGKILL is not a ``finally``, and a random socket is a name nothing recorded.
+
+    ``check_conf`` cleans up from a ``finally``, which covers returning and
+    raising and not being killed. What a killed run leaves is a server holding a
+    session the conf's own ``remain-on-exit on`` will not let go, on a socket
+    whose name existed only in the dead process: unreachable and unable to end
+    itself. The file tmux left in ``/tmp/tmux-<uid>`` is the last handle on it,
+    so a later check reads the directory back.
+
+    Everything it must NOT take is planted here as old as the one it must:
+    only the name rule and the age rule may decide, never the clock alone.
+    """
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf, socket="asq")
+    sockets = _socket_directory(server)
+    abandoned = _plant(sockets, f"asq{CHECK_SOCKET_SUFFIX}-0123abcd", age=_ABANDONED)
+    spared = {
+        # A check that may be running RIGHT NOW: the whole reason the name is
+        # random is that one call must not touch another call's live probe.
+        "a probe younger than the longest a live check can hold one": _plant(
+            sockets, f"asq{CHECK_SOCKET_SUFFIX}-89abcdef"
+        ),
+        "the fleet's own server": _plant(sockets, "asq", age=_ABANDONED),
+        "a fleet whose socket merely starts the same way": _plant(
+            sockets, f"asq-other{CHECK_SOCKET_SUFFIX}-0123abcd", age=_ABANDONED
+        ),
+        "a tail that is not the eight hex digits a check writes": _plant(
+            sockets, f"asq{CHECK_SOCKET_SUFFIX}-zzzzzzzz", age=_ABANDONED
+        ),
+        "a tail that is hex but longer": _plant(
+            sockets, f"asq{CHECK_SOCKET_SUFFIX}-0123abcde", age=_ABANDONED
+        ),
+        "the prefix with nothing after it": _plant(
+            sockets, f"asq{CHECK_SOCKET_SUFFIX}", age=_ABANDONED
+        ),
+    }
+
+    assert _completes(server.check_conf)
+
+    killed = _servers_killed(fake)
+    assert killed[0] == abandoned.name, "the abandoned probe is killed before anything else"
+    assert len(killed) == 2, f"…and then only this check's own probe: {killed}"
+    assert _CHECK_SOCKET.fullmatch(killed[1]), "…which is the socket it just invented"
+    assert not abandoned.exists(), "the socket file goes with the server it addressed"
+    for why, path in spared.items():
+        assert path.exists(), f"the sweep took {path.name}, which is {why}"
+
+
+def test_the_sweep_cannot_be_pointed_at_another_fleet_by_the_socket_name(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``FleetSettings.tmux_socket`` is the user's to choose, so it is never a pattern.
+
+    ``Path.glob(f"{socket}-check-*")`` reads the socket name as a PATTERN: for a
+    fleet on ``asq[1]`` that is a character class, and this exact pair is what it
+    does — ``fnmatch("asq1-check-0123abcd", "asq[1]-check-*")`` is true and
+    ``fnmatch("asq[1]-check-0123abcd", "asq[1]-check-*")`` is false. So the glob
+    would spare this fleet's own leftover and reclaim the neighbour's instead —
+    killing a server that is not ours on a socket we were never told about.
+    ``str.startswith`` on a literal prefix has no such reading.
+    """
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf, socket="asq[1]")
+    sockets = _socket_directory(server)
+    ours = _plant(sockets, f"asq[1]{CHECK_SOCKET_SUFFIX}-0123abcd", age=_ABANDONED)
+    theirs = _plant(sockets, f"asq1{CHECK_SOCKET_SUFFIX}-89abcdef", age=_ABANDONED)
+
+    assert _completes(server.check_conf)
+
+    assert not ours.exists(), "the literal name is the one that gets reclaimed"
+    assert theirs.exists(), "…and a glob would have reclaimed this one instead"
+    assert _servers_killed(fake)[0] == ours.name
+
+
+def test_the_sweep_is_bounded_by_the_clock_and_not_by_the_number_of_stale_sockets(
+    fake_bin: Path, conf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One ``kill-server`` per stale socket at ``_COMMAND_TIMEOUT`` each is O(N x 30s).
+
+    ``check_conf`` is what the doctor calls, and it used to cost a flat two tmux
+    round trips. A sweep that pays for every file it finds would make a
+    directory nobody had tidied for a month into a doctor that appears to hang.
+    So the sweep stops at :data:`_SWEEP_BUDGET` and leaves the rest — still
+    there, and still older — for the next call.
+    """
+
+    per_kill = 0.05
+
+    class SlowKill(FakeTmux):
+        """A ``kill-server`` that costs measurable time, as a hung one would."""
+
+        def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
+            if "kill-server" in argv:
+                time.sleep(per_kill)
+            return super().__call__(argv, stdin)
+
+    monkeypatch.setattr(tmux_module, "_SWEEP_BUDGET", 3 * per_kill)
+    fake = SlowKill()
+    # A socket of its own, so nothing another test planted can be counted here.
+    server = _server(fake, fake_bin, conf, socket="asq-budget")
+    sockets = _socket_directory(server)
+    stale = [
+        _plant(sockets, f"asq-budget{CHECK_SOCKET_SUFFIX}-{index:08x}", age=_ABANDONED)
+        for index in range(40)
+    ]
+
+    started = time.monotonic()
+    assert _completes(server.check_conf)
+    elapsed = time.monotonic() - started
+
+    planted = {path.name for path in stale}
+    swept = [socket for socket in _servers_killed(fake) if socket in planted]
+    assert 1 <= len(swept) < len(stale), f"the sweep did {len(swept)} of {len(stale)} kills"
+    assert elapsed < len(stale) * per_kill, "…and did not pay for every file it found"
+    left = [path for path in stale if path.exists()]
+    assert len(left) == len(stale) - len(swept), "the rest wait their turn, still there"
+
+
+def test_a_sweep_that_cannot_read_the_directory_is_not_a_bad_configuration(
+    fake_bin: Path, conf: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The answer this method gives is about the user's CONF; litter is nobody's verdict."""
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "tmux-has-not-run-here"))
+    fake = FakeTmux()
+    assert _completes(_server(fake, fake_bin, conf, socket="asq").check_conf)
+    assert _servers_killed(fake) == [_sockets_used(fake)[0]], "only its own probe was killed"
 
 
 # --- sessions and windows -------------------------------------------------------------------
@@ -1153,18 +1357,101 @@ def test_live_scrollback_is_bounded_and_clamped(live: TmuxServer) -> None:
     assert deep.lines[0].startswith("\x1b[31mred"), "the top of history is the first line printed"
 
 
+#: How long a pane that already reads dead is given to also carry its status.
+#: The two are not one event: tmux marks a pane dead when it closes the pane's
+#: fd (``pane_dead`` is ``wp->fd == -1``) and can only fill ``pane_dead_status``
+#: from the SIGCHLD that reaps the child, which sets ``PANE_STATUSREADY`` —
+#: ``server_destroy_pane`` and ``server_child_exited`` in tmux 3.4's source. So
+#: waiting for the first and asserting the second is a race, and this is the
+#: bound on the wait for the second. Generous on purpose: over 250 exiting
+#: panes measured here on 3.4 — 100 idle and 150 under 16 busy-loop CPU hogs —
+#: the status was present on the FIRST read after ``pane_dead`` every time it
+#: arrived at all and not once arrived late, so nothing but the defect below
+#: ever reaches this bound.
+_DEAD_STATUS_TIMEOUT = 8.0
+
+#: How many exiting panes this tmux may be asked for before the test gives up.
+#: tmux 3.4 sometimes loses a pane's exit status outright — ``pane_dead=1`` with
+#: ``pane_dead_status``, ``pane_dead_signal`` and ``pane_dead_time`` all empty,
+#: and still empty ``_DEAD_STATUS_TIMEOUT`` later. Measured on this box: 5 of
+#: 150 panes under 16 CPU hogs with PLAIN tmux and no fleet code in the way
+#: (11 of 150 through :meth:`TmuxServer.spawn_window`), 2 of 280 idle, and 0 of
+#: 150 on tmux 3.5a under the same load — a 3.4 defect, on the tmux CI runs.
+#:
+#: It is independent per pane: across 120 runs of three consecutive panes, no
+#: run lost more than one. So a retry is not a way to tolerate a wrong answer —
+#: a status that is present and not 3 fails on the spot, and a tmux that reports
+#: none at all fails every attempt and the test still reds — only a way to stop
+#: one pane in ~30 deciding a whole CI run.
+_DEAD_STATUS_ATTEMPTS = 3
+
+#: What tmux itself says about a dead pane, for a failure to quote back.
+_DEAD_FORMAT = (
+    "pane_dead=#{pane_dead} status=[#{pane_dead_status}] "
+    "signal=[#{pane_dead_signal}] time=[#{pane_dead_time}]"
+)
+
+
+def _reports_a_status(live: TmuxServer, session: str, pane_id: str) -> bool:
+    """Has tmux filled the exit status in, in BOTH places the test reads it?
+
+    Deliberately not "is it 3": what may be waited for is tmux being READY to
+    answer, and what the answer says is then asserted once, where a wrong status
+    fails instead of quietly costing another attempt.
+    """
+    window = next((w for w in live.list_windows(session) if w.pane_id == pane_id), None)
+    facts = live.pane_facts(pane_id)
+    return (
+        window is not None
+        and window.dead
+        and window.dead_status is not None
+        and facts is not None
+        and facts.dead
+        and facts.dead_status is not None
+    )
+
+
+def _exited_pane(live: TmuxServer, session: str, name: str) -> WindowInfo:
+    """A window whose ``exit 3`` has finished AND whose status tmux still holds.
+
+    Waits for the condition the caller ASSERTS rather than for the earlier
+    ``pane_dead`` the assertion does not mention (:data:`_DEAD_STATUS_TIMEOUT`),
+    and gives up loudly, in tmux's own words, when no pane ever reports one
+    (:data:`_DEAD_STATUS_ATTEMPTS`). A pane that lost its status is killed before
+    the next attempt, so the caller still gets a session with one dead window.
+    """
+    unanswered: list[str] = []
+    for attempt in range(_DEAD_STATUS_ATTEMPTS):
+        window = _spawn(live, session, f"{name}-{attempt}", EXIT_3)
+        ready = functools.partial(_reports_a_status, live, session, window.pane_id)
+        if _wait(ready, timeout=_DEAD_STATUS_TIMEOUT):
+            return window
+        unanswered.append(
+            live.run("display-message", "-p", "-t", window.pane_id, _DEAD_FORMAT).strip()
+        )
+        live.kill_window(window.pane_id)
+    raise AssertionError(
+        f"{_DEAD_STATUS_ATTEMPTS} panes ran `{' '.join(EXIT_3)}` and not one reported an exit "
+        f"status within {_DEAD_STATUS_TIMEOUT:.0f}s. tmux's own answer for each: "
+        + "; ".join(unanswered)
+    )
+
+
 @requires_tmux
 def test_live_a_finished_command_is_a_dead_pane_with_its_status(live: TmuxServer) -> None:
+    """``remain-on-exit`` keeps the window, and the exit status is readable from it.
+
+    What the fleet needs from a finished agent is the number it exited with, and
+    it reads that two ways — out of ``list-panes`` for the whole session, and out
+    of ``display-message`` for the one pane. Both are pinned here, on the same
+    pane, and both must say 3.
+    """
     keeper = _spawn(live, "asq-test-fox", "w0", CAT)
-    exiting = _spawn(live, "asq-test-fox", "w1", EXIT_3)
+    exiting = _exited_pane(live, "asq-test-fox", "w1")
 
-    def dead() -> WindowInfo | None:
-        return next(
-            (w for w in live.list_windows("asq-test-fox") if w.pane_id == exiting.pane_id), None
-        )
-
-    assert _wait(lambda: (found := dead()) is not None and found.dead)
-    found = dead()
+    found = next(
+        (w for w in live.list_windows("asq-test-fox") if w.pane_id == exiting.pane_id), None
+    )
     assert found is not None and (found.dead, found.dead_status) == (True, 3)
     facts = live.pane_facts(exiting.pane_id)
     assert facts is not None and (facts.dead, facts.dead_status) == (True, 3)
@@ -1378,6 +1665,89 @@ def test_live_checks_running_at_once_do_not_report_each_other_as_a_bad_conf(
     assert outcomes == [None] * 4, f"a concurrent check called a good conf bad: {outcomes}"
     assert _check_leftovers(live) == []
     assert live.list_sessions() == [], "and none of them touched the fleet's own server"
+
+
+def _server_is_up(socket: str) -> bool:
+    """Does a tmux server answer on ``socket``? tmux's own answer, not the file's.
+
+    ``display-message`` carries no ``CMD_STARTSERVER``, so asking cannot create
+    what it is asking about — measured on 3.4: against a socket with no server
+    it exits 1 with ``error connecting to …`` and leaves the directory empty.
+    """
+    server = TmuxServer(socket)
+    return _tmux(server.argv("display-message", "-p", "#{pid}"), None).returncode == 0
+
+
+def _strand_a_probe(live: TmuxServer, socket: str) -> Path:
+    """A probe server in the state a run killed mid-chain leaves behind.
+
+    The same session name, on the same kind of socket, under the same bundled
+    conf — but without the ``kill-session`` that ends ``check_conf``'s chain. That
+    conf's ``remain-on-exit on`` keeps the finished ``true`` pane, the pane keeps
+    the window, the window keeps the session and the session keeps the server,
+    so ``exit-empty`` never fires and nothing about this server ends on its own.
+    """
+    stranded = TmuxServer(socket)
+    stranded.run("new-session", "-d", "-s", "asq-conf-check", "-c", "/", "--", "true")
+    assert _server_is_up(socket), "the stranded probe never came up"
+    return stranded.socket_path()
+
+
+@requires_tmux
+def test_live_a_probe_server_ends_itself_when_the_run_that_made_it_does_not(
+    live: TmuxServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``finally`` covers returning and raising. It does not cover SIGKILL.
+
+    So the chain ends by killing its own session, which empties the server, and
+    tmux's default ``exit-empty on`` does the rest — no cleanup code involved.
+    This disables the cleanup entirely to prove that, keeping the socket name the
+    disabled call was given so the abandoned server can still be looked at.
+
+    What that is worth is measured by its opposite: :func:`_strand_a_probe`
+    builds the same server WITHOUT that command, and the test below finds it
+    still running until something reclaims it.
+    """
+    abandoned: list[str] = []
+    monkeypatch.setattr(live, "_discard_server", abandoned.append)
+
+    assert _completes(live.check_conf), "the conf is good; only the tidying was removed"
+    assert len(abandoned) == 1, f"the cleanup this test replaced ran once: {abandoned}"
+    socket = abandoned[0]
+
+    assert _wait(lambda: not _server_is_up(socket)), (
+        f"the probe server on {socket} outlived the run and nothing can name it now"
+    )
+    # The FILE is what tmux never removes, and what _discard_server would have.
+    assert TmuxServer(socket).socket_path().exists()
+    assert _check_leftovers(live) == [socket], "…so exactly one piece of litter, no server"
+
+
+@requires_tmux
+def test_live_check_conf_reclaims_a_probe_server_an_earlier_run_abandoned(
+    live: TmuxServer,
+) -> None:
+    """The socket file is the only handle left on a server whose run was killed.
+
+    Two of them here, in the state :func:`_strand_a_probe` describes, differing
+    in one thing: how old their socket file is. Age is what separates a probe
+    nobody will ever come back for from one a check running right now is in the
+    middle of using — the situation the random socket name exists to protect —
+    so the young one must survive a sweep that takes the old one.
+    """
+    old, young = (f"{live.socket}{CHECK_SOCKET_SUFFIX}-{tail}" for tail in ("0123abcd", "89abcdef"))
+    old_file, young_file = _strand_a_probe(live, old), _strand_a_probe(live, young)
+    stamp = time.time() - _ABANDONED
+    os.utime(old_file, (stamp, stamp))
+
+    assert _completes(live.check_conf), "reclaiming litter is not a verdict on the conf"
+
+    assert not _server_is_up(old), "the abandoned probe server is still running"
+    assert not old_file.exists(), "…and its socket file is still in tmux's directory"
+    assert _server_is_up(young), "a probe young enough to belong to a running check was killed"
+    assert young_file.exists()
+    assert _check_leftovers(live) == [young], "nothing else of that shape was touched"
+    assert live.list_sessions() == [], "and the fleet's own server was never started"
 
 
 @requires_tmux

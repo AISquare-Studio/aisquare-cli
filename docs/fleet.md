@@ -32,7 +32,7 @@ Three ideas carry the whole feature:
 
 | Tool | Needed for | Minimum |
 | --- | --- | --- |
-| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys) — the whole floor. A newer tmux is fine, but it is not what decides whether shift+enter reaches the agent (**Keys**, below) |
+| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-session -e`, extended keys) — the whole floor. A newer tmux is fine, but it is not what decides whether shift+enter reaches the agent (**Keys**, below) |
 | **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--restricted`, `--effort` |
 | `git` | worktrees for coders and reviewers | 2.20+ |
 | `gh` | *optional* — the coder opens PRs and the reviewer reviews them with it | any current release |
@@ -501,7 +501,12 @@ a chord asked for by *name* lands in the pane as the name — the literal text
 `S-Enter` — rather than as the key. There is no tmux version to upgrade past
 this; what decides it is the keyboard mode the agent's own program puts the pane
 in, which tmux neither reports nor lets us change. So the fleet does not forward
-those chords by name.
+those chords by name. It writes the bytes the chord means instead — shift+enter
+as `ESC [ 13 ; 2 u`, tmux's own spelling of it — and sends them as literal text,
+which every tmux from the floor up delivers unchanged (measured on 3.2, 3.2a,
+3.3a, 3.4 and 3.5a). That is why the tmux row above is a floor and not a
+recommendation, and why `aisquare doctor` asks you to upgrade tmux only when it
+is below that floor.
 
 ---
 

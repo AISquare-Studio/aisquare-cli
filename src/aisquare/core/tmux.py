@@ -98,6 +98,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,20 +108,67 @@ from aisquare.core.spawn import untraced_env
 
 DEFAULT_SOCKET = "asq"
 MIN_VERSION = (3, 2)
-"""``new-window -e`` and ``extended-keys`` arrived in 3.2 — that is the whole floor.
+"""``new-session -e`` and ``extended-keys`` arrived in 3.2 — that is the whole floor.
 
-It is NOT a floor for the key names ``send-keys`` takes: tmux 3.4, the newest
-version this repository can measure and what ``ubuntu-latest`` ships, does not
-know 15 of the names ``aisquare.core.keys`` emits — ``C-M-Enter``, ``C-S-Enter``,
-``C-S-Space``, ``C-S-a``, ``C-S-z``, ``M-S-BSpace``, ``M-S-Enter``,
-``M-S-Escape``, ``M-S-Space``, ``M-S-Tab``, ``S-BSpace``, ``S-Enter``,
-``S-Escape``, ``S-Space``, ``S-Tab`` — and TYPES THEM as text instead of
-raising: ``send-keys S-Enter`` puts the eight characters ``S-Enter`` in the
-pane (measured here with ``cat -A``, identical with and without
-``extended-keys on``, so it is a gap in tmux's key table and not a mode this
-server could switch on). Raising :data:`MIN_VERSION` would not buy those names
-back on the tmux CI actually runs, so it does not move: ``aisquare.core.keys``
-owns what happens to a name this tmux does not know.
+Both from tmux's own CHANGES for 3.1c → 3.2, and the ``-e`` entry there says
+what it is: the flag ``new-window`` ALREADY had, given to ``new-session`` too.
+:meth:`TmuxServer.spawn_window` uses it on whichever of the two it needs, so the
+later arrival is the one that sets the floor — verified against the 3.2 build
+here, which takes ``new-session -e ASQ_PROBE=yes`` and reports it back through
+``show-environment``.
+
+Raising the floor would not buy back the chords ``aisquare.core.keys`` hand-encodes,
+because those are not a missing NAME on any tmux the fleet supports. tmux 3.4 —
+what ``ubuntu-latest`` ships — parses every one of them: ``bind-key S-Enter``,
+``C-S-a``, ``M-S-BSpace`` … are all accepted and printed back by ``list-keys``
+(as tmux's own spelling, ``S-C-a``; only a name it really does not know,
+``Bogus`` or ``F13``, answers ``unknown key``). What it will not do is ENCODE
+such a chord for a pane in legacy mode, and ``cmd-send-keys`` does not fail when
+it cannot: it types the NAME as text. ``send-keys S-Enter`` into a
+``stty raw -echo; cat`` pane put the SEVEN bytes ``S-Enter`` there, and
+``C-Enter`` put nothing at all (measured on 3.4 here, reading the file the pane
+wrote). Which chords, and how many, is ``aisquare.core.keys``'s business and its
+docstring carries the count over the vocabulary it emits; this is only about
+what the SERVER can be told to do about it.
+
+And it is a MODE, not a key-table gap. ``extended-keys always`` makes tmux 3.4
+encode such a chord without waiting for the pane to ask for it: same server,
+same names, that option the only difference, ``S-Enter`` → ``ESC [ 13 ; 2 u``,
+``C-Enter`` → ``ESC [ 13 ; 5 u``, ``C-S-a`` → ``ESC [ 65 ; 6 u``, ``S-Tab`` →
+``ESC [ 9 ; 2 u``, with ``Enter``, ``C-c``, ``Tab`` and ``M-x`` byte-identical
+under both values (four chords measured, not the whole vocabulary).
+
+The fleet still sets ``extended-keys on`` (:data:`BUNDLED_CONF`) and still
+hand-encodes those chords itself, for two measured reasons that ``always`` cannot
+be talked out of:
+
+* tmux 3.2 — this very floor — REJECTS the value. With ``set -s extended-keys
+  always`` in the ``-f`` file the 3.2 server starts and every other line applies
+  (``escape-time`` is 0), but that option keeps its default: ``show -s
+  extended-keys`` answers ``off``. Then ``source-file`` on the running server —
+  which is exactly what :meth:`TmuxServer.check_conf` runs — answers ``bad
+  value: always`` with status 1, so the doctor would condemn a good
+  configuration on the oldest tmux the fleet claims to support. 3.2a, 3.3a, 3.4
+  and 3.5a all accept it — ``options-table.c`` is where the change is:
+  ``extended-keys`` is an ``OPTIONS_TABLE_FLAG`` in 3.2 and an
+  ``OPTIONS_TABLE_CHOICE`` over off/on/always from 3.2a.
+* on 3.5a — the newest build measured here — ``always`` makes ``send-keys -l``
+  DROP control bytes. Sending ``<0x01><0x02>…<0x1f><0x7f>`` as one literal
+  string: under ``on`` all 32 arrive; under ``always`` only four survive — TAB
+  (0x09), CR (0x0d), ESC (0x1b) and DEL (0x7f) — and the other 28 vanish
+  silently. Under ``on`` nothing is dropped on either 3.4 or 3.5a, and on 3.4
+  nothing is dropped under ``always`` either, so this is newer than the tmux CI
+  runs and squarely in the range users have.
+  :meth:`TmuxServer.send_literal` is how the fleet forwards pasted text, so
+  ``always`` would quietly damage any paste carrying a control byte.
+
+Letting tmux encode would not even be one answer: on 3.5a under ``always`` the
+same ``S-Enter`` arrives as ``ESC [ 27 ; 2 ; 13 ~``, not the CSI-u 3.4 sends,
+because ``extended-keys-format`` defaults to ``xterm`` there. Hand-encoding is
+what is left, and it is the version-independent half: the bytes the fleet writes
+are the bytes the agent receives on every tmux from 3.2 up, and the ESC that
+starts each sequence is one of the four ``send-keys -l`` never drops even under
+the value the fleet does not use.
 """
 PASTE_BUFFER = "asq-paste"
 CONF_NAME = "fleet-tmux.conf"
@@ -134,8 +182,42 @@ kills a CONCURRENT check's server, and one that does not lets a server left
 over by a killed run answer in its place — tmux reads ``-f`` only when it
 STARTS a server, so that stale server would run some other configuration and
 report a clean bill for the file nobody tested. A name no other call can pick
-removes both."""
+removes both.
+
+What a random name costs is that nothing can ADDRESS it afterwards, so a run
+killed without unwinding (SIGKILL, the OOM killer) would strand its probe
+server for the life of the box. :meth:`TmuxServer._reclaim_abandoned_probes`
+is the answer to that, and this prefix plus :data:`_PROBE_TAIL` is the whole
+shape it recognises."""
 _COMMAND_TIMEOUT = 30.0
+
+#: The random tail :meth:`TmuxServer.check_conf` gives its socket, as a pattern
+#: the sweep matches against the part of a filename AFTER the prefix — never
+#: interpolated into a glob. ``FleetSettings.tmux_socket`` is the user's to
+#: choose, and a socket named ``asq[1]`` in a ``glob()`` pattern would match
+#: another fleet's sockets and kill their servers; ``str.startswith`` on a
+#: literal prefix cannot, and this pins the rest to eight hex digits so that a
+#: second fleet on a socket merely BEGINNING ``asq-check-`` is left alone too.
+_PROBE_TAIL = re.compile(r"[0-9a-f]{8}")
+
+#: How old a ``<socket>-check-<hex>`` socket file must be before the sweep may
+#: touch it — the guard that keeps it off a CONCURRENT check's live probe,
+#: which is the whole reason the name is random in the first place.
+#:
+#: It is derived, not guessed: every tmux invocation is bounded by
+#: :data:`_COMMAND_TIMEOUT` (:func:`_tmux`), and a check makes exactly two after
+#: the socket exists (the probe chain and the ``kill-server`` behind it), so no
+#: live check can hold one longer than ``2 * _COMMAND_TIMEOUT``. Twice that is
+#: the margin. tmux writes the socket file when it STARTS the server and never
+#: touches it again — not on a client connect, not when the server exits
+#: (measured on 3.4 here) — so its mtime IS that server's start time.
+_PROBE_ABANDONED_AFTER = 4 * _COMMAND_TIMEOUT
+
+#: Wall clock the sweep may spend, so that :meth:`TmuxServer.check_conf` stays
+#: flat in the number of stale sockets instead of O(N) ``kill-server`` calls at
+#: :data:`_COMMAND_TIMEOUT` each. Nothing is lost by stopping early: what is not
+#: reclaimed this call is still there, and still older, for the next one.
+_SWEEP_BUDGET = _COMMAND_TIMEOUT
 
 #: The bundled server configuration. Applied with ``-f`` when the server starts
 #: (harmless afterwards). Every line has a reason: docs/plans/fleet-tui.md §3.1.
@@ -577,11 +659,31 @@ class TmuxServer:
         meet. They used to — each cleared the fixed socket first, and whichever
         created its session second got ``duplicate session: asq-conf-check``,
         which this method can only report as tmux rejecting the user's
-        configuration. :meth:`_discard_server` runs from a ``finally``, because
-        a check that raised used to leave its server up for good.
+        configuration.
+
+        Three layers get rid of that server again, because the socket name is
+        random and only the first two of them know it:
+
+        * the chain ENDS by killing its own session. With nothing left to hold
+          the server up, tmux's default ``exit-empty on`` reaps it — measured on
+          3.2, 3.2a, 3.3a, 3.4 and 3.5a, gone within 0.6s, where the same chain
+          without that command left the session listed on every one of them. So
+          the ordinary end of a check leaves no server even if this process is
+          killed the instant the command returns, and the complaint still comes
+          back intact: the ``kill-session`` is behind ``source-file`` and was
+          measured not to disturb either the status or the stderr of a rejected
+          conf.
+        * :meth:`_discard_server` runs from a ``finally``, because a check that
+          RAISED — a timeout, an OS refusal, a conf that stopped the chain
+          before its last command — used to leave its server up for good.
+        * :meth:`_reclaim_abandoned_probes` first, for the one case neither
+          covers: a run killed without unwinding, between the server starting
+          and the chain reaching its end. It runs BEFORE this call's own socket
+          exists, so it can never sweep it.
 
         The doctor's "private server starts" check is exactly this call.
         """
+        self._reclaim_abandoned_probes()
         path = conf if conf is not None else self.conf_path()
         socket = f"{self.socket}{CHECK_SOCKET_SUFFIX}-{secrets.token_hex(4)}"
         width, height = _CHECK_SIZE
@@ -596,6 +698,7 @@ class TmuxServer:
                 probe,
                 *_configure_window(f"={_CHECK_SESSION}:", width, height),
                 ["source-file", str(path)],
+                ["kill-session", "-t", f"={_CHECK_SESSION}"],
             ),
         )
         try:
@@ -606,17 +709,76 @@ class TmuxServer:
         if completed.returncode != 0 or complaint:
             raise TmuxError(complaint or f"tmux rejected {path} without saying why")
 
+    def _reclaim_abandoned_probes(self) -> None:
+        """Kill probe servers no run can name any more. Best effort, and bounded.
+
+        :meth:`check_conf` gives each probe a socket no other call can pick, and
+        records it nowhere: the moment the process holding it dies without
+        unwinding, that server is unaddressable and — because the conf under
+        test sets ``remain-on-exit on``, so the dead ``true`` pane keeps the
+        session and ``exit-empty`` never fires — unable to end itself either.
+        The socket FILE tmux left in ``/tmp/tmux-<uid>`` is the only handle on
+        it left, and that is what this reads back.
+
+        Three separate guards keep the sweep off things that are not that:
+
+        * the name must START WITH ``<this fleet's socket>-check-`` as a literal
+          ``str.startswith``, over ``iterdir()`` — never a ``glob()`` pattern
+          with the socket name interpolated, which would turn a socket the user
+          named ``asq[1]`` into a class matching another fleet's (see
+          :data:`_PROBE_TAIL`) — and the rest must be the eight hex digits
+          :meth:`check_conf` writes.
+        * it must be older than :data:`_PROBE_ABANDONED_AFTER`, which is twice
+          the longest a live check can possibly hold one. Without that, this
+          would kill a CONCURRENT doctor's probe mid-check, which is the exact
+          harm the random socket exists to prevent.
+        * :data:`_SWEEP_BUDGET` caps the whole sweep, so ``check_conf`` stays
+          flat rather than paying one ``kill-server`` timeout per stale socket.
+
+        Nothing raised here reaches the caller: this runs before a check whose
+        answer is about the user's CONFIGURATION, and litter in ``/tmp`` must
+        never be reported as a bad conf.
+        """
+        prefix = f"{self.socket}{CHECK_SOCKET_SUFFIX}-"
+        try:
+            entries = sorted(self.socket_path().parent.iterdir())
+        except (OSError, TmuxUnavailable):
+            return
+        abandoned_before = time.time() - _PROBE_ABANDONED_AFTER
+        deadline = time.monotonic() + _SWEEP_BUDGET
+        for entry in entries:
+            name = entry.name
+            if not name.startswith(prefix):
+                continue
+            if _PROBE_TAIL.fullmatch(name[len(prefix) :]) is None:
+                continue
+            try:
+                if entry.stat().st_mtime > abandoned_before:
+                    continue
+            except OSError:
+                continue
+            if time.monotonic() >= deadline:
+                return
+            self._discard_server(name)
+
     def _discard_server(self, socket: str) -> None:
         """Take a throwaway server down and leave nothing of it behind. Best effort.
 
         Both steps are needed and neither may raise. ``kill-server`` is what
-        ends it: this server holds a session whose pane the bundled
-        ``remain-on-exit on`` keeps after ``true`` returns, so ``exit-empty``
-        never fires and it would otherwise sit there for the life of the box
-        (measured: still listing its session two seconds on, where a server
-        with no session was gone within one). Then the socket FILE, which tmux
-        never unlinks (:meth:`kill_server`) and which a per-call socket name
-        would otherwise leave in ``/tmp/tmux-<uid>`` once per check.
+        ends a probe whose chain did not reach its own ``kill-session``: such a
+        server holds a session whose pane the bundled ``remain-on-exit on``
+        keeps after ``true`` returns, so ``exit-empty`` never fires and it would
+        otherwise sit there for the life of the box (measured on 3.2 through
+        3.5a — the session still listed 0.6s on, where the chain that ends in
+        ``kill-session`` had already taken the server with it). Then the socket
+        FILE, which tmux never unlinks (:meth:`kill_server`) and which a
+        per-call socket name would otherwise leave in ``/tmp/tmux-<uid>`` once
+        per check.
+
+        Called for the socket this run made (from :meth:`check_conf`'s
+        ``finally``) and for one an earlier run abandoned
+        (:meth:`_reclaim_abandoned_probes`); ``no server running`` is the
+        ordinary answer in both.
 
         Failure here is not the caller's business — ``no server running`` is an
         ordinary answer, a vanished socket file is the desired state — and it

@@ -502,11 +502,10 @@ a chord asked for by *name* lands in the pane as the name — the literal text
 this; what decides it is the keyboard mode the agent's own program puts the pane
 in, which tmux neither reports nor lets us change. So the fleet does not forward
 those chords by name. It writes the bytes the chord means instead — shift+enter
-as `ESC [ 13 ; 2 u`, tmux's own spelling of it — and sends them as literal text,
-which every tmux from the floor up delivers unchanged (measured on 3.2, 3.2a,
-3.3a, 3.4 and 3.5a). That is why the tmux row above is a floor and not a
-recommendation, and why `aisquare doctor` asks you to upgrade tmux only when it
-is below that floor.
+as `ESC [ 13 ; 2 u` — and sends them as literal text, which every tmux from the
+floor up delivers unchanged (measured on 3.2, 3.2a, 3.3a, 3.4 and 3.5a). That is
+why the tmux row above is a floor and not a recommendation, and why
+`aisquare doctor` asks you to upgrade tmux only when it is below that floor.
 
 ---
 
@@ -526,9 +525,9 @@ aisquare --json fleet ls
 `fleet_unavailable` and the reason ("tmux is not installed", "tmux 3.1 is too
 old — the fleet needs 3.2 or newer"); the Welcome page shows `✗ tmux`;
 everything outside the fleet keeps working. `aisquare doctor` gains a `tmux`
-check — present, version, the private server starts — with per-OS install
-hints, and warn-level checks for `gh` and the fleet's own state (Phase 3).
-Install or upgrade as above and re-run:
+check — present, version — with per-OS install hints, and warn-level checks for
+`gh` and the fleet's own state (Phase 3). Install or upgrade as above and
+re-run:
 
 ```sh
 tmux -V

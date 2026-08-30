@@ -73,12 +73,13 @@ module already claimed to send are simply sent.
 
 That is NOT a version gap, and raising :data:`aisquare.core.tmux.MIN_VERSION`
 would not close it. tmux 3.4 knows every one of those names (``bind-key`` takes
-them; only a name like ``Bogus`` is refused) and encodes all 121 the moment the
-PANE'S application turns extended keys on: with ``printf '\\033[>4;2m'`` —
-xterm's modifyOtherKeys — before ``cat``, ``S-Enter`` arrives as
-``ESC [ 13 ; 2 u``. What tmux 3.4 does not understand is the OTHER request, the
-kitty keyboard protocol's ``ESC [ > 1 u`` (nor ``ESC [ > 5 u``): measured here,
-a pane that sends either still gets the seven characters ``S-Enter``. tmux
+them; only a name like ``Bogus`` is refused) and encodes 118 of the 121 — every
+one but the ctrl-on-Tab family below — the moment the PANE'S application turns
+extended keys on: with ``printf '\\033[>4;2m'`` — xterm's modifyOtherKeys —
+before ``cat``, ``S-Enter`` arrives as ``ESC [ 13 ; 2 u``. What tmux 3.4 does
+not understand is the OTHER request, the kitty keyboard protocol's
+``ESC [ > 1 u`` (nor ``ESC [ > 5 u``): measured here, a pane that sends either
+still gets the seven characters ``S-Enter``. tmux
 publishes no format variable for a pane's key mode either — ``display-message
 -a`` prints the same 120 variables for a legacy and a modifyOtherKeys pane,
 differing only in the ones that identify the pane (``pane_id``, ``pane_pid``,
@@ -223,8 +224,9 @@ NO_CTRL: frozenset[str] = frozenset({"Escape", "BSpace"})
 #: :data:`aisquare.core.tmux.MIN_VERSION` — ``C-/`` is not in the key table at
 #: all (``bind-key C-/`` answers ``unknown key: C-/``), so ``send-keys C-/``
 #: TYPES those three characters. Of the 350 names this module sends as names,
-#: that is the only one mistyped by any of the five builds measured (3.2, 3.2a,
-#: 3.3a, 3.4, 3.5a), and only by 3.2; 3.2a is where tmux learned the name.
+#: that is the only one TYPED OUT as its own letters by any of the five builds
+#: measured (3.2, 3.2a, 3.3a, 3.4, 3.5a), and only by 3.2; 3.2a is where tmux
+#: learned the name.
 CTRL_US_ALIASES: frozenset[str] = frozenset("-/_")
 
 #: Punctuation tmux can put a control modifier on (the classic C0 mappings:

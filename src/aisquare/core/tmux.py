@@ -42,13 +42,14 @@ Verified against tmux 3.7c, and on 3.4 where a version is named below
   for the first attached client, which the fleet never has, and the command
   exits 0. ``source-file`` on a running server reports them on stderr with
   status 1 — so that, on a throwaway server, is :meth:`TmuxServer.check_conf`.
-* ``window-size manual`` in the GLOBAL window options is FATAL below tmux 3.7,
-  whether the ``-f`` file sets it at server start or a ``set -g`` sets it on a
+* ``window-size manual`` in the GLOBAL window options is FATAL on every build
+  measured here from 3.3a up — 3.3a, 3.4 and 3.5a, the newest one there is here
+  — whether the ``-f`` file sets it at server start or a ``set -g`` sets it on a
   running server. Creating a window reads that global (``default_window_size``,
   which has no window yet) and ``clients_calculate_size`` then reads
   ``w->manual_sx`` through the window pointer it was never given: the server
-  segfaults and the client says ``server exited unexpectedly``. tmux 3.7 added
-  the ``w != NULL`` guard; 3.4 — what ``ubuntu-latest`` ships — dies on the
+  segfaults and the client says ``server exited unexpectedly``. 3.2 and 3.2a
+  take it without complaint; 3.4 — what ``ubuntu-latest`` ships — dies on the
   first ``new-session``, and on every later ``new-window`` if the option is set
   once the server is up. So the fleet sets ``window-size`` on each window it
   creates instead (:data:`WINDOW_OPTIONS`): a WINDOW's own option is what pins
@@ -152,15 +153,13 @@ be talked out of:
   and 3.5a all accept it — ``options-table.c`` is where the change is:
   ``extended-keys`` is an ``OPTIONS_TABLE_FLAG`` in 3.2 and an
   ``OPTIONS_TABLE_CHOICE`` over off/on/always from 3.2a.
-* on 3.5a — the newest build measured here — ``always`` makes ``send-keys -l``
-  DROP control bytes. Sending ``<0x01><0x02>…<0x1f><0x7f>`` as one literal
-  string: under ``on`` all 32 arrive; under ``always`` only four survive — TAB
-  (0x09), CR (0x0d), ESC (0x1b) and DEL (0x7f) — and the other 28 vanish
-  silently. Under ``on`` nothing is dropped on either 3.4 or 3.5a, and on 3.4
-  nothing is dropped under ``always`` either, so this is newer than the tmux CI
-  runs and squarely in the range users have.
-  :meth:`TmuxServer.send_literal` is how the fleet forwards pasted text, so
-  ``always`` would quietly damage any paste carrying a control byte.
+* on 3.5a — the newest build measured here — an extended-keys pane makes
+  ``send-keys -l`` DROP control bytes: sending ``<0x01><0x02>…<0x1f><0x7f>`` as
+  one literal string, only four survive — TAB (0x09), CR (0x0d), ESC (0x1b) and
+  DEL (0x7f). It is the PANE's mode that does it rather than the option's value
+  (all 32 arrive only for ``on`` with a pane that has not asked for extended
+  keys), and ``always`` is precisely what puts every pane in that mode whether
+  it asked or not. On 3.4 all 32 arrive in all four combinations.
 
 Letting tmux encode would not even be one answer: on 3.5a under ``always`` the
 same ``S-Enter`` arrives as ``ESC [ 27 ; 2 ; 13 ~``, not the CSI-u 3.4 sends,
@@ -213,10 +212,13 @@ _PROBE_TAIL = re.compile(r"[0-9a-f]{8}")
 #: (measured on 3.4 here) — so its mtime IS that server's start time.
 _PROBE_ABANDONED_AFTER = 4 * _COMMAND_TIMEOUT
 
-#: Wall clock the sweep may spend, so that :meth:`TmuxServer.check_conf` stays
-#: flat in the number of stale sockets instead of O(N) ``kill-server`` calls at
-#: :data:`_COMMAND_TIMEOUT` each. Nothing is lost by stopping early: what is not
-#: reclaimed this call is still there, and still older, for the next one.
+#: How long the sweep may go on STARTING kills, so that
+#: :meth:`TmuxServer.check_conf` stays flat in the number of stale sockets
+#: instead of O(N) ``kill-server`` calls at :data:`_COMMAND_TIMEOUT` each. The
+#: deadline is tested before each kill and never interrupts one, so a sweep can
+#: run this long plus one :data:`_COMMAND_TIMEOUT`, not this long flat. Nothing
+#: is lost by stopping early: what is not reclaimed this call is still there,
+#: and still older, for the next one.
 _SWEEP_BUDGET = _COMMAND_TIMEOUT
 
 #: The bundled server configuration. Applied with ``-f`` when the server starts
@@ -224,8 +226,8 @@ _SWEEP_BUDGET = _COMMAND_TIMEOUT
 #: Every option is verified to load, with this value, on the tmux running the
 #: tests by ``tests/test_tmux.py::test_live_every_bundled_option_is_applied_with_its_value``.
 #: ``window-size`` is NOT here and must never be: a global one kills the server
-#: below tmux 3.7 (module docstring). It lives in :data:`WINDOW_OPTIONS`, set on
-#: each window as it is created, and
+#: from tmux 3.3a up (module docstring). It lives in :data:`WINDOW_OPTIONS`,
+#: set on each window as it is created, and
 #: ``tests/test_tmux.py::test_no_window_option_is_written_into_the_file_the_server_starts_with``
 #: fails if it ever reappears here.
 BUNDLED_CONF = """\
@@ -250,7 +252,7 @@ set -g renumber-windows off
 #: Window-SCOPED options the fleet sets on each window it creates, the moment
 #: that window exists — the half of its configuration that cannot be in a file
 #: the server reads at start (module docstring: a global ``window-size`` is a
-#: segfault waiting for the next window on tmux below 3.7). Nothing here may
+#: segfault waiting for the next window from tmux 3.3a up). Nothing here may
 #: also appear in :data:`BUNDLED_CONF`;
 #: ``tests/test_tmux.py::test_no_window_option_is_written_into_the_file_the_server_starts_with``
 #: is the guard.
@@ -680,8 +682,6 @@ class TmuxServer:
           covers: a run killed without unwinding, between the server starting
           and the chain reaching its end. It runs BEFORE this call's own socket
           exists, so it can never sweep it.
-
-        The doctor's "private server starts" check is exactly this call.
         """
         self._reclaim_abandoned_probes()
         path = conf if conf is not None else self.conf_path()
@@ -732,8 +732,9 @@ class TmuxServer:
           the longest a live check can possibly hold one. Without that, this
           would kill a CONCURRENT doctor's probe mid-check, which is the exact
           harm the random socket exists to prevent.
-        * :data:`_SWEEP_BUDGET` caps the whole sweep, so ``check_conf`` stays
-          flat rather than paying one ``kill-server`` timeout per stale socket.
+        * :data:`_SWEEP_BUDGET` stops the sweep starting further kills, so
+          ``check_conf`` stays flat rather than paying one ``kill-server``
+          timeout per stale socket.
 
         Nothing raised here reaches the caller: this runs before a check whose
         answer is about the user's CONFIGURATION, and litter in ``/tmp`` must

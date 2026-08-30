@@ -310,11 +310,12 @@ def test_an_explicit_conf_is_used_verbatim_and_never_written(fake_bin: Path, con
 def test_no_window_option_is_written_into_the_file_the_server_starts_with() -> None:
     """The split that keeps tmux alive, pinned where a future edit would undo it.
 
-    ``window-size manual`` among the GLOBAL window options segfaults every tmux
-    below 3.7 the next time a window is created — from the ``-f`` file it is the
-    first ``new-session``, from a ``set -g`` on a running server it is the next
-    spawn (module docstring). The fleet sets it on each window instead, so an
-    option in WINDOW_OPTIONS must never also be a line of BUNDLED_CONF.
+    ``window-size manual`` among the GLOBAL window options segfaults tmux the
+    next time a window is created — measured on 3.3a, 3.4 and 3.5a, and not on
+    3.2 or 3.2a. From the ``-f`` file that is the first ``new-session``; from a
+    ``set -g`` on a running server it is the next spawn (module docstring). The
+    fleet sets it on each window instead, so an option in WINDOW_OPTIONS must
+    never also be a line of BUNDLED_CONF.
     """
     lines = [line for line in BUNDLED_CONF.splitlines() if line and not line.startswith("#")]
     rules = [_SET.match(line) for line in lines]
@@ -1776,7 +1777,7 @@ def test_live_the_conf_the_server_starts_with_survives_the_windows_it_is_there_t
     assert live.list_sessions() == ["asq-test-fox", "asq-test-owl"]
     assert all(live.pane_facts(w.pane_id) is not None for w in windows)
     assert live.run("show-options", "-gv", "window-size").strip() != "manual", (
-        "the global option is the one that kills tmux below 3.7 — the fleet never sets it"
+        "the global option is the one that kills tmux from 3.3a up — the fleet never sets it"
     )
     assert [
         live.run("show-options", "-wv", "-t", w.window_id, "window-size").strip() for w in windows

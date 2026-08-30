@@ -618,7 +618,7 @@ TMUX_EXTENDED_FORM: dict[str, str] = {
 }
 
 #: Every name whose bytes are compared with tmux's own: all 121 the fleet spells
-#: (:data:`SPELLED`), plus the three :data:`TYPED_LITERALLY_BY_TMUX` carries that
+#: (:data:`SPELLED`), plus the two :data:`TYPED_LITERALLY_BY_TMUX` carries that
 #: :func:`translate` never builds. Not a sample — the earlier version of this
 #: list held 31 names while ``core.keys`` claimed all 122 were verified, which is
 #: the claim this file now has to earn.

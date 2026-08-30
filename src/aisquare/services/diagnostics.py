@@ -534,18 +534,18 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
     agent cannot tell from Enter), and the chord reaches an agent on every one
     of them because ``aisquare.core.keys`` writes ``ESC [ 13 ; 2 u`` itself and
     :meth:`~aisquare.core.tmux.TmuxServer.send_literal` delivers those bytes
-    unchanged. Everything else the fleet asks of tmux answered identically too:
-    the bundled conf applies and ``source-file`` re-reads it clean,
-    ``new-session -e``, per-window ``window-size manual`` plus ``resize-window``,
-    ``capture-pane -e``, and ``load-buffer -`` + ``paste-buffer -p`` bracketed
-    paste — as did the two answers :func:`_check_fleet` reads, a dead pane's
-    ``pane_dead``/``pane_dead_status`` and a vanished target's exit 0 with every
-    field empty. Measured 2026-08-30 on builds of tmux 3.2, 3.2a, 3.3a, 3.4 and
-    3.5a, under the fleet's own configuration.
+    unchanged. These answered the same on all five: the bundled conf applies and
+    ``source-file`` re-reads it clean, ``new-session -e``, per-window
+    ``window-size manual`` plus ``resize-window``, ``capture-pane -e``,
+    ``load-buffer -`` + ``paste-buffer -p`` bracketed paste, and the two answers
+    :func:`_check_fleet` reads — a dead pane's ``pane_dead``, and a vanished
+    target's exit 0 with every field empty. Measured 2026-08-30 on builds of
+    tmux 3.2, 3.2a, 3.3a, 3.4 and 3.5a, under the fleet's own configuration.
+    Individual KEY encodings do differ across those builds
+    (``aisquare.core.keys``); none of it is anything this check could report.
 
-    The one difference those builds did show at the floor cannot be reported
-    from here anyway: tmux 3.2 has no ``C-/`` in its key table and types those
-    three characters into the pane, which 3.2a fixed
+    One such difference at the floor: tmux 3.2 has no ``C-/`` in its key table
+    and types those three characters into the pane, which 3.2a fixed
     (``aisquare.core.keys.CTRL_US_ALIASES``) — and ``tmux -V`` for 3.2 and 3.2a
     both parse to ``(3, 2)``, so no version test on this side could tell the two
     users apart.

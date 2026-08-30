@@ -166,7 +166,7 @@ this file:
   `send-keys -l` as well: a literal string of control bytes answers status 1,
   `not in a mode`, and reaches the pane as nothing — measured with a bogus
   option line too, and not reproducible on 3.4.
-- **From tmux 3.5, `always` makes `send-keys -l` drop control bytes.** Sending
+- **On tmux 3.5a, `always` makes `send-keys -l` drop control bytes.** Sending
   0x01-0x1f and DEL — 32 bytes — as one literal string on 3.5a, four survive
   under `always` (TAB, CR, ESC, DEL) where all 32 arrive under `on`. That is
   the transport `core/keys.py` hands its chords to (`TerminalPane._send`).
@@ -181,15 +181,16 @@ one of the four `send-keys -l` never drops even under the value we do not use.
 **`window-size` is not in that file, and no window option may be.** A window
 nobody is attached to still needs a size we choose, and `window-size manual` is
 what holds one — but only as a *window* option. Set globally it kills the
-server below tmux 3.7: creating a window reads that global through
-`default_window_size`, which has no window yet, and `clients_calculate_size()`
-then dereferences the window pointer it was never given — upstream added the
-`w != NULL` guard in 3.7. Measured here on 3.4, the version `ubuntu-latest`
-ships, both ways in: the option in the `-f` file kills the first `new-session`,
-and a `set -g` on a running server kills the next `new-window`, each leaving the
-client with `server exited unexpectedly`. That is 19 of the 22 CI failures on
-this branch, and the rule it leaves is general: a window-scoped option goes on
-each window as it is created, never into the `-f` file and never `-g`.
+server on every build measured here from 3.3a up — 3.3a, 3.4 and 3.5a, the
+newest there is here; 3.2 and 3.2a take it without complaint. Creating a window
+reads that global through `default_window_size`, which has no window yet, and
+`clients_calculate_size()` then dereferences the window pointer it was never
+given. Measured on 3.4, the version `ubuntu-latest` ships, both ways in: the
+option in the `-f` file kills the first `new-session`, and a `set -g` on a
+running server kills the next `new-window`, each leaving the client with
+`server exited unexpectedly`. That is 19 of the 22 CI failures on this branch,
+and the rule it leaves is general: a window-scoped option goes on each window as
+it is created, never into the `-f` file and never `-g`.
 
 **So the fleet pins each window and sizes it explicitly.** The pin alone is not
 a sizing model, it is a freeze on whatever size tmux already chose — and without
@@ -726,11 +727,11 @@ ask nor switch it — and the one server option that would encode the chord
 regardless of the pane's mode, `extended-keys always`, is ruled out by its own
 measurements (§3.1). Shift+enter is a key Claude Code uses, so the affected chords
 are not forwarded by name at all: `src/aisquare/core/keys.py` writes the bytes
-the chord means — tmux's own CSI-u spelling, `ESC [ 13 ; 2 u` for shift+enter —
-and `send-keys -l` puts them in the pane, so what the agent receives no longer
-depends on the tmux version. Measured 2026-08-30 on builds of 3.2, 3.2a, 3.3a,
-3.4 and 3.5a: sent by NAME, `S-Enter` types those seven characters on the first
-four and arrives as a bare CR (indistinguishable from Enter) on 3.5a; sent as
+the chord means — `ESC [ 13 ; 2 u` for shift+enter — and `send-keys -l` puts
+them in the pane, so what the agent receives no longer depends on the tmux
+version. Measured 2026-08-30 on builds of 3.2, 3.2a, 3.3a, 3.4 and 3.5a: sent
+by NAME, `S-Enter` types those seven characters on the first four and arrives as
+a bare CR (indistinguishable from Enter) on 3.5a; sent as
 bytes, all five deliver them unchanged. `tests/test_keys.py` checks it against
 the running binary. Two gates this does not close: the outer terminal still has
 to give Textual the chord (the matrix below is unfilled), and whether the agent
@@ -910,7 +911,7 @@ untouched.
 
 | Tool | Needed for | Minimum | Doctor |
 | --- | --- | --- | --- |
-| `tmux` | the fleet (spawning and surfacing) | 3.2 (`new-session -e`, `extended-keys`); no higher floor buys shift+enter (§6) | new `tmux` check: present, version, private server starts; absent → fleet disabled with per-OS install hints (`apt`, `dnf`, `brew`), everything else works |
+| `tmux` | the fleet (spawning and surfacing) | 3.2 (`new-session -e`, `extended-keys`); no higher floor buys shift+enter (§6) | new `tmux` check: present and version; absent → fleet disabled with per-OS install hints (`apt`, `dnf`, `brew`), everything else works |
 | `git` | worktrees | 2.20+ | existing |
 | `gh` | PR flow (coder, reviewer) | any current | new warn-level check |
 | `node` / `npx` / `repomix` | snapshots | existing | existing |
@@ -1054,5 +1055,5 @@ matrix is filled in Phase 0.
 | 2026-08-28 | Owner decisions folded in: textual core; `auto` permissions; human merges; roles manager / coder / tester / reviewer / validator; native agent teams off in fleet launches; Codex deferred; every default configurable (§3.10). Naming scheme in §5.7 from a forked planning agent. | owner + PR #71 |
 | 2026-08-28 | Implementation landed on this branch: scaffold f0a818c (contracts), then ten siloed work packages (tmux, fleet-service, fleet-cli, terminal, shell, onboard, doctor, manager, board, docs) built in parallel worktrees and merged without a conflict, plus an integration pass. Deviations, all recorded in code: the `auto`→`acceptEdits` permission fallback (§3.6) is documented, not automated; drag-select/copy inside an agent pane (§6) is not implemented (Line-API widget); a dead/vanished pane is read BEFORE the board row when deriving state (§5.1) because a killed agent fires no SessionEnd; `window_activity_flag` is not a signal on a headless server (§3.1), the frame diff is; the Settings tab omits model/effort/binary (one home per concept); the Onboard view is built on the first `+`; `ExplainabilitySettings.roles` now lists all seven roles. The §6 per-terminal key matrix still needs a human at each terminal. | PR #71 |
 | 2026-08-28 | Implementation started from the scaffold (`f0a818c`: store v11, `[fleet]` config, the roles, `core/tmux.py`, `cli/fleet.py`, the UI skeleton) with the work packages in parallel. User documentation written from the scaffolded CLI: `docs/fleet.md` (listed in `DOCUMENTED`), the README fleet section and command-tree lines, the CHANGELOG entry — saying plainly where a piece lands in a later phase. | WP docs |
-| 2026-08-29 | CI on `ubuntu-latest`, which runs tmux 3.4, failed 22 tests, and the repair changed two mechanisms this plan described. **§3.1:** `window-size manual` has left the bundled `-f` file. A GLOBAL one kills the server on every tmux below 3.7 — `clients_calculate_size()` dereferences a window pointer `default_window_size` never had — which was 19 of the 22 failures; it is now set on each window as that window is created, together with an explicit `resize-window`, because without the global the birth size falls back to `window-size latest`, i.e. the most recent attached client's terminal. The intent is unchanged (every fleet window pinned to a size the fleet chose) and the general rule is new: a window-scoped option must never go in the `-f` file. **§6:** `S-Enter` and the other single-byte chords are not a version gap. tmux 3.4 knows those names and cannot ENCODE them for a pane in legacy mode, typing the name as text instead — so §8.2's "3.4+ recommended (`S-Enter`)" was wrong and is gone, and `src/aisquare/core/keys.py` owns what those chords send. | PR #71 |
-| 2026-08-30 | **`extended-keys always` measured and rejected; the fleet keeps `extended-keys on` and the hand-encoded chords of §6.** `always` really does make tmux 3.4 encode those chords itself (`S-Enter` → `ESC [ 13 ; 2 u`) — but tmux 3.2, the floor, has no such value and `source-file` answers `bad value: always` with status 1, so `check_conf` would read the fleet's own file as broken there; from tmux 3.5 the value makes `send-keys -l` drop 28 of the 32 control bytes (0x01-0x1f and DEL), the transport `core/keys.py` hands its chords to; and 3.5a spells the same chord `ESC [ 27 ; 2 ; 13 ~` rather than CSI-u, so tmux's own encoding is not one answer either. Recorded in §3.1, measured on builds of 3.2, 3.2a, 3.3a, 3.4 and 3.5a. Those builds also settle the `tmux` doctor check: everything the fleet asks of tmux answers identically from 3.2 up, so the check recommends no version above the floor — it used to advise 3.4 for Shift+Enter, which no build delivers by name. §6's key table now says what is actually sent for `shift+enter` and `ctrl+shift+<x>`; the per-terminal matrix below it is still unfilled. | PR #71 |
+| 2026-08-29 | CI on `ubuntu-latest`, which runs tmux 3.4, failed 22 tests, and the repair changed two mechanisms this plan described. **§3.1:** `window-size manual` has left the bundled `-f` file. A GLOBAL one kills the server on every build measured here from 3.3a up — `clients_calculate_size()` dereferences a window pointer `default_window_size` never had — which was 19 of the 22 failures; it is now set on each window as that window is created, together with an explicit `resize-window`, because without the global the birth size falls back to `window-size latest`, i.e. the most recent attached client's terminal. The intent is unchanged (every fleet window pinned to a size the fleet chose) and the general rule is new: a window-scoped option must never go in the `-f` file. **§6:** `S-Enter` and the other single-byte chords are not a version gap. tmux 3.4 knows those names and cannot ENCODE them for a pane in legacy mode, typing the name as text instead — so §8.2's "3.4+ recommended (`S-Enter`)" was wrong and is gone, and `src/aisquare/core/keys.py` owns what those chords send. | PR #71 |
+| 2026-08-30 | **`extended-keys always` measured and rejected; the fleet keeps `extended-keys on` and the hand-encoded chords of §6.** `always` really does make tmux 3.4 encode those chords itself (`S-Enter` → `ESC [ 13 ; 2 u`) — but tmux 3.2, the floor, has no such value and `source-file` answers `bad value: always` with status 1, so `check_conf` would read the fleet's own file as broken there; on 3.5a the value makes `send-keys -l` drop 28 of the 32 control bytes (0x01-0x1f and DEL), the transport `core/keys.py` hands its chords to; and 3.5a spells the same chord `ESC [ 27 ; 2 ; 13 ~` rather than CSI-u, so tmux's own encoding is not one answer either. Recorded in §3.1, measured on builds of 3.2, 3.2a, 3.3a, 3.4 and 3.5a. Those builds also settle the `tmux` doctor check: it recommends no version above the floor — it used to advise 3.4 for Shift+Enter, which no build delivers by name. §6's key table now says what is actually sent for `shift+enter` and `ctrl+shift+<x>`; the per-terminal matrix below it is still unfilled. | PR #71 |

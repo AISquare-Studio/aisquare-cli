@@ -34,6 +34,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import (
     Completed,
     PaneFacts,
+    Runner,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
@@ -387,6 +388,32 @@ def _board_session(agent: FleetAgent, state: str, *, seen_ago: timedelta = timed
             assert state == "working", "a stale row can only be inserted in its default state"
 
 
+def _stale_board_session(agent: FleetAgent, state: str, *, seen_ago: timedelta) -> None:
+    """A board row frozen at ``state`` ``seen_ago`` ago — hooks that stopped firing.
+
+    Written as an INSERT on purpose: ``upsert_session`` forces ``state = 'working'``
+    on conflict, so a row in any other state can only be created, never updated into
+    place. What leaves one behind in the wild: a Stop hook that never ran (an
+    unreadable store for a stretch, hooks reinstalled, or the pane's Claude session
+    id no longer matching the pinned ``FleetAgent.session_id``).
+    """
+    assert agent.session_id is not None
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        assert store.get_session(agent.session_id) is None, "an INSERT, or the state is lost"
+        stored = store.upsert_session(
+            TeamSession(
+                id=agent.session_id,
+                project_id=agent.project_id,
+                role=agent.role,
+                started_at=now - seen_ago,
+                last_seen_at=now - seen_ago,
+                state=state,
+            )
+        )
+    assert stored.state == state and now - stored.last_seen_at >= seen_ago
+
+
 def _add_task(project: ProjectInfo, title: str) -> TeamTask:
     now = datetime.now(tz=UTC)
     with store_session() as store:
@@ -573,6 +600,83 @@ def test_a_reused_worktree_with_uncommitted_work_on_another_branch_is_refused(
     # Negative control: the same dirty tree, reused for its OWN branch, is fine.
     receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id)
     assert receipt.agent.cwd == first.cwd and (first.cwd / "wip.txt").exists()
+
+
+def test_a_worktree_is_not_checked_out_from_under_an_agent_whose_row_lands_late(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_refuse_occupied_worktree`` reads live ROWS, and a spawn's row is written only
+    after its tmux window exists — so the loser of a label race can arrive at
+    ``_reuse_worktree`` with no holder in sight and ``git checkout`` the winner's tree
+    onto its own branch. ``_relabel`` refuses the second ROW afterwards, but it cannot
+    undo a checkout: the first agent goes on committing to the second spawn's branch.
+    One more look, in the last moment before the checkout, catches the row that landed
+    while the branch queries were running.
+    """
+    first_task = _add_task(project, "First job")
+    first = fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id).agent
+    on_first = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    with store_session() as store:
+        store.end_fleet_agent(first.id)  # the pre-check sees a free label and a free tree
+    second_task = _add_task(project, "Second job")
+    real_git = fleet_service._git
+
+    def revive_during_the_dirty_check(cwd: Path, *args: str) -> object:
+        if args[:2] == ("status", "--porcelain"):  # the winner's row lands here
+            with store_session() as store:
+                store.upsert_fleet_agent(first.model_copy(update={"ended_at": None}))
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(fleet_service, "_git", revive_during_the_dirty_check)
+    with pytest.raises(FleetError, match=r"is the live worktree of coder-auth \(agt_"):
+        fleet_service.spawn(project, "coder", label="coder-auth", task_id=second_task.id)
+
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd) == on_first, (
+        "the live agent's tree is still on the live agent's branch"
+    )
+    assert len(tmux.spawned) == 1, "refused before a second window existed"
+    # Negative control: with no holder in the way the same reuse switches the branch,
+    # as test_a_reused_worktree_is_put_on_the_branch_this_spawn_asked_for requires.
+    monkeypatch.setattr(fleet_service, "_git", real_git)
+    with store_session() as store:
+        store.end_fleet_agent(first.id)
+    receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=second_task.id)
+    assert receipt.agent.cwd == first.cwd
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd) != on_first
+
+
+def test_a_reused_worktree_on_a_detached_head_is_called_detached(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``git rev-parse --abbrev-ref HEAD`` on a detached HEAD exits 0 and prints the
+    literal ``HEAD`` (measured with the git in this environment), so the failure
+    branch the wording was written for is never taken: the refusal used to say "on
+    HEAD" and the note "it was on HEAD", neither of which is a branch.
+    """
+    first_task = _add_task(project, "First job")
+    first = fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id).agent
+    fleet_service.stop(project, "coder-auth", force=True)  # ending frees the label (§5.7)
+    _git("checkout", "-q", "--detach", cwd=first.cwd)
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd) == "HEAD"
+    (first.cwd / "wip.txt").write_text("half a change\n", encoding="utf-8")
+    second_task = _add_task(project, "Second job")
+
+    with pytest.raises(FleetError, match="holds uncommitted work on a detached HEAD"):
+        fleet_service.spawn(project, "coder", label="coder-auth", task_id=second_task.id)
+
+    # The same wording carries the reuse note when the detached tree is clean.
+    (first.cwd / "wip.txt").unlink()
+    receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=second_task.id)
+    on_second = fleet_service.branch_name(
+        _codename(project), task_id=second_task.id, title="Second job"
+    )
+    assert any(f"it was on a detached HEAD, now on {on_second}" in n for n in receipt.notes)
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd) == on_second
+    # Negative control: a real branch is named as a branch, never as detached.
+    fleet_service.stop(project, "coder-auth", force=True)
+    (first.cwd / "wip.txt").write_text("half a change\n", encoding="utf-8")
+    with pytest.raises(FleetError, match=f"holds uncommitted work on {on_second}"):
+        fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id)
 
 
 def test_spawn_permission_mode_flag_beats_role_config_beats_default(
@@ -994,6 +1098,107 @@ def test_spawn_without_the_agent_binary_names_it_and_who_chose_it(
 # --- derived state (§5.1) --------------------------------------------------------------
 
 
+_UNREACHABLE = "error connecting to /tmp/tmux-1000/asq (No such file or directory)"
+"""How tmux reports a server it cannot reach: this on stderr, with exit 1.
+
+Measured on tmux 3.7c against a socket name with no server — ``list-panes -a``,
+``display-message -p -t %7`` and ``list-sessions`` all answer that way — which is
+why ``list_windows`` ([]), ``pane_facts`` (None) and ``_activity_times`` ({}) each
+hand back an empty answer without raising.
+"""
+
+
+def _real_server(runner: Runner) -> TmuxServer:
+    """The REAL ``TmuxServer`` — every swallow of a non-zero exit intact — over ``runner``."""
+    return TmuxServer("asq-test", binary=sys.executable, conf=Path("/fake.conf"), runner=runner)
+
+
+def _unreachable_server() -> TmuxServer:
+    def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        return Completed(1, "", _UNREACHABLE)
+
+    return _real_server(refusing)
+
+
+def _answering_server(*sessions: str) -> TmuxServer:
+    """A server that answers every question and knows none of the panes asked about."""
+
+    def answering(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        args = list(argv)
+        if "list-sessions" in args:
+            return Completed(0, "".join(f"{name}\n" for name in sessions), "")
+        if "display-message" in args:
+            # tmux 3.7c's answer for a pane it cannot find: status 0 and every
+            # field empty, because display-message's target may fail.
+            return Completed(0, "|~|" * 12 + "\n", "")
+        return Completed(0, "", "")  # list-panes -s / -a: the server holds no panes
+
+    return _real_server(answering)
+
+
+def test_an_unreachable_tmux_server_is_not_read_as_every_pane_gone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_observe`` promises ``None`` when tmux cannot be asked at all, and an
+    unreachable server is exactly that — though nothing raises: its non-zero exit
+    reaches ``_observe`` as an empty answer, which used to read as "every pane is
+    gone". ``reap`` then ended every live row as ``lost`` for processes that are
+    still running, and ``_remove_merged_worktrees`` — the same pass, now seeing
+    ``ended_at`` set — removed their clean worktrees out from under them. A stale
+    socket path is all it takes (a /tmp sweep, or a ``TMUX_TMPDIR`` that differs
+    between the spawning shell and the reaping one).
+    """
+    agent = fleet_service.spawn(project, "coder").agent
+    session = f"asq-{_codename(project)}"
+    assert agent.worktree and agent.cwd.is_dir()
+    dead = _unreachable_server()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+    assert fleet_service._observe(dead, session, [agent]) is None, "could not ask"
+    status = fleet_service.status_of(agent)
+    assert status.state == "unknown" and status.detail == "tmux unavailable"
+    report = fleet_service.reap(project)
+
+    assert report.lost == [] and report.ended == []
+    assert report.worktrees_removed == [] and agent.cwd.is_dir(), (
+        "the row is still live, so the running agent's tree is not a merged leftover"
+    )
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [agent.id]
+
+    # Negative control: a server that ANSWERS and does not name the pane is a real
+    # loss, and must still be recorded as one — the refusal above is about silence.
+    answering = _answering_server(session)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: answering)
+    assert fleet_service._observe(answering, session, [agent]) == {}
+    assert fleet_service.status_of(agent).state == "lost"
+    assert [a.id for a in fleet_service.reap(project).lost] == [agent.id]
+
+
+def test_unknown_blames_tmux_first_and_the_missing_hooks_second(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``detail`` is "why the state is what it is" (models.py). When tmux cannot be
+    asked, tmux is why — a hookless binary is a second, smaller fact and must not
+    stand in front of the reason and leave the operator thinking the fleet is healthy.
+    """
+    hookless = _coder(project, binary=sys.executable)  # takes no --session-id
+    with_hooks = _coder(project)
+    assert hookless.session_id is None and with_hooks.session_id is not None
+    tmux.installed = False
+
+    states = {s.agent.id: (s.state, s.detail) for s in fleet_service.list_agents(project)}
+
+    assert states[hookless.id] == ("unknown", "tmux unavailable; no hooks")
+    assert states[with_hooks.id] == ("unknown", "tmux unavailable")
+    # Negative control: a server that answered is never blamed. The hookless agent's
+    # detail is then the hooks alone, and the agent with hooks says nothing at all.
+    tmux.installed = True
+    states = {s.agent.id: (s.state, s.detail) for s in fleet_service.list_agents(project)}
+    assert states[hookless.id] == ("waiting", "no hooks")
+    assert states[with_hooks.id] == ("waiting", None)
+
+
 @pytest.mark.parametrize("state", ["working", "waiting", "attention"])
 def test_a_fresh_board_row_decides_the_state(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, state: str
@@ -1242,6 +1447,7 @@ def test_tell_types_into_a_waiting_agent(
 ) -> None:
     agent = _coder(project)
     _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")  # the agent, not the launcher, is up
     result = fleet_service.tell(project, "coder-1", "please rebase")
     assert result.delivered and "typed" in result.how
     assert tmux.typed == [
@@ -1270,10 +1476,43 @@ def test_tell_falls_back_to_a_note_when_tmux_cannot_type(
 ) -> None:
     agent = _coder(project)
     _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
     tmux.fail_input = True
     result = fleet_service.tell(project, "coder-1", "please rebase")
     assert not result.delivered and "tmux could not type" in result.how
     assert _events(project, "note") == ["please rebase"]
+
+
+def test_tell_does_not_type_into_a_pane_that_is_not_the_agent_yet(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A pane whose foreground is still ``aisquare launch`` reads ``waiting`` as soon
+    as its last output is older than ACTIVITY_WINDOW, and the launcher has requested
+    no bracketed paste — so ``paste-buffer -p`` would replace every LF with a CR and
+    the agent would read N submitted messages instead of one. That is the harm
+    ``_type_prompt`` documents and declines to cause, and ``nudge_manager`` already
+    applies the same readiness test; ``tell`` consulted the state alone.
+    """
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    assert tmux.facts[agent.pane_id].current_command == PYTHON_LAUNCHER
+    assert fleet_service.status_of(agent).state == "waiting", "the state alone says type"
+    message = "first line\nsecond line"
+
+    result = fleet_service.tell(project, "coder-1", message)
+
+    assert not result.delivered and "board note" in result.how
+    assert tmux.typed == [], "two lines would have arrived as two messages"
+    assert _events(project, "note") == [message]
+    # Negative control: the same waiting agent with the AGENT in the foreground is
+    # typed into, several lines and all — by then it has asked for bracketed paste.
+    tmux.set_command(agent.pane_id, "claude")
+    again = fleet_service.tell(project, "coder-1", message)
+    assert again.delivered and tmux.typed == [
+        (agent.pane_id, "paste", message),
+        (agent.pane_id, "key", "Enter"),
+    ]
+    assert _events(project, "note") == [message], "no second note was filed"
 
 
 def test_tell_an_unknown_label_is_no_such_agent(tmux: FakeTmux, project: ProjectInfo) -> None:
@@ -1618,6 +1857,37 @@ def test_nudge_never_touches_a_manager_that_is_not_waiting(
     assert tmux.typed == []
 
 
+def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The nudge must not type where ``tell`` refuses to. Every other consumer goes
+    through ``_derive``, which trusts a board row's ``state`` only while the row is
+    FRESH (``_STALE_AFTER``) and otherwise lets pane activity decide; ``nudge_manager``
+    read the field raw. So a row frozen at "waiting" over a pane that keeps printing
+    was ``working`` in ``fleet ls``, refused by ``fleet tell`` — and typed into by the
+    nudge, which is the interleaving ``tell``'s rule exists to prevent.
+    """
+    manager = fleet_service.spawn(project, "manager").agent
+    tmux.set_command(manager.pane_id, "claude")
+    _stale_board_session(
+        manager, "waiting", seen_ago=team_service._STALE_AFTER + timedelta(minutes=1)
+    )
+    tmux.printed(manager.pane_id)  # the pane printed just now: mid-turn
+
+    assert fleet_service.status_of(manager).state == "working", "what ls and tell see"
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    assert tmux.typed == []
+    # Negative control: the same stale row over a QUIET pane is waiting everywhere,
+    # and the nudge goes in — the freshness term must not refuse everything.
+    tmux.printed(manager.pane_id, ago=ACTIVITY_WINDOW + timedelta(seconds=2))
+    assert fleet_service.status_of(manager).state == "waiting"
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True
+    assert tmux.typed == [
+        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "key", "Enter"),
+    ]
+
+
 @pytest.mark.parametrize("command", ["bash", PYTHON_LAUNCHER, "zsh"])
 def test_nudge_needs_the_agent_in_the_foreground(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, command: str
@@ -1700,6 +1970,42 @@ def test_rename_sets_the_codename_and_renames_the_tmux_session(
     assert tmux.renamed == [(f"asq-{old}", "asq-amber-otter")]
     [status] = fleet_service.list_agents(project)
     assert status.tmux_session == "asq-amber-otter" and status.state == "waiting"
+
+
+def test_rename_says_what_a_swallowed_tmux_rename_cost(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is renamed even when tmux refuses — ``reap`` addresses panes by id — but
+    that fail-open costs the plan's full-fidelity escape hatch, permanently: the
+    session keeps the OLD name, ``fleet attach`` looks for the new one and refuses
+    with advice that cannot work, and a second ``rename`` cannot repair it (it drives
+    from the stored codename, which is already the new one). So it says so.
+    """
+    fleet_service.spawn(project, "manager")
+    first = _codename(project)
+    accepted: list[str] = []
+
+    # Negative control first: a rename tmux accepts reports no cost at all.
+    assert fleet_service.rename(project, "amber-otter", notes=accepted).codename == "amber-otter"
+    assert accepted == [] and tmux.renamed == [(f"asq-{first}", "asq-amber-otter")]
+
+    def refusing(old: str, new: str) -> None:
+        raise TmuxError("duplicate session: asq-quiet-lynx")
+
+    monkeypatch.setattr(tmux, "rename_session", refusing)
+    notes: list[str] = []
+    updated = fleet_service.rename(project, "quiet-lynx", notes=notes)
+
+    assert updated.codename == "quiet-lynx" and _codename(project) == "quiet-lynx"
+    said = " ".join(notes)
+    assert said, "the failure was swallowed"
+    assert "asq-amber-otter" in said and "asq-quiet-lynx" in said, said
+    assert "rename-session" in said and "attach" in said, said
+    # Not decoration: the escape hatch really is refused now, exactly as the note says.
+    with pytest.raises(FleetError, match="nothing to attach to"):
+        fleet_service.attach_argv(project)
+    # And the note channel is optional — the CLI's plain call must not blow up.
+    assert fleet_service.rename(project, "ruby-fox").codename == "ruby-fox"
 
 
 @pytest.mark.parametrize("bad", ["Amber-Otter", "amber_otter", "amber-otter-x"])

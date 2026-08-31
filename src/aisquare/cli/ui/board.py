@@ -17,10 +17,20 @@ there needs them without Textual, and other modules import them from there.
 All data comes from ``services.team``; nothing here writes. The panel resolves
 its project ONCE (or takes it from the caller) and passes it to every board
 read, so a tick never costs a ``git rev-parse`` and never touches ``os.environ``.
+
+Two bounds, both because the fleet UI keeps every view it builds (one
+``ProjectView`` per project ever selected, cli/ui/app.py): a tick behind a
+hidden tab is SKIPPED and made up in ``on_show``, the way ``TerminalPane``
+skips frames for a pane that is not on screen; and the feed keeps its last
+:attr:`BoardPanel.FEED_LIMIT` lines, evicting the oldest from the OptionList
+and the event cache together. Without them, N visited projects cost N store
+reads every ``interval`` seconds forever, and each panel's feed grows for as
+long as the session lives.
 """
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
@@ -32,7 +42,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
 from textual.message import Message
 from textual.widgets import DataTable, OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
@@ -127,6 +137,16 @@ class BoardPanel(Vertical):
         ("o", "open_transcript", "transcript"),
     ]
 
+    FEED_LIMIT: ClassVar[int] = 2000
+    """Feed lines kept before the oldest are dropped.
+
+    The panel outlives every tab switch, so the feed is the one structure here
+    that only grows: ``_events_by_id``, ``_feed_order`` and the OptionList all
+    gain a row per event for the life of the app. 2000 lines is ~5x the first
+    fetch (``board_data(events=400)``) — deep enough that scrolling back has
+    somewhere to go, bounded enough that a week-long session cannot swell.
+    """
+
     class Refreshed(Message):
         """A refresh landed; ``project`` is the board it read."""
 
@@ -181,7 +201,23 @@ class BoardPanel(Vertical):
             "#detailwrap", VerticalScroll
         ).border_title = "detail — click a task or feed line"
         self.refresh_data()
-        self.set_interval(self.interval, self.refresh_data)
+        self.set_interval(self.interval, self._tick)
+
+    def _tick(self) -> None:
+        """The polled read — skipped while the panel is off screen.
+
+        The fleet UI keeps a ``ProjectView`` per project ever selected, so an
+        ungated timer means N store reads every ``interval`` seconds for the
+        life of the app, N-1 of them behind ``display: none``. What skipping
+        costs: a hidden panel's data is stale, so :meth:`on_show` re-reads the
+        moment the tab comes back (as ``TerminalPane`` does for its frames).
+        """
+        if self.is_on_screen:
+            self.refresh_data()
+
+    def on_show(self) -> None:
+        """A hidden tab came back: catch up on what the skipped ticks missed."""
+        self.refresh_data()
 
     # --- data ---------------------------------------------------------------------
 
@@ -302,8 +338,26 @@ class BoardPanel(Vertical):
                 # is stale; a reopen-and-reclose must re-attribute.
                 self._terminal_by_task = {}
                 self._terminal_fetched = False
+        self._evict_oldest(feed, len(self._feed_order) - self.FEED_LIMIT)
         if self.autoscroll:
             feed.scroll_end(animate=False)
+
+    def _evict_oldest(self, feed: OptionList, count: int) -> None:
+        """Drop the oldest ``count`` feed lines from the list AND the caches.
+
+        All three together: ``_feed_order`` is what select mode replays through
+        ``_events_by_id``, so an id may never outlive its event, and the option
+        holds the row on screen. A close attribution does NOT come from here
+        (``_done_event_for`` asks the store), so an evicted line costs only
+        history the user can no longer scroll to.
+        """
+        if count <= 0:
+            return
+        for event_id in self._feed_order[:count]:
+            self._events_by_id.pop(event_id, None)
+            with contextlib.suppress(OptionDoesNotExist):  # already gone
+                feed.remove_option(event_id)
+        del self._feed_order[:count]
 
     # --- the detail pane -----------------------------------------------------------
 
@@ -396,7 +450,9 @@ class BoardPanel(Vertical):
         line = watch.transcript_line_near(transcript, when)
         error = watch.action_open_transcript(self.app, watch._transcript_command(transcript, line))
         if error is not None:
-            self.notify(f"could not open transcript: {error}", severity="error", timeout=6)
+            self.notify(
+                f"could not open transcript: {error}", severity="error", timeout=6, markup=False
+            )
 
     def _feed_title(self) -> str:
         title = "live feed"

@@ -1396,11 +1396,17 @@ def test_attach_argv_without_tmux_is_fleet_unavailable(
 # --- the real thing, once ------------------------------------------------------------
 
 
+_WINDOW_PROBE = (
+    "#{window_id} #{window_name} #{pane_id} dead=#{pane_dead} status=#{pane_dead_status}"
+)
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
 def test_spawn_and_stop_on_a_real_tmux_server(
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """End to end on a private socket: the command we build is one ``aisquare launch``
     accepts, the fake agent receives our flags, and ``/exit`` + Enter reaches it.
@@ -1411,11 +1417,36 @@ def test_spawn_and_stop_on_a_real_tmux_server(
     """
     monkeypatch.setattr(fleet_service, "_sleep", time.sleep)
     monkeypatch.setattr(fleet_service, "_monotonic", time.monotonic)
+    monkeypatch.chdir(tmp_path)  # the -vv server logs land in the server's cwd
+
+    class LoggedServer(TmuxServer):
+        """The real server, with tmux's own logging on — the CI autopsy channel."""
+
+        def argv(self, *args: str) -> list[str]:
+            base = super().argv(*args)
+            return [base[0], "-vv", *base[1:]]
+
+    def _autopsy(server: TmuxServer, session: str) -> str:
+        """Everything tmux can still tell us, for an assert message on a runner."""
+        parts: list[str] = []
+        for label, args in (
+            ("sessions", ("list-sessions", "-F", "#{session_name}")),
+            ("windows", ("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_PROBE)),
+        ):
+            try:
+                parts.append(f"{label}: {server.run(*args)!r}")
+            except TmuxError as exc:
+                parts.append(f"{label}: TmuxError({exc})")
+        for log in sorted(tmp_path.glob("tmux-*.log")):
+            tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
+            parts.append(f"--- {log.name} tail ---\n" + "\n".join(tail))
+        return "\n".join(parts)
+
     # A socket of our OWN: another file's test on a shared name can be mid
     # kill-server when this new-session arrives, which lands the session on the
     # dying server — it then vanishes with it (seen on CI as an empty window
     # list). Every real-tmux test in this suite now suffixes its socket.
-    real = TmuxServer(f"asq-test-{os.getpid()}-fleet")
+    real = LoggedServer(f"asq-test-{os.getpid()}-fleet")
     monkeypatch.setattr(fleet_service, "server", lambda config=None: real)
     try:
         receipt = fleet_service.spawn(project, "coder", worktree=False)
@@ -1444,7 +1475,7 @@ def test_spawn_and_stop_on_a_real_tmux_server(
 
         ended = fleet_service.stop(project, "coder-1", grace=15.0)
 
-        assert ended.exit_status == 0, (ended, real.list_windows(receipt.tmux_session))
+        assert ended.exit_status == 0, (ended, _autopsy(real, receipt.tmux_session))
         assert real.list_windows(receipt.tmux_session) == []
     finally:
         with suppress(TmuxError):

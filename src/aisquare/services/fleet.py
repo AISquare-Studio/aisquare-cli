@@ -35,6 +35,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,7 +45,7 @@ from aisquare.core import codenames, harness
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
-from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.tmux import PaneFacts, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     FleetAgent,
@@ -974,6 +975,7 @@ def stop(
         agent = _live_agent(store, project, label)
     srv = server()
     exit_status: int | None = None
+    facts: PaneFacts | None = None
     try:
         if not force:
             srv.send_literal(agent.pane_id, "/exit")
@@ -986,10 +988,17 @@ def stop(
                 if _monotonic() >= deadline:
                     break
                 _sleep(_POLL_INTERVAL)
-        facts = srv.pane_facts(agent.pane_id)
+        else:
+            facts = srv.pane_facts(agent.pane_id)
+        # The POLL's facts, never a re-read: a just-dead pane can answer
+        # display-message as the wrong pane (pane_facts guards that to None),
+        # so a re-read here was a TOCTOU that lost the exit status the loop
+        # had already seen — observed as a CI-runner flake. The kill is
+        # unconditional for the same reason: "None" may be that guard, not a
+        # window that is really gone, and killing a gone window just errors.
         if facts is not None and facts.dead:
             exit_status = facts.dead_status
-        if facts is not None:
+        with suppress(TmuxError):  # already gone — which is what the kill wanted
             srv.kill_window(agent.pane_id)
     except TmuxError:
         pass  # the pane is gone or tmux is: the row still ends

@@ -45,7 +45,7 @@ from aisquare.core import codenames, harness
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
-from aisquare.core.tmux import PaneFacts, TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.tmux import TmuxError, TmuxServer, TmuxUnavailable, WindowInfo
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     FleetAgent,
@@ -974,30 +974,38 @@ def stop(
     with store_session() as store:
         agent = _live_agent(store, project, label)
     srv = server()
+    session = session_name(ensure_codename(project).codename or "")
     exit_status: int | None = None
-    facts: PaneFacts | None = None
+
+    def _window() -> WindowInfo | None:
+        """The agent's window as ``list-panes -s`` reports it; ``None`` = really gone.
+
+        Deliberately NOT ``pane_facts`` (display-message): on some tmux
+        versions a JUST-DEAD pane answers display-message as the wrong pane,
+        which the guard there maps to None — indistinguishable from gone, and
+        the exit status is lost. The window list names dead panes reliably on
+        every version this repo has measured (3.3a, 3.4, 3.5a, 3.7c).
+        """
+        for window in srv.list_windows(session):
+            if window.pane_id == agent.pane_id:
+                return window
+        return None
+
     try:
-        if not force:
+        window = _window()
+        if not force and window is not None and not window.dead:
             srv.send_literal(agent.pane_id, "/exit")
             srv.send_keys(agent.pane_id, "Enter")
             deadline = _monotonic() + grace
             while True:
-                facts = srv.pane_facts(agent.pane_id)
-                if facts is None or facts.dead:
+                window = _window()
+                if window is None or window.dead:
                     break
                 if _monotonic() >= deadline:
                     break
                 _sleep(_POLL_INTERVAL)
-        else:
-            facts = srv.pane_facts(agent.pane_id)
-        # The POLL's facts, never a re-read: a just-dead pane can answer
-        # display-message as the wrong pane (pane_facts guards that to None),
-        # so a re-read here was a TOCTOU that lost the exit status the loop
-        # had already seen — observed as a CI-runner flake. The kill is
-        # unconditional for the same reason: "None" may be that guard, not a
-        # window that is really gone, and killing a gone window just errors.
-        if facts is not None and facts.dead:
-            exit_status = facts.dead_status
+        if window is not None and window.dead:
+            exit_status = window.dead_status
         with suppress(TmuxError):  # already gone — which is what the kill wanted
             srv.kill_window(agent.pane_id)
     except TmuxError:

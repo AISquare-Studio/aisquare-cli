@@ -1438,7 +1438,7 @@ def test_spawn_and_stop_on_a_real_tmux_server(
 
         ended = fleet_service.stop(project, "coder-1", grace=15.0)
 
-        assert ended.exit_status == 0, real.capture(pane) if real.pane_facts(pane) else "gone"
+        assert ended.exit_status == 0, (ended, real.list_windows(receipt.tmux_session))
         assert real.list_windows(receipt.tmux_session) == []
     finally:
         with suppress(TmuxError):

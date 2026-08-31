@@ -1076,6 +1076,20 @@ def test_stop_outwaits_the_dead_without_status_gap(
     assert tmux.status_lag == 0, "the gap reads were consumed — the lag was exercised"
 
 
+def test_stop_accepts_a_dead_pane_whose_status_never_lands(
+    tmux: FakeTmux, clock: FakeClock, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """tmux 3.4 sometimes never exposes a dead pane's status: stop() waits the
+    one-second window, then ends the row honestly with no exit status — it must
+    not sit out the whole grace for a status that will never land."""
+    tmux.status_lag = 10**9
+    agent = _coder(project)
+    ended = fleet_service.stop(project, "coder-1", grace=15.0)
+    assert ended.exit_status is None and ended.ended_at is not None
+    assert tmux.killed == [agent.pane_id]
+    assert clock.now < 15.0, "the status window, not the whole grace"
+
+
 def test_stop_kills_after_the_grace_period_when_exit_is_ignored(
     tmux: FakeTmux, clock: FakeClock, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -1515,7 +1529,12 @@ def test_spawn_and_stop_on_a_real_tmux_server(
             # the whole point is the server log — captured stdout survives whole.
             print(f"ENDED ROW: {ended!r}")
             print(_autopsy(real, receipt.tmux_session))
-        assert ended.exit_status == 0
+        # None is tmux 3.4 being tmux 3.4: it sometimes NEVER exposes a dead
+        # pane's exit status (`pane_dead_status` empty on every poll — its own
+        # -vv log, ~1 death in 30 under one CPU). The row must still end, and
+        # 0 is required wherever the server does expose it.
+        assert ended.exit_status in (0, None)
+        assert ended.ended_at is not None
         assert real.list_windows(receipt.tmux_session) == []
     finally:
         with suppress(TmuxError):

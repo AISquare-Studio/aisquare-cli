@@ -90,6 +90,9 @@ vouch for (no hooks, or a stale row). Measured on tmux 3.7c: the plan's
 clears without a client, so it cannot tell working from idle; ``#{window_activity}``
 — the epoch second of the last output — can."""
 
+_STATUS_WINDOW = 1.0
+"""Seconds to keep polling a DEAD pane for its exit status (see ``stop``)."""
+
 _POLL_INTERVAL = 0.25
 _PROMPT_SETTLE = 2.0
 """After the agent process appears, its UI needs a moment before it reads input."""
@@ -997,16 +1000,24 @@ def stop(
             srv.send_literal(agent.pane_id, "/exit")
             srv.send_keys(agent.pane_id, "Enter")
             deadline = _monotonic() + grace
+            dead_seen: float | None = None
             while True:
                 window = _window()
                 if window is None:
                     break
-                if window.dead and window.dead_status is not None:
-                    break
-                # A dead pane WITHOUT its status yet is not an answer: measured
-                # in tmux 3.4's own -vv server log, one poll can see dead=1
-                # while `pane_dead_status` still expands to '' — it lands a
-                # beat later. Keep polling until it does or the grace ends.
+                if window.dead:
+                    if window.dead_status is not None:
+                        break
+                    # A dead pane usually gets its exit status a poll later —
+                    # but tmux 3.4 sometimes NEVER exposes it (measured in its
+                    # own -vv server log: dead=1 with `pane_dead_status` empty
+                    # on every poll for a full 15 s grace, about one death in
+                    # thirty under one CPU; 3.5a and 3.7c always expose it).
+                    # One second is plenty for a status that will ever land.
+                    if dead_seen is None:
+                        dead_seen = _monotonic()
+                    elif _monotonic() - dead_seen >= _STATUS_WINDOW:
+                        break
                 if _monotonic() >= deadline:
                     break
                 _sleep(_POLL_INTERVAL)

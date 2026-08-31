@@ -139,8 +139,7 @@ because it is fifty lines and measurable.
 **A private server, never the user's.** `tmux -L asq -f <bundled conf>`. We do
 not read `~/.tmux.conf`, touch the user's sessions, or change their prefix key.
 Bundled options: `status off` · `escape-time 0` (Esc must interrupt Claude
-immediately) · `history-limit 50000` · `window-size manual` (so we can size a
-window nobody is attached to) · `remain-on-exit on` · `mouse off` (we own the
+immediately) · `history-limit 50000` · `remain-on-exit on` · `mouse off` (we own the
 mouse) · `default-terminal tmux-256color` · `terminal-overrides ',*:Tc'` ·
 `extended-keys on` (CSI-u / modifyOtherKeys reach Claude Code — shift+enter and
 friends) · `set-clipboard off` · `focus-events on` · `monitor-activity on` (kept
@@ -643,7 +642,7 @@ otherwise map `Key.key`:
 | `home` `end` | `Home` `End` | `pageup` `pagedown` | `PPage` `NPage` |
 | `f1` … `f12` | `F1` … `F12` | `ctrl+<x>` | `C-<x>` |
 | `alt+<x>` | `M-<x>` | `ctrl+shift+<x>` | `C-S-<x>` |
-| `shift+enter` | `S-Enter` (tmux ≥ 3.4 with extended keys) | anything else | dropped, one-line notice |
+| `shift+enter` | `S-Enter` (tmux ≥ 3.5; dropped below — 3.3/3.4 mistype it) | anything else | dropped, one-line notice |
 
 The escape hatch key is consumed by us and never forwarded. Textual 8.2.7 /
 8.2.8 speak the kitty keyboard protocol, so modifier-rich chords arrive **when
@@ -826,7 +825,7 @@ untouched.
 
 | Tool | Needed for | Minimum | Doctor |
 | --- | --- | --- | --- |
-| `tmux` | the fleet (spawning and surfacing) | 3.2 (`new-window -e`, `extended-keys`); 3.4+ recommended (`S-Enter`) | new `tmux` check: present, version, private server starts; absent → fleet disabled with per-OS install hints (`apt`, `dnf`, `brew`), everything else works |
+| `tmux` | the fleet (spawning and surfacing) | 3.2 (`new-window -e`, `extended-keys`); 3.5+ recommended (`S-Enter` and the other extended chords) | new `tmux` check: present, version, private server starts; absent → fleet disabled with per-OS install hints (`apt`, `dnf`, `brew`), everything else works |
 | `git` | worktrees | 2.20+ | existing |
 | `gh` | PR flow (coder, reviewer) | any current | new warn-level check |
 | `node` / `npx` / `repomix` | snapshots | existing | existing |
@@ -968,5 +967,6 @@ matrix is filled in Phase 0.
 | --- | --- | --- |
 | 2026-08-28 | First version of the plan. Approach D (tmux substrate) proposed; §12 open. Draft PR #71; suite on the branch: 1767 passed, 1 skipped. | PR #71 |
 | 2026-08-28 | Owner decisions folded in: textual core; `auto` permissions; human merges; roles manager / coder / tester / reviewer / validator; native agent teams off in fleet launches; Codex deferred; every default configurable (§3.10). Naming scheme in §5.7 from a forked planning agent. | owner + PR #71 |
+| 2026-08-28 | CI (ubuntu-24.04, tmux 3.4) found three integration truths: `window-size manual` CRASHES tmux 3.4 (fatal in the startup conf, and a live set kills the server on the next window op — measured in a container), so the bundled conf drops it and `resize-window` pins windows to manual per-window; `init` with AISQUARE_HOME pointing at a file now fails cleanly (`home_not_creatable`) instead of a traceback under `--json`; the pane scroll test scrolls through known history instead of racing the clamp; and tmux < 3.5 TYPES extended-only chords (`S-Enter`, `S-Escape`, `C-S-<letter>`, `C-M-Enter`…) literally into a pane — measured across 3.3a / 3.4 / 3.5a — so `translate` version-gates them (`EXTENDED_MINIMUM = (3, 5)`) and the doctor recommends 3.5. | PR #71 |
 | 2026-08-28 | Implementation landed on this branch: scaffold f0a818c (contracts), then ten siloed work packages (tmux, fleet-service, fleet-cli, terminal, shell, onboard, doctor, manager, board, docs) built in parallel worktrees and merged without a conflict, plus an integration pass. Deviations, all recorded in code: the `auto`→`acceptEdits` permission fallback (§3.6) is documented, not automated; drag-select/copy inside an agent pane (§6) is not implemented (Line-API widget); a dead/vanished pane is read BEFORE the board row when deriving state (§5.1) because a killed agent fires no SessionEnd; `window_activity_flag` is not a signal on a headless server (§3.1), the frame diff is; the Settings tab omits model/effort/binary (one home per concept); the Onboard view is built on the first `+`; `ExplainabilitySettings.roles` now lists all seven roles. The §6 per-terminal key matrix still needs a human at each terminal. | PR #71 |
 | 2026-08-28 | Implementation started from the scaffold (`f0a818c`: store v11, `[fleet]` config, the roles, `core/tmux.py`, `cli/fleet.py`, the UI skeleton) with the work packages in parallel. User documentation written from the scaffolded CLI: `docs/fleet.md` (listed in `DOCUMENTED`), the README fleet section and command-tree lines, the CHANGELOG entry — saying plainly where a piece lands in a later phase. | WP docs |

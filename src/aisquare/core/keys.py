@@ -151,8 +151,68 @@ def _base_character(base: str) -> str | None:
     return PUNCTUATION.get(base)
 
 
-def translate(key: str, character: str | None, *, printable: bool) -> Translation | None:
+EXTENDED_MINIMUM: tuple[int, int] = (3, 5)
+"""The tmux version from which every chord this module emits arrives as a key.
+
+Measured 2026-08-29, raw-mode ``cat -v`` panes under the bundled conf, in
+containers: tmux 3.3a and 3.4 TYPE the extended-only chords LITERALLY into the
+pane — ``S-Enter``, ``S-Escape``, ``S-Space``, ``S-Tab``, ``S-BSpace`` and
+their C-/M- stacks, ``C-S-<letter>``, ``C-M-Enter`` (3.3 also ``C-M-Tab``) —
+while 3.5a delivers the entire emitted set. Everything with a legacy escape
+sequence (``S-Up``, ``C-S-DC``, ``BTab``, ``M-Enter``…) is fine on every
+version back to the fleet's 3.2 minimum.
+"""
+
+_EXTENDED_BASES = frozenset({"Enter", "Escape", "Space", "Tab", "BSpace"})
+_MODIFIER_TOKENS = ("C-", "M-", "S-")
+
+
+def needs_extended_keys(name: str) -> bool:
+    """Whether tmux < :data:`EXTENDED_MINIMUM` would TYPE ``name`` literally.
+
+    The measured class (see :data:`EXTENDED_MINIMUM`): a shifted key with no
+    legacy shifted escape (Enter/Escape/Space/Tab/BSpace, and ctrl+shift on a
+    letter), plus ctrl+alt on those same bases. Deliberately a little wider
+    than the 3.4 measurement alone — 3.3 mistypes ``C-M-Tab`` too, and a rare
+    chord dropped on an old server is cheaper than nine characters typed into
+    a running agent.
+    """
+    mods: set[str] = set()
+    rest = name
+    while len(rest) > 2 and rest[:2] in _MODIFIER_TOKENS:
+        mods.add(rest[:2])
+        rest = rest[2:]
+    if "S-" in mods:
+        if rest in _EXTENDED_BASES:
+            return True
+        if len(rest) == 1 and rest.isalpha() and "C-" in mods:
+            return True
+    return "C-" in mods and "M-" in mods and rest in _EXTENDED_BASES
+
+
+def translate(
+    key: str, character: str | None, *, printable: bool, extended_keys: bool = True
+) -> Translation | None:
     """Translate one Textual key event; ``None`` when tmux has no safe name for it.
+
+    ``extended_keys`` says whether the tmux SERVER is ≥ :data:`EXTENDED_MINIMUM`
+    (the pane reads its version once): on an older server the extended-only
+    chords are dropped here, because tmux would otherwise type their NAMES into
+    the agent — the exact mistyping this module exists to prevent.
+    """
+    translation = _translate(key, character, printable=printable)
+    if (
+        translation is not None
+        and translation.kind == "key"
+        and not extended_keys
+        and needs_extended_keys(translation.value)
+    ):
+        return None
+    return translation
+
+
+def _translate(key: str, character: str | None, *, printable: bool) -> Translation | None:
+    """The table itself, capability-blind — ``translate`` applies the version gate.
 
     ``key`` is Textual's ``Key.key`` (``"ctrl+c"``, ``"shift+tab"``, ``"f5"``,
     ``"a"``), ``character`` its ``Key.character`` and ``printable`` its

@@ -74,7 +74,8 @@ from aisquare.core.spawn import untraced_env
 
 DEFAULT_SOCKET = "asq"
 MIN_VERSION = (3, 2)
-"""``new-window -e`` and ``extended-keys`` arrived in 3.2; ``S-Enter`` needs 3.4."""
+"""``new-window -e`` and ``extended-keys`` arrived in 3.2; ``S-Enter`` needs 3.5
+(3.3/3.4 type extended-only chords literally — ``core.keys.EXTENDED_MINIMUM``)."""
 PASTE_BUFFER = "asq-paste"
 CONF_NAME = "fleet-tmux.conf"
 CHECK_SOCKET_SUFFIX = "-check"
@@ -90,7 +91,13 @@ BUNDLED_CONF = """\
 set -g status off
 set -s escape-time 0
 set -g history-limit 50000
-set -g window-size manual
+# window-size manual is DELIBERATELY absent. tmux 3.4 (ubuntu-24.04, the CI
+# runner) crashes on it: in the startup conf the server dies before answering
+# ("server exited unexpectedly"), and even a live `set -g window-size manual`
+# kills the server on the next window operation — both measured in an
+# ubuntu-24.04 container; 3.7c is fine either way. It is also not needed:
+# `resize-window` (TmuxServer.resize) pins THAT window to manual sizing itself,
+# and -x/-y at session creation set the detached default size.
 set -g remain-on-exit on
 set -g mouse off
 set -g default-terminal tmux-256color
@@ -460,7 +467,9 @@ class TmuxServer:
         passed as separate arguments and executed directly, never through a
         shell, so nothing in it is re-interpreted. ``width``/``height`` size a
         NEW session's first window; a window added to an existing session takes
-        the session's size (``window-size manual``) until :meth:`resize`.
+        the session's default size until :meth:`resize`, which also pins that
+        window to manual sizing (the global ``window-size manual`` crashes
+        tmux 3.4 — see :data:`BUNDLED_CONF`).
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
         """

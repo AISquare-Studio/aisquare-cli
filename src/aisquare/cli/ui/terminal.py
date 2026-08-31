@@ -47,6 +47,7 @@ keys pressed into a gone pane are dropped (the notice is the only feedback).
 
 from __future__ import annotations
 
+import contextlib
 from typing import ClassVar
 
 from rich.segment import Segment
@@ -59,7 +60,12 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
-from aisquare.core.keys import ARGV_SEPARATOR, Translation, translate
+from aisquare.core.keys import (
+    ARGV_SEPARATOR,
+    EXTENDED_MINIMUM,
+    Translation,
+    translate,
+)
 from aisquare.core.tmux import PaneFacts, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.services import fleet as fleet_service
 
@@ -112,6 +118,8 @@ class TerminalPane(Widget, can_focus=True):
         self.pane_id = pane_id
         self.server = server
         self.escape_key = escape_key
+        self._extended: bool | None = None
+        """Whether the server delivers extended chords; read once per server."""
         self.scrollback = 0
         """How many history lines above the live screen the view starts at (``k``)."""
         self.facts: PaneFacts | None = None
@@ -141,6 +149,23 @@ class TerminalPane(Widget, can_focus=True):
     def attached(self) -> bool:
         return self.pane_id is not None
 
+    def _extended_keys(self) -> bool:
+        """Whether this server delivers extended chords (tmux ≥ 3.5), read once.
+
+        Below :data:`~aisquare.core.keys.EXTENDED_MINIMUM` tmux TYPES those
+        chords' names into the agent (measured on 3.3a/3.4), so ``translate``
+        drops them there. Fail-open to True when the version cannot be read:
+        ``tmux -V`` answers on anything alive, and refusing shift+enter on
+        every modern server to guard a hypothetical mute one inverts the trade.
+        """
+        if self._extended is None:
+            version: tuple[int, int] | None = None
+            if self.server is not None:
+                with contextlib.suppress(TmuxError):
+                    version = self.server.version()
+            self._extended = version is None or version >= EXTENDED_MINIMUM
+        return self._extended
+
     def attach(self, pane_id: str | None) -> None:
         """Show ``pane_id`` (``None`` clears the pane) and restart the render loop."""
         self.pane_id = pane_id
@@ -154,6 +179,7 @@ class TerminalPane(Widget, can_focus=True):
         if pane_id is not None and self.server is None:
             # The fleet's server from config — a default like any other (§3.10).
             self.server = fleet_service.server()
+            self._extended = None  # a new server may speak a different tmux
         if self.is_mounted:
             self._sync_size()
             self.refresh_frame()
@@ -324,7 +350,12 @@ class TerminalPane(Widget, can_focus=True):
             return  # nothing to type into; the app's own bindings stay live
         event.stop()
         event.prevent_default()
-        translation = translate(event.key, event.character, printable=event.is_printable)
+        translation = translate(
+            event.key,
+            event.character,
+            printable=event.is_printable,
+            extended_keys=self._extended_keys(),
+        )
         if translation is None:
             self._warn_once(event.key, f"{event.key}: tmux has no name for this key — dropped")
             return

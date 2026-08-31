@@ -445,6 +445,22 @@ def expected_config_write_errors() -> Iterator[None]:
             error="config_target_missing",
             hint=f"create {exc.filename} or repoint the link" if exc.filename else None,
         )
+    except (FileExistsError, NotADirectoryError) as exc:
+        # AISQUARE_HOME pointing at (or through) a FILE is a foreseeable operator
+        # mistake, not a crash: ``ensure_home`` cannot mkdir over it. Measured
+        # before this existed: ``aisquare --json init <dir>`` printed a Rich
+        # traceback to stderr and NOTHING on stdout — a traceback under --json
+        # breaks the machine contract, and the fleet UI's onboarding reads that
+        # stdout to say why an onboard failed.
+        where = exc.filename or str(paths.aisquare_home())
+        fail(
+            f"cannot create the aisquare home: {where} is in the way "
+            f"({exc.strerror or type(exc).__name__})",
+            error="home_not_creatable",
+            hint="AISQUARE_HOME must point at a directory (it may not exist yet) — "
+            "move the file, or point AISQUARE_HOME elsewhere",
+            detail=exc.strerror or str(exc),
+        )
     except OSError as exc:
         # EROFS belongs with the two above by the same test: it is a consequence
         # of WHERE THE OPERATOR POINTED THE CONFIG, and a one-line message can

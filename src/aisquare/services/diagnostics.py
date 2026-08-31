@@ -486,8 +486,10 @@ def _check_claude_code() -> DoctorCheck:
 _OS_RELEASE = Path("/etc/os-release")
 _APT_FAMILY = frozenset({"debian", "ubuntu", "linuxmint", "pop", "raspbian", "kali", "elementary"})
 _DNF_FAMILY = frozenset({"fedora", "rhel", "centos", "rocky", "almalinux", "amzn", "nobara", "ol"})
-_RECOMMENDED_TMUX = (3, 4)
-"""``S-Enter`` reaches an agent pane from 3.4; below it the fleet works without it."""
+_RECOMMENDED_TMUX = (3, 5)
+"""``S-Enter`` (and the other extended chords) reach an agent pane from 3.5 —
+measured: 3.3/3.4 type their names literally, so the key table drops them there —
+below it the fleet works without them."""
 
 
 def install_hint(

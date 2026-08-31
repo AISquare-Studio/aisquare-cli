@@ -24,11 +24,13 @@ import pytest
 from aisquare.core.keys import (
     CHORDS,
     CTRL_PUNCTUATION,
+    EXTENDED_MINIMUM,
     MAX_FUNCTION_KEY,
     NO_CTRL,
     PUNCTUATION,
     SPECIAL,
     Translation,
+    needs_extended_keys,
     translate,
 )
 from aisquare.core.tmux import BUNDLED_CONF, TmuxError, TmuxServer
@@ -274,6 +276,45 @@ def test_no_ctrl_set_is_consulted() -> None:
     assert translate("shift+backspace", None, printable=False) == key("S-BSpace")
 
 
+MEASURED_LITERAL_BELOW_35: set[str] = {
+    # Typed literally by tmux 3.4 (and 3.3, which adds C-M-Tab) under the
+    # bundled conf — the measurement behind EXTENDED_MINIMUM.
+    "S-Enter", "S-Escape", "S-Space", "S-Tab", "S-BSpace",
+    "C-S-Enter", "C-S-Space", "C-S-a", "C-S-z",
+    "M-S-Enter", "M-S-Escape", "M-S-Space", "M-S-Tab", "M-S-BSpace",
+    "C-M-Enter", "C-M-Tab",
+}  # fmt: skip
+
+MEASURED_FINE_EVERYWHERE: set[str] = {
+    # Legacy-encodable chords the same probes saw arrive as keys on 3.3/3.4.
+    "S-Up", "S-F1", "S-DC", "C-S-DC", "C-S-Up", "C-S-Home", "C-BTab", "M-BTab",
+    "C-Enter", "M-Enter", "C-M-Up", "C-M-DC", "C-M-F5",
+}  # fmt: skip
+
+
+def test_the_extended_predicate_matches_the_measurement_both_ways() -> None:
+    wrongly_kept = sorted(n for n in MEASURED_LITERAL_BELOW_35 if not needs_extended_keys(n))
+    assert not wrongly_kept, f"measured literal on <3.5 yet not gated: {wrongly_kept}"
+    wrongly_dropped = sorted(n for n in MEASURED_FINE_EVERYWHERE if needs_extended_keys(n))
+    assert not wrongly_dropped, f"measured fine everywhere yet gated: {wrongly_dropped}"
+
+
+def test_an_old_server_drops_extended_only_chords_instead_of_mistyping() -> None:
+    """tmux < 3.5 TYPES these names into the agent (measured); None is the fix."""
+    for textual in ("shift+enter", "shift+escape", "ctrl+shift+a", "ctrl+alt+enter"):
+        assert translate(textual, None, printable=False, extended_keys=False) is None, textual
+    # The negative half: legacy-encodable chords still flow on an old server…
+    assert translate("shift+up", None, printable=False, extended_keys=False) == key("S-Up")
+    assert translate("ctrl+shift+delete", None, printable=False, extended_keys=False) == key(
+        "C-S-DC"
+    )
+    assert translate("shift+tab", None, printable=False, extended_keys=False) == key("BTab")
+    assert translate("alt+enter", None, printable=False, extended_keys=False) == key("M-Enter")
+    # …and a capable server (the default) still gets the full vocabulary.
+    assert translate("shift+enter", None, printable=False) == key("S-Enter")
+    assert translate("ctrl+alt+enter", None, printable=False) == key("C-M-Enter")
+
+
 # --- against a real tmux --------------------------------------------------------------
 
 #: Every named key this module can emit, exercised against the real binary.
@@ -340,7 +381,12 @@ def test_real_tmux_types_none_of_our_names_literally(
     )
     pane = window.pane_id
     time.sleep(0.3)  # let stty run before the first key lands
-    for name in EMITTED:
+    # Only what a pane on THIS server would emit: translate() gates the
+    # extended-only chords below EXTENDED_MINIMUM, so the guard sends the same.
+    version = real_server.version()
+    extended = version is None or version >= EXTENDED_MINIMUM
+    emitted = [name for name in EMITTED if extended or not needs_extended_keys(name)]
+    for name in emitted:
         real_server.send_keys(pane, name)
         real_server.send_literal(pane, f" <{name}>\r\n")
     for control in ("Bogus", "C-BSpace"):
@@ -348,9 +394,12 @@ def test_real_tmux_types_none_of_our_names_literally(
         real_server.send_literal(pane, f" <{control}>\r\n")
     text = _wait_for(real_server, pane, "<C-BSpace>")
     assert "<C-BSpace>" in text, text[-500:]
-    for name in EMITTED:
+    for name in emitted:
         assert f"<{name}>" in text, f"marker for {name} never arrived"
         assert f"{name} <{name}>" not in text, f"tmux typed {name!r} literally"
     # The control: tmux DOES type an unknown name literally, and we can see it.
     assert "Bogus <Bogus>" in text
-    assert "C-BSpace <C-BSpace>" in text
+    # C-BSpace is refused by our table because tmux mistreats it — 3.7c types
+    # it literally, 3.4 swallows it. Version-independent half: it must never
+    # arrive as a WORKING backspace, the mistranslation the refusal prevents.
+    assert "^? <C-BSpace>" not in text

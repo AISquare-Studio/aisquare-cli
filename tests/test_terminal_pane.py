@@ -828,7 +828,13 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
             header = host.query_one("#agent-header", Static)
             await wait_until(pilot, lambda: view.pane.frames >= 1)
             first = view.pane.pane_id or ""
-            view.pane.scrollback = 2
+            # Scroll the way a user does — through history the pane KNOWS about.
+            # A bare `scrollback = 2` raced the render loop: the next frame
+            # clamps to history_size (0 here), which is exactly what happened on
+            # the slower CI runners while passing locally.
+            fake.panes["%1"].history = ["old"] * 5
+            view.pane.refresh_frame()
+            view.pane.scroll_history(2)
             view.refresh_status(_status(state="waiting"))  # same pane: no re-attach
             await pilot.pause()
             kept, waiting = view.pane.scrollback, str(header.content)

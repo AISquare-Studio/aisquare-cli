@@ -32,7 +32,7 @@ Three ideas carry the whole feature:
 
 | Tool | Needed for | Minimum |
 | --- | --- | --- |
-| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.4+ recommended**, where shift+enter reaches the agent |
+| **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.5+ recommended**, where shift+enter reaches the agent (3.3/3.4 would mistype it, so the fleet drops it there) |
 | **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--restricted`, `--effort` |
 | `git` | worktrees for coders and reviewers | 2.20+ |
 | `gh` | *optional* — the coder opens PRs and the reviewer reviews them with it | any current release |

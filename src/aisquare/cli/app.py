@@ -1,12 +1,14 @@
 """Root Typer application: global flags, version, and command registration.
 
-Bare ``aisquare`` / ``asq`` at a terminal opens the fleet UI; anywhere else
-(a pipe, ``--json``, ``TERM=dumb``) it prints usage and exits 2 exactly as it
-always did, so scripts never meet a full-screen app (docs/plans/fleet-tui.md §3.8).
+Bare ``aisquare`` / ``asq`` at a terminal opens the fleet UI; in a pipe or with
+``TERM=dumb`` it prints usage and exits 2 exactly as it always did, so scripts
+never meet a full-screen app (docs/plans/fleet-tui.md §3.8). Under ``--json``
+the same refusal is one JSON object, because there stdout belongs to a program.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
 import typer
@@ -105,10 +107,20 @@ def _no_arguments(ctx: typer.Context) -> None:
 
     Exit 2 with the help text is what ``no_args_is_help`` produced for every
     earlier release, so a script that ran ``aisquare`` by mistake sees nothing
-    new. ``--json`` never opens a UI: a machine asked for a machine-readable
-    answer and there is none — usage is the honest reply.
+    new. ``--json`` never opens a UI either — a machine asked for a
+    machine-readable answer and there is none — but it does not get the help
+    page: under ``--json`` stdout belongs to a program (empty, or ONE parseable
+    object — ``tests/test_json_stdout_is_machine_readable.py``), and echoing
+    ~40 lines of rich-formatted human text there hands a ``jq`` pipeline a
+    parse error. It is also what ``no_args_is_help`` never did: click sent its
+    ``Missing command.`` to stderr and left stdout empty. So the refusal is the
+    same usage object ``global_flags._handle_usage_error`` emits for an unknown
+    command or option — same key, same exit code, one line.
     """
-    if get_state().json_output or not fleet.interactive_terminal():
+    if get_state().json_output:
+        typer.echo(json.dumps({"error": "usage", "message": "Missing command."}))
+        raise typer.Exit(2)
+    if not fleet.interactive_terminal():
         typer.echo(ctx.get_help())
         raise typer.Exit(2)
     fleet.ui()

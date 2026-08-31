@@ -239,16 +239,24 @@ def test_nothing_new_means_waiting_exactly_as_before(
 
 
 def test_stop_hook_active_defers_the_wakeup_to_the_next_prompt(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    no_nudge: list[tuple[str, str]],
 ) -> None:
     """Claude Code is already continuing on a stop hook: wait, and lose nothing.
 
     The second half is the point of "defers": the events stay past the cursor,
     so the next prompt's delta — the path that already existed — delivers them.
+    And a next prompt is SCHEDULED rather than hoped for: the deferral issues
+    path 2's nudge itself, because nothing else will (see
+    ``test_the_stop_that_ends_a_continuation_schedules_the_rest`` below).
     """
     _fleet(runner, monkeypatch, work_dir)
     before = _session(MANAGER)
+    project_id = before.project_id
     task_id = _coder_reviews(work_dir)
+    no_nudge.clear()  # the coder's own write-time nudge is not what is under test
 
     result = _stop(runner, MANAGER, work_dir, stop_hook_active=True)
 
@@ -256,8 +264,47 @@ def test_stop_hook_active_defers_the_wakeup_to_the_next_prompt(
     after = _session(MANAGER)
     assert after.state == "waiting" and after.cursor == before.cursor
     assert _meta(_counter_key(MANAGER)) is None
+    assert no_nudge == [(project_id, "deferred:task_review")]
     delta = _prompt(runner, MANAGER, work_dir).stdout
     assert task_id in delta and "review" in delta, "the deferred events reached the next prompt"
+
+
+def test_a_deferring_stop_with_nothing_pending_nudges_nobody(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    no_nudge: list[tuple[str, str]],
+) -> None:
+    """The negative control for the deferral's nudge: an empty board schedules
+    nothing, so a manager that simply finished a continuation is left alone."""
+    _fleet(runner, monkeypatch, work_dir)
+    _emit_from_coder("note", "just saying")
+
+    result = _stop(runner, MANAGER, work_dir, stop_hook_active=True)
+
+    assert result.exit_code == 0 and result.stdout == "", result.output
+    assert _session(MANAGER).state == "waiting"
+    assert no_nudge == [], "a plain note is news; nothing is waiting for the manager"
+
+
+def test_muted_deltas_mute_the_deferred_nudge_too(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    no_nudge: list[tuple[str, str]],
+) -> None:
+    """The nudge's whole payload is the delta the next prompt injects, so with
+    that door shut (``AISQUARE_TEAM_DELTA=0``) a nudge would be pure noise."""
+    _fleet(runner, monkeypatch, work_dir)
+    _coder_reviews(work_dir)
+    no_nudge.clear()
+    monkeypatch.setenv("AISQUARE_TEAM_DELTA", "0")
+
+    result = _stop(runner, MANAGER, work_dir, stop_hook_active=True)
+
+    assert result.exit_code == 0 and result.stdout == "", result.output
+    assert _session(MANAGER).state == "waiting"
+    assert no_nudge == []
 
 
 @pytest.mark.parametrize("value", [True, "true", "false", 1])
@@ -472,7 +519,12 @@ def test_the_reason_is_bounded_and_the_rest_waits_its_turn(
 ) -> None:
     """Claude Code caps hook output at 10,000 characters; the delta limit keeps
     the reason far under it, and the cursor stops at what was shown so the
-    remainder wakes the manager on its NEXT Stop rather than vanishing."""
+    remainder is still pending afterwards rather than vanishing.
+
+    The second Stop here is a Stop of a turn the manager began on its own — no
+    ``stop_hook_active`` — which is why it wakes again. The Stop that ends the
+    CONTINUATION is a different payload and has its own test below.
+    """
     _fleet(runner, monkeypatch, work_dir)
     seqs = [_emit_from_coder("question", f"question number {i}") for i in range(15)]
 
@@ -491,6 +543,42 @@ def test_the_reason_is_bounded_and_the_rest_waits_its_turn(
     assert "question number 14" in leftover["reason"]
     assert _session(MANAGER).cursor == seqs[-1]
     assert _meta(_counter_key(MANAGER)) == "2"
+
+
+def test_the_stop_that_ends_a_continuation_schedules_the_rest(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    no_nudge: list[tuple[str, str]],
+) -> None:
+    """The payload sequence Claude Code really produces after a block — and the
+    one the truncation depends on.
+
+    A block continues the turn; the Stop that ends THAT turn is exactly the Stop
+    Claude Code marks ``stop_hook_active`` (``cli/hook.py``: "Claude Code saying
+    it is already continuing on a stop hook"). So "the remainder wakes it on its
+    next Stop" is not true of the next Stop, and the remainder's own write-time
+    nudges were already refused while the manager was working. At the end of a
+    burst — every coder finished — no further board write is coming, and the
+    manager would park as waiting with five unseen questions past its cursor and
+    nothing at all scheduled to deliver them. What is scheduled instead is path
+    2's nudge, which produces the ``UserPromptSubmit`` the delta rides on.
+    """
+    _fleet(runner, monkeypatch, work_dir)
+    project_id = _session(MANAGER).project_id
+    seqs = [_emit_from_coder("question", f"question number {i}") for i in range(15)]
+    assert _decision(_stop(runner, MANAGER, work_dir))["decision"] == BLOCK
+    no_nudge.clear()
+
+    parked = _stop(runner, MANAGER, work_dir, stop_hook_active=True)
+
+    assert parked.exit_code == 0 and parked.stdout == "", parked.output
+    assert _session(MANAGER).state == "waiting"
+    assert _session(MANAGER).cursor == seqs[team_service._DELTA_LIMIT - 1], "nothing consumed"
+    assert no_nudge == [(project_id, "deferred:question")]
+    delta = _prompt(runner, MANAGER, work_dir).stdout
+    assert "question number 10" in delta and "question number 14" in delta
+    assert _session(MANAGER).cursor == seqs[-1], "the nudge's prompt consumed the remainder"
 
 
 def test_muted_deltas_mute_the_wakeup_too(
@@ -639,6 +727,101 @@ def test_result_and_question_notes_nudge_and_other_notes_do_not(
     team_service.add_note("GATE: PASS", kind="result", session_ref=CODER, cwd=work_dir)
 
     assert no_nudge == [(project_id, "question"), (project_id, "result")]
+
+
+@pytest.mark.parametrize("addressed", ["manager", "Manager"])
+def test_a_note_to_the_manager_nudges_it_whatever_its_kind(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    no_nudge: list[tuple[str, str]],
+    addressed: str,
+) -> None:
+    """§7.3 path 2 lists ``note --to manager`` among the writes that nudge a
+    waiting manager, and only the KIND was consulted here.
+
+    So a note addressed to the manager reached a waiting one on no path at all:
+    'note' is not a ``MANAGER_WAKE_KIND`` either, so its Stop hook did not
+    deliver it and it sat past the cursor until some unrelated event arrived.
+    ``fleet tell manager`` files exactly this shape."""
+    _fleet(runner, monkeypatch, work_dir)
+    project_id = _session(MANAGER).project_id
+
+    team_service.add_note("look at the auth contract", session_ref=CODER, to_role=addressed)
+
+    assert no_nudge == [(project_id, "note_to_manager")]
+
+
+def test_a_note_to_someone_else_does_not_nudge_the_manager(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    no_nudge: list[tuple[str, str]],
+) -> None:
+    """The negative half: addressed mail wakes the addressee, and a rule that
+    nudged on any ``--to`` would wake the manager for a coder's mail."""
+    _fleet(runner, monkeypatch, work_dir)
+
+    team_service.add_note("please rebase", session_ref=CODER, to_role="coder-1")
+    team_service.add_note("no address at all", session_ref=CODER)
+
+    assert no_nudge == []
+
+
+def test_the_note_command_itself_nudges_the_manager(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    work_dir: Path,
+    no_nudge: list[tuple[str, str]],
+) -> None:
+    """Through the CLI, because the plan names the COMMAND: ``note --to manager``.
+    A service that nudges from a call the command never makes would pass the
+    tests above and leave the plan's sentence false."""
+    _fleet(runner, monkeypatch, work_dir)
+    project_id = _session(MANAGER).project_id
+
+    result = runner.invoke(
+        app, ["note", "the auth contract changed", "--as", CODER, "--to", "manager"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert no_nudge == [(project_id, "note_to_manager")]
+
+
+def test_a_note_to_the_manager_also_wakes_it_at_its_next_stop(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """The other half of the same mailbox, and the reason the nudge alone is not
+    enough: ``nudge_manager`` refuses a WORKING manager by design, which is
+    precisely the state ``fleet tell`` files a note in. With 'note' outside
+    MANAGER_WAKE_KINDS and the address ignored at Stop too, a message to a
+    working manager had no delivery path in either direction."""
+    _fleet(runner, monkeypatch, work_dir)
+
+    team_service.add_note("the auth contract changed", session_ref=CODER, to_role="manager")
+
+    decision = _decision(_stop(runner, MANAGER, work_dir))
+
+    assert decision["decision"] == BLOCK
+    assert "the auth contract changed" in decision["reason"]
+    assert _session(MANAGER).state == "working"
+
+
+def test_a_note_to_someone_else_still_leaves_the_manager_waiting(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """The negative control for the Stop half: unaddressed news and another
+    agent's mail still arrive with the next prompt's delta, like everyone
+    else's (``test_news_that_is_not_a_decision_does_not_wake`` covers the
+    kinds; this one covers the address)."""
+    _fleet(runner, monkeypatch, work_dir)
+
+    team_service.add_note("please rebase", session_ref=CODER, to_role="coder-1")
+
+    result = _stop(runner, MANAGER, work_dir)
+
+    assert result.exit_code == 0 and result.stdout == "", result.output
+    assert _session(MANAGER).state == "waiting"
 
 
 def test_claims_releases_and_drops_do_not_nudge(

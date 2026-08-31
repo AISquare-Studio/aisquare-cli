@@ -185,18 +185,34 @@ def test_install_hint_reads_the_distribution_family(tmp_path: Path) -> None:
 
 
 def test_install_hint_names_every_manager_when_unsure(tmp_path: Path) -> None:
-    """A wrong hint is worse than three right ones; an unreadable file never raises."""
+    """A wrong hint is worse than three right ones; an unreadable file never raises.
+
+    "Unreadable" covers two shapes and each is a separate way out of the read:
+    absent (``FileNotFoundError``, an ``OSError``) and UNDECODABLE — bytes that
+    are not UTF-8 raise ``UnicodeDecodeError``, which is a ``ValueError`` and
+    walked straight through the ``except OSError`` this function used to have.
+    The known distribution is the negative control: whatever the guard
+    swallows, a readable file must still be parsed.
+    """
     alien = tmp_path / "alien"
     alien.write_text("ID=plan9\n", encoding="utf-8")
+    undecodable = tmp_path / "binary-os-release"
+    undecodable.write_bytes(b"\xff\xfe\x00ID=fedora\n")
 
     unsure = diagnostics.install_hint("tmux", platform="linux", os_release=alien)
     unreadable = diagnostics.install_hint(
         "tmux", platform="linux", os_release=tmp_path / "does-not-exist"
     )
+    binary = diagnostics.install_hint("tmux", platform="linux", os_release=undecodable)
 
-    for hint in (unsure, unreadable):
+    for hint in (unsure, unreadable, binary):
         assert "apt install tmux" in hint and "dnf install tmux" in hint
         assert "brew install tmux" in hint
+    fedora = tmp_path / "fedora"
+    fedora.write_text("ID=fedora\n", encoding="utf-8")
+    assert diagnostics.install_hint("tmux", platform="linux", os_release=fedora) == (
+        "dnf install tmux"
+    ), "a guard that swallowed the parse too would answer 'unsure' here as well"
     assert "WSL2" in diagnostics.install_hint("tmux", platform="win32")
 
 
@@ -317,6 +333,89 @@ def test_gh_present_but_not_logged_in_is_ok_with_the_login_command(
     assert without_token.status is CheckStatus.ok
     assert "gh auth login" in without_token.detail
     assert "gh auth login" not in with_token.detail, "a token IS a login"
+
+
+def test_a_hosts_file_that_is_not_utf8_is_unreadable_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_gh_login_note`` promises "unreadable is treated as logged in"; a
+    ``hosts.yml`` of non-UTF-8 bytes was the unreadability it did not survive.
+
+    ``read_text`` answers those bytes with ``UnicodeDecodeError`` — a
+    ``ValueError``, so the ``except OSError`` beside it never saw it, and the
+    exception left ``_check_gh``, left ``doctor()``, and ended the one command
+    that exists to diagnose damage in a Rich traceback (measured on the PR head:
+    ``GH_CONFIG_DIR`` pointed at a 4-byte ``\\xff\\xfe\\x00bad`` hosts file,
+    ``aisquare doctor`` exited 1).
+    """
+    monkeypatch.setattr(
+        shutil, "which", lambda cmd, *a, **k: "/usr/bin/gh" if cmd == "gh" else None
+    )
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    config = tmp_path / "gh-binary"
+    config.mkdir()
+    (config / "hosts.yml").write_bytes(b"\xff\xfe\x00bad")
+    monkeypatch.setenv("GH_CONFIG_DIR", str(config))
+
+    assert diagnostics._gh_login_note() == "", "undecodable is unreadable is logged in"
+    check = diagnostics._check_gh()
+
+    assert check.status is CheckStatus.ok
+    assert "PR flow available" in check.detail
+    assert "not evaluated" not in check.detail, "the note handled it; no need to fail open"
+
+
+def test_gh_check_never_raises_and_names_the_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard every sibling check in this file has, and this one did not.
+
+    Sabotaging the login note is the point: the crash-guard's job is to hold for
+    the failure nobody predicted, so the input is a raising collaborator rather
+    than a shape the code above already handles.
+    """
+    monkeypatch.setattr(
+        shutil, "which", lambda cmd, *a, **k: "/usr/bin/gh" if cmd == "gh" else None
+    )
+
+    def boom() -> str:
+        raise RuntimeError("gh config unreadable in a new way")
+
+    monkeypatch.setattr(diagnostics, "_gh_login_note", boom)
+
+    check = diagnostics._check_gh()
+
+    assert check.status is CheckStatus.ok
+    assert "not evaluated" in check.detail
+    assert "gh config unreadable in a new way" in check.detail
+    assert "the PR step reports" in check.detail, "failing open must say what it cost"
+
+
+def test_doctor_survives_a_damaged_gh_config_end_to_end(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the CLI, because that is where the traceback was: ``doctor`` is the
+    command an operator runs BECAUSE something is damaged.
+
+    The gh row is asserted present and ok — the claim is about the artefact
+    ``doctor`` produced, not merely about "no exception escaped", which a
+    swallow upstream could satisfy while dropping the row entirely.
+    """
+    monkeypatch.setattr(
+        shutil, "which", lambda cmd, *a, **k: "/usr/bin/gh" if cmd == "gh" else None
+    )
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    config = tmp_path / "gh-damaged"
+    config.mkdir()
+    (config / "hosts.yml").write_bytes(b"\xff\xfe\x00bad")
+    monkeypatch.setenv("GH_CONFIG_DIR", str(config))
+
+    result = runner.invoke(app, ["--json", "doctor"])
+
+    assert "Traceback" not in result.output, result.output
+    rows = {row["name"]: row for row in json.loads(result.stdout)}
+    assert rows["gh"]["status"] == "ok", rows["gh"]
+    assert "PR flow" in rows["gh"]["detail"]
 
 
 # --- the fleet check ----------------------------------------------------------------------

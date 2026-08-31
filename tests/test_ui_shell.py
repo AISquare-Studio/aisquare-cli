@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
@@ -51,13 +52,20 @@ from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
+from aisquare.core import tmux as tmux_core
 from aisquare.core.store import ContextStore, store_session
+from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 
 T = TypeVar("T")
 SIZE = (140, 40)
 T0 = datetime(2026, 8, 28, 9, 0, tzinfo=UTC)
+PRIVATE_SOCKET = f"asq-test-{os.getpid()}-ui-shell"
+"""A socket nobody serves. ``FleetAgent.tmux_socket`` defaults to ``asq`` — the
+fleet's REAL socket — and clicking an agent row mounts an ``AgentView`` whose
+``TerminalPane`` captures and RESIZES that pane for real. Scripted rows carry
+this instead, and ``no_real_tmux`` below refuses anything else."""
 Script = dict[str, list[FleetAgentStatus]]
 
 
@@ -93,12 +101,44 @@ def status(
         label=label,
         role=role,
         pane_id="%1",
+        tmux_socket=PRIVATE_SOCKET,  # never "asq", the developer's own fleet
         cwd=Path("/w"),
         created_at=T0 + timedelta(minutes=minute),
         ended_at=T0 + timedelta(minutes=minute + 1) if exit_status is not None else None,
         exit_status=exit_status,
     )
     return FleetAgentStatus(agent=agent, state=state)
+
+
+def _socket_of(argv: Sequence[str]) -> str | None:
+    """The ``-L <socket>`` a tmux argv addresses, or ``None`` when it names none."""
+    args = list(argv)
+    return args[args.index("-L") + 1] if "-L" in args else None
+
+
+@pytest.fixture(autouse=True)
+def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ...]]]:
+    """Every tmux command this file causes must address :data:`PRIVATE_SOCKET`.
+
+    Clicking an agent row mounts an ``AgentView`` whose pane builds
+    ``TmuxServer(status.agent.tmux_socket)`` and then really captures and
+    RESIZES that pane — so a scripted row on the default ``asq`` would reach
+    into the developer's live fleet (measured: three tests here issue
+    ``capture-pane`` and ``resize-window``). The runner is replaced, and what
+    it was asked to run is read AFTER the test: an assertion raised inside a
+    frame would be swallowed by ``TerminalPane.refresh_frame``, so the recorder
+    is the guard rather than an assert in the seam.
+    """
+    ran: list[tuple[str, ...]] = []
+
+    def record(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        ran.append(tuple(argv))
+        return Completed(1, "", "no server running (a UI test addresses no real fleet)\n")
+
+    monkeypatch.setattr(tmux_core, "_tmux", record)
+    yield ran
+    wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
+    assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"
 
 
 @pytest.fixture
@@ -159,6 +199,28 @@ def fleet_app(pilot: Pilot[None]) -> FleetApp:
     app = pilot.app
     assert isinstance(app, FleetApp)
     return app
+
+
+def test_the_no_tmux_guard_is_reachable_and_rejects_the_real_socket(
+    no_real_tmux: list[tuple[str, ...]], tmp_path: Path, script: Script
+) -> None:
+    """The guard's two halves: it SEES the pane's tmux calls, and it would refuse
+    the default socket — a guard that no test reaches would protect nothing."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    script["prj_a"] = [status("prj_a", "coder-1", "coder", "working")]
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-1"))
+        await pilot.pause()
+
+    drive(go)
+
+    assert no_real_tmux, "no tmux call recorded — the guard inspects nothing here"
+    assert {_socket_of(argv) for argv in no_real_tmux} == {PRIVATE_SOCKET}
+    # The negative half, on the rule itself: the real fleet's socket is refused.
+    assert _socket_of(("tmux", "-L", "asq", "capture-pane")) != PRIVATE_SOCKET
+    assert FleetAgent.model_fields["tmux_socket"].default == "asq" != PRIVATE_SOCKET
 
 
 def card_for(app: FleetApp, project_id: str) -> ProjectCard:

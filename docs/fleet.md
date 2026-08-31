@@ -227,6 +227,11 @@ Sends `/exit`, waits a grace period, then kills the window. The agent's own
 `SessionEnd` hook releases its task claims on the way out. `--force` skips the
 graceful exit.
 
+**When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
+left `PATH` — the row is **left live** and the command fails saying so, rather
+than reporting `✓ stopped` over an agent that is still running. Re-run it once
+tmux answers again, or `fleet reap` after the server comes back.
+
 ### `fleet attach`
 
 ```sh
@@ -435,6 +440,14 @@ have worktrees:** `fleet spawn coder --worktree` there refuses with
 "not a git repository — spawn without --worktree or pick a repo inside it",
 and the spawn dialog greys the option out.
 
+**A worktree reused by a later agent** — the same label, the previous agent
+having ended — is put on the branch *that* spawn asked for: checked out when
+the tree is clean, and refused when it holds uncommitted work on another
+branch. Either way the receipt says where the tree came from and where it went.
+A worktree that a *live* agent is already working in is never handed to a
+second one: that spawn is refused rather than suffixed, because the tree named
+by that label belongs to the spawn that won the label.
+
 Worked examples: `~/Code/AISquare/ws2/aisquare-cli` → `aisquare-cli`,
 codename `amber-otter`, session `asq-amber-otter`, branches
 `fleet/amber-otter/…`. `~/Code/AISquare` (a non-git parent of several repos) →
@@ -553,7 +566,10 @@ Manager tab and answer in the session.
 **`fleet spawn` refused.** The message says why: a second manager (there is
 one per project), the agent cap (`max_agents_per_project`, with the count),
 `--worktree` in a non-git project, an unknown role, an invalid label. A label
-that was merely *taken* is not refused — it is suffixed, and the receipt says so.
+that was merely *taken* is not refused — it is suffixed, and the receipt says
+so. The one exception: an agent **with a worktree** that loses its label in a
+true parallel race is refused rather than suffixed, since the tree that label
+names belongs to the winner.
 
 **A `fleet` command says the service is not wired yet.** The checkout predates
 Phase 3 (plan §9): it carries the fleet's contracts — the CLI, the config, the

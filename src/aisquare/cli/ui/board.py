@@ -444,6 +444,7 @@ class BoardPanel(Vertical):
                 "no transcript for this item (session predates transcript capture, "
                 "or it was a CLI/remote action)",
                 timeout=5,
+                markup=False,
             )
             return
         transcript, when = target
@@ -497,10 +498,12 @@ class BoardPanel(Vertical):
         getter = getattr(self.screen, "get_selected_text", None)
         selected = getter() if callable(getter) else None
         if not selected:
-            self.notify("nothing selected — v enters select mode, then drag", timeout=4)
+            self.notify(
+                "nothing selected — v enters select mode, then drag", timeout=4, markup=False
+            )
             return
         self.app.copy_to_clipboard(selected)
-        self.notify(f"copied {len(selected)} chars", timeout=3)
+        self.notify(f"copied {len(selected)} chars", timeout=3, markup=False)
 
     def action_toggle_board(self) -> None:
         self.query_one("#board-side").toggle_class("collapsed")

@@ -515,7 +515,7 @@ def test_fleet_check_does_not_write_the_tmux_conf(home: Path) -> None:
 @pytest.fixture
 def private_tmux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TmuxServer]:
     """A real tmux server on a socket nobody else uses, killed on the way out."""
-    socket = f"asq-test-{os.getpid()}"
+    socket = f"asq-test-{os.getpid()}-doctor"
     conf = tmp_path / "test-tmux.conf"
     conf.write_text("set -g remain-on-exit on\n", encoding="utf-8")
     server = TmuxServer(socket, conf=conf)
@@ -714,11 +714,16 @@ def test_a_stale_row_reaches_the_cli_as_a_warning_without_failing_doctor(
 ) -> None:
     """The positive half of the test above, through the CLI, on a socket nobody runs."""
     monkeypatch.setattr(
-        fleet_service, "settings", lambda: FleetSettings(tmux_socket=f"asq-test-{os.getpid()}")
+        fleet_service,
+        "settings",
+        lambda: FleetSettings(tmux_socket=f"asq-test-{os.getpid()}-doctor"),
     )
     runner.invoke(app, ["init", "--no-onboard"], catch_exceptions=False)
     project = _seed(tmp_path / "repo")
-    _seed(tmp_path / "repo", _agent(project.id, "coder-1", "%7", socket=f"asq-test-{os.getpid()}"))
+    _seed(
+        tmp_path / "repo",
+        _agent(project.id, "coder-1", "%7", socket=f"asq-test-{os.getpid()}-doctor"),
+    )
 
     result = runner.invoke(app, ["--json", "doctor"])
     rows = {row["name"]: row for row in json.loads(result.stdout)}

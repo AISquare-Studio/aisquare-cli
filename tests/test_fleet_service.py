@@ -1411,7 +1411,11 @@ def test_spawn_and_stop_on_a_real_tmux_server(
     """
     monkeypatch.setattr(fleet_service, "_sleep", time.sleep)
     monkeypatch.setattr(fleet_service, "_monotonic", time.monotonic)
-    real = TmuxServer(f"asq-test-{os.getpid()}")
+    # A socket of our OWN: another file's test on a shared name can be mid
+    # kill-server when this new-session arrives, which lands the session on the
+    # dying server — it then vanishes with it (seen on CI as an empty window
+    # list). Every real-tmux test in this suite now suffixes its socket.
+    real = TmuxServer(f"asq-test-{os.getpid()}-fleet")
     monkeypatch.setattr(fleet_service, "server", lambda config=None: real)
     try:
         receipt = fleet_service.spawn(project, "coder", worktree=False)
@@ -1428,6 +1432,8 @@ def test_spawn_and_stop_on_a_real_tmux_server(
                 break
             time.sleep(0.2)
         assert "fake claude:" in screen, screen
+        # The control behind the "gone" hunts: this server must keep dead panes.
+        assert real.run("show-options", "-gv", "remain-on-exit").strip() == "on"
         assert f"--session-id {receipt.agent.session_id}" in screen, screen
         assert "--name coder-1" in screen and "--permission-mode auto" in screen, screen
         output_at = fleet_service._activity_times(real)

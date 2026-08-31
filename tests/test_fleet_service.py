@@ -84,6 +84,10 @@ class FakeTmux(TmuxServer):
         """Whether ``tmux`` is on PATH — every fake call checks, as the real server does."""
         self.honours_exit = True
         """Whether a typed ``/exit`` makes the pane die with status 0 (a real agent does)."""
+        self.status_lag = 0
+        """Reads for which a dead pane's ``dead_status`` is still empty — measured on
+        tmux 3.4 (its own -vv server log): one poll can see ``dead=1`` while
+        ``pane_dead_status`` expands to ``''``; the status lands a beat later."""
         self.fail_input = False
         self.sessions: dict[str, list[WindowInfo]] = {}
         self.facts: dict[str, PaneFacts] = {}
@@ -176,10 +180,14 @@ class FakeTmux(TmuxServer):
 
     def _current(self, window: WindowInfo) -> WindowInfo:
         facts = self.facts[window.pane_id]
+        dead_status = facts.dead_status
+        if facts.dead and self.status_lag > 0:
+            self.status_lag -= 1  # the gap: dead, but no status on this read yet
+            dead_status = None
         return replace(
             window,
             dead=facts.dead,
-            dead_status=facts.dead_status,
+            dead_status=dead_status,
             current_command=facts.current_command,
             # Faithful to tmux 3.7c: the flag is set from creation and never clears
             # on a detached session, so it must not be what the service reads.
@@ -1049,6 +1057,23 @@ def test_stop_exits_gracefully_and_records_the_status(
     assert ended.ended_at is not None and ended.exit_status == 0
     assert tmux.killed == [agent.pane_id]
     assert fleet_service.list_agents(project) == []
+
+
+def test_stop_outwaits_the_dead_without_status_gap(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A dead pane whose status has not landed yet is polled again, not recorded.
+
+    The gap is real: tmux 3.4's own -vv server log showed a poll where
+    ``pane_dead`` was 1 while ``pane_dead_status`` still expanded to '' —
+    reading that as final cost the exit status (and CI three red runs).
+    """
+    tmux.status_lag = 2
+    agent = _coder(project)
+    ended = fleet_service.stop(project, "coder-1")
+    assert ended.exit_status == 0, "the status that landed a beat later was collected"
+    assert tmux.killed == [agent.pane_id]
+    assert tmux.status_lag == 0, "the gap reads were consumed — the lag was exercised"
 
 
 def test_stop_kills_after_the_grace_period_when_exit_is_ignored(

@@ -999,8 +999,14 @@ def stop(
             deadline = _monotonic() + grace
             while True:
                 window = _window()
-                if window is None or window.dead:
+                if window is None:
                     break
+                if window.dead and window.dead_status is not None:
+                    break
+                # A dead pane WITHOUT its status yet is not an answer: measured
+                # in tmux 3.4's own -vv server log, one poll can see dead=1
+                # while `pane_dead_status` still expands to '' — it lands a
+                # beat later. Keep polling until it does or the grace ends.
                 if _monotonic() >= deadline:
                     break
                 _sleep(_POLL_INTERVAL)

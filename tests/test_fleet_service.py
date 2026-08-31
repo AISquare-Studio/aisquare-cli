@@ -12,6 +12,7 @@ fake forgot to override fails loudly instead of quietly reaching a real tmux.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1437,9 +1438,18 @@ def test_spawn_and_stop_on_a_real_tmux_server(
                 parts.append(f"{label}: {server.run(*args)!r}")
             except TmuxError as exc:
                 parts.append(f"{label}: TmuxError({exc})")
+        interesting = re.compile(
+            r"destroy|kill|exited|dead|signal|lost|session_|window_|spawn|got \\d+|loop exit"
+        )
         for log in sorted(tmp_path.glob("tmux-*.log")):
-            tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
-            parts.append(f"--- {log.name} tail ---\n" + "\n".join(tail))
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+            events = [line for line in lines if interesting.search(line)]
+            parts.append(
+                f"--- {log.name}: {len(lines)} lines; the events ---\n"
+                + "\n".join(events[-160:])
+                + "\n--- raw tail ---\n"
+                + "\n".join(lines[-40:])
+            )
         return "\n".join(parts)
 
     # A socket of our OWN: another file's test on a shared name can be mid
@@ -1475,7 +1485,12 @@ def test_spawn_and_stop_on_a_real_tmux_server(
 
         ended = fleet_service.stop(project, "coder-1", grace=15.0)
 
-        assert ended.exit_status == 0, (ended, _autopsy(real, receipt.tmux_session))
+        if ended.exit_status != 0:
+            # print(), not the assert message: pytest truncates long reprs, and
+            # the whole point is the server log — captured stdout survives whole.
+            print(f"ENDED ROW: {ended!r}")
+            print(_autopsy(real, receipt.tmux_session))
+        assert ended.exit_status == 0
         assert real.list_windows(receipt.tmux_session) == []
     finally:
         with suppress(TmuxError):

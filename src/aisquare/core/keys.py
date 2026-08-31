@@ -161,33 +161,54 @@ their C-/M- stacks, ``C-S-<letter>``, ``C-M-Enter`` (3.3 also ``C-M-Tab``) —
 while 3.5a delivers the entire emitted set. Everything with a legacy escape
 sequence (``S-Up``, ``C-S-DC``, ``BTab``, ``M-Enter``…) is fine on every
 version back to the fleet's 3.2 minimum.
+
+Re-measured 2026-08-31 against the WHOLE emittable vocabulary — all 470 names
+:func:`translate` can produce, not a hand-listed sample — on 3.2a
+(ubuntu:22.04), 3.3a (debian:bookworm), 3.4 (ubuntu:24.04, the CI runner) and
+3.7c. That found one class the sample had missed, now gated: SHIFTED
+PUNCTUATION. Every ``C-S-<punct>``, ``M-S-<punct>`` and ``C-M-S-<punct>`` —
+``M-S--`` from alt+shift+minus, ``C-S-@``, ``M-S-{`` … — is typed literally by
+all three old versions, as are ``C-M--`` and ``C-M-/`` (tmux's own aliases for
+``C-M-_``, which itself is fine). Everything else the sweep added arrives as a
+key on every version: the triple-modifier stacks on cursor keys and function
+keys (``C-M-S-Up``, ``C-M-S-F5``), ``C-S-F1``, ``M-S-F12``, ``C-M-<letter>``,
+``C-M-@``/``[``/``\\``/``]``/``^``/``_`` and ``M-<uppercase letter>``.
 """
 
 _EXTENDED_BASES = frozenset({"Enter", "Escape", "Space", "Tab", "BSpace"})
 _MODIFIER_TOKENS = ("C-", "M-", "S-")
+#: The two punctuation keys tmux < 3.5 types literally with ctrl AND alt held.
+#: tmux resolves ``C--`` and ``C-/`` to ``C-_`` (:data:`CTRL_PUNCTUATION`); with
+#: ``M-`` also held the old versions had no encoding for the result and spelled
+#: the name out instead. The rest of the C-M- punctuation set is measured fine.
+_CTRL_ALT_LITERAL = frozenset("-/")
 
 
 def needs_extended_keys(name: str) -> bool:
     """Whether tmux < :data:`EXTENDED_MINIMUM` would TYPE ``name`` literally.
 
     The measured class (see :data:`EXTENDED_MINIMUM`): a shifted key with no
-    legacy shifted escape (Enter/Escape/Space/Tab/BSpace, and ctrl+shift on a
-    letter), plus ctrl+alt on those same bases. Deliberately a little wider
-    than the 3.4 measurement alone — 3.3 mistypes ``C-M-Tab`` too, and a rare
-    chord dropped on an old server is cheaper than nine characters typed into
-    a running agent.
+    legacy shifted escape (Enter/Escape/Space/Tab/BSpace, ctrl+shift on a
+    letter, shift on any punctuation), plus ctrl+alt on those same bases and on
+    the two punctuation aliases. Deliberately a little wider than the 3.4
+    measurement alone — 3.3 mistypes ``C-M-Tab`` too, and a rare chord dropped
+    on an old server is cheaper than nine characters typed into a running agent.
     """
     mods: set[str] = set()
     rest = name
     while len(rest) > 2 and rest[:2] in _MODIFIER_TOKENS:
         mods.add(rest[:2])
         rest = rest[2:]
+    single = len(rest) == 1
     if "S-" in mods:
         if rest in _EXTENDED_BASES:
             return True
-        if len(rest) == 1 and rest.isalpha() and "C-" in mods:
+        if single and rest.isalpha() and "C-" in mods:
             return True
-    return "C-" in mods and "M-" in mods and rest in _EXTENDED_BASES
+        if single and not rest.isalnum():
+            # Shifted punctuation: no legacy escape on any version below 3.5.
+            return True
+    return "C-" in mods and "M-" in mods and (rest in _EXTENDED_BASES or rest in _CTRL_ALT_LITERAL)
 
 
 def translate(

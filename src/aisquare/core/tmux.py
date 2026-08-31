@@ -22,8 +22,10 @@ Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 
 * ``new-session``/``new-window`` accept ``-e KEY=VALUE`` and a multi-argument
   command after ``--``; ``send-keys -l --`` takes literal text that starts with
-  ``-``; a lone ``;`` argument separates commands in one invocation, and an
-  error in one command stops the chain with exit status 1.
+  ``-``; ANY argument ending in ``;`` separates commands in one invocation —
+  ``--`` does not stop that — and an error in one command stops the chain with
+  exit status 1. A backslash before that final ``;`` escapes it, which is how
+  :func:`_data_arg` keeps caller data out of tmux's command grammar.
 * ``=name`` targets a session exactly (``=prob`` does not match ``probe``;
   bare ``prob`` does). ``.`` and ``:`` in a session name make it untargetable
   by name — tmux reads them as window and pane separators — which is why names
@@ -147,6 +149,16 @@ _VERSION = re.compile(r"(\d+)\.(\d+)")
 #: Characters tmux reads as target separators; a session named with one can be
 #: created but never addressed by name again (``=a.b`` → "can't find pane: b").
 _UNTARGETABLE = frozenset(".:")
+
+#: tmux's command separator. It is not a shell feature and ``--`` does not stop
+#: it: tmux itself ends a command at ANY argument whose LAST character is this —
+#: an argument that is only ``;`` included. Measured on 3.7c — ``new-window -d --
+#: sh -c 'sleep 60' ';' set -g history-limit 1`` exits 0 and ``show -g history-limit`` says
+#: ``1``; with ``'arg;'`` in place of the lone ``;`` the same thing happens, and
+#: with ``kill-server`` in place of ``set`` the private server (every agent on
+#: it) dies. So every argument that carries CALLER data is passed through
+#: :func:`_data_arg` first.
+_ARGV_SEPARATOR = ";"
 
 
 class TmuxError(RuntimeError):
@@ -318,6 +330,19 @@ def _require_directory(cwd: Path) -> None:
         )
 
 
+def _data_arg(value: str) -> str:
+    """One argument tmux must read as DATA, never as the end of the command.
+
+    A trailing ``;`` is tmux's own separator (:data:`_ARGV_SEPARATOR`) and a
+    single backslash before it escapes it: measured on 3.7c, ``-- sh -c … 'a\\;'``
+    reaches the program as ``a;`` and nothing after it is run as a tmux command.
+    Only the LAST character matters, so ``a;b`` is already data and is untouched.
+    """
+    if value.endswith(_ARGV_SEPARATOR):
+        return value[:-1] + "\\" + _ARGV_SEPARATOR
+    return value
+
+
 class TmuxServer:
     """A handle on one private tmux server (``-L socket``).
 
@@ -465,30 +490,39 @@ class TmuxServer:
 
         ``env`` pairs are set for the new window only (``-e``); the command is
         passed as separate arguments and executed directly, never through a
-        shell, so nothing in it is re-interpreted. ``width``/``height`` size a
-        NEW session's first window; a window added to an existing session takes
-        the session's default size until :meth:`resize`, which also pins that
-        window to manual sizing (the global ``window-size manual`` crashes
-        tmux 3.4 — see :data:`BUNDLED_CONF`).
+        shell, so no shell re-interprets it. TMUX still would: an argument that
+        ends in ``;`` ends the tmux command even after ``--`` and runs the rest
+        as a second one on the private server (``… -- sh -c … ';' kill-server``
+        would kill every agent), so ``name``, ``cwd``, ``env`` and every element
+        of ``command`` go through :func:`_data_arg` and arrive verbatim.
+
+        ``width``/``height`` size a NEW session's first window; a window added
+        to an existing session takes the session's default size until
+        :meth:`resize`, which also pins that window to manual sizing (the global
+        ``window-size manual`` crashes tmux 3.4 — see :data:`BUNDLED_CONF`).
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
         """
         _require_targetable(session)
         _require_directory(cwd)
         env_flags = [
-            flag for key, value in (env or {}).items() for flag in ("-e", f"{key}={value}")
+            flag
+            for key, value in (env or {}).items()
+            for flag in ("-e", _data_arg(f"{key}={value}"))
         ]
+        args = [_data_arg(arg) for arg in command]
         fmt = f"#{{window_id}}{_SEP}#{{pane_id}}"
         if self.has_session(session):
             out = self.run(
-                "new-window", "-d", "-P", "-F", fmt, "-t", f"={session}:", "-n", name,
-                "-c", str(cwd), *env_flags, "--", *command,
+                "new-window", "-d", "-P", "-F", fmt, "-t", f"={session}:", "-n", _data_arg(name),
+                "-c", _data_arg(str(cwd)), *env_flags, "--", *args,
             )  # fmt: skip
         else:
             out = self.run(
-                "new-session", "-d", "-P", "-F", fmt, "-s", session, "-n", name,
-                "-c", str(cwd), "-x", str(width), "-y", str(height), *env_flags,
-                "--", *command,
+                "new-session", "-d", "-P", "-F", fmt, "-s", _data_arg(session), "-n",
+                _data_arg(name), "-c", _data_arg(str(cwd)),
+                "-x", str(width), "-y", str(height), *env_flags,
+                "--", *args,
             )  # fmt: skip
         window_id, _, pane_id = out.strip().partition(_SEP)
         return WindowInfo(
@@ -638,12 +672,11 @@ class TmuxServer:
 
         A TRAILING ``;`` is tmux's command separator even after ``-l`` — measured
         on 3.7c: ``send-keys -l -- ';'`` sends nothing and ``'a;'`` sends ``a``,
-        while ``'a\\;'`` arrives as ``a;``. So the last ``;`` is escaped.
+        while ``'a\\;'`` arrives as ``a;``. So the last ``;`` is escaped
+        (:func:`_data_arg`, the same escape :meth:`spawn_window` applies).
         """
         if text:
-            if text.endswith(";"):
-                text = text[:-1] + "\\;"
-            self.run("send-keys", "-t", pane_id, "-l", "--", text)
+            self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
 
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line."""

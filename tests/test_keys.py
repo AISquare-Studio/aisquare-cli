@@ -12,9 +12,11 @@ mistyped name at all.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import re
 import shutil
+import string
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -228,6 +230,22 @@ DELIBERATELY_DROPPED = {
 }
 
 
+def audit_holes(holes: set[str], dropped: set[str], names: set[str]) -> list[str]:
+    """Both directions of the ratchet: new holes, and entries that no longer hole.
+
+    Returned as complaints rather than asserted so the SHAPE can be tested (the
+    test below). It used to be one ``A == B or not (A - B)``, which cannot fail
+    on its equality half — so an entry that started translating stayed in
+    ``DELIBERATELY_DROPPED`` unaudited, the allow list CONTRIBUTING warns about.
+    """
+    complaints: list[str] = []
+    if unexpected := sorted(holes - dropped):
+        complaints.append(f"translate to nothing and are not deliberate: {unexpected}")
+    if stale := sorted((dropped & names) - holes):
+        complaints.append(f"translate now — remove from DELIBERATELY_DROPPED: {stale}")
+    return complaints
+
+
 def test_every_textual_key_name_translates_or_is_deliberately_dropped() -> None:
     from textual.keys import Keys
 
@@ -236,13 +254,27 @@ def test_every_textual_key_name_translates_or_is_deliberately_dropped() -> None:
     translated: dict[str, Translation | None] = {
         name: translate(name, None, printable=False) for name in names
     }
-    unexpected_holes = [n for n, t in translated.items() if t is None]
-    assert set(unexpected_holes) == DELIBERATELY_DROPPED & set(names) or not (
-        set(unexpected_holes) - DELIBERATELY_DROPPED
-    ), sorted(set(unexpected_holes) - DELIBERATELY_DROPPED)
+    holes = {name for name, translation in translated.items() if translation is None}
+    assert audit_holes(holes, DELIBERATELY_DROPPED, set(names)) == []
     for name, translation in translated.items():
         if translation is not None and translation.kind == "key":
             assert TMUX_NAME.match(translation.value), (name, translation.value)
+
+
+def test_the_hole_audit_complains_in_both_directions() -> None:
+    """The ratchet must fire for a NEW hole and for one that healed."""
+    names = {"enter", "ctrl+1", "shift+minus"}
+    dropped = {"ctrl+1"}
+    assert audit_holes({"ctrl+1"}, dropped, names) == [], "the steady state is silent"
+    assert audit_holes({"ctrl+1", "shift+minus"}, dropped, names) == [
+        "translate to nothing and are not deliberate: ['shift+minus']"
+    ]
+    assert audit_holes(set(), dropped, names) == [
+        "translate now — remove from DELIBERATELY_DROPPED: ['ctrl+1']"
+    ]
+    # The negative control: an entry Textual no longer has at all is not
+    # "healed" — the set may keep covering enum members that came and went.
+    assert audit_holes(set(), {"ctrl-at"}, names) == []
 
 
 def test_the_tmux_grammar_control_rejects_what_tmux_would_mistype() -> None:
@@ -283,12 +315,29 @@ MEASURED_LITERAL_BELOW_35: set[str] = {
     "C-S-Enter", "C-S-Space", "C-S-a", "C-S-z",
     "M-S-Enter", "M-S-Escape", "M-S-Space", "M-S-Tab", "M-S-BSpace",
     "C-M-Enter", "C-M-Tab",
+    # 2026-08-31, the whole EMITTED sweep on 3.2a (ubuntu:22.04), 3.3a
+    # (debian:bookworm) and 3.4 (ubuntu:24.04): all three type EVERY shifted
+    # punctuation chord, plus tmux's two C-M- aliases for C-M-_, and the triple
+    # stacks on the extended bases and on letters.
+    "C-S--", "C-S-/", "C-S-?", "C-S-@", "C-S-[", "C-S-\\", "C-S-]", "C-S-^", "C-S-_",
+    "M-S-!", "M-S-'", "M-S-,", "M-S--", "M-S-.", "M-S-/", "M-S-@", "M-S-[", "M-S-^",
+    "M-S-`", "M-S-{", "M-S-|", "M-S-}", "M-S-~",
+    "C-M-S--", "C-M-S-/", "C-M-S-?", "C-M-S-@", "C-M-S-[", "C-M-S-\\", "C-M-S-_",
+    "C-M--", "C-M-/",
+    "C-M-S-Enter", "C-M-S-Space", "C-M-S-Tab", "C-M-S-a", "C-M-S-z",
 }  # fmt: skip
 
 MEASURED_FINE_EVERYWHERE: set[str] = {
     # Legacy-encodable chords the same probes saw arrive as keys on 3.3/3.4.
     "S-Up", "S-F1", "S-DC", "C-S-DC", "C-S-Up", "C-S-Home", "C-BTab", "M-BTab",
     "C-Enter", "M-Enter", "C-M-Up", "C-M-DC", "C-M-F5",
+    # …and, from the 2026-08-31 sweep on 3.2a/3.3a/3.4, the classes the hand
+    # list had never sent: triple stacks on cursor and function keys, shift on
+    # function keys, C-M- on letters and on the punctuation tmux still encodes,
+    # and M-<uppercase letter> (alt+shift+z).
+    "C-M-S-Up", "C-M-S-DC", "C-M-S-Home", "C-M-S-Left", "C-M-S-F5", "C-M-S-F12",
+    "C-S-F1", "M-S-F1", "M-S-F12", "S-F12", "C-F2",
+    "C-M-x", "C-M-@", "C-M-[", "C-M-\\", "C-M-]", "C-M-^", "C-M-_", "M-Z",
 }  # fmt: skip
 
 
@@ -317,22 +366,59 @@ def test_an_old_server_drops_extended_only_chords_instead_of_mistyping() -> None
 
 # --- against a real tmux --------------------------------------------------------------
 
+#: Every Textual chord that could reach ``translate``: each subset of the
+#: modifiers it understands (``meta`` is an alias of ``alt`` and adds no name),
+#: over every base the tables name. ``CHORDS`` keys are whole chords already.
+MODIFIER_SETS: list[str] = [
+    "+".join(combo)
+    for count in range(4)
+    for combo in itertools.combinations(("ctrl", "alt", "shift"), count)
+]
+BASES: list[str] = [
+    *SPECIAL,
+    *(f"f{number}" for number in range(1, MAX_FUNCTION_KEY + 1)),
+    *string.ascii_lowercase,
+    *string.digits,
+    *PUNCTUATION,
+]
+
+
+def emittable_names() -> list[str]:
+    """Every named key ``translate`` can emit, from ``translate`` itself.
+
+    DERIVED, not hand-listed, because a hand-listed product understated the
+    vocabulary for a whole round: its modifier list stopped at pairs, so every
+    triple chord (``C-M-S-Up``, ``C-M-S-a``) and all the ``M-S-`` punctuation
+    (``M-S--`` is alt+shift+minus) was never sent to a real tmux — and the
+    live sweep below could not fail for that class. It also listed names
+    ``translate`` never emits (``C-A``, ``S-Space``, ``C-S-Tab``), which the
+    sweep then "proved" safe.
+    """
+    chords = [
+        *CHORDS,
+        *(f"{mods}+{base}" if mods else base for mods in MODIFIER_SETS for base in BASES),
+    ]
+    translated = (translate(chord, None, printable=False) for chord in chords)
+    return sorted({t.value for t in translated if t is not None and t.kind == "key"})
+
+
 #: Every named key this module can emit, exercised against the real binary.
-EMITTED: list[str] = sorted(
-    {
-        *SPECIAL.values(),
-        *CHORDS.values(),
-        *(f"{mod}{name}" for mod in ("C-", "M-", "S-", "C-S-", "C-M-", "M-S-")
-          for name in SPECIAL.values() if not (mod.startswith("C-") and name in NO_CTRL)),
-        *(f"F{n}" for n in range(1, MAX_FUNCTION_KEY + 1)),
-        *(f"{mod}F{n}" for mod in ("C-", "M-", "S-") for n in (1, 12)),
-        *(f"C-{char}" for char in CTRL_PUNCTUATION),
-        *(f"C-{char}" for char in "azAZ"),
-        *(f"M-{char}" for char in "azAZ019,.-=[]/\\'`~"),
-        *(f"C-S-{char}" for char in "az"),
-        *(f"C-M-{char}" for char in "az"),
-    }
-)  # fmt: skip
+EMITTED: list[str] = emittable_names()
+
+
+def test_the_swept_vocabulary_is_everything_translate_emits() -> None:
+    """The sweep's input is the guard's reach: pin what it must and must not hold."""
+    assert len(EMITTED) > 400, len(EMITTED)
+    assert {name for _, name in TABLE} <= set(EMITTED), "every §6 row is swept"
+    # The classes the old hand-written product missed entirely.
+    for name in ("C-M-S-Up", "C-M-S-a", "M-S--", "C-S-@", "M-S-{", "C-M-/", "S-F12", "M-Z"):
+        assert name in EMITTED, name
+    # The negative control: names translate() never emits are NOT swept, so no
+    # amount of green here can vouch for a chord the UI cannot produce.
+    for name in ("C-A", "S-Space", "S-Tab", "C-S-Tab", "Space", "M-;", "Bogus", "F13"):
+        assert name not in EMITTED, name
+    assert all(TMUX_NAME.match(name) for name in EMITTED)
+
 
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
 
@@ -370,6 +456,14 @@ def test_real_tmux_types_none_of_our_names_literally(
     not know arrives spelled out, right before its own marker — which is what
     the control at the end must see for ``Bogus`` and ``C-BSpace``, or the
     read-back proves nothing.
+
+    All 470 of :data:`EMITTED` on 3.7c: 1.4 s, none typed literally. The same
+    sweep was run by hand in containers on 2026-08-31 for the versions this
+    machine cannot install — 3.2a (ubuntu:22.04), 3.3a (debian:bookworm) and
+    3.4 (ubuntu:24.04, the CI runner). There the 352 names left after the
+    :func:`needs_extended_keys` gate all arrived as keys too, and of the 118 the
+    gate holds back, 117 were typed literally by those versions; the 118th is
+    ``C-M-Space``, gated with the class it belongs to.
     """
     window = real_server.spawn_window(
         "keys",

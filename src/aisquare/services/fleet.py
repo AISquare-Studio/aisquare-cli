@@ -440,7 +440,14 @@ def _empty_dir(path: Path) -> bool:
         return False
 
 
-def _reuse_worktree(root: Path, path: Path, branch: str, notes: list[str]) -> None:
+def _reuse_worktree(
+    root: Path,
+    path: Path,
+    branch: str,
+    notes: list[str],
+    *,
+    refuse_if_taken: Callable[[], None] | None = None,
+) -> None:
     """Put an existing worktree ON ``branch`` before an agent is started in it.
 
     A label outlives one task — an ended agent frees it (§5.7) — so the tree
@@ -451,10 +458,26 @@ def _reuse_worktree(root: Path, path: Path, branch: str, notes: list[str]) -> No
     switched. Dirty and on another branch: refused, because the uncommitted
     work is somebody's and neither switching over it nor ignoring it is this
     function's call to make.
+
+    ``refuse_if_taken`` is asked again in the last moment before the checkout —
+    it raises when a LIVE agent holds this path. A spawn's row is written only
+    after its tmux window exists, so the loser of a label race can pass
+    :func:`_refuse_occupied_worktree` with no holder in sight and arrive here
+    while the winner's row is still on its way; ``git checkout`` is then run in
+    a directory another agent is already working in, and :func:`_relabel`'s
+    later refusal of the ROW cannot undo it. Asking as late as possible shrinks
+    that window from "a ``git worktree add`` plus a tmux spawn plus a store
+    write" to the two git commands below; closing it entirely needs the label
+    reserved in the store before anything is created, which no index here can
+    express.
     """
     head = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
     current = head.stdout.strip() if head.returncode == 0 else ""
-    where = f"on {current}" if current else "on a detached HEAD"
+    # A detached HEAD is not a failure: `--abbrev-ref` exits 0 and prints the
+    # literal "HEAD" (measured with git 2.x). The empty string is the shapes
+    # that really do fail — an unborn HEAD, or no repository at all.
+    detached = current in ("", "HEAD")
+    where = "on a detached HEAD" if detached else f"on {current}"
     if current == branch:
         notes.append(f"reusing the existing worktree at {path} (already on {branch})")
         return
@@ -464,6 +487,8 @@ def _reuse_worktree(root: Path, path: Path, branch: str, notes: list[str]) -> No
             f"the worktree at {path} holds uncommitted work {where} and this agent needs "
             f"{branch} — commit or stash it there, or spawn under another label"
         )
+    if refuse_if_taken is not None:
+        refuse_if_taken()
     if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
         _git_ok(path, "checkout", branch)
     else:
@@ -472,7 +497,13 @@ def _reuse_worktree(root: Path, path: Path, branch: str, notes: list[str]) -> No
 
 
 def _ensure_worktree(
-    root: Path, worktree_dir: str, label: str, branch: str, notes: list[str]
+    root: Path,
+    worktree_dir: str,
+    label: str,
+    branch: str,
+    notes: list[str],
+    *,
+    refuse_if_taken: Callable[[], None] | None = None,
 ) -> Path:
     """``<root>/<worktree_dir>/<label>`` on ``branch``, created or reused.
 
@@ -482,11 +513,15 @@ def _ensure_worktree(
     second spawn continues the first one's work — and a reused tree is put on
     the branch THIS spawn asked for (see :func:`_reuse_worktree`), never handed
     over on whatever branch the last agent left it on.
+
+    ``refuse_if_taken`` reaches :func:`_reuse_worktree`, which asks it once more
+    before switching branches; a tree this call CREATES cannot be another
+    agent's, because ``git worktree add`` refuses an existing directory.
     """
     path = root / worktree_dir / label
     if path.exists():
         if (path / ".git").exists():
-            _reuse_worktree(root, path, branch, notes)
+            _reuse_worktree(root, path, branch, notes, refuse_if_taken=refuse_if_taken)
             return path
         # A `git worktree add` still in flight has made the directory and not
         # yet its .git; saying "remove it" about that would be wrong advice.
@@ -629,6 +664,39 @@ def _activity_times(srv: TmuxServer) -> dict[str, datetime]:
     return times
 
 
+def _server_answers(srv: TmuxServer) -> bool:
+    """Whether this tmux server answers a question at all — not what it answers.
+
+    ``list_windows``, ``pane_facts`` and :func:`_activity_times` report a server
+    that cannot be REACHED exactly as they report a pane that is not there: an
+    empty answer, no exception. tmux exits 1 with ``error connecting to
+    /tmp/tmux-<uid>/<socket>`` for ``list-panes -a``, ``display-message`` and
+    ``list-sessions`` alike (measured on 3.7c), and each wrapper swallows the
+    non-zero exit. So "no pane answered" is not evidence of dead panes until the
+    server itself has said something.
+
+    ``list_sessions`` is the cheapest question :class:`TmuxServer` already
+    exposes, and it swallows the exit status, so an empty list here means either
+    shape: no server, or a server holding nothing. On the FLEET's own server the
+    second one barely exists — ``exit-empty`` is on by default and
+    :data:`~aisquare.core.tmux.BUNDLED_CONF` does not turn it off, and measured
+    on 3.7c a ``start-server`` with no session leaves no socket behind at all
+    (``list-sessions`` then exits 1, "no server running on …"); with
+    ``exit-empty off`` the same server answers ``list-sessions`` with status 0
+    and no lines. So what failing open costs is one reap pass that marks nothing
+    on a hand-started sessionless server — the rows stay live and the next pass
+    settles them — against ending every live row, and removing the merged
+    worktrees of the agents still working in them, whenever the socket path goes
+    stale. A ``TmuxServer.answers()`` that separates the two exactly
+    (``display-message -p '#{version}'``: status 0 on that sessionless server,
+    1 when there is none) is requested; this stands in until it lands.
+    """
+    try:
+        return bool(srv.list_sessions())
+    except TmuxError:
+        return False
+
+
 def _observe(
     srv: TmuxServer, tmux_session: str | None, agents: Sequence[FleetAgent]
 ) -> dict[str, _PaneView] | None:
@@ -639,6 +707,13 @@ def _observe(
     tmux never heard of leaves the panes alive under the old session name. The
     ``activity`` flag those answers carry is not used (see :data:`ACTIVITY_WINDOW`);
     the last-output time comes from one more ``list-panes`` over the server.
+
+    "Cannot be asked" is not only a :class:`TmuxError`: an unreachable server
+    answers every one of those queries with an empty answer and no exception, so
+    an empty result set is never taken as "every pane is gone" until
+    :func:`_server_answers` has heard the server speak. That probe runs only in
+    the one case it can change — no pane answered at all — so the ordinary
+    listing still costs the same two commands.
     """
     try:
         windows = (
@@ -667,6 +742,8 @@ def _observe(
                     facts.current_command,
                     output_at.get(agent.pane_id),
                 )
+        if live and not seen and not _server_answers(srv):
+            return None
         return seen
     except TmuxError:
         return None
@@ -728,7 +805,11 @@ def _derive(
         if fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:
-        return "unknown", hooks or "tmux unavailable"
+        # tmux is WHY the state is unknown, and ``detail`` is "why the state is
+        # what it is" (models.py). A missing board join is a second, smaller
+        # fact: reported after the reason, never instead of it — an operator
+        # told only "no hooks" reads a healthy fleet with an odd binary.
+        return "unknown", "tmux unavailable" if hooks is None else f"tmux unavailable; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
 
@@ -872,8 +953,19 @@ def spawn(
             task_id=resolved_task_id,
             title=task.title if task is not None else picked,
         )
-        _refuse_occupied_worktree(project, config.worktree_dir, picked)
-        cwd = _ensure_worktree(project.root, config.worktree_dir, picked, branch, notes)
+
+        def refuse_if_taken() -> None:
+            _refuse_occupied_worktree(project, config.worktree_dir, picked)
+
+        refuse_if_taken()
+        cwd = _ensure_worktree(
+            project.root,
+            config.worktree_dir,
+            picked,
+            branch,
+            notes,
+            refuse_if_taken=refuse_if_taken,
+        )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
     role_args = list(role_config.extra_args)
@@ -933,8 +1025,14 @@ def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: st
     parallel spawn that picked this label from a snapshot taken a moment
     earlier. The tree at ``<worktree_dir>/<label>`` is then the winner's, and
     neither starting a second agent in it nor (worse) checking another branch
-    out from under the first one is acceptable. The winner's row can still
-    appear AFTER this read; :func:`_relabel` refuses that half of the race.
+    out from under the first one is acceptable.
+
+    The winner's row can still appear AFTER this read, and the two halves of
+    that race need two different guards: :func:`_relabel` refuses the second
+    ROW, which is enough for a tree nothing has touched, but a checkout it
+    cannot undo has by then already moved the first agent's branch. So
+    :func:`_reuse_worktree` asks this function again immediately before its
+    ``git checkout`` (``refuse_if_taken``).
     """
     path = (project.root / worktree_dir / label).resolve()
     with store_session() as store:
@@ -1158,12 +1256,29 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     needs the human, it could answer a permission prompt. So anything but
     ``waiting`` with a live pane goes to the board, addressed to the label,
     where the agent's next delta injection delivers it.
+
+    ``waiting`` alone is not enough. A pane whose foreground is still
+    ``aisquare launch`` reads waiting as soon as its last output is older than
+    :data:`ACTIVITY_WINDOW` (five seconds — and ``PROMPT_TIMEOUT`` exists
+    because a start takes longer than that), and the launcher has requested no
+    bracketed paste, so tmux would turn every LF into a CR and the agent would
+    read N submitted messages instead of one: the harm :func:`_type_prompt`
+    documents and refuses to cause. So the same readiness test decides here —
+    the one :func:`nudge_manager` already applies — and a pane that is not the
+    agent's gets the board note instead.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
     if status.state == "waiting":
         srv = server_for(agent.tmux_socket)
+        if not _pane_is_the_agent(srv, agent.pane_id):
+            how = _file_note(project, label, text, sender)
+            return TellResult(
+                False,
+                "it reads as waiting, but its pane is not running the agent yet (the "
+                f"launcher or a shell is in the foreground) — {how}",
+            )
         try:
             srv.paste(agent.pane_id, text)
             srv.send_keys(agent.pane_id, "Enter")
@@ -1173,6 +1288,19 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
         return TellResult(True, "typed into its pane (it was waiting)")
     how = _file_note(project, label, text, sender)
     return TellResult(False, f"it is {status.state} — {how}")
+
+
+def _pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
+    """Whether the pane's foreground process is the agent right now.
+
+    Never raises: tmux that cannot answer is not a pane to type into either
+    (and :func:`_derive` has already called such an agent ``unknown``).
+    """
+    try:
+        facts = srv.pane_facts(pane_id)
+    except TmuxError:
+        return False
+    return facts is not None and not facts.dead and _agent_running(facts.current_command)
 
 
 def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) -> str:
@@ -1355,11 +1483,18 @@ def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:
         )
 
 
-def rename(project: ProjectInfo, codename: str) -> ProjectInfo:
+def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = None) -> ProjectInfo:
     """Set the fleet codename (validated, unique) and rename the tmux session with it.
 
     The row is renamed even when tmux is unreachable — ``reap`` reconciles from
-    the panes themselves, which are addressed by id, not by session name.
+    the panes themselves, which are addressed by id, not by session name — but
+    that fail-open is not free and no longer silent. A tmux session left under
+    the OLD name is what ``fleet attach`` (the plan's full-fidelity escape
+    hatch, §3.1) looks for and does not find, and a second ``rename`` cannot
+    repair it: it drives from the STORED codename, which is already the new
+    one. So ``notes`` collects what it cost, the way :class:`SpawnReceipt` does,
+    naming the session that still holds the old name and the one tmux command
+    that fixes it.
     """
     if not codenames.is_codename(codename):
         raise FleetError(
@@ -1378,11 +1513,22 @@ def rename(project: ProjectInfo, codename: str) -> ProjectInfo:
             raise FleetError(f"codename {codename!r} is already taken by another project") from exc
     if old:
         srv = server()
+        old_session, new_session = session_name(old), session_name(codename)
         try:
-            if srv.has_session(session_name(old)):
-                srv.rename_session(session_name(old), session_name(codename))
-        except TmuxError:
-            pass
+            if srv.has_session(old_session):
+                srv.rename_session(old_session, new_session)
+        except TmuxError as exc:
+            if notes is not None:
+                notes.append(
+                    f"the codename is {codename}, but tmux could not be told ({exc}) — if a "
+                    f"session named {old_session} is still running this project's agents, "
+                    f"`aisquare fleet attach` looks for {new_session} and will refuse until "
+                    f"it is renamed: `tmux -L {srv.socket} rename-session -t ={old_session} "
+                    f"{new_session}` does that, and a second `aisquare fleet rename` will not "
+                    "(it renames from the stored codename, which is already the new one). "
+                    "`fleet ls`, `tell`, `stop` and `reap` are unaffected — they address "
+                    "panes by id"
+                )
     return updated
 
 
@@ -1421,6 +1567,16 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
     human: this runs inside sub-agents' CLI processes, where a failure must
     cost nothing but the nudge. ``reason`` is for the caller's own log — the
     nudge text is fixed and carries nothing (the delta injection does).
+
+    Waiting is decided by :func:`_derive` — the one derivation ``fleet ls`` and
+    ``fleet tell`` also go through — and NOT by the board row's ``state``
+    field, which that derivation trusts only while the row is fresh
+    (``_STALE_AFTER``). A row frozen at ``waiting`` while the pane keeps
+    printing (hooks that stopped firing: a Stop that never ran, a session id
+    that no longer matches) is ``working`` everywhere else, and typing into it
+    is the interleaving ``tell`` refuses to cause. Agreeing costs one extra
+    ``list-panes`` for the pane's last-output time, on a path the debounce
+    already bounds to one pass per :data:`NUDGE_DEBOUNCE`.
     """
     try:
         with store_session() as store:
@@ -1428,7 +1584,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             if manager is None or manager.session_id is None:
                 return False
             session = store.get_session(manager.session_id)
-            if session is None or session.ended_at is not None or session.state != "waiting":
+            if session is None or session.ended_at is not None:
                 return False
             key = f"nudge:{session.id}"
             now = _now()
@@ -1438,6 +1594,15 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             srv = server_for(manager.tmux_socket)
             facts = srv.pane_facts(manager.pane_id)
             if facts is None or facts.dead or not _agent_running(facts.current_command):
+                return False
+            pane = _PaneView(
+                facts.dead,
+                facts.dead_status,
+                facts.current_command,
+                _activity_times(srv).get(manager.pane_id),
+            )
+            state, _ = _derive(manager, session, pane, observed=True, now=now)
+            if state != "waiting":
                 return False
             store.set_meta(key, now.isoformat())
             srv.send_literal(manager.pane_id, NUDGE_TEXT)

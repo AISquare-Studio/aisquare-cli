@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import statistics
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -31,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import spawn
 from aisquare.core import tmux as tmux_module
 from aisquare.core.tmux import (
     _SEP,
@@ -127,6 +129,14 @@ def _completes(call: Callable[[], None]) -> bool:
     """True when ``call`` returns — the assertion that a call does not raise."""
     call()
     return True
+
+
+#: The permission bits below are advice to root, not a refusal, so a suite run
+#: as root would prove the opposite of what the test claims.
+not_root = pytest.mark.skipif(
+    hasattr(os, "getuid") and os.getuid() == 0,
+    reason="root writes an unwritable file anyway — the fail-open branch is unreachable",
+)
 
 
 # --- availability -----------------------------------------------------------------------
@@ -240,6 +250,71 @@ def test_an_explicit_conf_is_used_verbatim_and_never_written(fake_bin: Path, con
     server = _server(FakeTmux(), fake_bin, conf)
     assert server.conf_path() == conf
     assert not conf.exists()
+    assert server.conf_fallback is None
+
+
+@not_root
+def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
+    fake_bin: Path, isolated_home: Path
+) -> None:
+    """An unwritable conf may not cost a fleet COMMAND — only the rewrite.
+
+    ``conf_path`` runs inside ``argv``, i.e. on every tmux invocation, and the
+    OSError used to escape the class's contract entirely: ``fleet attach`` ended
+    in a ``PermissionError`` traceback with nothing on stdout under ``--json``.
+    The artefact is what tmux is handed and that the command completes; the cost
+    is on ``conf_fallback`` so a caller can say it out loud.
+    """
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    path = isolated_home / CONF_NAME
+    path.write_text("set -g status on  # what the last version wrote\n", encoding="utf-8")
+    path.chmod(0o444)
+
+    server = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
+    # Readable but not writable: tmux gets the stale file, and it is untouched.
+    assert server.conf_path() == path
+    assert server.argv("has-session")[4] == str(path)
+    assert path.read_text(encoding="utf-8").startswith("set -g status on")
+    assert server.conf_fallback is not None
+    assert CONF_NAME in server.conf_fallback
+    assert "whatever the last version wrote" in server.conf_fallback
+
+    fresh = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
+    assert fresh.has_session("x") is True, "an unwritable conf does not cost the command"
+
+    # Unreadable AND unwritable: measured on 3.7c, handing tmux an unreadable
+    # -f file kills the server at startup ("server exited unexpectedly"), while
+    # a missing one is fine — so this branch must NOT hand over the path.
+    path.chmod(0o000)
+    blind = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
+    assert blind.conf_path() == Path(os.devnull)
+    assert blind.conf_fallback is not None and "/dev/null" in blind.conf_fallback
+
+    # Negative control: with the file writable again nothing fails open, and the
+    # drift is repaired — so the fallback is a response to the failure, not the
+    # new normal.
+    path.chmod(0o644)
+    healthy = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
+    assert healthy.conf_path() == path
+    assert healthy.conf_fallback is None
+    assert path.read_text(encoding="utf-8") == BUNDLED_CONF
+
+
+def test_a_home_that_cannot_be_created_costs_the_conf_and_not_the_command(
+    fake_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ensure_home`` mkdir failure is the same class of accident, one step earlier."""
+
+    def refuse() -> Path:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("aisquare.core.paths.ensure_home", refuse)
+    fake = FakeTmux()
+    server = TmuxServer("s", binary=str(fake_bin), runner=fake)
+    assert server.conf_path() == Path(os.devnull)
+    assert server.has_session("x") is True, "the command still runs"
+    assert fake.calls[0][0][4] == os.devnull
+    assert server.conf_fallback is not None and "aisquare home" in server.conf_fallback
 
 
 def test_check_conf_sources_the_file_on_a_throwaway_server(fake_bin: Path, conf: Path) -> None:
@@ -645,15 +720,24 @@ def test_capture_raises_when_the_pane_is_gone(fake_bin: Path, conf: Path) -> Non
 
 
 def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path) -> None:
+    """…including the escape send_literal's docstring records.
+
+    A TRAILING ``;`` is tmux's command separator even after ``-l --``: measured
+    on 3.7c, ``send-keys -l -- 'a;'`` puts ``a`` in the pane and drops the
+    semicolon (proved live in ``test_live_send_literal_delivers_a_trailing_semicolon``).
+    A ``;`` anywhere else is already data — the negative control on the escape.
+    """
     fake = FakeTmux()
     server = _server(fake, fake_bin, conf)
     server.send_keys("%3", "C-c", "Enter")
     server.send_literal("%3", "-dash text; not a command")
+    server.send_literal("%3", "a;")
     server.send_keys("%3")
     server.send_literal("%3", "")
     assert fake.commands() == [
         ["send-keys", "-t", "%3", "C-c", "Enter"],
         ["send-keys", "-t", "%3", "-l", "--", "-dash text; not a command"],
+        ["send-keys", "-t", "%3", "-l", "--", "a\\;"],
     ], "nothing to send is not a tmux call"
 
 
@@ -664,12 +748,56 @@ def test_paste_loads_the_buffer_from_stdin_then_pastes_bracketed(
     server = _server(fake, fake_bin, conf)
     server.paste("%3", "line one\nline two\n")
     server.paste("%3", "")
-    assert fake.commands() == [
-        ["load-buffer", "-b", PASTE_BUFFER, "-"],
-        ["paste-buffer", "-p", "-d", "-b", PASTE_BUFFER, "-t", "%3"],
-    ]
+    load, pasted = fake.commands()
+    buffer_name = load[2]
+    assert load == ["load-buffer", "-b", buffer_name, "-"]
+    assert pasted == ["paste-buffer", "-p", "-d", "-b", buffer_name, "-t", "%3"]
     assert fake.calls[0][1] == b"line one\nline two\n"
     assert fake.calls[1][1] is None
+
+
+def test_every_paste_loads_a_buffer_of_its_own(fake_bin: Path, conf: Path) -> None:
+    """Two pastes may not share a buffer name — one shared name crossed panes.
+
+    ``load`` and ``paste`` are separate invocations, so with a single fixed name
+    an interleaved pair delivers B's text to pane A (the live test reproduces
+    exactly that as its control). The name therefore carries the pid, which
+    separates processes, AND a counter, which separates calls in one.
+    """
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    server.paste("%3", "for the first agent")
+    server.paste("%4", "for the second agent")
+    first_load, first_paste, second_load, second_paste = fake.commands()
+
+    first, second = first_load[2], second_load[2]
+    assert first_paste[4] == first, "a paste must name the buffer its own load created"
+    assert second_paste[4] == second
+    assert first != second, "two pastes in one process share a name"
+    for name in (first, second):
+        assert name.startswith(f"{PASTE_BUFFER}-{os.getpid()}-"), name
+
+
+def test_a_paste_that_fails_does_not_leave_its_text_on_the_server(
+    fake_bin: Path, conf: Path
+) -> None:
+    """A per-call name is never reused, so a failed paste's buffer would linger.
+
+    It holds an agent's prompt on a server the user can attach to, where
+    ``prefix-]`` would deliver it to whatever pane they are looking at.
+    """
+    fake = FakeTmux(OK, Completed(1, "", "can't find pane: %9\n"))
+    with pytest.raises(TmuxError, match="can't find pane: %9"):
+        _server(fake, fake_bin, conf).paste("%9", "unsent prompt")
+    load, pasted, deleted = fake.commands()
+    assert deleted == ["delete-buffer", "-b", load[2]]
+    assert pasted[4] == load[2]
+
+    # Negative control: a paste that works does not delete anything itself —
+    # `-d` already did, and a third invocation per keystroke is not free.
+    quiet = FakeTmux()
+    _server(quiet, fake_bin, conf).paste("%3", "sent")
+    assert [command[0] for command in quiet.commands()] == ["load-buffer", "paste-buffer"]
 
 
 def test_resize_never_asks_for_a_zero_sized_window(fake_bin: Path, conf: Path) -> None:
@@ -697,20 +825,33 @@ def test_the_seam_maps_a_hung_server_to_tmux_error(monkeypatch: pytest.MonkeyPat
         _tmux([sys.executable, "-c", "import time; time.sleep(5)"], None)
 
 
-def test_the_seam_strips_the_tracing_identity_and_nothing_else(
+def test_the_seam_strips_the_whole_tracing_identity_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://proxy.example")
-    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Agent-Name: coder")
+    """Every name of the identity, in the child's OWN environment.
+
+    The marker pair matters as much as the headers here: this server hands its
+    environment to every window, and an agent that launches untraced (the
+    default) keeps whatever it inherited — ``core.insights.run_key`` then files
+    that agent's insights under the Run of whoever started the server, and the
+    hook writes a session→Run join that is not true. docs/fleet.md: "the tmux
+    server inherits nothing of a tracing identity from whoever started it".
+    """
+    for name in spawn.IDENTITY_ENV_VARS:
+        monkeypatch.setenv(name, f"parent-{name}")
     monkeypatch.setenv("ASQ_TEST_PASSTHROUGH", "kept")
-    probe = (
-        "import os; print(os.environ.get('ANTHROPIC_BASE_URL', '<unset>'), "
-        "os.environ.get('ANTHROPIC_CUSTOM_HEADERS', '<unset>'), "
-        "os.environ.get('ASQ_TEST_PASSTHROUGH', '<unset>'))"
-    )
-    completed = _tmux([sys.executable, "-c", probe], None)
+    probe = "import os,sys; print(' '.join(os.environ.get(n, '<unset>') for n in sys.argv[1:]))"
+    names = [*spawn.IDENTITY_ENV_VARS, "ASQ_TEST_PASSTHROUGH"]
+    completed = _tmux([sys.executable, "-c", probe, *names], None)
     assert completed.returncode == 0
-    assert completed.stdout.split() == ["<unset>", "<unset>", "kept"]
+    assert completed.stdout.split() == ["<unset>"] * len(spawn.IDENTITY_ENV_VARS) + ["kept"]
+
+    # Negative control on the probe: without the strip it reports the values, so
+    # a row of "<unset>" is the seam's work and not a blind reader.
+    unstripped = subprocess.run(
+        [sys.executable, "-c", probe, *names], capture_output=True, text=True, check=True
+    )
+    assert unstripped.stdout.split() == [f"parent-{n}" for n in spawn.IDENTITY_ENV_VARS] + ["kept"]
 
 
 def test_the_seam_feeds_stdin_and_returns_both_streams() -> None:
@@ -837,6 +978,78 @@ def test_live_paste_delivers_every_line(live: TmuxServer) -> None:
         )
     )
     assert live.run("list-buffers") == "", "the paste buffer is deleted after use (-d)"
+
+
+@requires_tmux
+def test_live_two_pastes_at_once_reach_the_pane_they_were_addressed_to(live: TmuxServer) -> None:
+    """The race, staged deterministically: B's whole paste runs inside A's.
+
+    ``paste`` is ``load-buffer`` then ``paste-buffer``, and two processes can
+    interleave there — two ``fleet tell``s, a ``spawn --prompt`` beside a
+    ``tell``, the UI's ``on_paste`` beside either. The artefact is the panes:
+    each must hold the text ADDRESSED to it and not the other's. The control at
+    the end is the old mechanism — one fixed buffer name — which delivers B's
+    text to pane A and then cannot paste to B at all.
+    """
+    first = _spawn(live, "asq-test-fox", "w0", CAT)
+    second = _spawn(live, "asq-test-fox", "w1", CAT)
+    assert _wait(lambda: "plain" in _screen(live, first.pane_id))
+    assert _wait(lambda: "plain" in _screen(live, second.pane_id))
+
+    other = TmuxServer(live.socket)
+    staged = {"fired": False}
+
+    def interleave(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        """The real seam, with the OTHER paste squeezed in after the load."""
+        result = _tmux(argv, stdin)
+        if not staged["fired"] and "load-buffer" in argv:
+            staged["fired"] = True
+            other.paste(second.pane_id, "FOR-THE-SECOND-AGENT\n")
+        return result
+
+    TmuxServer(live.socket, runner=interleave).paste(first.pane_id, "FOR-THE-FIRST-AGENT\n")
+    assert staged["fired"], "the interleaved paste never ran — the race was not staged"
+
+    assert _wait(lambda: "FOR-THE-FIRST-AGENT" in _screen(live, first.pane_id))
+    assert _wait(lambda: "FOR-THE-SECOND-AGENT" in _screen(live, second.pane_id))
+    assert "FOR-THE-SECOND-AGENT" not in _screen(live, first.pane_id)
+    assert "FOR-THE-FIRST-AGENT" not in _screen(live, second.pane_id)
+    assert live.run("list-buffers") == "", "each call's own -d deleted its own buffer"
+
+    # The control on the mechanism: ONE name, the same interleaving.
+    shared = "asq-test-one-name"
+    live.run("load-buffer", "-b", shared, "-", stdin=b"CROSSED-FIRST\n")
+    live.run("load-buffer", "-b", shared, "-", stdin=b"CROSSED-SECOND\n")
+    live.run("paste-buffer", "-p", "-d", "-b", shared, "-t", first.pane_id)
+    assert _wait(lambda: "CROSSED-SECOND" in _screen(live, first.pane_id))
+    assert "CROSSED-FIRST" not in _screen(live, first.pane_id), "the loser's text is gone"
+    with pytest.raises(TmuxError, match=f"no buffer {shared}"):
+        live.run("paste-buffer", "-p", "-d", "-b", shared, "-t", second.pane_id)
+    assert "CROSSED-SECOND" not in _screen(live, second.pane_id)
+
+
+@requires_tmux
+def test_live_send_literal_delivers_a_trailing_semicolon(live: TmuxServer) -> None:
+    """``send_literal``'s escape, measured against the pane it types into.
+
+    tmux ends a command at ANY argument whose last character is ``;`` — ``-l --``
+    does not stop it — so unescaped, the semicolon never reaches the agent and
+    whatever followed it in the text would be run as a tmux command. The control
+    at the end is the same text sent raw: the ``;`` is dropped.
+    """
+    window = _spawn(live, "asq-test-fox", "w0", CAT)
+    assert _wait(lambda: "plain" in _screen(live, window.pane_id))
+
+    live.send_literal(window.pane_id, "run make;")
+    live.send_literal(window.pane_id, "END")
+    live.send_keys(window.pane_id, "Enter")
+    assert _wait(lambda: "run make;END" in _screen(live, window.pane_id))
+
+    # The control on the mechanism: raw, tmux eats the separator.
+    live.run("send-keys", "-t", window.pane_id, "-l", "--", "run make;")
+    live.send_literal(window.pane_id, "RAW")
+    live.send_keys(window.pane_id, "Enter")
+    assert _wait(lambda: "run makeRAW" in _screen(live, window.pane_id))
 
 
 @requires_tmux

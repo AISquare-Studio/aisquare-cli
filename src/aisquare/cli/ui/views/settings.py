@@ -222,20 +222,30 @@ class SettingsView(VerticalScroll):
         try:
             config: AppConfig = load_config()
         except Exception as exc:  # a broken config.toml: say so, change nothing
-            self.notify(f"config unreadable — nothing saved: {exc}", severity="error", timeout=8)
+            self.notify(
+                f"config unreadable — nothing saved: {exc}",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
             return
         result = self._form_fleet(config.fleet)
         if isinstance(result, str):
-            self.notify(result, severity="error", timeout=6)
+            self.notify(result, severity="error", timeout=6, markup=False)
             return
         config.fleet = result
         try:
             written = save_config(config)
         except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure
-            self.notify(f"could not write the config: {exc}", severity="error", timeout=8)
+            self.notify(
+                f"could not write the config: {exc}",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
             return
         self.reload_form()
-        self.notify(f"✓ fleet settings saved to {written}", timeout=5)
+        self.notify(f"✓ fleet settings saved to {written}", timeout=5, markup=False)
 
     @on(Button.Pressed, "#rename-codename")
     def _rename_codename(self) -> None:
@@ -247,15 +257,16 @@ class SettingsView(VerticalScroll):
                 "joined by '-', like amber-otter",
                 severity="error",
                 timeout=6,
+                markup=False,
             )
             return
         if wanted == self.project.codename:
-            self.notify(f"the codename is already {wanted}", timeout=4)
+            self.notify(f"the codename is already {wanted}", timeout=4, markup=False)
             return
         try:
             updated = fleet_service.rename(self.project, wanted)
         except fleet_service.FleetError as exc:
-            self.notify(str(exc), severity="error", timeout=8)
+            self.notify(str(exc), severity="error", timeout=8, markup=False)
             return
         self.project = updated
         self.query_one("#codename", Input).value = updated.codename or ""
@@ -263,4 +274,5 @@ class SettingsView(VerticalScroll):
             f"✓ {updated.root.name or updated.id} is now {updated.codename} "
             f"({fleet_service.session_name(updated.codename or '')})",
             timeout=5,
+            markup=False,
         )

@@ -27,6 +27,16 @@ fork alone, ~1.7-2.1 ms. At the 20 fps ceiling that is 3.9 % and 5.7 % of one
 core against the plan's 15 % go/no-go, so a fork per tick stays the design
 until the control-mode client (§3.1) replaces polling.
 
+Scrollback (§6). The wheel moves our own offset ``k`` over the pane's history,
+and the last-seen pane height goes with every capture: tmux is asked for
+``-S -k -E (H-1-k)``, one screen, instead of history-to-bottom. Without the
+bound a frame at ``k`` pipes ``k + H`` rows out of the subprocess and splits
+them all to keep ``H`` — reading the top of a 50 000-line Claude session, that
+is 50 000 rows per tick on the event loop (measured with the fake tmux: 3006
+rows unbounded against 6 bounded, at ``k=3000`` in a 6-row widget). A stale
+hint yields a short frame, which ``core.tmux.capture`` detects and refetches
+unbounded — one extra process, only then.
+
 Input (§4.3). With the pane focused every key goes to tmux through
 ``core.keys.translate`` — literal text via ``send-keys -l``, everything else by
 tmux's key name — except the escape hatch (``F12`` by default), which posts
@@ -230,7 +240,15 @@ class TerminalPane(Widget, can_focus=True):
         if width <= 0 or height <= 0:
             return False
         try:
-            capture = self.server.capture(self.pane_id, scrollback=self.scrollback)
+            capture = self.server.capture(
+                self.pane_id,
+                scrollback=self.scrollback,
+                # The pane height the last frame reported bounds a scrolled
+                # capture to one screen (§6); without it tmux pipes
+                # ``scrollback + height`` rows every tick. ``None`` before the
+                # first frame, when scrollback is 0 and there is nothing to bound.
+                height=self.facts.height if self.facts is not None else None,
+            )
         except TmuxUnavailable:
             return self._fail(TMUX_UNAVAILABLE)
         except TmuxError:

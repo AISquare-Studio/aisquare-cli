@@ -25,7 +25,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -101,6 +101,9 @@ class FakeTmux:
         self.panes: dict[str, FakePane] = {}
         self.captures: list[tuple[str, int]] = []
         """``(pane_id, scrollback)`` per ``capture-pane``."""
+        self.capture_rows: list[int] = []
+        """Rows each ``capture-pane`` piped back — what the subprocess actually
+        transferred and the widget actually split, one entry per capture."""
         self.input: list[tuple[str, ...]] = []
         """``("send-keys", pane, *args)``, ``("load-buffer", text)``,
         ``("paste-buffer", pane)``, ``("resize-window", pane, w, h)`` in order."""
@@ -160,6 +163,13 @@ class FakeTmux:
             self.captures.append((pane_id, scrollback))
             rows = pane.history[len(pane.history) - scrollback :] if scrollback else []
             rows = rows + pane.screen + [""] * (pane.height - len(pane.screen))
+            # ``-E`` is tmux's LAST line, numbered from the top of the screen
+            # (0), so history lines are negative: line ``e`` sits at index
+            # ``e + scrollback`` of the span we just built. Without it tmux
+            # answers history-to-bottom, which is the whole point of the flag.
+            if "-E" in group:
+                rows = rows[: max(0, int(self._flag(group, "-E")) + scrollback + 1)]
+            self.capture_rows.append(len(rows))
             return Completed(0, "".join(row + "\n" for row in rows), "")
         if name == "display-message":
             return Completed(0, pane.facts(pane_id, group[-1]) + "\n", "")
@@ -646,6 +656,65 @@ def test_wheel_scrolls_history_clamped_and_any_key_returns_to_live(
     assert fake.captures[-1] == ("%1", 0)
 
 
+def test_a_scrolled_frame_is_bounded_to_one_screen(fake: FakeTmux, tmp_path: Path) -> None:
+    """§6: offset ``k`` asks for ``-S -k -E (H-1-k)``, not history-to-bottom.
+
+    The claim is about the rows that cross the subprocess boundary and get
+    split, so that is what is asserted — with the same frame fetched unbounded
+    as the control, since a counter that can only report one number proves
+    nothing.
+    """
+    fake.panes["%1"].history = [f"old {n}" for n in range(5000)]
+
+    async def drive() -> tuple[list[int], list[str], int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            fake.capture_rows.clear()  # the pre-resize frames are a 24-row pane
+            pane.scroll_history(3000)
+            await pilot.pause(0.2)  # several ticks, all of them deep in history
+            return list(fake.capture_rows), screen_text(pane), pane.scrollback
+
+    rows_per_capture, text, scrollback = run(drive())
+    assert scrollback == 3000
+    assert len(rows_per_capture) >= 2  # the loop kept capturing while scrolled
+    assert set(rows_per_capture) == {6}  # every frame: one screen, not 3006 rows
+    assert text[:2] == ["old 2000", "old 2001"]  # …and it is the RIGHT screen
+
+    # The control: the same frame with no height hint — what the widget asked
+    # for before the bound — pipes scrollback + height rows for the same screen.
+    unbounded = fake.server(tmp_path).capture("%1", scrollback=3000)
+    assert fake.capture_rows[-1] == 3000 + fake.panes["%1"].height == 3006
+    assert unbounded.lines[:2] == text[:2]
+
+
+def test_a_stale_height_hint_still_shows_a_full_screen(fake: FakeTmux, tmp_path: Path) -> None:
+    """The bound's failure mode: the pane grew since the last frame.
+
+    A hint smaller than the pane makes tmux answer short; ``core.tmux.capture``
+    notices and refetches unbounded, so the user never sees a truncated screen —
+    at the cost of one extra tmux process on that one frame.
+    """
+    fake.panes["%1"].history = [f"old {n}" for n in range(50)]
+
+    async def drive() -> tuple[list[int], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            assert pane.facts is not None
+            pane.facts = replace(pane.facts, height=4)  # the hint goes stale-small
+            fake.capture_rows.clear()
+            pane.scroll_history(10)
+            await pilot.pause()
+            return list(fake.capture_rows), screen_text(pane)
+
+    rows_per_capture, text = run(drive())
+    assert rows_per_capture[:2] == [4, 16]  # the short answer, then the refetch
+    assert text == ["old 40", "old 41", "old 42", "old 43", "old 44", "old 45"]
+
+
 def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) -> None:
     async def drive() -> int:
         host = Host(fake.server(tmp_path), "%1")
@@ -666,22 +735,40 @@ def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) 
 def test_resize_is_debounced_and_forwarded_as_the_content_size(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
+    """Two resizes inside the window are one ``resize-window``; two outside are two.
+
+    The debounce is widened to a second for the coalescing half, so "inside the
+    window" is true by construction rather than by luck: at the shipped 100 ms a
+    scheduler stall between the two ``resize_terminal`` awaits — routine on a
+    loaded runner — fires the first timer and reddens this test for load instead
+    of for a regression. The separated pair is the control: the recorder can
+    count two, so "exactly one" is a measurement and not a tautology.
+    """
+
     def resizes() -> list[tuple[str, ...]]:
         return [call for call in fake.input if call[0] == "resize-window"]
 
-    async def drive() -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+    async def drive() -> tuple[list[tuple[str, ...]], list[tuple[str, ...]], list[tuple[str, ...]]]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(60, 20)) as pilot:
-            await pilot.pause(0.3)
+            pane = host.pane
+            await wait_until(pilot, lambda: bool(resizes()))
             initial = resizes()
+            pane.RESIZE_DEBOUNCE = 1.0  # this instance only; the class default stands
             await pilot.resize_terminal(100, 30)
-            await pilot.resize_terminal(90, 28)  # inside the debounce window
-            await pilot.pause(0.35)
-            return initial, resizes()
+            await pilot.resize_terminal(90, 28)  # inside the (now one-second) window
+            await wait_until(pilot, lambda: len(resizes()) > len(initial))
+            coalesced = resizes()
+            # The control: a resize AFTER the window closes is its own call.
+            pane.RESIZE_DEBOUNCE = 0.05
+            await pilot.resize_terminal(80, 26)
+            await wait_until(pilot, lambda: len(resizes()) > len(coalesced))
+            return initial, coalesced, resizes()
 
-    initial, final = run(drive())
+    initial, coalesced, final = run(drive())
     assert initial == [("resize-window", "%1", "60", "20")]
-    assert final == [*initial, ("resize-window", "%1", "90", "28")]
+    assert coalesced == [*initial, ("resize-window", "%1", "90", "28")]  # ONE, the last size
+    assert final == [*coalesced, ("resize-window", "%1", "80", "26")]
 
 
 # --- placeholder and failure states -----------------------------------------------------------

@@ -76,6 +76,33 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 WAKEUP_CLOSE = "If nothing needs you, stop."
 
 
+def _addressed_to_manager(to_role: str | None) -> bool:
+    """Whether a board write is addressed to the manager (``--to manager``).
+
+    The fleet's manager label and the manager role are the same word
+    (``services.fleet.MANAGER_LABEL``), so one comparison covers both
+    ``note --to manager`` and ``fleet tell manager``'s board-note fallback.
+    Case- and space-insensitive because the CLI passes through whatever the
+    operator typed.
+    """
+    return (to_role or "").strip().lower() == MANAGER_ROLE
+
+
+def _wakes_manager(event: TeamEvent) -> bool:
+    """Whether one board event is something the manager has to come back for (§7.3).
+
+    Two ways in. Its KIND is one of :data:`MANAGER_WAKE_KINDS` — a verdict, a
+    hand-off, a result, a question, an exit. Or it is ADDRESSED to the manager:
+    §7.3 path 2 counts ``note --to manager`` as wake-worthy, and a mailbox that
+    delivers only while the recipient happens to be idle is not a mailbox. The
+    same note written while the manager is WORKING has no other path — path 2
+    refuses a working manager by design, and 'note' is not a wake kind — so
+    without this it would sit past the cursor until an unrelated event arrived.
+    Unaddressed news (a plain note, a decision, a claim) still waits its turn.
+    """
+    return event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role)
+
+
 class TeamDisabledError(RuntimeError):
     """Raised when a team command runs with the orchestrator disabled (AISQUARE_TEAM=0)."""
 
@@ -753,6 +780,13 @@ def add_note(
         distill_service.spawn_drain(root=board.root)
     if kind in ("result", "question"):
         _nudge_manager(board.id, reason=kind)
+    elif _addressed_to_manager(to_role):
+        # §7.3 path 2 lists `note --to manager` among the writes that wake a
+        # waiting manager, and only the KIND was consulted here: a note
+        # addressed to the manager reached a waiting one on no path at all —
+        # 'note' is not a MANAGER_WAKE_KIND either, so its Stop hook did not
+        # deliver it and it sat past the cursor until some unrelated event.
+        _nudge_manager(board.id, reason=f"{kind}_to_manager")
     return stored
 
 
@@ -1329,15 +1363,22 @@ def hook_stop(
             return None
         store.renew_leases(session.id, _now() + timedelta(minutes=orchestrator.lease_minutes()))
         failure: Exception | None = None
+        deferred: str | None = None
         if session.role == MANAGER_ROLE:
             try:
                 decision = _manager_wakeup(store, session, stop_hook_active=stop_hook_active)
+                if decision is None and stop_hook_active:
+                    deferred = _deferred_wake_reason(store, session)
             except Exception as exc:  # waiting is the contract; the wake-up is the extra
                 failure = exc
             else:
                 if decision is not None:
                     return decision
         store.touch_session(session.id, state="waiting")
+    if deferred is not None:
+        # After the row says waiting, never before: nudge_manager refuses every
+        # other state. Outside the `with` too — it opens its own connection.
+        _nudge_manager(session.project_id, reason=deferred)
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
@@ -1367,6 +1408,49 @@ def _count(raw: str | None) -> int:
         return 0
 
 
+def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
+    """The board since a manager's cursor, exactly as its next prompt would read it.
+
+    One function so the wake-up and the deferral below can never disagree about
+    the window they are judging — same source, same exclusions, same limit as
+    :func:`hook_prompt_heartbeat`. Attention notices are for the human board,
+    not teammate context.
+    """
+    raw = store.events_since(
+        me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
+    )
+    return [event for event in raw if event.kind != "attention"]
+
+
+def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
+    """The kind of the first wake event a ``stop_hook_active`` Stop left undelivered.
+
+    ``None`` when nothing wake-worthy is pending, or when deltas are muted (the
+    nudge's whole payload is the delta the next prompt injects, so a nudge with
+    that door shut is noise).
+
+    Why this exists: ``stop_hook_active`` defers this turn's news to "the next
+    prompt's delta or a nudge", and neither was scheduled. The Stop that ends a
+    stop-hook continuation is *precisely* the Stop Claude Code marks
+    ``stop_hook_active``, so "the next Stop will deliver it" is not true of the
+    next Stop; and the write-time nudges of those events were already refused
+    while the manager was working. At the end of a burst — every coder finished
+    — no further board write is coming to nudge it, and the manager parks as
+    waiting with unseen ``question``/``task_done`` events past its cursor. That
+    is a stalled fleet, not a deferral, so the deferral schedules its own
+    delivery: path 2's nudge, from the manager's own process, which produces the
+    ``UserPromptSubmit`` the delta rides on. Bounded by construction — the
+    prompt's delta advances the cursor, and the nudge is debounced and refused
+    for any state but ``waiting``.
+    """
+    if not orchestrator.delta_enabled():
+        return None
+    for event in _wake_candidates(store, me):
+        if _wakes_manager(event):
+            return f"deferred:{event.kind}"
+    return None
+
+
 def _manager_wakeup(
     store: ContextStore, me: TeamSession, *, stop_hook_active: bool
 ) -> StopDecision | None:
@@ -1384,12 +1468,8 @@ def _manager_wakeup(
     """
     if stop_hook_active or not orchestrator.delta_enabled():
         return None
-    raw = store.events_since(
-        me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
-    )
-    # Attention notices are for the human board, not teammate context.
-    events = [event for event in raw if event.kind != "attention"]
-    if not any(event.kind in MANAGER_WAKE_KINDS for event in events):
+    events = _wake_candidates(store, me)
+    if not any(_wakes_manager(event) for event in events):
         return None
     key = continuation_key(me.id, _now())
     used = _count(store.get_meta(key))

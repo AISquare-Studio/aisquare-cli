@@ -500,7 +500,10 @@ def install_hint(
     Read from ``/etc/os-release`` (``ID`` and ``ID_LIKE``), which is a file, not
     a process. A distribution this table does not know gets every hint rather
     than a wrong one; Windows gets the plan's answer (§3.9): the fleet runs in
-    WSL2. Never raises — an unreadable os-release is "unsure", not a crash.
+    WSL2. Never raises — an unreadable os-release is "unsure", not a crash, and
+    "unreadable" includes bytes that are not UTF-8: ``read_text`` answers those
+    with ``UnicodeDecodeError``, which is a ``ValueError`` and so slips straight
+    past an ``OSError``-only guard.
     """
     if platform == "darwin":
         return f"brew install {package}"
@@ -512,7 +515,7 @@ def install_hint(
             key, _, value = line.partition("=")
             if key.strip() in {"ID", "ID_LIKE"}:
                 families.update(value.strip().strip('"').lower().split())
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     if families & _APT_FAMILY:
         return f"apt install {package}"
@@ -585,6 +588,12 @@ def _gh_login_note() -> str:
     (a process, and one that goes to the network). Unreadable is treated as
     logged in: a wrong "log in" nag is worse than a missing one, and the PR
     step itself says clearly when it is refused.
+
+    "Unreadable" has to include *undecodable*. A ``hosts.yml`` holding non-UTF-8
+    bytes raises ``UnicodeDecodeError`` — a ``ValueError``, not an ``OSError`` —
+    so an ``OSError``-only guard let it out of the one command whose whole job
+    is to diagnose damage; measured before the fix: ``aisquare doctor`` exited 1
+    with a Rich traceback on a 4-byte ``\\xff\\xfe\\x00bad`` hosts file.
     """
     if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
         return ""
@@ -592,21 +601,32 @@ def _gh_login_note() -> str:
         hosts = _gh_config_dir() / "hosts.yml"
         if hosts.is_file() and hosts.read_text(encoding="utf-8").strip():
             return ""
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
     return " (no login found: gh auth login)"
 
 
 def _check_gh() -> DoctorCheck:
     """GitHub CLI: the fleet's coder and reviewer open and review PRs through it (§3.5)."""
-    found = shutil.which("gh")
-    if found is None:
-        return _warn(
-            "gh",
-            "gh not found — the fleet's PR flow for coder/reviewer needs it; everything else works",
-            f"Install GitHub CLI: {install_hint('gh')}, then: gh auth login",
+    name = "gh"
+    try:
+        found = shutil.which("gh")
+        if found is None:
+            return _warn(
+                name,
+                "gh not found — the fleet's PR flow for coder/reviewer needs it; "
+                "everything else works",
+                f"Install GitHub CLI: {install_hint('gh')}, then: gh auth login",
+            )
+        return _ok(name, f"gh at {found} — PR flow available{_gh_login_note()}")
+    except Exception as exc:  # diagnostics must never crash
+        # The last check in this file without the guard every sibling has, and
+        # the gap was reachable: see _gh_login_note. Failing open costs this
+        # line its verdict and nothing else — the coder/reviewer PR step names
+        # a missing or logged-out gh itself, at the moment it needs it.
+        return _ok(
+            name, f"not evaluated ({exc}) — the PR step reports a missing or logged-out gh itself"
         )
-    return _ok("gh", f"gh at {found} — PR flow available{_gh_login_note()}")
 
 
 def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:

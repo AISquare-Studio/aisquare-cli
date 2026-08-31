@@ -15,6 +15,8 @@ import ast
 import inspect
 import json
 import os
+import pty
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -622,11 +624,13 @@ def test_onboard_runs_the_real_cli_in_a_throwaway_home(tmp_path: Path) -> None:
 def test_onboard_reports_the_real_cli_failing_in_its_own_words(tmp_path: Path) -> None:
     """Negative control with the real CLI: a home that is a FILE stops ``init``.
 
-    Today that failure is a traceback — ``paths.ensure_home`` raises
-    ``FileExistsError`` outside ``expected_config_write_errors``, which is the
-    CLI's bug and reported to its owners — and the outcome carries the
-    exception, not the box or a wrapped path tail. A clean ``fail()`` there
-    would still satisfy this: both say what could not be created.
+    That failure used to be a Rich traceback, and this docstring used to say so.
+    It is now the CLI's one-line convention: ``init`` writes config inside
+    ``expected_config_write_errors``, which translates it to
+    ``{"error":"home_not_creatable",…}``
+    (``tests/test_config_write_failure_surface.py`` pins that end). This test is
+    written to accept either — both say what could not be created — and neither
+    may reach the UI as a box or a wrapped path tail.
     """
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -693,3 +697,60 @@ def test_the_service_starts_no_process_of_its_own() -> None:
     for function in (onboarding.onboard, onboarding.apply_fix, onboarding.run_doctor):
         default = inspect.signature(function).parameters["run"].default
         assert default is selfcli.run, function.__name__
+
+
+# --------------------------------------------------------------------------- INIT_FLAGS
+
+
+#: Reports whether the process it runs in has a terminal on stdin.
+_TTY_PROBE = "import sys; print('tty' if sys.stdin.isatty() else 'no-tty')"
+
+
+def test_the_child_that_runs_init_never_has_a_terminal_on_stdin() -> None:
+    """The fact ``INIT_FLAGS``' comment rests on, pinned so the comment cannot rot.
+
+    That comment used to justify ``--no-explainability`` by saying ``selfcli.run``
+    "leaves stdin as it found it — which, under the TUI, is the terminal". It does
+    not: ``core/selfcli.py`` passes ``stdin=subprocess.DEVNULL`` on the one path
+    ``onboard`` uses, so ``sys.stdin.isatty()`` is already False in the child and
+    ``init`` could not have asked its question. The flag is belt to that brace, not
+    the only thing holding §4.2's promise — and if the runner ever stops setting
+    DEVNULL, this test says so rather than leaving the comment to lie again.
+
+    Measured through the real seam. ``argv_for`` is swapped for the probe because
+    the property under test is what ``run`` does with the child's stdin, not what
+    it puts in argv (``test_onboard_runs_the_real_cli_in_a_throwaway_home`` covers
+    that).
+
+    THIS TEST NEEDS THE PTY. Written first without it, it passed with
+    ``stdin=subprocess.DEVNULL`` deleted from ``selfcli.run`` — measured — because
+    under pytest this process's own fd 0 is not a terminal, so an inherited stdin
+    answers "no-tty" too and the assertion could not fail for the reason it exists.
+    Putting a real terminal on fd 0 for the duration is what makes the two answers
+    different, and the control below proves the terminal is actually there.
+    """
+    import subprocess
+
+    probe = [sys.executable, "-c", _TTY_PROBE]
+    master, slave = pty.openpty()
+    saved_stdin = os.dup(0)
+    try:
+        os.dup2(slave, 0)
+        # The control, taken at the same moment and from the same fd 0: a child
+        # that INHERITS this process's stdin does see a terminal. Without it,
+        # "no-tty" below is consistent with a probe that can only say one thing.
+        inheriting = subprocess.run(probe, capture_output=True, text=True, check=True)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(selfcli, "argv_for", lambda args: probe)
+            through_the_seam = selfcli.run(["--json", "init"])
+    finally:
+        os.dup2(saved_stdin, 0)
+        os.close(saved_stdin)
+        os.close(master)
+        os.close(slave)
+
+    assert inheriting.stdout.strip() == "tty", "the pty is not on fd 0 — result meaningless"
+    assert through_the_seam.stdout.strip() == "no-tty", through_the_seam
+    # The flag stays regardless: §4.2 puts the consent on the `explainability
+    # enable` button, not on a prompt in a subprocess nobody is looking at.
+    assert "--no-explainability" in onboarding.INIT_FLAGS

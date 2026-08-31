@@ -830,3 +830,118 @@ def test_a_stale_row_reaches_the_cli_as_a_warning_without_failing_doctor(
     assert rows["fleet"]["status"] == "warn", rows["fleet"]
     assert "aisquare fleet reap" in rows["fleet"]["fix"]
     assert result.exit_code == 0, "a stale fleet row is advice, not a broken machine"
+
+
+# --- a home that cannot be created: one wrong verdict is worse than a deferral ----------
+#
+# ``_check_home`` asked ``home.exists()``, which is true of a regular FILE, so the
+# one check whose entire job is the home reported ``ok`` for a home that can never
+# be created — and the failure surfaced two rows later as ``context.db is
+# unreadable: [Errno 17] File exists`` carrying the corrupt-store remedy, a
+# ``mv <file>/context.db …`` that cannot run because there is no directory to move
+# anything out of. Measured with ``AISQUARE_HOME=<a 1-byte file> asq --json doctor``.
+
+
+def _file_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """``AISQUARE_HOME`` pointing at a regular file — a foreseeable operator mistake."""
+    blocked = tmp_path / "homefile"
+    blocked.write_text("x", encoding="utf-8")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(blocked))
+    return blocked
+
+
+def test_a_file_home_fails_the_home_check_and_says_what_to_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocked = _file_home(tmp_path, monkeypatch)
+
+    rows = _by_name(diagnostics.doctor())
+
+    assert rows["home"].status is CheckStatus.fail, rows["home"]
+    assert "not a directory" in rows["home"].detail
+    assert str(blocked) in rows["home"].detail
+    assert rows["home"].fix is not None and "AISQUARE_HOME" in rows["home"].fix
+    # Diagnosis must not be a side effect — least of all overwriting the file.
+    assert blocked.read_text(encoding="utf-8") == "x"
+
+
+def test_no_check_offers_a_remedy_inside_a_home_that_is_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The artefact this is about: the FIX TEXT an operator would paste.
+
+    ``database`` was measured printing ``mv <homefile>/context.db
+    <homefile>/context.db.broken && aisquare init``. Nothing under a regular file
+    can be moved, so that command fails with ENOTDIR and the real answer — repoint
+    AISQUARE_HOME — appears nowhere.
+    """
+    blocked = _file_home(tmp_path, monkeypatch)
+
+    rows = _by_name(diagnostics.doctor())
+
+    inside = f"{blocked}{os.sep}"
+    offenders = {name: row.fix for name, row in rows.items() if row.fix and inside in row.fix}
+    assert not offenders, offenders
+    assert rows["database"].status is CheckStatus.ok, rows["database"]
+    assert "not a directory" in rows["database"].detail
+    assert "home" in rows["database"].detail, "it points at the check that owns the verdict"
+
+
+def test_the_cli_reports_a_file_home_as_json_and_not_a_traceback(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--json`` paths emit JSON or nothing, and ``doctor`` never crashes.
+
+    Exit 1 because a check failed, which is ``doctor``'s contract — the point is
+    that stdout is still the machine-readable report and not an empty string with
+    a traceback beside it.
+    """
+    _file_home(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["--json", "doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "Traceback" not in result.output, result.output
+    rows = {row["name"]: row for row in json.loads(result.stdout)}
+    assert rows["home"]["status"] == "fail", rows["home"]
+    assert [name for name, row in rows.items() if row["status"] == "fail"] == ["home"], rows
+
+
+def test_a_directory_home_is_still_ok_and_a_missing_one_still_says_init(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two negative controls. Without them the cheapest way to pass the three
+    tests above is a ``home`` check that fails for every machine, and a
+    ``_uncreated_home`` that defers every downstream check forever."""
+    real = _by_name(diagnostics.doctor())
+
+    assert real["home"].status is CheckStatus.ok, real["home"]
+    assert real["database"].status is CheckStatus.ok, real["database"]
+    assert "unreadable" not in real["database"].detail
+
+    missing = tmp_path / "never-created"
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(missing))
+    absent = _by_name(diagnostics.doctor())
+
+    assert absent["home"].status is CheckStatus.fail
+    assert "is missing" in absent["home"].detail
+    assert absent["home"].fix is not None and "aisquare init" in absent["home"].fix
+    assert absent["database"].detail.startswith("not created yet")
+    assert not missing.exists(), "doctor must not create the home it reports on"
+
+
+def test_a_symlinked_home_is_a_directory_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shape the ``is_dir()`` test must NOT accuse: ``ensure_home`` follows a
+    link to a directory and everything works, so the check has to agree."""
+    target = tmp_path / "real-home"
+    target.mkdir()
+    link = tmp_path / "linked-home"
+    link.symlink_to(target)
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(link))
+
+    rows = _by_name(diagnostics.doctor())
+
+    assert rows["home"].status is CheckStatus.ok, rows["home"]
+    assert rows["database"].status is CheckStatus.ok, rows["database"]

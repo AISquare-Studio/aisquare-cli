@@ -180,15 +180,23 @@ def validate_path(text: str, *, lookup: Lookup | None = None) -> PathVerdict:
 
 
 #: What ``init`` is run with, beyond ``--json`` and the path. ``--no-explainability``
-#: is what keeps the plan's promise that onboarding never prompts (§4.2): ``init``
-#: asks the shipping question whenever ``sys.stdin.isatty()`` and the SDK extra is
-#: installed, and ``selfcli.run`` captures stdout and stderr but leaves stdin as it
-#: found it — which, under the TUI, is the terminal. A fake runner cannot see this;
-#: it was found by reading ``cli/root.py::_explainability_decision``. Declining is
-#: the one answer that changes nothing (``lifecycle._explainability_step``: "#50's
-#: first acceptance clause is that declining leaves ZERO behavioural change"), so a
-#: machine that already ships keeps shipping, and the consent stays where §4.2 puts
-#: it — the ``explainability enable`` button.
+#: keeps the plan's promise that onboarding never prompts (§4.2): ``init`` asks the
+#: shipping question whenever ``sys.stdin.isatty()`` and the SDK extra is installed
+#: (``cli/root.py::_explainability_decision``).
+#:
+#: It is belt to ``selfcli.run``'s braces, not the only thing holding the promise —
+#: an earlier version of this comment claimed ``run`` "leaves stdin as it found
+#: it — which, under the TUI, is the terminal", and that was simply false:
+#: ``core/selfcli.py`` passes ``stdin=subprocess.DEVNULL`` ("the child must never
+#: wait on the TUI's terminal") on the one path ``onboard`` uses, so
+#: ``isatty()`` is already False in the child and the question could not be asked.
+#: The flag stays for two reasons that survive that correction: it holds if the
+#: runner ever stops setting DEVNULL, and it keeps the consent where §4.2 puts it —
+#: the ``explainability enable`` button — rather than at a prompt nobody sees.
+#: Declining is the one answer that changes nothing
+#: (``lifecycle._explainability_step``: "#50's first acceptance clause is that
+#: declining leaves ZERO behavioural change"), so a machine that already ships
+#: keeps shipping.
 INIT_FLAGS: tuple[str, ...] = ("--no-explainability",)
 
 

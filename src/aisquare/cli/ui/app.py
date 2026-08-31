@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -51,7 +52,7 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.agent import AgentView
-from aisquare.cli.ui.views.doctor import DoctorView
+from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
@@ -293,17 +294,24 @@ class FleetApp(App[None], inherit_bindings=False):
 
     # --- doctor -------------------------------------------------------------------------
 
+    def _scoped_project(self) -> ProjectInfo | None:
+        """The project the Doctor section is about, or ``None`` for the global checks.
+
+        One place for it: the run needs its root as the doctor's ``cwd``, and the
+        views need the same root as the cwd their project-scoped fix buttons run
+        in — the two must never disagree.
+        """
+        snapshot = self.snapshot
+        if snapshot is None or not self.doctor_scope:
+            return None
+        return snapshot.project(self.doctor_scope)
+
     def run_doctor(self) -> None:
         """Run the checks off the UI thread; ``on_worker_state_changed`` paints them."""
         if self._doctor is None:
             return
         runner: Callable[[], list[DoctorCheck]] = self._doctor
-        snapshot = self.snapshot
-        project = (
-            snapshot.project(self.doctor_scope)
-            if snapshot is not None and self.doctor_scope
-            else None
-        )
+        project = self._scoped_project()
         if project is not None and self._doctor is diagnostics.doctor:
             # Per-project checks: the real doctor takes the project's root as
             # cwd (services.diagnostics.doctor(cwd=...)); an injected fake keeps
@@ -330,7 +338,17 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def show_doctor(self, checks: list[DoctorCheck]) -> None:
         self.doctor_checks = checks
-        self.query_one("#doctor", DoctorView).show(checks)
+        project = self._scoped_project()
+        root = project.root if project is not None else None
+        self._feed_doctor(self.query_one("#doctor", DoctorView), checks, root)
+        # The scoped project's own Doctor tab shows the same report. Only that
+        # project's: another open ProjectView's tab must not be handed a report
+        # about a different root — its fixes would run in the wrong one.
+        if project is not None:
+            for view in self.query(ProjectView):
+                if view.project.id == project.id:
+                    for tab in view.query(DoctorView):
+                        self._feed_doctor(tab, checks, root)
         counts = {status: 0 for status in CheckStatus}
         for check in checks:
             counts[check.status] += 1
@@ -349,6 +367,20 @@ class FleetApp(App[None], inherit_bindings=False):
             counts[CheckStatus.ok], counts[CheckStatus.warn], counts[CheckStatus.fail], lines=lines
         )
         sidebar.show_doctor_notice(None)
+
+    @staticmethod
+    def _feed_doctor(view: DoctorView, checks: list[DoctorCheck], root: Path | None) -> None:
+        """Hand a Doctor view the report AND the root its project fixes run in.
+
+        Without the root every ``scope == "project"`` fix renders disabled with
+        "(select a project first)" — while a project is selected — so the
+        one-click fix of §0 item 4 never worked from the shell. ``show(cwd=None)``
+        means "keep the cwd you have", so the global scope is set on the
+        attribute: a project's root must not linger once the report is the
+        machine-wide one, or a button would run in a project the user has left.
+        """
+        view.cwd = root
+        view.show(checks)
 
     def show_doctor_failure(self, reason: str) -> None:
         """Doctor itself crashed: say so where the counts would be, and in the view."""
@@ -420,11 +452,35 @@ class FleetApp(App[None], inherit_bindings=False):
         self.post_message(ProjectSelected(event.project_id))
 
     def on_onboard_failed(self, event: OnboardFailed) -> None:
-        self.notify(f"{event.path}: {event.reason}", severity="error", timeout=8)
+        # markup=False: the message carries a path the user chose, and a toast
+        # parses markup by default — ``/home/me/[archive]/repo`` would reach the
+        # screen as ``/home/me//repo`` and name a directory that did not fail.
+        self.notify(f"{event.path}: {event.reason}", severity="error", timeout=8, markup=False)
+
+    def on_doctor_refreshed(self, event: DoctorRefreshed) -> None:
+        """A view re-ran the doctor after a one-click fix — follow it.
+
+        Without this the sidebar keeps the pre-fix ✓/⚠/✗ counts and the old
+        worst-findings lines until the user presses ``r``. A report about the
+        scope we are showing is adopted as it is (no second run of the checks);
+        one about another root — the Onboard view's, for the project it just
+        registered — means our own report is stale, so we re-run ours.
+        """
+        project = self._scoped_project()
+        root = project.root if project is not None else None
+        if event.cwd == root:
+            self.show_doctor(list(event.checks))
+        else:
+            self.run_doctor()
 
     def _set_doctor_scope(self, project_id: str | None) -> None:
+        changed = project_id != self.doctor_scope
         self.doctor_scope = project_id
         self.sidebar.set_doctor_scope(project_id)
+        if changed:
+            # The counts, the report and the fixes' cwd are all about the scope:
+            # a new one makes what is on screen a report about another project.
+            self.run_doctor()
 
     # --- for tests and callers --------------------------------------------------------
 

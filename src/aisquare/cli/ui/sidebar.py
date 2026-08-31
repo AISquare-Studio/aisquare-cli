@@ -36,6 +36,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Static
 
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -484,7 +485,13 @@ class Sidebar(Vertical):
             yield Static(Text("Fleet"), id="fleet-title")
             yield AddButton()
         yield Static("", id="projects-notice")
-        with VerticalScroll(id="projects"):
+        # can_focus=False: the rows are Statics, so a mouse-down on one focuses
+        # the nearest focusable ancestor. Left focusable, this scroll would take
+        # that focus and — once the list overflows — its own up/down bindings
+        # would eat the arrows, so ↑/↓ scrolled the list instead of moving the
+        # cursor and the Sidebar:focus border never showed. Focus belongs to the
+        # Sidebar (§4.3); the cursor scrolls the list through ``scroll_visible``.
+        with VerticalScroll(id="projects", can_focus=False):
             yield Static(
                 Text("No projects yet — press + to onboard one.", style="dim"),
                 id="projects-empty",
@@ -608,7 +615,27 @@ class Sidebar(Vertical):
     # --- keyboard -------------------------------------------------------------------
 
     def _rows(self) -> list[Activatable]:
-        return [row for row in self.query(Activatable) if row.display and row.selection_key]
+        """The rows the cursor may land on: activatable and actually on screen."""
+        return [
+            row for row in self.query(Activatable) if row.selection_key and self._on_screen(row)
+        ]
+
+    def _on_screen(self, row: Activatable) -> bool:
+        """Is ``row`` visible — including every container between it and here?
+
+        A collapsed card hides its rows by hiding their ``#agents`` holder
+        (``_paint_decorations``); the rows' own ``display`` stays True. Filtering
+        on that alone walked the cursor onto invisible rows, so ↑/↓ lost the
+        highlight and Enter opened an agent the user could not see.
+        """
+        if not row.display:
+            return False
+        for node in row.ancestors:
+            if node is self:
+                return True
+            if isinstance(node, Widget) and not node.display:
+                return False
+        return True
 
     def _move_cursor(self, step: int) -> None:
         rows = self._rows()

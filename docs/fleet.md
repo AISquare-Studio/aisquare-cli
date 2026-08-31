@@ -73,9 +73,15 @@ tmux can see and its row says so (`no hooks`).
 
 1. **Run `asq`** (or `aisquare`) in a terminal. The UI opens: the navigator on
    the left and, until you add a project, a Welcome page on the right that
-   checks `tmux`, `claude` and `gh` are on this machine. In a pipe, under `--json`, or with `TERM=dumb` there is
-   no UI — you get usage and exit 2, byte for byte as before, so no script ever
-   meets a full-screen app.
+   checks `tmux`, `claude` and `gh` are on this machine. No script ever meets a
+   full-screen app, and the two ways of getting no UI differ. **In a pipe or
+   with `TERM=dumb`**: the help page on stdout and exit 2, byte for byte as
+   before — the same ~5 KB either way (5,159 bytes at 80 columns, measured).
+   **Under `--json`**, and that is checked before the terminal is, so it holds
+   at a terminal too: exit 2 and one line, nothing else —
+   `{"error": "usage", "message": "Missing command."}`. Under `--json` stdout
+   belongs to a program, and ~40 lines of Rich-formatted help there would hand a
+   `jq` pipeline a parse error.
 2. **Click `+` beside Fleet.** Onboarding opens on the right: browse or type a
    directory (`~` and `$VAR` expand). When it resolves, the UI runs the
    equivalent of `aisquare init <path>` and then `aisquare doctor` **in the
@@ -127,7 +133,7 @@ tier above the work it gates.
 | --- | --- | --- | --- |
 | **manager** | `planner` + fleet authority | intake → contracts → `fleet spawn` → steer → report. One per project. Never codes, never merges. | the repo root |
 | **coder** | `coder` | implements one task to its acceptance criteria; pushes and opens the PR | its own git worktree |
-| **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | no worktree of its own — it verifies in the coder's worktree, named by the task |
+| **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`; read-only by construction | its own worktree, `--restricted` |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
 
@@ -301,7 +307,7 @@ answer.
 | Role | Default | Note |
 | --- | --- | --- |
 | manager | `auto` | its tool use is board and fleet CLI calls |
-| coder, tester, validator | `auto` | plus a project allowlist for the project's own check commands (`make check`, `pytest`, `git`, `gh`), so they never reach the classifier |
+| coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
 | reviewer | `auto` + `--restricted` | read-only by construction |
 
 The mode is passed straight through to `claude` and nothing here reads its
@@ -314,9 +320,15 @@ yourself, per spawn (`--permission-mode acceptEdits`) or for the role
 **Every default is a default.** Everything this guide calls one — permission
 mode, worktree-per-role, the escape key, the agent cap, the tmux socket, the
 native-agent-teams switch, codenames, labels — is yours to change, under one
-precedence rule, the same one the harness already uses:
+precedence rule:
 
-> per-spawn flag  >  environment  >  `[fleet]` config  >  built-in default
+> per-spawn flag  >  `[fleet]` config  >  built-in default
+
+**No `[fleet]` setting is read from the environment**: there is no
+`AISQUARE_FLEET_*` variable, and the fleet reads this section from the config
+file alone. The environment layer is real one level down — the model, effort
+and binary a launch resolves (`AISQUARE_MODEL_<ROLE>` and friends, below) —
+which is the harness's rule, not this one.
 
 Three places to change one:
 
@@ -350,7 +362,7 @@ extra_args = []
 
 [fleet.roles.tester]                      # `runner` is accepted as an alias
 permission_mode = "auto"
-worktree = false                          # verifies in the coder's worktree, named by the task
+worktree = false                          # runs in the repo root; point it at the branch yourself
 extra_args = []
 
 [fleet.roles.reviewer]
@@ -513,9 +525,12 @@ everywhere.
 ## Troubleshooting
 
 **`asq` prints usage instead of opening the UI.** It is not at an interactive
-terminal: stdin or stdout is a pipe, `TERM` is empty or `dumb`, or `--json` was
-given. That is deliberate — scripts must never meet a full-screen app. Run it
-in a terminal, or ask `aisquare ui` for the reason:
+terminal: stdin or stdout is a pipe, or `TERM` is empty or `dumb`. That is
+deliberate — scripts must never meet a full-screen app. Run it in a terminal,
+or ask `aisquare ui` for the reason. **`asq --json` prints neither the UI nor
+usage**: it prints `{"error": "usage", "message": "Missing command."}` and exits
+2, at a terminal as much as in a pipe, because a caller that asked for JSON gets
+JSON or nothing.
 
 ```sh
 aisquare ui
@@ -526,9 +541,12 @@ aisquare --json fleet ls
 `fleet_unavailable` and the reason ("tmux is not installed", "tmux 3.1 is too
 old — the fleet needs 3.2 or newer"); the Welcome page shows `✗ tmux`;
 everything outside the fleet keeps working. `aisquare doctor` gains a `tmux`
-check — present, version, the private server starts — with per-OS install
-hints, and warn-level checks for `gh` and the fleet's own state (Phase 3).
-Install or upgrade as above and re-run:
+check — present, and new enough (the 3.2 minimum, with a note below 3.5) — with
+per-OS install hints, and warn-level checks for `gh` and the fleet's own stale
+rows (Phase 3). It does **not** source the bundled config: `tmux -f` queues
+configuration errors for the first attached client, which the fleet never has,
+so a `tmux` that rejects a line in that file surfaces as an odd or dead pane
+rather than as a doctor warning. Install or upgrade as above and re-run:
 
 ```sh
 tmux -V
@@ -556,8 +574,9 @@ tmux -L asq kill-server
 and the terminal rings. Nothing nudges it and nothing answers for it: click the
 agent, click into the pane, and answer as you would in the agent's own
 terminal — or `aisquare fleet attach` and answer there. If prompts are routine
-for that project, the role's `permission_mode` and the project allowlist are
-the knobs; `bypassPermissions` exists and is never a default.
+for that project, the role's `permission_mode` is the knob — per spawn
+(`--permission-mode`) or in `[fleet.roles.<role>]`; there is no project
+allowlist in this checkout. `bypassPermissions` exists and is never a default.
 
 **The manager needs you.** 🔔 on the project, and a `question` note on the
 board (the manager asks after being blocked twice on one task). Open the

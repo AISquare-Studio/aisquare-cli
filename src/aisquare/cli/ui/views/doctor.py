@@ -120,7 +120,14 @@ class DoctorView(VerticalScroll):
     # ---------------------------------------------------------------- the report
 
     def show(self, checks: Iterable[DoctorCheck], *, cwd: Path | None = None) -> None:
-        """Replace the report (and, when given, the cwd the fixes run in)."""
+        """Replace the report (and, when given, the cwd the fixes run in).
+
+        ``cwd=None`` means "keep the one you have": most callers show a new
+        report for the same project. A caller that has to go BACK to no project
+        — the shell, when the report becomes the machine-wide one — sets
+        :attr:`cwd` itself before calling this, or a project fix button would
+        stay armed on a root the user has left.
+        """
         if cwd is not None:
             self.cwd = cwd
         self.checks = list(checks)

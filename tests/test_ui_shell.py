@@ -26,12 +26,16 @@ from typing import TypeVar
 
 import pytest
 from textual import events
+from textual.containers import VerticalScroll
+from textual.content import Content
 from textual.pilot import Pilot
-from textual.widgets import Static
+from textual.widgets import Button, Static
+from textual.widgets._toast import Toast
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.sidebar import (
+    Activatable,
     AgentRow,
     Disclosure,
     DoctorSection,
@@ -44,8 +48,8 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker
 from aisquare.cli.ui.views.agent import AgentView
-from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.cli.ui.views.onboard import ProjectOnboarded
+from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
+from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
@@ -113,12 +117,17 @@ def drive(
     fn: Callable[[Pilot[None]], Awaitable[T]],
     *,
     doctor: Callable[[], list[DoctorCheck]] | None = None,
+    notifications: bool = False,
 ) -> T:
-    """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor)."""
+    """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor).
+
+    ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
+    out by default, and without it a ``notify`` goes nowhere to be read.
+    """
 
     async def run() -> T:
         app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
-        async with app.run_test(size=SIZE) as pilot:
+        async with app.run_test(size=SIZE, notifications=notifications) as pilot:
             await pilot.pause()
             return await fn(pilot)
 
@@ -445,6 +454,142 @@ def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script
     assert drive(healthy) is False  # a working doctor leaves no such notice
 
 
+SNAPSHOT_WARN = DoctorCheck(
+    name="snapshot",
+    status=CheckStatus.warn,
+    detail="no codebase snapshot",
+    fix="Pack one: aisquare project onboard",
+)
+"""A finding whose fix is one of ours and is PROJECT-scoped — the button needs a cwd."""
+CONNECT_WARN = DoctorCheck(
+    name="claude-code",
+    status=CheckStatus.warn,
+    detail="hooks are missing",
+    fix="(Re)connect it: aisquare agents connect claude-code",
+)
+
+
+def _fix_buttons(view: DoctorView) -> list[tuple[str, bool]]:
+    return [(str(b.label), b.disabled) for b in view.query("#doctor-fixes Button").results(Button)]
+
+
+def test_the_selected_projects_root_arms_its_project_scoped_fixes(
+    tmp_path: Path, script: Script
+) -> None:
+    """§0 item 4: a project fix is one click. Without a cwd every one renders disabled.
+
+    ``DoctorView`` disables ``scope == "project"`` fixes when ``cwd is None``,
+    so the shell must hand it the scoped project's root — and the project's own
+    Doctor tab the same report and the same root.
+    """
+    projects = seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[tuple[str, bool]], Path | None, list[tuple[str, bool]], Path | None, str]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.pause()
+        shell_doctor = app.query_one("#doctor", DoctorView)
+        globally = (_fix_buttons(shell_doctor), shell_doctor.cwd)  # control: nothing selected yet
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        tab = view.query_one(DoctorView)
+        return (
+            *globally,
+            _fix_buttons(shell_doctor),
+            shell_doctor.cwd,
+            shown(tab.query_one("#doctor-report", Static)),
+        )
+
+    checks = [SNAPSHOT_WARN, CONNECT_WARN]
+    global_buttons, global_cwd, scoped_buttons, scoped_cwd, tab_report = drive(
+        go, doctor=lambda: list(checks)
+    )
+    assert global_cwd is None
+    assert global_buttons == [
+        ("aisquare project onboard --refresh", True),  # no project: correctly refused
+        ("aisquare agents connect claude-code", False),
+    ]
+    assert scoped_cwd == projects[0].root
+    assert scoped_buttons == [
+        ("aisquare project onboard --refresh", False),  # a project IS selected: armed
+        ("aisquare agents connect claude-code", False),
+    ]
+    assert "⚠ snapshot: no codebase snapshot" in tab_report  # the project's own tab is fed
+
+
+def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
+    tmp_path: Path, script: Script
+) -> None:
+    """A one-click fix re-runs the doctor inside the view; the shell must follow it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    calls: list[int] = []
+
+    def doctor() -> list[DoctorCheck]:
+        calls.append(1)
+        return [SNAPSHOT_WARN]
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, str, int, str, int]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.pause()
+        summary = app.query_one(DoctorTitle)
+        before = (shown(summary), len(calls))
+        # The report the view was handed is about the scope on screen: adopt it.
+        app.post_message(
+            DoctorRefreshed(
+                [
+                    DoctorCheck(
+                        name="snapshot", status=CheckStatus.ok, detail="packed 2 minutes ago"
+                    )
+                ],
+                None,
+            )
+        )
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
+        adopted = (shown(summary), len(calls))
+        # A report about another root (the Onboard view's) says ours is stale.
+        app.post_message(DoctorRefreshed([], tmp_path / "elsewhere"))
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
+        return (*before, *adopted, shown(summary), len(calls))
+
+    before, calls_before, adopted, calls_adopted, rerun, calls_rerun = drive(go, doctor=doctor)
+    assert "⚠ 1" in before and "✓ 0" in before and calls_before == 1
+    assert "✓ 1" in adopted and "⚠ 0" in adopted, "the fixed check is reflected in the counts"
+    assert calls_adopted == 1, "the matching report was adopted — the checks did not run again"
+    assert calls_rerun == 2, "a report about another root re-runs ours instead"
+    assert "⚠ 1" in rerun  # …and shows what OUR doctor says, not the foreign report's ✓ 0
+
+
+def test_the_failure_toast_shows_the_directory_it_was_given(tmp_path: Path, script: Script) -> None:
+    """CONTRIBUTING: no markup in data. A toast parses markup unless told not to."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    path = tmp_path / "[archive]" / "repo"
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        app.post_message(OnboardFailed(path, "init failed: store_unopenable"))
+        await pilot.pause()
+        await pilot.pause()
+        return app.screen.query_one(Toast).render().plain
+
+    rendered = drive(go, notifications=True)
+    assert rendered == f"{path}: init failed: store_unopenable"
+    assert "[archive]" in rendered
+    # Control: the same string rendered AS MARKUP loses the bracketed segment —
+    # the failure this assertion exists to catch, measured here.
+    assert Content.from_markup(rendered).plain == rendered.replace("[archive]", "")
+
+
 def test_project_onboarded_refreshes_and_selects_the_project(
     tmp_path: Path, script: Script
 ) -> None:
@@ -578,6 +723,96 @@ def test_keyboard_cursor_walks_the_rows_and_enter_activates(tmp_path: Path, scri
     assert walk == ["AddButton", "ProjectTitle", "AgentRow", "ProjectTitle"]
     assert current == "project-prj_a"  # Enter on the title opened the project
     assert len(walk) == len(set(walk)) + 1  # the cursor moved, it did not stick
+
+
+def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
+    tmp_path: Path, script: Script
+) -> None:
+    """A row is a non-focusable Static: mouse-down focuses its nearest focusable ancestor.
+
+    With a focusable ``#projects`` that was the scroll, whose own up/down
+    bindings then ate the arrows as soon as the list overflowed — the documented
+    ``↑ ↓ Enter`` model died after any click. Measured on the unfixed tree:
+    focus landed on ``VerticalScroll``, no ``.cursor`` row existed and each
+    ``down`` moved ``scroll_y`` by one instead.
+    """
+    specs = [(f"prj_{index:02d}", f"p{index:02d}", None) for index in range(15)]
+    seed(tmp_path, *specs)
+    for project_id, _, _ in specs:
+        script[project_id] = [status(project_id, "manager", "manager", "waiting")]
+
+    async def go(pilot: Pilot[None]) -> tuple[float, str, list[str], list[float], str]:
+        app = fleet_app(pilot)
+        holder = app.sidebar.query_one("#projects", VerticalScroll)
+        overflow = holder.max_scroll_y  # the precondition of the bug: the list scrolls
+        await pilot.click(card_for(app, "prj_00").query_one(ProjectTitle))
+        await pilot.pause()
+        focused = type(app.focused).__name__
+        walk: list[str] = []
+        scrolls: list[float] = []
+        for _ in range(2):
+            await pilot.press("down")
+            await pilot.pause()
+            # Not query_one: with the arrows eaten there is no cursor at all, and
+            # the claim should read as a diff, not as a NoMatches from the probe.
+            cursors = app.query(".cursor").results(Activatable)
+            walk.append(next((row.selection_key for row in cursors), "(no cursor)"))
+            scrolls.append(holder.scroll_y)
+        # Control: a widget that IS focusable still takes the click — focus was
+        # not nailed to the sidebar, only handed the rows' clicks.
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        await pilot.pause()  # let it lay out, or the click lands on the old view
+        await pilot.click(pane)
+        await pilot.pause()
+        return overflow, focused, walk, scrolls, type(app.focused).__name__
+
+    overflow, focused, walk, scrolls, on_pane = drive(go)
+    assert overflow > 0, "the list must overflow, or the bug cannot show"
+    assert focused == "Sidebar"
+    assert walk == ["agent:agt_00_manager", "spawn:prj_00"]  # the arrows moved the cursor…
+    assert scrolls == [0.0, 0.0]  # …and not the scroll
+    assert on_pane == "RecordingPane"
+
+
+def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: Script) -> None:
+    """Collapsing hides the rows through their ``#agents`` holder, not their own flag."""
+
+    def walk(*, collapse: bool) -> list[str]:
+        async def go(pilot: Pilot[None]) -> list[str]:
+            app = fleet_app(pilot)
+            card = card_for(app, "prj_a")
+            if collapse:
+                await pilot.click(card.query_one(Disclosure))
+                await pilot.pause()
+            assert card.query_one("#agents").display is not collapse
+            app.sidebar.focus()
+            await pilot.pause()
+            keys: list[str] = []
+            for _ in range(4):
+                await pilot.press("down")
+                await pilot.pause()
+                keys.append(app.query_one(".cursor", Activatable).selection_key)
+            return keys
+
+        return drive(go)
+
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
+    script["prj_b"] = [status("prj_b", "manager", "manager", "waiting")]
+
+    collapsed = walk(collapse=True)
+    assert collapsed == ["add", "project:prj_a", "project:prj_b", "agent:agt_b_manager"]
+    assert not any(key.endswith("agt_a_manager") or key == "spawn:prj_a" for key in collapsed), (
+        "the cursor must not land on a row hidden inside the collapsed card"
+    )
+    # Control: expanded, the very same keys walk through those rows.
+    assert walk(collapse=False) == [
+        "add",
+        "project:prj_a",
+        "agent:agt_a_manager",
+        "spawn:prj_a",
+    ]
 
 
 # --- bell, rebuilds, failing open -------------------------------------------------

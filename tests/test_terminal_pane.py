@@ -38,7 +38,7 @@ from textual.geometry import Region
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.strip import Strip
-from textual.widgets import Input, Static
+from textual.widgets import ContentSwitcher, Input, Static
 
 from aisquare.cli.ui.terminal import (
     NO_PANE,
@@ -113,6 +113,12 @@ class FakeTmux:
         """Whether ``resize-window`` changes the pane, as tmux does. ``False`` holds
         the pane at its size — the window between a ``Resize`` and its debounced
         ``resize-window``, or a tmux that refused the resize."""
+        self.version = "tmux 3.7c"
+        """What ``tmux -V`` answers. Below 3.5 tmux TYPES the extended chords'
+        names into the pane, so the widget must drop them there (core.keys)."""
+        self.fail_resizes = 0
+        """How many ``resize-window`` calls fail like a killed window first. The
+        attempt is still recorded: a test counts the retries."""
 
     def server(self, tmp_path: Path) -> TmuxServer:
         # ``binary`` must resolve through ``shutil.which`` on a machine WITHOUT
@@ -126,7 +132,7 @@ class FakeTmux:
     def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
         args = list(argv)
         if args[1:] == ["-V"]:
-            return Completed(0, "tmux 3.7c\n", "")
+            return Completed(0, f"{self.version}\n", "")
         # <binary> -L <socket> -f <conf> <command...>
         command = args[5:]
         groups: list[list[str]] = [[]]
@@ -183,6 +189,9 @@ class FakeTmux:
         if name == "resize-window":
             width, height = int(self._flag(group, "-x")), int(self._flag(group, "-y"))
             self.input.append((name, pane_id, str(width), str(height)))
+            if self.fail_resizes > 0:
+                self.fail_resizes -= 1
+                return Completed(1, "", f"can't find pane: {pane_id}\n")
             if self.apply_resize:
                 pane.width, pane.height = width, height
                 surplus = len(pane.screen) - height
@@ -240,6 +249,23 @@ class Host(App[None]):
         markup: bool = True,
     ) -> None:
         self.notices.append(message)
+
+
+class SwitcherHost(App[None]):
+    """Two panes in a ``ContentSwitcher`` — the shell's own shape for hidden tabs."""
+
+    def __init__(self, server: TmuxServer) -> None:
+        super().__init__()
+        self._server = server
+
+    def compose(self) -> ComposeResult:
+        with ContentSwitcher(initial="first", id="tabs"):
+            yield TerminalPane("%1", server=self._server, id="first")
+            yield TerminalPane("%2", server=self._server, id="second")
+
+    @property
+    def tabs(self) -> ContentSwitcher:
+        return self.query_one("#tabs", ContentSwitcher)
 
 
 def run(coro: Coroutine[Any, Any, T]) -> T:
@@ -468,6 +494,54 @@ def test_render_loop_runs_fast_while_streaming_and_backs_off_when_idle(
     assert streamed >= 4  # 0.4 s at 50 ms is ~8 frames; well above the idle rate
     assert idle_interval == TerminalPane.IDLE_INTERVAL
     assert 1 <= idle_delta <= 2  # 0.6 s at 500 ms: one frame, two at the edge
+
+
+def test_a_hidden_pane_is_not_captured_and_catches_up_when_shown(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The docstring's claim: a pane that is not on screen is not captured at all.
+
+    It is what lets the shell keep one view per agent alive without forking N
+    tmux processes 20 times a second (the shell reuses views across selections:
+    ``assert views == 2  # one view per project, reused``). No test ever hid a
+    pane, so nothing here covered it; the visible pane is the control.
+
+    Measured while writing this: the property has TWO guards in the shell's own
+    shape, and a test that names only one would mislead. ``_tick``'s
+    ``is_on_screen`` refuses first, and a hidden ``ContentSwitcher`` child also
+    has a ``content_size`` of 0x0, which ``refresh_frame`` refuses on its own —
+    so removing either alone still captures nothing. Both are asserted.
+    """
+    fake.panes["%2"] = FakePane(screen=["second pane"])
+
+    def taken(pane_id: str) -> int:
+        return len([capture for capture in fake.captures if capture[0] == pane_id])
+
+    async def drive() -> tuple[int, int, int, int, tuple[int, int], list[str]]:
+        host = SwitcherHost(fake.server(tmp_path))
+        async with host.run_test(size=(40, 6)) as pilot:
+            await pilot.pause(0.6)
+            second = host.query_one("#second", TerminalPane)
+            shown_first, hidden_first = taken("%1"), taken("%2")
+            hidden_state = (second.is_on_screen, second.content_size.area)
+            host.tabs.current = "second"
+            await pilot.pause(0.6)
+            return (
+                shown_first,
+                hidden_first,
+                taken("%1") - shown_first,
+                taken("%2") - hidden_first,
+                hidden_state,
+                screen_text(second),
+            )
+
+    shown_first, hidden_first, first_after, second_after, hidden_state, text = run(drive())
+    assert shown_first >= 2, "the VISIBLE pane must keep being captured (the control)"
+    assert hidden_first == 0, "a hidden tab's pane is not captured at all"
+    assert hidden_state == (False, 0)  # both guards say no while it is hidden
+    assert first_after == 0  # …and the one that just went hidden stops
+    assert second_after >= 2  # …while the one shown picks up where it was
+    assert text[0] == "second pane"  # it caught up: on_show refreshed the frame
 
 
 # --- input ----------------------------------------------------------------------------------
@@ -769,6 +843,174 @@ def test_resize_is_debounced_and_forwarded_as_the_content_size(
     assert initial == [("resize-window", "%1", "60", "20")]
     assert coalesced == [*initial, ("resize-window", "%1", "90", "28")]  # ONE, the last size
     assert final == [*coalesced, ("resize-window", "%1", "80", "26")]
+
+
+def _resizes(tmux: FakeTmux) -> list[tuple[str, ...]]:
+    return [call for call in tmux.input if call[0] == "resize-window"]
+
+
+def test_a_failed_resize_is_retried_until_the_window_matches_the_widget(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """One refused ``resize-window`` must not mis-size the pane for the view's life.
+
+    ``_sync_size``'s only other caller is a ``Resize`` event, so a failure that
+    is merely swallowed leaves the tmux window at its spawn geometry (200x50 by
+    default) while captures keep succeeding — the widget then shows the bottom
+    ``height`` rows of that screen, each truncated to its width.
+    """
+    fake.fail_resizes = 1
+
+    async def drive() -> tuple[int, bool, bool, str | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: bool(_resizes(fake)))
+            # The positive half: the refusal really left the 24-row pane in place.
+            mis_sized = not synced(pane)
+            await wait_until(pilot, lambda: synced(pane))
+            return len(_resizes(fake)), mis_sized, synced(pane), pane.notice
+
+    attempts, mis_sized, ended_synced, notice = run(drive())
+    assert mis_sized, "the refusal must really mis-size the pane, or the retry proves nothing"
+    assert attempts >= 2 and ended_synced  # it asked again, and the window came in line
+    assert notice is None  # the transient (pane gone) cleared with the next good frame
+
+    # The control: with tmux answering, ONE call is enough — the retry is a
+    # response to the failure and not a resize loop.
+    healthy = FakeTmux()
+    healthy.panes["%1"] = FakePane(screen=["only row"])
+
+    async def clean() -> tuple[int, bool]:
+        host = Host(healthy.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await pilot.pause(0.5)  # several ticks past the (single) resize
+            return len(_resizes(healthy)), synced(pane)
+
+    assert run(clean()) == (1, True)
+
+
+def test_a_cursor_above_the_shown_window_is_neither_drawn_nor_dirtied(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """A pane taller than the widget can put the cursor off screen (a refused resize).
+
+    Its row comes out negative: nothing renders it, yet it used to enter
+    ``dirty`` — so every move of that invisible cursor handed ``refresh`` a
+    Region outside the widget (measured: ``Region(0, -16, 40, 1)``) and re-armed
+    the 50 ms cadence for rows nobody can see.
+    """
+    fake.apply_resize = False  # a tmux that will not shrink the window
+    fake.panes["%1"].screen = [f"row{y}" for y in range(24)]
+    fake.panes["%1"].cursor = (0, 3)  # row 3 of 24: above the six rows we show
+
+    async def drive() -> tuple[bool, bool, int, bool, bool]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: ("resize-window", "%1", "40", "6") in fake.input)
+            pane.refresh_frame()
+            await pilot.pause()
+            drawn = any(reverse_anywhere(strip, 10) for strip in rows(pane))
+            painted = pane.rows_repainted
+            fake.panes["%1"].cursor = (0, 4)  # the invisible cursor moves; no row changes
+            changed = pane.refresh_frame()
+            await pilot.pause()
+            invisible = pane.rows_repainted - painted
+            # The control: a cursor move INSIDE the window is a real change.
+            fake.panes["%1"].cursor = (0, 20)
+            visible = pane.refresh_frame()
+            await pilot.pause()
+            return (
+                drawn,
+                changed,
+                invisible,
+                visible,
+                any(reverse_anywhere(strip, 10) for strip in rows(pane)),
+            )
+
+    drawn, changed, invisible, visible, drawn_after = run(drive())
+    assert not drawn  # nothing on screen is the cursor…
+    assert changed is False and invisible == 0, "an off-screen cursor is not a repaint"
+    assert visible is True and drawn_after  # …until its row is one this widget has
+
+
+# --- the tmux-version key gate -----------------------------------------------------------------
+
+
+def _press_shift_enter(tmux: FakeTmux, tmp_path: Path) -> tuple[list[tuple[str, ...]], list[str]]:
+    """Press an extended-only chord (then a plain key) into a pane on ``tmux``."""
+
+    async def drive() -> tuple[list[tuple[str, ...]], list[str]]:
+        host = Host(tmux.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            await pilot.press("shift+enter", "enter")
+            await pilot.pause()
+            return tmux.sent(), list(host.notices)
+
+    return run(drive())
+
+
+def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``_extended_keys`` is this widget's half of core.keys' anti-corruption rule.
+
+    Below 3.5 tmux TYPES ``S-Enter`` into the running agent instead of sending
+    the key (measured on 3.3a/3.4), so the pane drops it there — and sends it on
+    every modern server, which is the only reason shift+enter works at all.
+    Nothing outside test_keys.py's pure units reached the gate: the fake always
+    answered 3.7c and no test pressed an extended-only chord, so the widget's
+    gate could have been stuck at either value undetected.
+    """
+    fake.version = "tmux 3.4"
+    old_sent, old_notices = _press_shift_enter(fake, tmp_path)
+    modern = FakeTmux()
+    modern.panes["%1"] = FakePane(screen=["one row"])
+    modern_sent, modern_notices = _press_shift_enter(modern, tmp_path)
+
+    assert old_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
+    assert len(old_notices) == 1 and old_notices[0].startswith("shift+enter")
+    assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
+    assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
+    assert modern_notices == []
+
+
+def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: Path) -> None:
+    """The version is read once PER SERVER, and a pane outlives its server.
+
+    ``ManagerTab`` assigns ``pane.server`` and then calls ``attach``; a cached
+    "extended chords are fine" from a 3.7 server would otherwise type
+    ``S-Enter`` into an agent running on a 3.4 one.
+    """
+    old = FakeTmux()
+    old.version = "tmux 3.4"
+    old.panes["%1"] = FakePane(screen=["older server"])
+
+    async def drive() -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("shift+enter")
+            await pilot.pause()
+            modern = fake.sent()
+            pane.server = old.server(tmp_path)
+            pane.attach("%1")
+            await pilot.pause()
+            await pilot.press("shift+enter")
+            await pilot.pause()
+            return modern, old.sent()
+
+    modern_sent, old_sent = run(drive())
+    assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
+    assert old_sent == [], "…and the version was re-read for the server attached after it"
 
 
 # --- placeholder and failure states -----------------------------------------------------------

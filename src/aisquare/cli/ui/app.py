@@ -13,14 +13,16 @@ agents from the fleet service, both re-read every two seconds exactly as
 store cannot be read, because the agents are unaffected by our trouble and a
 blank sidebar would say otherwise.
 
-**Focus is in the sidebar or in a terminal pane** (§4.3). The app's own keys
-(``q`` ``t`` ``r`` ``?``, the palette) are declared non-priority and refused by
-``check_action`` while a ``TerminalPane`` has focus, and textual's defaults
-that would steal keys from the agent are removed: ``inherit_bindings=False``
-drops the priority ``ctrl+q`` and the ``ctrl+c`` "how to quit" hint, and the
-command palette moves from ``ctrl+p`` to ``F1``. Claude Code uses ctrl+c,
-ctrl+o, ctrl+r, ctrl+t, ctrl+b, ctrl+g, ctrl+v and shift+tab; all of them must
-reach it.
+**The app's keys belong to the sidebar** (§4.3). ``q`` ``t`` ``r`` ``?`` and the
+palette are declared non-priority and refused by ``check_action`` unless focus
+is in the sidebar (or nowhere yet) — not merely "unless a ``TerminalPane`` has
+focus": the views mount ``Button``s, ``Select``s and ``Switch``es, none of which
+consumes a letter key, so ``q`` in a half-filled form used to quit. Textual's
+defaults that would steal keys from the agent are removed:
+``inherit_bindings=False`` drops the priority ``ctrl+q`` and the ``ctrl+c`` "how
+to quit" hint, and the command palette moves from ``ctrl+p`` to ``F1``. Claude
+Code uses ctrl+c, ctrl+o, ctrl+r, ctrl+t, ctrl+b, ctrl+g, ctrl+v and shift+tab;
+all of them must reach it.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ from aisquare.cli.ui.sidebar import (
     Sidebar,
     SpawnAgent,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
+from aisquare.cli.ui.terminal import EscapeToSidebar
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
@@ -64,9 +66,26 @@ from aisquare.services import fleet as fleet_service
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor section runs: ``diagnostics.doctor`` in production, a stub in tests."""
 
+_DoctorReport = tuple[Path | None, list[DoctorCheck]]
+"""What the doctor worker hands back: the scope it ran for, and its checks."""
+
 _DOCTOR_WORKER = "doctor"
 _CHECK_SYMBOL = {CheckStatus.ok: "✓", CheckStatus.warn: "⚠", CheckStatus.fail: "✗"}
 _CHECK_STYLE = {CheckStatus.ok: "green", CheckStatus.warn: "yellow", CheckStatus.fail: "bold red"}
+
+
+def _doctor_report(result: object) -> _DoctorReport | None:
+    """Unpack a doctor worker's tagged result; ``None`` when it carries no tag.
+
+    The worker is ours (its identity is checked before this is called), so the
+    shape holds — the check is here so a runner that ever forgets the scope tag
+    paints nothing instead of raising inside a message handler.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        scope, checks = result
+        if (scope is None or isinstance(scope, Path)) and isinstance(checks, list):
+            return scope, list(checks)
+    return None
 
 
 @dataclass(frozen=True)
@@ -147,7 +166,7 @@ class FleetApp(App[None], inherit_bindings=False):
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {"quit", "pick_theme", "refresh_now", "help", "command_palette", "change_theme"}
     )
-    """Actions that are live only while no terminal pane has focus (§4.3)."""
+    """Actions that are live only while focus is in the sidebar (§4.3)."""
 
     def __init__(
         self,
@@ -167,6 +186,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self.doctor_checks: list[DoctorCheck] = []
         self.doctor_scope: str | None = None
         """The project the Doctor section is about; ``None`` = global checks."""
+        self._doctor_worker: Worker[Any] | None = None
+        """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
 
     # --- layout -------------------------------------------------------------------
@@ -200,8 +221,27 @@ class FleetApp(App[None], inherit_bindings=False):
     # --- focus model (§4.3) ---------------------------------------------------------
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """App keys are live only when the focused widget is not a terminal pane."""
-        return not (action in self.SIDEBAR_ACTIONS and isinstance(self.focused, TerminalPane))
+        """App keys are live only while focus is in the sidebar (or nowhere yet).
+
+        Gated on the sidebar rather than on ``isinstance(focused, TerminalPane)``:
+        of everything the views mount only ``Input`` implements
+        ``check_consume_key``, so with a ``Button``, ``Select``, ``Switch``,
+        ``DataTable`` or ``DirectoryTree`` focused these letters stayed live —
+        measured against the running app, ``q`` with the Settings tab's
+        permission-mode ``Select`` focused exited the UI and took the unsaved
+        form with it. Focus nowhere keeps them live, or the shell would open
+        unquittable (at mount the sidebar has focus, so this is only the
+        fallback).
+        """
+        if action not in self.SIDEBAR_ACTIONS:
+            return True
+        focused = self.focused
+        # query, not self.sidebar: bindings are inspected while the screen is
+        # still composing, and a missing sidebar must not raise from a key press.
+        sidebar = next(iter(self.query(Sidebar)), None)
+        if focused is None or sidebar is None:
+            return True
+        return focused is sidebar or sidebar in focused.ancestors
 
     def on_escape_to_sidebar(self, event: EscapeToSidebar) -> None:
         self.sidebar.focus()
@@ -278,6 +318,18 @@ class FleetApp(App[None], inherit_bindings=False):
         The attribute is the scaffold's contract; ``show`` is called when a view
         offers one (the views are another work package's), and a view whose row
         has left the frame keeps what it has — the pane it renders is still real.
+
+        **Only a frame that actually answered is pushed.** ``refresh_data``
+        records ``agents[id] = []`` plus a notice when a fleet read failed open,
+        and that empty list is indistinguishable from "this project has no
+        manager": handed on, ``ManagerTab.show(None)`` detaches the LIVE
+        manager's pane, hides it, paints "<name> has no manager yet" with a
+        Start-manager button and takes the focus the user was typing into with
+        it (measured: ``pane_id`` %7 → ``None``, focus ``TerminalPane`` →
+        ``Button``, for one momentarily locked sqlite db). So a noticed project
+        keeps what its view has; what failing open costs here is a manager
+        header that ages until the next read succeeds, while the sidebar carries
+        the reason on the project's own card.
         """
         for agent_view in self.query(AgentView):
             fresh = snapshot.agent(agent_view.status.agent.project_id, agent_view.status.agent.id)
@@ -285,12 +337,16 @@ class FleetApp(App[None], inherit_bindings=False):
                 agent_view.refresh_status(fresh)
         for project_view in self.query(ProjectView):
             fresh_project = snapshot.project(project_view.project.id)
-            if fresh_project is not None and fresh_project != project_view.project:
+            if fresh_project is None:
+                continue  # the row has left the frame: keep what the view has
+            if fresh_project != project_view.project:
                 # A new codename or root: the view re-reads what depends on it.
                 project_view.project = fresh_project
+            if snapshot.notices.get(fresh_project.id) is not None:
+                continue  # we could not ask — not "the fleet answered: none"
             # ProjectView.show() is the MANAGER status renderer; the snapshot
             # goes through refresh_status, which picks the manager out of it.
-            project_view.refresh_status(snapshot.agents.get(project_view.project.id, []))
+            project_view.refresh_status(snapshot.agents.get(fresh_project.id, []))
 
     # --- doctor -------------------------------------------------------------------------
 
@@ -306,19 +362,39 @@ class FleetApp(App[None], inherit_bindings=False):
             return None
         return snapshot.project(self.doctor_scope)
 
+    def _scope_root(self) -> Path | None:
+        """The root the Doctor section's checks and fixes belong to right now."""
+        project = self._scoped_project()
+        return project.root if project is not None else None
+
     def run_doctor(self) -> None:
-        """Run the checks off the UI thread; ``on_worker_state_changed`` paints them."""
+        """Run the checks off the UI thread; ``on_worker_state_changed`` paints them.
+
+        The result carries the SCOPE it was run for, and the newest run is
+        remembered. Without both, a report that finished while the user was
+        selecting another project was painted as the new scope's: the filter was
+        the worker NAME alone and ``show_doctor`` re-reads ``_scoped_project()``
+        at paint time, so the old project's findings were handed the new
+        project's root and a one-click project fix would have run in the wrong
+        one — the hazard ``show_doctor``'s own comment warns about. Reachable
+        because ``on_project_selected`` awaits ``add_content`` before
+        ``_set_doctor_scope``, and a worker that has already left RUNNING is
+        past cancelling.
+        """
         if self._doctor is None:
             return
-        runner: Callable[[], list[DoctorCheck]] = self._doctor
+        injected: DoctorRunner = self._doctor
         project = self._scoped_project()
+        scope: Path | None = project.root if project is not None else None
+        # An injected fake keeps its own signature and stays global; it is still
+        # tagged with the scope its report is ABOUT, which is what the tab and
+        # the fix buttons are keyed on.
+        runner: Callable[[], _DoctorReport] = lambda: (scope, injected())  # noqa: E731
         if project is not None and self._doctor is diagnostics.doctor:
             # Per-project checks: the real doctor takes the project's root as
-            # cwd (services.diagnostics.doctor(cwd=...)); an injected fake keeps
-            # its own signature and stays global.
-            root = project.root
-            runner = lambda: diagnostics.doctor(cwd=root)  # noqa: E731 — a worker target
-        self.run_worker(
+            # cwd (services.diagnostics.doctor(cwd=...)).
+            runner = lambda: (scope, diagnostics.doctor(cwd=scope))  # noqa: E731 — worker target
+        self._doctor_worker = self.run_worker(
             runner,
             name=_DOCTOR_WORKER,
             group=_DOCTOR_WORKER,
@@ -330,9 +406,13 @@ class FleetApp(App[None], inherit_bindings=False):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != _DOCTOR_WORKER:
             return
+        if event.worker is not self._doctor_worker:
+            return  # a superseded run: the newest one owns the section
         if event.state is WorkerState.SUCCESS:
-            result = event.worker.result
-            self.show_doctor(list(result) if isinstance(result, list) else [])
+            report = _doctor_report(event.worker.result)
+            if report is None or report[0] != self._scope_root():
+                return  # a report about a scope the user has left is not ours to paint
+            self.show_doctor(report[1])
         elif event.state is WorkerState.ERROR:
             self.show_doctor_failure(f"{type(event.worker.error).__name__}: {event.worker.error}")
 
@@ -466,9 +546,7 @@ class FleetApp(App[None], inherit_bindings=False):
         one about another root — the Onboard view's, for the project it just
         registered — means our own report is stale, so we re-run ours.
         """
-        project = self._scoped_project()
-        root = project.root if project is not None else None
-        if event.cwd == root:
+        if event.cwd == self._scope_root():
             self.show_doctor(list(event.checks))
         else:
             self.run_doctor()

@@ -227,7 +227,12 @@ class ExplainabilityView(VerticalScroll):
         try:
             return load_config()
         except Exception as exc:  # a broken config.toml: say so, change nothing
-            self.notify(f"config unreadable — nothing changed: {exc}", severity="error", timeout=8)
+            self.notify(
+                f"config unreadable — nothing changed: {exc}",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
             return None
 
     def _write_config(self, config: AppConfig) -> bool:
@@ -235,7 +240,14 @@ class ExplainabilityView(VerticalScroll):
         try:
             save_config(config)
         except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure
-            self.notify(f"could not write the config: {exc}", severity="error", timeout=8)
+            # markup=False, as everywhere in this view: the message carries a
+            # path and an OS string, and a toast parses markup by default —
+            # ``[Errno 30] Read-only file system: '/home/me/[work]/…'`` reached
+            # the screen naming a directory that does not exist, and a stray
+            # ``[/x]`` raises MarkupError inside Toast.render.
+            self.notify(
+                f"could not write the config: {exc}", severity="error", timeout=8, markup=False
+            )
             return False
         return True
 
@@ -252,6 +264,7 @@ class ExplainabilityView(VerticalScroll):
         self.notify(
             f"✓ tracing enabled for target '{resolved.name}' — next: aisquare doctor --live",
             timeout=6,
+            markup=False,
         )
         self.refresh_status()
 
@@ -265,7 +278,9 @@ class ExplainabilityView(VerticalScroll):
         if not self._write_config(config):
             return
         self.notify(
-            "✓ tracing disabled — sessions launch untraced, targets left in place", timeout=6
+            "✓ tracing disabled — sessions launch untraced, targets left in place",
+            timeout=6,
+            markup=False,
         )
         stale = stale_shell_export(config)
         if stale is not None:
@@ -275,6 +290,7 @@ class ExplainabilityView(VerticalScroll):
                 f"{' '.join(RESERVED_ENV_VARS)} in the shell that started the UI",
                 severity="warning",
                 timeout=10,
+                markup=False,
             )
         self.refresh_status()
 
@@ -316,10 +332,13 @@ class ExplainabilityView(VerticalScroll):
             return
         if event.state is WorkerState.SUCCESS and isinstance(event.worker.result, Notice):
             notice = event.worker.result
-            self.notify(notice.message, severity=notice.severity, timeout=10)
+            # markup=False: a Notice carries gateway prose, a key path and env
+            # names — ``ship_once``'s "set $KEY or write /home/me/[work]/…/key"
+            # loses the bracketed directory when parsed as markup.
+            self.notify(notice.message, severity=notice.severity, timeout=10, markup=False)
             self.refresh_status()
         elif event.state is WorkerState.ERROR:
             self.notify(f"{name.removeprefix('explainability-')} failed: {event.worker.error}",
-                        severity="error", timeout=10)  # fmt: skip
+                        severity="error", timeout=10, markup=False)  # fmt: skip
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             self._set_buttons(disabled=False)

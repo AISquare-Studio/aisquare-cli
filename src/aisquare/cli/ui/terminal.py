@@ -53,6 +53,16 @@ stays on screen with a notice in its bottom row — ``(pane gone)``,
 ``(exited N)``, ``(tmux unavailable)`` — and polling backs off to idle. What
 that costs: one row of the agent's last screen is covered by the notice, and
 keys pressed into a gone pane are dropped (the notice is the only feedback).
+A failed ``resize-window`` fails open the same way but is RETRIED, on a
+widening backoff (:attr:`TerminalPane.RESIZE_RETRY` doubling to
+:attr:`TerminalPane.RESIZE_RETRY_MAX`): its only other caller is a ``Resize``
+event, so one transient failure used to leave the tmux window at its spawn
+geometry (``spawn_window`` defaults to 200x50) for the life of the view while
+captures kept succeeding — the widget then shows the bottom ``height`` rows of
+that screen with every row truncated to its width, so wrapped output is cut
+mid-line and the cursor sits off screen. What the retry costs is one tmux
+process per attempt while the pane stays unreachable (~2 in the first second,
+then ever fewer).
 """
 
 from __future__ import annotations
@@ -111,6 +121,10 @@ class TerminalPane(Widget, can_focus=True):
     """Seconds between frames once nothing changed (~2 fps)."""
     RESIZE_DEBOUNCE: float = 0.1
     """Seconds to wait after the last ``Resize`` before telling tmux."""
+    RESIZE_RETRY: float = 0.25
+    """Seconds before a FAILED ``resize-window`` is tried again (then doubling)."""
+    RESIZE_RETRY_MAX: float = 8.0
+    """Where the resize backoff stops, so an unreachable pane costs ~1 process / 8 s."""
     WHEEL_LINES: int = 3
     """History lines one wheel notch moves."""
     CACHE_LIMIT: int = 4096
@@ -149,6 +163,7 @@ class TerminalPane(Widget, can_focus=True):
         self._strip_cache: dict[str, Strip] = {}
         self._timer: Timer | None = None
         self._resize_timer: Timer | None = None
+        self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
         self._warned: set[str] = set()
         self._reported_gone = False
@@ -185,11 +200,16 @@ class TerminalPane(Widget, can_focus=True):
         self._lines = []
         self._cursor = None
         self._synced = None
+        self._resize_retry = self.RESIZE_RETRY
         self._reported_gone = False
+        # A new attach may be a new server — ``ManagerTab`` assigns ``server``
+        # then calls this — and a cached "extended chords are fine" from a 3.7
+        # server would TYPE ``S-Enter`` into an agent on a 3.4 one. Re-read
+        # lazily, on the next key: one ``tmux -V`` per attach at most.
+        self._extended = None
         if pane_id is not None and self.server is None:
             # The fleet's server from config — a default like any other (§3.10).
             self.server = fleet_service.server()
-            self._extended = None  # a new server may speak a different tmux
         if self.is_mounted:
             self._sync_size()
             self.refresh_frame()
@@ -267,7 +287,14 @@ class TerminalPane(Widget, can_focus=True):
         lines += [""] * (height - len(lines))
         cursor: tuple[int, int] | None = None
         if facts.cursor_visible and self.scrollback == 0 and not facts.dead:
-            cursor = (facts.cursor_x, facts.cursor_y - offset)
+            row = facts.cursor_y - offset
+            # Only a row this widget HAS. A pane taller than the widget whose
+            # cursor sits above the shown window gives a negative row: nothing
+            # can render it, yet it entered ``dirty`` and every move of that
+            # invisible cursor held the 50 ms cadence and handed ``refresh`` a
+            # Region outside the widget (measured: ``Region(0, -16, 40, 1)``).
+            if 0 <= row < height:
+                cursor = (facts.cursor_x, row)
         notice: str | None = None
         if facts.dead:
             notice = "(exited)" if facts.dead_status is None else f"(exited {facts.dead_status})"
@@ -451,6 +478,7 @@ class TerminalPane(Widget, can_focus=True):
     def on_resize(self, event: events.Resize) -> None:
         if self._resize_timer is not None:
             self._resize_timer.stop()
+        self._resize_retry = self.RESIZE_RETRY  # a new size, not the failed one's backoff
         self._resize_timer = self.set_timer(
             self.RESIZE_DEBOUNCE, self._sync_size, name="terminal-resize"
         )
@@ -470,10 +498,26 @@ class TerminalPane(Widget, can_focus=True):
             self.server.resize(self.pane_id, width, height)
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
+            self._retry_size()
             return
         except TmuxError:
             self._fail(PANE_GONE)
+            self._retry_size()
             return
+        self._resize_retry = self.RESIZE_RETRY
         self._synced = wanted
         self.refresh_frame()
         self._schedule(self.FAST_INTERVAL)
+
+    def _retry_size(self) -> None:
+        """Ask again later. Nothing else would: the only other caller is ``Resize``.
+
+        See the module's "Failing open" paragraph for what an un-retried failure
+        costs — a window left at its spawn geometry for the life of the view.
+        """
+        if self._resize_timer is not None:
+            self._resize_timer.stop()
+        self._resize_timer = self.set_timer(
+            self._resize_retry, self._sync_size, name="terminal-resize-retry"
+        )
+        self._resize_retry = min(self._resize_retry * 2, self.RESIZE_RETRY_MAX)

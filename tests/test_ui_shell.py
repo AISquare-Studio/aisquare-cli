@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -27,11 +28,12 @@ from typing import TypeVar
 
 import pytest
 from textual import events
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.pilot import Pilot
-from textual.widgets import Button, Static
+from textual.widgets import Button, Static, Switch
 from textual.widgets._toast import Toast
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp, HelpScreen
@@ -48,10 +50,12 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker
+from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
+from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
-from aisquare.cli.ui.views.project import ProjectView
+from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.core import tmux as tmux_core
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
@@ -201,11 +205,24 @@ def fleet_app(pilot: Pilot[None]) -> FleetApp:
     return app
 
 
-def test_the_no_tmux_guard_is_reachable_and_rejects_the_real_socket(
+_needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
+
+
+@_needs_tmux
+def test_the_no_tmux_guard_is_reachable(
     no_real_tmux: list[tuple[str, ...]], tmp_path: Path, script: Script
 ) -> None:
-    """The guard's two halves: it SEES the pane's tmux calls, and it would refuse
-    the default socket — a guard that no test reaches would protect nothing."""
+    """The guard SEES the pane's tmux calls — one no test reaches protects nothing.
+
+    Skipped without tmux, as every other tmux-dependent test here is: on such a
+    machine ``TmuxServer.binary()`` raises ``TmuxUnavailable`` at
+    ``shutil.which("tmux")``, before an argv exists, the pane fails open to
+    ``(tmux unavailable)`` and the recorder is handed nothing. That is the guard
+    being unreachable, not the socket rule being wrong — and asserting it there
+    made this the one test in the fleet's set that FAILED instead of skipping
+    (measured on a PATH without tmux: ``1 failed, 28 passed``). The rule's other
+    half is checked below and needs no tmux at all.
+    """
     seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
     script["prj_a"] = [status("prj_a", "coder-1", "coder", "working")]
 
@@ -218,8 +235,13 @@ def test_the_no_tmux_guard_is_reachable_and_rejects_the_real_socket(
 
     assert no_real_tmux, "no tmux call recorded — the guard inspects nothing here"
     assert {_socket_of(argv) for argv in no_real_tmux} == {PRIVATE_SOCKET}
-    # The negative half, on the rule itself: the real fleet's socket is refused.
+
+
+def test_the_no_tmux_guard_rejects_the_real_fleets_socket() -> None:
+    """The negative half, on the rule itself — and it must still SEE a good argv."""
     assert _socket_of(("tmux", "-L", "asq", "capture-pane")) != PRIVATE_SOCKET
+    assert _socket_of(("tmux", "-L", PRIVATE_SOCKET, "capture-pane")) == PRIVATE_SOCKET
+    assert _socket_of(("tmux", "-V")) is None  # an argv naming no socket is not the test's
     assert FleetAgent.model_fields["tmux_socket"].default == "asq" != PRIVATE_SOCKET
 
 
@@ -632,7 +654,86 @@ def test_a_doctor_refreshed_message_updates_the_sidebar_counts(
     assert "⚠ 1" in rerun  # …and shows what OUR doctor says, not the foreign report's ✓ 0
 
 
-def test_the_failure_toast_shows_the_directory_it_was_given(tmp_path: Path, script: Script) -> None:
+class SpyApp(FleetApp):
+    """The shell plus the doctor ``Worker`` objects its handler was told about.
+
+    A worker cannot be reached from outside once ``run_worker`` returns, and the
+    claim below is about ONE run's result arriving under another run's scope —
+    so the runs are collected here rather than read off a private attribute.
+    """
+
+    def __init__(self, **options: object) -> None:
+        super().__init__(**options)  # type: ignore[arg-type]
+        self.doctor_runs: list[Worker[object]] = []
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name == "doctor" and event.worker not in self.doctor_runs:
+            self.doctor_runs.append(event.worker)
+        super().on_worker_state_changed(event)
+
+
+def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
+    tmp_path: Path, script: Script
+) -> None:
+    """A report finished in project A must never be painted with project B's root.
+
+    ``show_doctor`` re-reads the scope at PAINT time and the worker filter was
+    the name alone, so a SUCCESS queued across a selection change (reachable:
+    ``on_project_selected`` awaits ``add_content`` before ``_set_doctor_scope``,
+    and a worker past RUNNING is past cancelling) handed the old project's
+    findings to the new project's ``DoctorView.cwd`` — a one-click project fix
+    would then have run in the wrong root, the hazard ``show_doctor``'s own
+    comment warns about. Replaying that queued message IS the race, without
+    racing.
+    """
+    projects = seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    alpha, beta = projects
+    runs: list[str] = []
+
+    def doctor() -> list[DoctorCheck]:
+        runs.append(f"run-{len(runs) + 1}")
+        return [DoctorCheck(name=runs[-1], status=CheckStatus.warn, detail="a finding", fix="")]
+
+    async def run() -> tuple[object, str, str, str, str, Path | None]:
+        app = SpyApp(refresh_seconds=3600, doctor=doctor)
+        async with app.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            await settle(app)
+            await pilot.pause()
+            await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+            await settle(app)
+            await pilot.pause()
+            stale = app.doctor_runs[-1]  # the run whose scope is alpha
+            await pilot.click(card_for(app, "prj_b").query_one(ProjectTitle))
+            await settle(app)
+            await pilot.pause()
+            view = app.query_one("#doctor", DoctorView)
+            report = view.query_one("#doctor-report", Static)
+            painted = shown(report)
+            # Exactly what a SUCCESS queued across the selection change is.
+            app.post_message(Worker.StateChanged(stale, WorkerState.SUCCESS))
+            await pilot.pause()
+            await pilot.pause()
+            after_replay = shown(report)
+            # Control: the CURRENT run's own message still paints. Wipe the view
+            # first, or a refused replay and a no-op replay look identical.
+            view.show([])
+            await pilot.pause()
+            wiped = shown(report)
+            app.post_message(Worker.StateChanged(app.doctor_runs[-1], WorkerState.SUCCESS))
+            await pilot.pause()
+            await pilot.pause()
+            return stale.result, painted, after_replay, wiped, shown(report), view.cwd
+
+    tagged, painted, after_replay, wiped, repainted, cwd = asyncio.run(run())
+    assert runs == ["run-1", "run-2", "run-3"]  # mount (global), alpha, beta
+    assert isinstance(tagged, tuple), "the result must carry the scope it ran for"
+    assert tagged[0] == alpha.root and [c.name for c in tagged[1]] == ["run-2"]
+    assert "run-3" in painted and "run-2" not in painted  # beta's report is on screen
+    assert after_replay == painted, "alpha's report must not be painted under beta's scope"
+    assert "run-3" not in wiped  # the wipe took, so the control can show something
+    assert "run-3" in repainted, "the current scope's own report still paints"
+    assert cwd == beta.root  # …and the fixes still run in the scope that is shown
     """CONTRIBUTING: no markup in data. A toast parses markup unless told not to."""
     seed(tmp_path, ("prj_a", "alpha", None))
     path = tmp_path / "[archive]" / "repo"
@@ -650,6 +751,44 @@ def test_the_failure_toast_shows_the_directory_it_was_given(tmp_path: Path, scri
     # Control: the same string rendered AS MARKUP loses the bracketed segment —
     # the failure this assertion exists to catch, measured here.
     assert Content.from_markup(rendered).plain == rendered.replace("[archive]", "")
+
+
+def test_the_explainability_views_toasts_keep_bracketed_data(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one view the markup sweep missed. CONTRIBUTING: no markup in data.
+
+    Its ``notify`` calls interpolate an OS error, a path, env values and gateway
+    prose. Parsed as markup, ``'/home/me/[work]/.aisquare/config.toml'`` reaches
+    the screen naming a directory that does not exist — and a ``[/x]`` anywhere
+    in the same data raises ``MarkupError`` inside ``Toast.render``. The test
+    lives here because the other Explainability tests are another package's
+    file; the claim is the shell toast's, one view over.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    refused = tmp_path / "[work]" / ".aisquare" / "config.toml"
+
+    def refuse(config: object) -> None:
+        raise OSError(30, "Read-only file system", str(refused))
+
+    monkeypatch.setattr(explainability_view, "save_config", refuse)
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)  # the mount's status worker (tracing off: nothing is dialled)
+        await pilot.click("#explainability-enable")
+        await pilot.pause()
+        await pilot.pause()
+        return app.screen.query_one(Toast).render().plain
+
+    rendered = drive(go, notifications=True)
+    assert str(refused) in rendered and "[work]" in rendered
+    assert rendered.startswith("could not write the config:")
+    # Control: the same string parsed AS MARKUP loses the bracketed directory —
+    # the failure this assertion exists to catch, measured here.
+    assert "[work]" not in Content.from_markup(rendered).plain
 
 
 def test_project_onboarded_refreshes_and_selects_the_project(
@@ -723,6 +862,67 @@ def test_q_quits_from_the_sidebar_but_reaches_a_focused_terminal_pane(
     assert with_pane == "Screen"  # no palette (f1), theme picker (t) or help (?) opened
     assert from_sidebar == "CommandPalette"
     assert after_q == 0
+
+
+def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, script: Script) -> None:
+    """A form widget is not a ``TerminalPane`` and does not consume a letter either.
+
+    Of everything the views mount only ``Input`` implements
+    ``check_consume_key``, so with a ``Button`` or a ``Switch`` focused ``q``
+    reached the app's binding and exited the fleet UI — taking the unsaved form
+    with it (measured against the running app: ``q`` with the Settings tab's
+    permission-mode ``Select`` focused set ``_exit``). The sidebar is the
+    control: there the very same keys still quit, theme and help.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[int | None], list[str], int | None]:
+        app = fleet_app(pilot)
+        button, switch = Button("save", id="probe-button"), Switch(id="probe-switch")
+        await app.content.add_content(Vertical(button, switch, id="probe-form"), set_current=True)
+        await pilot.pause()
+        focused: list[str] = []
+        codes: list[int | None] = []
+        screens: list[str] = []
+        for widget in (button, switch):
+            widget.focus()
+            await pilot.pause()
+            focused.append(type(app.focused).__name__)
+            await pilot.press("q", "t", "question_mark", "f1")
+            await pilot.pause()
+            codes.append(app.return_code)
+            screens.append(type(app.screen).__name__)
+        # The rule is "focus is IN the sidebar", not "focus IS the sidebar": a
+        # focusable row would keep the keys live. The sidebar has none today, so
+        # the probe is synthetic on purpose — it exercises the rule, not a widget.
+        inside = Button("in the sidebar", id="probe-inside")
+        await app.sidebar.mount(inside)
+        inside.focus()
+        await pilot.pause()
+        focused.append(type(app.focused).__name__)
+        await pilot.press("question_mark")
+        await pilot.pause()
+        screens.append(type(app.screen).__name__)
+        await pilot.press("escape")
+        await pilot.pause()
+        # The control: the same keys from the sidebar itself do what they always did.
+        app.sidebar.focus()
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await pilot.pause()
+        screens.append(type(app.screen).__name__)
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("q")
+        return focused, codes, screens, app.return_code
+
+    focused, codes, screens, quit_code = drive(go)
+    # The claim first: a quit here also stops the rest of the probe, and the
+    # reader should read "q quit from a form", not "the second probe lost focus".
+    assert codes == [None, None], "q in a form must not quit the fleet UI"
+    assert focused == ["Button", "Switch", "Button"]  # the probes really had focus
+    assert screens == ["Screen", "Screen", "HelpScreen", "HelpScreen"]
+    assert quit_code == 0  # …and the sidebar still quits
 
 
 def test_escape_hatch_focuses_the_sidebar(tmp_path: Path, script: Script) -> None:
@@ -835,6 +1035,51 @@ def test_clicking_a_row_leaves_focus_on_the_sidebar_so_the_arrows_keep_working(
     assert walk == ["agent:agt_00_manager", "spawn:prj_00"]  # the arrows moved the cursor…
     assert scrolls == [0.0, 0.0]  # …and not the scroll
     assert on_pane == "RecordingPane"
+
+
+def test_collapsing_the_card_under_the_cursor_leaves_one_cursor_and_moves_beside_it(
+    tmp_path: Path, script: Script
+) -> None:
+    """Exactly one row may render as the keyboard cursor, collapsed cards included.
+
+    ``_move_cursor`` re-applied the class over the VISIBLE rows only, so a row
+    hidden inside a collapsed card kept it forever: two rows highlighted, and
+    because the stale anchor was not in the visible list the next arrow jumped
+    to the FIRST row instead of continuing beside the card. Both halves show up
+    in the same walk.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
+    script["prj_b"] = [status("prj_b", "manager", "manager", "waiting")]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str], list[str]]:
+        app = fleet_app(pilot)
+
+        def cursors() -> list[str]:
+            return [row.selection_key for row in app.query(".cursor").results(Activatable)]
+
+        app.sidebar.focus()
+        await pilot.pause()
+        for _ in range(3):  # add → project:prj_a → agent:agt_a_manager
+            await pilot.press("down")
+            await pilot.pause()
+        walked = cursors()
+        await pilot.click(card_for(app, "prj_a").query_one(Disclosure))  # hides the cursor's row
+        await pilot.pause()
+        collapsed = cursors()
+        await pilot.press("down")
+        await pilot.pause()
+        moved = cursors()
+        # Control: the walk goes on from there, one cursor at a time.
+        await pilot.press("down")
+        await pilot.pause()
+        return walked, collapsed, moved, cursors()
+
+    walked, collapsed, moved, onwards = drive(go)
+    assert walked == ["agent:agt_a_manager"]
+    assert collapsed == walked  # the hidden row keeps it until the cursor next moves
+    assert moved == ["project:prj_b"], "one cursor row, and it resumed beside the collapsed card"
+    assert onwards == ["agent:agt_b_manager"]
 
 
 def test_the_cursor_skips_the_rows_of_a_collapsed_card(tmp_path: Path, script: Script) -> None:
@@ -1030,6 +1275,69 @@ def test_agent_errors_fail_open_with_the_cost_shown(
     assert rows_a == 0 and shown_a and "tmux 3.1 is too old" in text_a
     assert rows_b == 1 and not shown_b  # the healthy project is untouched by the other's failure
     assert set(notices) == {"prj_a"}
+
+
+def test_a_fleet_read_that_failed_open_keeps_the_live_manager_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that could not ask must not reach the screen as "there is no manager".
+
+    ``refresh_data`` records ``agents[id] = []`` plus a notice when a fleet read
+    fails open (one momentarily locked sqlite db is enough — ``list_agents``
+    opens its own session). Handed on, that empty list made ``ManagerTab.show``
+    detach the RUNNING manager's pane, hide it and paint the Start-manager
+    button. The control is the same push with the fleet ANSWERING none, which
+    must still tear the pane down.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = [status("prj_a", "manager", "manager", "working")]
+    failure: list[Exception] = []
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if failure:
+            raise failure[0]
+        return list(live)
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    State = tuple[str | None, bool, bool, str]
+
+    async def go(pilot: Pilot[None]) -> tuple[State, State, str, State]:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await pilot.pause()
+        view = app.current_view()
+        assert isinstance(view, ProjectView)
+        tab = view.query_one(ManagerTab)
+        header = tab.query_one("#manager-header", Static)
+        pane = tab.query_one(TerminalPane)
+        button = tab.query_one("#start-manager", Button)
+
+        def state() -> State:
+            return pane.pane_id, pane.display, button.display, shown(header)
+
+        app.refresh_data()  # the first frame the freshly opened view is handed
+        await pilot.pause()
+        attached = state()
+        failure.append(fleet_service.FleetUnavailable("tmux 3.1 is too old (need 3.2)"))
+        app.refresh_data()
+        await pilot.pause()
+        failed_open = state()
+        card_notice = shown(card_for(app, "prj_a").query_one(".card-notice", Static))
+        # The control: the fleet answers, and its answer is that there is none.
+        failure.clear()
+        live.clear()
+        app.refresh_data()
+        await pilot.pause()
+        return attached, failed_open, card_notice, state()
+
+    attached, failed_open, card_notice, answered = drive(go)
+    assert attached[:3] == ("%1", True, False) and "manager" in attached[3]
+    assert failed_open[:3] == ("%1", True, False), "the live pane survived a read that failed open"
+    assert "has no manager yet" not in failed_open[3]
+    assert failed_open[3] == attached[3]  # …and the header still names the manager
+    assert "tmux 3.1 is too old" in card_notice  # the cost is shown, on the project's card
+    assert answered[:3] == (None, False, True)  # the fleet ANSWERED none: the pane goes
+    assert "has no manager yet" in answered[3]
 
 
 def test_open_views_are_fed_each_frame_and_survive_a_vanished_row(

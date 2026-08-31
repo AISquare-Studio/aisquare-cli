@@ -638,18 +638,47 @@ class Sidebar(Vertical):
         return True
 
     def _move_cursor(self, step: int) -> None:
-        rows = self._rows()
-        if not rows:
+        every = [row for row in self.query(Activatable) if row.selection_key]
+        on_screen = [index for index, row in enumerate(every) if self._on_screen(row)]
+        # Cleared over EVERY row, not only the visible ones: a row hidden inside
+        # a collapsed card kept the class forever, so two rows rendered as the
+        # keyboard cursor as soon as the card came back.
+        for row in every:
+            row.remove_class("cursor")
+        if not on_screen:
             return
-        keys = [row.selection_key for row in rows]
+        keys = [every[index].selection_key for index in on_screen]
         anchor = self._cursor_key or self.selected_key
-        # No cursor and no selection yet: the first key lands on the first row,
-        # whichever direction it was — there is no "above" to move to.
-        index = max(0, min(len(rows) - 1, keys.index(anchor) + step)) if anchor in keys else 0
-        self._cursor_key = keys[index]
-        for row in rows:
-            row.set_class(row.selection_key == self._cursor_key, "cursor")
-        rows[index].scroll_visible()
+        if anchor in keys:
+            slot = max(0, min(len(on_screen) - 1, keys.index(anchor) + step))
+        else:
+            slot = self._nearest_on_screen(every, on_screen, anchor, step)
+        row = every[on_screen[slot]]
+        self._cursor_key = row.selection_key
+        row.add_class("cursor")
+        row.scroll_visible()
+
+    @staticmethod
+    def _nearest_on_screen(
+        every: list[Activatable], on_screen: list[int], anchor: str | None, step: int
+    ) -> int:
+        """Which visible row takes the cursor when the anchor row is not one.
+
+        A collapsed card takes its rows off screen with the cursor still on one
+        of them: continuing from the top of the pane (index 0) is a jump the user
+        did not ask for, so the cursor resumes at the nearest row that IS on
+        screen, ahead of the old one when moving down and behind it when moving
+        up. No cursor and no selection yet is the other case, and there the first
+        row is right — there is no "above" to move to.
+        """
+        home = next((index for index, row in enumerate(every) if row.selection_key == anchor), None)
+        if home is None:
+            return 0
+        ahead = [slot for slot, index in enumerate(on_screen) if index >= home]
+        behind = [slot for slot, index in enumerate(on_screen) if index <= home]
+        if step >= 0:
+            return ahead[0] if ahead else behind[-1]
+        return behind[-1] if behind else ahead[0]
 
     def action_cursor_down(self) -> None:
         self._move_cursor(1)

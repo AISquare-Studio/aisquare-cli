@@ -363,6 +363,47 @@ def test_spawn_window_without_env_passes_no_dash_e(
     assert "-e" not in fake.commands()[1]
 
 
+def test_spawn_window_escapes_the_separator_in_every_argument_it_carries(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """An argument ending in ``;`` would end the tmux command; it must arrive escaped.
+
+    The launch command reaches here from ``fleet spawn … -- <args>`` and from a
+    role's configured ``extra_args``, so a ``;`` in it is caller data, not tmux
+    syntax. What escaping prevents is measured live below.
+    """
+    directory = tmp_path / "dir;"
+    directory.mkdir()
+    fake = FakeTmux(OK, Completed(0, f"@1{_SEP}%1\n", ""))
+    _server(fake, fake_bin, conf).spawn_window(
+        "asq-amber-fox",
+        name="coder;",
+        cwd=directory,
+        command=["claude", "--flag", "a;b", ";", "kill-server", "trailing;"],
+        env={"K": "v;"},
+    )
+    assert fake.commands()[1] == [
+        "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
+        "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", f"{tmp_path}/dir\\;",
+        "-e", "K=v\\;",
+        # "a;b" is data to tmux already: only a LAST ";" separates commands.
+        "--", "claude", "--flag", "a;b", "\\;", "kill-server", "trailing\\;",
+    ]  # fmt: skip
+
+
+def test_spawn_window_leaves_an_argument_without_a_trailing_separator_alone(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """The negative control on the escape: it fires only where tmux would split."""
+    command = ["claude", "-p", "a;b", "--append", "one; two", "x\\"]
+    fake = FakeTmux(OK, Completed(0, f"@1{_SEP}%1\n", ""))
+    _server(fake, fake_bin, conf).spawn_window(
+        "asq-amber-fox", name="coder-1", cwd=tmp_path, command=command, env={"K": "v"}
+    )
+    assert "\\;" not in " ".join(fake.commands()[1])
+    assert fake.commands()[1][-len(command) :] == command
+
+
 @pytest.mark.parametrize("name", ["a.b", "asq:fox", "", "with.dot:and-colon"])
 def test_spawn_and_rename_refuse_a_session_name_tmux_could_not_target(
     name: str, fake_bin: Path, conf: Path, tmp_path: Path
@@ -916,6 +957,38 @@ def test_live_spawn_refuses_the_cwd_tmux_would_silently_replace(
     where = live.run("display-message", "-p", "-t", pane_id, "#{pane_current_path}").strip()
     assert where and where != str(missing)
     assert where == os.path.expanduser("~")
+
+
+@requires_tmux
+def test_live_spawn_cannot_be_talked_into_running_a_second_tmux_command(
+    live: TmuxServer, tmp_path: Path
+) -> None:
+    """A ``;`` in the launch command must reach the AGENT, never tmux's parser.
+
+    The artefact is the pane's own argv, written to a file, plus a server option
+    the injected command would have changed. The control at the end is the same
+    argv sent to tmux unescaped: it DOES run, which is what the escape prevents
+    — with ``kill-server`` in place of ``set`` it would take every agent on the
+    private server with it.
+    """
+    argv_file = tmp_path / "argv.txt"
+    injection = [";", "set", "-g", "history-limit", "1"]
+    command = ["sh", "-c", f'printf "[%s]\\n" "$@" > {argv_file}; exec cat', "sh", *injection]
+
+    window = live.spawn_window(
+        "asq-test-fox", name="w0", cwd=tmp_path, command=command, width=80, height=24
+    )
+    assert _wait(lambda: argv_file.exists())
+    assert argv_file.read_text(encoding="utf-8").splitlines() == [f"[{arg}]" for arg in injection]
+    assert live.pane_facts(window.pane_id) is not None, "the window is alive, not a parse error"
+    assert live.run("show", "-g", "history-limit").strip() == "history-limit 50000"
+
+    # The control on the mechanism: unescaped, tmux runs the tail itself.
+    live.run(
+        "new-window", "-d", "-t", "=asq-test-fox:", "-n", "raw", "-c", str(tmp_path),
+        "--", *command,
+    )  # fmt: skip
+    assert live.run("show", "-g", "history-limit").strip() == "history-limit 1"
 
 
 @requires_tmux

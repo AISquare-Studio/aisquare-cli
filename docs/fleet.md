@@ -165,7 +165,8 @@ Starts an agent in the project's tmux session — a window running
 `aisquare launch <role> …` — with the role's permission flags and a session id
 minted *before* launch, records it, and prints a receipt:
 `✓ spawned coder-auth (agt_…) → asq-amber-otter %7`. Anything the receipt
-should tell you — a permission-mode fallback, a label that had to be suffixed —
+should tell you — a label that had to be suffixed, a worktree or branch that
+already existed, an agent that did not come up before its prompt was typed —
 follows as a `⚠` line.
 
 | Flag | Meaning | Default |
@@ -298,9 +299,12 @@ answer.
 | coder, tester, validator | `auto` | plus a project allowlist for the project's own check commands (`make check`, `pytest`, `git`, `gh`), so they never reach the classifier |
 | reviewer | `auto` + `--restricted` | read-only by construction |
 
-Where `auto` is unavailable to the account, the spawn detects the refusal,
-falls back to `acceptEdits`, and the receipt says so. `bypassPermissions` is
-available and is never a default.
+The mode is passed straight through to `claude` and nothing here reads its
+answer, so where `auto` is unavailable to the account the refusal appears in
+that agent's own pane and the spawn does not fall back: pick another mode
+yourself, per spawn (`--permission-mode acceptEdits`) or for the role
+(`aisquare config set fleet.roles.coder.permission_mode acceptEdits`).
+`bypassPermissions` is available and is never a default.
 
 **Every default is a default.** Everything this guide calls one — permission
 mode, worktree-per-role, the escape key, the agent cap, the tmux socket, the
@@ -390,7 +394,7 @@ their parent as a dim subtitle (`~/work/api`, `~/oss/api`).
 
 **Codename.** Every project that enters the fleet gets an `adjective-animal`
 codename — `amber-otter` — matching `^[a-z]{3,7}-[a-z]{3,7}$`, from two
-hand-curated, family-friendly word lists (about 5,500 pairs). It is
+hand-curated, family-friendly word lists (96 by 96, so 9,216 pairs). It is
 **deterministic from the project id** — itself a stable hash of the resolved
 root — walking to the next pair on a collision, so the same checkout gets the
 same name on every machine and after a `context.db` loss, and two projects on

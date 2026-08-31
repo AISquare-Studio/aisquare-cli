@@ -27,11 +27,14 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from aisquare.cli import common
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, save_config
+from aisquare.core.state import RuntimeState, set_state
 
 
 def _config_symlinked_into_an_unwritable_directory(tmp_path: Path) -> Path:
@@ -283,3 +286,131 @@ def test_the_redaction_command_translates_too(
     assert result.exit_code == 1
     assert "Traceback" not in result.output, result.output
     assert "✗" in result.output
+
+
+# --- AISQUARE_HOME pointing at a file: the same convention, a wider reach ---------------
+#
+# ``ensure_home`` cannot mkdir over a regular file, and ``core.store.open_store``
+# calls it unconditionally — so this failure is not confined to the four commands
+# that write config. Measured with ``AISQUARE_HOME=<a regular file>``:
+# ``asq --json init <dir>`` printed one refusal line, while ``asq --json fleet ls``
+# printed 97 lines of Rich traceback with an EMPTY stdout (``project list``: 83,
+# ``status``: 86). A traceback under ``--json`` breaks the machine contract, and
+# the fleet UI's onboarding reads that stdout to say why an onboard failed.
+#
+# The reach is widened by a second guard, not by tidying every OSError in
+# ``main()``: ``expected_home_creation_errors`` translates only the two exceptions
+# a non-directory in the path produces, and only while ``home_blocker`` confirms
+# the operator's home really is blocked. Everything else keeps its traceback.
+
+
+def _blocked_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """``AISQUARE_HOME`` pointing AT a regular file."""
+    blocked = tmp_path / "homefile"
+    blocked.write_text("x", encoding="utf-8")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(blocked))
+    return blocked
+
+
+def test_init_reports_a_file_home_as_one_json_line(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reach the branch already had, and which nothing pinned."""
+    blocked = _blocked_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    result = runner.invoke(app, ["--json", "init", str(project)])
+
+    assert result.exit_code == 1, result.output
+    assert "Traceback" not in result.output, result.output
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "home_not_creatable", payload
+    assert "AISQUARE_HOME" in payload["hint"]
+    assert blocked.read_text(encoding="utf-8") == "x"
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [FileExistsError(errno.EEXIST, "File exists"), NotADirectoryError(errno.ENOTDIR, "Not a dir")],
+    ids=["file-exists", "not-a-directory"],
+)
+def test_the_home_guard_translates_the_failure_from_any_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raised: OSError,
+) -> None:
+    """One positive case per exception shape ``mkdir``/``open`` raises for a
+    non-directory in the path, from the guard's own reach rather than from a
+    command that happens to write config.
+
+    Asserted on the ``--json`` payload, which is the artefact the machine contract
+    is about: one object, exit 1, and the actionable sentence inside it.
+    """
+    blocked = _blocked_home(tmp_path, monkeypatch)
+    set_state(RuntimeState(json_output=True))
+
+    with pytest.raises(typer.Exit) as exit_info, common.expected_home_creation_errors():
+        raise raised
+
+    assert exit_info.value.exit_code == 1
+    printed = capsys.readouterr().out
+    assert printed.count("\n") == 1, printed
+    payload = json.loads(printed)
+    assert payload["error"] == "home_not_creatable", payload
+    assert str(blocked) in payload["hint"] or "AISQUARE_HOME" in payload["hint"]
+
+
+def test_the_home_guard_re_raises_when_the_home_is_healthy(
+    home_is_a_directory: Path, tmp_path: Path
+) -> None:
+    """The negative control, and the whole reason this can sit around every command.
+
+    ``CONTRIBUTING`` is explicit that an unexpected OSError is a bug and a
+    traceback is the correct output for one. Without this half, the cheapest way
+    to pass the two tests above is a handler that tidies every
+    ``FileExistsError`` in the tree — including the ones that are defects.
+    """
+    with pytest.raises(FileExistsError), common.expected_home_creation_errors():
+        raise FileExistsError(errno.EEXIST, "File exists", str(tmp_path / "unrelated"))
+
+
+@pytest.fixture
+def home_is_a_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The ordinary machine: AISQUARE_HOME is a directory that exists."""
+    real = tmp_path / "real-home"
+    real.mkdir()
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(real))
+    return real
+
+
+def test_home_blocker_names_the_file_in_the_way_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four shapes, because the message names the path the operator has to move.
+
+    The dangling symlink is the one that is easy to miss: ``exists()`` follows the
+    link and says no, but ``mkdir`` still refuses with ``FileExistsError``.
+    """
+    blocker = tmp_path / "in-the-way"
+    blocker.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(blocker))
+    assert common.home_blocker() == blocker
+
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(blocker / "nested" / "home"))
+    assert common.home_blocker() == blocker, "a file ABOVE the home blocks it too"
+
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "nowhere")
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(dangling))
+    assert common.home_blocker() == dangling
+
+    # The negative controls: a directory that exists, and one that does not yet.
+    fine = tmp_path / "fine"
+    fine.mkdir()
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(fine))
+    assert common.home_blocker() is None
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(fine / "not-created-yet"))
+    assert common.home_blocker() is None

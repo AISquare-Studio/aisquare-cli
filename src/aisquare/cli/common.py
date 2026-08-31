@@ -394,6 +394,82 @@ def emit_doctor(checks: list[DoctorCheck]) -> None:
             console.print(f"    → {check.fix}")
 
 
+def home_blocker() -> Path | None:
+    """The non-directory standing at or above the aisquare home, if there is one.
+
+    Walks up from ``AISQUARE_HOME`` to the first path that exists: if that is a
+    directory, ``ensure_home`` can create the rest, and this returns ``None``.
+    If it is a file, that file is why the home cannot come into being — the case
+    where ``AISQUARE_HOME`` points AT a file and the case where it points THROUGH
+    one both land here, and both name the file the operator has to move.
+
+    A DANGLING SYMLINK counts as a blocker: ``exists()`` follows links and says
+    no, but ``mkdir`` still refuses with ``FileExistsError``, so treating it as
+    "nothing there" would send exactly that case back to a traceback.
+
+    Cheap by construction (a handful of stats, no mkdir) and never raises, so it
+    is safe to consult from an exception handler.
+    """
+    home = paths.aisquare_home()
+    for candidate in (home, *home.parents):
+        try:
+            if candidate.is_dir():
+                return None
+            if candidate.exists() or candidate.is_symlink():
+                return candidate
+        except OSError:  # an unstattable ancestor is not a diagnosis we can make
+            return None
+    return None
+
+
+def _fail_home_not_creatable(exc: OSError, blocker: Path | None = None) -> NoReturn:
+    """The one-line refusal for a home that cannot be created.
+
+    Shared by both guards below so the message and the ``home_not_creatable``
+    code cannot drift between the config-write path and the every-command path.
+    """
+    where = blocker or exc.filename or paths.aisquare_home()
+    fail(
+        f"cannot create the aisquare home: {where} is in the way "
+        f"({exc.strerror or type(exc).__name__})",
+        error="home_not_creatable",
+        hint="AISQUARE_HOME must point at a directory (it may not exist yet) — "
+        "move the file, or point AISQUARE_HOME elsewhere",
+        detail=exc.strerror or str(exc),
+    )
+
+
+@contextmanager
+def expected_home_creation_errors() -> Iterator[None]:
+    """Route ``ensure_home`` failing on a home that cannot exist through ``fail``.
+
+    Wider reach than :func:`expected_config_write_errors`, and it needs to be.
+    ``core.store.open_store`` calls ``paths.ensure_home()`` unconditionally, so
+    EVERY command that touches the store hits this failure — not just the four
+    that write config. Measured with ``AISQUARE_HOME=<a regular file>``:
+    ``aisquare --json init <dir>`` printed the one refusal line, while
+    ``aisquare --json fleet ls`` printed 97 lines of Rich traceback with an EMPTY
+    stdout (``project list``: 83, ``status``: 86), which breaks the ``--json``
+    contract the branch was added to protect and leaves the fleet UI with nothing
+    to report.
+
+    Still not a general tidier, which is what ``CONTRIBUTING`` forbids: an
+    unexpected ``OSError`` is a bug and a traceback is the correct output for one.
+    Two things keep this narrow. The exception classes are the two
+    ``mkdir``/``open`` raises for a non-directory in the path, and the handler
+    only translates when :func:`home_blocker` confirms the operator's home really
+    is blocked RIGHT NOW. A ``FileExistsError`` from anywhere else in a command,
+    on a machine whose home is a healthy directory, is re-raised untouched.
+    """
+    try:
+        yield
+    except (FileExistsError, NotADirectoryError) as exc:
+        blocker = home_blocker()
+        if blocker is None:
+            raise
+        _fail_home_not_creatable(exc, blocker)
+
+
 @contextmanager
 def expected_config_write_errors() -> Iterator[None]:
     """Route a foreseeable "config is not writable" failure through ``fail``.
@@ -452,15 +528,12 @@ def expected_config_write_errors() -> Iterator[None]:
         # traceback to stderr and NOTHING on stdout — a traceback under --json
         # breaks the machine contract, and the fleet UI's onboarding reads that
         # stdout to say why an onboard failed.
-        where = exc.filename or str(paths.aisquare_home())
-        fail(
-            f"cannot create the aisquare home: {where} is in the way "
-            f"({exc.strerror or type(exc).__name__})",
-            error="home_not_creatable",
-            hint="AISQUARE_HOME must point at a directory (it may not exist yet) — "
-            "move the file, or point AISQUARE_HOME elsewhere",
-            detail=exc.strerror or str(exc),
-        )
+        #
+        # Unconditional here, unlike in ``expected_home_creation_errors``: a
+        # config write is one statement, this pair of exceptions has one cause on
+        # that path, and narrowing an already-narrow site would only add a way to
+        # miss it.
+        _fail_home_not_creatable(exc)
     except OSError as exc:
         # EROFS belongs with the two above by the same test: it is a consequence
         # of WHERE THE OPERATOR POINTED THE CONFIG, and a one-line message can

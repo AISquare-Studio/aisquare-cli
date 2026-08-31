@@ -52,6 +52,38 @@ _CLAIM_ORPHAN_AFTER = timedelta(hours=4)
 MANAGER_ROLE = "manager"
 """The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
 
+#: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
+#: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
+#: in one role and need them apart on the board; the base is derived by stripping
+#: the digits rather than matched against a second copy of the role list, so the
+#: two can never drift.
+_SEAT_SUFFIX = re.compile(r"^(?P<base>[a-z][a-z_-]*)\d+$")
+
+
+def base_role(role: str) -> str:
+    """The first-class role a numbered seat belongs to — ``coder1`` → ``coder``.
+
+    Anything that is not a seat of a role the harness actually profiles comes
+    back unchanged, so a declared role called ``bot7`` stays ``bot7`` and a typo
+    is never silently promoted to a real role.
+
+    Why this exists at all: ``aisquare launch coder1`` exports the seat verbatim
+    as ``AISQUARE_ROLE`` (that is the point — the board must show ``coder1``, and
+    ``team bind coder1`` binds that seat's own profile), and every harness lookup
+    is keyed on the role. Measured before this existed:
+    ``harness.role_cycle('coder1', …)`` returned ``[]`` where ``'coder'`` returns
+    7 lines, and ``harness.model_mismatch('coder1', <anything>)`` returned
+    ``None`` — so a numbered seat, the shape README documents for a parallel
+    crew, was launched with NO standing work cycle and invisible to the board's
+    only tiering signal. The number is an identity, not a new role.
+    """
+    match = _SEAT_SUFFIX.match(role)
+    if match is None:
+        return role
+    base = match.group("base")
+    return base if base in harness.ROLE_PROFILES else role
+
+
 #: The board events worth waking a manager for: a sub-agent's verdict or hand-off
 #: (``task_review``, ``task_done``), a task that needs the manager back
 #: (``task_blocked``, ``task_reopened``), a result or a question on the board, and
@@ -161,8 +193,14 @@ class StopDecision:
     …}}``, which continues the conversation too but is labelled "Stop hook
     feedback" in the transcript rather than a hook error; switching is one
     method. Claude Code itself ends the turn after 8 consecutive blocks and caps
-    hook output at 10,000 characters — the reason stays far under that because it
-    shows at most ``_DELTA_LIMIT`` events.
+    hook output at 10,000 characters, truncating the rest — mid-JSON-string if it
+    must, which costs the whole payload and not just the tail. The event COUNT
+    does not bound that: ``event.text`` is unbounded board text, and the coder's
+    own standing cycle asks for ``--note "how to verify + evidence"``. Measured
+    with the real renderer: ten ``task_review`` events carrying a 2 KB note each
+    rendered a 20,541-character reason, 20,603 as the JSON object — twice the
+    cap. So :func:`_render_wakeup` budgets CHARACTERS (see
+    :data:`_WAKEUP_REASON_BUDGET`) and the count limit is only the other half.
     """
 
     reason: str
@@ -1722,7 +1760,9 @@ def _render_board(
                 parts.append(f"[{label}]")
             if session.model:
                 parts.append(f"[{session.model}]")
-                mismatch = harness.model_mismatch(session.role, session.model)
+                # base_role: a seat rides its role's ladder, so `coder1` on a
+                # model outside the coder ladder is flagged like `coder` is.
+                mismatch = harness.model_mismatch(base_role(session.role), session.model)
                 if mismatch:
                     parts.append("⚠ off-ladder")
             if session.focus:
@@ -1771,8 +1811,12 @@ def _role_cycle(me: TeamSession) -> list[str]:
 
     The cycles themselves live in :mod:`aisquare.core.harness` (one source of
     truth for the whole harness: profiles, ladders, and briefings).
+
+    Keyed on :func:`base_role`, so a numbered seat (``coder1``) receives its
+    role's cycle. Without that a seat got an empty briefing — the one thing the
+    seat's own comment in ``cli/launch.py`` promises it does not lose.
     """
-    return harness.role_cycle(me.role, short_id(me.id))
+    return harness.role_cycle(base_role(me.role), short_id(me.id))
 
 
 def event_line(event: TeamEvent, roles: dict[str, str]) -> str:
@@ -1800,15 +1844,92 @@ def _render_delta(events: list[TeamEvent], roles: dict[str, str], *, truncated: 
     return "\n".join(lines)
 
 
+#: What one Stop reason may cost in the hook's OUTPUT — the thing Claude Code caps
+#: at 10,000 characters. Set below the cap because the reason travels inside
+#: ``{"decision":"block","reason":…}``: a reason that goes over does not lose its
+#: tail, it loses the closing quote and brace, and then Claude Code parses nothing
+#: at all and the wake-up is silently gone.
+_WAKEUP_REASON_BUDGET = 8_000
+
+#: The most one rendered event line may cost. Board text is unbounded and the
+#: coder's own cycle asks for ``--note "how to verify + evidence"``, so one 2 KB
+#: note must not crowd out the other nine events — every event the reason shows
+#: has to stay legible, because ``_manager_wakeup`` advances the cursor past all
+#: of them and nothing will show them again.
+_WAKEUP_LINE_BUDGET = 400
+
+
+def _output_cost(text: str) -> int:
+    """What ``text`` costs in the hook's JSON output, escaping included.
+
+    Measured rather than assumed: ``cli/hook.py`` prints the decision through
+    ``json.dumps``, whose default escaping turns every non-ASCII character into
+    ``\\uXXXX`` (six characters) and every quote or newline into two. A budget
+    counted in raw characters therefore bounds nothing at all for a note written
+    in a non-Latin script — 1,700 such characters already exceed the cap on their
+    own. The ``- 2`` drops the quotes ``json.dumps`` puts around a string.
+    """
+    return len(json.dumps(text)) - 2
+
+
+def _clip(text: str, budget: int) -> str:
+    """``text`` costing at most ``budget`` characters of hook output.
+
+    An ellipsis rather than a silent truncation: the manager is being asked to
+    act on this line, so "there was more here" is part of what it needs.
+
+    Halving rather than one proportional guess, because the relationship between
+    characters and output cost depends on the characters: ASCII text needs one
+    pass, and the loop terminates because ``keep`` strictly decreases (at most
+    ~log2(budget) passes, each encoding at most ``budget`` characters).
+    """
+    if _output_cost(text) <= budget:
+        return text
+    keep = budget
+    while keep > 1 and _output_cost(_shorten(text, keep)) > budget:
+        keep //= 2
+    return _shorten(text, keep)
+
+
+def _shorten(text: str, keep: int) -> str:
+    """``text`` cut to ``keep`` characters with the cut marked, or unchanged."""
+    if len(text) <= keep:
+        return text
+    return text[: max(keep - 1, 0)].rstrip() + "…"
+
+
+#: What the mark a clip leaves behind costs on its own — the floor for a line's
+#: share, because a line clipped to less than this still costs this.
+_ELLIPSIS_COST = _output_cost("…")
+
+
 def _render_wakeup(events: list[TeamEvent], roles: dict[str, str], *, truncated: bool) -> str:
     """The Stop reason: the delta in the same lines the prompt hook would have used,
-    framed as the instruction Claude Code continues the turn with."""
+    framed as the instruction Claude Code continues the turn with.
+
+    Bounded in OUTPUT COST, not only in events (:class:`StopDecision` says what
+    going over costs). Each event line gets a share derived from the remaining
+    budget and the number of events, so raising ``_DELTA_LIMIT`` clips lines
+    harder instead of overflowing, and no event the cursor consumed is ever
+    dropped from the reason — ``_manager_wakeup`` advances past every event it
+    shows, so a dropped line is a lost board update.
+
+    The sum is under budget by arithmetic: the head and frame are paid for first,
+    and each of the ``n`` lines costs at most ``share`` plus the four characters
+    of ``"- "`` and its newline. That holds while the share stays above
+    :data:`_ELLIPSIS_COST` — a clipped line cannot cost less than the mark it
+    ends with — which is every event count up to roughly 700. ``_DELTA_LIMIT`` is
+    10; the test beside this renders at both counts, so the margin is measured
+    rather than assumed.
+    """
     count = f"{len(events)}{'+' if truncated else ''}"
-    lines = [
-        f"{count} board update(s) from your fleet arrived while you were finishing this turn:",
-        *(f"- {event_line(event, roles)}" for event in events),
+    head = f"{count} board update(s) from your fleet arrived while you were finishing this turn:"
+    frame = [
+        *(["… more waiting — run `aisquare board` for the full picture."] if truncated else []),
+        f"Act on what needs the manager — reopen, re-spec, spawn, report. {WAKEUP_CLOSE}",
     ]
-    if truncated:
-        lines.append("… more waiting — run `aisquare board` for the full picture.")
-    lines.append(f"Act on what needs the manager — reopen, re-spec, spawn, report. {WAKEUP_CLOSE}")
+    spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
+    share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)
+    per_line = min(_WAKEUP_LINE_BUDGET, share)
+    lines = [head, *(f"- {_clip(event_line(event, roles), per_line)}" for event in events), *frame]
     return "\n".join(lines)

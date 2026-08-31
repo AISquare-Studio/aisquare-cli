@@ -705,3 +705,46 @@ def test_a_role_bound_to_a_resume_is_not_pinned(
         f"yet: {spy['argv']}"
     )
     assert spy["argv"] == ["claude", *bound], spy["argv"]
+
+
+def test_every_role_that_can_take_a_seat_has_a_harness_profile() -> None:
+    """The exclusion that makes ``services.team.base_role`` complete.
+
+    ``_SEAT`` is built from ``launch.ROLES``; ``base_role`` strips the digits and
+    keeps the result only when ``harness.ROLE_PROFILES`` has it. So a role added to
+    ``ROLES`` without a profile would be a seat ``launch`` accepts and
+    ``base_role`` refuses — a session with no work cycle and no ladder, which is
+    the defect this pins the fix against. Asserted of the two modules rather than
+    of a literal list, so neither can drift alone.
+
+    One direction on purpose: a profiled role that ``launch`` does not whitelist is
+    reachable through ``team bind`` and is not this hazard.
+    """
+    from aisquare.core import harness
+
+    # An empty set on either side would satisfy the claim for free, which is the
+    # shape where blindness and success look identical — so read both first.
+    assert "coder" in launch_cli.ROLES and "coder" in harness.ROLE_PROFILES
+    assert set(launch_cli.ROLES) - {"nosuchrole"} == set(launch_cli.ROLES)
+    assert {"nosuchrole", *launch_cli.ROLES} - set(harness.ROLE_PROFILES) == {"nosuchrole"}, (
+        "the positive control: an unprofiled role IS reported by this comparison"
+    )
+
+    missing = set(launch_cli.ROLES) - set(harness.ROLE_PROFILES)
+    assert not missing, f"{sorted(missing)} accept a numbered seat but have no harness profile"
+
+
+def test_a_numbered_seat_exports_the_seat_and_resolves_to_its_base_role() -> None:
+    """Both halves of the seat contract, from the one place that defines its shape.
+
+    The regex must accept the seat (the board keeps ``coder1`` as an identity) and
+    ``base_role`` must map it home. The negative controls are the shapes neither
+    may claim: a typo, and a bare number.
+    """
+    from aisquare.services import team as team_service
+
+    assert launch_cli._SEAT.match("coder1") is not None
+    assert team_service.base_role("coder1") == "coder"
+    assert launch_cli._SEAT.match("codr1") is None
+    assert team_service.base_role("codr1") == "codr1"
+    assert launch_cli._SEAT.match("1") is None

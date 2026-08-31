@@ -524,6 +524,12 @@ def test_the_reason_is_bounded_and_the_rest_waits_its_turn(
     The second Stop here is a Stop of a turn the manager began on its own — no
     ``stop_hook_active`` — which is why it wakes again. The Stop that ends the
     CONTINUATION is a different payload and has its own test below.
+
+    NOTE the texts here are 18 characters each, so this test says nothing about
+    the character bound — with a count limit and no character limit it passes
+    exactly as it does now. That gap shipped, and
+    ``test_the_hook_output_stays_under_the_cap_when_the_notes_are_long`` below is
+    the half that closes it.
     """
     _fleet(runner, monkeypatch, work_dir)
     seqs = [_emit_from_coder("question", f"question number {i}") for i in range(15)]
@@ -536,6 +542,12 @@ def test_the_reason_is_bounded_and_the_rest_waits_its_turn(
     assert "more waiting" in reason and "aisquare board" in reason
     assert reason.endswith(team_service.WAKEUP_CLOSE)
     assert len(reason) < 10_000
+    event_lines = [line for line in reason.splitlines() if line.startswith("- ")]
+    assert len(event_lines) == team_service._DELTA_LIMIT
+    assert not any("…" in line for line in event_lines), (
+        "short board text must not be clipped — the negative control for the "
+        "character budget, without which clipping everything would pass"
+    )
     assert _session(MANAGER).cursor == seqs[team_service._DELTA_LIMIT - 1]
 
     leftover = _decision(_stop(runner, MANAGER, work_dir))
@@ -543,6 +555,89 @@ def test_the_reason_is_bounded_and_the_rest_waits_its_turn(
     assert "question number 14" in leftover["reason"]
     assert _session(MANAGER).cursor == seqs[-1]
     assert _meta(_counter_key(MANAGER)) == "2"
+
+
+#: The cap Claude Code applies to a hook's stdout. Asserted against the BYTES the
+#: hook prints, not against the reason inside them: the reason travels in a JSON
+#: object, and a payload truncated at the cap loses its closing quote and brace,
+#: so Claude Code parses nothing and the wake-up is gone rather than shortened.
+_HOOK_OUTPUT_CAP = 10_000
+
+
+@pytest.mark.parametrize(
+    ("label", "note"),
+    [
+        # What the coder's own standing cycle asks for: `--note "how to verify +
+        # evidence"` (core/harness.py). 2 KB of evidence is an ordinary note.
+        ("ascii evidence", "verified: " + "x" * 2000),
+        # Non-ASCII is the shape a character budget alone does not bound:
+        # json.dumps escapes each of these to six characters, so 1,700 of them
+        # exceed the cap on their own.
+        ("non-latin evidence", "検証済み: " + "証" * 2000),
+        # Quotes and newlines each cost two escaped, and board notes carry both.
+        ("quoted evidence", 'verified: "' + '"\n' * 1000),
+    ],
+    ids=["ascii", "non-latin", "quoted"],
+)
+def test_the_hook_output_stays_under_the_cap_when_the_notes_are_long(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, label: str, note: str
+) -> None:
+    """The bound the event count does not give: ``event.text`` is unbounded.
+
+    Measured before the character budget existed: ten ``task_review`` events
+    carrying a 2 KB note each rendered a 20,541-character reason — 20,603 as the
+    JSON object, twice the cap — so Claude Code truncated the payload mid-string
+    and the manager was not woken at all.
+
+    Asserted on the hook's stdout, which is the artefact the cap applies to, and
+    every event still has to be legible in it: ``_manager_wakeup`` advances the
+    cursor past all ten, so an event dropped from the reason is a board update
+    nothing will show again.
+    """
+    _fleet(runner, monkeypatch, work_dir)
+    for index in range(team_service._DELTA_LIMIT):
+        _emit_from_coder("task_review", f"event{index} {note}")
+
+    result = _stop(runner, MANAGER, work_dir)
+    decision = _decision(result)
+
+    assert len(result.stdout) < _HOOK_OUTPUT_CAP, (label, len(result.stdout))
+    reason = decision["reason"]
+    assert reason.count("\n- ") == team_service._DELTA_LIMIT, "every event is still shown"
+    for index in range(team_service._DELTA_LIMIT):
+        assert f"event{index} " in reason, (label, index)
+    assert "…" in reason, "the clip is marked, not silent"
+    assert reason.endswith(team_service.WAKEUP_CLOSE), "the licence to stop survives the clip"
+
+
+def test_the_wakeup_budget_leaves_the_delta_limit_room_to_grow() -> None:
+    """``_render_wakeup``'s arithmetic holds while each line's share stays above
+    the ellipsis floor. Measured at the limit the fleet actually uses and at 700
+    — two orders of magnitude up — so the margin is a property of the budget
+    rather than a coincidence of ``_DELTA_LIMIT`` being 10 today.
+
+    Rendered through the real function with worst-case text, not asserted as a
+    number someone can lower while doing something else.
+    """
+    hostile = "証" * 4000
+    for count in (team_service._DELTA_LIMIT, 700):
+        events = [
+            TeamEvent(
+                id=new_event_id(),
+                project_id="p",
+                session_id=CODER,
+                kind="task_review",
+                text=f"event{index} {hostile}",
+                created_at=datetime.now(tz=UTC),
+            )
+            for index in range(count)
+        ]
+        reason = team_service._render_wakeup(events, {CODER: "coder"}, truncated=True)
+        payload = json.dumps({"decision": "block", "reason": reason})
+
+        assert len(payload) < _HOOK_OUTPUT_CAP, (count, len(payload))
+        assert reason.count("\n- ") == count, count
+        assert reason.endswith(team_service.WAKEUP_CLOSE), count
 
 
 def test_the_stop_that_ends_a_continuation_schedules_the_rest(
@@ -1001,6 +1096,87 @@ def test_the_manager_briefing_is_injected_at_session_start(
     assert "Your standing cycle (manager)" in result.stdout
     assert "fleet spawn" in result.stdout
     assert "Never write code. Never merge." in result.stdout
+
+
+# --- numbered seats ride their role's cycle and ladder --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("seat", "expected"),
+    [
+        ("coder1", "coder"),
+        ("coder2", "coder"),
+        ("reviewer12", "reviewer"),
+        # Not a seat at all: unchanged, so nothing is promoted to a real role by
+        # accident. `codr1` is the typo `launch`'s whitelist exists to catch, and
+        # `bot7` is a role an operator may legitimately have declared in config.
+        ("coder", "coder"),
+        ("codr1", "codr1"),
+        ("bot7", "bot7"),
+        ("7", "7"),
+        ("", ""),
+    ],
+)
+def test_base_role_strips_a_seat_number_and_nothing_else(seat: str, expected: str) -> None:
+    assert team_service.base_role(seat) == expected
+
+
+def test_a_numbered_seat_gets_its_roles_standing_cycle_and_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``aisquare launch coder1`` exports the seat verbatim as ``AISQUARE_ROLE``
+    (the board must show ``coder1``, and ``team bind coder1`` binds that seat),
+    so every harness lookup downstream sees ``coder1``.
+
+    Measured before ``base_role`` existed: ``harness.role_cycle('coder1', …)``
+    returned ``[]`` where ``'coder'`` returns 7 lines, and
+    ``harness.model_mismatch('coder1', <anything>)`` returned ``None`` — so the
+    crew shape README documents launched with NO standing work cycle and exempt
+    from the board's only tiering signal, which is the opposite of what the seat
+    comment in ``cli/launch.py`` promises.
+
+    Asserted on the injected board — the artefact the session actually receives —
+    rather than on ``role_cycle``'s arguments.
+    """
+    monkeypatch.setenv("AISQUARE_ROLE", "coder1")
+    work = tmp_path / "seat-repo"
+    work.mkdir()
+
+    board = team_service.hook_session_start(
+        "5eaa0000-0000-0000-0000-000000000001",
+        work,
+        "startup",
+        model="claude-haiku-4-5",
+        effort="low",
+    )
+
+    assert "(role: coder1)" in board, "the seat keeps its identity on the board"
+    assert "Your standing cycle (coder)" in board
+    assert "task next --role coder --claim" in board
+    assert "⚠ off-ladder" in board, "a seat is judged against its role's ladder"
+
+
+def test_a_role_that_is_not_a_seat_of_a_real_role_gets_no_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control. Stripping digits unconditionally would hand ``codr1``
+    — the typo the whitelist exists to catch — a coder's briefing, and hand every
+    operator-declared role a briefing written for someone else."""
+    monkeypatch.setenv("AISQUARE_ROLE", "codr1")
+    work = tmp_path / "typo-repo"
+    work.mkdir()
+
+    board = team_service.hook_session_start(
+        "5eaa0000-0000-0000-0000-000000000002",
+        work,
+        "startup",
+        model="claude-haiku-4-5",
+        effort="low",
+    )
+
+    assert "(role: codr1)" in board
+    assert "standing cycle" not in board
+    assert "off-ladder" not in board
 
 
 # --- the roster registers every identity the fleet can emit (§3.3) ---------------------

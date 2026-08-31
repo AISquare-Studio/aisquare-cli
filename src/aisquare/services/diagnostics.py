@@ -35,6 +35,7 @@ from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import fleet as fleet_service
+from aisquare.services import team as team_service
 
 
 def status() -> StatusReport:
@@ -198,9 +199,29 @@ def _check_provenance() -> DoctorCheck:
 
 
 def _check_home() -> DoctorCheck:
+    """Whether the aisquare home is a directory we could work in.
+
+    ``exists()`` was the whole test, and it is true of a regular FILE — so the
+    one check whose entire job is the home reported ``ok`` for a home that can
+    never be created, and the failure surfaced two checks later as
+    ``context.db is unreadable: [Errno 17] File exists`` with the corrupt-store
+    remedy attached: a ``mv <file>/context.db …`` that cannot run, because there
+    is no directory to move anything out of. Measured with
+    ``AISQUARE_HOME=<a 1-byte file> aisquare --json doctor``.
+
+    Three shapes, three verdicts. A symlink to a directory is a directory here,
+    which is right: ``ensure_home`` follows it and everything works.
+    """
     home = paths.aisquare_home()
-    if home.exists():
+    if home.is_dir():
         return _ok("home", f"{home} exists")
+    if home.exists():
+        return _fail(
+            "home",
+            f"{home} exists but is not a directory — nothing can be created inside it",
+            f"AISQUARE_HOME must point at a directory: move {home} aside, or repoint "
+            "AISQUARE_HOME and run `aisquare init`",
+        )
     return _fail("home", f"{home} is missing", "Set it up: aisquare init")
 
 
@@ -336,9 +357,20 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
     Reported at ok status because ``home`` owns that verdict and already fails:
     a second failure here would send an operator to look at the database when
     the answer is that nothing has been set up yet.
+
+    A home that EXISTS but is not a directory short-circuits for the same
+    reason and a sharper one. ``ensure_home`` cannot mkdir over a file, so every
+    check downstream fails with the raw ``FileExistsError`` and offers its own
+    remediation for it — ``database`` was measured printing the corrupt-store
+    recovery, a ``mv`` inside a path that is not a directory. One wrong verdict
+    the operator can act on is worse than a quiet deferral to the check that has
+    the right one.
     """
-    if paths.aisquare_home().exists():
+    home = paths.aisquare_home()
+    if home.is_dir():
         return None
+    if home.exists():
+        return _ok(name, f"not evaluated — {home} is not a directory (see the `home` check)")
     return _ok(name, "not created yet — set it up: aisquare init")
 
 
@@ -765,7 +797,11 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
         interference = harness.interfering_env()
         mismatches: list[str] = []
         for session in live:
-            complaint = harness.model_mismatch(session.role, session.model)
+            # `base_role`: a numbered seat (`coder1`, the shape README documents
+            # for a parallel crew) rides its role's ladder, so it is judged
+            # against it. Keyed on the raw role, `ROLE_PROFILES.get` missed and
+            # every seat was silently exempt from the board's only tiering signal.
+            complaint = harness.model_mismatch(team_service.base_role(session.role), session.model)
             if complaint:
                 mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
         problems: list[str] = []

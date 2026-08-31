@@ -56,32 +56,18 @@ MANAGER_ROLE = "manager"
 #: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
 #: in one role and need them apart on the board; the base is derived by stripping
 #: the digits rather than matched against a second copy of the role list, so the
-#: two can never drift.
-_SEAT_SUFFIX = re.compile(r"^(?P<base>[a-z][a-z_-]*)\d+$")
 
 
 def base_role(role: str) -> str:
     """The first-class role a numbered seat belongs to — ``coder1`` → ``coder``.
 
-    Anything that is not a seat of a role the harness actually profiles comes
-    back unchanged, so a declared role called ``bot7`` stays ``bot7`` and a typo
-    is never silently promoted to a real role.
-
-    Why this exists at all: ``aisquare launch coder1`` exports the seat verbatim
-    as ``AISQUARE_ROLE`` (that is the point — the board must show ``coder1``, and
-    ``team bind coder1`` binds that seat's own profile), and every harness lookup
-    is keyed on the role. Measured before this existed:
-    ``harness.role_cycle('coder1', …)`` returned ``[]`` where ``'coder'`` returns
-    7 lines, and ``harness.model_mismatch('coder1', <anything>)`` returned
-    ``None`` — so a numbered seat, the shape README documents for a parallel
-    crew, was launched with NO standing work cycle and invisible to the board's
-    only tiering signal. The number is an identity, not a new role.
+    A one-line delegate to :func:`aisquare.core.harness.base_role`, which is the
+    one home for the rule: the harness itself now keys its profile lookups on
+    it, so a seat gets its role's cycle, ladder and effort offset. Kept as a
+    name here because this module's callers read as board logic, not harness
+    plumbing.
     """
-    match = _SEAT_SUFFIX.match(role)
-    if match is None:
-        return role
-    base = match.group("base")
-    return base if base in harness.ROLE_PROFILES else role
+    return harness.base_role(role)
 
 
 #: The board events worth waking a manager for: a sub-agent's verdict or hand-off

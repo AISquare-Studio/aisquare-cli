@@ -51,6 +51,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -153,6 +154,33 @@ ROLE_PROFILES: dict[str, RoleProfile] = {
 }
 
 
+#: A numbered SEAT: a first-class role with a crew index glued on (``coder1``).
+_SEAT_SUFFIX = re.compile(r"^(?P<base>[a-z][a-z_-]*)\d+$")
+
+
+def base_role(role: str) -> str:
+    """The first-class role a numbered seat belongs to — ``coder1`` → ``coder``.
+
+    ``cli/launch.py`` accepts numbered seats (a crew runs several agents in one
+    role and needs them apart on the board) and exports the seat VERBATIM as
+    ``AISQUARE_ROLE``, so every lookup in this module is handed ``coder1``.
+    Measured before this existed: ``role_cycle("coder1", …)`` returned ``[]``
+    where ``"coder"`` returns seven lines, ``model_mismatch("coder1", …)``
+    returned ``None`` so the board could never flag a seat as off-ladder, and
+    ``resolve_model("coder1")`` picked no model and no effort offset — the seat
+    launched on the session default. The number is an identity, not a new role.
+
+    Anything that is not a seat of a role this module PROFILES comes back
+    unchanged, so a declared role called ``bot7`` stays ``bot7`` and a typo is
+    never silently promoted to a real role.
+    """
+    match = _SEAT_SUFFIX.match(role)
+    if match is None:
+        return role
+    base = match.group("base")
+    return base if base in ROLE_PROFILES else role
+
+
 def normalize_effort(value: str | None) -> str | None:
     """A raw effort value placed on :data:`EFFORT_SCALE`; ``None`` if unusable.
 
@@ -216,7 +244,7 @@ def resolve_effort(role: str, *, explicit: str | None = None) -> tuple[str, str]
         if rung is not None:
             return rung, source
     base, base_source = base_effort()
-    profile = ROLE_PROFILES.get(role)
+    profile = ROLE_PROFILES.get(base_role(role))
     offset = profile.effort_offset if profile else 0
     wants_ultracode = os.environ.get("AISQUARE_EFFORT", "").strip().lower() == ULTRACODE
     return _apply_offset(base, offset, ultracode=wants_ultracode), base_source
@@ -499,7 +527,7 @@ def resolve_model(
     rung of a ladder is always accepted without proof — resolution never comes
     back empty-handed, and a launch is never blocked.
     """
-    profile = ROLE_PROFILES.get(role)
+    profile = ROLE_PROFILES.get(base_role(role))
     level, effort_source = resolve_effort(role, explicit=effort)
     pinned = role_model_override(role)
     if pinned is not None:
@@ -589,7 +617,7 @@ def model_mismatch(role: str, model: str | None) -> str | None:
     """
     if model is None:
         return None
-    profile = ROLE_PROFILES.get(role)
+    profile = ROLE_PROFILES.get(base_role(role))
     if profile is None:
         return None
     families = [MODEL_FAMILIES[alias] for alias in profile.ladder if alias in MODEL_FAMILIES]
@@ -664,7 +692,12 @@ def interfering_env() -> list[str]:
 
 
 def role_cycle(role: str, session_short_id: str) -> list[str]:
-    """The standing work cycle injected for ``role`` (empty for unknown roles)."""
+    """The standing work cycle injected for ``role`` (empty for unknown roles).
+
+    Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
+    the role it is a seat of — the number is an identity, not a new role.
+    """
+    role = base_role(role)
     sid = session_short_id
     if role == "planner":
         return [

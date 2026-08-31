@@ -359,17 +359,23 @@ def rename(
 ) -> None:
     """Set the project's fleet codename (and rename its tmux session to match)."""
     target = _project(project)
+    notes: list[str] = []
     try:
-        updated = fleet_service.rename(target, codename)
+        updated = fleet_service.rename(target, codename, notes=notes)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(json.dumps(_project_json(updated)))
+        typer.echo(json.dumps({**_project_json(updated), "notes": notes}))
         return
     stdout_console().print(
         f"✓ {_display_name(updated)} is now {updated.codename} "
         f"({fleet_service.session_name(updated.codename or '')})"
     )
+    # The rename fails OPEN on the tmux half (the row is what everything else
+    # reads), and a swallowed one costs `fleet attach` — so say it here rather
+    # than leave the operator to discover it at the escape hatch.
+    for note in notes:
+        stdout_console().print(f"  ⚠ {note}")
 
 
 @app.command("pause")

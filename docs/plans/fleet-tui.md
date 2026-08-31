@@ -25,8 +25,9 @@
 From the owner's brief. Each line is something the finished feature must do.
 
 1. `aisquare` / `asq` with **no arguments**, at a terminal, opens a full-screen
-   UI with mouse support. Scripts, `--help` and `--json` callers see exactly
-   what they see today (usage, exit 2) — a non-TTY never gets a TUI.
+   UI with mouse support. Scripts and `--help` see exactly what they see today
+   (usage, exit 2); `--json` gets a JSON usage object with the same exit code
+   (§3.8) — a non-TTY never gets a TUI.
 2. Two panes: a narrow **navigator** on the left, a wide **content area** on the
    right.
 3. Left: a **Fleet** heading with a `+`. Clicking it opens onboarding on the
@@ -220,7 +221,7 @@ click to answer). Per role on top of that:
 | Role | Default | Note |
 | --- | --- | --- |
 | manager | `auto` | its tool use is board and fleet CLI calls |
-| coder, tester, validator | `auto` | plus a project allowlist for the project's own check commands (`make check`, `pytest`, `git`, `gh`) so they never reach the classifier |
+| coder, tester, validator | `auto` | the classifier sees every tool call. *Not built:* a per-project allowlist for the project's own check commands (`make check`, `pytest`, `git`, `gh`) so routine ones never reach it — the config has no such key |
 | reviewer | `auto` + `--restricted` | read-only by construction |
 
 Changeable per role in `[fleet.roles.<role>]`, in the Settings tab, and per
@@ -252,8 +253,13 @@ Today `aisquare` with no arguments prints usage and exits 2 (`no_args_is_help=Tr
 on the root `Typer`; measured). New behaviour: `no_args_is_help=False`; in
 `main_callback`, when `ctx.invoked_subcommand is None`:
 
-- `--json` given, **or** stdin/stdout not a TTY, **or** `TERM=dumb` → print help,
-  exit 2, byte-for-byte as today;
+- stdin/stdout not a TTY, **or** `TERM=dumb` → print help, exit 2,
+  byte-for-byte as today;
+- `--json` → **one JSON usage object** on stdout (`{"error": "usage", "message":
+  "Missing command."}`) and exit 2. Amended after round 1 of review: echoing the
+  rich help page under `--json` put ~40 lines of human text on stdout, which
+  breaks the repo-wide contract that `--json` stdout is empty or parseable —
+  and on `main` that invocation printed nothing there at all;
 - otherwise → run the fleet UI.
 
 Plus an explicit `aisquare ui` command, so the UI is reachable from a script or
@@ -463,7 +469,7 @@ worktree = true
 
 [fleet.roles.tester]                      # `runner` is accepted as an alias
 permission_mode = "auto"
-worktree = false                          # verifies in the coder's worktree, named by the task
+worktree = false                          # runs in the repo ROOT; point it at a branch yourself
 
 [fleet.roles.reviewer]
 permission_mode = "auto"
@@ -651,8 +657,11 @@ alacritty). In VTE-based terminals and Windows Terminal, shift+enter is
 indistinguishable from enter — we document that per terminal and never fake it
 (`\` + Enter works everywhere in Claude Code).
 
-**Paste.** `Paste.text` → `load-buffer -b asq-paste -` (stdin) →
-`paste-buffer -p -d -b asq-paste -t %pane`. `-p` gives bracketed paste when
+**Paste.** `Paste.text` → `load-buffer -b asq-paste-<pid>-<n> -` (stdin) →
+`paste-buffer -p -d -b <that same name> -t %pane`. The name is per CALL:
+one fixed `asq-paste` let two concurrent pastes cross panes (round 2 measured
+load(A), load(B), paste(A) delivering B's text to pane A, and B's paste then
+failing with `no buffer asq-paste`), so `core.tmux.PASTE_BUFFER` is a prefix. `-p` gives bracketed paste when
 the agent enabled it, which Claude Code does.
 
 **Scrollback.** Offset *k* → `capture-pane -S -k -E (H-1-k)`; wheel changes *k*;
@@ -913,7 +922,7 @@ driven headless with `App.run_test()` / `Pilot`, as `test_watch.py` already does
 | Parallel coders conflict | high without worktrees | correctness | worktree per coder by default; PR per task |
 | Autonomy vs permissions | high | friction or risk | `acceptEdits` + allowlist; 🔔 surfaced; bypass never a default |
 | Textual major bump breaks internals we lean on | medium | maintenance | pin `<9`; Dependabot; Pilot tests |
-| `auto` permission mode unavailable to an account, or the classifier blocks a routine command | medium | friction | spawn detects the refusal and falls back to `acceptEdits`, saying so; project allowlist for its own check commands |
+| `auto` permission mode unavailable to an account, or the classifier blocks a routine command | medium | friction | **Unmitigated in code today** (round 2 struck both claimed mitigations: no refusal detection, no allowlist). Set the mode per role in `[fleet.roles.<role>]` or per spawn with `--permission-mode`; the prompt surfaces as 🔔 on the row |
 | Scope creep into "a whole IDE" | high | delivery | phases with exit criteria; v1 = surface + onboard + manager loop |
 | Dual identity if a fleet launch inherits a traced parent's env | low | data | `disown_inherited_trace` already runs in `launch`; the tmux server env is stripped by the seam ruling |
 
@@ -967,6 +976,7 @@ matrix is filled in Phase 0.
 | --- | --- | --- |
 | 2026-08-28 | First version of the plan. Approach D (tmux substrate) proposed; §12 open. Draft PR #71; suite on the branch: 1767 passed, 1 skipped. | PR #71 |
 | 2026-08-28 | Owner decisions folded in: textual core; `auto` permissions; human merges; roles manager / coder / tester / reviewer / validator; native agent teams off in fleet launches; Codex deferred; every default configurable (§3.10). Naming scheme in §5.7 from a forked planning agent. | owner + PR #71 |
+| 2026-08-31 | **Independent review round 2** (fresh reviewers, told not to read round 1 and to weight the round-1 fix commits): 33 of 36 findings survived, all 33 fixed. The load-bearing ones, all in the fail-open seams: an UNREACHABLE tmux server read as "every pane is gone", so `reap` ended live rows and then removed their worktrees — `TmuxServer.answers()` now asks the one question that separates absence from silence (`display-message -p '#{version}'`: exit 1 with no server, exit 0 even for an empty one; measured on 3.7c); one fixed paste buffer let two concurrent pastes cross panes, so the name is per call; `conf_path()` wrote inside `argv()`, so an unwritable conf tracebacked every fleet command; the tmux seam did not strip `AISQUARE_PIPELINE_ID`, so agents could inherit the starter's Run; a numbered seat (`coder1`) got no work cycle and no ladder — `harness.base_role` is now the one home for the seat→role rule and every profile lookup keys on it; `home_not_creatable` reached only `init`, so every store-touching command still tracebacked on a home that cannot exist (now translated once, in the root group's dispatch); the Stop continuation's reason was bounded by event count but not by characters; a failed-open fleet read tore down the live manager pane and claimed there was no manager; `q` quit from any focused form widget. Six documentation claims were made true rather than promised, and `tests/test_fleet_docs_are_true.py` now pins the mechanically checkable ones against the CLI and the config model, with a negative control per rule. Four capabilities were documented on this branch that the code does not have and are now described honestly: the automated `auto`→`acceptEdits` fallback, the per-project check-command allowlist, an environment rung for `[fleet]` (there is none), and a tester that runs in the coder's worktree (it runs in the repo root). | PR #71 |
 | 2026-08-31 | **Independent review round 1** (five context-free reviewers over the PR diff, two adversarial verifiers per finding): 30 of 32 findings survived and ALL 30 were fixed by five parallel agents with disjoint file ownership. The load-bearing ones: `spawn` reserved a label in one store session and created the worktree in another, so two racing spawns could work one checkout — a live agent's tree is now refused rather than reused, and a worktree agent that loses a label race is refused rather than suffixed; a reused worktree is now put on the branch that spawn asked for (checked out when clean, refused when dirty); `_record` kills its window on ANY store failure, not only an IntegrityError; the cap is settled inside the writing transaction, so racers past it back their own rows out; `reap`/`ls`/`stop`/`tell` address the socket each row was started on instead of the current config's; `stop` leaves the row LIVE when tmux cannot confirm the pane died, and falls back to `pane_facts` when the session was renamed behind us; `ensure_codename` retries a cross-process collision instead of leaking `sqlite3.IntegrityError`; a multi-line `--prompt` is no longer typed before the agent can bracket a paste. `aisquare --json` with no subcommand now emits a JSON usage object, not the help page; `doctor` survives a non-UTF-8 `gh` hosts.yml; §7.3's `note --to manager` now really nudges, and a Stop that ends a continuation no longer strands pending wake events. UI: scrolled captures pass the height bound, the project Doctor tab is fed (with its project's cwd, so its fix buttons work), `DoctorRefreshed` refreshes the sidebar, hidden BoardPanels stop polling and their feed is capped, sidebar arrows survive a click, collapsed rows leave the keyboard cursor, and every notify that interpolates data passes `markup=False`. Tests: UI tests can no longer address the real `asq` socket, the activity control measures both directions, the key sweep covers triple-modifier chords, and two timing assertions stopped depending on runner speed. | PR #71 |
 | 2026-08-31 | CI made green across 3.11/3.12/3.13 (PR #71). Beyond the first three truths: tmux < 3.5 TYPES extended-only chords literally (`keys.EXTENDED_MINIMUM = (3, 5)` gates them; measured 3.3a/3.4/3.5a); and a three-round hunt through tmux's own `-vv` server log (reproduced in a 1-CPU container at ~1 death in 30) showed `stop()`'s real contract: tmux 3.4 sometimes marks a pane dead and NEVER exposes `pane_dead_status`, so `stop()` polls death via `list-panes` (a just-dead pane can answer `display-message` as the wrong pane), waits a bounded 1 s for the status, then ends the row honestly with `exit_status = None`. Every real-tmux test now uses its own socket suffix, and the live test keeps a tmux-side autopsy (`-vv` log through captured stdout) so any future flake names its cause. Verified: 60/60 single-CPU container loop, full suites on 3.12 and 3.14, and a green matrix. | PR #71 |
 | 2026-08-28 | CI (ubuntu-24.04, tmux 3.4) found three integration truths: `window-size manual` CRASHES tmux 3.4 (fatal in the startup conf, and a live set kills the server on the next window op — measured in a container), so the bundled conf drops it and `resize-window` pins windows to manual per-window; `init` with AISQUARE_HOME pointing at a file now fails cleanly (`home_not_creatable`) instead of a traceback under `--json`; the pane scroll test scrolls through known history instead of racing the clamp; and tmux < 3.5 TYPES extended-only chords (`S-Enter`, `S-Escape`, `C-S-<letter>`, `C-M-Enter`…) literally into a pane — measured across 3.3a / 3.4 / 3.5a — so `translate` version-gates them (`EXTENDED_MINIMUM = (3, 5)`) and the doctor recommends 3.5. | PR #71 |

@@ -26,7 +26,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   branches. A `[fleet]` config section in which every value is a default —
   permission mode `auto` for every role, a worktree per coder and reviewer,
   four agents per project, `F12` as the escape key, Claude's native agent
-  teams off in fleet launches — overridable per spawn, in the environment or
+  teams off in fleet launches — overridable per spawn or
   in config. Scripts, pipes and `--json` callers of bare `aisquare` still get
   usage and exit 2. User guide: `docs/fleet.md`; the plan and its decisions
   log: `docs/plans/fleet-tui.md`. Delivered in phases (plan §9); the plan's

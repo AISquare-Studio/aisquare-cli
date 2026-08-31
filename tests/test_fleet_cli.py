@@ -828,7 +828,9 @@ def test_rename_json_is_the_updated_project(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"project", "name", "codename", "tmux_session"}
+    # `notes` carries what a swallowed tmux rename cost (empty when it worked).
+    assert set(payload) == {"project", "name", "codename", "tmux_session", "notes"}
+    assert payload["notes"] == []
     assert payload["codename"] == "ruby-fox"
     assert payload["tmux_session"] == "asq-ruby-fox"
     assert payload["project"]["codename"] == "ruby-fox"

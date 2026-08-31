@@ -175,7 +175,10 @@ class FleetRoleSettings(BaseModel):
     ``acceptEdits``, ``bypassPermissions``, ``manual``, ``dontAsk``, ``plan``); the
     empty string means "pass no flag". ``worktree`` puts the agent in its own git
     worktree; ``extra_args`` are appended to the agent command verbatim.
-    Precedence everywhere: per-spawn flag > environment > this config > built-in.
+    Precedence: per-spawn flag > this config > built-in. NOT the environment:
+    no ``[fleet]`` value is read from an env var (the orchestrator's own knobs
+    — ``AISQUARE_TEAM``, ``AISQUARE_MODEL_<ROLE>`` and friends — are a
+    different surface, documented in the README).
     """
 
     permission_mode: str = "auto"

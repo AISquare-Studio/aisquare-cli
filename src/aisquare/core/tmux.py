@@ -568,6 +568,31 @@ class TmuxServer:
         completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
         return completed.returncode == 0
 
+    def answers(self) -> bool:
+        """Whether a server is listening on this socket at all — not what it holds.
+
+        The reachability question, asked exactly. Every other wrapper here
+        swallows a non-zero exit and reports an unreachable server the way it
+        reports an absent pane (``[]`` / ``None``), so a caller cannot tell
+        "asked and answered" from "could not ask" — which is how a fleet-wide
+        ``reap`` came to read a missing socket as every pane being gone.
+
+        ``display-message -p '#{version}'`` is the cheapest question that
+        separates all three states, measured on tmux 3.7c: no server exits 1
+        (``error connecting to /tmp/tmux-<uid>/<socket>``); a server holding a
+        session exits 0 with the version; and a server holding NOTHING (only
+        reachable with ``exit-empty off``, which :data:`BUNDLED_CONF` does not
+        set) also exits 0 with the version — where ``list-sessions`` exits 0
+        with no output and is therefore indistinguishable from absence.
+
+        Never raises: an unavailable binary is not a server that answered.
+        """
+        try:
+            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+        except TmuxUnavailable:
+            return False
+        return completed.returncode == 0
+
     def spawn_window(
         self,
         session: str,

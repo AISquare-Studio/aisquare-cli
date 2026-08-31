@@ -710,8 +710,14 @@ def test_settings_rejects_an_invalid_codename_and_renames_a_valid_one(
 ) -> None:
     renames: list[tuple[str, str]] = []
 
-    def rename(target: ProjectInfo, codename: str) -> ProjectInfo:
+    def rename(
+        target: ProjectInfo, codename: str, *, notes: list[str] | None = None
+    ) -> ProjectInfo:
+        # `notes` is the service's fail-open channel: a tmux rename it had to
+        # swallow is reported there, and the view shows it.
         renames.append((target.id, codename))
+        if notes is not None:
+            notes.append("tmux kept the old session name (fake)")
         return target.model_copy(update={"codename": codename})
 
     monkeypatch.setattr(fleet_service, "rename", rename)

@@ -671,30 +671,17 @@ def _server_answers(srv: TmuxServer) -> bool:
     that cannot be REACHED exactly as they report a pane that is not there: an
     empty answer, no exception. tmux exits 1 with ``error connecting to
     /tmp/tmux-<uid>/<socket>`` for ``list-panes -a``, ``display-message`` and
-    ``list-sessions`` alike (measured on 3.7c), and each wrapper swallows the
+    ``list-sessions`` alike (measured on 3.7c) and each wrapper swallows the
     non-zero exit. So "no pane answered" is not evidence of dead panes until the
     server itself has said something.
 
-    ``list_sessions`` is the cheapest question :class:`TmuxServer` already
-    exposes, and it swallows the exit status, so an empty list here means either
-    shape: no server, or a server holding nothing. On the FLEET's own server the
-    second one barely exists — ``exit-empty`` is on by default and
-    :data:`~aisquare.core.tmux.BUNDLED_CONF` does not turn it off, and measured
-    on 3.7c a ``start-server`` with no session leaves no socket behind at all
-    (``list-sessions`` then exits 1, "no server running on …"); with
-    ``exit-empty off`` the same server answers ``list-sessions`` with status 0
-    and no lines. So what failing open costs is one reap pass that marks nothing
-    on a hand-started sessionless server — the rows stay live and the next pass
-    settles them — against ending every live row, and removing the merged
-    worktrees of the agents still working in them, whenever the socket path goes
-    stale. A ``TmuxServer.answers()`` that separates the two exactly
-    (``display-message -p '#{version}'``: status 0 on that sessionless server,
-    1 when there is none) is requested; this stands in until it lands.
+    Delegates to :meth:`~aisquare.core.tmux.TmuxServer.answers`, which asks the
+    one question that separates every state exactly. This used to stand in with
+    ``list_sessions()``, whose empty list means either "no server" or "a server
+    holding nothing" — safe on the fleet's own server (``exit-empty`` is on, so
+    the second state barely exists) but not a distinction worth guessing.
     """
-    try:
-        return bool(srv.list_sessions())
-    except TmuxError:
-        return False
+    return srv.answers()
 
 
 def _observe(

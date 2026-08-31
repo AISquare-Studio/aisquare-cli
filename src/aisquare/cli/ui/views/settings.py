@@ -4,9 +4,10 @@ docs/plans/fleet-tui.md §3.10, §4.2: permission mode and worktree per role, th
 escape key, ``max_agents_per_project``, the worktree root, the native-agent-teams
 switch and the project's codename are all user-changeable here, written through
 ``core.config.save_config`` (the one writer) and re-read after every save so the
-form shows what the file holds. Precedence stays the harness's: a per-spawn flag
-beats the environment beats this file beats the built-in default — the form
-edits the third rung only.
+form shows what the file holds. Precedence: a per-spawn flag beats this file
+beats the built-in default — the form edits the middle rung. There is no
+environment rung for ``[fleet]``: no value in that section is read from an env
+var (the orchestrator's own knobs are a different surface).
 
 Model, effort and binary per role are NOT here on purpose: they live in
 ``team harness`` / ``team bind`` / ``AISQUARE_MODEL_<ROLE>`` — one home per
@@ -146,9 +147,10 @@ class SettingsView(VerticalScroll):
             yield Button("Reload", id="reload-settings")
         yield Static(
             Text(
-                f"saved to {paths.config_path()} — a per-spawn flag or the environment still "
-                "wins over these. Model, effort and binary per role live in "
-                "`aisquare team harness` and `aisquare team bind`.",
+                f"saved to {paths.config_path()} — a per-spawn flag still wins over "
+                "these (no [fleet] value is read from the environment). Model, effort "
+                "and binary per role live in `aisquare team harness` and "
+                "`aisquare team bind`.",
             ),
             id="settings-note",
         )
@@ -263,8 +265,9 @@ class SettingsView(VerticalScroll):
         if wanted == self.project.codename:
             self.notify(f"the codename is already {wanted}", timeout=4, markup=False)
             return
+        notes: list[str] = []
         try:
-            updated = fleet_service.rename(self.project, wanted)
+            updated = fleet_service.rename(self.project, wanted, notes=notes)
         except fleet_service.FleetError as exc:
             self.notify(str(exc), severity="error", timeout=8, markup=False)
             return
@@ -276,3 +279,8 @@ class SettingsView(VerticalScroll):
             timeout=5,
             markup=False,
         )
+        # A tmux rename the server refused is swallowed by the service (the row
+        # is what everything else reads) — but it costs `fleet attach`, so the
+        # cost is shown rather than left for the escape hatch to reveal.
+        for note in notes:
+            self.notify(note, severity="warning", timeout=10, markup=False)

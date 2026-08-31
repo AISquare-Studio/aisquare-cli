@@ -132,6 +132,21 @@ class FakeTmux(TmuxServer):
         )
 
     # -- sessions and windows --
+    def answers(self) -> bool:
+        """Reachable while tmux is installed — the real one asks tmux its version.
+
+        Faithful to :meth:`aisquare.core.tmux.TmuxServer.answers`: an
+        unavailable BINARY is not a server that answered (it returns False
+        rather than raising), and everything else here is a server that is
+        there. A test that wants "the socket has no server" scripts the runner
+        instead (see the unreachable-server test).
+        """
+        try:
+            self.binary()
+        except TmuxUnavailable:
+            return False
+        return True
+
     def list_sessions(self) -> list[str]:
         self.binary()
         return list(self.sessions)

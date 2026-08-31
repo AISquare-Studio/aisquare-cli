@@ -17,6 +17,12 @@ keys), ``send-keys -l`` (literal text) and ``load-buffer`` + ``paste-buffer -p``
 stripped: the server inherits the environment of whoever starts it and hands it
 to every window, so an inherited tracing identity here would become every
 agent's identity. Each window's agent takes its own through ``aisquare launch``.
+The whole identity goes — ``core.spawn.IDENTITY_ENV_VARS``, headers AND the
+``AISQUARE_PIPELINE_ID``/``AISQUARE_TRACE_AGENT_NAME`` marker: an agent that
+launches untraced (the default) keeps whatever marker it inherited, and that
+marker alone is what ``core.insights.run_key`` and the hook's session→Run join
+file records under. docs/fleet.md's "the tmux server inherits nothing of a
+tracing identity from whoever started it" is that sentence's contract.
 
 Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 
@@ -63,6 +69,8 @@ Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import os
 import re
 import shutil
@@ -79,6 +87,25 @@ MIN_VERSION = (3, 2)
 """``new-window -e`` and ``extended-keys`` arrived in 3.2; ``S-Enter`` needs 3.5
 (3.3/3.4 type extended-only chords literally — ``core.keys.EXTENDED_MINIMUM``)."""
 PASTE_BUFFER = "asq-paste"
+"""PREFIX for a paste buffer; :meth:`TmuxServer.paste` names each call's own.
+
+ONE fixed name was a cross-pane leak. A paste is TWO invocations — ``load-buffer``
+then ``paste-buffer`` — and nothing serialises them across processes: two
+``fleet tell``s, a ``fleet spawn --prompt`` beside a ``tell``, the UI's
+``on_paste`` beside either. Interleaved as load(A), load(B), paste(A) tmux hands
+pane A the text addressed to agent B — and the UI's ``Enter`` submits it —
+while B's own paste then fails with ``no buffer asq-paste``, because ``-d``
+deleted the one buffer. Verified on 3.7c, and
+``test_live_two_pastes_at_once_reach_the_pane_they_were_addressed_to`` keeps
+both halves: the fix, and the old behaviour as the control on the mechanism.
+"""
+
+#: Per-call suffix, so no two ``load``/``paste`` pairs can cross. The pid
+#: separates processes; the counter separates calls within one (``next`` on an
+#: ``itertools.count`` is a single C step, so the UI's threads cannot collide on
+#: it). A pid is reused only after its process is gone, and ``load-buffer``
+#: overwrites, so a leftover from a crashed paste cannot be delivered.
+_PASTE_SEQUENCE = itertools.count()
 CONF_NAME = "fleet-tmux.conf"
 CHECK_SOCKET_SUFFIX = "-check"
 """Where :meth:`TmuxServer.check_conf` starts its throwaway server: ``<socket>-check``."""
@@ -368,6 +395,10 @@ class TmuxServer:
         #: frames a second bought nothing: tmux reads it only when the server
         #: starts, and drift is fixed by the next process that starts one.
         self._conf_ready: Path | None = None
+        #: What :meth:`conf_path` failing open cost, once it has been called and
+        #: something did fail; ``None`` while the conf is the bundled one. Read
+        #: it to TELL somebody — nothing here prints.
+        self.conf_fallback: str | None = None
 
     # --- availability -----------------------------------------------------------
 
@@ -409,20 +440,82 @@ class TmuxServer:
     # --- running commands -----------------------------------------------------------
 
     def conf_path(self) -> Path:
-        """The bundled configuration on disk, rewritten whenever it drifts."""
+        """The bundled configuration on disk, rewritten whenever it drifts.
+
+        FAILS OPEN — no ``OSError`` leaves this method. :meth:`argv` calls it,
+        so it runs on EVERY tmux command, and a home it cannot write (a
+        root-owned conf after one ``sudo asq``, a read-only home, ENOSPC) used
+        to put a ``PermissionError`` through ``has_session``, ``run``, … past
+        this class's contract and past ``cli/fleet.py``'s ``except FleetError``:
+        a raw traceback, and zero bytes on stdout under ``--json``. Mapping it
+        to :class:`TmuxError` was the other option and is not enough on its own
+        — the CLI catches ``FleetError``, so ``fleet attach`` would still
+        traceback — so the write is repair, not a precondition, and a failed
+        repair costs the repair only. :attr:`conf_fallback` records what it
+        cost, for a caller that wants to say so; the doctor's conf check reads
+        the file itself (``diagnostics._fleet_conf``) and is unaffected.
+
+        Why the branches differ, measured on tmux 3.7c: ``-f`` is read only when
+        a server STARTS, a MISSING ``-f`` file is not an error (exit 0, built-in
+        defaults), and an UNREADABLE one kills the start outright ("server
+        exited unexpectedly", exit 1). So a conf that could be read but not
+        rewritten is handed over STALE — the drift is whatever an upgrade
+        changed, and the next process with a writable home repairs it — while
+        one that could not be read is replaced by ``os.devnull``, which costs
+        the bundled options on a server this process starts (status bar on,
+        escape-time back to 500 ms, extended keys off, so ``S-Enter`` never
+        reaches an agent) and never the command.
+        """
         if self._conf is not None:
             return self._conf
         if self._conf_ready is not None:
             return self._conf_ready
-        path = paths.ensure_home() / CONF_NAME
+        path, cost = self._ensure_conf()
+        # Cached like a successful write: a home that refused one write refuses
+        # every later one too, and retrying per command would pay for it twenty
+        # times a second while the UI renders.
+        self._conf_ready = path
+        self.conf_fallback = cost
+        return path
+
+    def _ensure_conf(self) -> tuple[Path, str | None]:
+        """``(the conf to hand tmux, what failing open cost)`` — ``None`` when nothing did."""
+        try:
+            path = paths.ensure_home() / CONF_NAME
+        except OSError as exc:
+            return Path(os.devnull), (
+                f"could not create the aisquare home ({exc.strerror or exc}) — the fleet's "
+                "tmux server starts with tmux's built-in options, not the bundled ones"
+            )
+        absent = False
+        readable = True
         try:
             current = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            current, absent = "", True
         except OSError:
-            current = ""
-        if current != BUNDLED_CONF:
+            current, readable = "", False
+        if current == BUNDLED_CONF:
+            return path, None
+        try:
             path.write_text(BUNDLED_CONF, encoding="utf-8")
-        self._conf_ready = path
-        return path
+        except OSError as exc:
+            why = f"could not write {path} ({exc.strerror or exc})"
+            if absent:
+                return path, (
+                    f"{why} — the fleet's tmux server starts with tmux's built-in options, "
+                    "not the bundled ones"
+                )
+            if readable:
+                return path, (
+                    f"{why} — tmux gets the file that is there, whose options are "
+                    "whatever the last version wrote"
+                )
+            return Path(os.devnull), (
+                f"{why}, and it cannot be read either — an unreadable -f file makes tmux "
+                "exit at startup, so the server gets /dev/null and tmux's built-in options"
+            )
+        return path, None
 
     def _argv_on(self, socket: str, conf: str, *args: str) -> list[str]:
         return [self.binary(), "-L", socket, "-f", conf, *args]
@@ -679,11 +772,28 @@ class TmuxServer:
             self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
 
     def paste(self, pane_id: str, text: str) -> None:
-        """Bracketed paste: the agent sees one paste, not one Enter per line."""
+        """Bracketed paste: the agent sees one paste, not one Enter per line.
+
+        The buffer belongs to THIS call (:data:`PASTE_BUFFER` says what one
+        shared name cost), so ``-d`` deletes exactly the buffer this call
+        created and an interleaved paste elsewhere cannot be delivered here.
+        """
         if not text:
             return
-        self.run("load-buffer", "-b", PASTE_BUFFER, "-", stdin=text.encode("utf-8"))
-        self.run("paste-buffer", "-p", "-d", "-b", PASTE_BUFFER, "-t", pane_id)
+        buffer_name = f"{PASTE_BUFFER}-{os.getpid()}-{next(_PASTE_SEQUENCE)}"
+        self.run("load-buffer", "-b", buffer_name, "-", stdin=text.encode("utf-8"))
+        try:
+            self.run("paste-buffer", "-p", "-d", "-b", buffer_name, "-t", pane_id)
+        except TmuxError:
+            # The pane died between the two calls. ``-d`` never ran, so the text
+            # is still a buffer on a server the user can attach to, where
+            # `prefix-]` would deliver an agent's prompt to whatever pane they
+            # are looking at — and a per-call name is never reused, so nothing
+            # overwrites it. Tidy it away; the error the caller gets is the
+            # paste's, never the tidy-up's.
+            with contextlib.suppress(TmuxError):
+                self.run("delete-buffer", "-b", buffer_name)
+            raise
 
     def resize(self, pane_id: str, width: int, height: int) -> None:
         """Size the pane's window to the pane the UI is showing it in."""

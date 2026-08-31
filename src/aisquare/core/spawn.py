@@ -8,6 +8,16 @@ and an *undecided* one is not neutral: a probe subprocess that inherits a real
 role's identity mints a junk Run under that role and corrupts the dataset the
 morning experiments measure.
 
+The headers are not the whole identity. A traced launch also exports the run
+key and the role it ran as (``AISQUARE_PIPELINE_ID``,
+``AISQUARE_TRACE_AGENT_NAME`` — ``services.explainability.trace_marker``), and
+those are what a process DOWNSTREAM of the agent keys its records on:
+``core.insights.run_key`` reads the first one, and the session→Run join the
+hook writes reads both. So a child that keeps them files its work under the
+parent's Run even when its own model traffic is untraced — which is why
+:data:`IDENTITY_ENV_VARS`, not :data:`TRACING_ENV_VARS`, is what a stripping
+seam removes.
+
 So the decisions are written down here rather than left implicit, and
 ``tests/test_spawn_seams.py`` walks the AST of this package on every run to
 assert that ``SEAMS`` still names every call site that exists. A docstring
@@ -82,12 +92,35 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-#: Environment that carries a tracing identity. A child that is not itself the
-#: traced agent must not inherit these. Kept beside the seam registry rather
-#: than imported from ``services.explainability`` because ``core`` does not
-#: depend on ``services`` — ``tests/test_spawn_seams.py`` pins the two against
-#: each other so they cannot drift apart.
+#: The HEADER half of a tracing identity — the routing the wiring sets, and the
+#: names it stands down on when the operator already owns them. Kept beside the
+#: seam registry rather than imported from ``services.explainability`` because
+#: ``core`` does not depend on ``services`` — ``tests/test_spawn_seams.py`` pins
+#: the two against each other so they cannot drift apart. What a seam strips is
+#: :data:`IDENTITY_ENV_VARS`, which is this plus the marker pair below.
 TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
+
+#: The MARKER half: the run key and role a traced launch exports beside the
+#: headers (``services.explainability.trace_marker``). Duplicated here for the
+#: same reason as above, and pinned to the wiring's own names by
+#: ``tests/test_spawn_seams.py`` in both directions.
+#:
+#: They are not decoration: ``core.insights.run_key`` files every insight under
+#: ``AISQUARE_PIPELINE_ID`` when it is set, and the hook reads both to write the
+#: session→Run join. Stripping only the headers left an excluded child with the
+#: parent's run key — measured on the tmux seam, where the private server hands
+#: its environment to every window: an agent that then launched untraced (the
+#: default) filed its insights and its join under whoever started the server,
+#: which ``trace_marker``'s own docstring calls "worse than no record because it
+#: reads as evidence".
+MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME")
+
+#: Everything :func:`untraced_env` removes: the whole identity, header and
+#: marker. Separate from :data:`TRACING_ENV_VARS` because that tuple has a
+#: second job — it is the stand-down list the wiring shares, and it is joined
+#: into a shell snippet the CLI prints — so widening it in place would change
+#: user-visible output and the reserved-var guard.
+IDENTITY_ENV_VARS = (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 
 TRACED = "traced"
 EXCLUDED = "excluded"
@@ -185,10 +218,12 @@ SEAMS: dict[str, Seam] = {
 def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """``base`` (default the current environment) without the tracing identity.
 
-    A plain copy minus :data:`TRACING_ENV_VARS`. Never mutates ``base``, and
-    never raises — this runs on paths whose whole contract is that they degrade
-    quietly, and a child losing two variables it was not entitled to is not a
-    failure worth reporting.
+    A plain copy minus :data:`IDENTITY_ENV_VARS` — the headers AND the marker
+    pair, because a child that keeps the run key files its records under the
+    parent's Run however its own model traffic is routed. Never mutates
+    ``base``, and never raises — this runs on paths whose whole contract is that
+    they degrade quietly, and a child losing four variables it was not entitled
+    to is not a failure worth reporting.
     """
     source = os.environ if base is None else base
-    return {key: value for key, value in source.items() if key not in TRACING_ENV_VARS}
+    return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}

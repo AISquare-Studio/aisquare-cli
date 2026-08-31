@@ -23,7 +23,14 @@ from typing import Any
 import pytest
 
 from aisquare.core import spawn
-from aisquare.core.spawn import SEAMS, TRACED, TRACING_ENV_VARS, untraced_env
+from aisquare.core.spawn import (
+    IDENTITY_ENV_VARS,
+    MARKER_ENV_VARS,
+    SEAMS,
+    TRACED,
+    TRACING_ENV_VARS,
+    untraced_env,
+)
 from aisquare.services import distill as _distill
 
 #: The REAL ``spawn_drain``, captured at import. conftest's autouse
@@ -242,16 +249,62 @@ def test_tracing_vars_agree_with_the_wiring_that_sets_them() -> None:
     )
 
 
+def test_the_strip_covers_everything_a_traced_launch_exports() -> None:
+    """``IDENTITY_ENV_VARS`` against the wiring, in BOTH directions.
+
+    Forward: the tuple is the headers plus the marker pair, under the wiring's
+    own names — a rename there fails here rather than silently leaving a name
+    unstripped. Backward, and the half that actually caught the leak: whatever
+    a traced launch PUTS in an agent's environment must be a subset of what the
+    strip removes. Stripping the headers alone satisfied the forward check
+    forever while ``AISQUARE_PIPELINE_ID`` — the name ``insights.run_key`` files
+    every record under — went through untouched.
+    """
+    from aisquare.services import explainability
+
+    assert tuple(MARKER_ENV_VARS) == (
+        explainability.PIPELINE_ID_ENV_VAR,
+        explainability.TRACE_AGENT_NAME_ENV_VAR,
+    )
+    assert tuple(IDENTITY_ENV_VARS) == (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
+
+    # What a traced launch exports: `cli/launch.py` and `cli/team.py` both do
+    # env.update(wiring.env) then env.update(trace_marker(wiring)).
+    wiring = explainability.SessionWiring(
+        traced=True,
+        reason="traced as aisquare-coder (pipeline run-1)",
+        env={"ANTHROPIC_BASE_URL": "http://127.0.0.1:9190", "ANTHROPIC_CUSTOM_HEADERS": "X-…"},
+        agent_name="aisquare-coder",
+        pipeline_id="run-1",
+    )
+    exported = {**wiring.env, **explainability.trace_marker(wiring)}
+    assert exported, "a traced wiring that exports nothing would make the check vacuous"
+    assert set(exported) <= set(IDENTITY_ENV_VARS), (
+        f"a traced launch exports {sorted(set(exported) - set(IDENTITY_ENV_VARS))}, which "
+        "no seam strips — an excluded child would inherit it"
+    )
+    # …and the marker really is the identity: disowning pops exactly these four.
+    disownable = dict.fromkeys(IDENTITY_ENV_VARS, "x") | {"AISQUARE_PIPELINE_ID": "run-1"}
+    assert explainability.disown_inherited_trace(disownable) == "run-1"
+    assert disownable == {}, f"disown left {sorted(disownable)} — the two lists disagree"
+
+
 # ── the strip itself ─────────────────────────────────────────────────────────
 
 
 @pytest.fixture
 def traced_parent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An environment that looks like a live traced agent session."""
+    """An environment that looks like a live traced agent session.
+
+    All four names, because that is what ``aisquare launch`` exports: the header
+    pair AND the marker pair a child keys its own records on.
+    """
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9190")
     monkeypatch.setenv(
         "ANTHROPIC_CUSTOM_HEADERS", "X-Agent-Name: aisquare-coder\nX-Pipeline-Id: run-1"
     )
+    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "run-1")
+    monkeypatch.setenv("AISQUARE_TRACE_AGENT_NAME", "aisquare-coder")
 
 
 def test_untraced_env_drops_the_identity_and_nothing_else(
@@ -262,16 +315,25 @@ def test_untraced_env_drops_the_identity_and_nothing_else(
 
     env = untraced_env()
 
-    assert "ANTHROPIC_BASE_URL" not in env
-    assert "ANTHROPIC_CUSTOM_HEADERS" not in env
+    for name in IDENTITY_ENV_VARS:
+        assert name not in env, f"{name} survives the strip"
     assert env["ANTHROPIC_API_KEY"] == "kept", "credentials are how the child authenticates"
     assert env["PATH"] == "/usr/bin"
+    # The marker half, named rather than only iterated: it is the one that was
+    # missing, and a shrunk IDENTITY_ENV_VARS must fail this test and not pass
+    # it by iterating over less.
+    assert "AISQUARE_PIPELINE_ID" not in env
+    assert "AISQUARE_TRACE_AGENT_NAME" not in env
+    # Negative control on the same environment: an AISQUARE_ name that is not
+    # the identity stays, so this is a strip and not a purge of our namespace.
+    monkeypatch.setenv("AISQUARE_HOME", "/tmp/asq-home")
+    assert untraced_env()["AISQUARE_HOME"] == "/tmp/asq-home"
 
 
 def test_untraced_env_does_not_mutate_what_it_was_given() -> None:
-    base = {"ANTHROPIC_BASE_URL": "http://x", "KEEP": "1"}
+    base = {"ANTHROPIC_BASE_URL": "http://x", "AISQUARE_PIPELINE_ID": "run-1", "KEEP": "1"}
     assert untraced_env(base) == {"KEEP": "1"}
-    assert base == {"ANTHROPIC_BASE_URL": "http://x", "KEEP": "1"}
+    assert base == {"ANTHROPIC_BASE_URL": "http://x", "AISQUARE_PIPELINE_ID": "run-1", "KEEP": "1"}
 
 
 def test_the_model_probe_never_inherits_a_role_identity(traced_parent: None) -> None:
@@ -287,7 +349,7 @@ def test_the_model_probe_never_inherits_a_role_identity(traced_parent: None) -> 
 
     env = harness._probe_env()
 
-    for name in TRACING_ENV_VARS:
+    for name in IDENTITY_ENV_VARS:
         assert name not in env, f"{name} reaches the probe child"
 
 
@@ -313,7 +375,7 @@ def test_the_gbrain_worker_never_inherits_a_role_identity(
 
     env = brain._env(tmp_path)
 
-    for name in TRACING_ENV_VARS:
+    for name in IDENTITY_ENV_VARS:
         assert name not in env, f"{name} reaches gbrain"
 
 
@@ -337,7 +399,7 @@ def test_the_detached_distiller_never_inherits_a_role_identity(
 
     env = seen["env"]
     assert env is not None, "the drain must pass an environment, not inherit one wholesale"
-    for name in TRACING_ENV_VARS:
+    for name in IDENTITY_ENV_VARS:
         assert name not in env, f"{name} reaches the detached distiller"
     assert env.get("PATH") == os.environ.get("PATH")
 

@@ -42,8 +42,11 @@ project's **manager** (an agent you task in prose; it plans, spawns coders,
 testers and reviewers, loops until the goal is met, and reports), or any
 agent's *real* Claude Code session, live. Agents run inside a private tmux
 server, so they outlive the UI, and `aisquare fleet attach` shows the same
-session from any terminal. Needs `tmux` 3.2+. Scripts, pipes and `--json`
-callers of bare `aisquare` still get usage and exit 2, exactly as before.
+session from any terminal. Needs `tmux` 3.2+. Scripts still never meet a
+full-screen app: bare `aisquare` in a pipe or under `TERM=dumb` prints usage and
+exits 2, exactly as before, while under `--json` it prints one usage object —
+`{"error": "usage", "message": "Missing command."}` — and exits 2, so a `jq`
+pipeline gets JSON rather than a help page.
 
 **[The fleet](docs/fleet.md)** has the first five minutes, the roles, the
 `aisquare fleet …` command reference and every default you can change. It is a

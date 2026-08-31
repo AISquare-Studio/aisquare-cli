@@ -102,6 +102,8 @@ _NOT_AN_AGENT = _SHELLS | {"tmux"}
 exit), and ``tmux`` itself — a new pane reads ``tmux`` for the first few hundred
 milliseconds, between the fork and the exec (measured on 3.7c)."""
 _LABEL_RETRIES = 5
+_CODENAME_RETRIES = 5
+"""How many times a codename assignment re-walks past a name another process took."""
 _GIT_TIMEOUT = 120.0
 _SEP = "|~|"
 _ACTIVITY_FORMAT = f"#{{pane_id}}{_SEP}#{{window_activity}}"
@@ -143,7 +145,10 @@ class SpawnReceipt:
     asked_label: str | None
     tmux_session: str
     notes: list[str] = field(default_factory=list)
-    """Anything the caller should see: a permission-mode fallback, a suffixed label."""
+    """Anything the caller should see: a suffixed label, a reused worktree (and the
+    branch it was put on), a prompt that could not be typed, an agent that will not
+    join the board. NOT a permission-mode fallback — there is none: the mode is the
+    flag, then the role's config, then ``auto``, and nothing here rewrites it."""
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,24 @@ def role_settings(role: str, config: FleetSettings | None = None) -> FleetRoleSe
 def server(config: FleetSettings | None = None) -> TmuxServer:
     """The private tmux server the fleet runs on."""
     return TmuxServer((config or settings()).tmux_socket)
+
+
+def server_for(socket: str, config: FleetSettings | None = None) -> TmuxServer:
+    """The server a RECORDED agent lives on — ITS socket, not today's config.
+
+    Every ``fleet_agent`` row stores the socket it was started on, because an
+    operator who edits ``[fleet] tmux_socket`` must not thereby make every
+    running agent unreachable: the new socket answers "no such window" for
+    them, which is indistinguishable from "the pane is gone" and would end
+    rows whose processes are still running. ``services.diagnostics`` and the
+    UI's agent pane already address panes by the stored socket; the lifecycle
+    here does too. Routed through :func:`server` so a caller that fakes that
+    one factory sees every socket.
+    """
+    config = config or settings()
+    if socket and socket != config.tmux_socket:
+        config = config.model_copy(update={"tmux_socket": socket})
+    return server(config)
 
 
 def _team() -> ModuleType:
@@ -262,17 +285,33 @@ def resolve_project(ref: str | None = None, *, cwd: Path | None = None) -> Proje
 
 
 def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> ProjectInfo:
-    """Give the project its codename if it has none (lazily, on first fleet contact)."""
+    """Give the project its codename if it has none (lazily, on first fleet contact).
+
+    ``codename_for`` walks past the names a SNAPSHOT of the store called taken,
+    so two processes naming two projects at the same moment can both pick the
+    same candidate; the ``project_codename`` index then refuses the loser.
+    That refusal is retried, not raised: the walk is deterministic, and the
+    re-read includes the name that was just taken, so the next attempt lands
+    one pair further on.
+    """
     if project.codename:
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
         store.ensure_project(project)
-        current = store.get_project(project.id)
-        if current is not None and current.codename:
-            return current
-        name = codenames.codename_for(project.id, taken=store.codenames_in_use())
-        return store.set_codename(project.id, name)
+        for _ in range(_CODENAME_RETRIES):
+            current = store.get_project(project.id)
+            if current is not None and current.codename:
+                return current
+            name = codenames.codename_for(project.id, taken=store.codenames_in_use())
+            try:
+                return store.set_codename(project.id, name)
+            except sqlite3.IntegrityError:
+                continue  # another process took that name between the read and the write
+        raise FleetError(
+            f"could not give {_name(project)} a codename: every name this walk tried was "
+            f"taken by another project while writing it ({_CODENAME_RETRIES} attempts)"
+        )
 
     if store is not None:
         return assign(store)
@@ -393,6 +432,45 @@ def _exclude_worktrees(root: Path, worktree_dir: str, notes: list[str]) -> None:
         )
 
 
+def _empty_dir(path: Path) -> bool:
+    """Whether ``path`` is a directory with nothing in it (an unreadable one is not)."""
+    try:
+        return path.is_dir() and next(path.iterdir(), None) is None
+    except OSError:
+        return False
+
+
+def _reuse_worktree(root: Path, path: Path, branch: str, notes: list[str]) -> None:
+    """Put an existing worktree ON ``branch`` before an agent is started in it.
+
+    A label outlives one task — an ended agent frees it (§5.7) — so the tree
+    left behind may still sit on the PREVIOUS task's branch. Handing it over as
+    it is would make an agent spawned for task B commit to
+    ``fleet/<codename>/<taskA>-…``, which is the one thing
+    :func:`branch_name` promises does not happen. Clean and on another branch:
+    switched. Dirty and on another branch: refused, because the uncommitted
+    work is somebody's and neither switching over it nor ignoring it is this
+    function's call to make.
+    """
+    head = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
+    current = head.stdout.strip() if head.returncode == 0 else ""
+    where = f"on {current}" if current else "on a detached HEAD"
+    if current == branch:
+        notes.append(f"reusing the existing worktree at {path} (already on {branch})")
+        return
+    dirty = _git(path, "status", "--porcelain")
+    if dirty.returncode != 0 or dirty.stdout.strip():
+        raise FleetError(
+            f"the worktree at {path} holds uncommitted work {where} and this agent needs "
+            f"{branch} — commit or stash it there, or spawn under another label"
+        )
+    if _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+        _git_ok(path, "checkout", branch)
+    else:
+        _git_ok(path, "checkout", "-b", branch)
+    notes.append(f"reusing the existing worktree at {path} — it was {where}, now on {branch}")
+
+
 def _ensure_worktree(
     root: Path, worktree_dir: str, label: str, branch: str, notes: list[str]
 ) -> Path:
@@ -401,16 +479,23 @@ def _ensure_worktree(
     Reuse is deliberate: a coder respawned on the same task after review
     findings must land in the tree that holds its branch, not beside it. A
     branch that already exists is checked out rather than recreated, so the
-    second spawn continues the first one's work.
+    second spawn continues the first one's work — and a reused tree is put on
+    the branch THIS spawn asked for (see :func:`_reuse_worktree`), never handed
+    over on whatever branch the last agent left it on.
     """
     path = root / worktree_dir / label
     if path.exists():
         if (path / ".git").exists():
-            notes.append(f"reusing the existing worktree at {path}")
+            _reuse_worktree(root, path, branch, notes)
             return path
-        raise FleetError(
-            f"{path} exists and is not a git worktree — remove it or pick another label"
+        # A `git worktree add` still in flight has made the directory and not
+        # yet its .git; saying "remove it" about that would be wrong advice.
+        detail = (
+            "it is empty — another spawn may be creating it right now; try again"
+            if _empty_dir(path)
+            else "remove it or pick another label"
         )
+        raise FleetError(f"{path} exists and is not a git worktree — {detail}")
     path.parent.mkdir(parents=True, exist_ok=True)
     # A worktree whose directory was deleted by hand stays registered and blocks
     # `add` at the same path; prune is idempotent and cheap.
@@ -585,6 +670,25 @@ def _observe(
         return seen
     except TmuxError:
         return None
+
+
+def _observe_sockets(
+    agents: Sequence[FleetAgent], tmux_session: str | None, config: FleetSettings | None = None
+) -> dict[str, dict[str, _PaneView] | None]:
+    """Socket → what THAT server says about the live agents recorded on it.
+
+    Rows can span sockets — ``[fleet] tmux_socket`` may have changed since they
+    were started — and each must be asked of the server it lives on
+    (:func:`server_for`). A ``None`` value is one socket that could not be
+    asked at all, which is per socket and not per fleet: an unreachable server
+    must not make the agents on a reachable one read as gone, nor the reverse.
+    """
+    config = config or settings()
+    views: dict[str, dict[str, _PaneView] | None] = {}
+    for socket in {agent.tmux_socket for agent in agents if agent.ended_at is None}:
+        group = [agent for agent in agents if agent.tmux_socket == socket]
+        views[socket] = _observe(server_for(socket, config), tmux_session, group)
+    return views
 
 
 def _exit_detail(status: int | None) -> str | None:
@@ -768,6 +872,7 @@ def spawn(
             task_id=resolved_task_id,
             title=task.title if task is not None else picked,
         )
+        _refuse_occupied_worktree(project, config.worktree_dir, picked)
         cwd = _ensure_worktree(project.root, config.worktree_dir, picked, branch, notes)
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
@@ -813,10 +918,33 @@ def spawn(
         spawned_by=spawned_by,
         created_at=_now(),
     )
-    stored = _record(agent, project, srv, wanted=label, notes=notes)
+    stored = _record(
+        agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
+    )
     if prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+
+
+def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:
+    """Refuse the tree a LIVE agent is working in — before anything touches it.
+
+    ``next_label`` keeps live labels apart, so the only way to arrive here is a
+    parallel spawn that picked this label from a snapshot taken a moment
+    earlier. The tree at ``<worktree_dir>/<label>`` is then the winner's, and
+    neither starting a second agent in it nor (worse) checking another branch
+    out from under the first one is acceptable. The winner's row can still
+    appear AFTER this read; :func:`_relabel` refuses that half of the race.
+    """
+    path = (project.root / worktree_dir / label).resolve()
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    holder = next((a for a in live if a.worktree and a.cwd.resolve() == path), None)
+    if holder is not None:
+        raise FleetError(
+            f"{path} is the live worktree of {holder.label} ({holder.id}) — a parallel spawn "
+            f"took the label {label!r} while this one was starting; spawn again"
+        )
 
 
 def _record(
@@ -826,44 +954,129 @@ def _record(
     *,
     wanted: str | None,
     notes: list[str],
+    cap: int,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
 
-    The window already exists by now, so the label is the one thing that can
-    still be wrong: a parallel spawn may have taken it between ``next_label``
-    and this write. The partial unique index says so with ``IntegrityError``;
-    the suffixed label is recorded and the receipt says which. If no label can
-    be recorded the window is killed rather than left running unrecorded.
+    The window already exists by now, so what can still be wrong is the label
+    and the count: a parallel spawn may have taken either between ``spawn``'s
+    checks and this write. The partial unique index reports the label with
+    ``IntegrityError``; the suffixed label is recorded and the receipt says
+    which. The cap has no index behind it — an index cannot count rows — so it
+    is settled in :func:`_verify_cap`, after the insert.
+
+    Whatever goes wrong, the window does not stay up unrecorded: a label with
+    nothing to fall back on, a store that refuses (``context.db`` locked past
+    its busy timeout, or damaged), the cap — every one of them kills the window
+    and raises :class:`FleetError`, because a live agent no row knows about is
+    one no ``fleet ls`` shows and no ``fleet stop`` can address.
     """
+    try:
+        return _write_row(agent, project, wanted=wanted, notes=notes, cap=cap)
+    except FleetError:
+        _kill_unrecorded(srv, agent.pane_id)
+        raise
+    except Exception as exc:  # a locked or damaged store — the duty is the same
+        _kill_unrecorded(srv, agent.pane_id)
+        raise FleetError(
+            f"could not record the agent ({exc}) — its tmux window was killed rather than "
+            "left running unrecorded"
+        ) from exc
+
+
+def _kill_unrecorded(srv: TmuxServer, pane_id: str) -> None:
+    """Kill a window whose row could not be written. Best effort: it may be gone."""
+    with contextlib.suppress(TmuxError):
+        srv.kill_window(pane_id)
+
+
+def _write_row(
+    agent: FleetAgent, project: ProjectInfo, *, wanted: str | None, notes: list[str], cap: int
+) -> FleetAgent:
+    """The store half of :func:`_record`: insert, relabelling past a live collision."""
     with store_session() as store:
         for _ in range(_LABEL_RETRIES):
             try:
-                return store.upsert_fleet_agent(agent)
+                stored = store.upsert_fleet_agent(agent)
             except sqlite3.IntegrityError:
-                if agent.role == "manager":
-                    break
-                relabel = next_label(
-                    project, agent.role, wanted=wanted, task_id=agent.task_id, store=store
-                )
-                notes.append(
-                    f"label {agent.label!r} was taken while starting — recorded as "
-                    f"{relabel!r} (the tmux window keeps its name)"
-                )
-                agent = agent.model_copy(update={"label": relabel})
-    with contextlib.suppress(TmuxError):
-        srv.kill_window(agent.pane_id)
+                agent = _relabel(agent, project, store, wanted=wanted, notes=notes)
+                continue
+            _verify_cap(store, stored, cap)
+            return stored
+    raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
+
+
+def _relabel(
+    agent: FleetAgent,
+    project: ProjectInfo,
+    store: ContextStore,
+    *,
+    wanted: str | None,
+    notes: list[str],
+) -> FleetAgent:
+    """The same agent under a free label — or a refusal when it cannot be renamed.
+
+    A worktree agent cannot be: its cwd is ``<worktree_dir>/<label>``, chosen
+    for the label this spawn LOST, and the agent that won it is being started
+    in that very tree. Recording this one under a suffixed label would leave
+    two live agents editing one checkout on one branch — the thing worktrees
+    exist to prevent — with only the row's label to say otherwise. So the
+    spawn is refused instead; the window is killed by the caller.
+    """
     if agent.role == "manager":
         raise FleetError(f"{_name(project)} already has a manager — one per project")
-    raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
+    if agent.worktree:
+        raise FleetError(
+            f"label {agent.label!r} was taken while this agent was starting, and "
+            f"{agent.cwd} is that label's worktree — the agent that won the label works "
+            "there, so this one is refused rather than made to share a checkout; spawn again"
+        )
+    relabel = next_label(project, agent.role, wanted=wanted, task_id=agent.task_id, store=store)
+    notes.append(
+        f"label {agent.label!r} was taken while starting — recorded as "
+        f"{relabel!r} (the tmux window keeps its name)"
+    )
+    return agent.model_copy(update={"label": relabel})
+
+
+def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
+    """Back the row out if it is past ``max_agents_per_project``.
+
+    ``spawn`` checks the cap before it starts anything, but that read and this
+    write are different transactions with a worktree and a tmux window between
+    them: N parallel spawns at ``cap - 1`` all pass the check. No index can
+    express "at most N live rows", so the count is settled here, from the row's
+    own place in the live list — ordered by ``created_at, id``, a total order
+    every racer agrees on — so exactly the surplus backs out, and never both
+    sides of a race. The row is ended rather than deleted (the store has no
+    delete): its label is freed and no live listing shows it.
+    """
+    live = store.fleet_agents(stored.project_id, live_only=True)
+    if len(live) <= cap or all(agent.id != stored.id for agent in live[cap:]):
+        return
+    store.end_fleet_agent(stored.id)
+    raise FleetError(
+        f"that would be {len(live)} live agents (max_agents_per_project = {cap}) — another "
+        "spawn took the last slot while this one was starting; stop one, or raise the "
+        "limit in [fleet]"
+    )
 
 
 def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -> None:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
     Ready means the pane's foreground process is no longer our launcher (or it
-    has produced scrollback). Past :data:`PROMPT_TIMEOUT` the prompt is typed
-    anyway and the receipt says so — a slow start must not turn into a hang,
-    and the text sits harmlessly in the input buffer until the agent reads it.
+    has produced scrollback). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
+    is typed anyway and the receipt says so — a slow start must not turn into a
+    hang, and one line sits harmlessly in the pty's input buffer until the
+    agent reads it.
+
+    A multi-line prompt does not: ``paste-buffer -p`` brackets a paste only
+    "if the application has requested bracketed paste mode" (tmux 3.7c's own
+    man page), and past the timeout the foreground is still the launcher, which
+    has requested nothing — so tmux replaces every LF with a CR and the agent
+    reads N submitted messages instead of one. That is not a slow start's cost
+    to pay silently, so it is not typed; the note says what to do instead.
     """
     deadline = _monotonic() + PROMPT_TIMEOUT
     ready = False
@@ -880,6 +1093,15 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
         _sleep(_POLL_INTERVAL)
     if ready:
         _sleep(_PROMPT_SETTLE)
+    elif "\n" in prompt:
+        notes.append(
+            f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
+            "several lines — NOT typed: tmux brackets a paste only for an application that "
+            "asked for bracketed paste, and the launcher has not, so each line would arrive "
+            "as its own message. Send it once the agent is up: `aisquare fleet tell "
+            "<label> …`, or `aisquare fleet attach`"
+        )
+        return
     else:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
@@ -893,19 +1115,18 @@ def _type_prompt(srv: TmuxServer, pane_id: str, prompt: str, notes: list[str]) -
 
 def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
     """The project's agents with their DERIVED state (§5.1)."""
-    srv = server()
     with store_session() as store:
         current = store.get_project(project.id) or project
         agents = store.fleet_agents(project.id, live_only=live_only)
         sessions = {session.id: session for session in store.team_sessions(project.id)}
     tmux_session = session_name(current.codename) if current.codename else None
-    observed = _observe(srv, tmux_session, agents)
+    views = _observe_sockets(agents, tmux_session)
     now = _now()
     return [
         _status(
             agent,
             sessions.get(agent.session_id) if agent.session_id else None,
-            observed,
+            views.get(agent.tmux_socket),
             tmux_session,
             now,
         )
@@ -915,12 +1136,11 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
 
 def status_of(agent: FleetAgent) -> FleetAgentStatus:
     """One agent's derived state: board session first, tmux facts second."""
-    srv = server()
     with store_session() as store:
         project = store.get_project(agent.project_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
     tmux_session = session_name(project.codename) if project and project.codename else None
-    observed = _observe(srv, tmux_session, [agent])
+    observed = _observe(server_for(agent.tmux_socket), tmux_session, [agent])
     return _status(agent, session, observed, tmux_session, _now())
 
 
@@ -943,7 +1163,7 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
         agent = _live_agent(store, project, label)
     status = status_of(agent)
     if status.state == "waiting":
-        srv = server()
+        srv = server_for(agent.tmux_socket)
         try:
             srv.paste(agent.pane_id, text)
             srv.send_keys(agent.pane_id, "Enter")
@@ -973,26 +1193,52 @@ def stop(
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
     cleanly; ``force`` skips the ``/exit`` and goes straight to the kill.
+
+    tmux failing to ANSWER is not evidence that the agent died, so it does not
+    end the row (see :func:`_verify_gone`): a row ended for a process still
+    running is an agent no live listing shows and no ``stop`` can address, and
+    the operator was told "stopped".
     """
     with store_session() as store:
         agent = _live_agent(store, project, label)
-    srv = server()
+    srv = server_for(agent.tmux_socket)
     session = session_name(ensure_codename(project).codename or "")
     exit_status: int | None = None
 
     def _window() -> WindowInfo | None:
         """The agent's window as ``list-panes -s`` reports it; ``None`` = really gone.
 
-        Deliberately NOT ``pane_facts`` (display-message): on some tmux
-        versions a JUST-DEAD pane answers display-message as the wrong pane,
-        which the guard there maps to None — indistinguishable from gone, and
-        the exit status is lost. The window list names dead panes reliably on
-        every version this repo has measured (3.3a, 3.4, 3.5a, 3.7c).
+        The window LIST is asked first, not ``pane_facts`` (display-message):
+        on some tmux versions a JUST-DEAD pane answers display-message as the
+        wrong pane, which the guard there maps to None — indistinguishable from
+        gone, and the exit status is lost. The window list names dead panes
+        reliably on every version this repo has measured (3.3a, 3.4, 3.5a, 3.7c).
+
+        But that list is per SESSION, and the session may not carry the
+        codename: ``rename`` fails open when tmux is unreachable, and the
+        escape hatch lets anyone rename a session by hand. So a pane the list
+        does not name is asked about directly — ``pane_facts`` answers None for
+        both shapes of gone, so a pane that answers at all is alive (or dead
+        with a status) under some other session name, and hard-killing it
+        without the graceful ``/exit`` would drop its ``SessionEnd`` hook, its
+        claims and its exit status.
         """
         for window in srv.list_windows(session):
             if window.pane_id == agent.pane_id:
                 return window
-        return None
+        facts = srv.pane_facts(agent.pane_id)
+        if facts is None:
+            return None
+        return WindowInfo(
+            session=session,
+            window_id="",  # display-message was not asked for one; nothing here reads it
+            name=agent.label,
+            pane_id=facts.pane_id,
+            dead=facts.dead,
+            dead_status=facts.dead_status,
+            current_command=facts.current_command,
+            activity=False,
+        )
 
     try:
         window = _window()
@@ -1025,10 +1271,36 @@ def stop(
             exit_status = window.dead_status
         with suppress(TmuxError):  # already gone — which is what the kill wanted
             srv.kill_window(agent.pane_id)
-    except TmuxError:
-        pass  # the pane is gone or tmux is: the row still ends
+    except TmuxError as exc:
+        exit_status = _verify_gone(_window, label, exc)
     with store_session() as store:
         return store.end_fleet_agent(agent.id, exit_status=exit_status)
+
+
+def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxError) -> int | None:
+    """A stop step failed: end the row only if the pane is VERIFIABLY dead or gone.
+
+    ``TmuxError`` is not proof of death. A 30 s command timeout on a wedged
+    server is one, and so is a tmux that left ``PATH`` — in both, the server
+    and the pane may be perfectly alive, so one more look decides. What the old
+    fail-open cost when that look would have said "alive": a row marked ended
+    for a running process (invisible to every live listing, addressable by no
+    ``stop``, holding its claims and its worktree) and a ``✓ stopped`` printed
+    over it. A pane that answers "gone" or "dead" ends the row as before.
+    """
+    try:
+        window = look()
+    except TmuxError as exc:
+        raise FleetError(
+            f"tmux could not be asked whether {label!r} stopped ({exc}) — it may still be "
+            "running, so its row is left live; try again once tmux answers"
+        ) from cause
+    if window is not None and not window.dead:
+        raise FleetError(
+            f"could not stop {label!r} ({cause}) — its pane is still alive, so its row is "
+            "left live; try again, or `--force` once tmux is healthy"
+        ) from cause
+    return window.dead_status if window is not None else None
 
 
 def reap(project: ProjectInfo | None = None) -> ReapReport:
@@ -1036,9 +1308,11 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
     dead pane, and an unreachable tmux must not end rows whose processes may
-    still be running.
+    still be running. That is decided per SOCKET — each row is asked of the
+    server it was started on — so an operator who changed ``[fleet]
+    tmux_socket`` does not thereby lose every agent still running on the old one.
     """
-    srv = server()
+    config = settings()
     report = ReapReport()
     with store_session() as store:
         if project is not None:
@@ -1049,16 +1323,18 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
             live = store.fleet_agents(current.id, live_only=True)
             if live:
                 tmux_session = session_name(current.codename) if current.codename else None
-                observed = _observe(srv, tmux_session, live)
-                if observed is not None:
-                    for agent in live:
-                        pane = observed.get(agent.pane_id)
-                        if pane is None:
-                            report.lost.append(store.end_fleet_agent(agent.id, exit_status=None))
-                        elif pane.dead:
-                            ended = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
-                            report.ended.append(ended)
-                            _emit_exit(store, ended)
+                views = _observe_sockets(live, tmux_session, config)
+                for agent in live:
+                    observed = views.get(agent.tmux_socket)
+                    if observed is None:
+                        continue  # that socket could not be asked: nothing is marked
+                    pane = observed.get(agent.pane_id)
+                    if pane is None:
+                        report.lost.append(store.end_fleet_agent(agent.id, exit_status=None))
+                    elif pane.dead:
+                        ended = store.end_fleet_agent(agent.id, exit_status=pane.dead_status)
+                        report.ended.append(ended)
+                        _emit_exit(store, ended)
             _remove_merged_worktrees(store, current, report)
     for ended in report.ended:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
@@ -1159,7 +1435,7 @@ def nudge_manager(project_id: str, *, reason: str) -> bool:
             last = store.get_meta(key)
             if last is not None and now - datetime.fromisoformat(last) < NUDGE_DEBOUNCE:
                 return False
-            srv = server()
+            srv = server_for(manager.tmux_socket)
             facts = srv.pane_facts(manager.pane_id)
             if facts is None or facts.dead or not _agent_running(facts.current_command):
                 return False

@@ -14,10 +14,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -25,8 +26,9 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import codenames
 from aisquare.core.config import FleetRoleSettings, FleetSettings
-from aisquare.core.ids import new_task_id
+from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import (
@@ -527,6 +529,52 @@ def test_spawn_with_a_task_names_the_label_and_the_branch_after_it(
         fleet_service.spawn(project, "coder", task_id="tsk_nope")
 
 
+def test_a_reused_worktree_is_put_on_the_branch_this_spawn_asked_for(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A label outlives one task, so the tree it names may sit on the PREVIOUS task's
+    branch — and an agent spawned for task B must not commit to task A's branch."""
+    first_task = _add_task(project, "First job")
+    first = fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id).agent
+    was_on = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
+    fleet_service.stop(project, "coder-auth", force=True)  # ending frees the label (§5.7)
+
+    next_task = _add_task(project, "Second job")
+    receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=next_task.id)
+
+    assert receipt.agent.cwd == first.cwd, "the same label reuses the tree"
+    short = next_task.id.removeprefix("tsk_")[:8]
+    wanted = f"fleet/{_codename(project)}/{short}-second-job"
+    assert wanted != was_on
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=receipt.agent.cwd) == wanted
+    assert any(f"it was on {was_on}, now on {wanted}" in note for note in receipt.notes)
+    # Negative control: reused for the SAME task, nothing is switched.
+    fleet_service.stop(project, "coder-auth", force=True)
+    again = fleet_service.spawn(project, "coder", label="coder-auth", task_id=next_task.id)
+    assert any(f"already on {wanted}" in note for note in again.notes)
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=again.agent.cwd) == wanted
+
+
+def test_a_reused_worktree_with_uncommitted_work_on_another_branch_is_refused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Switching branches over somebody's uncommitted work is not this code's call —
+    and neither is leaving the agent on the wrong branch."""
+    first_task = _add_task(project, "First job")
+    first = fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id).agent
+    (first.cwd / "wip.txt").write_text("half a change\n", encoding="utf-8")
+    fleet_service.stop(project, "coder-auth", force=True)
+    next_task = _add_task(project, "Second job")
+
+    with pytest.raises(FleetError, match="holds uncommitted work on fleet/"):
+        fleet_service.spawn(project, "coder", label="coder-auth", task_id=next_task.id)
+    assert len(tmux.spawned) == 1, "refused before any window was started"
+    assert (first.cwd / "wip.txt").exists(), "the work is left exactly where it was"
+    # Negative control: the same dirty tree, reused for its OWN branch, is fine.
+    receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id)
+    assert receipt.agent.cwd == first.cwd and (first.cwd / "wip.txt").exists()
+
+
 def test_spawn_permission_mode_flag_beats_role_config_beats_default(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -644,6 +692,137 @@ def test_spawn_kills_the_window_when_no_label_can_be_recorded(
     assert tmux.killed == ["%2"]
 
 
+def test_spawn_never_puts_a_second_live_agent_in_one_worktree(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race of the test above, with a worktree. The tree is named after the label
+    this spawn LOST, so a suffixed row would leave two live agents editing one checkout
+    on one branch — and the race has two halves, guarded in two places.
+    """
+    first = fleet_service.spawn(project, "coder", label="coder-auth").agent
+    real = fleet_service.next_label
+    racing = {"on": False}
+
+    def once(
+        project_: ProjectInfo,
+        role: str,
+        *,
+        wanted: str | None = None,
+        task_id: str | None = None,
+        store: object = None,
+    ) -> str:
+        if racing["on"]:
+            racing["on"] = False
+            return "coder-auth"  # looked free a moment ago
+        return real(project_, role, wanted=wanted, task_id=task_id, store=store)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fleet_service, "next_label", once)
+
+    # Half one: the winner's row is already there — refused before the tree is
+    # touched at all (a reuse would also check ITS branch out from under it).
+    racing["on"] = True
+    with pytest.raises(FleetError, match=r"is the live worktree of coder-auth \(agt_"):
+        fleet_service.spawn(project, "coder", label="coder-auth")
+    assert len(tmux.spawned) == 1 and tmux.killed == []
+
+    # Half two: the winner's row lands only after this window exists.
+    fleet_service.stop(project, "coder-auth", force=True)  # frees the label; the tree stays
+    tmux.killed.clear()  # that stop's own kill; what matters below is the spawn's
+    original = tmux.spawn_window
+
+    def spawn_then_revive(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        with store_session() as store:  # the other spawn wins the row before we write ours
+            store.upsert_fleet_agent(first.model_copy(update={"ended_at": None}))
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_revive)
+    with pytest.raises(FleetError, match="refused rather than made to share a checkout"):
+        fleet_service.spawn(project, "coder", label="coder-auth")
+    assert tmux.killed == ["%2"], "the second window is killed, not left in the first tree"
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    assert [(agent.label, agent.cwd) for agent in live] == [("coder-auth", first.cwd)]
+
+    # The other direction: no worktree, no checkout to share — the same collision is
+    # recorded under a suffixed label, as test_spawn_retries_the_label... requires.
+    monkeypatch.setattr(tmux, "spawn_window", original)
+    racing["on"] = True
+    second = fleet_service.spawn(project, "coder", worktree=False, label="coder-auth")
+    assert second.agent.label == "coder-auth-2" and second.agent.cwd == project.root
+    assert tmux.killed == ["%2"], "no further window was killed"
+
+
+def test_spawn_kills_the_window_when_the_store_refuses_the_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that refuses for any reason but a taken label — locked past its busy
+    timeout, or damaged — must not leave a live agent no row knows about."""
+    original = tmux.spawn_window
+
+    def wedged() -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    def spawn_then_wedge(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        monkeypatch.setattr(fleet_service, "store_session", wedged)
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_wedge)
+    with pytest.raises(FleetError, match="could not record the agent"):
+        _coder(project)
+
+    assert tmux.killed == ["%1"], "the window was killed, not left running unrecorded"
+    monkeypatch.setattr(fleet_service, "store_session", store_session)
+    with store_session() as store:
+        assert store.fleet_agents(project.id) == []
+    # Negative control: with the store answering, the same spawn records and lives.
+    monkeypatch.setattr(tmux, "spawn_window", original)
+    assert _coder(project).label == "coder-1"
+    assert tmux.killed == ["%1"], "no second window was killed"
+
+
+def test_a_spawn_that_races_past_the_cap_backs_its_row_out(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-check and the insert are different transactions with a worktree and a
+    tmux window between them, so the count is settled again at the write: the row
+    past the cap backs out and its window is killed."""
+    _settings(monkeypatch, max_agents_per_project=2)
+    _coder(project)
+    original = tmux.spawn_window
+
+    def spawn_then_fill(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        with store_session() as store:  # a parallel spawn takes the last slot
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(),
+                    project_id=project.id,
+                    label="coder-racer",
+                    role="coder",
+                    pane_id="%99",
+                    cwd=project.root,
+                    created_at=datetime.now(tz=UTC) - timedelta(seconds=1),
+                )
+            )
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_fill)
+    with pytest.raises(FleetError, match=r"3 live agents \(max_agents_per_project = 2\)"):
+        _coder(project)
+
+    assert tmux.killed == ["%2"], "the window of the row that backed out is killed"
+    with store_session() as store:
+        live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
+    assert live == {"coder-1", "coder-racer"}, "the cap holds"
+    # Negative control: the same write under a cap with room records and lives.
+    monkeypatch.setattr(tmux, "spawn_window", original)
+    _settings(monkeypatch, max_agents_per_project=4)
+    assert _coder(project).label == "coder-2"
+    assert tmux.killed == ["%2"], "no second window was killed"
+
+
 def test_spawn_refuses_the_reserved_manager_label_for_other_roles(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -735,6 +914,37 @@ def test_spawn_prompt_stops_waiting_at_the_timeout_and_types_anyway(
     assert PROMPT_TIMEOUT <= clock.now < PROMPT_TIMEOUT + 5
     assert any("did not come up within 20 s" in note for note in receipt.notes)
     assert (receipt.agent.pane_id, "paste", "hello") in tmux.typed
+
+
+def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``paste-buffer -p`` brackets a paste only for an application that asked for
+    bracketed paste mode; past the timeout the foreground is still the launcher, which
+    has not, so tmux would replace every LF with a CR and the agent would read N
+    submitted messages. Not typed — and the note says what to do instead."""
+    prompt = "first line\nsecond line"
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt=prompt)
+
+    assert tmux.typed == [], "N lines would arrive as N messages"
+    assert any("NOT typed" in note and "several lines" in note for note in receipt.notes)
+    # Negative control: once the agent IS up it has asked for bracketed paste, and
+    # the very same prompt goes in as one paste.
+    original = tmux.pane_facts
+
+    def up(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original(pane_id)
+
+    monkeypatch.setattr(tmux, "pane_facts", up)
+    second = fleet_service.spawn(project, "coder", worktree=False, prompt=prompt)
+    pane = second.agent.pane_id
+    assert tmux.typed == [(pane, "paste", prompt), (pane, "key", "Enter")]
+    assert second.notes == []
 
 
 def test_spawn_prompt_is_not_typed_into_a_dead_pane(
@@ -932,6 +1142,52 @@ def test_resolve_project_by_codename(project: ProjectInfo) -> None:
         fleet_service.resolve_project("nothing-here")
 
 
+def test_ensure_codename_walks_on_when_another_process_took_the_name(
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``codename_for`` walks past a SNAPSHOT of the taken names, so two processes can
+    both pick one candidate; the unique index refuses the loser, which must retry the
+    walk rather than escape as a raw ``sqlite3.IntegrityError``."""
+    held = fleet_service.ensure_codename(plain_project).codename
+    assert held is not None
+    real = codenames.codename_for
+    calls: list[str] = []
+    collide = {"once": True}
+
+    def racing(seed: str, *, taken: Collection[str] = ()) -> str:
+        calls.append(seed)
+        if collide["once"]:
+            collide["once"] = False
+            return held  # another process took it between our read and our write
+        return real(seed, taken=taken)
+
+    monkeypatch.setattr(codenames, "codename_for", racing)
+    named = fleet_service.ensure_codename(project)
+    assert named.codename and named.codename != held
+    assert len(calls) == 2, "the walk was re-run past the name that had been taken"
+    assert fleet_service.resolve_project(named.codename).id == project.id
+    # Negative control: with nothing in the way the walk runs once.
+    calls.clear()
+    third = fleet_service.ensure_codename(team_project(tmp_path / "third"))
+    assert third.codename and len(calls) == 1
+
+
+def test_ensure_codename_gives_up_as_a_fleet_error_not_a_traceback(
+    project: ProjectInfo, plain_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry is bounded, and losing every attempt is still a FleetError — the CLI
+    catches those, and nothing here may reach the operator as a traceback."""
+    held = fleet_service.ensure_codename(plain_project).codename
+    assert held is not None
+    monkeypatch.setattr(codenames, "codename_for", lambda seed, *, taken=(): held)
+    with pytest.raises(FleetError, match=r"could not give .* a codename"):
+        fleet_service.ensure_codename(project)
+    assert _codename(plain_project) == held, "the project that holds it keeps it"
+
+
 def test_resolve_project_names_the_codenames_when_basenames_collide(tmp_path: Path) -> None:
     """``~/work/api`` and ``~/oss/api`` (§5.7): the codename is what tells them apart."""
     infos = []
@@ -1118,6 +1374,51 @@ def test_stop_ends_the_row_even_when_the_pane_is_already_gone(
     assert ended.ended_at is not None and tmux.killed == []
 
 
+def test_stop_exits_gracefully_when_the_pane_sits_under_another_session_name(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``rename`` fails open when tmux is unreachable, and the escape hatch lets anyone
+    rename a session by hand — so a window list that does not name the pane is not
+    proof it is gone. Hard-killing a healthy agent there drops its ``SessionEnd``
+    hook, its claims and its exit status."""
+    agent = _coder(project)
+    tmux.sessions["asq-elsewhere"] = tmux.sessions.pop(f"asq-{_codename(project)}")
+
+    ended = fleet_service.stop(project, "coder-1")
+
+    assert tmux.typed == [(agent.pane_id, "literal", "/exit"), (agent.pane_id, "key", "Enter")]
+    assert ended.exit_status == 0 and tmux.killed == [agent.pane_id]
+    # Negative control: a pane that really is gone is not typed into.
+    second = _coder(project)
+    tmux.vanish(second.pane_id)
+    tmux.typed.clear()
+    assert fleet_service.stop(project, second.label).ended_at is not None
+    assert tmux.typed == []
+
+
+def test_stop_leaves_the_row_live_when_tmux_cannot_confirm_the_agent_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A ``TmuxError`` is not proof of death — a wedged server's 30 s timeout is one —
+    so it must not end the row and print ``✓ stopped`` over a running agent."""
+    agent = _coder(project)
+    tmux.installed = False
+    with pytest.raises(FleetError, match="could not be asked whether 'coder-1' stopped"):
+        fleet_service.stop(project, "coder-1")
+    tmux.installed = True
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [agent.id]
+
+    tmux.fail_input = True  # the server answers, but /exit does not go through
+    with pytest.raises(FleetError, match="its pane is still alive"):
+        fleet_service.stop(project, "coder-1")
+    tmux.fail_input = False
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [agent.id]
+    # Negative control: with tmux answering, the same call stops it and ends the row.
+    ended = fleet_service.stop(project, "coder-1")
+    assert ended.ended_at is not None and ended.exit_status == 0
+    assert fleet_service.list_agents(project) == []
+
+
 # --- reap ----------------------------------------------------------------------------
 
 
@@ -1186,6 +1487,38 @@ def test_reap_does_nothing_when_tmux_cannot_be_asked(
     assert report.ended == [] and report.lost == []
     tmux.installed = True
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+
+
+def test_the_lifecycle_addresses_the_socket_each_row_was_started_on(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every row records its ``tmux_socket``. An operator who edits ``[fleet]
+    tmux_socket`` must not thereby lose the agents still running on the old server: the
+    new socket answers nothing about them, which reads exactly like panes that are
+    gone and would end rows for processes that are still running."""
+    _settings(monkeypatch, tmux_socket="asq-first")
+    live = _coder(project)
+    dead = _coder(project)
+    tmux.die(dead.pane_id, 3)
+    assert live.tmux_socket == "asq-first" and dead.tmux_socket == "asq-first"
+
+    moved = FakeTmux()  # the server the config now names: it holds none of these panes
+    _settings(monkeypatch, tmux_socket="asq-second")
+
+    def per_socket(config: FleetSettings | None = None) -> FakeTmux:
+        return tmux if config is not None and config.tmux_socket == "asq-first" else moved
+
+    monkeypatch.setattr(fleet_service, "server", per_socket)
+
+    listed = {status.agent.id: status.state for status in fleet_service.list_agents(project)}
+    assert listed == {live.id: "waiting", dead.id: "exited"}, listed
+    report = fleet_service.reap(project)
+    assert [a.id for a in report.ended] == [dead.id], "the dead pane was seen on its own socket"
+    assert report.lost == [], "a live agent must not be lost because the config moved"
+
+    ended = fleet_service.stop(project, live.label)
+    assert tmux.killed == [live.pane_id] and moved.killed == []
+    assert ended.exit_status == 0, "the /exit reached the pane on the row's socket"
 
 
 def test_reap_over_every_project(
@@ -1478,7 +1811,7 @@ def test_spawn_and_stop_on_a_real_tmux_server(
             except TmuxError as exc:
                 parts.append(f"{label}: TmuxError({exc})")
         interesting = re.compile(
-            r"destroy|kill|exited|dead|signal|lost|session_|window_|spawn|got \\d+|loop exit"
+            r"destroy|kill|exited|dead|signal|lost|session_|window_|spawn|got \d+|loop exit"
         )
         for log in sorted(tmp_path.glob("tmux-*.log")):
             lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -1516,11 +1849,31 @@ def test_spawn_and_stop_on_a_real_tmux_server(
         assert real.run("show-options", "-gv", "remain-on-exit").strip() == "on"
         assert f"--session-id {receipt.agent.session_id}" in screen, screen
         assert "--name coder-1" in screen and "--permission-mode auto" in screen, screen
-        output_at = fleet_service._activity_times(real)
-        assert pane in output_at, output_at
-        assert datetime.now(tz=UTC) - output_at[pane] < timedelta(minutes=1)
+        # ``#{window_activity}`` must be the time of the last OUTPUT, not the
+        # window's creation time: it is the whole working/waiting distinction for
+        # an agent with no hooks (ACTIVITY_WINDOW), and a creation-only stamp —
+        # which is exactly what ``window_activity_flag`` does, see test_tmux.py's
+        # live flag test — would leave every such agent reading "waiting" forever
+        # while every assertion stayed green. Both directions, on a real server.
+        first = fleet_service._activity_times(real)
+        assert pane in first, first
+        assert datetime.now(tz=UTC) - first[pane] < timedelta(minutes=1)
+        time.sleep(1.5)  # more than one whole second, the field's resolution
+        quiet = fleet_service._activity_times(real)
+        assert quiet[pane] == first[pane], f"advanced while the pane was quiet: {quiet} vs {first}"
+        # The pty echoes what is typed, so this is output from the pane — and the
+        # fake agent's `read` is still waiting, so it does not end it.
+        real.send_literal(pane, "x")
+        deadline = time.monotonic() + 30
+        after = quiet
+        while time.monotonic() < deadline:
+            after = fleet_service._activity_times(real)
+            if after[pane] > quiet[pane]:
+                break
+            time.sleep(0.2)
+        assert after[pane] > quiet[pane], f"output did not advance it: {after} vs {quiet}"
         [status] = fleet_service.list_agents(project)
-        assert status.state in ("working", "waiting"), status
+        assert status.state == "working", status  # output inside ACTIVITY_WINDOW
 
         ended = fleet_service.stop(project, "coder-1", grace=15.0)
 

@@ -20,8 +20,14 @@ _SIGNAL_TEXT = re.compile(r"^([a-z0-9][a-z0-9._-]*): (\S+)(?: \(was (\S+)\))?$")
 an optional `` (was prev)`` tail. Names and values are validated single
 tokens at set time, so the decode is exact — never substring matching."""
 
-Pool = Literal["user", "project"]
-"""Where context lives: the global user pool or the current project pool."""
+Pool = Literal["user", "project", "stream"]
+"""Where context lives: the global user pool, the current project pool, or a
+named stream's pool (a stream is a body of work spanning several projects)."""
+
+DefaultPool = Literal["user", "project"]
+"""Pools a bare ``remember``/``add`` may default into. ``stream`` is excluded:
+a stream entry needs a stream *name*, so it can only ever be asked for
+explicitly (``--stream NAME``), never fallen into by configuration."""
 
 
 class ExportFormat(StrEnum):
@@ -45,7 +51,9 @@ class ContextEntry(BaseModel):
     id: str
     pool: Pool
     project_id: str | None = None
-    """Owning project for ``pool == "project"`` entries; ``None`` for the user pool."""
+    """Owning project for ``pool == "project"`` entries; ``None`` otherwise."""
+    stream_id: str | None = None
+    """Owning stream for ``pool == "stream"`` entries; ``None`` otherwise."""
     text: str
     tags: list[str] = Field(default_factory=list)
     source: str = "manual"
@@ -96,6 +104,26 @@ class ProjectInfo(BaseModel):
     linked_repos: list[str] = Field(default_factory=list)
 
 
+class StreamInfo(BaseModel):
+    """A stream: a named body of work that owns a set of projects.
+
+    Streams sit between the user pool and project pools. A project may belong
+    to many streams (one checkout can carry several efforts), a stream may
+    contain non-git roots (compliance work has no code), and a stream may
+    *require* other streams — injection follows those edges, so a project in a
+    stream that requires ``platform`` sees the platform conventions without
+    anyone copying entries.
+    """
+
+    id: str
+    name: str
+    created_at: datetime
+    members: list[str] = Field(default_factory=list)
+    """Project ids belonging to this stream."""
+    requires: list[str] = Field(default_factory=list)
+    """Stream ids this stream depends on; their entries join this scope."""
+
+
 class InjectionRecord(BaseModel):
     """A record of the most recent context injection, surfaced by ``why``."""
 
@@ -103,6 +131,9 @@ class InjectionRecord(BaseModel):
     project_id: str | None = None
     user_count: int = 0
     project_count: int = 0
+    stream_count: int = 0
+    streams: list[str] = Field(default_factory=list)
+    """Stream names in scope for the injection, dependency closure included."""
     entry_ids: list[str] = Field(default_factory=list)
 
 

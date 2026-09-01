@@ -2,8 +2,9 @@
 
 Today the "agent session" is just stdout — ``inject`` writes the block there so
 it can be piped or, later, consumed by an installed agent hook (``agents
-connect``). Selection is currently "everything in scope" (the user pool plus the
-current project); relevance ranking comes later.
+connect``). Selection is currently "everything in scope": the user pool, the
+current project's pool, and every stream the project belongs to (dependency
+closure included). Relevance ranking comes later.
 """
 
 from __future__ import annotations
@@ -11,11 +12,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from aisquare.core import paths
-from aisquare.models import ContextEntry, InjectionRecord, ProjectInfo
+from aisquare.models import ContextEntry, InjectionRecord, ProjectInfo, StreamInfo
 
 
-def build_block(entries: list[ContextEntry], project: ProjectInfo) -> str:
-    """Render in-scope ``entries`` into the Markdown context block for an agent."""
+def build_block(
+    entries: list[ContextEntry],
+    project: ProjectInfo,
+    streams: list[StreamInfo] | None = None,
+) -> str:
+    """Render in-scope ``entries`` into the Markdown context block for an agent.
+
+    Stream sections carry provenance in their heading — which stream an entry
+    arrived through — because the reader of an injected convention needs to
+    know where to go to change it.
+    """
     user = [entry for entry in entries if entry.pool == "user"]
     project_entries = [entry for entry in entries if entry.pool == "project"]
     lines = ["# Context (via aisquare)", ""]
@@ -27,7 +37,16 @@ def build_block(entries: list[ContextEntry], project: ProjectInfo) -> str:
         lines.append(f"## Project: {project.root.name or project.id}")
         lines += [_bullet(entry.text) for entry in project_entries]
         lines.append("")
-    if not user and not project_entries:
+    rendered_streams = 0
+    for stream in streams or []:
+        in_stream = [entry for entry in entries if entry.stream_id == stream.id]
+        if not in_stream:
+            continue
+        lines.append(f"## Stream: {stream.name}")
+        lines += [_bullet(entry.text) for entry in in_stream]
+        lines.append("")
+        rendered_streams += 1
+    if not user and not project_entries and not rendered_streams:
         lines += ["_No saved context yet._", ""]
     return "\n".join(lines).rstrip("\n") + "\n"
 
@@ -38,13 +57,19 @@ def _bullet(text: str) -> str:
     return "\n".join([f"- {first}", *(f"  {line}" for line in rest)])
 
 
-def record_injection(entries: list[ContextEntry], project: ProjectInfo) -> InjectionRecord:
+def record_injection(
+    entries: list[ContextEntry],
+    project: ProjectInfo,
+    streams: list[StreamInfo] | None = None,
+) -> InjectionRecord:
     """Persist a record of an injection and return it."""
     record = InjectionRecord(
         injected_at=datetime.now(tz=UTC),
         project_id=project.id,
         user_count=sum(1 for entry in entries if entry.pool == "user"),
         project_count=sum(1 for entry in entries if entry.pool == "project"),
+        stream_count=sum(1 for entry in entries if entry.pool == "stream"),
+        streams=[stream.name for stream in streams or []],
         entry_ids=[entry.id for entry in entries],
     )
     paths.ensure_home()

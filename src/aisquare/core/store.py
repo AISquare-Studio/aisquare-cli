@@ -38,6 +38,7 @@ from aisquare.models import (
     Pool,
     ProjectInfo,
     PromptRecord,
+    StreamInfo,
     TaskStatus,
     TeamEvent,
     TeamSession,
@@ -221,6 +222,78 @@ ALTER TABLE team_session ADD COLUMN model TEXT;
 ALTER TABLE team_session ADD COLUMN effort TEXT;
 """
 
+# v11: streams — a named body of work owning a set of projects, with
+# requires-edges between streams that injection follows. The entry table gains
+# a third pool ('stream') plus its owning stream_id; a CHECK constraint cannot
+# be altered in SQLite, so the table is rebuilt (the v4 pattern), preserving
+# rowids so the FTS5 external-content mirror stays aligned — the mirror itself
+# is dropped and rebuilt because its content= argument names the table by
+# string and does not follow a RENAME.
+_SCHEMA_V11 = """
+CREATE TABLE stream (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE stream_member (
+    stream_id   TEXT NOT NULL REFERENCES stream (id),
+    project_id  TEXT NOT NULL REFERENCES project (id),
+    PRIMARY KEY (stream_id, project_id)
+);
+CREATE TABLE stream_requires (
+    stream_id    TEXT NOT NULL REFERENCES stream (id),
+    requires_id  TEXT NOT NULL REFERENCES stream (id),
+    PRIMARY KEY (stream_id, requires_id),
+    CHECK (stream_id <> requires_id)
+);
+
+DROP TRIGGER entry_ai;
+DROP TRIGGER entry_ad;
+DROP TRIGGER entry_au;
+DROP TABLE entry_fts;
+DROP INDEX entry_pool_project;
+ALTER TABLE entry RENAME TO entry_v10;
+CREATE TABLE entry (
+    id          TEXT PRIMARY KEY,
+    pool        TEXT NOT NULL CHECK (pool IN ('user', 'project', 'stream')),
+    project_id  TEXT REFERENCES project (id),
+    stream_id   TEXT REFERENCES stream (id),
+    text        TEXT NOT NULL,
+    tags        TEXT NOT NULL DEFAULT '[]',
+    source      TEXT NOT NULL DEFAULT 'manual',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    deleted_at  TEXT,
+    CHECK ((pool = 'project') = (project_id IS NOT NULL)),
+    CHECK ((pool = 'stream') = (stream_id IS NOT NULL))
+);
+INSERT INTO entry (rowid, id, pool, project_id, stream_id, text, tags, source,
+                   created_at, updated_at, deleted_at)
+    SELECT rowid, id, pool, project_id, NULL, text, tags, source,
+           created_at, updated_at, deleted_at
+    FROM entry_v10;
+DROP TABLE entry_v10;
+CREATE INDEX entry_pool_project ON entry (pool, project_id) WHERE deleted_at IS NULL;
+CREATE INDEX entry_pool_stream ON entry (pool, stream_id) WHERE deleted_at IS NULL;
+
+CREATE VIRTUAL TABLE entry_fts USING fts5 (
+    text, tags, content='entry', content_rowid='rowid'
+);
+CREATE TRIGGER entry_ai AFTER INSERT ON entry BEGIN
+    INSERT INTO entry_fts (rowid, text, tags) VALUES (new.rowid, new.text, new.tags);
+END;
+CREATE TRIGGER entry_ad AFTER DELETE ON entry BEGIN
+    INSERT INTO entry_fts (entry_fts, rowid, text, tags)
+    VALUES ('delete', old.rowid, old.text, old.tags);
+END;
+CREATE TRIGGER entry_au AFTER UPDATE ON entry BEGIN
+    INSERT INTO entry_fts (entry_fts, rowid, text, tags)
+    VALUES ('delete', old.rowid, old.text, old.tags);
+    INSERT INTO entry_fts (rowid, text, tags) VALUES (new.rowid, new.text, new.tags);
+END;
+INSERT INTO entry_fts (entry_fts) VALUES ('rebuild');
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -233,10 +306,11 @@ _MIGRATIONS = (
     _SCHEMA_V8,
     _SCHEMA_V9,
     _SCHEMA_V10,
+    _SCHEMA_V11,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
-_COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
+_COLUMNS = "id, pool, project_id, stream_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
@@ -263,10 +337,19 @@ class ContextStore(Protocol):
     def add(self, entry: ContextEntry) -> ContextEntry: ...
     def get(self, ref: str) -> ContextEntry | None: ...
     def entries(
-        self, pool: Pool | None = None, *, project_id: str | None = None
+        self,
+        pool: Pool | None = None,
+        *,
+        project_id: str | None = None,
+        stream_ids: list[str] | None = None,
     ) -> list[ContextEntry]: ...
     def search(
-        self, query: str, *, pool: Pool | None = None, project_id: str | None = None
+        self,
+        query: str,
+        *,
+        pool: Pool | None = None,
+        project_id: str | None = None,
+        stream_ids: list[str] | None = None,
     ) -> list[ContextEntry]: ...
     def update(
         self, entry_id: str, *, text: str | None = None, tags: list[str] | None = None
@@ -278,6 +361,13 @@ class ContextStore(Protocol):
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
+    def create_stream(self, stream: StreamInfo) -> StreamInfo: ...
+    def get_stream(self, ref: str) -> StreamInfo | None: ...
+    def list_streams(self) -> list[StreamInfo]: ...
+    def add_stream_member(self, stream_id: str, project_id: str) -> None: ...
+    def remove_stream_member(self, stream_id: str, project_id: str) -> None: ...
+    def add_stream_requirement(self, stream_id: str, requires_id: str) -> None: ...
+    def streams_for_project(self, project_id: str) -> list[StreamInfo]: ...
     def add_prompt(
         self, text: str, project_id: str | None, source: str = "claude-code"
     ) -> PromptRecord: ...
@@ -354,6 +444,7 @@ def _row_to_entry(row: sqlite3.Row) -> ContextEntry:
         id=row["id"],
         pool=row["pool"],
         project_id=row["project_id"],
+        stream_id=row["stream_id"],
         text=row["text"],
         tags=json.loads(row["tags"]),
         source=row["source"],
@@ -456,24 +547,40 @@ def _fts_match(query: str) -> str:
 
 
 def _scope_filter(
-    pool: Pool | None, project_id: str | None, *, prefix: str = ""
+    pool: Pool | None,
+    project_id: str | None,
+    *,
+    stream_ids: list[str] | None = None,
+    prefix: str = "",
 ) -> tuple[list[str], list[str]]:
-    """Build the pool/project ``WHERE`` clauses and params for a query.
+    """Build the pool/project/stream ``WHERE`` clauses and params for a query.
 
-    With no ``pool`` but a ``project_id``, this is the in-scope view that
-    unqualified ``entries``/``search`` show: the user pool plus that project's
-    pool. ``prefix`` qualifies the column names for joined queries (e.g.
-    ``"e."``).
+    With no ``pool`` this is the in-scope view that unqualified ``entries``/
+    ``search`` show: the user pool, plus the project's pool when a
+    ``project_id`` is given, plus every stream in ``stream_ids`` (the caller
+    resolves the dependency closure — the store only filters). ``prefix``
+    qualifies the column names for joined queries (e.g. ``"e."``).
     """
     pool_col, pid_col = f"{prefix}pool", f"{prefix}project_id"
+    sid_col = f"{prefix}stream_id"
     if pool == "user":
         return [f"{pool_col} = 'user'"], []
     if pool == "project":
         return [f"{pool_col} = 'project' AND {pid_col} = ?"], [project_id or ""]
+    if pool == "stream":
+        ids = stream_ids or [""]
+        marks = ", ".join("?" for _ in ids)
+        return [f"{pool_col} = 'stream' AND {sid_col} IN ({marks})"], list(ids)
+    alternatives: list[str] = [f"{pool_col} = 'user'"]
+    params: list[str] = []
     if project_id is not None:
-        in_scope = f"({pool_col} = 'user' OR ({pool_col} = 'project' AND {pid_col} = ?))"
-        return [in_scope], [project_id]
-    return [f"{pool_col} = 'user'"], []
+        alternatives.append(f"({pool_col} = 'project' AND {pid_col} = ?)")
+        params.append(project_id)
+    if stream_ids:
+        marks = ", ".join("?" for _ in stream_ids)
+        alternatives.append(f"({pool_col} = 'stream' AND {sid_col} IN ({marks}))")
+        params.extend(stream_ids)
+    return [f"({' OR '.join(alternatives)})"], params
 
 
 class SqliteStore:
@@ -484,11 +591,12 @@ class SqliteStore:
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
-            f"INSERT INTO entry ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO entry ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry.id,
                 entry.pool,
                 entry.project_id,
+                entry.stream_id,
                 entry.text,
                 json.dumps(entry.tags),
                 entry.source,
@@ -515,9 +623,13 @@ class SqliteStore:
         return _row_to_entry(matches[0]) if matches else None
 
     def entries(
-        self, pool: Pool | None = None, *, project_id: str | None = None
+        self,
+        pool: Pool | None = None,
+        *,
+        project_id: str | None = None,
+        stream_ids: list[str] | None = None,
     ) -> list[ContextEntry]:
-        clauses, params = _scope_filter(pool, project_id)
+        clauses, params = _scope_filter(pool, project_id, stream_ids=stream_ids)
         where = " AND ".join(["deleted_at IS NULL", *clauses])
         rows = self._conn.execute(
             f"SELECT {_COLUMNS} FROM entry WHERE {where} ORDER BY id", params
@@ -525,12 +637,17 @@ class SqliteStore:
         return [_row_to_entry(row) for row in rows]
 
     def search(
-        self, query: str, *, pool: Pool | None = None, project_id: str | None = None
+        self,
+        query: str,
+        *,
+        pool: Pool | None = None,
+        project_id: str | None = None,
+        stream_ids: list[str] | None = None,
     ) -> list[ContextEntry]:
         match = _fts_match(query)
         if not match:
             return []
-        clauses, params = _scope_filter(pool, project_id, prefix="e.")
+        clauses, params = _scope_filter(pool, project_id, stream_ids=stream_ids, prefix="e.")
         where = " AND ".join(["entry_fts MATCH ?", "e.deleted_at IS NULL", *clauses])
         columns = ", ".join(f"e.{col}" for col in _COLUMNS.split(", "))
         rows = self._conn.execute(
@@ -571,12 +688,13 @@ class SqliteStore:
         entry = self.get(entry_id)
         if entry is None:
             raise KeyError(entry_id)
-        if entry.pool != "project":
+        if entry.pool == "user":
             raise ValueError(f"entry {entry.id} is already in the user pool")
-        # Move in place: same id and history, now global. The CHECK constraint
-        # requires project_id to be NULL for user-pool rows.
+        # Move in place: same id and history, now global. The CHECK constraints
+        # require project_id/stream_id to be NULL for user-pool rows.
         self._conn.execute(
-            "UPDATE entry SET pool = 'user', project_id = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE entry SET pool = 'user', project_id = NULL, stream_id = NULL, "
+            "updated_at = ? WHERE id = ?",
             (_now_iso(), entry.id),
         )
         self._conn.commit()
@@ -630,6 +748,102 @@ class SqliteStore:
         updated = self.get_project(project_id)
         assert updated is not None  # just confirmed it exists
         return updated
+
+    # --- streams -----------------------------------------------------------------
+
+    def create_stream(self, stream: StreamInfo) -> StreamInfo:
+        """Create a stream; a duplicate name raises ``ValueError``."""
+        try:
+            self._conn.execute(
+                "INSERT INTO stream (id, name, created_at) VALUES (?, ?, ?)",
+                (stream.id, stream.name, stream.created_at.isoformat()),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"a stream named {stream.name!r} already exists") from exc
+        self._conn.commit()
+        stored = self.get_stream(stream.id)
+        assert stored is not None  # just inserted
+        return stored
+
+    def get_stream(self, ref: str) -> StreamInfo | None:
+        """One stream by exact name, exact id, or unambiguous id prefix."""
+        row = self._conn.execute(
+            "SELECT id, name, created_at FROM stream WHERE name = ? OR id = ?", (ref, ref)
+        ).fetchone()
+        if row is None:
+            matches = self._conn.execute(
+                "SELECT id, name, created_at FROM stream WHERE id GLOB ? LIMIT 2",
+                (_glob_prefix(ref),),
+            ).fetchall()
+            if len(matches) > 1:
+                raise AmbiguousIdError(ref)
+            if not matches:
+                return None
+            row = matches[0]
+        return self._hydrate_stream(row)
+
+    def list_streams(self) -> list[StreamInfo]:
+        rows = self._conn.execute("SELECT id, name, created_at FROM stream ORDER BY name")
+        return [self._hydrate_stream(row) for row in rows.fetchall()]
+
+    def add_stream_member(self, stream_id: str, project_id: str) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO stream_member (stream_id, project_id) VALUES (?, ?)",
+            (stream_id, project_id),
+        )
+        self._conn.commit()
+
+    def remove_stream_member(self, stream_id: str, project_id: str) -> None:
+        self._conn.execute(
+            "DELETE FROM stream_member WHERE stream_id = ? AND project_id = ?",
+            (stream_id, project_id),
+        )
+        self._conn.commit()
+
+    def add_stream_requirement(self, stream_id: str, requires_id: str) -> None:
+        """Record that ``stream_id`` requires ``requires_id``.
+
+        Cycle prevention lives in the service layer, where the whole graph is
+        in hand and the refusal can name the path; the store only refuses the
+        degenerate self-edge (schema CHECK).
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO stream_requires (stream_id, requires_id) VALUES (?, ?)",
+            (stream_id, requires_id),
+        )
+        self._conn.commit()
+
+    def streams_for_project(self, project_id: str) -> list[StreamInfo]:
+        rows = self._conn.execute(
+            "SELECT s.id, s.name, s.created_at FROM stream s "
+            "JOIN stream_member m ON m.stream_id = s.id "
+            "WHERE m.project_id = ? ORDER BY s.name",
+            (project_id,),
+        ).fetchall()
+        return [self._hydrate_stream(row) for row in rows]
+
+    def _hydrate_stream(self, row: sqlite3.Row) -> StreamInfo:
+        members = [
+            str(member["project_id"])
+            for member in self._conn.execute(
+                "SELECT project_id FROM stream_member WHERE stream_id = ? ORDER BY project_id",
+                (row["id"],),
+            ).fetchall()
+        ]
+        requires = [
+            str(req["requires_id"])
+            for req in self._conn.execute(
+                "SELECT requires_id FROM stream_requires WHERE stream_id = ? ORDER BY requires_id",
+                (row["id"],),
+            ).fetchall()
+        ]
+        return StreamInfo(
+            id=row["id"],
+            name=row["name"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            members=members,
+            requires=requires,
+        )
 
     def add_prompt(
         self, text: str, project_id: str | None, source: str = "claude-code"

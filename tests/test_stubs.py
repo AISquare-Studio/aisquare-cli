@@ -18,6 +18,9 @@ from tests.cli_tree import leaf_invocations
 # as commands graduate from stub to service.
 IMPLEMENTED: set[tuple[str, ...]] = {
     ("remember",),
+    ("handoff",),
+    ("import", "claude-memory"),
+    *(("stream", command) for command in ("new", "add", "remove", "requires", "list", "show")),
     ("init",),
     ("inject",),
     ("why",),

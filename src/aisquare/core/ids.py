@@ -25,6 +25,7 @@ PROJECT_PREFIX = "prj_"
 PROMPT_PREFIX = "prm_"
 TASK_PREFIX = "tsk_"
 EVENT_PREFIX = "evt_"
+STREAM_PREFIX = "stm_"
 
 
 def _encode(value: int, length: int) -> str:
@@ -61,3 +62,8 @@ def new_task_id() -> str:
 def new_event_id() -> str:
     """Return a fresh, time-sortable team-event id (``evt_…``)."""
     return _new_id(EVENT_PREFIX)
+
+
+def new_stream_id() -> str:
+    """Return a fresh, time-sortable stream id (``stm_…``)."""
+    return _new_id(STREAM_PREFIX)

@@ -165,13 +165,26 @@ def remember(
     project: Annotated[
         bool, typer.Option("--project", help="Store in the current project pool.")
     ] = False,
+    stream: Annotated[
+        str | None,
+        typer.Option("--stream", help="Store in a named stream's pool.", metavar="NAME"),
+    ] = None,
     tag: Annotated[
         list[str] | None,
         typer.Option("--tag", help="Tag for the entry; repeat for several."),
     ] = None,
 ) -> None:
     """Remember something across sessions (shorthand for `context add`)."""
-    entry = context_service.remember(text, pool=resolve_pool(user, project), tags=tag or [])
+    if stream is not None and (user or project):
+        raise typer.BadParameter("--stream cannot be combined with --user/--project.")
+    try:
+        entry = context_service.remember(
+            text, pool=resolve_pool(user, project), tags=tag or [], stream=stream
+        )
+    except context_service.HomeProjectRefused as exc:
+        fail(str(exc), error="home_is_not_a_project", ref=str(exc.root))
+    except LookupError as exc:
+        fail(str(exc), error="unknown_stream", ref=stream or "")
     emit_entry(entry, verb="remembered")
 
 

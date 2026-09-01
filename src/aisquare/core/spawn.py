@@ -131,6 +131,13 @@ SEAMS: dict[str, Seam] = {
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
     ),
+    "aisquare/services/handoff.py::_distill_llm": Seam(
+        EXCLUDED,
+        "runs `claude -p` once to distill a transcript into a handoff brief; "
+        "a Run for the distillation would sit beside the Runs of the sessions "
+        "being distilled and read as a phantom sixth session",
+        strips_identity=True,
+    ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"
     ),

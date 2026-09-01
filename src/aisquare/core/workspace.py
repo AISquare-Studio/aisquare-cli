@@ -79,9 +79,54 @@ def find_project_root(start: Path) -> Path:
     if common is not None:
         return common
     for directory in (start, *start.parents):
-        if any((directory / marker).exists() for marker in _ROOT_MARKERS):
+        if any(_is_root_marker(directory / marker) for marker in _ROOT_MARKERS):
             return directory
     return start
+
+
+def _is_root_marker(candidate: Path) -> bool:
+    """Whether ``candidate`` marks a project root.
+
+    The aisquare DATA home (``~/.aisquare`` by default) is excluded: it marks
+    an aisquare *installation*, not a project. Without this, every non-git
+    directory under ``$HOME`` walked up to ``$HOME/.aisquare`` and resolved to
+    ``$HOME`` as its project — so a docs-only workspace like ``~/SOC2`` could
+    never be its own project, and stray ``remember`` calls all landed in one
+    accidental home-directory pool.
+    """
+    if not candidate.exists():
+        return False
+    if candidate.name == ".aisquare":
+        try:
+            if candidate.resolve() == paths.aisquare_home().resolve():
+                return False
+        except OSError:  # unreadable marker: treat as a marker, never crash resolution
+            return True
+    return True
+
+
+class HomeProjectRefused(ValueError):
+    """A project write resolved to the home directory (or ``/``).
+
+    Nobody means "$HOME is my project" — it happens when a command runs
+    outside any repository and the fallback resolution lands on the top of the
+    tree. The write would target a project no session ever resolves to on
+    purpose, which is worse than failing loudly.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(
+            f"refusing to treat {root} as a project — run this inside a repository, "
+            "pass --user for a global entry, or --stream NAME for a stream entry"
+        )
+        self.root = root
+
+
+def refuse_home_as_project(root: Path) -> None:
+    """Raise :class:`HomeProjectRefused` for ``$HOME`` or a filesystem root."""
+    resolved = root.resolve()
+    if resolved == Path.home().resolve() or resolved == Path(resolved.anchor):
+        raise HomeProjectRefused(resolved)
 
 
 def project_id_for(root: Path) -> str:

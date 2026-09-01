@@ -475,11 +475,21 @@ machine-readable output — global flags go before the command:
 ```
 aisquare
 ├── init [path] [--api-key K] [--local] [--agent A]… [--no-onboard] [--reinit] [-y]
-├── remember <text> [--user|--project] [--tag T]…
+├── remember <text> [--user|--project|--stream NAME] [--tag T]…
 ├── context (ctx)   add · list · show · edit · remove · search · preview
 │                   promote · import · export · —  your persistent memory
+├── stream          new [--requires S]… · add <name> [path]… · remove · requires
+│                   list · show — group projects into bodies of work; a
+│                   stream's entries inject into every member project, and
+│                   `--requires` pulls another stream's entries in too
+├── import          claude-memory [--stream NAME] [--claude-dir DIR] — bring
+│                   Claude Code's auto-memory files into the pools (idempotent)
+├── handoff <session-id>… [--to ROLE] [--task ID] [--raw] [--no-llm] [--out F]
+│                   distill past agent sessions into state-of-play briefs
+│                   another agent can start from
 ├── inject · why · log · status · doctor
 ├── project (workspace)  info · list · switch · link · onboard [--refresh]
+│                   (switch and link are deprecated — prefer streams)
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]

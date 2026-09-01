@@ -15,15 +15,18 @@ from aisquare.cli import (
     enforce,
     explainability,
     hook,
+    imports,
     launch,
     policy,
     project,
     root,
     serve,
+    stream,
     task,
     team,
 )
 from aisquare.cli import config as config_cli
+from aisquare.cli import handoff as handoff_cli
 from aisquare.cli.global_flags import GlobalFlagsGroup
 from aisquare.core.state import RuntimeState, set_state
 from aisquare.core.version import __version__
@@ -104,6 +107,9 @@ app.add_typer(context.app, name="context")
 app.add_typer(context.app, name="ctx", hidden=True, help="Alias of 'context'.")
 app.add_typer(project.app, name="project")
 app.add_typer(project.app, name="workspace", hidden=True, help="Alias of 'project'.")
+app.add_typer(stream.app, name="stream")
+app.add_typer(imports.app, name="import")
+app.command("handoff")(handoff_cli.handoff)
 app.add_typer(capture.app, name="capture", hidden=True)
 app.add_typer(config_cli.app, name="config")
 app.add_typer(policy.app, name="policy", hidden=True)

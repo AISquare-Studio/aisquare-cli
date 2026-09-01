@@ -13,37 +13,54 @@ from aisquare.core.editor import edit_text
 from aisquare.core.entries import new_entry
 from aisquare.core.injection import build_block, record_injection
 from aisquare.core.store import store_session
-from aisquare.core.workspace import active_project
+from aisquare.core.workspace import (
+    HomeProjectRefused,
+    active_project,
+    refuse_home_as_project,
+)
 from aisquare.models import ContextEntry, ExportFormat, Pool
+from aisquare.services import stream as stream_service
+
+__all__ = ["HomeProjectRefused"]  # the CLI names it; core owns it
 
 
-def remember(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
+def remember(
+    text: str, pool: Pool | None, tags: list[str], stream: str | None = None
+) -> ContextEntry:
     """Store ``text`` as a context entry (shorthand for ``context add``)."""
-    return add_entry(text, pool, tags)
+    return add_entry(text, pool, tags, stream=stream)
 
 
 def inject() -> str:
     """Assemble the in-scope context block, record the injection, and return it."""
     with store_session() as store:
-        project = active_project(store)
-        entries = store.entries(project_id=project.id)
-    record_injection(entries, project)
-    return build_block(entries, project)
+        project, streams = stream_service.active_scope(store)
+        entries = store.entries(project_id=project.id, stream_ids=[s.id for s in streams])
+    record_injection(entries, project, streams)
+    return build_block(entries, project, streams)
 
 
 def list_entries() -> list[ContextEntry]:
-    """List context in scope here: the user pool plus the active project's."""
+    """List context in scope here: user pool + active project + its streams."""
     with store_session() as store:
-        return store.entries(project_id=active_project(store).id)
+        project, streams = stream_service.active_scope(store)
+        return store.entries(project_id=project.id, stream_ids=[s.id for s in streams])
 
 
-def add_entry(text: str, pool: Pool | None, tags: list[str]) -> ContextEntry:
-    """Add a context entry to the user or project pool."""
+def add_entry(
+    text: str, pool: Pool | None, tags: list[str], stream: str | None = None
+) -> ContextEntry:
+    """Add a context entry to the user, project, or a named stream's pool."""
+    if stream is not None:
+        with store_session() as store:
+            target = stream_service.resolve(store, stream)
+            return store.add(new_entry(text, "stream", None, tags, "cli", stream_id=target.id))
     resolved: Pool = pool or load_config().default_pool
     with store_session() as store:
         project_id: str | None = None
         if resolved == "project":
             project = active_project(store)
+            refuse_home_as_project(project.root)
             store.ensure_project(project)
             project_id = project.id
         return store.add(new_entry(text, resolved, project_id, tags, "cli"))
@@ -81,17 +98,18 @@ def remove_entry(entry_id: str) -> None:
 
 
 def search_entries(query: str) -> list[ContextEntry]:
-    """Search context in scope here: the user pool plus the current project's."""
+    """Search context in scope here: user pool + current project + its streams."""
     with store_session() as store:
-        return store.search(query, project_id=active_project(store).id)
+        project, streams = stream_service.active_scope(store)
+        return store.search(query, project_id=project.id, stream_ids=[s.id for s in streams])
 
 
 def preview() -> str:
     """Return the context block that would be injected right now (no side effects)."""
     with store_session() as store:
-        project = active_project(store)
-        entries = store.entries(project_id=project.id)
-    return build_block(entries, project)
+        project, streams = stream_service.active_scope(store)
+        entries = store.entries(project_id=project.id, stream_ids=[s.id for s in streams])
+    return build_block(entries, project, streams)
 
 
 def import_entries(file: Path) -> int:
@@ -115,6 +133,7 @@ def import_entries(file: Path) -> int:
             project_id: str | None = None
             if pool == "project":
                 if not project_ready:
+                    refuse_home_as_project(project.root)
                     store.ensure_project(project)
                     project_ready = True
                 project_id = project.id

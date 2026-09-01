@@ -31,6 +31,7 @@ from aisquare.models import (
     PromptRecord,
     SetupReport,
     StatusReport,
+    StreamInfo,
 )
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
@@ -146,12 +147,15 @@ def emit_injection_record(record: InjectionRecord | None) -> None:
     if record is None:
         console.print("No context has been injected yet. Run: aisquare inject")
         return
-    total = record.user_count + record.project_count
+    total = record.user_count + record.project_count + record.stream_count
     console.print(f"Last injection: {record.injected_at.isoformat()}")
     console.print(
         f"  {total} entries — {record.user_count} from your user pool, "
-        f"{record.project_count} from this project"
+        f"{record.project_count} from this project, "
+        f"{record.stream_count} via streams"
     )
+    if record.streams:
+        console.print(f"  streams in scope: {', '.join(record.streams)}")
 
 
 def emit_project_detail(project: ProjectInfo) -> None:
@@ -187,6 +191,62 @@ def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None
         marker = "*" if project.id == active_id else ""
         table.add_row(marker, project.root.name or "—", project.id, str(project.root))
     stdout_console().print(table)
+
+
+def emit_streams(streams: list[StreamInfo]) -> None:
+    """Render the stream list — a JSON array under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps([stream.model_dump(mode="json") for stream in streams]))
+        return
+    if not streams:
+        stdout_console().print("No streams yet. Create one with: aisquare stream new NAME")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("NAME")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("PROJECTS", justify="right")
+    table.add_column("REQUIRES", justify="right")
+    for stream in streams:
+        table.add_row(stream.name, stream.id, str(len(stream.members)), str(len(stream.requires)))
+    stdout_console().print(table)
+
+
+def emit_stream_detail(
+    stream: StreamInfo,
+    members: list[ProjectInfo],
+    required_names: list[str],
+    entry_count: int,
+) -> None:
+    """Render one stream in full — JSON under ``--json``, a key/value view otherwise."""
+    if get_state().json_output:
+        payload = stream.model_dump(mode="json")
+        payload["member_roots"] = [str(project.root) for project in members]
+        payload["requires_names"] = required_names
+        payload["entry_count"] = entry_count
+        typer.echo(json.dumps(payload))
+        return
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold")
+    grid.add_column()
+    grid.add_row("name", stream.name)
+    grid.add_row("id", stream.id)
+    if required_names:
+        grid.add_row("requires", ", ".join(required_names))
+    grid.add_row("entries", str(entry_count))
+    console = stdout_console()
+    console.print(grid)
+    if members:
+        console.print()
+        for project in members:
+            console.print(f"  {project.root}")
+
+
+def emit_stream_action(message: str, stream: StreamInfo) -> None:
+    """Confirm a stream action — the stream as JSON under ``--json``, a message otherwise."""
+    if get_state().json_output:
+        typer.echo(stream.model_dump_json())
+    else:
+        stdout_console().print(message)
 
 
 def emit_project_action(message: str, project: ProjectInfo) -> None:

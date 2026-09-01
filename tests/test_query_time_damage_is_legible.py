@@ -66,17 +66,33 @@ _QUERY_TIME_COMMANDS = [
 
 
 def _damage_a_page(runner: CliRunner) -> None:
-    """Zero page 2 with the header intact — the shape the open cannot see.
+    """Zero the ``entry`` table's root page — damage the nine queries must hit.
 
-    Same recipe as tests/test_no_traceback_on_a_damaged_store.py rather than a
-    second invention, so the two files cannot disagree about what "query-time
-    damage" means.
+    This used to zero exactly page 2 (the recipe
+    tests/test_no_traceback_on_a_damaged_store.py still uses), which worked
+    only while the ``entry`` table happened to live there. The v11 migration
+    rebuilds ``entry`` and adds the stream tables, and the reorganised file no
+    longer keeps entry rows on page 2 — the damaged page became one the nine
+    commands never read, and this test started asserting the legibility of a
+    failure that no longer happened. Zeroing the WHOLE tail is not the answer
+    either: ``PRAGMA journal_mode = WAL`` in the open path trips on it, which
+    turns query-time damage into open-time damage and a different message.
+    So the page is looked up rather than assumed: ``sqlite_master`` says where
+    the entry btree's root lives, and that page is the one every one of the
+    nine commands reads.
     """
     runner.invoke(app, ["init", "--yes"], catch_exceptions=True)
     database = paths.db_path()
+    with sqlite3.connect(str(database)) as probe:
+        page_size = int(probe.execute("PRAGMA page_size").fetchone()[0])
+        rootpage = int(
+            probe.execute("SELECT rootpage FROM sqlite_master WHERE name = 'entry'").fetchone()[0]
+        )
     good = database.read_bytes()
-    assert len(good) > 8192, "fixture premise: store too small to corrupt a page of"
-    database.write_bytes(good[:4096] + bytes(4096) + good[8192:])
+    offset = (rootpage - 1) * page_size
+    assert len(good) >= offset + page_size, "fixture premise: store too small to corrupt"
+    assert rootpage > 1, "fixture premise: zeroing page 1 would be open-time damage"
+    database.write_bytes(good[:offset] + bytes(page_size) + good[offset + page_size :])
 
 
 @pytest.mark.parametrize("command", _QUERY_TIME_COMMANDS, ids=lambda c: " ".join(c))

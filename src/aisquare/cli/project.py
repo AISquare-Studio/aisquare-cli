@@ -36,7 +36,12 @@ def list_() -> None:
 
 @app.command("switch")
 def switch(name: Annotated[str, typer.Argument(help="Project name or id prefix.")]) -> None:
-    """Switch the active project."""
+    """Switch the active project (deprecated — prefer streams)."""
+    _deprecated(
+        "project switch pins ONE project globally and the pin beats your working "
+        "directory in every terminal. Prefer streams: `aisquare stream add NAME` "
+        "to group projects, AISQUARE_STREAM=NAME to force one per shell."
+    )
     try:
         project = project_service.switch(name)
     except KeyError:
@@ -48,9 +53,19 @@ def switch(name: Annotated[str, typer.Argument(help="Project name or id prefix."
 
 @app.command("link")
 def link(repo: Annotated[str, typer.Argument(help="Repository path or URL to link.")]) -> None:
-    """Link another repository into the active project."""
+    """Link another repository into the active project (deprecated — prefer streams)."""
+    _deprecated(
+        "project link only records the path — nothing reads it back. To share "
+        "context between repositories, put them in a stream: "
+        "`aisquare stream new NAME && aisquare stream add NAME PATH…`."
+    )
     project = project_service.link(repo)
     emit_project_action(f"✓ linked {repo} into {project.root.name or project.id}", project)
+
+
+def _deprecated(message: str) -> None:
+    """Warn on stderr; the command still works for one more release."""
+    typer.secho(f"⚠ deprecated: {message}", err=True, fg=typer.colors.YELLOW)
 
 
 @app.command("onboard")

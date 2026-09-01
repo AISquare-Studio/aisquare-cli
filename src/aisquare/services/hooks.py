@@ -28,6 +28,7 @@ from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.services import explainability as explainability_service
+from aisquare.services import stream as stream_service
 from aisquare.services import team as team_service
 
 
@@ -75,10 +76,11 @@ def session_start_context(
     record_trace_join(session_id)
     with store_session() as store:
         project = active_project(store, cwd)
-        entries = store.entries(project_id=project.id)
+        streams = stream_service.scope_streams(store, project.id)
+        entries = store.entries(project_id=project.id, stream_ids=[s.id for s in streams])
         has_prompts = bool(store.recent_prompts(project.id, limit=1))
     directive = _directive(project.id, has_prompts=has_prompts)
-    block = build_block(entries, project) if entries else ""
+    block = build_block(entries, project, streams) if entries else ""
     team_block = (
         team_service.hook_session_start(
             session_id, cwd, source, transcript_path=transcript_path, model=model, effort=effort

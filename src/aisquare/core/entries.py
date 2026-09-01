@@ -18,6 +18,8 @@ def new_entry(
     project_id: str | None,
     tags: list[str],
     source: str,
+    *,
+    stream_id: str | None = None,
 ) -> ContextEntry:
     """Build a new :class:`ContextEntry` with a fresh id and current timestamps."""
     now = datetime.now(tz=UTC)
@@ -25,6 +27,7 @@ def new_entry(
         id=new_entry_id(),
         pool=pool,
         project_id=project_id,
+        stream_id=stream_id,
         text=text,
         tags=tags,
         source=source,

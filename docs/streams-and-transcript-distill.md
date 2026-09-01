@@ -201,6 +201,42 @@ as **pending** entries. `aisquare context pending` lists them; approve or reject
 one at a time or in bulk. Nothing reaches a pool unreviewed: one wrong
 extraction injected into every future session costs more than a missing one.
 
+**Tier 2b — session handoff: give an agent specific chats, per task.** Tiers
+1–3 feed *long-term memory* — durable facts, reviewed, injected everywhere in
+scope. This tier answers a different request, and one an orchestrator hits
+immediately: *"spawn a manager and give it these three conversations."* A
+spawned teammate today receives snapshot pointers, the context pools and the
+team briefing — never a conversation. The agent's own runtime is no better:
+`--resume <session-id>` reopens one session (with `--fork-session` to branch
+it), but *becoming* a session is not *receiving* it, and several sessions
+cannot be merged at all.
+
+```sh
+aisquare handoff <session-id>… [--to ROLE] [--task ID] [--raw]
+```
+
+For each id: find its `.jsonl` under the agent's project directories (the
+directory slug *is* the cwd, so the source project comes for free), run
+redaction, and distill — not fact extraction but a **state-of-play brief**:
+goal, current state, decisions and their reasons, open threads, exact file
+paths. Attach the bundle to the task or role; the spawned agent's briefing
+includes it. `--raw` additionally attaches the verbatim (redacted) transcripts
+as files the agent may read itself, for when the brief might have lost the
+detail that matters.
+
+Differences from Tier 2, which is what make it a separate surface rather than
+a flag on `import`:
+
+| | Tier 2 (backfill) | Tier 2b (handoff) |
+| --- | --- | --- |
+| Output | context entries | one briefing document (+ optional raw transcripts) |
+| Lifetime | permanent, pool-scoped | attached to a task; dies with it |
+| Review | pending queue, human approves | none — the requester chose the sessions |
+| Extraction | "durable facts, not task chatter" | "state of play, *especially* the task chatter" |
+
+Both share the transcript-reading, session→project mapping and redaction
+plumbing, which is why they land in the same phase.
+
 **Tier 3 — distill on `Stop`.** The hook already fires at the end of every
 turn with `transcript_path` in its payload. Spawn a detached drain — the same
 pattern `services/distill.py` uses for team events: off the hot path, own
@@ -232,7 +268,7 @@ One source, two projections.
 | **1 — streams: schema + injection** | `stream`, `project_stream`, `stream_requires` tables; `pool` accepts `stream:*`; injection walks the graph; `why` reports provenance | zero streams ⇒ identical to today |
 | **2 — streams: surface** | `stream new/add/remove/list/show/requires`; `remember --stream`; `--stream` flag; `AISQUARE_STREAM`; deprecate `project switch` and `project link` with a pointer | pin honoured with a warning for one release, then removed |
 | **3 — guards + snapshots** | refuse `$HOME`/`/` auto-projects; `remote_url`/`branch` metadata and sibling detection; `init` explains an ignore-hidden root; stream-level snapshot index | — |
-| **4 — memory import** | Tier 1 (`import claude-memory`) and Tier 2 (`import claude-code`, pending queue, `context pending`) | additive |
+| **4 — memory import + handoff** | Tier 1 (`import claude-memory`); Tier 2 (`import claude-code`, pending queue, `context pending`); Tier 2b (`handoff <session-id>…`, briefs attached to tasks/roles, `--raw`) | additive |
 | **5 — distill** | Tier 3 on `Stop`; extractor location decided; canonical-store export | additive; off by default |
 | **6 — orchestration + explainability** | boards scoped to a stream; `agent_name_template` gains `{stream}` so Runs group by stream in the dashboard | additive |
 

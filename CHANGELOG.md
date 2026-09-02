@@ -68,6 +68,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variants, adding a third, rewriting the matrix in block style — do not cause a
   false failure.
 
+### Changed
+- **`aisquare serve` runs on mcp 2.x.** The `serve` and `dev` extras require
+  `mcp>=2.1,<3` (was `>=1.10,<2`). mcp 2.0.0 renamed `FastMCP` to `MCPServer` and
+  deleted `mcp.server.fastmcp`, the module this CLI imported, so the Dependabot
+  bump (#73) went red on mypy and the `<2` pin was the only thing keeping a
+  fresh install green. The port is confined to `services/mcp_server.py`, the
+  `serve` dependency guard, and the two test files that drive them; the nine
+  tools, their wording, and both transports' behaviour are unchanged.
+  - **The error-wording contract survives, on the seam the SDK now provides.**
+    mcp 2 still folds a tool's `ToolError` into `Error executing tool <name>:
+    <msg>`, so the handler that unwraps our own message back out is still
+    needed. It moves from the removed `_mcp_server.call_tool()` decorator to
+    `add_request_handler("tools/call", …)` on `_lowlevel_server`, which is what
+    the SDK's own migration guide names for replacing a protocol handler (and
+    what the SDK itself uses to wrap this method for extensions). A remote
+    agent still sees `error: reopen requires a note (the feedback)`, verbatim,
+    as an `isError` result — `tests/test_serve.py` asserts every one of those
+    strings end-to-end through a real client session.
+  - **A crashed tool is now logged server-side.** New in mcp 2.1, not chosen
+    here: the SDK tells a crash apart from a deliberate failure by type
+    (`UnexpectedToolError`) and keeps the crash's detail off the wire, so the
+    agent sees `Error executing tool <name>` and nothing else. In 1.x the
+    message rode along in the result, which was the only place it went. The
+    replacement handler logs the traceback on the server (stderr, which is
+    never the protocol channel on either transport) where the SDK's own handler
+    would have, so a bug in a tool is still readable somewhere. A rejected
+    argument set is the caller's mistake, not a crash, and is not logged as
+    one. `test_a_crashed_tool_is_an_error_result_logged_server_side` pins both
+    halves: nothing of the exception on the wire, all of it in the log.
+  - HTTP transport settings moved off the server object: `host` is passed to
+    `streamable_http_app()`, whose only use for it is deciding whether loopback
+    DNS-rebinding protection auto-enables (it does, as before), and the port is
+    uvicorn's alone, as it already was.
+  - The `serve` guard probes `mcp.server.mcpserver`, and its message for an
+    incompatible major points the other way now — a 1.x is the one that cannot
+    work — with `pip install 'mcp>=2.1,<3'`. The distribution-versus-module
+    distinction it was written for (#55) is exactly what makes a 1.x a
+    sentence rather than a traceback. It tells majors apart, not minors: the
+    pin is what keeps a 2.0.x out, and pip reports that at install time.
+  - `tests/test_serve.py` drives the server through `mcp.client.Client(server)`,
+    the in-memory replacement for the removed
+    `create_connected_server_and_client_session`, and reads `is_error`: field
+    names are snake_case in 2.x.
+  - Also inherited from 2.x: synchronous tool bodies run on a worker thread
+    rather than inline on the event loop. Each of the nine opens its own store
+    session per call and touches nothing thread-affine, so nothing crosses.
+  - The floor is measured, not guessed: against every 2.x release on PyPI,
+    the serve suite, the stdio idle-deadline suite and mypy strict are green on
+    2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`
+    import — the distinction above did not exist yet, so `>=2.1`.
+
 
 ## [0.5.0] - 2026-08-27
 

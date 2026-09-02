@@ -11,6 +11,23 @@ The branch already speaks contract v2 and is built against a stub (`docs/ci-cont
 client that talks to the real server, in the order the work should happen, with the things that
 will bite stated first.
 
+> **Progress, 2026-09-02 (same day, later).** Landed on the branch, each step green under
+> `make check`: **Step 0** (merged `main` at `b98aee1`, mcp 2.1, the recall registration test
+> ported to `list_tools`); **Step 6** (`error.v1` bodies read on every non-200 — verified live: the
+> staging 401 now reads `token rejected (401) — scope_resolution_failed: no valid experiment
+> token…` on `doctor`, and a hook call through the client models records
+> `error_codes ['scope_resolution_failed']`); **Step 5** (the recall tool forwards to the MCP
+> route; `parse_briefing`; the stub grew the route); **Step 3 B** (the override, exactly as §2
+> describes, plus a `SOURCE` column in `metrics list`; `delivery_source` arrives as a **v12**
+> migration rather than an in-place v11 — this machine was at `user_version 11` with **no
+> `metric` table**, the state the PR body's own advice leaves behind, and every row was being
+> lost silently; v12 heals it). **Step 3 A** is asked for below and not yet done server-side.
+> **Steps 1, 2, 4, 7, 8 are blocked on the token**: the `aws` CLI is not installed on this
+> machine and there are no AWS credentials in the sandbox, so the owner fetches it. One more
+> thing Step 4 will meet: the hooks installed in `~/.claude-c2` point at the `ws1` checkout's
+> venv with no `timeout`, so `aisquare agents connect claude-code` must be re-run from this
+> checkout's venv before a real session is driven.
+
 ---
 
 ## 0. What is true today, verified from this machine

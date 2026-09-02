@@ -8,10 +8,15 @@ each surface, and which decisions the CLI has coded a *default assumption* for
 while the two sides settle them (the joint list is
 [`ci-integration-handoff.md`](ci-integration-handoff.md) §6).
 
-> **Status.** The CLI side is built and tested against the server's schemas and
-> a local stub. `POST /v1/hook` is not yet served by `aisquare-ci`, so nothing
-> here has exchanged a real turn. When it does, integration is a config change
-> plus the smoke at the end of this file.
+> **Status (2026-09-02).** The server is live at `https://ci-api.aisquare.studio`
+> (`aisquare-ci` `main` `4cb104b`, staging). `POST /v1/hook` and
+> `POST /v1/mcp/collective_intelligence_recall` answer any experiment token; the
+> CLI's models have been exercised against the real `error.v1` refusals from
+> here. The descriptor route still publishes `direct_api` only, so the
+> descriptor-gated hooks do not call yet — the plan, and the recorded staging
+> override that stands in until the server publishes real delivery modes, is
+> [`ci-live-wiring-handoff.md`](ci-live-wiring-handoff.md). Staging measures
+> nothing (`comparison_eligible: false`); it is a connectivity instrument.
 
 ## The authoritative bytes, vendored
 
@@ -20,7 +25,8 @@ while the two sides settle them (the joint list is
 | The seven schemas the CLI consumes | `tests/fixtures/ci_contract/v2/schemas/*.schema.json` | `aisquare-ci/contracts/jsonschema/{delivery,kernel}/` |
 | One valid and one invalid fixture per schema | `tests/fixtures/ci_contract/v2/*.{valid,invalid}.json` | `aisquare-ci/contracts/fixtures/{valid,invalid}/` |
 
-Copied byte for byte from `aisquare-ci` `main` @ `fff5646`. `tests/test_ci_contract.py`
+Copied byte for byte from `aisquare-ci` `main` @ `fff5646` and verified byte-identical
+at the deployed commit `4cb104b` (2026-09-02). `tests/test_ci_contract.py`
 validates the fixtures against the schemas with `jsonschema` (proving the `$ref`
 resolver, not just the files), round-trips every fixture through the CLI's
 pydantic models unchanged, and validates **every request this build can emit**
@@ -58,9 +64,20 @@ ledger join needs is recorded on the local row (below).
 **Pull — `collective_intelligence_recall`** (`mcp-tool-input.v1` → `mcp-tool-output.v1`).
 Registered in `aisquare serve`'s MCP server only when the descriptor lists
 `mcp_pull`. A standing instruction naming the tool and the exact `ses_…` to pass
-is injected at `SessionStart`. The tool forwards as `trigger: agent_request`
-through the hook endpoint (assumption J7, below) and returns the `briefing`
-object as its result.
+is injected at `SessionStart`. The tool forwards to the server's own pull route,
+`POST /v1/mcp/collective_intelligence_recall` (J7, settled), with `run_id`
+always filled from the descriptor — the server has no default-run concept and
+refuses its absence with a 422 — and `token_budget`/`reason` travelling as
+given. The answer is the bare briefing, `status` inside; `empty` comes back as
+a real briefing with no items and is returned as such. The row is a closed
+`agent_request`; its `trace_id` is the CLI's own (the pull contract carries
+none), so the ledger row and the metric row meet on `(run_id, session_id, query_id)`.
+
+**Refusals.** A non-200 from either route carries an `error.v1` body live
+(`scope_resolution_failed` on a 401, `dependency_unavailable` with "has no
+completed build" on a 503). The CLI records the code on the row's `error_codes`
+and the clipped sentence in the outcome detail; `doctor` quotes both on the
+descriptor line. Nothing branches on `retryable`, and nothing retries.
 
 **Observation.** Tool activity does not go through the hook. Sessions are traced
 into Explainability by the proxy lane; the CLI's part of the join is the
@@ -81,6 +98,11 @@ CLI's, in three groups that aggregates never mix:
 `none` means the server answered and this build understood it. Round-trip
 percentiles are taken over `none` rows only.
 
+Every row that had a descriptor in hand also records **`delivery_source`**:
+`descriptor` when the server's delivery list ruled the turn, `override` when the
+staging override below stood in for it. Rows the two produce are never summed;
+`metrics list` shows the column, `doctor` warns while the override is active.
+
 ## Assumptions coded as defaults (joint decisions still open)
 
 Each is one constant or one function so the settlement is a small change.
@@ -90,13 +112,14 @@ Each is one constant or one function so the settlement is a small change.
 | J2 ids | `ses_` + the Claude Code session id; `trc_` + ULID per turn, minted here; the CLI never mints `run_` or `qry_` | `ci_contract.wire_session_id`, `core.ids.new_trace_id` |
 | J3 snapshot | 40-hex object id from `git stash create` (dirty) or `HEAD` (clean); the object is kept alive under `refs/aisquare/wip/<trace_id>`; untracked files are excluded and the row says so | `services/ci_snapshot.py` |
 | J4 ceiling | `client_safety_ms` from the descriptor, enforced as wall clock; the installed `SessionStart`/`UserPromptSubmit` hooks carry `timeout: 120` so Claude Code does not discard the hook first | `ci_client.exchange`, `core.agents.CONTEXT_HOOK_TIMEOUT_SECONDS` |
-| J7 pull | recall forwards as `agent_request` via the hook endpoint; `token_budget` and `reason` have no field on that request and are reported as `not_forwarded` | `ci_recall.forward_recall` |
+| J7 pull | **settled 2026-09-02:** recall forwards to `POST /v1/mcp/collective_intelligence_recall` as `mcp-tool-input.v1`, `run_id` always filled from the descriptor, `token_budget`/`reason` carried; the bare `mcp-tool-output.v1` is parsed by `parse_briefing` | `ci_recall.forward_recall`, `ci_client.recall` |
 | J10 config | `AISQUARE_CI`, `_URL`, `_KEY`, `_RUN` (and `[experiment].enabled/url/run`); nothing about arms anywhere | `ci_client` |
 | J12 `run_kind` | not sent; recorded locally as `live` on every row, `replay` reserved for the runner | `ci_augment.RUN_KIND` |
 | J13 redaction | the configured `redaction.level` scrubs the prompt before it leaves; the level is recorded on the row | `ci_augment.outbound_prompt` |
 | J14 frame | on, `aisquare-ci-frame/1`: caveat before and after, delimited region the payload cannot close, 16 KB cap, both sizes recorded | `core.injection.build_retrieved_block` |
 | J15 error codes | recorded verbatim as an opaque list on the row | `ErrorRecord.code` |
-| J16 health | `doctor` probes `GET /ready`, then fetches the descriptor without caching it | `services/diagnostics.py` |
+| J16 health | `doctor` probes `GET /ready`, then fetches the descriptor without caching it; quotes the `error.v1` code and sentence on a refusal | `services/diagnostics.py` |
+| staging override (dated, §2 B of the live-wiring handoff) | `AISQUARE_CI_DELIVERY_OVERRIDE=hook_push:session_start,prompt_submit;mcp_pull` replaces the delivery list **only** when the fetched descriptor is `direct_api`-only; ignored otherwise, ignored when malformed, never cached; every row and join record says `delivery_source: override`; `doctor` warns on its own line. Removed once the server publishes real modes | `services/ci_override.py` |
 
 Also assumed, not a joint item: a `session_start` or `agent_request` row is
 closed at creation (it is a call, not a turn); an open prompt row older than 24 h
@@ -104,10 +127,11 @@ is left open rather than closed by a late `Stop`.
 
 ## The stub, and the smoke
 
-`tests/stub_ci_server.py` speaks v2 — `GET /ready`, the descriptor route, and a
+`tests/stub_ci_server.py` speaks v2 — `GET /ready`, the descriptor route, a
 programmable `POST /v1/hook` (status, body, a delay before headers, a drip that
-sends the body in slow pieces). It is what every client test runs against, and
-a human can run it too:
+sends the body in slow pieces) and the pull route
+`POST /v1/mcp/collective_intelligence_recall` with its own programmable answer.
+It is what every client test runs against, and a human can run it too:
 
 ```sh
 python -m tests.stub_ci_server --port 8765

@@ -58,6 +58,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `docs/ci-contract.md`; the server seam is `docs/ci-integration-handoff.md`.
   - `tests/stub_ci_server.py` speaks v2 and can be run by hand
     (`python -m tests.stub_ci_server --port 8765`) to point a real session at it.
+- **The CI test bed is wired to the live staging server** (`ci-api.aisquare.studio`,
+  2026-09-02) — three changes the real server asked for, all off unless the
+  switch is on:
+  - **Refusals are read, not just counted.** A non-200 from either route carries
+    an `error.v1` body live (`scope_resolution_failed` on a 401,
+    `dependency_unavailable` with "has no completed build" on a 503). The code
+    lands on the row's `error_codes` and the clipped sentence in the detail;
+    `doctor` quotes both on its descriptor line and picks the fix from the
+    status rather than from words in a message the server wrote. Nothing
+    branches on `retryable`; nothing retries.
+  - **The recall tool uses the server's pull route.**
+    `collective_intelligence_recall` forwards to
+    `POST /v1/mcp/collective_intelligence_recall` as `mcp-tool-input.v1` — so
+    `token_budget` and `reason` travel instead of being reported as dropped —
+    with `run_id` always filled from the descriptor (the server has no default
+    run and refuses its absence). The answer is the bare briefing; an `empty`
+    answer is the server's own briefing with no items, returned as such. The
+    stub grew the route; the suite drives the tool end to end through a real
+    in-memory MCP client.
+  - **A loud, recorded staging override.** The staging descriptor still says
+    `direct_api` for every run, so the descriptor-gated hooks never call.
+    `AISQUARE_CI_DELIVERY_OVERRIDE=hook_push:session_start,prompt_submit;mcp_pull`
+    (environment only) stands in for the delivery list **only** when the fetched
+    descriptor is `direct_api`-only — ignored otherwise, ignored when malformed,
+    never cached — and cannot be mistaken for the descriptor's ruling: every
+    row and join record carries `delivery_source` (`descriptor` | `override`),
+    `metrics list` shows it as `SOURCE`, and `doctor` warns on its own line
+    while it is set. Rows it produces measure nothing; it goes when the server
+    publishes real delivery modes.
+  - The column arrives as **schema v12**, a healing migration: `CREATE TABLE IF
+    NOT EXISTS metric` then `ALTER TABLE`, because v11 has reached developer
+    machines — some, following the earlier advice to delete the v1-shaped
+    table, at version 11 with no `metric` table and every row silently lost.
+    Nothing is dropped.
 - **CI runs the suite against a machine that looks like a developer's.** The
   `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
   nothing listening on any port, no optional extra — while anyone who followed

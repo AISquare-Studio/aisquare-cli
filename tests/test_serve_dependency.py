@@ -1,16 +1,18 @@
 """``aisquare serve`` must name what is wrong with its dependency, not traceback.
 
-Dependabot #55 proposes relaxing ``mcp>=1.10,<2`` to ``<3``. That resolves to
-mcp 2.0.0, which deleted ``mcp.server.fastmcp`` — the module
-``services/mcp_server.build_server`` imports. Reviewing it surfaced a second,
-independent defect: the guard in ``cli/serve.py`` probes the DISTRIBUTION
-(``find_spec("mcp")``) rather than the symbol the server actually needs, so an
-incompatible major sails through it and the user gets a raw
-``ModuleNotFoundError`` traceback instead of the CLI's error contract.
+mcp 2.0.0 renamed ``FastMCP`` to ``MCPServer`` and moved it from
+``mcp.server.fastmcp`` to ``mcp.server.mcpserver`` — the module
+``services/mcp_server.build_server`` now imports. Reviewing the first Dependabot
+bump towards it (#55) surfaced a second, independent defect: the guard in
+``cli/serve.py`` probed the DISTRIBUTION (``find_spec("mcp")``) rather than the
+symbol the server actually needs, so an incompatible major sailed through it
+and the user got a raw ``ModuleNotFoundError`` traceback instead of the CLI's
+error contract. Since the port to 2.x the incompatible major is a 1.x, and the
+guard is what turns that into a sentence rather than a traceback.
 
 The distinction matters because the two failures need different fixes — "install
-the extra" versus "the mcp you have is too new" — and a traceback tells the user
-neither.
+the extra" versus "the mcp you have is out of range" — and a traceback tells the
+user neither.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ def test_a_missing_extra_is_reported_as_the_error_contract(runner: CliRunner) ->
 
 
 def test_an_incompatible_mcp_major_is_reported_as_such(runner: CliRunner) -> None:
-    """mcp present, ``mcp.server.fastmcp`` gone — exactly mcp 2.x.
+    """mcp present, ``mcp.server.mcpserver`` absent — exactly mcp 1.x.
 
     Before this test the guard passed and ``build_server`` raised a bare
     ModuleNotFoundError through the CLI. The message must distinguish this from
@@ -65,7 +67,7 @@ def test_an_incompatible_mcp_major_is_reported_as_such(runner: CliRunner) -> Non
 def test_a_parent_that_cannot_be_imported_is_not_an_unhandled_error(
     runner: CliRunner,
 ) -> None:
-    """``find_spec('mcp.server.fastmcp')`` RAISES when ``mcp`` is absent.
+    """``find_spec('mcp.server.mcpserver')`` RAISES when ``mcp`` is absent.
 
     Not a hypothetical: that is the standard-library contract for a dotted name
     whose parent will not import, and it is the shape a user without the extra

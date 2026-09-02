@@ -16,12 +16,13 @@ from aisquare.core.state import get_state
 _INSTALL_HINT = "pip install 'aisquare-cli[serve]' (or: pipx inject aisquare-cli mcp)"
 
 #: The module ``services.mcp_server.build_server`` actually imports. Probing the
-#: DISTRIBUTION instead (``find_spec("mcp")``) is not enough: mcp 2.0.0 ships a
-#: package called ``mcp`` that no longer contains this module, so the
-#: distribution check passes and the user gets a raw ModuleNotFoundError from
-#: deep inside the server instead of the CLI's error contract. A test pins this
-#: name against the import in mcp_server.py so the two cannot drift.
-REQUIRED_MODULE = "mcp.server.fastmcp"
+#: DISTRIBUTION instead (``find_spec("mcp")``) is not enough: mcp 1.x ships a
+#: package called ``mcp`` that does not contain this module (it had
+#: ``mcp.server.fastmcp``, which 2.0.0 renamed to this), so the distribution
+#: check passes and the user gets a raw ModuleNotFoundError from deep inside
+#: the server instead of the CLI's error contract. A test pins this name
+#: against the import in mcp_server.py so the two cannot drift.
+REQUIRED_MODULE = "mcp.server.mcpserver"
 
 
 def _find_spec(name: str) -> object | None:
@@ -39,9 +40,10 @@ def _dependency_error() -> str | None:
     """Why the MCP server cannot start here, or ``None`` when it can.
 
     Two failures that need two different fixes: the extra is missing (install
-    it), or the installed ``mcp`` is a major that deleted what we import
-    (pin it back). Telling someone to install a package they already have is
-    worse than saying nothing, so they are reported separately.
+    it), or the installed ``mcp`` is a major without what we import (move it
+    into range — today that means a 1.x, which predates the rename). Telling
+    someone to install a package they already have is worse than saying
+    nothing, so they are reported separately.
     """
     try:
         if _find_spec(REQUIRED_MODULE) is not None:
@@ -55,8 +57,8 @@ def _dependency_error() -> str | None:
         return f"the serve extra is not installed — {_INSTALL_HINT}"
     return (
         f"the installed mcp package has no {REQUIRED_MODULE}{_installed_mcp()} — "
-        "aisquare needs mcp>=1.10,<2, which is where that module lives. "
-        "Pin it back: pip install 'mcp>=1.10,<2'"
+        "aisquare needs mcp>=2.1,<3, which is where that module lives. "
+        "Move it into range: pip install 'mcp>=2.1,<3'"
     )
 
 

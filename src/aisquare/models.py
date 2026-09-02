@@ -191,7 +191,8 @@ class PromptRecord(BaseModel):
 # revision, not an edit.
 
 HookTrigger = Literal["session_start", "prompt_submit", "agent_request"]
-"""Why the CLI called the hook endpoint. ``agent_request`` is the MCP recall tool."""
+"""Why the CLI called the server: the two hook events, plus ``agent_request``
+for the MCP recall tool — which travels on the pull route, not the hook."""
 
 BriefingStatus = Literal["served", "empty", "degraded", "unavailable"]
 """The server's own verdict on a call. ``unavailable`` is never a baseline."""
@@ -369,6 +370,11 @@ class MetricsSummary(BaseModel):
     """Rows where the client tried and got no usable answer."""
     injected_turns: int = 0
     deadline_breaches: int = 0
+    override_turns: int = 0
+    """Rows delivered under the staging override (``delivery_source override``).
+    They measure nothing and are kept out of the round-trip figures below;
+    counted here so their presence is never invisible."""
+    by_delivery_source: dict[str, int] = Field(default_factory=dict)
     by_reason: dict[str, int] = Field(default_factory=dict)
     by_status: dict[str, int] = Field(default_factory=dict)
     by_action: dict[str, int] = Field(default_factory=dict)

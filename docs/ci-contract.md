@@ -30,7 +30,8 @@ at the deployed commit `4cb104b` (2026-09-02). `tests/test_ci_contract.py`
 validates the fixtures against the schemas with `jsonschema` (proving the `$ref`
 resolver, not just the files), round-trips every fixture through the CLI's
 pydantic models unchanged, and validates **every request this build can emit**
-against `hook-request.experimental-v2` — via the server's schema, never via a
+against the server's schema for its route — `hook-request.experimental-v2` for
+the hooks, `mcp-tool-input.v1` for the pull — via `jsonschema`, never via a
 Python reading of it. When the server repository is cloned beside this one, a
 further test fails if any vendored file differs from the server's; re-vendor
 rather than edit.
@@ -65,13 +66,17 @@ ledger join needs is recorded on the local row (below).
 Registered in `aisquare serve`'s MCP server only when the descriptor lists
 `mcp_pull`. A standing instruction naming the tool and the exact `ses_…` to pass
 is injected at `SessionStart`. The tool forwards to the server's own pull route,
-`POST /v1/mcp/collective_intelligence_recall` (J7, settled), with `run_id`
-always filled from the descriptor — the server has no default-run concept and
-refuses its absence with a 422 — and `token_budget`/`reason` travelling as
-given. The answer is the bare briefing, `status` inside; `empty` comes back as
+`POST /v1/mcp/collective_intelligence_recall` (J7, settled). `run_id` is the
+descriptor's — the server has no default-run concept and refuses its absence
+with a 422, and an agent-supplied value is accepted only when it names that same
+run, refused otherwise; `token_budget` travels untouched; `prompt` and `reason`
+leave scrubbed at the configured `redaction.level` and clipped to the contract
+(J13). The answer is the bare briefing, `status` inside; `empty` comes back as
 a real briefing with no items and is returned as such. The row is a closed
-`agent_request`; its `trace_id` is the CLI's own (the pull contract carries
-none), so the ledger row and the metric row meet on `(run_id, session_id, query_id)`.
+`agent_request` with no snapshot (the contract has no field for one); its
+`trace_id` is the CLI's own (the pull contract carries none), so the ledger row
+and the metric row meet on `(run_id, session_id, query_id)` — which is why the
+row's `run_id` and the wire's are always the same value.
 
 **Refusals.** A non-200 from either route carries an `error.v1` body live
 (`scope_resolution_failed` on a 401, `dependency_unavailable` with "has no
@@ -100,8 +105,10 @@ percentiles are taken over `none` rows only.
 
 Every row that had a descriptor in hand also records **`delivery_source`**:
 `descriptor` when the server's delivery list ruled the turn, `override` when the
-staging override below stood in for it. Rows the two produce are never summed;
-`metrics list` shows the column, `doctor` warns while the override is active.
+staging override below stood in for it. Override rows never enter a measurement:
+`metrics show` keeps them out of the round-trip percentiles, counts them apart
+(`override_turns`, `by_delivery_source`) and says so; `metrics list` shows the
+column; `doctor` warns while the override is set.
 
 ## Assumptions coded as defaults (joint decisions still open)
 
@@ -112,7 +119,7 @@ Each is one constant or one function so the settlement is a small change.
 | J2 ids | `ses_` + the Claude Code session id; `trc_` + ULID per turn, minted here; the CLI never mints `run_` or `qry_` | `ci_contract.wire_session_id`, `core.ids.new_trace_id` |
 | J3 snapshot | 40-hex object id from `git stash create` (dirty) or `HEAD` (clean); the object is kept alive under `refs/aisquare/wip/<trace_id>`; untracked files are excluded and the row says so | `services/ci_snapshot.py` |
 | J4 ceiling | `client_safety_ms` from the descriptor, enforced as wall clock; the installed `SessionStart`/`UserPromptSubmit` hooks carry `timeout: 120` so Claude Code does not discard the hook first | `ci_client.exchange`, `core.agents.CONTEXT_HOOK_TIMEOUT_SECONDS` |
-| J7 pull | **settled 2026-09-02:** recall forwards to `POST /v1/mcp/collective_intelligence_recall` as `mcp-tool-input.v1`, `run_id` always filled from the descriptor, `token_budget`/`reason` carried; the bare `mcp-tool-output.v1` is parsed by `parse_briefing` | `ci_recall.forward_recall`, `ci_client.recall` |
+| J7 pull | **settled 2026-09-02:** recall forwards to `POST /v1/mcp/collective_intelligence_recall` as `mcp-tool-input.v1`; `run_id` is the descriptor's (a differing agent value is refused), `token_budget` carried, `prompt`/`reason` scrubbed and clipped; the bare `mcp-tool-output.v1` is parsed by `parse_briefing` | `ci_recall.forward_recall`, `ci_client.recall` |
 | J10 config | `AISQUARE_CI`, `_URL`, `_KEY`, `_RUN` (and `[experiment].enabled/url/run`); nothing about arms anywhere | `ci_client` |
 | J12 `run_kind` | not sent; recorded locally as `live` on every row, `replay` reserved for the runner | `ci_augment.RUN_KIND` |
 | J13 redaction | the configured `redaction.level` scrubs the prompt before it leaves; the level is recorded on the row | `ci_augment.outbound_prompt` |

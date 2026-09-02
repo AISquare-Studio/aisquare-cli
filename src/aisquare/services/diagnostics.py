@@ -584,12 +584,15 @@ def _experiment_checks() -> list[DoctorCheck]:
     else:
         checks.append(_ok(name, f"enabled for {shown}, run {run}"))
     checks.append(_check_ci_endpoint(base, shown))
+    descriptor: DeliveryDescriptor | None = None
     if key and run:
         descriptor_check, descriptor = _check_ci_descriptor(base, key, run)
         checks.append(descriptor_check)
-        override = _check_ci_override(descriptor)
-        if override is not None:
-            checks.append(override)
+    # Outside the gate above: a set override is named whenever it is set, even
+    # when no descriptor could be fetched for it to apply to.
+    override = _check_ci_override(descriptor)
+    if override is not None:
+        checks.append(override)
     return checks
 
 
@@ -627,15 +630,17 @@ def _check_ci_descriptor(
     if descriptor is None:
         detail = result.detail
         # The fix follows the status the server sent, never a word in its
-        # message: an error.v1 sentence is quoted into the detail now, and
-        # "token" or "not found" inside it would otherwise pick the wrong fix.
+        # message: an error.v1 sentence is quoted into the detail now, and a
+        # word inside it ("expired", the server's own contract_version_mismatch
+        # code) must not pick a fix. The two word-based branches are for the
+        # client's own parse details, which only exist when no status arrived.
         if result.status in (401, 403):
             fix = "Check AISQUARE_CI_KEY is the experiment token for this server"
         elif result.status == 404:
             fix = "Check AISQUARE_CI_RUN names a run this server has published"
-        elif "contract_version" in detail:
+        elif result.status is None and "contract_version" in detail:
             fix = "Upgrade aisquare-cli, or ask for a run published for this contract"
-        elif "expired" in detail:
+        elif result.status is None and "expired" in detail:
             fix = "Ask the experiment controller for a fresh run"
         else:
             fix = "Check the server, or turn the test bed off: export AISQUARE_CI=0"
@@ -647,10 +652,16 @@ def _check_ci_descriptor(
             ),
             None,
         )
+    # The server's ruling is always shown as the server's. But "the hooks will
+    # not call" is a promise the line beneath would break while the override is
+    # active, so that clause defers to it instead.
+    note = ci_override.DIRECT_API_NOTE
+    if ci_override.apply(descriptor).active:
+        note = "direct_api only — overridden, see ci delivery override below"
     return (
         _ok(
             "ci descriptor",
-            f"run {run}: {ci_override.describe(descriptor)}; "
+            f"run {run}: {ci_override.describe(descriptor, direct_api_note=note)}; "
             f"ceiling {descriptor.client_safety_ms} ms; expires {descriptor.expires_at}",
         ),
         descriptor,

@@ -21,7 +21,14 @@ will bite stated first.
 > describes, plus a `SOURCE` column in `metrics list`; `delivery_source` arrives as a **v12**
 > migration rather than an in-place v11 — this machine was at `user_version 11` with **no
 > `metric` table**, the state the PR body's own advice leaves behind, and every row was being
-> lost silently; v12 heals it). **Step 3 A** is asked for below and not yet done server-side.
+> lost silently; v12 heals it, and moves a v1-shaped table aside rather than stamping it current).
+> A seven-lens adversarial review of these commits then fixed: the agent's `run_id` diverging from
+> the row's (now refused unless it names the session's run), scrubbing that could grow a prompt or
+> reason past the contract and raise out of the tool (clipped on both sides of the scrub),
+> `metrics show` summing override rows into the latency figures (kept apart now), `doctor` staying
+> silent about a set override until a token existed, and its descriptor line promising "the hooks
+> will not call" under an active override. **Step 3 A** is asked for below and not yet done
+> server-side.
 > **Steps 1, 2, 4, 7, 8 are blocked on the token**: the `aws` CLI is not installed on this
 > machine and there are no AWS credentials in the sandbox, so the owner fetches it. One more
 > thing Step 4 will meet: the hooks installed in `~/.claude-c2` point at the `ws1` checkout's

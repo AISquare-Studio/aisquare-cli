@@ -124,20 +124,50 @@ def test_the_descriptor_line_quotes_the_servers_error_code(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The live 401 carries ``scope_resolution_failed`` and a sentence; both
-    reach the line, and the fix still follows the status, not the words."""
+    reach the line."""
     wire(monkeypatch, stub)
     stub.descriptor_json(
-        error_v1("scope_resolution_failed", 401, "no valid experiment token. Run not found."),
-        status=401,
+        error_v1("scope_resolution_failed", 401, "no valid experiment token."), status=401
     )
     check = _ci_checks()["ci descriptor"]
     assert check.status is CheckStatus.warn
     assert "token rejected (401) — scope_resolution_failed: no valid experiment token" in (
         check.detail
     )
-    assert check.fix and "AISQUARE_CI_KEY" in check.fix, (
-        "the message says 'not found'; the status wins"
-    )
+    assert check.fix and "AISQUARE_CI_KEY" in check.fix
+
+
+def test_the_fix_follows_the_status_not_words_in_the_servers_message(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 404 whose sentence says "token" must still point at the run; the
+    word-matching this replaced would have pointed at the key."""
+    wire(monkeypatch, stub)
+    stub.descriptor_json(error_v1("not_found", 404, "no run for this token"), status=404)
+    check = _ci_checks()["ci descriptor"]
+    assert check.fix and "AISQUARE_CI_RUN" in check.fix and "AISQUARE_CI_KEY" not in check.fix
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("dependency_unavailable", "postgres lease expired; the pool is restarting"),
+        ("contract_version_mismatch", "request body did not match the endpoint's contract"),
+    ],
+)
+def test_a_servers_sentence_cannot_pick_the_client_side_fixes(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, code: str, message: str
+) -> None:
+    """ "expired" and "contract_version" select fixes for the client's OWN parse
+    details — an expired descriptor, a skewed contract_version. Quoted from a
+    server refusal they must not: a 503 whose message says "expired" is not an
+    expired run, and the server's catch-all code for a malformed request is
+    literally contract_version_mismatch."""
+    wire(monkeypatch, stub)
+    stub.descriptor_json(error_v1(code, 503, message), status=503)
+    check = _ci_checks()["ci descriptor"]
+    assert check.status is CheckStatus.warn and code in check.detail
+    assert check.fix and "AISQUARE_CI=0" in check.fix, check.fix
 
 
 def test_a_503_on_the_descriptor_route_names_the_servers_reason(

@@ -51,6 +51,7 @@ from aisquare.services.ci_contract import (
     DeliveryMode,
     HookPushDelivery,
     McpPullDelivery,
+    clip,
     first_error,
 )
 
@@ -140,10 +141,12 @@ def parse(spec: str) -> list[DeliveryMode]:
             )
         elif kind == "mcp_pull":
             if rest.strip():
-                raise ValueError(f"mcp_pull takes no arguments, got {rest.strip()!r}")
+                raise ValueError(f"mcp_pull takes no arguments, got {clip(repr(rest.strip()), 40)}")
             members.append(McpPullDelivery(kind="mcp_pull", tool=RECALL_TOOL))
         else:
-            raise ValueError(f"unknown delivery kind {kind!r} (hook_push or mcp_pull)")
+            raise ValueError(
+                f"unknown delivery kind {clip(repr(kind), 40)} (hook_push or mcp_pull)"
+            )
     if not members:
         raise ValueError("no delivery members")
     return members
@@ -159,8 +162,17 @@ def with_delivery(
     return DeliveryDescriptor.model_validate(raw)
 
 
-def describe(descriptor: DeliveryDescriptor) -> str:
-    """``hook_push on a, b; mcp_pull (tool)`` — the delivery list as ``doctor`` prints it."""
+DIRECT_API_NOTE = "direct_api only — the hooks will not call"
+"""What ``describe`` says of a ``direct_api``-only list when nothing overrides it."""
+
+
+def describe(descriptor: DeliveryDescriptor, *, direct_api_note: str = DIRECT_API_NOTE) -> str:
+    """``hook_push on a, b; mcp_pull (tool)`` — the delivery list as ``doctor`` prints it.
+
+    ``direct_api_note`` is the sentence for a list with neither; the caller
+    that knows an override is in effect passes one that does not promise
+    silence the hooks will not keep.
+    """
     modes: list[str] = []
     push = descriptor.hook_push
     if push is not None:
@@ -168,9 +180,11 @@ def describe(descriptor: DeliveryDescriptor) -> str:
     if descriptor.mcp_pull is not None:
         modes.append(f"mcp_pull ({descriptor.mcp_pull.tool})")
     if not modes:
-        modes.append("direct_api only — the hooks will not call")
+        modes.append(direct_api_note)
     return "; ".join(modes)
 
 
 def _ignored(fault: str) -> str:
-    return f"{ENV_VAR} is set but ignored — {fault}; expected e.g. {EXAMPLE}"
+    """Bounded like every other detail: the value came from the environment,
+    and ``doctor`` output is the most pasteable artefact there is."""
+    return f"{ENV_VAR} is set but ignored — {clip(fault)}; expected e.g. {EXAMPLE}"

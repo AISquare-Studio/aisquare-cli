@@ -405,7 +405,8 @@ def test_a_served_pull_comes_back_as_the_briefing(wired: StubCI) -> None:
     assert result.briefing.query_id == "qry_kernel0001"
     assert result.config_fingerprint == result.briefing.config_fingerprint
     assert result.action is None and result.server_ms is None and result.network_ms is None
-    assert result.deadline_breached is False and result.error_codes == []
+    assert result.deadline_breached is None, "no server verdict on this surface"
+    assert result.error_codes == []
 
 
 def test_a_refused_pull_is_an_http_error_with_the_servers_code(wired: StubCI) -> None:

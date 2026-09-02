@@ -547,8 +547,11 @@ aisquare metrics show                     # what was recorded, per turn, for thi
 | `AISQUARE_CI_URL` | unset | The server's base URL, `http(s)://` only. Or `[experiment].url` |
 | `AISQUARE_CI_KEY` | unset | Bearer token. **Environment only** — never read from `config.toml` |
 | `AISQUARE_CI_RUN` | unset | The `run_…` whose delivery descriptor drives this machine. Or `[experiment].run`. No run ⇒ no calls |
+| `AISQUARE_CI_DELIVERY_OVERRIDE` | unset | **Staging only, dated.** Stands in for the server's delivery list while a run's descriptor still says `direct_api`; ignored otherwise. Every row it produces says `override` and measures nothing. See `docs/ci-live-wiring-handoff.md` |
 
-What the CLI does with a run is decided by the server, not by a flag here. At
+What the CLI does with a run is decided by the server, not by a flag here (the
+one dated exception is the staging override above, which applies only to a
+`direct_api`-only descriptor and marks every row it touches). At
 session start it fetches the run's **delivery descriptor** (cached until it
 expires) and honours only what that lists: which hooks call the server, where,
 under what ceiling, and whether the `collective_intelligence_recall` tool is

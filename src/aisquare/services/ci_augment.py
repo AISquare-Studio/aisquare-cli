@@ -354,11 +354,17 @@ def outbound_prompt(prompt: str | None, level: RedactionLevel) -> str | None:
     """
     if prompt is None:
         return None
-    text = prompt
-    if len(text) > MAX_PROMPT_CHARS:
-        text = text[: MAX_PROMPT_CHARS - len(_PROMPT_TRUNCATION_MARK)] + _PROMPT_TRUNCATION_MARK
-    scrubbed = redact(text, level)
+    scrubbed = redact(_clip_prompt(prompt), level)
+    # Scrubbing can lengthen text — ``a:b@`` in a URL becomes ``[redacted]`` —
+    # so the contract's ceiling is applied on both sides of it.
+    scrubbed = _clip_prompt(scrubbed)
     return scrubbed if scrubbed.strip() else None
+
+
+def _clip_prompt(text: str) -> str:
+    if len(text) <= MAX_PROMPT_CHARS:
+        return text
+    return text[: MAX_PROMPT_CHARS - len(_PROMPT_TRUNCATION_MARK)] + _PROMPT_TRUNCATION_MARK
 
 
 def instruction_for(session_id: str) -> str:

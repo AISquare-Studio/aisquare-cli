@@ -108,8 +108,10 @@ def test_a_recall_is_recorded_as_a_closed_agent_request_row(
     assert turn.query_id == "qry_kernel0001" and turn.briefing_id == "brf_kernel0001"
     assert turn.config_fingerprint == fixture("mcp-tool-output.v1.valid")["config_fingerprint"]
     assert turn.items_count == 1 and turn.token_count == 92 and turn.cache_status == "miss"
-    assert turn.round_trip_ms is not None and turn.deadline_breached is False
+    assert turn.round_trip_ms is not None
+    assert turn.deadline_breached is None, "the bare briefing carries no server verdict"
     assert turn.action is None and turn.server_ms is None, "no envelope on this surface"
+    assert turn.snapshot_ref is None, "no snapshot travels on the pull, so none is taken"
     assert turn.run_id == RUN and turn.opaque_config_id == "cfg_public_7d41ba90c2e5"
     assert turn.instruction_version == "aisquare-ci-instruction/1"
 
@@ -128,9 +130,27 @@ def test_token_budget_and_reason_travel_on_the_pull_route(
     assert "not_forwarded" not in result
 
 
-def test_the_agents_run_id_is_kept_when_it_names_one(wired: StubCI, isolated_home: Path) -> None:
+def test_the_agents_run_id_is_accepted_when_it_names_this_sessions_run(
+    wired: StubCI, isolated_home: Path
+) -> None:
     ci_recall.collective_intelligence_recall("q", WIRE, run_id=RUN)
     assert wired.recall_requests[0]["run_id"] == RUN
+
+
+def test_a_run_id_for_another_run_is_refused_and_recorded_against_this_one(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """The row, the join record, the ceiling and the opaque_config_id all come
+    from this session's descriptor; a request sent for another run would be
+    recorded against the wrong one, and the (run_id, session_id, query_id)
+    join could never meet. The descriptor is the only run document this
+    client trusts."""
+    result = ci_recall.collective_intelligence_recall("q", WIRE, run_id="run_other")
+    assert result["status"] == "unavailable" and result["client_reason"] == "schema_mismatch"
+    assert "run_other" in result["detail"] and RUN in result["detail"]
+    assert wired.recalls == [], "nothing was sent"
+    (turn,) = metrics_service.recent()
+    assert turn.client_reason is ClientReason.schema_mismatch and turn.run_id == RUN
 
 
 def test_the_prompt_and_the_reason_are_scrubbed_before_they_leave(
@@ -141,6 +161,32 @@ def test_the_prompt_and_the_reason_are_scrubbed_before_they_leave(
     sent = wired.recall_requests[0]
     assert secret not in sent["prompt"] and secret not in sent["reason"]
     assert "rotate" in sent["prompt"]
+
+
+def test_a_reason_that_scrubs_to_nothing_is_left_off_the_wire(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    ci_recall.collective_intelligence_recall("q", WIRE, reason="   ")
+    sent = wired.recall_requests[0]
+    assert "reason" not in sent, "optional, not nullable"
+    assert_valid("mcp-tool-input.v1", sent)
+
+
+def test_scrubbing_that_lengthens_text_past_the_contract_still_sends(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """``a:b@`` inside a URL scrubs to ``[redacted]`` — longer than it was. A
+    reason or prompt at the contract's ceiling used to fail the rebuilt input's
+    ``max_length`` and raise out of the tool with no row written."""
+    dense = "x://a:b@" * 250  # exactly 2 000 characters, valid on entry
+    result = ci_recall.collective_intelligence_recall(dense, WIRE, reason=dense)
+    assert result["status"] == "served", result
+    sent = wired.recall_requests[0]
+    assert_valid("mcp-tool-input.v1", sent)
+    assert "a:b@" not in sent["reason"] and "a:b@" not in sent["prompt"]
+    assert len(sent["reason"]) <= 2_000
+    (turn,) = metrics_service.recent()
+    assert turn.client_reason is ClientReason.none
 
 
 def test_a_prompt_with_nothing_in_it_is_never_sent(wired: StubCI, isolated_home: Path) -> None:

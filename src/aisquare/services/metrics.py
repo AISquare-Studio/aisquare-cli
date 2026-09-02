@@ -21,7 +21,10 @@ travel together or the data is unreadable later — see :class:`TurnMetric`.
 never asked), by-design skips (it chose not to) and failures (it tried) are
 counted separately and never summed; round-trip percentiles are taken over
 consulted rows only, because a row that made no round trip has no round trip,
-and its zero would make a 300 ms endpoint read as instant.
+and its zero would make a 300 ms endpoint read as instant. Rows delivered under
+the staging override are counted apart and kept out of the percentiles: they
+are a connectivity instrument, and a latency quoted from them is a number the
+experiment never measured.
 """
 
 from __future__ import annotations
@@ -137,6 +140,10 @@ def summarize(turns: list[TurnMetric], *, project_id: str | None = None) -> Metr
             _count(summary.by_action, turn.action)
         if turn.trigger is not None:
             _count(summary.by_trigger, turn.trigger)
+        if turn.delivery_source is not None:
+            _count(summary.by_delivery_source, turn.delivery_source)
+        if turn.delivery_source == "override":
+            summary.override_turns += 1
         if reason is ClientReason.none:
             summary.consulted += 1
         elif reason in BASELINE_REASONS:
@@ -153,7 +160,11 @@ def summarize(turns: list[TurnMetric], *, project_id: str | None = None) -> Metr
             summary.turns_with_tokens += 1
 
     summary.median_wall_ms = percentile([t.wall_ms for t in turns], 50)
-    consulted = [t.round_trip_ms for t in turns if t.client_reason is ClientReason.none]
+    consulted = [
+        t.round_trip_ms
+        for t in turns
+        if t.client_reason is ClientReason.none and t.delivery_source != "override"
+    ]
     summary.median_round_trip_ms = percentile(consulted, 50)
     summary.p95_round_trip_ms = percentile(consulted, 95)
     return summary

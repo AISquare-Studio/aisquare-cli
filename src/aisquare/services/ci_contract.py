@@ -68,6 +68,9 @@ no hook envelope, the ``status`` is inside (``app/api/delivery.py``)."""
 MAX_PROMPT_CHARS = 100_000
 """``hook-request.prompt`` ``maxLength``. Longer prompts are clipped before they leave."""
 
+MAX_REASON_CHARS = 2_000
+"""``mcp-tool-input.reason`` ``maxLength``. Scrubbed text is clipped to it before it leaves."""
+
 MAX_DETAIL_CHARS = 200
 """Cap on any server-controlled text interpolated into an outcome's ``detail``,
 so a 200 KB ``contract`` value costs 200 characters, not 200 KB per call."""
@@ -463,7 +466,7 @@ class RecallInput(BaseModel):
     session_id: str
     run_id: str | None = None
     token_budget: int | None = Field(default=None, ge=1)
-    reason: str | None = Field(default=None, max_length=2000)
+    reason: str | None = Field(default=None, max_length=MAX_REASON_CHARS)
 
     @model_validator(mode="after")
     def _shape(self) -> RecallInput:

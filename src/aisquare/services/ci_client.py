@@ -462,10 +462,13 @@ class RecallCall:
 
     @property
     def deadline_breached(self) -> bool | None:
-        """Client-side only: the ceiling held when a briefing arrived, was
-        breached on ``deadline_exceeded``, and is unknown for any other failure."""
-        if self.outcome.briefing is not None:
-            return False
+        """``True`` when the client ceiling passed; otherwise unknown.
+
+        The hook envelope reports the *server's* breach verdict and the row
+        records that. The bare briefing carries none — a server-side breach
+        arrives as a 200 with ``status: unavailable`` — so a pull row can say
+        the client ceiling was breached, never that nothing was.
+        """
         return True if self.reason is ClientReason.deadline_exceeded else None
 
     @property

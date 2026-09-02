@@ -331,6 +331,34 @@ def test_round_trip_stats_cover_consulted_rows_only() -> None:
     assert summary.p95_round_trip_ms == 320
 
 
+def test_override_rows_are_counted_apart_and_kept_out_of_the_round_trip_figures() -> None:
+    """A latency quoted from the staging override is a number the experiment
+    never measured (live-wiring handoff §4)."""
+    turns = [
+        _consulted(0, round_trip_ms=300, delivery_source="descriptor"),
+        _consulted(1, round_trip_ms=320, delivery_source="descriptor"),
+        _consulted(2, round_trip_ms=2, delivery_source="override"),
+        _consulted(3, round_trip_ms=3, delivery_source="override"),
+        _turn(n=4, client_reason=ClientReason.disabled),
+    ]
+    summary = metrics_service.summarize(turns)
+    assert summary.override_turns == 2
+    assert summary.by_delivery_source == {"descriptor": 2, "override": 2}
+    assert summary.consulted == 4, "what happened is still counted"
+    assert (summary.median_round_trip_ms, summary.p95_round_trip_ms) == (300, 320)
+
+
+def test_metrics_show_says_when_override_rows_are_present(
+    isolated_home: Path, runner: CliRunner
+) -> None:
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.open_turn(_consulted(0, round_trip_ms=5, delivery_source="override"))
+    result = runner.invoke(app, ["metrics", "show", "--all"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "staging delivery override" in result.stdout and "measure nothing" in result.stdout
+
+
 def test_missing_token_data_is_reported_as_missing() -> None:
     assert metrics_service.summarize([_turn(n=0)]).turns_with_tokens == 0
 

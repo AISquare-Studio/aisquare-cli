@@ -124,7 +124,7 @@ What the CLI sends, and where each value comes from:
 | Field | Value | Source | Notes |
 |---|---|---|---|
 | `contract` | `2` | constant | body only; the v1 `X-CI-Contract` header goes away |
-| `trigger` | `session_start` \| `prompt_submit` (\| `agent_request`, see §3.4) | which hook fired | only triggers the descriptor lists |
+| `trigger` | `session_start` \| `prompt_submit` | which hook fired | only triggers the descriptor lists. `agent_request` is the CLI's *local* row vocabulary for a pull and is never sent on this request (§3.4, settled) |
 | `run_id` | `run_…` | descriptor | |
 | `session_id` | `ses_` + Claude Code `session_id` | hook payload | Claude Code ids are UUIDs (36 chars); prefixed they fit `^ses_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. **Needs A-02 sign-off.** Same value the CLI already uses for the board row and the Explainability join |
 | `trace_id` | `trc_` + ULID, **one per turn** | CLI mints | matches A-02 "ULID-shaped"; same id is written to the local metric row and to the client-lane join record (§5) — the v1 code currently mints two different ids, which is a known defect |
@@ -168,7 +168,12 @@ that Claude Code connects to. The natural home for the tool is there: the CLI re
 descriptor lists `mcp_pull`, injects the versioned standing instruction ("consult CI before
 exploring") at `SessionStart`, and forwards the call to the server.
 
-**What the forward hits is undecided** (A-07). Two options:
+> **Settled 2026-09-02:** the forward hits the server's own route,
+> `POST /v1/mcp/collective_intelligence_recall` (`mcp-tool-input.v1` → bare
+> `mcp-tool-output.v1`) — neither option below as written. See the J7 row in §6 and
+> `docs/ci-contract.md`. The two options are kept as the record of the decision.
+
+**What the forward hits was undecided** (A-07). Two options:
 
 1. **Hook route with `trigger: agent_request`.** Already in v2; requires `prompt`; returns the same
    `briefing` shape (`mcp-tool-output.v1`). Server needs nothing new beyond `/v1/hook`. The CLI
@@ -176,11 +181,13 @@ exploring") at `SessionStart`, and forwards the call to the server.
 2. **A server-side MCP transport** the CLI's tool proxies to. Matches "connection identity
    determines the principal" literally, but the CLI is already the connection Claude Code holds.
 
-The CLI side recommends (1) and will build it unless the server rules otherwise.
+~~The CLI side recommends (1) and will build it unless the server rules otherwise.~~ The server
+built a dedicated route instead, and the CLI forwards to it.
 
-`token_budget` and `reason` pass through untouched; `session_id` and `run_id` are the same values as
-§3.2. The tool never accepts scope-shaped arguments — the schema closes them and the CLI will not
-add any.
+`token_budget` passes through untouched; `prompt` and `reason` leave scrubbed at the configured
+redaction level and clipped to the contract; `session_id` is the same value as §3.2 and `run_id` is
+the descriptor's (an agent-supplied value that names another run is refused). The tool never accepts
+scope-shaped arguments — the schema closes them and the CLI will not add any.
 
 ### 3.5 Observation — traces
 

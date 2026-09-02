@@ -233,6 +233,43 @@ def test_doctor_warns_on_its_own_line_while_the_override_is_active(
     assert line.fix and ci_override.ENV_VAR in line.fix
 
 
+def test_doctor_names_a_set_override_even_before_a_token_or_run_exists(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """The state this machine was in when the override landed: variable
+    exported, token not yet fetched. The first doctor run must not be silent
+    about it."""
+    monkeypatch.setenv("AISQUARE_CI", "1")
+    monkeypatch.setenv("AISQUARE_CI_URL", stub.url)
+    monkeypatch.setenv(ci_override.ENV_VAR, SPEC)
+    line = _ci_checks()["ci delivery override"]
+    assert line.status is CheckStatus.warn and "no fetched descriptor" in line.detail
+    monkeypatch.setenv("AISQUARE_CI_KEY", "k")  # still no run
+    assert "ci delivery override" in _ci_checks()
+
+
+def test_the_descriptor_line_does_not_promise_silence_the_override_breaks(
+    overridden: StubCI, isolated_home: Path
+) -> None:
+    checks = _ci_checks()
+    assert "the hooks will not call" not in checks["ci descriptor"].detail
+    assert "direct_api only" in checks["ci descriptor"].detail, "the server's ruling stays visible"
+    assert "overridden" in checks["ci descriptor"].detail
+
+
+def test_a_huge_override_value_is_never_echoed_whole(
+    direct: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """doctor output is the most pasteable artefact there is; a value exported
+    into the wrong variable must not come back verbatim at any length."""
+    monkeypatch.setenv(ci_override.ENV_VAR, "z" * 5_000)
+    ruling = ci_override.apply(DeliveryDescriptor.model_validate(DIRECT_API))
+    assert not ruling.active and len(ruling.detail) < 400
+    monkeypatch.setenv(ci_override.ENV_VAR, "mcp_pull:" + "y" * 5_000)
+    assert len(ci_override.apply(DeliveryDescriptor.model_validate(DIRECT_API)).detail) < 400
+    assert len(_ci_checks()["ci delivery override"].detail) < 400
+
+
 def test_doctor_is_silent_about_the_override_when_it_is_unset(
     direct: StubCI, isolated_home: Path
 ) -> None:

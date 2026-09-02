@@ -299,6 +299,28 @@ CREATE INDEX metric_project_started ON metric (project_id, started_at);
 CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_at IS NULL;
 """
 
+# v12: delivery_source on the metric row — which document ruled how a turn was
+# delivered: the descriptor the server published, or the staging override
+# (services/ci_override.py) standing in for it while the server's descriptor
+# still says direct_api. Rows the two produce are never summed, and a column is
+# the only place that distinction survives into a comparison.
+#
+# A migration this time, not another in-place rewrite of v11, because v11 has
+# reached machines: anyone who ran this branch's stub smoke is at user_version
+# 11, and anyone who followed the PR's advice for the v1-shaped table — "delete
+# the metric table" — is at 11 with NO metric table (measured on the machine
+# this was written on: user_version 11, no metric table, every row silently
+# lost). CREATE TABLE IF NOT EXISTS heals that machine with the v11 shape;
+# ALTER TABLE then adds the column to both. Nothing is dropped, no row is
+# touched, and the CHECK is mirrored in tests/test_store.py like the others.
+_SCHEMA_V12 = (
+    _SCHEMA_V11.replace("CREATE TABLE metric", "CREATE TABLE IF NOT EXISTS metric").replace(
+        "CREATE INDEX metric_", "CREATE INDEX IF NOT EXISTS metric_"
+    )
+    + "\nALTER TABLE metric ADD COLUMN delivery_source TEXT"
+    " CHECK (delivery_source IN ('descriptor', 'override'));\n"
+)
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -312,6 +334,7 @@ _MIGRATIONS = (
     _SCHEMA_V9,
     _SCHEMA_V10,
     _SCHEMA_V11,
+    _SCHEMA_V12,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -353,6 +376,7 @@ _METRIC_FIELDS = (
     "tokens_in",
     "tokens_out",
     "tool_calls",
+    "delivery_source",
 )
 _METRIC_COLUMNS = ", ".join(_METRIC_FIELDS)
 
@@ -557,6 +581,7 @@ def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
         tokens_in=row["tokens_in"],
         tokens_out=row["tokens_out"],
         tool_calls=row["tool_calls"],
+        delivery_source=row["delivery_source"],
     )
 
 
@@ -1274,6 +1299,7 @@ class SqliteStore:
             metric.tokens_in,
             metric.tokens_out,
             metric.tool_calls,
+            metric.delivery_source,
         )
         placeholders = ", ".join("?" for _ in _METRIC_FIELDS)
         self._conn.execute(

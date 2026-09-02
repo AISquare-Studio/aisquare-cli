@@ -38,8 +38,15 @@ from aisquare.core import insights
 from aisquare.core.ids import new_trace_id
 from aisquare.core.injection import FRAME_VERSION, RetrievedBlock, build_retrieved_block
 from aisquare.core.redaction import redact
-from aisquare.models import ClientReason, HookTrigger, ProjectInfo, RedactionLevel, TurnMetric
-from aisquare.services import ci_client, ci_descriptor, ci_snapshot
+from aisquare.models import (
+    ClientReason,
+    DeliverySource,
+    HookTrigger,
+    ProjectInfo,
+    RedactionLevel,
+    TurnMetric,
+)
+from aisquare.services import ci_client, ci_descriptor, ci_override, ci_snapshot
 from aisquare.services.ci_contract import (
     MAX_PROMPT_CHARS,
     RECALL_TOOL,
@@ -80,6 +87,8 @@ class Augmentation:
     rendered: RetrievedBlock | None = None
     redaction: RedactionLevel | None = None
     observed_at: str | None = None
+    delivery_source: DeliverySource | None = None
+    """Which document ruled delivery here; ``None`` when none was in hand."""
 
     @property
     def consulted(self) -> bool:
@@ -108,6 +117,7 @@ class Augmentation:
             run_id=self.run_id,
             run_kind=RUN_KIND if self.run_id else None,
             opaque_config_id=descriptor.opaque_config_id if descriptor else None,
+            delivery_source=self.delivery_source,
             trigger=self.trigger,
             client_reason=self.reason,
             status=call.status if call is not None else None,
@@ -153,6 +163,7 @@ class Augmentation:
             "run_id": self.run_id,
             "run_kind": RUN_KIND if self.run_id else None,
             "opaque_config_id": self.descriptor.opaque_config_id if self.descriptor else None,
+            "delivery_source": self.delivery_source,
             "trigger": self.trigger,
             "query_id": briefing.query_id if briefing else None,
             "briefing_id": briefing.briefing_id if briefing else None,
@@ -180,6 +191,9 @@ class Gate:
     run_id: str | None = None
     descriptor: DeliveryDescriptor | None = None
     base: str = ""
+    delivery_source: DeliverySource | None = None
+    """``descriptor`` normally; ``override`` when the staging override stood in
+    for a ``direct_api``-only descriptor (:mod:`aisquare.services.ci_override`)."""
 
     @property
     def open(self) -> bool:
@@ -206,8 +220,15 @@ def gate() -> Gate:
     result = ci_descriptor.current(run, base=base, key=ci_client.api_key())
     if result.descriptor is None:
         return Gate(ClientReason.descriptor_unavailable, result.detail, run_id=run, base=base)
+    # The one place the staging override may speak, and it says so on the gate.
+    ruling = ci_override.apply(result.descriptor)
     return Gate(
-        ClientReason.none, result.detail, run_id=run, descriptor=result.descriptor, base=base
+        ClientReason.none,
+        result.detail,
+        run_id=run,
+        descriptor=ruling.descriptor,
+        base=base,
+        delivery_source=ruling.source,
     )
 
 
@@ -252,13 +273,20 @@ def _event(
             opened.detail,
             run_id=opened.run_id,
             descriptor=opened.descriptor,
+            delivery_source=opened.delivery_source,
         )
     descriptor = opened.descriptor
     assert descriptor is not None and opened.run_id is not None  # gate().open says so
     run_id = opened.run_id
+    source = opened.delivery_source
     if not session_id:
         return Augmentation(
-            trigger, trace_id, ClientReason.no_session, run_id=run_id, descriptor=descriptor
+            trigger,
+            trace_id,
+            ClientReason.no_session,
+            run_id=run_id,
+            descriptor=descriptor,
+            delivery_source=source,
         )
     if not descriptor.pushes(trigger):
         return Augmentation(
@@ -268,10 +296,16 @@ def _event(
             f"descriptor lists {_listed(descriptor)}",
             run_id=run_id,
             descriptor=descriptor,
+            delivery_source=source,
         )
     if trigger != "session_start" and (prompt is None or not prompt.strip()):
         return Augmentation(
-            trigger, trace_id, ClientReason.no_prompt, run_id=run_id, descriptor=descriptor
+            trigger,
+            trace_id,
+            ClientReason.no_prompt,
+            run_id=run_id,
+            descriptor=descriptor,
+            delivery_source=source,
         )
 
     root = cwd or project.root
@@ -306,6 +340,7 @@ def _event(
         rendered=rendered,
         redaction=level,
         observed_at=observed,
+        delivery_source=source,
     )
 
 

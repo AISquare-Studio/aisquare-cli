@@ -225,7 +225,7 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 11
+    assert version == SCHEMA_VERSION == 12
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -234,12 +234,13 @@ def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
     a value the model accepts that the CHECK refuses would lose the row
     silently, on every prompt, with nothing raising."""
     import re
+    from typing import get_args
 
-    from aisquare.core.store import _SCHEMA_V11
-    from aisquare.models import ClientReason
+    from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V12
+    from aisquare.models import ClientReason, DeliverySource
 
-    def sql_set(column: str) -> set[str]:
-        match = re.search(rf"{column} TEXT[^,]*?IN \(([^)]*)\)", _SCHEMA_V11, re.DOTALL)
+    def sql_set(column: str, schema: str = _SCHEMA_V11) -> set[str]:
+        match = re.search(rf"{column} TEXT[^,]*?IN \(([^)]*)\)", schema, re.DOTALL)
         assert match is not None, column
         return {value.strip().strip("'") for value in match.group(1).split(",")}
 
@@ -249,19 +250,20 @@ def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
     assert sql_set("trigger") == {"session_start", "prompt_submit", "agent_request"}
     assert sql_set("cache_status") == {"hit", "miss", "bypass"}
     assert sql_set("run_kind") == {"live", "replay"}
+    assert sql_set("delivery_source", _SCHEMA_V12) == set(get_args(DeliverySource))
 
 
 def test_the_metric_table_has_no_column_that_could_name_an_arm() -> None:
-    from aisquare.core.store import _SCHEMA_V11
+    from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V12
 
     for forbidden in ("arm", "flags_hash", "architecture", "CREATE TABLE run"):
-        assert forbidden not in _SCHEMA_V11, forbidden
+        assert forbidden not in _SCHEMA_V11 and forbidden not in _SCHEMA_V12, forbidden
 
 
-def test_a_populated_v10_database_migrates_to_v11_with_its_rows_intact() -> None:
+def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_intact() -> None:
     """The migration real machines take: every row that existed before the
-    metric table survives it, the table arrives with the v2 columns, and no
-    ``run`` table comes along."""
+    metric table survives it, the table arrives with the v2 columns and the
+    v12 one, and no ``run`` table comes along."""
     from aisquare.core.store import _MIGRATIONS
 
     db = _db_path()
@@ -297,7 +299,7 @@ def test_a_populated_v10_database_migrates_to_v11_with_its_rows_intact() -> None
 
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
         assert (
             raw.execute("SELECT text FROM entry WHERE id = 'ctx_old'").fetchone()[0] == "survives"
         )
@@ -314,8 +316,113 @@ def test_a_populated_v10_database_migrates_to_v11_with_its_rows_intact() -> None
         "query_id",
         "opaque_config_id",
         "run_kind",
+        "delivery_source",
     } <= columns
     assert "arm" not in columns and "run" not in tables
+
+
+def _at_version(version: int, *, after: str = "") -> Path:
+    """A database migrated by hand to ``version``, with ``after`` run last."""
+    from aisquare.core.store import _MIGRATIONS
+
+    db = _db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(db))
+    try:
+        for migration in _MIGRATIONS[:version]:
+            raw.executescript(migration)
+        if after:
+            raw.executescript(after)
+        raw.execute(f"PRAGMA user_version = {version}")
+        raw.commit()
+    finally:
+        raw.close()
+    return db
+
+
+def _metric_columns(db: Path) -> set[str]:
+    raw = sqlite3.connect(str(db))
+    try:
+        return {row[1] for row in raw.execute("PRAGMA table_info(metric)")}
+    finally:
+        raw.close()
+
+
+def test_a_v11_database_gains_the_column_and_keeps_its_rows() -> None:
+    """The machine that ran the branch's stub smoke: at 11 with a populated
+    metric table. v12 adds the column; the rows stay and read back with a
+    ``None`` source, which is the truth about them."""
+    db = _at_version(11)
+    raw = sqlite3.connect(str(db))
+    try:
+        raw.execute(
+            "INSERT INTO metric (trace_id, project_id, started_at, client_reason) "
+            "VALUES ('trc_old', 'prj_old', '2026-09-01T00:00:00+00:00', 'disabled')"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    store = open_store()
+    try:
+        (old,) = store.turn_metrics(project_id="prj_old")
+    finally:
+        store.close()
+    assert old.trace_id == "trc_old" and old.delivery_source is None
+    assert "delivery_source" in _metric_columns(db)
+
+
+def test_a_v11_database_whose_metric_table_was_deleted_by_hand_heals() -> None:
+    """The state the PR body's own advice for the v1-shaped table leaves behind
+    — and the state this was written on: ``user_version`` 11, no ``metric``
+    table, every row silently lost. v12 creates the table before it alters it,
+    and a write lands afterwards."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TurnMetric
+
+    db = _at_version(11, after="DROP TABLE metric;")
+    assert _metric_columns(db) == set(), "the precondition: no metric table at all"
+    store = open_store()
+    try:
+        store.open_turn(
+            TurnMetric(
+                trace_id="trc_healed",
+                project_id="prj_x",
+                started_at=datetime.now(tz=UTC),
+                delivery_source="override",
+            )
+        )
+        (row,) = store.turn_metrics(project_id="prj_x")
+    finally:
+        store.close()
+    assert row.delivery_source == "override"
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+    finally:
+        raw.close()
+
+
+def test_a_bad_delivery_source_is_refused_at_the_row() -> None:
+    from datetime import UTC, datetime
+    from typing import cast
+
+    from aisquare.models import DeliverySource, TurnMetric
+
+    store = open_store()
+    try:
+        # model_construct skips validation, so the CHECK is the only thing in
+        # the way; the cast keeps mypy from refusing the value first.
+        bad = TurnMetric.model_construct(
+            trace_id="trc_bad",
+            project_id="prj_x",
+            started_at=datetime.now(tz=UTC),
+            delivery_source=cast(DeliverySource, "server"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            store.open_turn(bad)
+    finally:
+        store.close()
 
 
 def test_data_persists_across_reopen() -> None:

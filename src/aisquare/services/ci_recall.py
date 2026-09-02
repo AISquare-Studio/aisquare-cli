@@ -115,6 +115,7 @@ def forward_recall(
         _record(augmentation, project.id, recall.session_id)
         return None, augmentation
     descriptor = opened.descriptor
+    source = opened.delivery_source
     pull = descriptor.mcp_pull
     if pull is None:
         augmentation = ci_augment.Augmentation(
@@ -124,6 +125,7 @@ def forward_recall(
             "descriptor lists no mcp_pull",
             run_id=opened.run_id,
             descriptor=descriptor,
+            delivery_source=source,
         )
         _record(augmentation, project.id, recall.session_id)
         return None, augmentation
@@ -138,6 +140,7 @@ def forward_recall(
             run_id=opened.run_id,
             descriptor=descriptor,
             redaction=level,
+            delivery_source=source,
         )
         _record(augmentation, project.id, recall.session_id)
         return None, augmentation
@@ -169,6 +172,7 @@ def forward_recall(
         snapshot=snapshot,
         redaction=level,
         observed_at=observed,
+        delivery_source=source,
     )
     _record(augmentation, project.id, recall.session_id)
     return call, augmentation

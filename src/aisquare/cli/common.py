@@ -415,6 +415,9 @@ def emit_turn_metrics(turns: list[TurnMetric]) -> None:
     table.add_column("REASON", overflow="fold")
     table.add_column("STATUS", overflow="fold")
     table.add_column("ACTION", overflow="fold")
+    # Which document ruled delivery. A consulted row under the staging override
+    # must never read as one the descriptor allowed (services/ci_override.py).
+    table.add_column("SOURCE", overflow="fold")
     table.add_column("WALL", justify="right")
     table.add_column("TRIP", justify="right")
     for turn in turns:
@@ -425,6 +428,7 @@ def emit_turn_metrics(turns: list[TurnMetric]) -> None:
             turn.client_reason.value,
             turn.status or "—",
             turn.action or "—",
+            turn.delivery_source or "—",
             _ms(turn.wall_ms),
             _ms(turn.round_trip_ms),
         )

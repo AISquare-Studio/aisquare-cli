@@ -29,9 +29,10 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import ci_client, ci_descriptor, explainability_ops
+from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
+from aisquare.services.ci_contract import DeliveryDescriptor
 
 
 def status() -> StatusReport:
@@ -584,7 +585,11 @@ def _experiment_checks() -> list[DoctorCheck]:
         checks.append(_ok(name, f"enabled for {shown}, run {run}"))
     checks.append(_check_ci_endpoint(base, shown))
     if key and run:
-        checks.append(_check_ci_descriptor(base, key, run))
+        descriptor_check, descriptor = _check_ci_descriptor(base, key, run)
+        checks.append(descriptor_check)
+        override = _check_ci_override(descriptor)
+        if override is not None:
+            checks.append(override)
     return checks
 
 
@@ -611,8 +616,12 @@ def _check_ci_endpoint(base: str, shown: str) -> DoctorCheck:
     )
 
 
-def _check_ci_descriptor(base: str, key: str, run: str) -> DoctorCheck:
-    """The question that matters: will the hooks be told how to deliver?"""
+def _check_ci_descriptor(
+    base: str, key: str, run: str
+) -> tuple[DoctorCheck, DeliveryDescriptor | None]:
+    """The question that matters: will the hooks be told how to deliver?
+
+    Returns the descriptor too, so the override line can be judged against it."""
     result = ci_descriptor.fetch(run, base=base, key=key, cache=False, deadline_ms=_CI_PROBE_MS)
     descriptor = result.descriptor
     if descriptor is None:
@@ -630,22 +639,50 @@ def _check_ci_descriptor(base: str, key: str, run: str) -> DoctorCheck:
             fix = "Ask the experiment controller for a fresh run"
         else:
             fix = "Check the server, or turn the test bed off: export AISQUARE_CI=0"
-        return _warn(
-            "ci descriptor", f"run {run}: {detail} — every turn records descriptor_unavailable", fix
+        return (
+            _warn(
+                "ci descriptor",
+                f"run {run}: {detail} — every turn records descriptor_unavailable",
+                fix,
+            ),
+            None,
         )
-    modes = []
-    push = descriptor.hook_push
-    if push is not None:
-        modes.append(f"hook_push on {', '.join(push.triggers)}")
-    if descriptor.mcp_pull is not None:
-        modes.append(f"mcp_pull ({descriptor.mcp_pull.tool})")
-    if not modes:
-        modes.append("direct_api only — the hooks will not call")
-    return _ok(
-        "ci descriptor",
-        f"run {run}: {'; '.join(modes)}; ceiling {descriptor.client_safety_ms} ms; "
-        f"expires {descriptor.expires_at}",
+    return (
+        _ok(
+            "ci descriptor",
+            f"run {run}: {ci_override.describe(descriptor)}; "
+            f"ceiling {descriptor.client_safety_ms} ms; expires {descriptor.expires_at}",
+        ),
+        descriptor,
     )
+
+
+def _check_ci_override(descriptor: DeliveryDescriptor | None) -> DoctorCheck | None:
+    """The staging override, on its own line whenever the variable is set.
+
+    Silent when it is unset — the common case, and the one every row should
+    come from. Set, it is always a warning: active means every row this
+    machine writes says ``delivery_source override`` and measures nothing;
+    ignored means someone exported it and it is doing nothing, which is worth
+    a line before they wonder why.
+    """
+    if not ci_override.requested():
+        return None
+    if descriptor is None:
+        return _warn(
+            "ci delivery override",
+            f"{ci_override.ENV_VAR} is set, but there is no fetched descriptor to apply it to — "
+            "nothing is delivered",
+            "Fix the descriptor line first, or unset it",
+        )
+    ruling = ci_override.apply(descriptor)
+    if ruling.active:
+        return _warn(
+            "ci delivery override",
+            f"{ruling.detail}; every row records delivery_source override and measures nothing",
+            f"Unset {ci_override.ENV_VAR} once the server publishes real delivery modes",
+        )
+    return _warn("ci delivery override", ruling.detail, f"Fix or unset {ci_override.ENV_VAR}")
 
 
 def _display_url(url: str) -> str:

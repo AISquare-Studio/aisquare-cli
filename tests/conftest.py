@@ -191,11 +191,14 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         # The CI test bed's switches. An operator who has them exported would
         # otherwise run the suite's hooks against THEIR endpoint, with THEIR
         # token — measured once: four real POSTs to a listener during a green
-        # run. Off is the state every test starts from; tests opt in.
+        # run. Off is the state every test starts from; tests opt in. The
+        # staging override is cleared with them: left set, it would turn every
+        # direct_api descriptor a test serves into one that delivers.
         "AISQUARE_CI",
         "AISQUARE_CI_URL",
         "AISQUARE_CI_KEY",
         "AISQUARE_CI_RUN",
+        "AISQUARE_CI_DELIVERY_OVERRIDE",
     ):
         monkeypatch.delenv(knob, raising=False)
     return home

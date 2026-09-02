@@ -206,6 +206,12 @@ RunKind = Literal["live", "replay"]
 """Whether a turn was a developer's live session or a replay of one. Recorded
 locally from the first v2 build; not yet a wire field (seam doc J12)."""
 
+DeliverySource = Literal["descriptor", "override"]
+"""Which document decided how a turn was delivered: the descriptor the server
+published, or the staging override (``services/ci_override.py``) standing in for
+it while the server's descriptor still says ``direct_api``. Rows the two produce
+are never summed; a row from an override measures nothing."""
+
 
 class ClientReason(StrEnum):
     """Why there is no usable server decision on a turn, or ``none``.
@@ -291,6 +297,11 @@ class TurnMetric(BaseModel):
     opaque_config_id: str | None = None
     """From the descriptor; recorded, never interpreted. It is the only handle
     the client ever holds on which configuration served it."""
+    delivery_source: DeliverySource | None = None
+    """``descriptor`` when the server's delivery list ruled this turn, ``override``
+    when the staging override stood in for it; ``None`` when no descriptor was
+    in hand. Loud on purpose: a consulted row under an override must never be
+    mistaken for one the descriptor allowed."""
     trigger: HookTrigger | None = None
 
     client_reason: ClientReason = ClientReason.disabled

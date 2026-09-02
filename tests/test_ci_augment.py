@@ -360,6 +360,24 @@ def test_a_useless_response_injects_nothing_and_records_why(
     assert turn.injected_chars is None and turn.action is None
 
 
+def test_a_refused_call_records_the_servers_error_code_on_the_row(
+    wired: StubCI, isolated_home: Path, tmp_path: Path
+) -> None:
+    """A 503 whose body says "has no completed build" is an ``http_error`` row
+    whose ``error_codes`` names the server's code — the difference between a
+    row that says the call failed and one that says what to fix."""
+    from tests.stub_ci_server import error_v1
+
+    wired.respond_json(
+        error_v1("dependency_unavailable", 503, f"run {RUN} has no completed build"), status=503
+    )
+    assert hooks_service.prompt_submitted("q", tmp_path, session_id=SESSION) == ""
+    turn = _turn()
+    assert turn.client_reason is ClientReason.http_error
+    assert turn.error_codes == ["dependency_unavailable"]
+    assert turn.status is None and turn.action is None, "no envelope, no server verdict"
+
+
 def test_a_dead_endpoint_records_transport_error_and_still_opens_the_row(
     wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delta: str
 ) -> None:

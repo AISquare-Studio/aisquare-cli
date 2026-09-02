@@ -56,6 +56,26 @@ def fixture_text(name: str) -> str:
 FAR_FUTURE = "2099-01-01T00:00:00Z"
 
 
+def error_v1(code: str, http_status: int, message: str, **detail: Any) -> dict[str, Any]:
+    """An ``error.v1`` body the way the live server writes one on a non-200.
+
+    The vendored fixture pins the shape; this fills it the way
+    ``app/api/errors.py`` does for a delivery refusal — ``scope_resolution_failed``
+    on a 401, ``dependency_unavailable`` on a 503 — so the client's reading of a
+    real refusal is exercised without the real server.
+    """
+    return {
+        "schema_version": "error/v1",
+        "code": code,
+        "http_status": http_status,
+        "message": message,
+        "subject_ref": None,
+        "retryable": False,
+        "detail": detail,
+        "occurred_at": "2026-09-02T14:59:10.866894Z",
+    }
+
+
 def live_descriptor(**overrides: Any) -> dict[str, Any]:
     """The vendored descriptor with an expiry that has not passed.
 

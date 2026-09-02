@@ -37,6 +37,7 @@ from aisquare.services.ci_contract import (
     DeliveryDescriptor,
     clip,
     first_error,
+    parse_error,
 )
 
 DESCRIPTOR_PATH = "/v1/experiment/runs/"
@@ -57,6 +58,10 @@ class DescriptorResult:
     descriptor: DeliveryDescriptor | None
     detail: str = ""
     from_cache: bool = False
+    status: int | None = None
+    """The HTTP status of a refusal, when the server answered with one. ``doctor``
+    chooses its fix from this rather than from words in ``detail``, which a
+    server message could contain by accident."""
 
     @property
     def reason(self) -> ClientReason:
@@ -103,7 +108,9 @@ def fetch(
     if result.reason is not None:
         return DescriptorResult(None, f"{result.reason.value}: {result.detail}")
     if result.status != 200:
-        return DescriptorResult(None, _status_detail(result.status))
+        return DescriptorResult(
+            None, _status_detail(result.status, result.body), status=result.status
+        )
     descriptor, detail = parse_descriptor(result.body, now=now)
     if descriptor is None:
         return DescriptorResult(None, detail)
@@ -147,14 +154,21 @@ def parse_descriptor(
     return descriptor, "ok"
 
 
-def _status_detail(status: int | None) -> str:
+def _status_detail(status: int | None, body: str = "") -> str:
+    """One line for a refusal: the CLI's reading of the status, then the server's
+    own ``error.v1`` code and sentence when the body carried one."""
     if status == 401:
-        return "token rejected (401)"
-    if status == 403:
-        return "token not allowed to read this run (403)"
-    if status == 404:
-        return "run not found (404)"
-    return f"http {status}"
+        detail = "token rejected (401)"
+    elif status == 403:
+        detail = "token not allowed to read this run (403)"
+    elif status == 404:
+        detail = "run not found (404)"
+    else:
+        detail = f"http {status}"
+    error = parse_error(body)
+    if error is None:
+        return detail
+    return clip(f"{detail} — {error.code}: {error.message}")
 
 
 def _read_cache(run: str, now: datetime) -> DeliveryDescriptor | None:

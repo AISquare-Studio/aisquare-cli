@@ -14,7 +14,7 @@ from aisquare.models import ClientReason
 from aisquare.services import ci_descriptor
 from tests.ci_schemas import fixture
 from tests.ci_support import RUN
-from tests.stub_ci_server import StubCI, live_descriptor, serve
+from tests.stub_ci_server import StubCI, error_v1, live_descriptor, serve
 
 
 @pytest.fixture
@@ -86,6 +86,30 @@ def test_each_http_refusal_has_its_own_detail(
     assert result.descriptor is None
     assert phrase in result.detail
     assert result.reason is ClientReason.descriptor_unavailable
+
+
+def test_a_refusal_with_an_error_body_quotes_the_servers_code_and_sentence(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    """Live, an unauthenticated descriptor fetch answers a proper error.v1 401;
+    the line a person reads should carry the server's own reason, and the
+    status should travel separately so ``doctor`` can pick its fix from it."""
+    stub.descriptor_json(
+        error_v1("scope_resolution_failed", 401, "no valid experiment token."), status=401
+    )
+    result = _current(stub)
+    assert result.descriptor is None and result.status == 401
+    assert result.detail == (
+        "token rejected (401) — scope_resolution_failed: no valid experiment token."
+    )
+
+
+def test_a_refusal_without_an_error_body_keeps_the_bare_status(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    stub.descriptor_json({"error": "no"}, status=503)
+    result = _current(stub)
+    assert result.detail == "http 503" and result.status == 503
 
 
 def test_a_contract_skew_is_named_before_the_shape_is_checked(

@@ -483,6 +483,10 @@ class Outcome:
     reason: ClientReason
     detail: str = ""
     """Free text for logs, clipped. Never parsed, never aggregated on."""
+    error_codes: tuple[str, ...] = ()
+    """``error.v1`` codes the server put in the body of a non-200, verbatim.
+    Empty unless the outcome is ``http_error`` with a body this build could
+    read; a parsed response carries its codes in ``response.errors``."""
 
     @property
     def degraded(self) -> bool:
@@ -498,11 +502,13 @@ class Outcome:
         return None if self.response is None else self.response.briefing
 
 
-def degraded(reason: ClientReason, detail: str = "") -> Outcome:
+def degraded(
+    reason: ClientReason, detail: str = "", *, error_codes: tuple[str, ...] = ()
+) -> Outcome:
     """An outcome with no server decision, carrying why."""
     if reason is ClientReason.none:
         raise ValueError("a degraded outcome needs a reason other than none")
-    return Outcome(response=None, reason=reason, detail=clip(detail))
+    return Outcome(response=None, reason=reason, detail=clip(detail), error_codes=error_codes)
 
 
 def clip(text: str, limit: int = MAX_DETAIL_CHARS) -> str:
@@ -525,7 +531,8 @@ def parse_response(*, status: int, body: str) -> Outcome:
     builds disagree about a field", which is a bug in one of them.
     """
     if status != 200:
-        return degraded(ClientReason.http_error, f"status {status}")
+        detail, codes = http_failure(status, body)
+        return degraded(ClientReason.http_error, detail, error_codes=codes)
     try:
         raw = json.loads(body)
     except Exception:  # RecursionError on deep nesting is not a ValueError
@@ -553,3 +560,38 @@ def first_error(exc: ValidationError) -> str:
     first = errors[0]
     location = ".".join(str(part) for part in first.get("loc", ())) or "<root>"
     return clip(f"{location}: {first.get('msg', 'invalid')}")
+
+
+def parse_error(body: str) -> ErrorRecord | None:
+    """``body`` as an ``error.v1`` record, or ``None`` for anything else. Never raises.
+
+    Live, every non-200 the server sends carries one — ``scope_resolution_failed``
+    on a 401, ``dependency_unavailable`` with "has no completed build" on a 503
+    — and the sentence in ``message`` is the part that says what to fix. A body
+    that is not one (a proxy's HTML, a bare status) is simply not read.
+    """
+    try:
+        raw = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return ErrorRecord.model_validate(raw)
+    except ValidationError:
+        return None
+
+
+def http_failure(status: int, body: str) -> tuple[str, tuple[str, ...]]:
+    """The detail and the codes an ``http_error`` outcome records for a non-200.
+
+    ``status 503`` alone loses the server's own sentence; with an ``error.v1``
+    body it becomes ``status 503 dependency_unavailable: run … has no completed
+    build``, clipped, and the code rides on the row's ``error_codes`` where the
+    catalog stays the server's. Nothing here branches on ``retryable`` (server
+    issue #117: it is not always true) — the client never retries anyway.
+    """
+    error = parse_error(body)
+    if error is None:
+        return f"status {status}", ()
+    return clip(f"status {status} {error.code}: {error.message}"), (error.code,)

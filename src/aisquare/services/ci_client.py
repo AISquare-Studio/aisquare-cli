@@ -371,9 +371,20 @@ class Call:
 
     @property
     def error_codes(self) -> list[str]:
+        """``errors[].code`` from a parsed response, or the ``error.v1`` code a
+        non-200 body carried. Either way the catalog is the server's."""
         if self.outcome.response is None:
-            return []
+            return list(self.outcome.error_codes)
         return [error.code for error in self.outcome.response.errors]
+
+    @property
+    def config_fingerprint(self) -> str | None:
+        """The envelope's fingerprint — present on ``empty`` answers too."""
+        return None if self.outcome.response is None else self.outcome.response.config_fingerprint
+
+    @property
+    def detail(self) -> str:
+        return self.outcome.detail
 
 
 def call(request: HookRequest, *, url: str) -> Call:

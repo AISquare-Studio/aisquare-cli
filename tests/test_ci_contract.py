@@ -281,6 +281,38 @@ def test_non_200_degrades_as_http_error() -> None:
     outcome = parse_response(status=503, body=fixture_text("hook-response.experimental-v2.valid"))
     assert outcome.reason is ClientReason.http_error
     assert outcome.response is None
+    assert outcome.error_codes == () and outcome.detail == "status 503"
+
+
+def test_a_non_200_with_an_error_body_keeps_the_code_and_the_sentence() -> None:
+    """Live, a 503 says *why* in an error.v1 body — "run … has no completed
+    build" — and a bare ``status 503`` would throw that sentence away."""
+    from tests.stub_ci_server import error_v1
+
+    body = error_v1(
+        "dependency_unavailable", 503, "run run_x has no completed build", run_id="run_x"
+    )
+    assert errors("error.v1", body) == [], "the stub writes what the schema pins"
+    outcome = parse_response(status=503, body=json.dumps(body))
+    assert outcome.reason is ClientReason.http_error and outcome.response is None
+    assert outcome.error_codes == ("dependency_unavailable",)
+    assert outcome.detail == "status 503 dependency_unavailable: run run_x has no completed build"
+
+
+def test_an_error_body_this_build_cannot_read_is_still_a_plain_http_error() -> None:
+    for body in ("", "<html/>", "[]", '{"code": "x"}', json.dumps({"schema_version": "error/v2"})):
+        outcome = parse_response(status=502, body=body)
+        assert outcome.reason is ClientReason.http_error and outcome.error_codes == (), body
+        assert outcome.detail == "status 502"
+
+
+def test_a_long_error_message_is_clipped_in_the_detail_not_on_the_row() -> None:
+    from tests.stub_ci_server import error_v1
+
+    body = error_v1("dependency_unavailable", 503, "x" * 1_500)
+    outcome = parse_response(status=503, body=json.dumps(body))
+    assert len(outcome.detail) == MAX_DETAIL_CHARS and outcome.detail.endswith("…")
+    assert outcome.error_codes == ("dependency_unavailable",)
 
 
 @pytest.mark.parametrize("status", [201, 204, 301, 400, 401, 429, 500])

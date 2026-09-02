@@ -20,7 +20,7 @@ from aisquare.models import CheckStatus, DoctorCheck
 from aisquare.services import ci_client, diagnostics
 from aisquare.services.diagnostics import doctor
 from tests.ci_support import RUN, wire
-from tests.stub_ci_server import StubCI, live_descriptor, serve
+from tests.stub_ci_server import StubCI, error_v1, live_descriptor, serve
 
 
 @pytest.fixture
@@ -118,6 +118,39 @@ def test_the_descriptor_line_says_which_credential_is_wrong(
     assert check.status is CheckStatus.warn
     assert phrase in check.detail and check.fix and fix_word in check.fix
     assert "descriptor_unavailable" in check.detail
+
+
+def test_the_descriptor_line_quotes_the_servers_error_code(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live 401 carries ``scope_resolution_failed`` and a sentence; both
+    reach the line, and the fix still follows the status, not the words."""
+    wire(monkeypatch, stub)
+    stub.descriptor_json(
+        error_v1("scope_resolution_failed", 401, "no valid experiment token. Run not found."),
+        status=401,
+    )
+    check = _ci_checks()["ci descriptor"]
+    assert check.status is CheckStatus.warn
+    assert "token rejected (401) — scope_resolution_failed: no valid experiment token" in (
+        check.detail
+    )
+    assert check.fix and "AISQUARE_CI_KEY" in check.fix, (
+        "the message says 'not found'; the status wins"
+    )
+
+
+def test_a_503_on_the_descriptor_route_names_the_servers_reason(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, stub)
+    stub.descriptor_json(
+        error_v1("dependency_unavailable", 503, f"run {RUN} has no completed build"), status=503
+    )
+    check = _ci_checks()["ci descriptor"]
+    assert check.status is CheckStatus.warn
+    assert "dependency_unavailable" in check.detail and "no completed build" in check.detail
+    assert check.fix and "AISQUARE_CI=0" in check.fix
 
 
 def test_an_expired_run_is_named_as_expired(stub: StubCI, monkeypatch: pytest.MonkeyPatch) -> None:

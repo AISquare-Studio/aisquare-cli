@@ -617,9 +617,12 @@ def _check_ci_descriptor(base: str, key: str, run: str) -> DoctorCheck:
     descriptor = result.descriptor
     if descriptor is None:
         detail = result.detail
-        if "token" in detail:
+        # The fix follows the status the server sent, never a word in its
+        # message: an error.v1 sentence is quoted into the detail now, and
+        # "token" or "not found" inside it would otherwise pick the wrong fix.
+        if result.status in (401, 403):
             fix = "Check AISQUARE_CI_KEY is the experiment token for this server"
-        elif "not found" in detail:
+        elif result.status == 404:
             fix = "Check AISQUARE_CI_RUN names a run this server has published"
         elif "contract_version" in detail:
             fix = "Upgrade aisquare-cli, or ask for a run published for this contract"

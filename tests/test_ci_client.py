@@ -20,7 +20,7 @@ from aisquare.models import ClientReason
 from aisquare.services import ci_client
 from tests.ci_schemas import errors, fixture, fixture_text
 from tests.ci_support import RUN, request, wire
-from tests.stub_ci_server import StubCI, serve
+from tests.stub_ci_server import StubCI, error_v1, serve
 
 
 @pytest.fixture
@@ -233,6 +233,26 @@ def test_a_500_is_an_http_error(wired: StubCI) -> None:
     assert result.action == "noop"
     assert result.reason is ClientReason.http_error
     assert "500" in result.outcome.detail
+
+
+def test_a_refusal_with_an_error_body_lands_its_code_on_the_call(wired: StubCI) -> None:
+    """The live server's 401: ``scope_resolution_failed`` with the sentence that
+    says what to fix. The code is what the row records; the sentence is the
+    detail a person reads."""
+    wired.respond_json(
+        error_v1(
+            "scope_resolution_failed",
+            401,
+            "no valid experiment token. These routes are experiment-only.",
+            credential_present=False,
+        ),
+        status=401,
+    )
+    result = _call(wired)
+    assert result.reason is ClientReason.http_error and result.action == "noop"
+    assert result.error_codes == ["scope_resolution_failed"]
+    assert result.detail.startswith("status 401 scope_resolution_failed: no valid experiment token")
+    assert result.status is None and result.server_ms is None, "no envelope arrived"
 
 
 def test_a_429_body_is_still_read_and_still_an_http_error(wired: StubCI) -> None:

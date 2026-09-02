@@ -39,10 +39,16 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def healthy_proxy(payload: dict[str, str] | None = None) -> Iterator[str]:
-    """Serve ``payload`` on a loopback port and yield its base URL."""
+def healthy_proxy(payload: dict[str, str] | None = None, port: int = 0) -> Iterator[str]:
+    """Serve ``payload`` on a loopback port and yield its base URL.
+
+    ``port`` defaults to 0 — an ephemeral port, which is what tests want, since
+    9090 is documented as somebody else's long-running proxy. The only caller
+    that passes one is ``_serve_forever`` below, on behalf of CI's ambient job,
+    which has to occupy the port the CLI is CONFIGURED to probe.
+    """
     handler = type("Handler", (_HealthHandler,), {"payload": payload or HEALTHY})
-    server = HTTPServer(("127.0.0.1", 0), handler)
+    server = HTTPServer(("127.0.0.1", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -51,3 +57,30 @@ def healthy_proxy(payload: dict[str, str] | None = None) -> Iterator[str]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def _serve_forever(port: int) -> None:
+    """Hold ``port`` until killed. The entry point CI's ambient job uses.
+
+    Exists so the workflow reuses THIS module's payload rather than inlining its
+    own JSON: `probe_proxy` checks `service` and `mode`, so a hand-rolled stub in
+    a YAML file would be a second copy of a contract that has to match, and the
+    copy nobody runs locally is the one that drifts.
+
+    Goes THROUGH ``healthy_proxy`` rather than building a second server, which is
+    the same argument one level down. It used to construct its own ``HTTPServer``,
+    which meant the module served CI from a code path no test exercised and left
+    ``healthy_proxy``'s ``port`` argument with no caller at all — a stub whose
+    tested half and shipped half were different code.
+
+    Prints the bound URL so the job's log records which port was actually taken.
+    """
+    with healthy_proxy(port=port) as url:
+        print(url, flush=True)
+        threading.Event().wait()
+
+
+if __name__ == "__main__":  # pragma: no cover - a CI entry point, not a test path
+    import sys
+
+    _serve_forever(int(sys.argv[1]) if len(sys.argv) > 1 else 9090)

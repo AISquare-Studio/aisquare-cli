@@ -75,7 +75,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bump (#73) went red on mypy and the `<2` pin was the only thing keeping a
   fresh install green. The port is confined to `services/mcp_server.py`, the
   `serve` dependency guard, and the two test files that drive them; the nine
-  tools, their wording, and both transports' behaviour are unchanged.
+  tools and their wording are unchanged, and so is stdio. HTTP changes in one
+  respect, for a non-loopback `--bind`, described below.
   - **The error-wording contract survives, on the seam the SDK now provides.**
     mcp 2 still folds a tool's `ToolError` into `Error executing tool <name>:
     <msg>`, so the handler that unwraps our own message back out is still
@@ -85,7 +86,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what the SDK itself uses to wrap this method for extensions). A remote
     agent still sees `error: reopen requires a note (the feedback)`, verbatim,
     as an `isError` result — `tests/test_serve.py` asserts every one of those
-    strings end-to-end through a real client session.
+    strings, the `ClaimLostError` mapping included, through a real client
+    session over memory streams with JSON-RPC framing, and proves once that the
+    modern in-process path (2026-07-28, no framing) reaches the same handler.
   - **A crashed tool is now logged server-side.** New in mcp 2.1, not chosen
     here: the SDK tells a crash apart from a deliberate failure by type
     (`UnexpectedToolError`) and keeps the crash's detail off the wire, so the
@@ -98,22 +101,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     one. `test_a_crashed_tool_is_an_error_result_logged_server_side` pins both
     halves: nothing of the exception on the wire, all of it in the log.
   - HTTP transport settings moved off the server object: `host` is passed to
-    `streamable_http_app()`, whose only use for it is deciding whether loopback
-    DNS-rebinding protection auto-enables (it does, as before), and the port is
-    uvicorn's alone, as it already was.
+    `streamable_http_app()`, whose only use for it is deciding whether
+    DNS-rebinding protection auto-enables, and the port is uvicorn's alone, as
+    it already was. **That decision now follows the actual bind, which changes
+    one thing.** In 1.x the SDK decided in its constructor from the default
+    host (`127.0.0.1`), and the pre-change code set `settings.host = bind` only
+    afterwards, so Host/Origin validation with a loopback-only allowlist was on
+    for every bind — `--bind 0.0.0.0` answered every LAN client with
+    `421 Invalid Host header` (measured against the pre-change tree on mcp
+    1.29.1; the module docstring's LAN use case never worked). In 2.x a loopback
+    bind keeps the protection (`127.0.0.1:*`, `localhost:*`, `[::1]:*`) and a
+    non-loopback bind runs with no Host/Origin validation, so LAN clients work
+    for the first time and the bearer token is the sole gate there. It is
+    checked outermost, before anything else in the app, and a DNS-rebinding
+    page cannot present it, which is why that trade is acceptable; an operator
+    who wants a Host allowlist on a LAN bind as well passes
+    `transport_security=TransportSecuritySettings(...)` to
+    `streamable_http_app()`, a one-line change in `run_http`. Found by an
+    independent review of #75 after it merged, which measured both trees.
   - The `serve` guard probes `mcp.server.mcpserver`, and its message for an
     incompatible major points the other way now — a 1.x is the one that cannot
     work — with `pip install 'mcp>=2.1,<3'`. The distribution-versus-module
     distinction it was written for (#55) is exactly what makes a 1.x a
     sentence rather than a traceback. It tells majors apart, not minors: the
     pin is what keeps a 2.0.x out, and pip reports that at install time.
-  - `tests/test_serve.py` drives the server through `mcp.client.Client(server)`,
-    the in-memory replacement for the removed
-    `create_connected_server_and_client_session`, and reads `is_error`: field
-    names are snake_case in 2.x.
-  - Also inherited from 2.x: synchronous tool bodies run on a worker thread
-    rather than inline on the event loop. Each of the nine opens its own store
-    session per call and touches nothing thread-affine, so nothing crosses.
+  - `tests/test_serve.py` drives the server through
+    `mcp.client.Client(server, mode="legacy")`, the in-memory replacement for
+    the removed `create_connected_server_and_client_session` and the same path
+    it took: memory streams, JSON-RPC framing, an initialize handshake. Not the
+    default `mode="auto"`, which for an in-process server is a
+    `DirectDispatcher` pair — no serialisation, no framing — and would let a
+    result that cannot cross the wire pass every test. It reads `is_error`:
+    field names are snake_case in 2.x.
+  - **`serverInfo.version` is now this CLI's version.** mcp 1.x filled an
+    omitted version with the SDK's own package version, so clients saw
+    `"1.29.1"` — a number that named nothing of ours — and 2.x fills it with
+    the empty string. `build_server` now passes `aisquare-cli`'s version, and a
+    test pins it. Found by the same post-merge review, which diffed the two
+    trees' wire output step for step: with this, `tools/list`, every success
+    result and every error text are byte-identical between 1.x and 2.x except
+    the crash case described above.
+  - Also inherited from 2.x, and not the project's to change: a request for an
+    unknown method is answered with the JSON-RPC-specified `-32601 Method not
+    found` (was `-32602 Invalid request parameters`), and synchronous tool
+    bodies run on a worker thread rather than inline on the event loop. Each of
+    the nine opens its own store session per call and touches nothing
+    thread-affine, so nothing crosses.
   - The floor is measured, not guessed: against every 2.x release on PyPI,
     the serve suite, the stdio idle-deadline suite and mypy strict are green on
     2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`

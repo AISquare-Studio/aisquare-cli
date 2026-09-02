@@ -21,6 +21,7 @@ from mcp.types import CallToolResult, TextContent
 
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
+from aisquare.services.team import ClaimLostError
 
 
 @pytest.fixture(autouse=True)
@@ -34,15 +35,19 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def call_remote(tool: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
     """Call one tool end-to-end through an in-memory MCP client session.
 
-    ``Client(server)`` is the SDK's in-memory pair (it replaced
-    ``create_connected_server_and_client_session`` in mcp 2): a real client
-    session over memory streams, so the request crosses the wire format and the
-    server's registered ``tools/call`` handler — the one that preserves error
-    wording — exactly as a remote agent's would.
+    ``Client(server, mode="legacy")`` is what replaced the removed
+    ``create_connected_server_and_client_session`` in mcp 2, and takes the same
+    path it did: a real client session over memory streams with JSON-RPC
+    framing, so the result is serialised and parsed exactly as a remote
+    agent's would be before it reaches the assertion. The default
+    ``mode="auto"`` dispatches in-process with no framing at all (a
+    ``DirectDispatcher`` pair); it reaches the same registered ``tools/call``
+    handler, and ``test_the_modern_in_process_path_reaches_the_same_handler``
+    proves that once, but wire-shaped is what every other assertion here wants.
     """
 
     async def go() -> CallToolResult:
-        async with Client(mcp_server.build_server()) as client:
+        async with Client(mcp_server.build_server(), mode="legacy") as client:
             return await client.call_tool(tool, arguments or {})
 
     return anyio.run(go)
@@ -342,6 +347,63 @@ def test_signal_tool_set_read_and_errors(work_dir: Path) -> None:
     assert error_text(missing).startswith("error: no signal named")
     invalid = call_remote("signal", {"name": "Bad Name", "value": "x"})
     assert error_text(invalid).startswith("error: signal name")
+
+
+def test_the_server_identifies_itself_with_the_cli_version() -> None:
+    """``serverInfo`` names this distribution and ITS version, not the SDK's.
+
+    mcp 1.x filled an omitted version with the SDK's own package version
+    ("1.29.1"), and 2.x fills it with nothing; either way a connector list
+    would show a number that says nothing about aisquare. The legacy
+    connection is used because ``InitializeResult.serverInfo`` is mandatory
+    there, so an absent identity fails loudly rather than reading as ``None``.
+    """
+    from aisquare.core.version import __version__
+
+    async def go() -> tuple[str, str] | None:
+        async with Client(mcp_server.build_server(), mode="legacy") as client:
+            info = client.server_info
+            return None if info is None else (info.name, info.version)
+
+    assert anyio.run(go) == ("aisquare-team", __version__)
+
+
+def test_the_modern_in_process_path_reaches_the_same_handler(work_dir: Path) -> None:
+    """``mode="auto"`` — 2026-07-28, no JSON-RPC framing — still hits our handler.
+
+    A replaced protocol handler that only took effect on the handshake era
+    would leave modern clients with the SDK's prefixed wording. Same call,
+    same exact text, on the path ``call_remote`` deliberately does not use.
+    """
+    team_service.activate()
+
+    async def go() -> CallToolResult:
+        async with Client(mcp_server.build_server()) as client:  # the default mode
+            return await client.call_tool("task_update", {"ref": "tsk_x", "action": "bogus"})
+
+    result = anyio.run(go)
+    assert error_text(result) == (
+        "error: action must be done, review, block, reopen, release or drop"
+    )
+
+
+def test_a_lost_claim_keeps_the_error_wording(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one ``_guard`` mapping nothing else here provokes: ``ClaimLostError``.
+
+    A real one needs two sessions racing for the same row, so the service is
+    made to raise it; what is under test is the mapping, not the race.
+    """
+    team_service.activate()
+    task, _created = team_service.add_task("contested")
+
+    def lost(**kwargs: object) -> object:
+        raise ClaimLostError(task)
+
+    monkeypatch.setattr(team_service, "next_task", lost)
+    result = call_remote("task_next", {"claim": True})
+    assert error_text(result) == f"error: task {task.id} is already claimed by another session"
 
 
 def test_a_crashed_tool_is_an_error_result_logged_server_side(

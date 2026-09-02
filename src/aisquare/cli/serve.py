@@ -63,7 +63,11 @@ def _dependency_error() -> str | None:
 
 
 def _installed_mcp() -> str:
-    """``" (mcp 2.0.0)"`` when the version is knowable, else nothing."""
+    """``" (mcp 1.29.1)"`` when the version is knowable, else nothing.
+
+    Only ever a 1.x: every 2.x release ships the probed module, so the message
+    this decorates is produced for nothing newer.
+    """
     from importlib.metadata import PackageNotFoundError, version
 
     try:

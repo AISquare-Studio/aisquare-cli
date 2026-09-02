@@ -365,8 +365,15 @@ def build_server() -> MCPServer:
     from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
     from mcp.shared.exceptions import MCPError
 
+    from aisquare.core.version import __version__
+
+    # ``version`` is the CLI's own. Left out, 1.x substituted the SDK's package
+    # version into ``serverInfo.version`` (clients saw "1.29.1", which named
+    # nothing of ours); 2.x sends the empty string. The one that means
+    # something in a client's connector list is this distribution's.
     server = MCPServer(
         "aisquare-team",
+        version=__version__,
         instructions=(
             "The shared task board and working memory of a team of coding-agent "
             "sessions. Check team_board first; add work with task_add (idempotent); "
@@ -411,9 +418,12 @@ def build_server() -> MCPServer:
         a deliberate failure in this scheme (the caller's mistake, reported to
         the caller), not a crash, and is not logged as one.
 
-        The request context is threaded through as the SDK's handler does, so
-        a tool that takes ``ctx`` (none of the nine does) would still see its
-        request rather than a request-less stand-in.
+        The request context and the call's own params are threaded through as
+        the SDK's handler does, so a tool that takes ``ctx`` (none of the nine
+        does) sees its request rather than a request-less stand-in. Not
+        threaded: the subscriptions bus behind ``ctx.notify_*`` — a second
+        private attribute, ``server._subscriptions``, that no tool needs. The
+        day one notifies, that is the kwarg to add here.
         """
         context = Context(request_context=ctx, mcp_server=server, input_params=params)
         try:
@@ -564,7 +574,16 @@ def run_http(*, bind: str, port: int) -> None:
     server = build_server()
     # mcp 2 moved transport settings off the server object. ``host`` goes to
     # the app factory, whose only use for it is deciding whether DNS-rebinding
-    # protection auto-enables (it does for loopback, as before); the port is
-    # uvicorn's alone, which is what binds it.
+    # protection auto-enables; the port is uvicorn's alone, which is what
+    # binds it. That decision now follows the ACTUAL bind: loopback keeps the
+    # protection (Host allowlist 127.0.0.1:*, localhost:*, [::1]:*), anything
+    # else runs with no Host/Origin validation. 1.x decided in the constructor
+    # from its default host, before this function set the bind, so the
+    # loopback allowlist applied to every bind and `--bind 0.0.0.0` answered
+    # every LAN client with 421 — measured against the pre-2.x tree. What
+    # gates a non-loopback bind is _BearerGuard, outermost, and a rebinding
+    # page cannot present the token; an operator who wants a Host allowlist
+    # there as well passes transport_security=TransportSecuritySettings(...)
+    # on this call.
     app = server.streamable_http_app(host=bind)
     uvicorn.run(_BearerGuard(app, token), host=bind, port=port, log_level="warning")

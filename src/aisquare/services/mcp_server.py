@@ -575,15 +575,18 @@ def run_http(*, bind: str, port: int) -> None:
     # mcp 2 moved transport settings off the server object. ``host`` goes to
     # the app factory, whose only use for it is deciding whether DNS-rebinding
     # protection auto-enables; the port is uvicorn's alone, which is what
-    # binds it. That decision now follows the ACTUAL bind: loopback keeps the
-    # protection (Host allowlist 127.0.0.1:*, localhost:*, [::1]:*), anything
-    # else runs with no Host/Origin validation. 1.x decided in the constructor
-    # from its default host, before this function set the bind, so the
-    # loopback allowlist applied to every bind and `--bind 0.0.0.0` answered
-    # every LAN client with 421 — measured against the pre-2.x tree. What
-    # gates a non-loopback bind is _BearerGuard, outermost, and a rebinding
-    # page cannot present the token; an operator who wants a Host allowlist
-    # there as well passes transport_security=TransportSecuritySettings(...)
-    # on this call.
+    # binds it. That decision now follows the ACTUAL bind: a bind spelled
+    # 127.0.0.1, localhost or ::1 keeps the protection (Host allowlist
+    # 127.0.0.1:*, localhost:*, [::1]:*); anything else — 0.0.0.0, a LAN
+    # address, even 127.0.0.2 — runs with no Host/Origin validation. mcp 1.23+
+    # decided in the constructor from its default host, before this function
+    # set the bind, so the loopback allowlist applied to every bind and
+    # `--bind 0.0.0.0` answered every LAN client with 421 (measured on 1.23.0
+    # and 1.29.1; 1.10 through 1.22 shipped the protection off and let it
+    # through). What gates a non-loopback bind here is _BearerGuard, outermost,
+    # and a rebinding page cannot present the token; an operator who wants a
+    # Host allowlist there as well passes transport_security=
+    # TransportSecuritySettings(...) on this call. tests/test_serve.py pins
+    # both directions of the decision, and the guard's place in front of it.
     app = server.streamable_http_app(host=bind)
     uvicorn.run(_BearerGuard(app, token), host=bind, port=port, log_level="warning")

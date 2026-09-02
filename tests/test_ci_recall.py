@@ -141,12 +141,14 @@ def test_the_mcp_server_registers_the_tool_only_when_available(
     wired: StubCI, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("mcp")
+    import anyio
+
     from aisquare.services.mcp_server import build_server
 
-    names = {tool.name for tool in build_server()._tool_manager.list_tools()}
+    names = {tool.name for tool in anyio.run(build_server().list_tools)}
     assert RECALL_TOOL in names
     monkeypatch.setenv("AISQUARE_CI", "0")
-    names = {tool.name for tool in build_server()._tool_manager.list_tools()}
+    names = {tool.name for tool in anyio.run(build_server().list_tools)}
     assert RECALL_TOOL not in names
 
 

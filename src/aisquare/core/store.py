@@ -25,7 +25,7 @@ import re
 import sqlite3
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -306,12 +306,18 @@ CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_
 # the only place that distinction survives into a comparison.
 #
 # A migration this time, not another in-place rewrite of v11, because v11 has
-# reached machines: anyone who ran this branch's stub smoke is at user_version
-# 11, and anyone who followed the PR's advice for the v1-shaped table — "delete
-# the metric table" — is at 11 with NO metric table (measured on the machine
-# this was written on: user_version 11, no metric table, every row silently
-# lost). CREATE TABLE IF NOT EXISTS heals that machine with the v11 shape;
-# ALTER TABLE then adds the column to both. Nothing is dropped, no row is
+# reached machines in three shapes, all stamped user_version 11:
+#   - the v2 metric table, from anyone who ran this branch's stub smoke;
+#   - NO metric table, from anyone who followed the PR's advice for the v1
+#     table — "delete the metric table" (measured on the machine this was
+#     written on: every row silently lost);
+#   - the v1-contract metric table (ci_action, degradation_reason, arm,
+#     flags_hash, plus a `run` table), from anyone who ran the branch between
+#     7557751 and 31956f2 — which cannot take a v2 row either.
+# _retire_v1_metric_table runs first, inside the same transaction, and renames
+# the third shape out of the way (renamed, never dropped — the rows are theirs);
+# CREATE TABLE IF NOT EXISTS then builds the v2 shape for the second and third;
+# ALTER TABLE adds the column to all three. Nothing is dropped, no row is
 # touched, and the CHECK is mirrored in tests/test_store.py like the others.
 _SCHEMA_V12 = (
     _SCHEMA_V11.replace("CREATE TABLE metric", "CREATE TABLE IF NOT EXISTS metric").replace(
@@ -320,6 +326,42 @@ _SCHEMA_V12 = (
     + "\nALTER TABLE metric ADD COLUMN delivery_source TEXT"
     " CHECK (delivery_source IN ('descriptor', 'override'));\n"
 )
+
+V1_ORPHAN_SUFFIX = "_v1_orphaned"
+"""Where the v1-contract ``metric`` and ``run`` tables go at v12. Nothing reads
+them; a developer who wants the space back drops them by hand."""
+
+
+def _retire_v1_metric_table(connection: sqlite3.Connection) -> None:
+    """Before the v12 statements: move a v1-contract ``metric`` table aside.
+
+    Detected by shape, not by version — the version is the same 11 for every
+    state above. A ``metric`` table without ``run_kind`` is the v1 one; it is
+    renamed, its indexes dropped (they keep their names through a rename and
+    would make the v12 ``CREATE INDEX IF NOT EXISTS`` a no-op on the new
+    table), and the v1 ``run`` table renamed with it, so the schema that ends
+    up stamped current is the v2 shape and nothing arm-shaped is live. Without
+    this step every v12 statement would succeed on the v1 shape and stamp it 12
+    — a database that can never take a row and can never be migrated by
+    version again.
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(metric)")}
+    if not columns or "run_kind" in columns:
+        return
+    connection.execute("DROP INDEX IF EXISTS metric_project_started")
+    connection.execute("DROP INDEX IF EXISTS metric_open_session")
+    connection.execute(f"ALTER TABLE metric RENAME TO metric{V1_ORPHAN_SUFFIX}")
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "run" in tables:
+        connection.execute(f"ALTER TABLE run RENAME TO run{V1_ORPHAN_SUFFIX}")
+
+
+# Python that must run before a migration's statements, inside its transaction,
+# keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
+# scripts stay plain SQL that executescript and _statements build identically.
+_PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {11: _retire_v1_metric_table}
 
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
@@ -1770,6 +1812,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
             if version >= len(_MIGRATIONS):
                 connection.execute("COMMIT")
                 return
+            prepare = _PREPARE.get(version)
+            if prepare is not None:
+                prepare(connection)
             for statement in _statements(_MIGRATIONS[version]):
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {version + 1}")

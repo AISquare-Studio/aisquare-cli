@@ -321,8 +321,9 @@ def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_
     assert "arm" not in columns and "run" not in tables
 
 
-def _at_version(version: int, *, after: str = "") -> Path:
-    """A database migrated by hand to ``version``, with ``after`` run last."""
+def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> Path:
+    """A database migrated by hand to ``version``, with ``after`` run last and
+    ``user_version`` stamped ``stamp`` (default: ``version``)."""
     from aisquare.core.store import _MIGRATIONS
 
     db = _db_path()
@@ -333,11 +334,49 @@ def _at_version(version: int, *, after: str = "") -> Path:
             raw.executescript(migration)
         if after:
             raw.executescript(after)
-        raw.execute(f"PRAGMA user_version = {version}")
+        raw.execute(f"PRAGMA user_version = {stamp if stamp is not None else version}")
         raw.commit()
     finally:
         raw.close()
     return db
+
+
+# The metric table the branch's v1 contract created (7557751..31956f2), stamped
+# user_version 11 like the v2 one that replaced it in place. Column names as
+# they were; the arm and flags_hash columns are the reason it must not stay.
+V1_METRIC_DDL = """
+CREATE TABLE metric (
+    trace_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    wall_ms INTEGER,
+    ci_action TEXT NOT NULL DEFAULT 'allow',
+    degradation_reason TEXT NOT NULL DEFAULT 'disabled',
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    server_ms INTEGER,
+    round_trip_ms INTEGER,
+    budget_breach INTEGER NOT NULL DEFAULT 0,
+    injected_chars INTEGER,
+    run_id TEXT,
+    arm TEXT,
+    flags_hash TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tool_calls INTEGER
+);
+CREATE INDEX metric_project_started ON metric (project_id, started_at);
+CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_at IS NULL;
+CREATE TABLE run (
+    id TEXT PRIMARY KEY,
+    arm TEXT,
+    flags_hash TEXT,
+    started_at TEXT NOT NULL,
+    note TEXT
+);
+INSERT INTO metric (trace_id, project_id, started_at, arm) VALUES ('trc_v1', 'prj_old', 't', 'A');
+"""
 
 
 def _metric_columns(db: Path) -> set[str]:
@@ -399,6 +438,47 @@ def test_a_v11_database_whose_metric_table_was_deleted_by_hand_heals() -> None:
     raw = sqlite3.connect(str(db))
     try:
         assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+    finally:
+        raw.close()
+
+
+def test_a_v11_database_with_the_v1_shaped_metric_table_is_moved_aside_and_rebuilt() -> None:
+    """The third real v11 state. Every v12 statement would succeed on the v1
+    shape and stamp it 12 — a table that can never take a v2 row and can never
+    be migrated by version again. It is renamed (never dropped), its arm-shaped
+    sibling with it, and the v2 shape is built in its place."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.store import V1_ORPHAN_SUFFIX
+    from aisquare.models import TurnMetric
+
+    db = _at_version(10, after=V1_METRIC_DDL, stamp=11)
+    assert "arm" in _metric_columns(db), "the precondition: the v1 shape"
+    store = open_store()
+    try:
+        store.open_turn(
+            TurnMetric(trace_id="trc_v2", project_id="prj_x", started_at=datetime.now(tz=UTC))
+        )
+        (row,) = store.turn_metrics(project_id="prj_x")
+    finally:
+        store.close()
+    assert row.trace_id == "trc_v2" and row.delivery_source is None
+    columns = _metric_columns(db)
+    assert {"run_kind", "delivery_source"} <= columns and "arm" not in columns
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert f"metric{V1_ORPHAN_SUFFIX}" in tables and f"run{V1_ORPHAN_SUFFIX}" in tables
+        assert "run" not in tables, "nothing arm-shaped stays live"
+        kept = raw.execute(f"SELECT trace_id, arm FROM metric{V1_ORPHAN_SUFFIX}").fetchall()
+        assert kept == [("trc_v1", "A")], "renamed, never dropped"
+        indexes = {row[1] for row in raw.execute("PRAGMA index_list(metric)")}
+        assert {"metric_project_started", "metric_open_session"} <= indexes, (
+            "the indexes follow the live table, not the orphan"
+        )
     finally:
         raw.close()
 

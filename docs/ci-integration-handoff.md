@@ -21,18 +21,24 @@ Built (per `README.md` and `docs/handoff-2026-08-25.md`): Slices 0–7 and 9 —
 contracts (67 schemas), immutable runs, signal ledger + normalizer, deterministic R1 builder,
 exact-reference reader, complete ledger and restore. Not started: 8, 10, 11.
 
+**Update 2026-09-02:** R1 is deployed at `https://ci-api.aisquare.studio` (`main` `4cb104b`, staging,
+us-east-1). `POST /v1/hook` and `POST /v1/mcp/collective_intelligence_recall` are built and live; the
+descriptor route still serves the constant `direct_api` list; the trusted session mapping is still a
+stub. `docs/ci-live-wiring-handoff.md` is the CLI-side plan against the live server. The table below is
+as of `fff5646`, with the rows that changed marked.
+
 What matters for the CLI:
 
 | Surface | State | Where |
 |---|---|---|
 | Hook contract v2 schemas + fixtures | **exist, frozen** | `contracts/jsonschema/delivery/hook-request.experimental-v2.schema.json`, `hook-response.experimental-v2.schema.json`, `contracts/fixtures/{valid,invalid}/hook-*.json` |
-| Delivery descriptor schema + `GET /v1/experiment/runs/{run_id}` | **exists** — but the handler returns a constant `direct_api` delivery list for every run (`app/api/runs.py`, `DIRECT_API_DELIVERY`) | `client-delivery-descriptor.v1` |
+| Delivery descriptor schema + `GET /v1/experiment/runs/{run_id}` | **exists, live** — the handler still returns a constant `direct_api` delivery list for every run (`app/api/runs.py`, `DIRECT_API_DELIVERY`), `client_safety_ms` 60 000, `expires_at` now + 1 h. *Still true at `4cb104b`* | `client-delivery-descriptor.v1` |
 | MCP tool schemas (`collective_intelligence_recall`) | **exist** | `mcp-tool-input.v1`, `mcp-tool-output.v1` |
 | Capability manifest schema | exists, **no route serves it** | `delivery-capability-manifest.v1` |
-| `POST /v1/hook` | **not built** — no handler, no binding, no test | route table in `app/api/*.py`, `app/api/contract_bindings.py` |
-| MCP server-side handler | **not built** | — |
+| `POST /v1/hook` | ~~not built~~ **built and live** (`app/api/delivery.py`, bound to `hook-request/response.experimental-v2`; any experiment token, a recorded stand-in for a developer-role principal) — *changed 2026-09-02* | `app/api/delivery.py` |
+| MCP server-side handler | ~~not built~~ **built and live as an HTTP route**: `POST /v1/mcp/collective_intelligence_recall` takes `mcp-tool-input.v1`, returns `mcp-tool-output.v1` directly — *changed 2026-09-02* | `app/api/delivery.py` |
 | Trusted session mapping (`ses_…` → principal / projects / studios) | **stub returning empty lists** — every real session resolves to zero scope; only admitted `workspace_wide` items can serve | `app/api/queries.py::trusted_session_mapping`; handoff "Residuals" |
-| Tokens | four fixture tokens (`CITEST_READER/FIXTURE_WRITER/RUNNER/ADMIN_TOKEN`) mapped to roles; `Authorization: Bearer` | `app/api/auth.py` |
+| Tokens | five experiment tokens in Secrets Manager `aisquare-ci/stg/api-token` (us-east-1); use `CITEST_READER_TOKEN`; `Authorization: Bearer` — *changed 2026-09-02* | `app/api/auth.py`, `docs/deploy/ci-client-integration.md` |
 | `ExplainabilityTraceBatchSource` (pull CLI sessions' spans from Explainability) | **not built**; only `TraceFixtureSource` | `app/sources/__init__.py` |
 | `run_kind: live \| replay` | **absent** from `hook-request.v2`, `normalized-signal.v2` and the ledger | plan §1.5 asks for it now |
 | `status: degraded` | unreachable from the reader | flagged in the schemas' own descriptions |

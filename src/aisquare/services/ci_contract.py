@@ -59,6 +59,12 @@ else — including ``true``, which ``== 1`` in Python — is a mismatch."""
 RECALL_TOOL = "collective_intelligence_recall"
 """The one read-only MCP tool, named by the descriptor and by canon."""
 
+RECALL_ROUTE = "/v1/mcp/"
+"""Server-relative prefix of the pull route. The descriptor's ``mcp_pull.tool``
+completes it: ``POST {base}/v1/mcp/collective_intelligence_recall`` takes
+``mcp-tool-input.v1`` and answers with a bare ``mcp-tool-output.v1`` briefing —
+no hook envelope, the ``status`` is inside (``app/api/delivery.py``)."""
+
 MAX_PROMPT_CHARS = 100_000
 """``hook-request.prompt`` ``maxLength``. Longer prompts are clipped before they leave."""
 
@@ -466,6 +472,11 @@ class RecallInput(BaseModel):
             _match(RUN_ID, self.run_id, "run_id")
         return self
 
+    def to_wire(self) -> dict[str, Any]:
+        """The JSON-ready body. The three optional keys are *absent* when unset,
+        not null: the schema types them as string/integer without ``null``."""
+        return self.model_dump(mode="json", exclude_none=True)
+
 
 # --- outcome ------------------------------------------------------------------
 
@@ -550,6 +561,49 @@ def parse_response(*, status: int, body: str) -> Outcome:
     except ValidationError as exc:
         return degraded(ClientReason.schema_mismatch, first_error(exc))
     return Outcome(response=response, reason=ClientReason.none)
+
+
+@dataclass(frozen=True)
+class BriefingOutcome:
+    """The pull route's answer, or why there is none — :class:`Outcome`'s sibling.
+
+    The MCP route returns the briefing bare, so there is no envelope to hold a
+    verdict beside it: ``briefing.status`` is the server's word, and
+    ``briefing`` is ``None`` exactly when ``reason`` is not
+    :attr:`ClientReason.none`.
+    """
+
+    briefing: Briefing | None
+    reason: ClientReason
+    detail: str = ""
+    error_codes: tuple[str, ...] = ()
+
+    @property
+    def degraded(self) -> bool:
+        return self.reason is not ClientReason.none
+
+
+def parse_briefing(*, status: int, body: str) -> BriefingOutcome:
+    """Turn the pull route's raw response into a :class:`BriefingOutcome`. Never raises.
+
+    The same ladder as :func:`parse_response` minus one rung: ``mcp-tool-output.v1``
+    carries no ``contract`` field, so a server that moved on shows up as
+    ``schema_mismatch`` naming the field rather than as ``contract_mismatch``.
+    """
+    if status != 200:
+        detail, codes = http_failure(status, body)
+        return BriefingOutcome(None, ClientReason.http_error, detail, codes)
+    try:
+        raw = json.loads(body)
+    except Exception:
+        return BriefingOutcome(None, ClientReason.malformed_body, "body is not JSON")
+    if not isinstance(raw, dict):
+        return BriefingOutcome(None, ClientReason.malformed_body, f"body is {type(raw).__name__}")
+    try:
+        briefing = Briefing.model_validate(raw)
+    except ValidationError as exc:
+        return BriefingOutcome(None, ClientReason.schema_mismatch, first_error(exc))
+    return BriefingOutcome(briefing, ClientReason.none)
 
 
 def first_error(exc: ValidationError) -> str:

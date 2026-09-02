@@ -55,10 +55,13 @@ from aisquare.models import BriefingStatus, ClientReason, HookAction
 from aisquare.services.ci_contract import (
     RUN_ID,
     Briefing,
+    BriefingOutcome,
     HookRequest,
     Outcome,
+    RecallInput,
     clip,
     degraded,
+    parse_briefing,
     parse_response,
 )
 
@@ -406,3 +409,102 @@ def call(request: HookRequest, *, url: str) -> Call:
         return Call(degraded(result.reason, result.detail), result.elapsed_ms, request)
     outcome = parse_response(status=result.status or 0, body=result.body)
     return Call(outcome, result.elapsed_ms, request)
+
+
+# --- the pull call ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RecallCall:
+    """One attempted pull through the server's MCP route — :class:`Call`'s sibling.
+
+    Same properties, so a metrics row is built from either without knowing
+    which surface answered. Where the hook envelope would have carried a value
+    and the bare briefing does not — ``action``, ``server_ms``, the server's
+    own ``deadline`` block — the property says ``None`` rather than inventing
+    one: a pull has no inject/noop decision (the agent asked, and gets what
+    came back), and the briefing's ``timing_ms`` is the reader's clock, not
+    the handler's, so it is not passed off as ``server_ms``.
+    """
+
+    outcome: BriefingOutcome
+    round_trip_ms: int
+    request: RecallInput | None = None
+
+    @property
+    def action(self) -> HookAction | None:
+        return None
+
+    @property
+    def reason(self) -> ClientReason:
+        return self.outcome.reason
+
+    @property
+    def degraded(self) -> bool:
+        return self.outcome.degraded
+
+    @property
+    def status(self) -> BriefingStatus | None:
+        """The server's verdict — inside the briefing on this surface."""
+        return None if self.outcome.briefing is None else self.outcome.briefing.status
+
+    @property
+    def briefing(self) -> Briefing | None:
+        return self.outcome.briefing
+
+    @property
+    def server_ms(self) -> int | None:
+        return None
+
+    @property
+    def network_ms(self) -> int | None:
+        return None
+
+    @property
+    def deadline_breached(self) -> bool | None:
+        """Client-side only: the ceiling held when a briefing arrived, was
+        breached on ``deadline_exceeded``, and is unknown for any other failure."""
+        if self.outcome.briefing is not None:
+            return False
+        return True if self.reason is ClientReason.deadline_exceeded else None
+
+    @property
+    def error_codes(self) -> list[str]:
+        return list(self.outcome.error_codes)
+
+    @property
+    def config_fingerprint(self) -> str | None:
+        return None if self.outcome.briefing is None else self.outcome.briefing.config_fingerprint
+
+    @property
+    def detail(self) -> str:
+        return self.outcome.detail
+
+
+def recall(request: RecallInput, *, url: str, deadline_ms: int) -> RecallCall:
+    """POST ``request`` to the pull route. Never raises, never retries.
+
+    ``mcp-tool-input.v1`` carries no ceiling of its own, so the deadline is the
+    descriptor's ``client_safety_ms``, passed in — the same ceiling the hooks
+    run under, enforced the same way.
+    """
+    payload = json.dumps(request.to_wire()).encode("utf-8")
+    result = exchange(
+        url,
+        method="POST",
+        deadline_ms=deadline_ms,
+        headers=headers_for(api_key(), json_body=True),
+        body=payload,
+        max_body=MAX_BODY_BYTES,
+    )
+    if result.reason is not None:
+        return RecallCall(
+            BriefingOutcome(None, result.reason, clip(result.detail)), result.elapsed_ms, request
+        )
+    return RecallCall(
+        parse_briefing(status=result.status or 0, body=result.body), result.elapsed_ms, request
+    )
+
+
+DeliveryCall = Call | RecallCall
+"""Either surface's call: what a metrics row is built from."""

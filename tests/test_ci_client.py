@@ -18,6 +18,7 @@ import pytest
 from aisquare.core.config import AppConfig, ExperimentSettings, save_config
 from aisquare.models import ClientReason
 from aisquare.services import ci_client
+from aisquare.services.ci_contract import RecallInput
 from tests.ci_schemas import errors, fixture, fixture_text
 from tests.ci_support import RUN, request, wire
 from tests.stub_ci_server import StubCI, error_v1, serve
@@ -372,6 +373,72 @@ def test_a_deadline_breach_is_not_retried_either(wired: StubCI) -> None:
     _call(wired, client_safety_ms=200)
     time.sleep(1.2)  # let the abandoned worker's request land on the stub
     assert wired.call_count == 1
+
+
+# --- the pull call ------------------------------------------------------------------------
+
+
+def _recall(stub: StubCI, **overrides: object) -> ci_client.RecallCall:
+    fields: dict[str, object] = {"prompt": "why does the lock use msvcrt", "session_id": "ses_test"}
+    fields.update(overrides)
+    return ci_client.recall(
+        RecallInput.model_validate(fields),
+        url=stub.url + "/v1/mcp/collective_intelligence_recall",
+        deadline_ms=5_000,
+    )
+
+
+def test_a_pull_carries_the_bearer_and_the_tool_input_body(wired: StubCI) -> None:
+    _recall(wired, run_id=RUN, token_budget=1800)
+    (recorded,) = wired.recalls
+    assert recorded.path == "/v1/mcp/collective_intelligence_recall"
+    assert recorded.headers.get("Authorization") == "Bearer k"
+    assert recorded.headers.get("Content-Type") == "application/json"
+    assert errors("mcp-tool-input.v1", wired.recall_requests[0]) == []
+    assert wired.recall_requests[0]["token_budget"] == 1800
+
+
+def test_a_served_pull_comes_back_as_the_briefing(wired: StubCI) -> None:
+    result = _recall(wired)
+    assert result.reason is ClientReason.none and not result.degraded
+    assert result.status == "served" and result.briefing is not None
+    assert result.briefing.query_id == "qry_kernel0001"
+    assert result.config_fingerprint == result.briefing.config_fingerprint
+    assert result.action is None and result.server_ms is None and result.network_ms is None
+    assert result.deadline_breached is False and result.error_codes == []
+
+
+def test_a_refused_pull_is_an_http_error_with_the_servers_code(wired: StubCI) -> None:
+    wired.respond_recall_json(
+        error_v1("scope_resolution_failed", 422, "called without run_id"), status=422
+    )
+    result = _recall(wired)
+    assert result.reason is ClientReason.http_error and result.briefing is None
+    assert result.status is None and result.config_fingerprint is None
+    assert result.error_codes == ["scope_resolution_failed"]
+    assert result.detail.startswith("status 422 scope_resolution_failed")
+    assert result.deadline_breached is None
+
+
+def test_a_stalled_pull_is_cut_off_at_the_ceiling_it_was_given(wired: StubCI) -> None:
+    wired.respond_recall(body=wired.recall_behaviour.body, delay_s=1.5)
+    started = time.monotonic()
+    result = ci_client.recall(
+        RecallInput(prompt="q", session_id="ses_test"),
+        url=wired.url + "/v1/mcp/collective_intelligence_recall",
+        deadline_ms=200,
+    )
+    assert time.monotonic() - started < 1.0
+    assert result.reason is ClientReason.deadline_exceeded
+    assert result.deadline_breached is True
+    time.sleep(1.5)  # the abandoned worker's request lands on the stub …
+    assert len(wired.recalls) == 1, "… and is never repeated"
+
+
+def test_a_pull_body_that_is_not_a_briefing_is_a_schema_mismatch(wired: StubCI) -> None:
+    wired.respond_recall_json(fixture("hook-response.experimental-v2.valid"))
+    result = _recall(wired)
+    assert result.reason is ClientReason.schema_mismatch and result.briefing is None
 
 
 # --- the generic exchange -------------------------------------------------------------

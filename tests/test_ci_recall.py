@@ -1,4 +1,5 @@
-"""The pull path: the recall tool exists only when the descriptor lists it."""
+"""The pull path: the recall tool exists only when the descriptor lists it, and
+travels on the server's own MCP route."""
 
 from __future__ import annotations
 
@@ -13,8 +14,10 @@ from aisquare.services import ci_recall
 from aisquare.services import metrics as metrics_service
 from aisquare.services.ci_contract import RECALL_TOOL, RecallInput, wire_session_id
 from tests.ci_schemas import assert_valid, errors, fixture
-from tests.ci_support import SESSION, wire
-from tests.stub_ci_server import StubCI, live_descriptor, serve
+from tests.ci_support import RUN, SESSION, wire
+from tests.stub_ci_server import StubCI, error_v1, live_descriptor, serve
+
+from .test_shipping_redaction import SECRETS
 
 
 @pytest.fixture
@@ -37,6 +40,14 @@ def _never_this_checkout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
 
 
 WIRE = wire_session_id(SESSION)
+ROUTE = f"/v1/mcp/{RECALL_TOOL}"
+
+
+def _empty_briefing() -> dict[str, object]:
+    """The server's own answer for "nothing matched": a real briefing, no items."""
+    raw: dict[str, object] = fixture("mcp-tool-output.v1.valid")
+    raw.update(status="empty", briefing_id=None, items=[], rendered_context="", token_count=0)
+    return raw
 
 
 def test_the_tool_is_unavailable_while_the_experiment_is_off(isolated_home: Path) -> None:
@@ -68,31 +79,77 @@ def test_a_recall_returns_the_briefing_as_the_tool_output_contract(
     assert result == fixture("mcp-tool-output.v1.valid")
 
 
-def test_a_recall_travels_as_an_agent_request_and_is_recorded(
+def test_a_recall_travels_on_the_mcp_route_as_the_tool_input_contract(
     wired: StubCI, isolated_home: Path
 ) -> None:
     ci_recall.collective_intelligence_recall("Why did the pool guard leak?", WIRE)
-    sent = wired.requests[0]
-    assert_valid("hook-request.experimental-v2", sent)
-    assert sent["trigger"] == "agent_request"
-    assert sent["session_id"] == WIRE
-    assert sent["prompt"] == "Why did the pool guard leak?"
+    (recorded,) = wired.recalls
+    assert recorded.path == ROUTE
+    assert recorded.headers.get("Authorization") == "Bearer k"
+    sent = wired.recall_requests[0]
+    assert_valid("mcp-tool-input.v1", sent)
+    assert sent == {
+        "prompt": "Why did the pool guard leak?",
+        "session_id": WIRE,
+        "run_id": RUN,
+    }, "optional keys are absent, not null; run_id is always filled from the descriptor"
+    assert wired.call_count == 0, "the hook route is not the pull route"
+
+
+def test_a_recall_is_recorded_as_a_closed_agent_request_row(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    ci_recall.collective_intelligence_recall("Why did the pool guard leak?", WIRE)
     (turn,) = metrics_service.recent()
     assert turn.trigger == "agent_request"
     assert turn.session_id == SESSION, "the row keeps the raw id the board uses"
     assert turn.ended_at is not None, "a recall is a call, not a turn"
-    assert turn.trace_id == sent["trace_id"]
     assert turn.client_reason is ClientReason.none and turn.status == "served"
+    assert turn.query_id == "qry_kernel0001" and turn.briefing_id == "brf_kernel0001"
+    assert turn.config_fingerprint == fixture("mcp-tool-output.v1.valid")["config_fingerprint"]
+    assert turn.items_count == 1 and turn.token_count == 92 and turn.cache_status == "miss"
+    assert turn.round_trip_ms is not None and turn.deadline_breached is False
+    assert turn.action is None and turn.server_ms is None, "no envelope on this surface"
+    assert turn.run_id == RUN and turn.opaque_config_id == "cfg_public_7d41ba90c2e5"
+    assert turn.instruction_version == "aisquare-ci-instruction/1"
 
 
-def test_arguments_the_hook_cannot_carry_are_reported_not_dropped_silently(
+def test_token_budget_and_reason_travel_on_the_pull_route(
     wired: StubCI, isolated_home: Path
 ) -> None:
+    """J7 as settled: the pull route has fields for both, so nothing is dropped
+    and nothing is reported as dropped."""
     result = ci_recall.collective_intelligence_recall(
         "q", WIRE, token_budget=1800, reason="pre-edit recall"
     )
-    assert result["not_forwarded"] == ["token_budget", "reason"]
-    assert "token_budget" not in wired.requests[0]
+    sent = wired.recall_requests[0]
+    assert sent["token_budget"] == 1800 and sent["reason"] == "pre-edit recall"
+    assert_valid("mcp-tool-input.v1", sent)
+    assert "not_forwarded" not in result
+
+
+def test_the_agents_run_id_is_kept_when_it_names_one(wired: StubCI, isolated_home: Path) -> None:
+    ci_recall.collective_intelligence_recall("q", WIRE, run_id=RUN)
+    assert wired.recall_requests[0]["run_id"] == RUN
+
+
+def test_the_prompt_and_the_reason_are_scrubbed_before_they_leave(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    secret = SECRETS["gitlab pat"]
+    ci_recall.collective_intelligence_recall(f"rotate {secret} now", WIRE, reason=f"saw {secret}")
+    sent = wired.recall_requests[0]
+    assert secret not in sent["prompt"] and secret not in sent["reason"]
+    assert "rotate" in sent["prompt"]
+
+
+def test_a_prompt_with_nothing_in_it_is_never_sent(wired: StubCI, isolated_home: Path) -> None:
+    """The schema's ``minLength: 1`` lets whitespace through; the wire does not."""
+    result = ci_recall.collective_intelligence_recall("   ", WIRE)
+    assert result["status"] == "unavailable" and result["client_reason"] == "no_prompt"
+    assert wired.recalls == []
+    (turn,) = metrics_service.recent()
+    assert turn.client_reason is ClientReason.no_prompt
 
 
 def test_a_scope_id_offered_as_authority_is_refused_by_the_schema_not_by_prose(
@@ -105,28 +162,61 @@ def test_a_scope_id_offered_as_authority_is_refused_by_the_schema_not_by_prose(
     result = ci_recall.collective_intelligence_recall("q", "ws_kernel01")
     assert result["status"] == "unavailable"
     assert result["client_reason"] == "schema_mismatch"
-    assert wired.call_count == 0
+    assert wired.recalls == [] and wired.call_count == 0
 
 
-def test_an_empty_answer_is_a_small_envelope(wired: StubCI, isolated_home: Path) -> None:
-    raw = fixture("hook-response.experimental-v2.valid")
-    raw.update(status="empty", action="noop", briefing=None)
-    wired.respond_json(raw)
+def test_an_empty_answer_is_the_servers_own_briefing(wired: StubCI, isolated_home: Path) -> None:
+    """``empty`` is a success: the query ran and a ledger row was written. The
+    server says so with a real briefing carrying no items, and the tool hands
+    that object back rather than substituting a CLI envelope for it."""
+    wired.respond_recall_json(_empty_briefing())
     result = ci_recall.collective_intelligence_recall("q", WIRE)
-    assert result["status"] == "empty"
-    assert result["client_reason"] == "none"
-    assert result["briefing"] is None
+    assert_valid("mcp-tool-output.v1", result)
+    assert result["status"] == "empty" and result["items"] == []
+    assert result["query_id"] == "qry_kernel0001", "the server's id, never a CLI one"
+    assert "client_reason" not in result
+    (turn,) = metrics_service.recent()
+    assert turn.client_reason is ClientReason.none and turn.status == "empty"
+    assert turn.query_id == "qry_kernel0001" and turn.briefing_id is None
 
 
 def test_a_failure_is_an_unavailable_envelope_with_the_reason(
     wired: StubCI, isolated_home: Path
 ) -> None:
-    wired.respond(status=500, body="boom")
+    wired.respond_recall(status=500, body="boom")
     result = ci_recall.collective_intelligence_recall("q", WIRE)
     assert result["status"] == "unavailable"
     assert result["client_reason"] == "http_error"
+    assert result["briefing"] is None
     (turn,) = metrics_service.recent()
-    assert turn.client_reason is ClientReason.http_error
+    assert turn.client_reason is ClientReason.http_error and turn.status is None
+
+
+def test_a_refusal_with_an_error_body_names_the_servers_code(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """The live server's 422 for a missing run — which this client cannot
+    produce — and its 503 for a run with no build both arrive as error.v1."""
+    wired.respond_recall_json(
+        error_v1("dependency_unavailable", 503, f"run {RUN} has no completed build"), status=503
+    )
+    result = ci_recall.collective_intelligence_recall("q", WIRE)
+    assert result["client_reason"] == "http_error"
+    assert "dependency_unavailable" in result["detail"] and "no completed build" in result["detail"]
+    (turn,) = metrics_service.recent()
+    assert turn.error_codes == ["dependency_unavailable"]
+
+
+def test_a_body_that_is_not_a_briefing_is_a_schema_mismatch(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """The pull route returns the briefing bare; a hook envelope here would be
+    the server answering the wrong contract on this route."""
+    wired.respond_recall_json(fixture("hook-response.experimental-v2.valid"))
+    result = ci_recall.collective_intelligence_recall("q", WIRE)
+    assert result["status"] == "unavailable"
+    assert result["client_reason"] == "schema_mismatch"
+    assert result["detail"] == "briefing_id: Field required", "the first field a briefing needs"
 
 
 def test_a_recall_while_off_is_unavailable_and_recorded(isolated_home: Path) -> None:
@@ -135,6 +225,31 @@ def test_a_recall_while_off_is_unavailable_and_recorded(isolated_home: Path) -> 
     assert result["client_reason"] == "disabled"
     (turn,) = metrics_service.recent()
     assert turn.trigger == "agent_request" and turn.client_reason is ClientReason.disabled
+
+
+def test_a_recall_against_a_push_only_descriptor_is_recorded_not_sent(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    wired.descriptor_json(
+        live_descriptor(
+            delivery=[{"kind": "hook_push", "triggers": ["prompt_submit"], "endpoint": "/v1/hook"}]
+        )
+    )
+    result = ci_recall.collective_intelligence_recall("q", WIRE)
+    assert result["client_reason"] == "trigger_not_in_descriptor"
+    assert wired.recalls == [] and wired.call_count == 0
+    (turn,) = metrics_service.recent()
+    assert turn.client_reason is ClientReason.trigger_not_in_descriptor
+
+
+def test_a_recall_runs_under_the_descriptors_ceiling(wired: StubCI, isolated_home: Path) -> None:
+    wired.descriptor_json(live_descriptor(client_safety_ms=300))
+    wired.respond_recall(body=wired.recall_behaviour.body, delay_s=1.5)
+    result = ci_recall.collective_intelligence_recall("q", WIRE)
+    assert result["client_reason"] == "deadline_exceeded"
+    (turn,) = metrics_service.recent()
+    assert turn.deadline_breached is True and turn.round_trip_ms is not None
+    assert turn.round_trip_ms < 1_000
 
 
 def test_the_mcp_server_registers_the_tool_only_when_available(
@@ -150,6 +265,29 @@ def test_the_mcp_server_registers_the_tool_only_when_available(
     monkeypatch.setenv("AISQUARE_CI", "0")
     names = {tool.name for tool in anyio.run(build_server().list_tools)}
     assert RECALL_TOOL not in names
+
+
+def test_the_tool_answers_through_a_real_mcp_client(wired: StubCI, isolated_home: Path) -> None:
+    """End to end over the protocol: a client calls the tool, the server pulls
+    from the stub, and the briefing comes back as the tool's structured result."""
+    pytest.importorskip("mcp")
+    import anyio
+    from mcp.client import Client
+
+    from aisquare.services.mcp_server import build_server
+
+    async def go() -> object:
+        async with Client(build_server()) as client:
+            return await client.call_tool(
+                RECALL_TOOL, {"prompt": "Why did the pool guard leak?", "session_id": WIRE}
+            )
+
+    result = anyio.run(go)
+    assert not getattr(result, "is_error", False), result
+    structured = getattr(result, "structured_content", None)
+    assert isinstance(structured, dict)
+    assert_valid("mcp-tool-output.v1", structured)
+    assert wired.recall_requests[0]["prompt"] == "Why did the pool guard leak?"
 
 
 def test_the_tool_module_never_imports_mcp() -> None:

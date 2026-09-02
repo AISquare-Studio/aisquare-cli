@@ -72,7 +72,8 @@ class Augmentation:
     detail: str = ""
     block: str = ""
     """Context to put in front of the agent; empty when there is nothing."""
-    call: ci_client.Call | None = None
+    call: ci_client.DeliveryCall | None = None
+    """The hook call or the pull call; the row is built the same way from either."""
     run_id: str | None = None
     descriptor: DeliveryDescriptor | None = None
     snapshot: Snapshot | None = None
@@ -96,8 +97,7 @@ class Augmentation:
         ``Stop`` must not pick it up as one."""
         now = datetime.now(tz=UTC)
         call = self.call
-        response = call.outcome.response if call is not None else None
-        briefing = response.briefing if response is not None else None
+        briefing = call.briefing if call is not None else None
         descriptor = self.descriptor
         return TurnMetric(
             trace_id=self.trace_id,
@@ -114,7 +114,7 @@ class Augmentation:
             action=call.action if call is not None and not call.degraded else None,
             query_id=briefing.query_id if briefing else None,
             briefing_id=briefing.briefing_id if briefing else None,
-            config_fingerprint=response.config_fingerprint if response else None,
+            config_fingerprint=call.config_fingerprint if call is not None else None,
             input_checkpoint=briefing.input_checkpoint if briefing else None,
             resolved_scope_version=briefing.resolved_scope_version if briefing else None,
             round_trip_ms=call.round_trip_ms if call is not None else None,
@@ -145,8 +145,7 @@ class Augmentation:
         infers a missing count as zero, and the CLI never fabricates one.
         """
         call = self.call
-        response = call.outcome.response if call is not None else None
-        briefing = response.briefing if response is not None else None
+        briefing = call.briefing if call is not None else None
         return {
             "session_id": wire_session_id(session_id) if session_id else None,
             "pipeline_id": os.environ.get(insights.RUN_KEY_ENV_VAR, "").strip() or None,
@@ -157,7 +156,7 @@ class Augmentation:
             "trigger": self.trigger,
             "query_id": briefing.query_id if briefing else None,
             "briefing_id": briefing.briefing_id if briefing else None,
-            "config_fingerprint": response.config_fingerprint if response else None,
+            "config_fingerprint": call.config_fingerprint if call is not None else None,
             "status": call.status if call is not None else None,
             "client_reason": self.reason.value,
             "client_observed_at": self.observed_at,
@@ -298,7 +297,7 @@ def _event(
         trigger,
         trace_id,
         call.reason,
-        call.outcome.detail,
+        call.detail,
         block=rendered.text if rendered else "",
         call=call,
         run_id=run_id,

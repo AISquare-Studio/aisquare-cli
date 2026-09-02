@@ -23,6 +23,8 @@ from aisquare.models import ClientReason
 from aisquare.services.ci_contract import (
     CONTRACT_VERSION,
     MAX_DETAIL_CHARS,
+    RECALL_ROUTE,
+    RECALL_TOOL,
     RFC3339_Z,
     SESSION_ID,
     Briefing,
@@ -34,6 +36,7 @@ from aisquare.services.ci_contract import (
     degraded,
     is_contract_current,
     observed_now,
+    parse_briefing,
     parse_response,
     wire_session_id,
 )
@@ -520,6 +523,70 @@ def test_the_descriptor_refuses_what_the_schema_refuses(delivery: list[dict[str,
     assert errors("client-delivery-descriptor.v1", raw), "premise: the schema refuses it"
     with pytest.raises(ValidationError):
         DeliveryDescriptor.model_validate(raw)
+
+
+def test_the_pull_route_is_the_servers() -> None:
+    assert RECALL_ROUTE + RECALL_TOOL == "/v1/mcp/collective_intelligence_recall"
+
+
+def test_every_recall_body_this_build_can_emit_validates_via_jsonschema() -> None:
+    full = RecallInput.model_validate(fixture("mcp-tool-input.v1.valid"))
+    assert errors("mcp-tool-input.v1", full.to_wire()) == []
+    assert full.to_wire() == fixture("mcp-tool-input.v1.valid")
+    bare = RecallInput(prompt="q", session_id="ses_x", run_id="run_x")
+    assert errors("mcp-tool-input.v1", bare.to_wire()) == []
+    assert bare.to_wire() == {"prompt": "q", "session_id": "ses_x", "run_id": "run_x"}, (
+        "the optional keys are typed string/integer, never null — absent is the only valid unset"
+    )
+
+
+# --- the pull ladder ---------------------------------------------------------------
+
+
+def test_the_valid_briefing_parses_undegraded() -> None:
+    outcome = parse_briefing(status=200, body=fixture_text("mcp-tool-output.v1.valid"))
+    assert outcome.reason is ClientReason.none and not outcome.degraded
+    assert outcome.briefing is not None and outcome.briefing.status == "served"
+
+
+def test_an_empty_briefing_is_a_healthy_pull() -> None:
+    raw = fixture("mcp-tool-output.v1.valid")
+    raw.update(status="empty", briefing_id=None, items=[], rendered_context="", token_count=0)
+    outcome = parse_briefing(status=200, body=json.dumps(raw))
+    assert outcome.reason is ClientReason.none
+    assert outcome.briefing is not None and outcome.briefing.status == "empty"
+
+
+def test_a_non_200_pull_is_an_http_error_with_the_servers_code() -> None:
+    from tests.stub_ci_server import error_v1
+
+    body = error_v1("scope_resolution_failed", 422, "called without run_id")
+    outcome = parse_briefing(status=422, body=json.dumps(body))
+    assert outcome.reason is ClientReason.http_error and outcome.briefing is None
+    assert outcome.error_codes == ("scope_resolution_failed",)
+    assert outcome.detail == "status 422 scope_resolution_failed: called without run_id"
+    assert parse_briefing(status=500, body="boom").detail == "status 500"
+
+
+@pytest.mark.parametrize("body", ["", "not json", "null", "[]", "42", "x" * 10, "{" * 20_000])
+def test_a_pull_body_that_is_not_an_object_is_malformed(body: str) -> None:
+    assert parse_briefing(status=200, body=body).reason is ClientReason.malformed_body
+
+
+def test_a_hook_envelope_on_the_pull_route_is_a_schema_mismatch_naming_the_field() -> None:
+    """No ``contract`` rung on this ladder: the briefing has no such field, so a
+    server that moved on shows as the first unknown or missing field."""
+    outcome = parse_briefing(status=200, body=fixture_text("hook-response.experimental-v2.valid"))
+    assert outcome.reason is ClientReason.schema_mismatch and outcome.briefing is None
+    assert outcome.detail == "briefing_id: Field required", "the first field a briefing needs"
+
+
+def test_a_served_pull_without_items_is_a_schema_mismatch_not_a_briefing() -> None:
+    raw = fixture("mcp-tool-output.v1.valid")
+    raw["items"] = []
+    outcome = parse_briefing(status=200, body=json.dumps(raw))
+    assert outcome.reason is ClientReason.schema_mismatch
+    assert "at least one item" in outcome.detail
 
 
 def test_a_recall_input_cannot_carry_authority() -> None:

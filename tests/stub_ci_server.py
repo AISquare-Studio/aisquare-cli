@@ -7,13 +7,16 @@ truncated body, a 401 on the descriptor, a 500 with an explanation in it — are
 transport behaviour, and a mock that returns them is only testing the mock's
 idea of what urllib does.
 
-Three routes, matching the server's:
+Four routes, matching the server's:
 
 - ``GET /ready`` — always 200 (``doctor``'s reachability probe);
 - ``GET /v1/experiment/runs/{run_id}`` — the delivery descriptor, programmable
   (default: the vendored valid fixture, so the stub and the contract agree);
 - ``POST /v1/hook`` — programmable status, body, delay before headers, and a
-  drip (``chunks`` pieces, ``interval`` seconds apart) for the deadline tests.
+  drip (``chunks`` pieces, ``interval`` seconds apart) for the deadline tests;
+- ``POST /v1/mcp/collective_intelligence_recall`` — the pull route, answering a
+  bare ``mcp-tool-output.v1`` (default: the vendored valid fixture), with its
+  own programmable status, body and delay.
 
 Every request is recorded with its method, path, headers and parsed body.
 
@@ -54,6 +57,8 @@ def fixture_text(name: str) -> str:
 
 
 FAR_FUTURE = "2099-01-01T00:00:00Z"
+
+MCP_ROUTE_PREFIX = "/v1/mcp/"
 
 
 def error_v1(code: str, http_status: int, message: str, **detail: Any) -> dict[str, Any]:
@@ -120,6 +125,9 @@ class StubCI:
 
     url: str
     behaviour: Behaviour
+    recall_behaviour: Behaviour = field(
+        default_factory=lambda: Behaviour(body=fixture_text("mcp-tool-output.v1.valid"))
+    )
     descriptor_status: int = 200
     descriptor_body: str = field(default_factory=lambda: json.dumps(live_descriptor()))
     ready_status: int = 200
@@ -133,7 +141,19 @@ class StubCI:
 
     @property
     def hooks(self) -> list[Recorded]:
-        return [r for r in self.seen if r.method == "POST"]
+        return [
+            r for r in self.seen if r.method == "POST" and not r.path.startswith(MCP_ROUTE_PREFIX)
+        ]
+
+    @property
+    def recalls(self) -> list[Recorded]:
+        """Every ``POST`` to the pull route, in order."""
+        return [r for r in self.seen if r.method == "POST" and r.path.startswith(MCP_ROUTE_PREFIX)]
+
+    @property
+    def recall_requests(self) -> list[dict[str, Any]]:
+        """Parsed bodies of every pull, in order."""
+        return [r.body if r.body is not None else {"__unparsed__": r.raw} for r in self.recalls]
 
     @property
     def headers(self) -> list[dict[str, str]]:
@@ -170,6 +190,16 @@ class StubCI:
         """Set the descriptor every run id resolves to."""
         self.descriptor_status = status
         self.descriptor_body = json.dumps(payload)
+
+    def respond_recall(self, *, status: int = 200, body: str = "", delay_s: float = 0.0) -> None:
+        """Set what the next pull gets back."""
+        self.recall_behaviour.status = status
+        self.recall_behaviour.body = body
+        self.recall_behaviour.delay_s = delay_s
+        self.recall_behaviour.drip = None
+
+    def respond_recall_json(self, payload: dict[str, Any], *, status: int = 200) -> None:
+        self.respond_recall(status=status, body=json.dumps(payload))
 
 
 def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
@@ -217,7 +247,9 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
             length = int(self.headers.get("Content-Length", "0") or 0)
             raw = self.rfile.read(length).decode("utf-8") if length else ""
             self._record(raw)
-            behaviour = stub.behaviour
+            behaviour = (
+                stub.recall_behaviour if self.path.startswith(MCP_ROUTE_PREFIX) else stub.behaviour
+            )
             if behaviour.delay_s:
                 time.sleep(behaviour.delay_s)
             payload = behaviour.body.encode("utf-8")

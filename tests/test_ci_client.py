@@ -443,6 +443,51 @@ def test_a_pull_body_that_is_not_a_briefing_is_a_schema_mismatch(wired: StubCI) 
     assert result.reason is ClientReason.schema_mismatch and result.briefing is None
 
 
+def test_a_redirect_is_recorded_as_a_response_not_followed(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default opener follows a 3xx and re-sends every header — the bearer
+    included — to whatever origin Location names, turning the POST into a GET
+    on the way. Two requests, and the token at a host of the server's choosing."""
+    elsewhere = next(serve())
+    wired.respond(status=302, body="", location=elsewhere.url + "/stolen")
+    result = _call(wired)
+    assert result.reason is ClientReason.http_error and "302" in result.detail
+    assert wired.call_count == 1, "one request, one attempt"
+    assert elsewhere.seen == [], "the bearer never reached the other origin"
+    # And the descriptor GET, which carries the same bearer.
+    wired.descriptor_location = elsewhere.url + "/stolen"
+    wired.descriptor_status = 302
+    from aisquare.services import ci_descriptor
+
+    fetched = ci_descriptor.fetch(RUN, base=wired.url, key="k", cache=False)
+    assert fetched.descriptor is None and fetched.status == 302 and "302" in fetched.detail
+    assert elsewhere.seen == []
+
+
+def test_a_multi_line_token_is_unset_and_never_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``export AISQUARE_CI_KEY=$(cat token)`` on a wrapped paste: http.client would
+    refuse the header and quote the token in its ValueError, which a detail then
+    carried onto doctor's line and into the tool envelope."""
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "sk-live-SUPERSECRET-1234\ninjected-header: x")
+    assert ci_client.api_key() == ""
+    assert "Authorization" not in ci_client.headers_for(ci_client.api_key(), json_body=True)
+    assert "more than one line" in ci_client.api_key_problem()
+    leaked = ci_client._failed(
+        time.monotonic(),
+        ClientReason.transport_error,
+        "ValueError: Invalid header value b'Bearer sk-live-SUPERSECRET-1234\\ninjected-header: x'",
+    )
+    assert "SUPERSECRET" not in leaked.detail and "[AISQUARE_CI_KEY]" in leaked.detail
+
+
+def test_a_single_line_token_is_scrubbed_from_any_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "sk-live-SUPERSECRET-1234")
+    assert ci_client.api_key() == "sk-live-SUPERSECRET-1234"
+    assert ci_client.api_key_problem() == ""
+    assert "SUPERSECRET" not in ci_client.scrub_secret("token sk-live-SUPERSECRET-1234 rejected")
+
+
 def test_a_client_that_gave_up_leaves_no_traceback_behind(wired: StubCI, capsys: Any) -> None:
     """A handler still sleeping when its client abandoned the exchange wakes,
     writes to a closed socket, and must stay quiet. socketserver would print

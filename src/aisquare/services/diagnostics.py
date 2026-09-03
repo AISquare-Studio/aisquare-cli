@@ -557,11 +557,18 @@ def _experiment_checks() -> list[DoctorCheck]:
     run = ci_client.run_id()
     checks: list[DoctorCheck] = []
     if not key:
+        problem = ci_client.api_key_problem()
         checks.append(
             _warn(
                 name,
-                f"enabled for {shown}, but no bearer token — the server will reject every request",
-                "Set the experiment token: export AISQUARE_CI_KEY=…",
+                f"enabled for {shown}, but {problem} — not usable; the server will reject "
+                "every request"
+                if problem
+                else f"enabled for {shown}, but no bearer token — the server will reject every "
+                "request",
+                "Re-export the token on one line: export AISQUARE_CI_KEY=…"
+                if problem
+                else "Set the experiment token: export AISQUARE_CI_KEY=…",
             )
         )
     elif not raw_run:

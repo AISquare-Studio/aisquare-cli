@@ -48,7 +48,7 @@ import time
 import urllib.error
 from dataclasses import dataclass
 from typing import Any
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aisquare.core.config import ExperimentSettings, load_config
 from aisquare.models import BriefingStatus, ClientReason, HookAction
@@ -120,8 +120,48 @@ def endpoint() -> str:
 
 
 def api_key() -> str:
-    """The bearer token. Environment only — never read from ``config.toml``."""
+    """The bearer token. Environment only — never read from ``config.toml``.
+
+    A value spanning more than one line is treated as unset: it can never make
+    a valid header, and letting it reach ``http.client`` produced a
+    ``ValueError`` whose text — the token, verbatim — became a recorded detail.
+    :func:`api_key_problem` says why for ``doctor``.
+    """
+    value = _raw_api_key()
+    return value if _single_line(value) else ""
+
+
+def api_key_problem() -> str:
+    """Why the configured token cannot be used, or ``""``. Never the value."""
+    value = _raw_api_key()
+    if value and not _single_line(value):
+        return f"{KEY_ENV_VAR} spans more than one line"
+    return ""
+
+
+def _raw_api_key() -> str:
     return os.environ.get(KEY_ENV_VAR, "").strip()
+
+
+def _single_line(value: str) -> bool:
+    return "\n" not in value and "\r" not in value
+
+
+def scrub_secret(text: str) -> str:
+    """``text`` with any appearance of the configured token replaced.
+
+    Details quote exception text, and ``http.client`` quotes header values in
+    its. Every fragment of the raw environment value that is long enough to be
+    a secret is replaced, so no path that records or prints a detail can echo
+    the token — whatever shape the value had.
+    """
+    raw = _raw_api_key()
+    fragments = {raw, *raw.splitlines()}
+    for fragment in sorted(
+        (f.strip() for f in fragments if len(f.strip()) >= 8), key=len, reverse=True
+    ):
+        text = text.replace(fragment, f"[{KEY_ENV_VAR}]")
+    return text
 
 
 def raw_run_id() -> str:
@@ -238,6 +278,33 @@ def late(elapsed_ms: int, deadline_ms: int) -> bool:
     return elapsed_ms >= deadline_ms
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """A 3xx is a response to record, never an instruction to follow.
+
+    The default opener follows a redirect and re-sends every header — the
+    bearer token included — to whatever origin the ``Location`` names, and
+    turns a POST into a GET without its body on the way. That is a second
+    request (``retry_policy: none`` says one), and it is the threat the
+    descriptor contract already names for the hook path ("an absolute URL here
+    would let a descriptor redirect a client's prompts to another host").
+    Refusing surfaces the 3xx as an ``HTTPError`` the ladder records as
+    ``http_error`` with its status: a redirecting server is visible data.
+    """
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: Any, msg: Any, headers: Any, newurl: Any
+    ) -> None:
+        return None
+
+
+_OPENER = build_opener(_NoRedirect)
+
+
+def urlopen(request: Request, timeout: float) -> Any:
+    """The one way this module opens a URL: the redirect-refusing opener."""
+    return _OPENER.open(request, timeout=timeout)
+
+
 def _blocking_exchange(
     url: str,
     *,
@@ -295,7 +362,11 @@ def _read(response: Any, status: int, started: float, deadline_s: float, max_bod
 
 def _failed(started: float, reason: ClientReason, detail: str) -> Exchange:
     return Exchange(
-        status=None, body="", elapsed_ms=_ms_since(started), reason=reason, detail=clip(detail)
+        status=None,
+        body="",
+        elapsed_ms=_ms_since(started),
+        reason=reason,
+        detail=clip(scrub_secret(detail)),
     )
 
 

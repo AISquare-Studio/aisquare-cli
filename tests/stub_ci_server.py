@@ -114,6 +114,8 @@ class Behaviour:
     drip: tuple[int, float] | None = None
     """``(chunks, interval_s)``: send the body in pieces this far apart, so the
     per-socket-op timeout never fires while the wall clock runs out."""
+    location: str | None = None
+    """A ``Location`` header to send with the status — a redirecting server."""
 
 
 @dataclass
@@ -139,6 +141,8 @@ class StubCI:
     descriptor_status: int = 200
     descriptor_body: str = field(default_factory=lambda: json.dumps(live_descriptor()))
     ready_status: int = 200
+    descriptor_location: str | None = None
+    """A ``Location`` header on the descriptor route — a redirecting server."""
     seen: list[Recorded] = field(default_factory=list)
     echo: bool = False
 
@@ -184,12 +188,14 @@ class StubCI:
         body: str = "",
         delay_s: float = 0.0,
         drip: tuple[int, float] | None = None,
+        location: str | None = None,
     ) -> None:
         """Set what the next hook call gets back."""
         self.behaviour.status = status
         self.behaviour.body = body
         self.behaviour.delay_s = delay_s
         self.behaviour.drip = drip
+        self.behaviour.location = location
 
     def respond_json(self, payload: dict[str, Any], *, status: int = 200) -> None:
         self.respond(status=status, body=json.dumps(payload))
@@ -234,11 +240,13 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
                 sys.stderr.flush()
             return record
 
-        def _send(self, status: int, payload: bytes) -> None:
+        def _send(self, status: int, payload: bytes, location: str | None = None) -> None:
             try:
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
+                if location is not None:
+                    self.send_header("Location", location)
                 self.end_headers()
                 self.wfile.write(payload)
             except _PEER_GONE:
@@ -250,7 +258,11 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
                 self._send(stub.ready_status, b'{"status": "ready"}')
                 return
             if self.path.startswith("/v1/experiment/runs/"):
-                self._send(stub.descriptor_status, stub.descriptor_body.encode("utf-8"))
+                self._send(
+                    stub.descriptor_status,
+                    stub.descriptor_body.encode("utf-8"),
+                    location=stub.descriptor_location,
+                )
                 return
             self._send(404, b'{"error": "no such route"}')
 
@@ -265,7 +277,7 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
                 time.sleep(behaviour.delay_s)
             payload = behaviour.body.encode("utf-8")
             if behaviour.drip is None:
-                self._send(behaviour.status, payload)
+                self._send(behaviour.status, payload, location=behaviour.location)
                 return
             chunks, interval = behaviour.drip
             try:

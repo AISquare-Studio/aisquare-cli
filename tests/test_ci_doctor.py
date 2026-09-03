@@ -79,6 +79,20 @@ def test_a_missing_token_and_a_missing_run_are_named_separately(
     assert bad_run.status is CheckStatus.warn and "not a run id" in bad_run.detail
 
 
+def test_a_multi_line_token_is_named_not_echoed(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, stub.url)
+    monkeypatch.setenv(ci_client.RUN_ENV_VAR, RUN)
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "sk-live-SUPERSECRET-1234\ninjected: x")
+    check = _ci_checks()["ci test bed"]
+    assert check.status is CheckStatus.warn and "more than one line" in check.detail
+    assert check.fix and "one line" in check.fix
+    for line in doctor():
+        assert "SUPERSECRET" not in line.detail and "SUPERSECRET" not in (line.fix or "")
+
+
 def test_a_healthy_stub_is_three_green_lines(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
 ) -> None:

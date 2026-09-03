@@ -40,9 +40,9 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
 from aisquare.core.injection import sanitise_text
 from aisquare.models import (
@@ -102,6 +102,21 @@ and read by the next), and no type coercion — the schema says ``integer`` and
 ``"63"`` is not one."""
 
 
+def _integral(value: object) -> object:
+    """JSON Schema ``integer`` admits any number with a zero fraction — ``63.0``
+    is a valid ``server_ms`` — and strict pydantic does not. A producer that
+    serialises numbers as doubles would otherwise turn every good response
+    into a recorded ``schema_mismatch``. Integral floats become ints here;
+    everything else (``63.5``, ``"63"``, ``True``) is left for strict to refuse."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+Integer = Annotated[int, BeforeValidator(_integral)]
+"""A schema ``integer`` field: strict, except that ``N.0`` is ``N``."""
+
+
 def _match(pattern: re.Pattern[str], value: str, what: str) -> str:
     if not pattern.match(value):
         raise ValueError(f"{what} does not match {pattern.pattern}")
@@ -156,7 +171,7 @@ class HookRequest(BaseModel):
     Never a ref *name*: ``refs/aisquare/wip/…`` is where the CLI keeps the
     object alive locally, the id is what travels."""
     prompt: str | None = Field(default=None, min_length=1, max_length=MAX_PROMPT_CHARS)
-    client_safety_ms: int = Field(ge=1)
+    client_safety_ms: Integer = Field(ge=1)
     client_observed_at: str
 
     @model_validator(mode="after")
@@ -201,7 +216,7 @@ class BriefingItem(BaseModel):
     model_config = _STRICT
 
     item_id: str
-    item_version: int = Field(ge=1)
+    item_version: Integer = Field(ge=1)
     text: str = Field(min_length=1)
     structured_facts: dict[str, Any]
     evidence_ids: list[str] = Field(min_length=1)
@@ -222,7 +237,7 @@ class CacheReport(BaseModel):
 
     status: CacheStatus
     key_hash: str
-    age_ms: int = Field(ge=0)
+    age_ms: Integer = Field(ge=0)
 
     @model_validator(mode="after")
     def _shape(self) -> CacheReport:
@@ -233,11 +248,11 @@ class CacheReport(BaseModel):
 class TimingReport(BaseModel):
     model_config = _STRICT
 
-    scope: int = Field(ge=0)
-    candidate: int = Field(ge=0)
-    rank: int = Field(ge=0)
-    compose: int = Field(ge=0)
-    total: int = Field(ge=0)
+    scope: Integer = Field(ge=0)
+    candidate: Integer = Field(ge=0)
+    rank: Integer = Field(ge=0)
+    compose: Integer = Field(ge=0)
+    total: Integer = Field(ge=0)
 
 
 class Briefing(BaseModel):
@@ -254,12 +269,12 @@ class Briefing(BaseModel):
     query_id: str
     config_fingerprint: str
     input_checkpoint: str
-    resolved_scope_version: int = Field(ge=0)
+    resolved_scope_version: Integer = Field(ge=0)
     items: list[BriefingItem]
     rendered_context: str
     """Server-rendered, byte-identical across arms by construction. The CLI
     frames it; it never rewrites it."""
-    token_count: int = Field(ge=0)
+    token_count: Integer = Field(ge=0)
     cache: CacheReport
     timing_ms: TimingReport
     status: BriefingStatus
@@ -300,7 +315,7 @@ class ErrorRecord(BaseModel):
 
     schema_version: Literal["error/v1"]
     code: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
-    http_status: int
+    http_status: Integer
     message: str = Field(min_length=1, max_length=2000)
     subject_ref: str | None = Field(default=None, min_length=1, max_length=500)
     retryable: bool
@@ -316,8 +331,8 @@ class ErrorRecord(BaseModel):
 class Deadline(BaseModel):
     model_config = _STRICT
 
-    server_ms: int = Field(ge=1)
-    client_safety_ms: int = Field(ge=1)
+    server_ms: Integer = Field(ge=1)
+    client_safety_ms: Integer = Field(ge=1)
     breached: bool
 
 
@@ -337,7 +352,7 @@ class HookResponse(BaseModel):
     action: HookAction
     briefing: Briefing | None
     config_fingerprint: str | None
-    server_ms: int = Field(ge=0)
+    server_ms: Integer = Field(ge=0)
     deadline: Deadline
     errors: list[ErrorRecord]
 
@@ -411,7 +426,7 @@ class DeliveryDescriptor(BaseModel):
     run_id: str
     opaque_config_id: str
     delivery: list[DeliveryMode] = Field(min_length=1)
-    client_safety_ms: int = Field(ge=1)
+    client_safety_ms: Integer = Field(ge=1)
     """The client's hang ceiling for this run, enforced as wall-clock. It
     replaces any constant the client might have had."""
     retry_policy: Literal["none"]
@@ -466,7 +481,7 @@ class RecallInput(BaseModel):
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     session_id: str
     run_id: str | None = None
-    token_budget: int | None = Field(default=None, ge=1)
+    token_budget: Integer | None = Field(default=None, ge=1)
     reason: str | None = Field(default=None, max_length=MAX_REASON_CHARS)
 
     @model_validator(mode="after")

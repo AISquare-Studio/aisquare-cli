@@ -556,6 +556,58 @@ def test_every_recall_body_this_build_can_emit_validates_via_jsonschema() -> Non
     )
 
 
+# --- integers the way JSON Schema means them ------------------------------------------
+
+
+def _floated(
+    value: object, *, skip: frozenset[str] = frozenset({"contract", "contract_version"})
+) -> object:
+    """Every integer in ``value`` as ``N.0`` — a producer that serialises doubles."""
+    if isinstance(value, dict):
+        return {k: (v if k in skip else _floated(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_floated(v) for v in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    return value
+
+
+@pytest.mark.parametrize(
+    ("name", "model"),
+    [
+        ("hook-response.experimental-v2", HookResponse),
+        ("mcp-tool-output.v1", Briefing),
+        ("client-delivery-descriptor.v1", DeliveryDescriptor),
+        ("error.v1", ErrorRecord),
+        ("mcp-tool-input.v1", RecallInput),
+        ("hook-request.experimental-v2", HookRequest),
+    ],
+)
+def test_integral_floats_are_the_integers_the_schema_says_they_are(
+    name: str, model: type[BaseModel]
+) -> None:
+    """``"type": "integer"`` matches ``63.0``; strict pydantic did not, so a server
+    that serialises numbers as doubles turned every good response into a
+    recorded schema_mismatch — the endpoint looked broken and the count the
+    experiment collects was a failure count."""
+    raw = fixture(f"{name}.valid")
+    floated = _floated(raw)
+    assert json.dumps(floated) != json.dumps(raw), "the fixture has at least one integer to float"
+    assert errors(name, floated) == [], "the schema accepts the floated fixture"
+    assert model.model_validate(floated) == model.model_validate(raw)
+
+
+def test_a_fractional_number_or_a_bool_is_still_refused_where_an_integer_is_due() -> None:
+    raw = fixture("hook-response.experimental-v2.valid")
+    for bad in (63.5, True, "63"):
+        raw["server_ms"] = bad
+        assert errors("hook-response.experimental-v2", raw), repr(bad)
+        outcome = parse_response(status=200, body=json.dumps(raw))
+        assert outcome.reason is ClientReason.schema_mismatch and "server_ms" in outcome.detail
+
+
 # --- the pull ladder ---------------------------------------------------------------
 
 

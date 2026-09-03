@@ -237,19 +237,29 @@ def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
     from typing import get_args
 
     from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V12
-    from aisquare.models import ClientReason, DeliverySource
+    from aisquare.models import (
+        BriefingStatus,
+        CacheStatus,
+        ClientReason,
+        DeliverySource,
+        HookAction,
+        HookTrigger,
+        RunKind,
+    )
 
     def sql_set(column: str, schema: str = _SCHEMA_V11) -> set[str]:
         match = re.search(rf"{column} TEXT[^,]*?IN \(([^)]*)\)", schema, re.DOTALL)
         assert match is not None, column
         return {value.strip().strip("'") for value in match.group(1).split(",")}
 
+    # Against the Python vocabulary itself, never a third copy typed here: a
+    # Literal that moves in models.py must move the SQL or fail this test.
     assert sql_set("client_reason") == {reason.value for reason in ClientReason}
-    assert sql_set("status") == {"served", "empty", "degraded", "unavailable"}
-    assert sql_set("action") == {"inject", "noop"}
-    assert sql_set("trigger") == {"session_start", "prompt_submit", "agent_request"}
-    assert sql_set("cache_status") == {"hit", "miss", "bypass"}
-    assert sql_set("run_kind") == {"live", "replay"}
+    assert sql_set("status") == set(get_args(BriefingStatus))
+    assert sql_set("action") == set(get_args(HookAction))
+    assert sql_set("trigger") == set(get_args(HookTrigger))
+    assert sql_set("cache_status") == set(get_args(CacheStatus))
+    assert sql_set("run_kind") == set(get_args(RunKind))
     assert sql_set("delivery_source", _SCHEMA_V12) == set(get_args(DeliverySource))
 
 
@@ -481,6 +491,77 @@ def test_a_v11_database_with_the_v1_shaped_metric_table_is_moved_aside_and_rebui
         )
     finally:
         raw.close()
+
+
+def test_a_v1_shaped_table_is_moved_aside_even_when_an_orphan_already_exists() -> None:
+    """The review's wedge: a fixed orphan name that already exists makes the
+    rename raise, the transaction roll back and user_version stay 11 — so every
+    later open fails identically until someone drops a table by hand."""
+    from aisquare.core.store import V1_ORPHAN_SUFFIX
+
+    prior = (
+        f"CREATE TABLE metric{V1_ORPHAN_SUFFIX} (x TEXT);"
+        f" CREATE TABLE run{V1_ORPHAN_SUFFIX} (x TEXT);"
+    )
+    db = _at_version(10, after=V1_METRIC_DDL + prior, stamp=11)
+    open_store().close()
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        raw.close()
+    assert {f"metric{V1_ORPHAN_SUFFIX}", f"metric{V1_ORPHAN_SUFFIX}_2"} <= tables
+    assert {f"run{V1_ORPHAN_SUFFIX}", f"run{V1_ORPHAN_SUFFIX}_2"} <= tables
+    assert {"run_kind", "delivery_source"} <= _metric_columns(db)
+
+
+def test_the_close_turn_compare_and_set_loses_to_a_stop_that_landed_first() -> None:
+    """The review found the CAS uncovered: the racing test's second call never
+    reached the UPDATE, and removing ``AND ended_at IS NULL`` left 74 tests
+    green. Here the other Stop lands between this call's SELECT and its UPDATE,
+    on the same connection, so the guard alone decides the outcome."""
+    from datetime import UTC, datetime, timedelta
+    from typing import Any
+
+    from aisquare.models import TurnMetric
+
+    store: Any = open_store()  # the concrete store, whose connection we interpose on
+    try:
+        started = datetime.now(tz=UTC) - timedelta(seconds=5)
+        store.open_turn(
+            TurnMetric(
+                trace_id="trc_cas", project_id="prj_x", session_id="ses_cas", started_at=started
+            )
+        )
+        first_close = (started + timedelta(seconds=1)).isoformat()
+        real_conn = store._conn
+
+        class RacingConnection:
+            """The other Stop writes the row the instant before our UPDATE."""
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(real_conn, name)
+
+            def execute(self, sql: str, *params: object) -> object:
+                if sql.lstrip().startswith("UPDATE metric SET ended_at"):
+                    real_conn.execute(
+                        "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ?",
+                        (first_close, 1000, "trc_cas"),
+                    )
+                return real_conn.execute(sql, *params)
+
+        store._conn = RacingConnection()
+        loser = store.close_turn("ses_cas", ended_at=started + timedelta(seconds=4))
+        store._conn = real_conn
+        (row,) = store.turn_metrics(session_id="ses_cas")
+    finally:
+        store.close()
+    assert loser is None, "the second Stop reports that it closed nothing"
+    assert row.ended_at is not None and row.ended_at.isoformat() == first_close
+    assert row.wall_ms == 1000, "the first close is never overwritten"
 
 
 def test_a_bad_delivery_source_is_refused_at_the_row() -> None:

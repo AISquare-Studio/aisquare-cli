@@ -350,12 +350,29 @@ def _retire_v1_metric_table(connection: sqlite3.Connection) -> None:
         return
     connection.execute("DROP INDEX IF EXISTS metric_project_started")
     connection.execute("DROP INDEX IF EXISTS metric_open_session")
-    connection.execute(f"ALTER TABLE metric RENAME TO metric{V1_ORPHAN_SUFFIX}")
+    # A free name, never a fixed one: a rename onto an existing name raises,
+    # the transaction rolls back, user_version stays 11 and every later open
+    # fails the same way — a store nobody can use until a table is dropped by
+    # hand. Two orphans are unlikely; a wedged store is certain if they occur.
+    connection.execute(
+        f"ALTER TABLE metric RENAME TO {_free_name(connection, f'metric{V1_ORPHAN_SUFFIX}')}"
+    )
     tables = {
         row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     if "run" in tables:
-        connection.execute(f"ALTER TABLE run RENAME TO run{V1_ORPHAN_SUFFIX}")
+        connection.execute(
+            f"ALTER TABLE run RENAME TO {_free_name(connection, f'run{V1_ORPHAN_SUFFIX}')}"
+        )
+
+
+def _free_name(connection: sqlite3.Connection, base: str) -> str:
+    """``base``, or ``base_2``, ``base_3`` … — the first name no table or index holds."""
+    taken = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    name, suffix = base, 2
+    while name in taken:
+        name, suffix = f"{base}_{suffix}", suffix + 1
+    return name
 
 
 # Python that must run before a migration's statements, inside its transaction,

@@ -45,11 +45,35 @@ will bite stated first.
 > and `run_id`, `principal_id usr_ci_reader`, `workspace_id ws_kernel01`, `briefing_id null`. **A
 > seam fact for Vaibhav:** an `empty` hook answer is schema-pinned to `briefing: null`, so no
 > `query_id` reaches the client on the hook route — the hook-side join must come from the server's
-> ledger `reason` (`trace=trc_…`); the pull route always returns one. Still open: a `served` pair
-> (needs a prompt that matches the seeded corpus), Step 4 through a real Claude Code session (hooks
-> must be re-pointed first), Step 7 — the two `ci_turn` join records from this session are spooled
-> in the outbox (shipping is configured here) but cannot leave: `EXPLAINABILITY_API_KEY` is not set
-> on this machine.
+> ledger `reason` (`trace=trc_…`); the pull route always returns one. Step 7 — the `ci_turn` join
+> records are spooled in the outbox (shipping is configured here) but cannot leave:
+> `EXPLAINABILITY_API_KEY` is not set on this machine.
+>
+> **The whole loop, with a real injection (2026-09-02, night).** Hooks re-pointed at this checkout
+> (`agents connect`, `timeout: 120`). A real `claude -p` session, with `aisquare serve --stdio`
+> attached through `--mcp-config`, first ran against the empty corpus: the `SessionStart` hook
+> injected the standing instruction (the agent quoted its `ses_…` id), the agent called the tool and
+> got a real `empty` briefing, `Stop` closed the prompt row — three rows, all `delivery_source
+> override`. To see an injection, the owner authorised the admin token, and one item was seeded into
+> `ws_kernel01` with the least token each step needs: a workspace-level grant for `usr_ci_reader`
+> (fixture-writer token, `grt_clismoke_a94831fc`), one admitted workspace-wide attachment
+> (admin token — the only route to one — `att_ws_clismoke_a94831fc`), one `trace` signal naming it
+> (reader token, `signal_id 96df355c-…`, `content_fingerprint` re-derived the server's way over the
+> canonicalised record). Then: both routes answer `served` (hook `action inject`, `briefing_id`
+> set, 3 items — ours plus two `agent run …` items earlier server-team e2e runs left in the
+> workspace, which the new grant made eligible); a second real Claude Code session saw **two**
+> "Retrieved by aisquare" blocks (session start, promptless, and prompt submit), quoted the seeded
+> item verbatim from the prompt-submit block, answered with it, and got it back through the tool too.
+> Rows: `session_start` and `prompt_submit` `served/inject`, `injected_chars 891`, `frame_version
+> aisquare-ci-frame/1`, `query_id qry_hook_…`, `briefing_id brf_…`, the prompt row closed by `Stop`;
+> `agent_request served`, `qry_mcp_…`. Step 8, served pairs: every one of those `query_id`s reads
+> back as `grounding-report/v1` with the same `briefing_id`, `returned_item_count 3`, verdict
+> `insufficiently_anchored` (no attestation on the seeded item; grounding is observation only).
+> `aisquare why` names the three items. Two things Vaibhav should know: the reader principal now
+> holds a workspace-level grant in `ws_kernel01`, so **every session start injects** the eligible
+> workspace-wide items there (promptless query, 891 chars); and the first hook call of a session
+> measured a 5.5 s round trip against 26 ms of server time — a cold-path cost on the client or the
+> ALB, not the reader — while every later call was ~100 ms. Staging measures nothing; noted, not quoted.
 > **Steps 1, 2, 4, 7, 8 are blocked on the token**: the `aws` CLI is not installed on this
 > machine and there are no AWS credentials in the sandbox, so the owner fetches it. One more
 > thing Step 4 will meet: the hooks installed in `~/.claude-c2` point at the `ws1` checkout's

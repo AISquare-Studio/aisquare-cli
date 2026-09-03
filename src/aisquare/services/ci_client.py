@@ -75,7 +75,7 @@ _ON_VALUES = frozenset({"1", "true", "yes", "on"})
 MAX_BODY_BYTES = 8 * 1_048_576
 """The most a hook response may be. Past it the body is ``malformed_body``.
 
-A briefing is a few kilobytes of items plus a context the CLI caps at 16 KB
+A briefing is a few kilobytes of items plus a context the CLI caps at 16 384 characters
 before injecting it, so anything near this is a server bug — but a bug worth
 *recording*: an oversized ``rendered_context`` that fits under this cap is read,
 capped at injection, and the row keeps both sizes, which is how the server team

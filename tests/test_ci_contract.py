@@ -99,33 +99,57 @@ def test_the_response_schema_reaches_the_error_catalog() -> None:
     assert any(line.startswith("$.errors[0].code") for line in found), found
 
 
-def test_vendored_bytes_match_the_server_when_its_checkout_is_beside_this_one() -> None:
-    """The server's bytes win. When ``aisquare-ci`` is cloned as a sibling, every
-    vendored file must be byte-identical to it; anywhere else this is skipped."""
-    server = REPO.parent / "aisquare-ci" / "contracts"
-    if not server.is_dir():
+VENDORED_AT = "4cb104b"
+"""The server commit the vendored bytes are held equal to — the one deployed to
+staging on 2026-09-02. Pinned, because the guard used to compare against
+whatever revision the sibling checkout happened to be at: a reviewer's clone at
+an older commit reported three fixtures as drifted when only their example
+UUIDs differed. Re-vendoring is: copy the seven files from the new commit and
+move this pin."""
+
+
+def test_vendored_bytes_match_the_server_at_the_pinned_commit() -> None:
+    """The server's bytes win. When ``aisquare-ci`` is cloned as a sibling that
+    has :data:`VENDORED_AT`, every vendored file must be byte-identical to that
+    commit's; anywhere else this is skipped, and says why."""
+    import subprocess
+
+    server = REPO.parent / "aisquare-ci"
+    if not (server / ".git").exists():
         pytest.skip("no sibling aisquare-ci checkout to compare against")
+
+    def blob(path: str) -> bytes | None:
+        result = subprocess.run(
+            ["git", "-C", str(server), "show", f"{VENDORED_AT}:{path}"],
+            capture_output=True,
+            check=False,
+        )
+        return result.stdout if result.returncode == 0 else None
+
+    if blob("README.md") is None:
+        pytest.skip(f"the sibling aisquare-ci does not have commit {VENDORED_AT}; fetch it")
     drifted: list[str] = []
     for name in CONTRACTS:
         family = "kernel" if name == "error.v1" else "delivery"
         pairs = [
             (
                 ci_schemas.SCHEMAS / f"{name}.schema.json",
-                server / "jsonschema" / family / f"{name}.schema.json",
+                f"contracts/jsonschema/{family}/{name}.schema.json",
             ),
             (
                 ci_schemas.FIXTURES / f"{name}.valid.json",
-                server / "fixtures" / "valid" / f"{name}.valid.json",
+                f"contracts/fixtures/valid/{name}.valid.json",
             ),
             (
                 ci_schemas.FIXTURES / f"{name}.invalid.json",
-                server / "fixtures" / "invalid" / f"{name}.invalid.json",
+                f"contracts/fixtures/invalid/{name}.invalid.json",
             ),
         ]
-        drifted += [
-            str(ours.name) for ours, theirs in pairs if ours.read_bytes() != theirs.read_bytes()
-        ]
-    assert not drifted, f"re-vendor from the server: {drifted}"
+        for ours, theirs in pairs:
+            served = blob(theirs)
+            if served is None or ours.read_bytes() != served:
+                drifted.append(ours.name)
+    assert not drifted, f"re-vendor from aisquare-ci {VENDORED_AT} (or move the pin): {drifted}"
 
 
 # --- round trips through the models ----------------------------------------------

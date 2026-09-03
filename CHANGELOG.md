@@ -42,7 +42,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     excluded.
   - Retrieved material is framed as candidate reference — caveat before and
     after, a delimited region the payload cannot close, control characters
-    stripped, a 16 KB cap with both sizes recorded. `aisquare why` names the
+    stripped, a 16 384-character cap with both sizes recorded. `aisquare why` names the
     items shown without clobbering the entry counts.
   - The prompt is scrubbed at the configured `redaction` level before it leaves,
     and the level is recorded. A `ci_turn` join record is spooled through the
@@ -99,6 +99,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     TABLE IF NOT EXISTS metric` then `ALTER TABLE` bring the other two to v12.
     Deleting the `metric` table by hand is no longer needed and, at version 12,
     no longer safe.
+- **The review of the CI branch at `ee422b5`, acted on.** Every item sits where
+  server-controlled bytes cross into the client, and each has a test that failed
+  before its fix:
+  - the injection frame could be escaped by one invisible character (a
+    zero-width space, a byte-order mark, a bidi override) or an odd line break
+    (U+2028, U+2029, U+0085, `\r`); a lone surrogate in a briefing turned
+    `session-start` into a traceback because the write sat outside the guard;
+  - the transport followed redirects and would have re-sent the bearer token to
+    another origin; a multi-line token was echoed by the header parser into a
+    detail `doctor` prints;
+  - the strict models refused `63.0` where the schema says `integer`;
+  - the v12 healing migration could wedge a store on a fixed orphan name;
+  - a credential straddling the 100 000-character cut shipped in the clear;
+    the descriptor's `client_safety_ms` had no client-side maximum, so a run
+    could publish a ceiling past the installed hook timeout; a failed descriptor
+    fetch cost a fresh 10 s probe on every prompt; snapshot refs grew forever;
+  - the recall tool returned the briefing text raw, uncapped and unmeasured,
+    and a locked store escaped it as an opaque crash;
+  - the hook install check ignored the timeout value; an unrecorded prompt was
+    silent; three `doctor` lines asserted more than their probe established.
+  Also: the compare-and-set in `close_turn` and five CHECK vocabularies are now
+  actually tested, the vendored-contract drift guard is pinned to the deployed
+  server commit, and the cap is stated in characters, which is what it is.
 - **CI runs the suite against a machine that looks like a developer's.** The
   `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
   nothing listening on any port, no optional extra — while anyone who followed

@@ -63,7 +63,7 @@ schemas and a local v2 stub:
 | Transport | `services/ci_client.py` — `urllib`, one attempt, **wall-clock deadline** from `client_safety_ms` (thread + join, chunked reads, late arrival is a breach), body cap, no client cache |
 | Hooks | `session_start` / `prompt_submit` only when the descriptor lists them; outcome of every call recorded; `trace_id` sent = `trace_id` recorded |
 | Snapshot | `services/ci_snapshot.py` — `git stash create` → `refs/aisquare/wip/<trace_id>`, object id on the wire, `untracked_excluded` on the row; `project_ref` from `origin` with credentials stripped |
-| Injection | `core/injection.py` — `aisquare-ci-frame/1`: caveat before and after, delimited region the payload cannot close, control characters stripped, 16 KB cap, both sizes recorded |
+| Injection | `core/injection.py` — `aisquare-ci-frame/1`: caveat before and after, delimited region the payload cannot close, control/format/bidi/surrogate characters stripped and line breaks normalised, 16 384-character cap, both sizes recorded; the recall tool's result gets the same sanitiser and cap as `aisquare-ci-tool/1` |
 | Metric row | `metric` table v11 rewritten in place: the §5 join keys, `status` + `action` beside a closed `client_reason` vocabulary in three groups, `run_kind` (local), `opaque_config_id`, `redaction_level`, `frame_version`, `instruction_version`; no `arm`, no `run` table. **v12 (2026-09-02)** adds `delivery_source` (`descriptor \| override`) as a healing migration — `CREATE TABLE IF NOT EXISTS` then `ALTER TABLE`, because v11 has reached developer machines, some with the table deleted by hand |
 | Join record | `insights.record_turn` spools a `ci_turn` record through the client lane; the sweeper emits it as a `ci.turn` span in the session's Run |
 | Pull | `services/ci_recall.py` — `collective_intelligence_recall` registered in `aisquare serve` when the descriptor lists `mcp_pull`; standing instruction (`aisquare-ci-instruction/1`) at `SessionStart`; ~~forwards as `agent_request` via the hook route (J7 default)~~ **forwards to `POST /v1/mcp/collective_intelligence_recall` as `mcp-tool-input.v1` with `run_id` always filled, `token_budget`/`reason` carried; parses the bare briefing — *changed 2026-09-02*** |
@@ -147,10 +147,11 @@ Nothing else. No `project_id`, `budget_ms`, `arm`, `tool`, `flags`, workspace or
 | `server_ms`, `deadline.{server_ms,client_safety_ms,breached}` | recorded; `network_ms = round_trip_ms − server_ms` computed client-side |
 | `errors[]` | `code`s recorded; free text kept for logs only |
 
-Client-side failure reasons (`transport_error`, `deadline_exceeded`, `http_error`,
-`malformed_body`, `contract_mismatch`, `schema_mismatch`, plus the never-asked states `disabled`,
-`not_configured`, `push_not_in_descriptor`, `no_prompt`) are a **separate axis** from the server's
-`status` and are recorded beside it. A turn with a client-side failure is treated like
+Client-side reasons — the failures `descriptor_unavailable`, `transport_error`, `deadline_exceeded`,
+`http_error`, `malformed_body`, `contract_mismatch`, `schema_mismatch`; the by-design skips
+`trigger_not_in_descriptor`, `no_prompt`, `no_session`; and the never-asked baseline states
+`disabled`, `not_configured`, `no_run` (`aisquare.models.ClientReason`) — are a **separate axis**
+from the server's `status` and are recorded beside it. A turn with a client-side failure is treated like
 `unavailable`: excluded by reason code, never counted as baseline. This is the plan's C10 ("record
 as `unavailable` with a reason — never silently `noop`") in v2 vocabulary.
 

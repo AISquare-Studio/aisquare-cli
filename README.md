@@ -569,7 +569,7 @@ Four things worth knowing before you enable it:
   (60 s today) for a slow server, as wall clock — a server dribbling bytes cannot
   hold it past that — and every breach is recorded.
 - **Retrieved material is framed as candidate reference, not fact**, inside a
-  delimited region the payload cannot close, capped at 16 KB, with the caveat
+  delimited region the payload cannot close, capped at 16 384 characters, with the caveat
   repeated after it, so a bad retrieval is visible in the transcript rather than
   silently absorbed. `aisquare why` names what was shown.
 - **Every turn is recorded whether or not the server answered**, with *why* it

@@ -335,6 +335,13 @@ aisquare serve --show-token      # connection details for the client
 aisquare serve --stdio           # stdio transport (Claude Desktop launches it)
 ```
 
+`--bind` decides more than the interface. The three loopback spellings
+(`127.0.0.1`, `localhost`, `::1`) keep the MCP transport's Host/Origin
+validation; any other bind — `0.0.0.0`, a LAN address — runs with the bearer
+token as the only gate, and that token is a long-lived credential sent in
+clear over plain HTTP on every request. `serve` says so on stderr when you do
+it. Use a trusted network or a TLS-terminating proxy.
+
 Running `serve` in a repo is the explicit opt-in for that project (it
 announces itself); the stdio transport refuses to run from directories that
 aren't a project, so a desktop client can't accidentally adopt your home

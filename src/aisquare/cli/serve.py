@@ -48,11 +48,21 @@ def _dependency_error() -> str | None:
     try:
         if _find_spec(REQUIRED_MODULE) is not None:
             return None
-    except (ImportError, ValueError):
+    except (ImportError, ValueError) as exc:
         # find_spec on a dotted name imports its parents first, so an absent
         # `mcp` raises here rather than returning None. That IS the
         # extra-not-installed case, and it falls through to the check below.
-        pass
+        # A parent that exists but will not import raises too — mcp present,
+        # one of ITS dependencies missing or broken — and that is a third
+        # case: neither "install the extra" nor "move mcp into range" fixes
+        # it, and the second would send someone to install the mcp they have.
+        # The exception names the module that failed; a bare re-raise from a
+        # test stub does not, and takes the absent-mcp path as before.
+        if getattr(exc, "name", None) not in (None, "mcp"):
+            return (
+                f"mcp{_installed_mcp()} is installed but cannot be imported — {exc}. "
+                f"Reinstall the serve extra: {_INSTALL_HINT}"
+            )
     if _find_spec("mcp") is None:
         return f"the serve extra is not installed — {_INSTALL_HINT}"
     return (
@@ -65,8 +75,9 @@ def _dependency_error() -> str | None:
 def _installed_mcp() -> str:
     """``" (mcp 1.29.1)"`` when the version is knowable, else nothing.
 
-    Only ever a 1.x: every 2.x release ships the probed module, so the message
-    this decorates is produced for nothing newer.
+    Today only a 1.x reaches the out-of-range message — every 2.x release
+    ships the probed module — but a 3.x would, and a 2.x that will not import
+    reaches the reinstall message, which this decorates too.
     """
     from importlib.metadata import PackageNotFoundError, version
 
@@ -74,6 +85,25 @@ def _installed_mcp() -> str:
         return f" (mcp {version('mcp')})"
     except PackageNotFoundError:  # importable but not an installed distribution
         return ""
+
+
+_WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
+
+
+def _client_url(bind: str, port: int) -> str:
+    """The URL a client dials for ``bind`` — a listen address is not always one.
+
+    An IPv6 literal needs brackets: ``http://::1:8747/mcp`` is not a URL, and
+    ``::1`` is one of the spellings that keeps the transport's Host validation,
+    so it has to print. A wildcard bind names every interface and no
+    destination, so this machine's hostname stands in for it.
+    """
+    import socket
+
+    host = socket.gethostname() if bind in _WILDCARD_BINDS else bind
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}/mcp"
 
 
 def serve(
@@ -85,7 +115,13 @@ def serve(
         int, typer.Option("--port", help="HTTP port.", envvar="AISQUARE_SERVE_PORT")
     ] = 8747,
     bind: Annotated[
-        str, typer.Option("--bind", help="HTTP bind address (keep it loopback unless you must).")
+        str,
+        typer.Option(
+            "--bind",
+            help="HTTP bind address. 127.0.0.1, localhost or ::1 keep the transport's "
+            "Host/Origin validation; any other bind runs with the bearer token as the only "
+            "gate, sent in clear — trusted networks or a TLS proxy only.",
+        ),
     ] = "127.0.0.1",
     show_token: Annotated[
         bool,
@@ -113,11 +149,14 @@ def serve(
 
     if show_token:
         token = mcp_server.serve_token()
+        url = _client_url(bind, port)
         if get_state().json_output:
-            typer.echo(json.dumps({"url": f"http://{bind}:{port}/mcp", "token": token}))
+            typer.echo(json.dumps({"url": url, "token": token, "bind": bind}))
         else:
             console = stdout_console()
-            console.print(f"URL:    http://{bind}:{port}/mcp")
+            console.print(f"URL:    {url}")
+            if bind in _WILDCARD_BINDS:
+                console.print(f"Bind:   {bind} (every interface — the URL names this machine)")
             console.print(f"Header: Authorization: Bearer {token}")
         return
     # Starting a server here IS the opt-in for this project: activate it
@@ -162,7 +201,18 @@ def serve(
         _fail_team(exc)
     stderr_console().print(
         f"Serving the orchestrator for {project.root.name or project.id} at "
-        f"http://{bind}:{port}/mcp "
+        f"{_client_url(bind, port)} "
         "(bearer token required — see `aisquare serve --show-token`). Ctrl-C stops."
     )
+    if bind not in mcp_server.LOOPBACK_BINDS:
+        # The one HTTP behaviour mcp 2 changed, said where the operator opening
+        # the port can see it: neither the SDK nor anything else says what a
+        # non-loopback bind gives up. Keyed on the same tuple the server keys
+        # on, so the notice cannot drift from what actually happens.
+        stderr_console().print(
+            f"--bind {bind} is not one of {', '.join(mcp_server.LOOPBACK_BINDS)}: the MCP "
+            "transport's Host/Origin validation is off for it, and the bearer token is the "
+            "only gate — a long-lived credential sent in clear over plain HTTP on every "
+            "request. Keep this on a trusted network, or behind a TLS-terminating proxy."
+        )
     mcp_server.run_http(bind=bind, port=port)

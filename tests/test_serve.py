@@ -37,20 +37,24 @@ def call_remote(tool: str, arguments: dict[str, Any] | None = None) -> CallToolR
 
     ``Client(server, mode="legacy")`` is what replaced the removed
     ``create_connected_server_and_client_session`` in mcp 2, and takes the same
-    path it did: a real client session over memory streams with JSON-RPC
-    request/response envelopes and an initialize handshake, the result
-    JSON-dumped, sieved at the negotiated 2025-11-25 surface and re-parsed on
-    the client — what a handshake-era remote agent gets. (The streams carry
-    the envelope objects rather than their text; that last encoding step is
-    the stdio transport's alone.) The default ``mode="auto"`` is a
-    ``DirectDispatcher`` pair — 2026-07-28, no handshake, no envelopes, the
-    same JSON dump — and reaches the same registered ``tools/call`` handler;
-    ``test_the_modern_in_process_path_reaches_the_same_handler`` proves that
-    once, and every other assertion here takes the handshake-era path.
+    path it did: a real client session over memory streams with an initialize
+    handshake and JSON-RPC framing, the result JSON-dumped, sieved at the
+    negotiated 2025-11-25 surface and re-parsed on the client — what a
+    handshake-era remote agent gets. (The streams carry the message objects
+    rather than their text; that last encoding step belongs to the real
+    transports — stdio's newline-delimited JSON, HTTP's JSON bodies and SSE
+    ``data:`` frames — and nothing in this suite exercises it.) The default
+    ``mode="auto"`` is a ``DirectDispatcher`` pair — 2026-07-28, no initialize
+    handshake, no JSON-RPC framing, each request carrying its own ``_meta``
+    envelope instead, the same JSON dump — and reaches the same registered
+    ``tools/call`` handler; the modern-path test below proves that once, and
+    every other assertion here takes the handshake-era path, asserted so that
+    a mode change cannot pass silently.
     """
 
     async def go() -> CallToolResult:
         async with Client(mcp_server.build_server(), mode="legacy") as client:
+            assert client.protocol_version == "2025-11-25", "not the handshake era"
             return await client.call_tool(tool, arguments or {})
 
     return anyio.run(go)
@@ -147,7 +151,52 @@ def test_show_token_cli(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--json", "serve", "--show-token"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["url"].endswith(":8747/mcp") and payload["token"]
+    assert payload["url"] == "http://127.0.0.1:8747/mcp" and payload["token"]
+    assert payload["bind"] == "127.0.0.1"
+
+
+def test_show_token_prints_a_url_a_client_can_dial(runner: CliRunner) -> None:
+    """A listen address is not always a destination; the printed one must be.
+
+    ``::1`` is one of the three spellings that keep the transport's Host
+    validation, and ``http://::1:8747/mcp`` is not a URL — the brackets are
+    load-bearing. ``0.0.0.0`` is every interface and no destination, so the
+    machine's hostname stands in, and the JSON carries the bind separately so
+    nothing is lost.
+    """
+    six = runner.invoke(app, ["--json", "serve", "--bind", "::1", "--show-token"])
+    assert six.exit_code == 0, six.output
+    assert json.loads(six.stdout)["url"] == "http://[::1]:8747/mcp"
+    wild = runner.invoke(app, ["--json", "serve", "--bind", "0.0.0.0", "--show-token"])
+    assert wild.exit_code == 0, wild.output
+    payload = json.loads(wild.stdout)
+    assert payload["bind"] == "0.0.0.0"
+    assert "0.0.0.0" not in payload["url"] and payload["url"].endswith(":8747/mcp")
+
+
+def test_a_non_loopback_bind_is_announced_before_serving(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator opening the port is told what a non-loopback bind gives up.
+
+    The SDK says nothing when it skips its Host/Origin protection, and neither
+    did the CLI: the disclosure lived in a comment and the CHANGELOG. One
+    stderr line, on exactly the binds outside ``LOOPBACK_BINDS`` — the tuple
+    the server keys on, so the notice cannot drift from the behaviour.
+    """
+    served: list[tuple[str, int]] = []
+
+    def do_not_serve(*, bind: str, port: int) -> None:
+        served.append((bind, port))
+
+    monkeypatch.setattr(mcp_server, "run_http", do_not_serve)
+    lan = runner.invoke(app, ["serve", "--bind", "0.0.0.0"])
+    assert lan.exit_code == 0, lan.output
+    assert served == [("0.0.0.0", 8747)]
+    assert "Host/Origin validation is off" in lan.output and "in clear" in lan.output
+    local = runner.invoke(app, ["serve"])
+    assert local.exit_code == 0, local.output
+    assert "Host/Origin validation is off" not in local.output
 
 
 def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
@@ -282,140 +331,95 @@ def test_bearer_guard_rejects_non_ascii_header_with_401() -> None:
     assert not any(m.get("type") == "PASSED_THROUGH" for m in sent)
 
 
-def _http_app_for(bind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, dict[str, Any]]:
+def _http_app_for(bind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any]]:
     """``run_http(bind=...)`` up to, not including, the listen: the app it hands uvicorn.
 
-    ``uvicorn.run`` is replaced so nothing binds a port, and ``build_server`` is
-    wrapped so the ``MCPServer`` is reachable: its session manager has to be
-    running for the app to answer a real request, which uvicorn does through
-    the Starlette lifespan and ``_post_status`` does by hand. Returns the ASGI
-    app (``_BearerGuard`` and all), the server, and uvicorn's keyword arguments.
+    ``uvicorn.run`` is replaced so nothing binds a port. What comes back is the
+    production ASGI object, ``_BearerGuard`` and all, plus uvicorn's keyword
+    arguments, so the bind and port plumbing is asserted along the way.
     """
     import uvicorn
 
     captured: dict[str, Any] = {}
-    real_build = mcp_server.build_server
-
-    def build_and_remember() -> Any:
-        server = real_build()
-        captured["server"] = server
-        return server
 
     def do_not_listen(app: Any, **kwargs: Any) -> None:
         captured["app"] = app
         captured["uvicorn"] = kwargs
 
-    monkeypatch.setattr(mcp_server, "build_server", build_and_remember)
     monkeypatch.setattr(uvicorn, "run", do_not_listen)
     mcp_server.run_http(bind=bind, port=8747)
-    return captured["app"], captured["server"], captured["uvicorn"]
+    return captured["app"], captured["uvicorn"]
 
 
-_INITIALIZE = json.dumps(
-    {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {"name": "probe", "version": "0"},
-        },
-    }
-).encode()
+_INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {"name": "probe", "version": "0"},
+    },
+}
 
 
-def _post_status(app: Any, server: Any, *, host: str, headers: dict[str, str]) -> int:
-    """The status of one ``POST /mcp`` to ``app`` — the first response line, no more.
+def _post_status(app: Any, *, host: str, headers: dict[str, str]) -> int:
+    """The status of one ``POST /mcp`` initialize to ``app``, served as uvicorn would.
 
-    A raw ASGI call rather than an HTTP client, so that nothing but the SDK's
-    own dependencies are needed (Starlette's ``TestClient`` wants ``httpx``,
-    which mcp 2 no longer pulls in). The transport answers a successful
-    initialize with an SSE stream that stays open, so the call is cancelled the
-    moment the status is known; a 401 or a 421 comes back whole before the
-    transport is reached at all.
+    Starlette's ``TestClient`` — it imports ``httpx2``, which mcp 2 depends on,
+    so nothing extra is needed — drives the ASGI lifespan the way uvicorn does,
+    and that is the only reason a request reaches the transport at all: the
+    session manager starts inside that lifespan, which has to flow through
+    ``_BearerGuard`` to get there, so a 200 here also pins the guard's lifespan
+    pass-through. A 401 or a 421 comes back before the transport is reached; a
+    200 is the SSE stream carrying ``InitializeResult``, closed once sent.
     """
-    wire = [
-        (b"host", host.encode()),
-        (b"accept", b"application/json, text/event-stream"),
-        (b"content-type", b"application/json"),
-        *((name.lower().encode(), value.encode()) for name, value in headers.items()),
-    ]
-    scope: dict[str, Any] = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/mcp",
-        "raw_path": b"/mcp",
-        "root_path": "",
-        "query_string": b"",
-        "headers": wire,
-        "client": ("192.168.1.9", 50000),
-        "server": (host.rsplit(":", 1)[0], 8747),
-    }
+    from starlette.testclient import TestClient
 
-    async def go() -> int:
-        body_sent = False
-        started = anyio.Event()
-        status: list[int] = []
-
-        async def receive() -> dict[str, Any]:
-            nonlocal body_sent
-            if not body_sent:
-                body_sent = True
-                return {"type": "http.request", "body": _INITIALIZE, "more_body": False}
-            await anyio.sleep_forever()  # the client neither sends more nor hangs up
-            raise AssertionError("unreachable")
-
-        async def send(message: dict[str, Any]) -> None:
-            if message["type"] == "http.response.start":
-                status.append(int(message["status"]))
-                started.set()
-
-        async with server.session_manager.run(), anyio.create_task_group() as tg:
-            tg.start_soon(app, scope, receive, send)
-            with anyio.fail_after(10):
-                await started.wait()
-            tg.cancel_scope.cancel()
-        return status[0]
-
-    return anyio.run(go)
+    with TestClient(app) as http:
+        response = http.post(
+            "/mcp",
+            headers={"Host": host, "Accept": "application/json, text/event-stream", **headers},
+            json=_INITIALIZE,
+        )
+    return int(response.status_code)
 
 
-@pytest.mark.parametrize(("bind", "expected"), [("0.0.0.0", 200), ("127.0.0.1", 421)])
-def test_http_host_validation_follows_the_bind(
-    bind: str, expected: int, monkeypatch: pytest.MonkeyPatch
+_LAN_HOST = "192.168.1.5:8747"
+_LOOPBACK_HOST = "127.0.0.1:8747"
+
+
+@pytest.mark.parametrize(
+    ("bind", "host", "with_token", "expected"),
+    [
+        pytest.param("0.0.0.0", _LAN_HOST, True, 200, id="lan-bind-serves-a-lan-client"),
+        pytest.param("127.0.0.1", _LAN_HOST, True, 421, id="loopback-bind-rejects-a-lan-host"),
+        pytest.param("127.0.0.1", _LOOPBACK_HOST, True, 200, id="loopback-bind-serves-itself"),
+        pytest.param("0.0.0.0", _LAN_HOST, False, 401, id="lan-bind-the-token-is-the-gate"),
+        pytest.param("127.0.0.1", _LAN_HOST, False, 401, id="guard-answers-before-host-check"),
+    ],
+)
+def test_http_answers_by_bind_host_and_token(
+    bind: str, host: str, with_token: bool, expected: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A LAN ``Host`` header: accepted on ``--bind 0.0.0.0``, 421 on a loopback bind.
+    """Every combination of bind, ``Host`` and token that the mcp 2 port made matter.
 
-    The one HTTP behaviour the mcp 2 port changed, pinned in both directions.
     mcp 2 decides DNS-rebinding protection from the ``host`` handed to
-    ``streamable_http_app`` — a bind spelled 127.0.0.1, localhost or ::1 gets a
-    loopback-only Host allowlist, anything else gets no Host/Origin check — so
-    the first case is what makes a LAN client possible at all, and the second
-    is what keeps a loopback bind protected. Nothing exercised ``run_http``
-    before this: dropping the ``host`` argument left every test green while
-    ``--bind 0.0.0.0`` reverted to answering every LAN client with 421.
+    ``streamable_http_app``: one of ``LOOPBACK_BINDS`` gets a loopback-only Host
+    allowlist, anything else gets no Host/Origin check. Row by row: a LAN
+    client reaches a LAN bind — what the port made possible; nothing exercised
+    ``run_http`` before, and dropping the ``host`` argument left every test
+    green while this reverted to 421. A loopback bind still rejects a LAN
+    ``Host`` — the protection is on where it should be — and still answers its
+    own client, the positive control: an SDK whose allowlist drifted would fail
+    here and nowhere else. And without the token it is 401 on either bind,
+    before any Host check runs — the ordering that makes the token an
+    acceptable sole gate on a LAN bind.
     """
-    app, server, uvicorn_kwargs = _http_app_for(bind, monkeypatch)
+    app, uvicorn_kwargs = _http_app_for(bind, monkeypatch)
     assert uvicorn_kwargs == {"host": bind, "port": 8747, "log_level": "warning"}
-    token = mcp_server.serve_token()  # the same one run_http just read
-    status = _post_status(
-        app, server, host="192.168.1.5:8747", headers={"Authorization": f"Bearer {token}"}
-    )
-    assert status == expected
-
-
-def test_http_bearer_guard_answers_before_the_host_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No token, bad Host, loopback bind: 401, not 421 — the guard is outermost.
-
-    That ordering is what makes the bearer token the sole gate on a
-    non-loopback bind acceptable: nothing in the app runs before it.
-    """
-    app, server, _uvicorn_kwargs = _http_app_for("127.0.0.1", monkeypatch)
-    assert _post_status(app, server, host="192.168.1.5:8747", headers={}) == 401
+    headers = {"Authorization": f"Bearer {mcp_server.serve_token()}"} if with_token else {}
+    assert _post_status(app, host=host, headers=headers) == expected
 
 
 def test_unknown_ref_keeps_nothing_matches_wording(work_dir: Path) -> None:
@@ -508,16 +512,19 @@ def test_the_server_identifies_itself_with_the_cli_version() -> None:
 
 
 def test_the_modern_in_process_path_reaches_the_same_handler(work_dir: Path) -> None:
-    """``mode="auto"`` — 2026-07-28, no handshake, no envelopes — still hits our handler.
+    """``mode="auto"`` — 2026-07-28, no initialize handshake, no framing — hits our handler.
 
     A replaced protocol handler that only took effect on the handshake era
     would leave modern clients with the SDK's prefixed wording. Same call,
-    same exact text, on the path ``call_remote`` deliberately does not use.
+    same exact text, on the path ``call_remote`` deliberately does not use —
+    and the era is asserted, because with ``mode="legacy"`` here this test
+    would still pass and prove nothing the rest of the file does not.
     """
     team_service.activate()
 
     async def go() -> CallToolResult:
         async with Client(mcp_server.build_server()) as client:  # the default mode
+            assert client.protocol_version == "2026-07-28", "not the modern era"
             return await client.call_tool("task_update", {"ref": "tsk_x", "action": "bogus"})
 
     result = anyio.run(go)

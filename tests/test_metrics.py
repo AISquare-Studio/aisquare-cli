@@ -257,6 +257,30 @@ def test_the_prompt_hook_still_delivers_the_team_delta_when_metrics_fail(
     assert hooks_service.prompt_submitted("hello", tmp_path, session_id="ses_h") == "TEAM DELTA"
 
 
+def test_a_prompt_that_cannot_be_recorded_says_so_on_stderr(
+    isolated_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The branch swallowed the store failure and returned "", so the regression
+    _cost_of_failing_open was written to end — a damaged store, silently — was
+    back for the prompt half. The teammate delta still flows; stderr says what
+    was lost; stdout stays the agent's."""
+    import sqlite3
+
+    def broken() -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(hooks_service, "store_session", broken)
+    monkeypatch.setattr(team_service, "hook_prompt_heartbeat", lambda *a, **k: "TEAM DELTA")
+    out = hooks_service.prompt_submitted("q", tmp_path, session_id="ses_1")
+    assert out == "TEAM DELTA"
+    captured = capsys.readouterr()
+    assert "prompt not recorded" in captured.err and "database is locked" in captured.err
+    assert captured.out == ""
+
+
 def test_the_prompt_hook_records_a_turn(isolated_home: Path, tmp_path: Path) -> None:
     hooks_service.prompt_submitted("why does the lock use msvcrt", tmp_path, session_id="ses_h")
     (turn,) = metrics_service.recent(session_id="ses_h")

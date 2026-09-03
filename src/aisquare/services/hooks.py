@@ -20,6 +20,7 @@ default agent does.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from aisquare.core import insights
@@ -191,7 +192,14 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             if prompt is not None and prompt.strip():
                 store.ensure_project(project)
                 store.add_prompt(prompt, project.id, source="claude-code")
-    except Exception:  # never disrupt the session to record it
+    except Exception as exc:  # never disrupt the session to record it — but say what it cost
+        # Swallowed here so the teammate delta still reaches the session; on
+        # stderr, never stdout, for the reason cli/hook.py gives — stdout is
+        # the agent's context. Silence was the regression that doctrine fixed.
+        sys.stderr.write(
+            f"aisquare: prompt not recorded ({type(exc).__name__}: {exc}) — this turn has no "
+            "prompt log and no CI row; run: aisquare doctor\n"
+        )
         return ""
     block = ""
     try:

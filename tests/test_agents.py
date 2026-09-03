@@ -252,6 +252,33 @@ def test_partial_install_is_reported_not_healthy(runner: CliRunner, fake_home: P
     assert agent_core.hooks_installed("claude-code") is True
 
 
+def test_hooks_without_the_context_timeout_are_not_installed(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """A settings file written before the context hooks carried ``timeout``
+    reported healthy while Claude Code cut the CI hook off at its 60 s default.
+    The value is reconciled, not just the marker; ``connect`` is the fix."""
+    from aisquare.core import agents as agent_core
+
+    assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
+    path = fake_home / ".claude" / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    for event in ("SessionStart", "UserPromptSubmit"):
+        for group in settings["hooks"][event]:
+            for item in group["hooks"]:
+                item.pop("timeout", None)
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    assert agent_core.hooks_installed("claude-code") is False
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    assert agent_core.hooks_installed("claude-code") is True
+    refreshed = json.loads(path.read_text(encoding="utf-8"))
+    assert all(
+        item["timeout"] == agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
+        for group in refreshed["hooks"]["UserPromptSubmit"]
+        for item in group["hooks"]
+    )
+
+
 def test_spaced_install_path_roundtrips_through_hooks(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

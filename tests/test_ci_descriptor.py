@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -110,6 +110,53 @@ def test_a_refusal_without_an_error_body_keeps_the_bare_status(
     stub.descriptor_json({"error": "no"}, status=503)
     result = _current(stub)
     assert result.detail == "http 503" and result.status == 503
+
+
+def test_a_refusal_is_cached_briefly_so_a_dead_endpoint_costs_one_probe_per_window(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    """Only successes were cached: every failed gate re-ran the full GET in front
+    of the prompt, ten seconds each against an endpoint that never answers."""
+    stub.descriptor_json({"error": "no"}, status=401)
+    first = _current(stub)
+    second = _current(stub)
+    assert first.descriptor is None and second.descriptor is None
+    assert stub.descriptor_fetches == 1, "the second gate did not go to the network"
+    assert second.from_cache and second.detail == "token rejected (401) (refusal cached)"
+    assert second.reason is ClientReason.descriptor_unavailable
+
+
+def test_a_cached_refusal_expires_and_a_later_success_clears_it(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    stub.descriptor_json({"error": "no"}, status=401)
+    t0 = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
+    ci_descriptor.current(RUN, base=stub.url, key="k", now=t0)
+    later = t0 + timedelta(seconds=ci_descriptor.REFUSAL_TTL_SECONDS + 1)
+    ci_descriptor.current(RUN, base=stub.url, key="k", now=later)
+    assert stub.descriptor_fetches == 2, "the window passed; the endpoint is asked again"
+    stub.descriptor_json(live_descriptor())
+    fixed = ci_descriptor.current(RUN, base=stub.url, key="k", now=later + timedelta(seconds=61))
+    assert fixed.descriptor is not None
+    assert not ci_descriptor._refusal_path(RUN).exists(), "a descriptor arrived; nothing refused"
+    assert ci_descriptor.current(RUN, base=stub.url, key="k").from_cache
+
+
+def test_a_doctor_style_fetch_caches_neither_a_descriptor_nor_a_refusal(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    stub.descriptor_json({"error": "no"}, status=401)
+    ci_descriptor.fetch(RUN, base=stub.url, key="k", cache=False)
+    assert not ci_descriptor._refusal_path(RUN).exists()
+    assert not paths.ci_cache_dir().exists()
+
+
+def test_forget_drops_the_refusal_too(stub: StubCI, isolated_home: Path) -> None:
+    stub.descriptor_json({"error": "no"}, status=401)
+    _current(stub)
+    assert ci_descriptor._refusal_path(RUN).exists()
+    ci_descriptor.forget(RUN)
+    assert not ci_descriptor._refusal_path(RUN).exists()
 
 
 def test_a_contract_skew_is_named_before_the_shape_is_checked(

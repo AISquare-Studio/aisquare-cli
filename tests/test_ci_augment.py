@@ -558,6 +558,40 @@ def test_a_prompt_over_the_contract_limit_is_clipped_not_refused(
     assert_valid("hook-request.experimental-v2", sent)
 
 
+def test_a_credential_straddling_the_contract_cut_never_ships_in_the_clear(
+    wired: StubCI, isolated_home: Path, tmp_path: Path
+) -> None:
+    """Clipped first, a secret spanning the 100 000th character lost its tail
+    and its head no longer matched the scrubber's pattern — so it went out."""
+    from aisquare.services.ci_augment import _PROMPT_TRUNCATION_MARK
+    from aisquare.services.ci_contract import MAX_PROMPT_CHARS
+
+    secret = SECRETS["github pat"]
+    cut = MAX_PROMPT_CHARS - len(_PROMPT_TRUNCATION_MARK)  # where the old code clipped
+    # A space before the token, as a pasted credential has: the scrubber's
+    # patterns start at a word boundary.
+    prompt = "x" * (cut - 13) + " " + secret + " and more text after the cut"
+    hooks_service.prompt_submitted(prompt, tmp_path, session_id=SESSION)
+    sent = wired.requests[0]["prompt"]
+    assert len(sent) <= MAX_PROMPT_CHARS
+    assert secret[:10] not in sent, "not even the head of the secret leaves"
+    assert "[redacted]" in sent, "scrubbed before the cut, so the marker is what remains"
+
+
+@pytest.mark.parametrize(("published", "enforced"), [(60_000, 60_000), (600_000, 115_000)])
+def test_the_ceiling_never_exceeds_what_the_installed_hook_timeout_allows(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, published: int, enforced: int
+) -> None:
+    """A run published with client_safety_ms past the installed hook timeout
+    would have Claude Code kill the hook first — context gone, and the row
+    saying why never written. The client's ceiling is always the inner one,
+    and the wire carries the ceiling actually enforced."""
+    assert ci_augment.MAX_CLIENT_SAFETY_MS == 115_000
+    wired.descriptor_json(live_descriptor(client_safety_ms=published))
+    hooks_service.prompt_submitted("q", tmp_path, session_id=SESSION)
+    assert wired.requests[0]["client_safety_ms"] == enforced
+
+
 def test_outbound_prompt_respects_the_configured_level() -> None:
     secret = SECRETS["github pat"]
     assert secret in (ci_augment.outbound_prompt(secret, RedactionLevel.off) or "")

@@ -172,7 +172,7 @@ def forward_recall(
     call = ci_client.recall(
         request,
         url=f"{opened.base}{RECALL_ROUTE}{pull.tool}",
-        deadline_ms=descriptor.client_safety_ms,
+        deadline_ms=ci_augment.ceiling_for(descriptor),
     )
     augmentation = ci_augment.Augmentation(
         "agent_request",

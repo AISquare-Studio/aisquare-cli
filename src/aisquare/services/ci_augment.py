@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import insights
+from aisquare.core.agents import CONTEXT_HOOK_TIMEOUT_SECONDS
 from aisquare.core.ids import new_trace_id
 from aisquare.core.injection import FRAME_VERSION, RetrievedBlock, build_retrieved_block
 from aisquare.core.redaction import redact
@@ -67,6 +68,22 @@ an experimental variable (plan C5): its wording changes whether the agent
 pulls. Change the text, bump the version."""
 
 _PROMPT_TRUNCATION_MARK = "… [clipped by aisquare-cli]"
+
+_REDACTION_SLACK = 4_096
+"""How far past the contract's cut the scrubber looks before the cut is made.
+A credential straddling the cut used to ship in the clear: clipped first, its
+leading half no longer matched the pattern. No secret shape is this long, so
+scrubbing this much more than the cap means nothing can straddle it."""
+
+MAX_CLIENT_SAFETY_MS = CONTEXT_HOOK_TIMEOUT_SECONDS * 1000 - 5_000
+"""The client's own ceiling, whatever the descriptor asks for.
+
+``client_safety_ms`` has no upper bound in the schema and used to flow straight
+into the transport. Claude Code kills a hook at the installed timeout and
+discards its output; a run published with a ceiling past that would put the two
+guards in the wrong order — the harness kills the hook first, the context is
+gone and the row explaining why is never written. The client's ceiling is
+always the inner one, with a margin for the rest of the hook's work."""
 
 
 @dataclass(frozen=True)
@@ -255,6 +272,15 @@ def for_session_start(
     return _event("session_start", None, project=project, session_id=session_id, cwd=cwd)
 
 
+def ceiling_for(descriptor: DeliveryDescriptor) -> int:
+    """The wall-clock ceiling for one call: the descriptor's, capped by ours.
+
+    The capped value is also what the request tells the server, because
+    ``client_safety_ms`` on the wire means "the ceiling this client enforces".
+    """
+    return min(descriptor.client_safety_ms, MAX_CLIENT_SAFETY_MS)
+
+
 def _event(
     trigger: HookTrigger,
     prompt: str | None,
@@ -320,7 +346,7 @@ def _event(
         project_ref=ci_snapshot.project_ref(root),
         snapshot_ref=snapshot.object_id if snapshot else None,
         prompt=outbound_prompt(prompt, level) if trigger != "session_start" else None,
-        client_safety_ms=descriptor.client_safety_ms,
+        client_safety_ms=ceiling_for(descriptor),
         client_observed_at=observed,
     )
     push = descriptor.hook_push
@@ -345,19 +371,18 @@ def _event(
 
 
 def outbound_prompt(prompt: str | None, level: RedactionLevel) -> str | None:
-    """The prompt as it leaves the machine: clipped to the contract, then scrubbed.
+    """The prompt as it leaves the machine: scrubbed, then clipped to the contract.
 
     The same :class:`RedactionLevel` that governs what ships to Explainability
     governs this (seam J13), and the level is recorded on the row so the server's
-    text can be reconciled with the local record. Clip first so the scrubber's
-    work is bounded whatever was pasted.
+    text can be reconciled with the local record. The scrubber's work is bounded
+    by a window a little wider than the cap, so no credential can straddle the
+    cut; the clip comes after, because scrubbing can also lengthen text —
+    ``a:b@`` in a URL becomes ``[redacted]``.
     """
     if prompt is None:
         return None
-    scrubbed = redact(_clip_prompt(prompt), level)
-    # Scrubbing can lengthen text — ``a:b@`` in a URL becomes ``[redacted]`` —
-    # so the contract's ceiling is applied on both sides of it.
-    scrubbed = _clip_prompt(scrubbed)
+    scrubbed = _clip_prompt(redact(prompt[: MAX_PROMPT_CHARS + _REDACTION_SLACK], level))
     return scrubbed if scrubbed.strip() else None
 
 

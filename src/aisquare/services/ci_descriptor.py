@@ -25,7 +25,8 @@ import contextlib
 import json
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -49,6 +50,16 @@ descriptor, so this one cannot; a bounded constant is the honest choice, and
 it sits well under any hook timeout an agent applies."""
 
 MAX_DESCRIPTOR_BYTES = 65_536
+
+REFUSAL_TTL_SECONDS = 60
+"""How long a failed fetch is remembered before the next hook tries again.
+
+Only successes were cached, so every failure state re-ran the full ``GET`` in
+front of every prompt, bounded by :data:`DESCRIPTOR_DEADLINE_MS` rather than
+the run's ceiling — ten seconds per prompt against an endpoint that accepts
+TCP and never answers, forever. A refusal is now cached for a short window: the
+first prompt pays the probe, the next ones record ``descriptor_unavailable``
+at once, and the window is short enough that a fixed server is noticed."""
 
 
 @dataclass(frozen=True)
@@ -78,10 +89,17 @@ def current(run: str, *, base: str, key: str, now: datetime | None = None) -> De
     Never raises. ``run`` is the validated ``run_…`` id; ``base`` the validated
     endpoint; ``key`` the bearer token (sent, never stored).
     """
-    cached = _read_cache(run, now or datetime.now(tz=UTC))
+    moment = now or datetime.now(tz=UTC)
+    cached = _read_cache(run, moment)
     if cached is not None:
         return DescriptorResult(cached, "cached", from_cache=True)
-    return fetch(run, base=base, key=key, now=now)
+    refused = _read_refusal(run, moment)
+    if refused is not None:
+        return DescriptorResult(None, f"{refused} (refusal cached)", from_cache=True)
+    result = fetch(run, base=base, key=key, now=now)
+    if result.descriptor is None:
+        _write_refusal(run, result.detail, moment)
+    return result
 
 
 def fetch(
@@ -185,7 +203,35 @@ def _read_cache(run: str, now: datetime) -> DeliveryDescriptor | None:
 
 def _write_cache(run: str, body: str) -> None:
     """Replace the cached descriptor in one step. Never raises."""
-    target = paths.ci_descriptor_path(run)
+    _replace(paths.ci_descriptor_path(run), body)
+    with contextlib.suppress(OSError):
+        _refusal_path(run).unlink()  # a descriptor arrived; nothing is refused now
+
+
+def _refusal_path(run: str) -> Path:
+    return paths.ci_descriptor_path(run).with_suffix(".refused.json")
+
+
+def _read_refusal(run: str, now: datetime) -> str | None:
+    """The detail of a recent refusal, or ``None`` when none is fresh."""
+    try:
+        raw = json.loads(_refusal_path(run).read_text(encoding="utf-8"))
+        until = datetime.fromisoformat(raw["until"])
+        detail = raw["detail"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(detail, str) or now >= until:
+        return None
+    return detail
+
+
+def _write_refusal(run: str, detail: str, now: datetime) -> None:
+    until = (now + timedelta(seconds=REFUSAL_TTL_SECONDS)).isoformat()
+    _replace(_refusal_path(run), json.dumps({"detail": detail, "until": until}))
+
+
+def _replace(target: Path, body: str) -> None:
+    """Write ``body`` to ``target`` in one step. Never raises."""
     temporary = target.with_suffix(f".{os.getpid()}.tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +243,7 @@ def _write_cache(run: str, body: str) -> None:
 
 
 def forget(run: str) -> None:
-    """Drop the cached descriptor for ``run``. Never raises."""
-    with contextlib.suppress(OSError):
-        paths.ci_descriptor_path(run).unlink()
+    """Drop the cached descriptor and any cached refusal for ``run``. Never raises."""
+    for path in (paths.ci_descriptor_path(run), _refusal_path(run)):
+        with contextlib.suppress(OSError):
+            path.unlink()

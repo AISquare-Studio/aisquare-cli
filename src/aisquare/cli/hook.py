@@ -110,11 +110,14 @@ def session_start() -> None:
             model=_str(payload, "model"),
             effort=_effort_level(payload),
         )
+        # Inside the try: the write itself can fail on what the context holds
+        # (a character stdout cannot encode), and that must not become a
+        # traceback and a non-zero exit either.
+        if context:
+            typer.echo(context)
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("session-start", exc)
         return
-    if context:
-        typer.echo(context)
 
 
 @app.command("user-prompt-submit")
@@ -131,11 +134,11 @@ def user_prompt_submit() -> None:
             model=_str(payload, "model"),
             effort=_effort_level(payload),
         )
+        if delta:
+            typer.echo(delta)
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("user-prompt-submit", exc)
         return
-    if delta:
-        typer.echo(delta)
 
 
 @app.command("session-end")

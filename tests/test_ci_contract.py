@@ -309,6 +309,22 @@ def test_an_error_body_this_build_cannot_read_is_still_a_plain_http_error() -> N
         assert outcome.detail == "status 502"
 
 
+def test_a_servers_sentence_reaches_a_detail_printable_only() -> None:
+    """The same sanitiser the frame applies: control codes, bidi overrides and
+    lone surrogates in an error.v1 message never reach doctor's output."""
+    from tests.stub_ci_server import error_v1
+
+    body = error_v1("dependency_unavailable", 503, "no build\x1b[31m \u202ehidden\u202c end")
+    outcome = parse_response(status=503, body=json.dumps(body))
+    assert outcome.detail == "status 503 dependency_unavailable: no build[31m hidden end"
+    # A lone surrogate in the message: pydantic refuses the string outright, so
+    # the body is simply not read — the bare status, and nothing raised.
+    body = error_v1("dependency_unavailable", 503, "no build \ud800 end")
+    outcome = parse_response(status=503, body=json.dumps(body))
+    assert outcome.detail == "status 503" and outcome.error_codes == ()
+    outcome.detail.encode("utf-8")
+
+
 def test_a_long_error_message_is_clipped_in_the_detail_not_on_the_row() -> None:
     from tests.stub_ci_server import error_v1
 

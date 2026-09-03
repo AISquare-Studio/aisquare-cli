@@ -52,9 +52,29 @@ buggy or hostile response must not hard-fail the turn on context length or
 bill an enormous token count for one prompt; past the cap the body is cut and
 says so, and the row records both sizes."""
 
+TOOL_FRAME_VERSION = "aisquare-ci-tool/1"
+"""What the recall tool's result went through: the same sanitiser and cap as the
+frame, no caveat wording — the agent asked for this text. Recorded on the
+``agent_request`` row so the pull arm says what framing the agent saw (C5)."""
+
 _OPEN = "<<<aisquare-retrieved"
 _CLOSE = ">>>aisquare-retrieved"
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CONTROL = re.compile(
+    # C0 controls and DEL, minus tab and newline …
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f"
+    # … the invisible and direction-changing format characters: soft hyphen,
+    # zero-width space/joiners/marks, the bidi embeddings and overrides, the
+    # word joiner and invisible operators, the byte-order mark — any of which
+    # ``str.lstrip`` leaves in place, so a delimiter behind one used to pass …
+    r"\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff"
+    # … and lone surrogates: legal in JSON, accepted by ``json.loads`` and by a
+    # ``str`` field, and impossible to encode as UTF-8 when the hook prints.
+    r"\ud800-\udfff]"
+)
+_LINE_BREAKS = re.compile(r"\r\n|\r|\u0085|\u2028|\u2029")
+"""Every break a terminal or a model renders as a new line but ``str.split("\\n")``
+does not see. Normalised before the delimiter check so a delimiter that starts a
+*rendered* line cannot hide inside one long ``\\n``-line."""
 _DELIMITER_REMOVED = "[aisquare: a frame delimiter was removed from the retrieved text]"
 
 
@@ -117,16 +137,44 @@ def build_retrieved_block(rendered_context: str) -> RetrievedBlock:
     )
 
 
+def sanitise_text(text: str) -> str:
+    """Server-controlled text made safe to print: one kind of line break, no
+    control, format, bidi or surrogate characters. The one policy for every
+    place a server's bytes reach a terminal or a model."""
+    return _CONTROL.sub("", _LINE_BREAKS.sub("\n", text))
+
+
 def _sanitise(text: str) -> str:
-    """Strip control characters and neutralise any line that could close the frame."""
-    cleaned = _CONTROL.sub("", text)
+    """Strip what :func:`sanitise_text` strips and neutralise any line that could
+    close the frame — wherever on the line the delimiter sits."""
     kept: list[str] = []
-    for line in cleaned.split("\n"):
-        if line.lstrip().startswith((_OPEN, _CLOSE)):
-            kept.append(_DELIMITER_REMOVED)
-        else:
-            kept.append(line)
+    for line in sanitise_text(text).split("\n"):
+        kept.append(_DELIMITER_REMOVED if (_OPEN in line or _CLOSE in line) else line)
     return "\n".join(kept)
+
+
+def build_tool_context(rendered_context: str) -> RetrievedBlock:
+    """The recall tool's ``rendered_context`` as the agent receives it.
+
+    A tool result the agent asked for needs no caveat around it, but it is the
+    same server-authored text the frame distrusts: sanitised the same way and
+    capped the same way, with both sizes recorded, so a buggy or hostile
+    briefing cannot bill the whole context window on the path the standing
+    instruction tells the agent to take.
+    """
+    body = _sanitise(rendered_context)
+    truncated = len(body) > INJECTION_CAP_CHARS
+    payload = body[:INJECTION_CAP_CHARS] if truncated else body
+    shown = payload
+    if truncated:
+        omitted = len(body) - INJECTION_CAP_CHARS
+        shown += f"\n[truncated by aisquare: {omitted} more characters not shown]"
+    return RetrievedBlock(
+        text=shown,
+        rendered_chars=len(rendered_context),
+        injected_chars=len(payload),
+        truncated=truncated,
+    )
 
 
 def record_retrieval(*, project_id: str, injected_chars: int, items: list[str]) -> None:

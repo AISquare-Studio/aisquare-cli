@@ -44,6 +44,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from aisquare.core.injection import sanitise_text
 from aisquare.models import (
     BriefingStatus,
     CacheStatus,
@@ -526,7 +527,14 @@ def degraded(
 
 
 def clip(text: str, limit: int = MAX_DETAIL_CHARS) -> str:
-    """``text`` bounded to ``limit`` characters, marked when cut."""
+    """``text`` bounded to ``limit`` characters, marked when cut — and printable.
+
+    Every detail passes through here, and most of them quote something the
+    server wrote (an ``error.v1`` message, a body that was not JSON). The same
+    sanitiser the injection frame applies runs first, so a server's control
+    codes or bidi overrides never reach ``doctor``'s output or a tool envelope.
+    """
+    text = sanitise_text(text)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 

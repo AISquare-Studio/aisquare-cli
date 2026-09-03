@@ -11,8 +11,10 @@ while the two sides settle them (the joint list is
 > **Status (2026-09-02).** The server is live at `https://ci-api.aisquare.studio`
 > (`aisquare-ci` `main` `4cb104b`, staging). `POST /v1/hook` and
 > `POST /v1/mcp/collective_intelligence_recall` answer any experiment token; the
-> CLI's models have been exercised against the real `error.v1` refusals from
-> here. The descriptor route still publishes `direct_api` only, so the
+> CLI has exchanged real turns with both (`none empty noop` on the hook, a real
+> `mcp-tool-output.v1` on the pull, `422 contract_version_mismatch` for a
+> hand-built `contract: 1`), and the server's grounding record for the pull's
+> `query_id` read back. The descriptor route still publishes `direct_api` only, so the
 > descriptor-gated hooks do not call yet — the plan, and the recorded staging
 > override that stands in until the server publishes real delivery modes, is
 > [`ci-live-wiring-handoff.md`](ci-live-wiring-handoff.md). Staging measures

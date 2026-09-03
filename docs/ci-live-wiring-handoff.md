@@ -29,6 +29,27 @@ will bite stated first.
 > silent about a set override until a token existed, and its descriptor line promising "the hooks
 > will not call" under an active override. **Step 3 A** is asked for below and not yet done
 > server-side.
+>
+> **Live, with the reader token (2026-09-02, evening).** Step 1: `doctor` three green lines, the
+> descriptor `direct_api only … ceiling 60000 ms`, and with the override exported the fourth line
+> warns. Step 2: one `prompt_submit` through the client models → `none empty noop`, `server_ms` 27,
+> round trip ~100 ms, `deadline.breached False`, `config_fingerprint sha256:1d0396…` — the vendored
+> contract and the deployed server agree. The pull route → a real `mcp-tool-output.v1` with
+> `status empty`, `query_id qry_mcp_331f9e22…`, `input_checkpoint ckp_b2d3fc23…`. A hand-built
+> `contract: 1` body → `422 contract_version_mismatch` in an `error.v1` body. Step 4 through the
+> console script with the override → one `session_start` and one `prompt_submit` row, both
+> `client_reason none`, `status empty`, `delivery_source override`, `opaque_config_id
+> cfg_public_25e58b76…`, `snapshot_ref` the HEAD object id, the prompt row closed by `Stop`; the
+> descriptor cache holds the server's `direct_api` list only. Step 8 for the pull:
+> `GET /v1/experiment/queries/qry_mcp_331f9e22…/grounding` → `grounding-report/v1`, same `query_id`
+> and `run_id`, `principal_id usr_ci_reader`, `workspace_id ws_kernel01`, `briefing_id null`. **A
+> seam fact for Vaibhav:** an `empty` hook answer is schema-pinned to `briefing: null`, so no
+> `query_id` reaches the client on the hook route — the hook-side join must come from the server's
+> ledger `reason` (`trace=trc_…`); the pull route always returns one. Still open: a `served` pair
+> (needs a prompt that matches the seeded corpus), Step 4 through a real Claude Code session (hooks
+> must be re-pointed first), Step 7 — the two `ci_turn` join records from this session are spooled
+> in the outbox (shipping is configured here) but cannot leave: `EXPLAINABILITY_API_KEY` is not set
+> on this machine.
 > **Steps 1, 2, 4, 7, 8 are blocked on the token**: the `aws` CLI is not installed on this
 > machine and there are no AWS credentials in the sandbox, so the owner fetches it. One more
 > thing Step 4 will meet: the hooks installed in `~/.claude-c2` point at the `ws1` checkout's

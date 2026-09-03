@@ -242,6 +242,11 @@ def _replace(target: Path, body: str) -> None:
             temporary.unlink()
 
 
+def cached(run: str, now: datetime | None = None) -> DeliveryDescriptor | None:
+    """The descriptor the hooks would use right now, if a fresh one is cached."""
+    return _read_cache(run, now or datetime.now(tz=UTC))
+
+
 def forget(run: str) -> None:
     """Drop the cached descriptor and any cached refusal for ``run``. Never raises."""
     for path in (paths.ci_descriptor_path(run), _refusal_path(run)):

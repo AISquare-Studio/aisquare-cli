@@ -595,6 +595,9 @@ def _experiment_checks() -> list[DoctorCheck]:
     if key and run:
         descriptor_check, descriptor = _check_ci_descriptor(base, key, run)
         checks.append(descriptor_check)
+        stale = _check_ci_cache(run, descriptor)
+        if stale is not None:
+            checks.append(stale)
     # Outside the gate above: a set override is named whenever it is set, even
     # when no descriptor could be fetched for it to apply to.
     override = _check_ci_override(descriptor)
@@ -620,8 +623,8 @@ def _check_ci_endpoint(base: str, shown: str) -> DoctorCheck:
     why = result.detail if result.reason is not None else f"http {result.status}"
     return _warn(
         "ci endpoint",
-        f"{shown}/ready did not answer ({why}) — prompts still work; every turn records "
-        "descriptor_unavailable or transport_error",
+        f"{shown}/ready did not answer ({why}) — prompts still work; whether the hooks can "
+        "deliver is what the descriptor line says, not this one",
         "Check the server is up, or turn the test bed off: export AISQUARE_CI=0",
     )
 
@@ -639,15 +642,16 @@ def _check_ci_descriptor(
         # The fix follows the status the server sent, never a word in its
         # message: an error.v1 sentence is quoted into the detail now, and a
         # word inside it ("expired", the server's own contract_version_mismatch
-        # code) must not pick a fix. The two word-based branches are for the
-        # client's own parse details, which only exist when no status arrived.
+        # code, a TLS certificate that "has expired") must not pick a fix. The
+        # two phrase-based branches match the client's OWN parse details at
+        # their start, and nothing else.
         if result.status in (401, 403):
             fix = "Check AISQUARE_CI_KEY is the experiment token for this server"
         elif result.status == 404:
             fix = "Check AISQUARE_CI_RUN names a run this server has published"
-        elif result.status is None and "contract_version" in detail:
+        elif detail.startswith("descriptor speaks contract_version"):
             fix = "Upgrade aisquare-cli, or ask for a run published for this contract"
-        elif result.status is None and "expired" in detail:
+        elif detail.startswith("descriptor expired at"):
             fix = "Ask the experiment controller for a fresh run"
         else:
             fix = "Check the server, or turn the test bed off: export AISQUARE_CI=0"
@@ -672,6 +676,24 @@ def _check_ci_descriptor(
             f"ceiling {descriptor.client_safety_ms} ms; expires {descriptor.expires_at}",
         ),
         descriptor,
+    )
+
+
+def _check_ci_cache(run: str, fresh: DeliveryDescriptor | None) -> DoctorCheck | None:
+    """The hooks read the cached descriptor; this probe fetched a fresh one.
+
+    When the two disagree on delivery, every line above describes a descriptor
+    the hooks are not using until the cache expires — so say so, once.
+    """
+    cached = ci_descriptor.cached(run)
+    if cached is None or fresh is None or cached.delivery == fresh.delivery:
+        return None
+    return _warn(
+        "ci descriptor cache",
+        f"the hooks use a cached descriptor until {cached.expires_at} that lists "
+        f"{ci_override.describe(cached)}; the server now says "
+        f"{ci_override.describe(fresh)}",
+        "Wait for the cache to expire, or start a new session after it does",
     )
 
 
@@ -704,17 +726,19 @@ def _check_ci_override(descriptor: DeliveryDescriptor | None) -> DoctorCheck | N
 
 
 def _display_url(url: str) -> str:
-    """A URL as ``doctor`` may print it: scheme and host, never ``user:secret@``.
+    """A URL as ``doctor`` may print it: scheme, host and path, never ``user:secret@``.
 
     ``doctor`` output is the most pasteable artefact there is, and a credential
-    in the URL would leak by being ordinary.
+    in the URL would leak by being ordinary. The path stays, so a base URL with
+    one prints the route that was actually probed.
     """
     try:
         parts = urlsplit(url if "://" in url else f"//{url}", scheme="")
     except ValueError:
         return re.sub(r"[^@/]*@", "", url)
     host = parts.netloc.rsplit("@", 1)[-1]
-    return f"{parts.scheme}://{host}" if parts.scheme else host
+    path = parts.path.rstrip("/")
+    return f"{parts.scheme}://{host}{path}" if parts.scheme else f"{host}{path}"
 
 
 def _has_module(name: str) -> bool:

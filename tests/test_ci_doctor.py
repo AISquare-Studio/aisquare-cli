@@ -212,8 +212,9 @@ def test_an_unreachable_server_warns_truthfully(monkeypatch: pytest.MonkeyPatch)
     checks = _ci_checks()
     assert checks["ci endpoint"].status is CheckStatus.warn
     assert "prompts still work" in checks["ci endpoint"].detail
-    assert "descriptor_unavailable" in checks["ci endpoint"].detail
+    assert "descriptor line" in checks["ci endpoint"].detail, "it defers; it does not predict"
     assert checks["ci descriptor"].status is CheckStatus.warn
+    assert "descriptor_unavailable" in checks["ci descriptor"].detail, "the line that knows says so"
 
 
 def test_credentials_in_the_url_never_reach_the_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,10 +266,65 @@ def test_doctor_still_answers_every_other_check_when_the_url_is_garbage(
         assert any(c.name == "ci endpoint" and c.status is CheckStatus.warn for c in checks), url
 
 
-def test_the_display_url_keeps_scheme_and_host_only() -> None:
+def test_the_display_url_keeps_scheme_host_and_path_and_drops_credentials() -> None:
     assert (
         diagnostics._display_url("https://user:pw@ci.example:9443/base")
-        == "https://ci.example:9443"
-    )
+        == "https://ci.example:9443/base"
+    ), "the route actually probed is /base/ready, so /base must show"
+    assert diagnostics._display_url("https://ci.example/") == "https://ci.example"
     assert diagnostics._display_url("example.com") == "example.com"
     assert "pw" not in diagnostics._display_url("user:pw@example.com")
+
+
+def test_a_transport_failure_that_mentions_expiry_does_not_get_the_fresh_run_fix(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An expired TLS certificate says "expired" too. The fix ladder must match
+    the client's own phrase for an expired descriptor, not the word."""
+    from aisquare.services import ci_descriptor
+
+    wire(monkeypatch, stub)
+    monkeypatch.setattr(
+        ci_descriptor,
+        "fetch",
+        lambda *a, **k: ci_descriptor.DescriptorResult(
+            None, "transport_error: [SSL: CERTIFICATE_VERIFY_FAILED] certificate has expired"
+        ),
+    )
+    check = _ci_checks()["ci descriptor"]
+    assert check.status is CheckStatus.warn
+    assert check.fix and "fresh run" not in check.fix and "AISQUARE_CI=0" in check.fix
+
+
+def test_the_endpoint_line_does_not_predict_what_the_descriptor_line_knows(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """/ready down while the descriptor route answers: the endpoint line must not
+    say every turn will fail when the line beneath it proves otherwise."""
+    wire(monkeypatch, stub)
+    stub.ready_status = 503
+    checks = _ci_checks()
+    assert checks["ci endpoint"].status is CheckStatus.warn
+    assert "every turn records" not in checks["ci endpoint"].detail
+    assert "descriptor line" in checks["ci endpoint"].detail
+    assert checks["ci descriptor"].status is CheckStatus.ok
+
+
+def test_doctor_says_when_the_hooks_use_a_cached_descriptor_the_server_no_longer_publishes(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """doctor fetches fresh; the hooks read the cache. When they disagree, every
+    verdict above describes a descriptor the hooks are not using yet."""
+    from aisquare.services import ci_descriptor
+
+    wire(monkeypatch, stub)
+    ci_descriptor.current(RUN, base=stub.url, key="k")  # cache the vendored (hook_push) descriptor
+    stub.descriptor_json(live_descriptor(delivery=[{"kind": "direct_api"}]))
+    checks = _ci_checks()
+    assert "direct_api only" in checks["ci descriptor"].detail
+    stale = checks["ci descriptor cache"]
+    assert stale.status is CheckStatus.warn
+    assert "hook_push on prompt_submit" in stale.detail and "direct_api only" in stale.detail
+    assert "2099-01-01" in stale.detail
+    ci_descriptor.forget(RUN)
+    assert "ci descriptor cache" not in _ci_checks(), "silent when the two agree or none is cached"

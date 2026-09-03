@@ -20,6 +20,14 @@ Four routes, matching the server's:
 
 Every request is recorded with its method, path, headers and parsed body.
 
+A client that gives up is not an error here. The deadline tests abandon the
+exchange at the ceiling while a handler is still sleeping out its programmed
+delay; when it wakes and writes, the peer is gone. ``socketserver`` would print
+that ``BrokenPipeError`` to ``sys.stderr`` — into whatever test happens to be
+running by then, including one that asserts "no traceback" on a CLI command
+that never touched this server. :class:`_QuietServer` swallows exactly those
+two exceptions and nothing else.
+
 Run it by hand to point a real Claude Code session at it::
 
     python -m tests.stub_ci_server --port 8765
@@ -227,11 +235,14 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
             return record
 
         def _send(self, status: int, payload: bytes) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except _PEER_GONE:
+                return  # the client abandoned the exchange; the tests wanted that
 
         def do_GET(self) -> None:
             self._record("")
@@ -257,16 +268,19 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
                 self._send(behaviour.status, payload)
                 return
             chunks, interval = behaviour.drip
-            self.send_response(behaviour.status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            size = max(1, -(-len(payload) // max(1, chunks)))
-            for start in range(0, len(payload), size):
-                self.wfile.write(payload[start : start + size])
-                self.wfile.flush()
-                if start + size < len(payload):
-                    time.sleep(interval)
+            try:
+                self.send_response(behaviour.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                size = max(1, -(-len(payload) // max(1, chunks)))
+                for start in range(0, len(payload), size):
+                    self.wfile.write(payload[start : start + size])
+                    self.wfile.flush()
+                    if start + size < len(payload):
+                        time.sleep(interval)
+            except _PEER_GONE:
+                return
 
         def log_message(self, *args: Any) -> None:
             """Silence the default stderr access log."""
@@ -274,10 +288,30 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+_PEER_GONE = (BrokenPipeError, ConnectionResetError)
+"""What a write raises when the client already hung up. Expected, never logged."""
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """``ThreadingHTTPServer`` that does not print a traceback for a peer that left.
+
+    ``handle_error`` is the one place ``socketserver`` reports a handler's
+    exception, and it does so with ``traceback.print_exc()`` to ``sys.stderr``
+    from the handler's thread — asynchronously, after the test that programmed
+    the delay has finished. Every other exception still prints; a genuine bug
+    in the stub must not become invisible.
+    """
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        if isinstance(sys.exc_info()[1], _PEER_GONE):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(*, port: int = 0, echo: bool = False) -> Iterator[StubCI]:
     """Run a stub server on ``port`` (0 = ephemeral) for the life of a test."""
     stub = StubCI(url="", behaviour=Behaviour(), echo=echo)
-    server = ThreadingHTTPServer(("127.0.0.1", port), _handler(stub))
+    server = _QuietServer(("127.0.0.1", port), _handler(stub))
     server.daemon_threads = True
     stub.url = f"http://127.0.0.1:{server.server_address[1]}"
     # serve_forever polls for shutdown every 0.5s by default, which would

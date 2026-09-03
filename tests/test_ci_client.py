@@ -12,6 +12,7 @@ import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -440,6 +441,19 @@ def test_a_pull_body_that_is_not_a_briefing_is_a_schema_mismatch(wired: StubCI) 
     wired.respond_recall_json(fixture("hook-response.experimental-v2.valid"))
     result = _recall(wired)
     assert result.reason is ClientReason.schema_mismatch and result.briefing is None
+
+
+def test_a_client_that_gave_up_leaves_no_traceback_behind(wired: StubCI, capsys: Any) -> None:
+    """A handler still sleeping when its client abandoned the exchange wakes,
+    writes to a closed socket, and must stay quiet. socketserver would print
+    the BrokenPipeError to sys.stderr — into whatever test is running by then,
+    which is how ``ambient (proxy-up)`` failed a test that asserts "no traceback"
+    on a stub server it never started."""
+    wired.respond(status=200, body="{}", delay_s=0.6)
+    result = _call(wired, client_safety_ms=100)
+    assert result.reason is ClientReason.deadline_exceeded
+    time.sleep(1.2)  # the abandoned handler wakes and writes to a peer that is gone
+    assert "Traceback" not in capsys.readouterr().err
 
 
 # --- the generic exchange -------------------------------------------------------------

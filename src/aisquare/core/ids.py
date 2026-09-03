@@ -25,6 +25,7 @@ PROJECT_PREFIX = "prj_"
 PROMPT_PREFIX = "prm_"
 TASK_PREFIX = "tsk_"
 EVENT_PREFIX = "evt_"
+TRACE_PREFIX = "trc_"
 
 
 def _encode(value: int, length: int) -> str:
@@ -61,3 +62,17 @@ def new_task_id() -> str:
 def new_event_id() -> str:
     """Return a fresh, time-sortable team-event id (``evt_…``)."""
     return _new_id(EVENT_PREFIX)
+
+
+def new_trace_id() -> str:
+    """Return a fresh, time-sortable CI trace id (``trc_…``).
+
+    One turn's identity across the hooks, the metrics row and the CI endpoint.
+    Minted here rather than reused from the agent's ``session_id`` because a
+    session spans many turns: keying on it would collapse every turn of a
+    session into one trace and make per-turn comparison impossible.
+
+    Note that ``run_id`` is *not* minted here — that one is the server's, and a
+    client that generated its own would fork the run space silently.
+    """
+    return _new_id(TRACE_PREFIX)

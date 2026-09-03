@@ -1,0 +1,521 @@
+"""The CI transport: off costs nothing, the deadline is wall-clock, nothing raises.
+
+Every test here runs against a real socket (``tests/stub_ci_server``) rather
+than a patched ``urlopen``, because the failures that matter — a stalled
+connection, a body that dribbles in past the ceiling, an oversized body — are
+transport behaviour, and a mock only proves what the mock believes urllib does.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from aisquare.core.config import AppConfig, ExperimentSettings, save_config
+from aisquare.models import ClientReason
+from aisquare.services import ci_client
+from aisquare.services.ci_contract import RecallInput
+from tests.ci_schemas import errors, fixture, fixture_text
+from tests.ci_support import RUN, request, wire
+from tests.stub_ci_server import StubCI, error_v1, serve
+
+
+@pytest.fixture
+def stub() -> Iterator[StubCI]:
+    yield from serve()
+
+
+@pytest.fixture
+def wired(stub: StubCI, monkeypatch: pytest.MonkeyPatch) -> StubCI:
+    wire(monkeypatch, stub)
+    return stub
+
+
+def _call(stub: StubCI, **overrides: object) -> ci_client.Call:
+    return ci_client.call(request(**overrides), url=stub.url + "/v1/hook")
+
+
+# --- the switches ------------------------------------------------------------------
+
+
+def test_off_is_the_default() -> None:
+    assert ci_client.enabled() is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", " On "])
+def test_the_recognised_on_values_enable(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, value)
+    assert ci_client.enabled() is True
+
+
+@pytest.mark.parametrize(
+    "value", ["0", "false", "off", "no", "disabled", "disable", "none", "garbage"]
+)
+def test_anything_else_is_off_even_when_config_says_on(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The kill switch someone reaches for in a hurry must not fail open on a
+    plausible spelling. ``disabled`` is exactly what a config field named
+    ``enabled`` invites."""
+    save_config(AppConfig(experiment=ExperimentSettings(enabled=True)))
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, value)
+    assert ci_client.enabled() is False
+
+
+def test_an_empty_variable_defers_to_config(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_config(AppConfig(experiment=ExperimentSettings(enabled=True)))
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "")
+    assert ci_client.enabled() is True
+
+
+def test_a_broken_config_enables_nothing(isolated_home: Path) -> None:
+    from aisquare.core import paths
+
+    paths.ensure_home()
+    paths.config_path().write_text("this is not = toml [", encoding="utf-8")
+    assert ci_client.enabled() is False
+    assert ci_client.endpoint() == ""
+
+
+def test_off_reads_no_config_and_costs_no_measurable_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A config read on the off path would be paid by every prompt of every
+    user who never opted in. Proven by making the read explode, and bounded by
+    a generous wall clock rather than a literal."""
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "0")
+    monkeypatch.setattr(
+        ci_client, "load_config", lambda: (_ for _ in ()).throw(RuntimeError("read"))
+    )
+    started = time.perf_counter()
+    for _ in range(200):
+        assert ci_client.enabled() is False
+    assert time.perf_counter() - started < 0.2
+
+
+@pytest.mark.parametrize(
+    "url", ["example.com", "example.com/v1", "ftp://x", "file:///etc/passwd", ""]
+)
+def test_a_url_without_an_http_scheme_is_not_an_endpoint(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """A scheme-less URL used to raise out of the request constructor, past every
+    reason the ladder knows, and cost the hook its whole output."""
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, url)
+    assert ci_client.endpoint() == ""
+    assert ci_client.raw_endpoint() == url.strip()
+
+
+def test_the_endpoint_keeps_its_scheme_and_drops_the_trailing_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, "HTTPS://ci.example/base/")
+    assert ci_client.endpoint() == "HTTPS://ci.example/base"
+
+
+def test_the_environment_url_beats_the_config_url(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_config(AppConfig(experiment=ExperimentSettings(url="http://from-config")))
+    assert ci_client.endpoint() == "http://from-config"
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, "http://from-env")
+    assert ci_client.endpoint() == "http://from-env"
+
+
+@pytest.mark.parametrize("value", ["run_kernel0001", "run_A-b_9"])
+def test_a_well_formed_run_id_is_accepted(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv(ci_client.RUN_ENV_VAR, value)
+    assert ci_client.run_id() == value
+
+
+@pytest.mark.parametrize(
+    "value", ["kernel0001", "run_", "run_ has space", "ws_kernel01", "run_" + "x" * 70]
+)
+def test_a_malformed_run_id_is_no_run(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """The CLI never mints or repairs a run id; a value the contract rejects is
+    ``no_run`` here rather than a request the server rejects on shape."""
+    monkeypatch.setenv(ci_client.RUN_ENV_VAR, value)
+    assert ci_client.run_id() == ""
+    assert ci_client.raw_run_id() == value
+
+
+def test_the_run_id_falls_back_to_config(isolated_home: Path) -> None:
+    save_config(AppConfig(experiment=ExperimentSettings(run=RUN)))
+    assert ci_client.run_id() == RUN
+
+
+def test_the_key_comes_from_the_environment_only(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert ci_client.api_key() == ""
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, " sekrit ")
+    assert ci_client.api_key() == "sekrit"
+    assert "key" not in ExperimentSettings.model_fields
+
+
+# --- the request on the wire ----------------------------------------------------------
+
+
+def _header(stub: StubCI, name: str) -> str | None:
+    wanted = name.lower()
+    return next((v for k, v in stub.headers[0].items() if k.lower() == wanted), None)
+
+
+def test_the_payload_validates_against_the_servers_schema(wired: StubCI) -> None:
+    _call(wired)
+    assert errors("hook-request.experimental-v2", wired.requests[0]) == []
+
+
+def test_the_bearer_travels_and_the_v1_header_does_not(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "sekrit")
+    _call(wired)
+    assert _header(wired, "Authorization") == "Bearer sekrit"
+    assert _header(wired, "Content-Type") == "application/json"
+    assert _header(wired, "X-CI-Contract") is None, "v2 carries the contract in the body"
+    assert wired.requests[0]["contract"] == 2
+
+
+def test_no_key_means_no_authorization_header(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    _call(wired)
+    assert _header(wired, "Authorization") is None
+
+
+def test_the_request_hits_the_path_it_was_given(wired: StubCI) -> None:
+    ci_client.call(request(), url=wired.url + "/custom/hook")
+    assert wired.hooks[0].path == "/custom/hook"
+
+
+# --- the happy path ------------------------------------------------------------------
+
+
+def test_a_served_response_comes_back_intact(wired: StubCI) -> None:
+    result = _call(wired)
+    assert result.reason is ClientReason.none
+    assert result.action == "inject"
+    assert result.status == "served"
+    assert result.briefing is not None and len(result.briefing.items) == 1
+    assert result.server_ms == 63
+    assert result.deadline_breached is False
+    assert result.error_codes == []
+
+
+def test_network_cost_stays_separable_from_server_cost(wired: StubCI) -> None:
+    """Folded together, a slow link is indistinguishable from a slow server."""
+    result = _call(wired)
+    assert result.network_ms is not None
+    assert result.network_ms == result.round_trip_ms - 63
+
+
+def test_a_degraded_response_records_its_error_codes(wired: StubCI) -> None:
+    raw = fixture("hook-response.experimental-v2.valid")
+    raw.update(status="degraded", errors=[fixture("error.v1.valid")])
+    wired.respond_json(raw)
+    result = _call(wired)
+    assert result.status == "degraded"
+    assert result.action == "inject"
+    assert result.error_codes == ["trace_batch_span_mismatch"]
+
+
+# --- every failure resolves to noop with a reason -------------------------------------
+
+
+def test_a_500_is_an_http_error(wired: StubCI) -> None:
+    wired.respond(status=500, body="internal error")
+    result = _call(wired)
+    assert result.action == "noop"
+    assert result.reason is ClientReason.http_error
+    assert "500" in result.outcome.detail
+
+
+def test_a_refusal_with_an_error_body_lands_its_code_on_the_call(wired: StubCI) -> None:
+    """The live server's 401: ``scope_resolution_failed`` with the sentence that
+    says what to fix. The code is what the row records; the sentence is the
+    detail a person reads."""
+    wired.respond_json(
+        error_v1(
+            "scope_resolution_failed",
+            401,
+            "no valid experiment token. These routes are experiment-only.",
+            credential_present=False,
+        ),
+        status=401,
+    )
+    result = _call(wired)
+    assert result.reason is ClientReason.http_error and result.action == "noop"
+    assert result.error_codes == ["scope_resolution_failed"]
+    assert result.detail.startswith("status 401 scope_resolution_failed: no valid experiment token")
+    assert result.status is None and result.server_ms is None, "no envelope arrived"
+
+
+def test_a_429_body_is_still_read_and_still_an_http_error(wired: StubCI) -> None:
+    wired.respond(status=429, body=fixture_text("hook-response.experimental-v2.valid"))
+    assert _call(wired).reason is ClientReason.http_error
+
+
+def test_garbage_is_malformed(wired: StubCI) -> None:
+    wired.respond(status=200, body="<html>not json</html>")
+    assert _call(wired).reason is ClientReason.malformed_body
+
+
+def test_a_contract_skew_is_a_mismatch(wired: StubCI) -> None:
+    body = fixture_text("hook-response.experimental-v2.valid").replace(
+        '"contract": 2', '"contract": 1', 1
+    )
+    wired.respond(status=200, body=body)
+    assert _call(wired).reason is ClientReason.contract_mismatch
+
+
+def test_a_refused_connection_is_a_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = ci_client.call(request(), url="http://127.0.0.1:1/v1/hook")
+    assert result.action == "noop"
+    assert result.reason is ClientReason.transport_error
+
+
+def test_a_stalled_server_is_cut_off_at_the_ceiling(wired: StubCI) -> None:
+    wired.respond(status=200, body=fixture_text("hook-response.experimental-v2.valid"), delay_s=2.0)
+    started = time.monotonic()
+    result = _call(wired, client_safety_ms=300)
+    elapsed = time.monotonic() - started
+    assert result.reason is ClientReason.deadline_exceeded
+    assert result.deadline_breached is True
+    assert elapsed < 1.2, f"the hook waited {elapsed:.2f}s for a 0.3s ceiling"
+
+
+def test_a_dripping_body_cannot_hold_the_hook_past_the_ceiling(wired: StubCI) -> None:
+    """The per-socket-operation timeout resets on every read; a server sending a
+    chunk every half-ceiling never trips it and holds the hook indefinitely.
+    The wall clock does not care how the bytes arrive."""
+    ceiling_ms = 600
+    wired.respond(
+        status=200,
+        body=fixture_text("hook-response.experimental-v2.valid"),
+        drip=(8, ceiling_ms / 1000 * 0.5),
+    )
+    started = time.monotonic()
+    result = _call(wired, client_safety_ms=ceiling_ms)
+    elapsed_ms = (time.monotonic() - started) * 1000
+    assert result.reason is ClientReason.deadline_exceeded
+    assert elapsed_ms < ceiling_ms + 600, f"returned after {elapsed_ms:.0f} ms"
+    assert wired.call_count == 1
+
+
+def test_a_response_that_arrives_after_the_ceiling_is_still_a_breach(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The late-arrival branch, taken deterministically: the exchange completes,
+    the clock says the ceiling passed, and counting it would hide exactly the
+    latency being measured."""
+    monkeypatch.setattr(ci_client, "late", lambda elapsed_ms, deadline_ms: True)
+    result = _call(wired)
+    assert result.reason is ClientReason.deadline_exceeded
+    assert "after the" in result.outcome.detail
+    assert wired.call_count == 1
+
+
+def test_late_is_at_or_past_the_ceiling() -> None:
+    assert ci_client.late(600, 600)
+    assert ci_client.late(601, 600)
+    assert not ci_client.late(599, 600)
+
+
+def test_an_oversized_body_is_malformed_not_read(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ci_client, "MAX_BODY_BYTES", 1024)
+    wired.respond(status=200, body=fixture_text("hook-response.experimental-v2.valid") + " " * 4096)
+    result = _call(wired)
+    assert result.reason is ClientReason.malformed_body
+    assert "exceeds" in result.outcome.detail
+
+
+def test_nothing_the_server_does_raises(wired: StubCI) -> None:
+    """One test for the property the whole hot path depends on."""
+    for status, body in [
+        (200, ""),
+        (200, "null"),
+        (200, "[]"),
+        (200, "{}"),
+        (200, '{"contract": 2}'),
+        (200, '{"contract": 2, "action": "block"}'),
+        (200, "[" * 20_000 + "]" * 20_000),
+        (204, ""),
+        (500, "boom"),
+        (503, "<html/>"),
+    ]:
+        wired.respond(status=status, body=body)
+        result = _call(wired)
+        assert result.action == "noop", (status, body[:40])
+        assert result.degraded
+
+
+# --- no retries ------------------------------------------------------------------------
+
+
+def test_a_failure_is_attempted_exactly_once(wired: StubCI) -> None:
+    """A retry doubles the latency being measured — it makes a slow endpoint
+    slower and contaminates the number the experiment exists to collect."""
+    wired.respond(status=500, body="boom")
+    _call(wired)
+    assert wired.call_count == 1
+
+
+def test_a_deadline_breach_is_not_retried_either(wired: StubCI) -> None:
+    wired.respond(status=200, body="{}", delay_s=1.0)
+    _call(wired, client_safety_ms=200)
+    time.sleep(1.2)  # let the abandoned worker's request land on the stub
+    assert wired.call_count == 1
+
+
+# --- the pull call ------------------------------------------------------------------------
+
+
+def _recall(stub: StubCI, **overrides: object) -> ci_client.RecallCall:
+    fields: dict[str, object] = {"prompt": "why does the lock use msvcrt", "session_id": "ses_test"}
+    fields.update(overrides)
+    return ci_client.recall(
+        RecallInput.model_validate(fields),
+        url=stub.url + "/v1/mcp/collective_intelligence_recall",
+        deadline_ms=5_000,
+    )
+
+
+def test_a_pull_carries_the_bearer_and_the_tool_input_body(wired: StubCI) -> None:
+    _recall(wired, run_id=RUN, token_budget=1800)
+    (recorded,) = wired.recalls
+    assert recorded.path == "/v1/mcp/collective_intelligence_recall"
+    assert recorded.headers.get("Authorization") == "Bearer k"
+    assert recorded.headers.get("Content-Type") == "application/json"
+    assert errors("mcp-tool-input.v1", wired.recall_requests[0]) == []
+    assert wired.recall_requests[0]["token_budget"] == 1800
+
+
+def test_a_served_pull_comes_back_as_the_briefing(wired: StubCI) -> None:
+    result = _recall(wired)
+    assert result.reason is ClientReason.none and not result.degraded
+    assert result.status == "served" and result.briefing is not None
+    assert result.briefing.query_id == "qry_kernel0001"
+    assert result.config_fingerprint == result.briefing.config_fingerprint
+    assert result.action is None and result.server_ms is None and result.network_ms is None
+    assert result.deadline_breached is None, "no server verdict on this surface"
+    assert result.error_codes == []
+
+
+def test_a_refused_pull_is_an_http_error_with_the_servers_code(wired: StubCI) -> None:
+    wired.respond_recall_json(
+        error_v1("scope_resolution_failed", 422, "called without run_id"), status=422
+    )
+    result = _recall(wired)
+    assert result.reason is ClientReason.http_error and result.briefing is None
+    assert result.status is None and result.config_fingerprint is None
+    assert result.error_codes == ["scope_resolution_failed"]
+    assert result.detail.startswith("status 422 scope_resolution_failed")
+    assert result.deadline_breached is None
+
+
+def test_a_stalled_pull_is_cut_off_at_the_ceiling_it_was_given(wired: StubCI) -> None:
+    wired.respond_recall(body=wired.recall_behaviour.body, delay_s=1.5)
+    started = time.monotonic()
+    result = ci_client.recall(
+        RecallInput(prompt="q", session_id="ses_test"),
+        url=wired.url + "/v1/mcp/collective_intelligence_recall",
+        deadline_ms=200,
+    )
+    assert time.monotonic() - started < 1.0
+    assert result.reason is ClientReason.deadline_exceeded
+    assert result.deadline_breached is True
+    time.sleep(1.5)  # the abandoned worker's request lands on the stub …
+    assert len(wired.recalls) == 1, "… and is never repeated"
+
+
+def test_a_pull_body_that_is_not_a_briefing_is_a_schema_mismatch(wired: StubCI) -> None:
+    wired.respond_recall_json(fixture("hook-response.experimental-v2.valid"))
+    result = _recall(wired)
+    assert result.reason is ClientReason.schema_mismatch and result.briefing is None
+
+
+def test_a_redirect_is_recorded_as_a_response_not_followed(
+    wired: StubCI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default opener follows a 3xx and re-sends every header — the bearer
+    included — to whatever origin Location names, turning the POST into a GET
+    on the way. Two requests, and the token at a host of the server's choosing."""
+    elsewhere = next(serve())
+    wired.respond(status=302, body="", location=elsewhere.url + "/stolen")
+    result = _call(wired)
+    assert result.reason is ClientReason.http_error and "302" in result.detail
+    assert wired.call_count == 1, "one request, one attempt"
+    assert elsewhere.seen == [], "the bearer never reached the other origin"
+    # And the descriptor GET, which carries the same bearer.
+    wired.descriptor_location = elsewhere.url + "/stolen"
+    wired.descriptor_status = 302
+    from aisquare.services import ci_descriptor
+
+    fetched = ci_descriptor.fetch(RUN, base=wired.url, key="k", cache=False)
+    assert fetched.descriptor is None and fetched.status == 302 and "302" in fetched.detail
+    assert elsewhere.seen == []
+
+
+def test_a_multi_line_token_is_unset_and_never_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``export AISQUARE_CI_KEY=$(cat token)`` on a wrapped paste: http.client would
+    refuse the header and quote the token in its ValueError, which a detail then
+    carried onto doctor's line and into the tool envelope."""
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "sk-live-SUPERSECRET-1234\ninjected-header: x")
+    assert ci_client.api_key() == ""
+    assert "Authorization" not in ci_client.headers_for(ci_client.api_key(), json_body=True)
+    assert "more than one line" in ci_client.api_key_problem()
+    leaked = ci_client._failed(
+        time.monotonic(),
+        ClientReason.transport_error,
+        "ValueError: Invalid header value b'Bearer sk-live-SUPERSECRET-1234\\ninjected-header: x'",
+    )
+    assert "SUPERSECRET" not in leaked.detail and "[AISQUARE_CI_KEY]" in leaked.detail
+
+
+def test_a_single_line_token_is_scrubbed_from_any_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "sk-live-SUPERSECRET-1234")
+    assert ci_client.api_key() == "sk-live-SUPERSECRET-1234"
+    assert ci_client.api_key_problem() == ""
+    assert "SUPERSECRET" not in ci_client.scrub_secret("token sk-live-SUPERSECRET-1234 rejected")
+
+
+def test_a_client_that_gave_up_leaves_no_traceback_behind(wired: StubCI, capsys: Any) -> None:
+    """A handler still sleeping when its client abandoned the exchange wakes,
+    writes to a closed socket, and must stay quiet. socketserver would print
+    the BrokenPipeError to sys.stderr — into whatever test is running by then,
+    which is how ``ambient (proxy-up)`` failed a test that asserts "no traceback"
+    on a stub server it never started."""
+    wired.respond(status=200, body="{}", delay_s=0.6)
+    result = _call(wired, client_safety_ms=100)
+    assert result.reason is ClientReason.deadline_exceeded
+    time.sleep(1.2)  # the abandoned handler wakes and writes to a peer that is gone
+    assert "Traceback" not in capsys.readouterr().err
+
+
+# --- the generic exchange -------------------------------------------------------------
+
+
+def test_exchange_reports_any_status_that_arrives(wired: StubCI) -> None:
+    result = ci_client.exchange(wired.url + "/ready", method="GET", deadline_ms=2_000)
+    assert result.reason is None
+    assert result.status == 200
+    assert json.loads(result.body) == {"status": "ready"}
+
+
+def test_exchange_never_raises_on_a_bad_url() -> None:
+    result = ci_client.exchange("nonsense://x", method="GET", deadline_ms=500)
+    assert result.reason is ClientReason.transport_error
+
+
+def test_deadline_breached_is_unknown_when_nothing_arrived_for_another_reason() -> None:
+    result = ci_client.call(request(), url="http://127.0.0.1:1/v1/hook")
+    assert result.deadline_breached is None

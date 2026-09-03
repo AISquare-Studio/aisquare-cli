@@ -24,6 +24,7 @@ from aisquare.cli import (
     team,
 )
 from aisquare.cli import config as config_cli
+from aisquare.cli import metrics as metrics_cli
 from aisquare.cli.global_flags import GlobalFlagsGroup
 from aisquare.core.state import RuntimeState, set_state
 from aisquare.core.version import __version__
@@ -106,6 +107,7 @@ app.add_typer(project.app, name="project")
 app.add_typer(project.app, name="workspace", hidden=True, help="Alias of 'project'.")
 app.add_typer(capture.app, name="capture", hidden=True)
 app.add_typer(config_cli.app, name="config")
+app.add_typer(metrics_cli.app, name="metrics", hidden=True)
 app.add_typer(policy.app, name="policy", hidden=True)
 app.add_typer(enforce.app, name="enforce", hidden=True)
 app.add_typer(team.app, name="team")

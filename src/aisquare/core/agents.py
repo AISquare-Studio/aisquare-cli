@@ -20,6 +20,23 @@ from typing import Any
 from aisquare.core import paths
 from aisquare.models import AgentHookSite, AgentInfo
 
+CONTEXT_HOOK_TIMEOUT_SECONDS = 120
+"""How long Claude Code lets the two context-producing hooks run.
+
+Claude Code cancels a command hook at 60 s by default and DISCARDS its output.
+The CI test bed's ``prompt_submit`` call may legitimately wait up to the
+descriptor's ``client_safety_ms`` (60 000 today) before it degrades and prints
+its own decision; under the default the agent would kill the hook first, the
+context would be lost, and — worse for the data — the row recording why would
+never be written. The installed timeout therefore exceeds that ceiling (seam
+decision J4). With the experiment off the hooks finish in well under a second,
+so this changes nothing for anyone who has not opted in.
+"""
+
+#: Hooks whose stdout becomes the agent's context. The others do bookkeeping
+#: and keep Claude Code's default.
+_CONTEXT_HOOKS = frozenset({"SessionStart", "UserPromptSubmit"})
+
 # Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
 _HOOKS = (
     ("SessionStart", "session-start"),
@@ -204,7 +221,10 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     for event, subcommand in _HOOKS:
         groups = hooks.get(event)
         kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
-        kept.append({"hooks": [{"type": "command", "command": f"{command} hook {subcommand}"}]})
+        entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {subcommand}"}
+        if event in _CONTEXT_HOOKS:
+            entry["timeout"] = CONTEXT_HOOK_TIMEOUT_SECONDS
+        kept.append({"hooks": [entry]})
         hooks[event] = kept
     settings["hooks"] = hooks
     spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -267,7 +287,29 @@ def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
     if not isinstance(hooks, dict):
         return False
     return all(
-        any(_is_aisquare_group(group) for group in (hooks.get(event) or [])) for event, _ in _HOOKS
+        any(_is_current_aisquare_group(group, event) for group in (hooks.get(event) or []))
+        for event, _ in _HOOKS
+    )
+
+
+def _is_current_aisquare_group(group: Any, event: str) -> bool:
+    """An aisquare hook group that is also what ``connect`` writes today.
+
+    Presence alone reported a settings file written before the context hooks
+    carried ``timeout`` as healthy, so ``doctor`` said the hooks were installed
+    while Claude Code cut the CI hook off at its 60 s default. The value is
+    reconciled, not just the marker.
+    """
+    if not _is_aisquare_group(group):
+        return False
+    if event not in _CONTEXT_HOOKS:
+        return True
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("command"), str)
+        and _is_aisquare_hook_command(item["command"])
+        and item.get("timeout") == CONTEXT_HOOK_TIMEOUT_SECONDS
+        for item in group.get("hooks", [])
     )
 
 

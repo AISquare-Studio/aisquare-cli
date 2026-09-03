@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/delivery/delivery-capability-manifest.v1.schema.json",
+  "title": "delivery-capability-manifest.v1",
+  "description": "What delivery surfaces this SERVER supports, at which contract versions, bound to the exact schemas each surface speaks. The Delivery row of 02-contracts-and-data.md section 4 requires a 'capability manifest' and does not describe one; this is the drafted shape, and every field below is justified from a canon sentence rather than from convenience. WHY A SCHEMA AND NOT A MARKDOWN TABLE. Three reasons, in order of weight. (1) Section 4's rule is 'No Python-only type is treated as a public contract', and every other member of the Delivery row is a schema; a capability list that is prose is a public contract with no fixture and no validator, which is the exact gap Slice 3 exists to close. (2) Section 10 makes 'Contract mismatch -> status=unavailable, action=noop, expected and received versions recorded' a RUNTIME decision. A client can only make it by reading a machine-readable version declaration before its first call; prose cannot be read at handshake time, and hardcoding the versions in the client turns a detectable mismatch into a silent one. (3) It is the client-facing twin of app/api/contract_bindings.py: the same method/path-to-contract binding idea, published outward. Keeping them the same shape is what lets a conformance test compare what the server binds internally against what it advertises. WHAT IT IS NOT. It is not a run's delivery configuration - that is client-delivery-descriptor.v1.delivery, which is a per-run subset of what this manifest offers. The distinction has teeth: 03 section 4's 'direct_api is mutually exclusive with agent-facing modes' constrains a RUN, so the descriptor enforces it and this manifest deliberately does not. A server that supports all three modes and offers each to different runs is correct; a run that uses direct_api and hook_push together is not. Set semantics (at most one capability per kind) still apply, because two hook_push entries would leave 'which endpoint does hook_push use' ambiguous. BLINDING. This document is served to delivery clients, so it is under the same rule as the descriptor: no architecture, source, reader, storage or arm-label field, and additionalProperties false at every level so adding one fails validation rather than shipping. Nothing here varies by arm - two runs on different architectures see byte-identical capability manifests, which is what makes it safe to cache and to publish once.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "descriptor_contract",
+    "capabilities",
+    "client_safety_ms",
+    "server_deadline_ms",
+    "published_at"
+  ],
+  "$defs": {
+    "contract_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)+$",
+      "description": "A contract name as app/contracts/registry.py resolves it: the schema file's basename with .schema.json removed, for example hook-request.experimental-v2. The pattern is the naming convention, not a guarantee the schema exists - resolution is the conformance suite's job and a name that resolves to nothing is a test failure there, not a validation failure here."
+    }
+  },
+  "properties": {
+    "manifest_version": {
+      "const": 1,
+      "description": "Version of this manifest document's own shape, distinct from the per-capability contract versions below. A client that cannot parse this number cannot trust anything after it."
+    },
+    "descriptor_contract": {
+      "$ref": "#/$defs/contract_name",
+      "description": "The contract a client-delivery-descriptor fetch returns, so a client knows what GET /v1/experiment/runs/{run_id} will speak before it calls it (02 section 5)."
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "contract"
+            ],
+            "properties": {
+              "kind": {
+                "const": "direct_api"
+              },
+              "contract": {
+                "const": 1,
+                "description": "The experiment API major version, matching the /v1/ path prefix of 02 section 5."
+              }
+            },
+            "description": "The pre-CLI mode (03 section 4.1). It binds no delivery schema of its own: a direct_api caller uses the experiment endpoints, whose bindings are app/api/contract_bindings.py, and it holds an experiment token to do so."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "contract",
+              "endpoint",
+              "triggers",
+              "request_contract",
+              "response_contract"
+            ],
+            "properties": {
+              "kind": {
+                "const": "hook_push"
+              },
+              "contract": {
+                "const": 2,
+                "description": "The shared hook contract version. 2 is what 02 section 6 specifies and what hook-request/response.experimental-v2 carry in their own contract field, so a client can compare this number against the one it is about to send."
+              },
+              "endpoint": {
+                "type": "string",
+                "pattern": "^/[A-Za-z0-9._~/-]{0,200}$",
+                "description": "Server-relative path, for example /v1/hook. Relative by construction, for the same reason as on the descriptor: an absolute URL in a server-published document is a redirect vector for a client's prompts."
+              },
+              "triggers": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "session_start",
+                    "prompt_submit",
+                    "agent_request"
+                  ]
+                },
+                "description": "Every trigger this server accepts. A run's descriptor advertises a SUBSET of these; the manifest is the ceiling, the descriptor is the selection."
+              },
+              "request_contract": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/contract_name"
+                  },
+                  {
+                    "enum": [
+                      "hook-request.experimental-v2"
+                    ]
+                  }
+                ],
+                "description": "Pinned, not free. A manifest that could claim hook_push speaks some other request schema would let a server advertise a contract it does not implement, which is the one failure this document exists to prevent. A hook contract v3 changes contract, request_contract and response_contract together, in one visible diff."
+              },
+              "response_contract": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/contract_name"
+                  },
+                  {
+                    "enum": [
+                      "hook-response.experimental-v2"
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "contract",
+              "tool",
+              "input_contract",
+              "output_contract"
+            ],
+            "properties": {
+              "kind": {
+                "const": "mcp_pull"
+              },
+              "contract": {
+                "const": 1
+              },
+              "tool": {
+                "type": "string",
+                "enum": [
+                  "collective_intelligence_recall"
+                ],
+                "description": "02 section 7: 'The initial MCP surface contains one read-only tool.' Single-member closed enum, same discipline as error.v1's reason catalog. The optional collective_intelligence_explain(item_id) tool 'may be added after provenance retrieval is stable' - adding it is a schema-version change here, so a server cannot start advertising an unbuilt tool by editing a config value."
+              },
+              "input_contract": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/contract_name"
+                  },
+                  {
+                    "enum": [
+                      "mcp-tool-input.v1"
+                    ]
+                  }
+                ]
+              },
+              "output_contract": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/contract_name"
+                  },
+                  {
+                    "enum": [
+                      "mcp-tool-output.v1"
+                    ]
+                  }
+                ]
+              }
+            },
+            "description": "The voluntary pull surface. 02 section 7: 'The tool is voluntary pull. It does not intercept another tool call' - which is why this capability declares an input and an output contract and no interception hook of any kind."
+          }
+        ]
+      },
+      "description": "What this server offers. The kinds are canon's delivery mode set (03 section 4: direct_api | hook_push | mcp_pull)."
+    },
+    "client_safety_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The safety ceiling this server expects clients to apply (03 section 4 runtime.client_safety_ms, 60000 in the pinned manifest). Published so a client sets its ceiling from the server's expectation instead of from a constant in its own source."
+    },
+    "server_deadline_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The server's own deadline (03 section 4 runtime.server_deadline_ms, 55000 in the pinned manifest). Already client-visible on every hook response's deadline object, so publishing it here reveals nothing new and lets a client detect a nonsensical pair before the first call. NOT EXPRESSIBLE IN JSON SCHEMA, adapter-enforced: that server_deadline_ms is less than client_safety_ms - a cross-field comparison, and the relation 04 section 6 calls the 55/60-second safety limits."
+    },
+    "published_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "description": "When this manifest was published. Unlike client-delivery-descriptor.v1 this document carries no expiry: it describes the server build, not a run, and it stops being true when the server is redeployed rather than at a scheduled time."
+    }
+  },
+  "allOf": [
+    {
+      "properties": {
+        "capabilities": {
+          "contains": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "direct_api"
+              }
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      },
+      "description": "At most one direct_api capability. minContains 0 makes it a cap rather than a requirement."
+    },
+    {
+      "properties": {
+        "capabilities": {
+          "contains": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "hook_push"
+              }
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      },
+      "description": "At most one hook_push capability. Two would leave the endpoint and trigger set ambiguous."
+    },
+    {
+      "properties": {
+        "capabilities": {
+          "contains": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "mcp_pull"
+              }
+            }
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      },
+      "description": "At most one mcp_pull capability."
+    }
+  ]
+}

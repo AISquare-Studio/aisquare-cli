@@ -225,7 +225,365 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 10
+    assert version == SCHEMA_VERSION == 12
+
+
+def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
+    """Each closed vocabulary is spelled twice — once in SQL, once in Python —
+    because SQLite cannot read an enum. Held equal here so neither can drift:
+    a value the model accepts that the CHECK refuses would lose the row
+    silently, on every prompt, with nothing raising."""
+    import re
+    from typing import get_args
+
+    from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V12
+    from aisquare.models import (
+        BriefingStatus,
+        CacheStatus,
+        ClientReason,
+        DeliverySource,
+        HookAction,
+        HookTrigger,
+        RunKind,
+    )
+
+    def sql_set(column: str, schema: str = _SCHEMA_V11) -> set[str]:
+        match = re.search(rf"{column} TEXT[^,]*?IN \(([^)]*)\)", schema, re.DOTALL)
+        assert match is not None, column
+        return {value.strip().strip("'") for value in match.group(1).split(",")}
+
+    # Against the Python vocabulary itself, never a third copy typed here: a
+    # Literal that moves in models.py must move the SQL or fail this test.
+    assert sql_set("client_reason") == {reason.value for reason in ClientReason}
+    assert sql_set("status") == set(get_args(BriefingStatus))
+    assert sql_set("action") == set(get_args(HookAction))
+    assert sql_set("trigger") == set(get_args(HookTrigger))
+    assert sql_set("cache_status") == set(get_args(CacheStatus))
+    assert sql_set("run_kind") == set(get_args(RunKind))
+    assert sql_set("delivery_source", _SCHEMA_V12) == set(get_args(DeliverySource))
+
+
+def test_the_metric_table_has_no_column_that_could_name_an_arm() -> None:
+    from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V12
+
+    for forbidden in ("arm", "flags_hash", "architecture", "CREATE TABLE run"):
+        assert forbidden not in _SCHEMA_V11 and forbidden not in _SCHEMA_V12, forbidden
+
+
+def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_intact() -> None:
+    """The migration real machines take: every row that existed before the
+    metric table survives it, the table arrives with the v2 columns and the
+    v12 one, and no ``run`` table comes along."""
+    from aisquare.core.store import _MIGRATIONS
+
+    db = _db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(db))
+    try:
+        for migration in _MIGRATIONS[:10]:
+            raw.executescript(migration)
+        raw.execute("PRAGMA user_version = 10")
+        raw.execute(
+            "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("prj_old", "/tmp/old", "old", "[]", "2026-01-01T00:00:00+00:00"),
+        )
+        raw.execute(
+            "INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "ctx_old",
+                "project",
+                "prj_old",
+                "survives",
+                "[]",
+                "test",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert (
+            raw.execute("SELECT text FROM entry WHERE id = 'ctx_old'").fetchone()[0] == "survives"
+        )
+        columns = {row[1] for row in raw.execute("PRAGMA table_info(metric)")}
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        raw.close()
+    assert {
+        "client_reason",
+        "status",
+        "action",
+        "query_id",
+        "opaque_config_id",
+        "run_kind",
+        "delivery_source",
+    } <= columns
+    assert "arm" not in columns and "run" not in tables
+
+
+def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> Path:
+    """A database migrated by hand to ``version``, with ``after`` run last and
+    ``user_version`` stamped ``stamp`` (default: ``version``)."""
+    from aisquare.core.store import _MIGRATIONS
+
+    db = _db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(db))
+    try:
+        for migration in _MIGRATIONS[:version]:
+            raw.executescript(migration)
+        if after:
+            raw.executescript(after)
+        raw.execute(f"PRAGMA user_version = {stamp if stamp is not None else version}")
+        raw.commit()
+    finally:
+        raw.close()
+    return db
+
+
+# The metric table the branch's v1 contract created (7557751..31956f2), stamped
+# user_version 11 like the v2 one that replaced it in place. Column names as
+# they were; the arm and flags_hash columns are the reason it must not stay.
+V1_METRIC_DDL = """
+CREATE TABLE metric (
+    trace_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    wall_ms INTEGER,
+    ci_action TEXT NOT NULL DEFAULT 'allow',
+    degradation_reason TEXT NOT NULL DEFAULT 'disabled',
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    server_ms INTEGER,
+    round_trip_ms INTEGER,
+    budget_breach INTEGER NOT NULL DEFAULT 0,
+    injected_chars INTEGER,
+    run_id TEXT,
+    arm TEXT,
+    flags_hash TEXT,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tool_calls INTEGER
+);
+CREATE INDEX metric_project_started ON metric (project_id, started_at);
+CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_at IS NULL;
+CREATE TABLE run (
+    id TEXT PRIMARY KEY,
+    arm TEXT,
+    flags_hash TEXT,
+    started_at TEXT NOT NULL,
+    note TEXT
+);
+INSERT INTO metric (trace_id, project_id, started_at, arm) VALUES ('trc_v1', 'prj_old', 't', 'A');
+"""
+
+
+def _metric_columns(db: Path) -> set[str]:
+    raw = sqlite3.connect(str(db))
+    try:
+        return {row[1] for row in raw.execute("PRAGMA table_info(metric)")}
+    finally:
+        raw.close()
+
+
+def test_a_v11_database_gains_the_column_and_keeps_its_rows() -> None:
+    """The machine that ran the branch's stub smoke: at 11 with a populated
+    metric table. v12 adds the column; the rows stay and read back with a
+    ``None`` source, which is the truth about them."""
+    db = _at_version(11)
+    raw = sqlite3.connect(str(db))
+    try:
+        raw.execute(
+            "INSERT INTO metric (trace_id, project_id, started_at, client_reason) "
+            "VALUES ('trc_old', 'prj_old', '2026-09-01T00:00:00+00:00', 'disabled')"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    store = open_store()
+    try:
+        (old,) = store.turn_metrics(project_id="prj_old")
+    finally:
+        store.close()
+    assert old.trace_id == "trc_old" and old.delivery_source is None
+    assert "delivery_source" in _metric_columns(db)
+
+
+def test_a_v11_database_whose_metric_table_was_deleted_by_hand_heals() -> None:
+    """The state the PR body's own advice for the v1-shaped table leaves behind
+    — and the state this was written on: ``user_version`` 11, no ``metric``
+    table, every row silently lost. v12 creates the table before it alters it,
+    and a write lands afterwards."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TurnMetric
+
+    db = _at_version(11, after="DROP TABLE metric;")
+    assert _metric_columns(db) == set(), "the precondition: no metric table at all"
+    store = open_store()
+    try:
+        store.open_turn(
+            TurnMetric(
+                trace_id="trc_healed",
+                project_id="prj_x",
+                started_at=datetime.now(tz=UTC),
+                delivery_source="override",
+            )
+        )
+        (row,) = store.turn_metrics(project_id="prj_x")
+    finally:
+        store.close()
+    assert row.delivery_source == "override"
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+    finally:
+        raw.close()
+
+
+def test_a_v11_database_with_the_v1_shaped_metric_table_is_moved_aside_and_rebuilt() -> None:
+    """The third real v11 state. Every v12 statement would succeed on the v1
+    shape and stamp it 12 — a table that can never take a v2 row and can never
+    be migrated by version again. It is renamed (never dropped), its arm-shaped
+    sibling with it, and the v2 shape is built in its place."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.store import V1_ORPHAN_SUFFIX
+    from aisquare.models import TurnMetric
+
+    db = _at_version(10, after=V1_METRIC_DDL, stamp=11)
+    assert "arm" in _metric_columns(db), "the precondition: the v1 shape"
+    store = open_store()
+    try:
+        store.open_turn(
+            TurnMetric(trace_id="trc_v2", project_id="prj_x", started_at=datetime.now(tz=UTC))
+        )
+        (row,) = store.turn_metrics(project_id="prj_x")
+    finally:
+        store.close()
+    assert row.trace_id == "trc_v2" and row.delivery_source is None
+    columns = _metric_columns(db)
+    assert {"run_kind", "delivery_source"} <= columns and "arm" not in columns
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert f"metric{V1_ORPHAN_SUFFIX}" in tables and f"run{V1_ORPHAN_SUFFIX}" in tables
+        assert "run" not in tables, "nothing arm-shaped stays live"
+        kept = raw.execute(f"SELECT trace_id, arm FROM metric{V1_ORPHAN_SUFFIX}").fetchall()
+        assert kept == [("trc_v1", "A")], "renamed, never dropped"
+        indexes = {row[1] for row in raw.execute("PRAGMA index_list(metric)")}
+        assert {"metric_project_started", "metric_open_session"} <= indexes, (
+            "the indexes follow the live table, not the orphan"
+        )
+    finally:
+        raw.close()
+
+
+def test_a_v1_shaped_table_is_moved_aside_even_when_an_orphan_already_exists() -> None:
+    """The review's wedge: a fixed orphan name that already exists makes the
+    rename raise, the transaction roll back and user_version stay 11 — so every
+    later open fails identically until someone drops a table by hand."""
+    from aisquare.core.store import V1_ORPHAN_SUFFIX
+
+    prior = (
+        f"CREATE TABLE metric{V1_ORPHAN_SUFFIX} (x TEXT);"
+        f" CREATE TABLE run{V1_ORPHAN_SUFFIX} (x TEXT);"
+    )
+    db = _at_version(10, after=V1_METRIC_DDL + prior, stamp=11)
+    open_store().close()
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        raw.close()
+    assert {f"metric{V1_ORPHAN_SUFFIX}", f"metric{V1_ORPHAN_SUFFIX}_2"} <= tables
+    assert {f"run{V1_ORPHAN_SUFFIX}", f"run{V1_ORPHAN_SUFFIX}_2"} <= tables
+    assert {"run_kind", "delivery_source"} <= _metric_columns(db)
+
+
+def test_the_close_turn_compare_and_set_loses_to_a_stop_that_landed_first() -> None:
+    """The review found the CAS uncovered: the racing test's second call never
+    reached the UPDATE, and removing ``AND ended_at IS NULL`` left 74 tests
+    green. Here the other Stop lands between this call's SELECT and its UPDATE,
+    on the same connection, so the guard alone decides the outcome."""
+    from datetime import UTC, datetime, timedelta
+    from typing import Any
+
+    from aisquare.models import TurnMetric
+
+    store: Any = open_store()  # the concrete store, whose connection we interpose on
+    try:
+        started = datetime.now(tz=UTC) - timedelta(seconds=5)
+        store.open_turn(
+            TurnMetric(
+                trace_id="trc_cas", project_id="prj_x", session_id="ses_cas", started_at=started
+            )
+        )
+        first_close = (started + timedelta(seconds=1)).isoformat()
+        real_conn = store._conn
+
+        class RacingConnection:
+            """The other Stop writes the row the instant before our UPDATE."""
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(real_conn, name)
+
+            def execute(self, sql: str, *params: object) -> object:
+                if sql.lstrip().startswith("UPDATE metric SET ended_at"):
+                    real_conn.execute(
+                        "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ?",
+                        (first_close, 1000, "trc_cas"),
+                    )
+                return real_conn.execute(sql, *params)
+
+        store._conn = RacingConnection()
+        loser = store.close_turn("ses_cas", ended_at=started + timedelta(seconds=4))
+        store._conn = real_conn
+        (row,) = store.turn_metrics(session_id="ses_cas")
+    finally:
+        store.close()
+    assert loser is None, "the second Stop reports that it closed nothing"
+    assert row.ended_at is not None and row.ended_at.isoformat() == first_close
+    assert row.wall_ms == 1000, "the first close is never overwritten"
+
+
+def test_a_bad_delivery_source_is_refused_at_the_row() -> None:
+    from datetime import UTC, datetime
+    from typing import cast
+
+    from aisquare.models import DeliverySource, TurnMetric
+
+    store = open_store()
+    try:
+        # model_construct skips validation, so the CHECK is the only thing in
+        # the way; the cast keeps mypy from refusing the value first.
+        bad = TurnMetric.model_construct(
+            trace_id="trc_bad",
+            project_id="prj_x",
+            started_at=datetime.now(tz=UTC),
+            delivery_source=cast(DeliverySource, "server"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            store.open_turn(bad)
+    finally:
+        store.close()
 
 
 def test_data_persists_across_reopen() -> None:

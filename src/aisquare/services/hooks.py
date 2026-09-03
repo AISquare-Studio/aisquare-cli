@@ -20,6 +20,7 @@ default agent does.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from aisquare.core import insights
@@ -27,7 +28,10 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
+from aisquare.models import ProjectInfo
+from aisquare.services import ci_augment
 from aisquare.services import explainability as explainability_service
+from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
 
 
@@ -86,7 +90,42 @@ def session_start_context(
         if session_id
         else ""
     )
-    return "\n\n".join(part for part in (directive, block, team_block) if part)
+    # Last, and only when the experiment is on: the standing instruction to
+    # consult the recall tool, then any retrieved material — closest to what
+    # the agent is about to do, and the part it should weigh least.
+    instruction, retrieved = _session_start_ci(project, session_id, cwd)
+    return "\n\n".join(
+        part for part in (directive, block, team_block, instruction, retrieved) if part
+    )
+
+
+def _session_start_ci(
+    project: ProjectInfo, session_id: str | None, cwd: Path | None
+) -> tuple[str, str]:
+    """Consult CI at session start and RECORD the outcome; never raises.
+
+    The row is closed at creation — a session start is a call, not a turn.
+    Nothing is written while the experiment is off or unconfigured: those
+    machines record their baseline per prompt, and a row per session start
+    would only say "off" again. A failure anywhere here costs the CI part of
+    the context and nothing else — the saved entries and the board must reach
+    the agent whatever the test bed does.
+    """
+    try:
+        augmentation = ci_augment.for_session_start(project=project, session_id=session_id, cwd=cwd)
+        if not augmentation.configured:
+            return "", ""
+        metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=True))
+        if augmentation.run_id:
+            insights.record_turn(
+                augmentation.join_facts(session_id), session_id=session_id, project_id=project.id
+            )
+        instruction = ""
+        if session_id and augmentation.descriptor and augmentation.descriptor.mcp_pull:
+            instruction = ci_augment.instruction_for(session_id)
+        return instruction, augmentation.block
+    except Exception:  # the experiment may never cost a session its context
+        return "", ""
 
 
 def prompt_submitted(
@@ -99,13 +138,13 @@ def prompt_submitted(
     effort: str | None = None,
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
-    if prompt is not None and prompt.strip():
-        capture_prompt(prompt, cwd, session_id=session_id)
+    retrieved = capture_prompt(prompt, cwd, session_id=session_id)
     if session_id is None:
-        return ""
-    return team_service.hook_prompt_heartbeat(
+        return retrieved
+    delta = team_service.hook_prompt_heartbeat(
         session_id, cwd, transcript_path=transcript_path, model=model, effort=effort
     )
+    return "\n\n".join(part for part in (delta, retrieved) if part)
 
 
 def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
@@ -115,9 +154,12 @@ def session_ended(cwd: Path | None, *, session_id: str | None = None) -> None:
 
 
 def turn_stopped(cwd: Path | None, *, session_id: str | None = None) -> None:
-    """Mark the session as waiting for input (its turn just ended)."""
+    """Mark the session as waiting for input, and close this turn's metrics row."""
     if session_id is not None:
         team_service.hook_stop(session_id, cwd)
+        # After the team update, never before: a metrics failure must not cost
+        # the board its state change, and close_turn swallows its own errors.
+        metrics_service.close_turn(session_id)
 
 
 def needs_attention(
@@ -128,19 +170,53 @@ def needs_attention(
         team_service.hook_notification(session_id, cwd, message)
 
 
-def capture_prompt(prompt: str, cwd: Path | None, *, session_id: str | None = None) -> None:
-    """Record a submitted user prompt against the active project.
+def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
+    """Record the prompt, consult CI, open this turn's row.
 
-    Spooling for the gateway comes last and cannot raise: recording the prompt
-    locally is the job, shipping it is an observer of the job.
+    Three steps, deliberately separated. The store is opened for the prompt
+    record and closed again BEFORE the server is consulted, so a slow endpoint
+    holds no database handle and a CI-side failure cannot take the store work
+    with it; the row is written afterwards in its own short transaction. A turn
+    is opened even when the prompt is empty and even when CI never ran: a row
+    per turn from the day this ships is what turns the stretch before the
+    endpoint goes live into a baseline rather than a gap.
+
+    Failures are swallowed here rather than in the caller so that a store
+    problem costs the record, not the teammate delta the hook still owes the
+    session. Returns the retrieved block to inject, or ``""`` — which is what
+    every turn returns while the experiment is off.
     """
-    if not prompt.strip():
-        return
-    with store_session() as store:
-        project = active_project(store, cwd)
-        store.ensure_project(project)
-        store.add_prompt(prompt, project.id, source="claude-code")
-    insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
+    try:
+        with store_session() as store:
+            project = active_project(store, cwd)
+            if prompt is not None and prompt.strip():
+                store.ensure_project(project)
+                store.add_prompt(prompt, project.id, source="claude-code")
+    except Exception as exc:  # never disrupt the session to record it — but say what it cost
+        # Swallowed here so the teammate delta still reaches the session; on
+        # stderr, never stdout, for the reason cli/hook.py gives — stdout is
+        # the agent's context. Silence was the regression that doctrine fixed.
+        sys.stderr.write(
+            f"aisquare: prompt not recorded ({type(exc).__name__}: {exc}) — this turn has no "
+            "prompt log and no CI row; run: aisquare doctor\n"
+        )
+        return ""
+    block = ""
+    try:
+        augmentation = ci_augment.for_prompt(
+            prompt, project=project, session_id=session_id, cwd=cwd
+        )
+        block = augmentation.block
+        metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=False))
+        if prompt is not None and prompt.strip():
+            insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
+        if augmentation.run_id:
+            insights.record_turn(
+                augmentation.join_facts(session_id), session_id=session_id, project_id=project.id
+            )
+    except Exception:  # recording may never cost the agent its context
+        return block
+    return block
 
 
 def _directive(project_id: str, *, has_prompts: bool) -> str:

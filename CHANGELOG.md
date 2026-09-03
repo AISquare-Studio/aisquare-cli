@@ -7,6 +7,121 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Collective Intelligence test bed — retrieval in front of the agent, off by
+  default (experimental).** When a prompt is submitted, aisquare can ask a CI
+  server whether the workspace already knows something relevant and hand that to
+  the agent *before* it starts exploring, through the `UserPromptSubmit` hook
+  installed since day one. **Nothing runs unless `AISQUARE_CI=1`, a URL, a token
+  and a run id are set:** with the switch off there is no request, no connection
+  and no measurable latency, and any unrecognised value of the switch is off.
+  - The CLI speaks **hook contract v2**, the server's frozen contract. Its seven
+    schemas and their fixtures are vendored byte for byte
+    (`tests/fixtures/ci_contract/v2/`); every request the CLI can emit is
+    validated against the server's schema with `jsonschema` in the suite, and
+    the models refuse what the schemas refuse — an unknown key, a scope id in an
+    id field, `allow`/`block`/`substitute`, an `inject` with no briefing.
+  - **The server's delivery descriptor decides delivery.** Fetched once per
+    session and cached until it expires, it says which hooks call the server,
+    where, under what ceiling, and whether the `collective_intelligence_recall`
+    MCP tool is exposed in `aisquare serve`. It carries no architecture or arm,
+    so the CLI is structurally unable to know which arm it is running.
+  - **The ceiling is wall clock.** The descriptor's `client_safety_ms` bounds the
+    whole exchange — a server dribbling bytes cannot hold the hook past it, a
+    response that lands late is a breach, bodies are capped, and nothing retries.
+    `agents connect` gives the two context hooks a 120 s Claude Code timeout so
+    the agent does not discard the hook's answer first.
+  - `aisquare metrics show|list` (hidden) — one row per hook event, scoped to the
+    current project (`--project`, `--all`). The row carries the join keys the
+    server ledger pairs on (`run_id`, `session_id`, `trace_id`, `query_id`), the
+    server's `status`/`action`, and a **client reason** in three groups that are
+    never summed: baseline (never asked), by design (chose not to), failure
+    (tried). Round-trip percentiles cover consulted turns only.
+  - Each turn snapshots the working tree (`git stash create`, kept alive under
+    `refs/aisquare/wip/<trace_id>`) so it can be replayed later; the object id
+    travels, the ref name does not, and the row records that untracked files are
+    excluded.
+  - Retrieved material is framed as candidate reference — caveat before and
+    after, a delimited region the payload cannot close, control characters
+    stripped, a 16 384-character cap with both sizes recorded. `aisquare why` names the
+    items shown without clobbering the entry counts.
+  - The prompt is scrubbed at the configured `redaction` level before it leaves,
+    and the level is recorded. A `ci_turn` join record is spooled through the
+    Explainability client lane when shipping is configured, so server rows and
+    CLI rows meet through the pipeline id.
+  - `doctor` reports the switch, the URL (scheme required, credentials never
+    echoed), the token and run, `GET /ready`, and the descriptor fetch — a
+    rejected token, an unknown run, an expired run and a contract skew each get
+    their own line and fix. Every probe is bounded.
+  - Token counts are **not** recorded — hook payloads do not carry them, and
+    `metrics show` says so rather than reporting a zero that reads as "no tokens
+    were used". The contract pointer and the CLI's standing assumptions are in
+    `docs/ci-contract.md`; the server seam is `docs/ci-integration-handoff.md`.
+  - `tests/stub_ci_server.py` speaks v2 and can be run by hand
+    (`python -m tests.stub_ci_server --port 8765`) to point a real session at it.
+- **The CI test bed is wired to the live staging server** (`ci-api.aisquare.studio`,
+  2026-09-02) — three changes the real server asked for, all off unless the
+  switch is on:
+  - **Refusals are read, not just counted.** A non-200 from either route carries
+    an `error.v1` body live (`scope_resolution_failed` on a 401,
+    `dependency_unavailable` with "has no completed build" on a 503). The code
+    lands on the row's `error_codes` and the clipped sentence in the detail;
+    `doctor` quotes both on its descriptor line and picks the fix from the
+    status rather than from words in a message the server wrote. Nothing
+    branches on `retryable`; nothing retries.
+  - **The recall tool uses the server's pull route.**
+    `collective_intelligence_recall` forwards to
+    `POST /v1/mcp/collective_intelligence_recall` as `mcp-tool-input.v1` — so
+    `token_budget` and `reason` travel instead of being reported as dropped —
+    with `run_id` the descriptor's (the server has no default run and refuses
+    its absence; an agent-supplied value naming another run is refused, so the
+    row and the ledger always agree). `prompt` and `reason` leave scrubbed and
+    clipped to the contract on both sides of the scrub. The answer is the bare
+    briefing; an `empty` answer is the server's own briefing with no items,
+    returned as such. The stub grew the route; the suite drives the tool end to
+    end through a real in-memory MCP client.
+  - **A loud, recorded staging override.** The staging descriptor still says
+    `direct_api` for every run, so the descriptor-gated hooks never call.
+    `AISQUARE_CI_DELIVERY_OVERRIDE=hook_push:session_start,prompt_submit;mcp_pull`
+    (environment only) stands in for the delivery list **only** when the fetched
+    descriptor is `direct_api`-only — ignored otherwise, ignored when malformed,
+    never cached — and cannot be mistaken for the descriptor's ruling: every
+    row and join record carries `delivery_source` (`descriptor` | `override`),
+    `metrics list` shows it as `SOURCE`, `metrics show` counts override rows
+    apart and keeps them out of the round-trip percentiles, and `doctor` warns
+    on its own line whenever it is set — active, ignored, or malformed. Rows it
+    produces measure nothing; it goes when the server publishes real delivery
+    modes.
+  - The column arrives as **schema v12**, a healing migration, because v11 has
+    reached developer machines in three shapes: the v2 table, no table at all
+    (following the earlier advice to delete the v1-shaped table — every row
+    silently lost), and the v1-shaped table itself. A v1-shaped `metric` (and
+    its `run` sibling) is renamed to `*_v1_orphaned`, never dropped; `CREATE
+    TABLE IF NOT EXISTS metric` then `ALTER TABLE` bring the other two to v12.
+    Deleting the `metric` table by hand is no longer needed and, at version 12,
+    no longer safe.
+- **The review of the CI branch at `ee422b5`, acted on.** Every item sits where
+  server-controlled bytes cross into the client, and each has a test that failed
+  before its fix:
+  - the injection frame could be escaped by one invisible character (a
+    zero-width space, a byte-order mark, a bidi override) or an odd line break
+    (U+2028, U+2029, U+0085, `\r`); a lone surrogate in a briefing turned
+    `session-start` into a traceback because the write sat outside the guard;
+  - the transport followed redirects and would have re-sent the bearer token to
+    another origin; a multi-line token was echoed by the header parser into a
+    detail `doctor` prints;
+  - the strict models refused `63.0` where the schema says `integer`;
+  - the v12 healing migration could wedge a store on a fixed orphan name;
+  - a credential straddling the 100 000-character cut shipped in the clear;
+    the descriptor's `client_safety_ms` had no client-side maximum, so a run
+    could publish a ceiling past the installed hook timeout; a failed descriptor
+    fetch cost a fresh 10 s probe on every prompt; snapshot refs grew forever;
+  - the recall tool returned the briefing text raw, uncapped and unmeasured,
+    and a locked store escaped it as an opaque crash;
+  - the hook install check ignored the timeout value; an unrecorded prompt was
+    silent; three `doctor` lines asserted more than their probe established.
+  Also: the compare-and-set in `close_turn` and five CHECK vocabularies are now
+  actually tested, the vendored-contract drift guard is pinned to the deployed
+  server commit, and the cap is stated in characters, which is what it is.
 - **CI runs the suite against a machine that looks like a developer's.** The
   `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
   nothing listening on any port, no optional extra — while anyone who followed

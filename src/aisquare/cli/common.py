@@ -25,12 +25,14 @@ from aisquare.models import (
     ContextEntry,
     DoctorCheck,
     InjectionRecord,
+    MetricsSummary,
     OnboardReport,
     Pool,
     ProjectInfo,
     PromptRecord,
     SetupReport,
     StatusReport,
+    TurnMetric,
 )
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
@@ -152,6 +154,13 @@ def emit_injection_record(record: InjectionRecord | None) -> None:
         f"  {total} entries — {record.user_count} from your user pool, "
         f"{record.project_count} from this project"
     )
+    if record.retrieved_chars:
+        console.print(
+            f"  {record.retrieved_chars} chars retrieved by the CI test bed "
+            "(candidate reference, not fetched by the agent)"
+        )
+        if record.retrieved_items:
+            console.print("  items: " + ", ".join(record.retrieved_items))
 
 
 def emit_project_detail(project: ProjectInfo) -> None:
@@ -332,6 +341,108 @@ def emit_prompts(prompts: list[PromptRecord]) -> None:
     for prompt in prompts:
         table.add_row(prompt.created_at.strftime("%Y-%m-%d %H:%M"), prompt.text)
     stdout_console().print(table)
+
+
+def emit_metrics_summary(summary: MetricsSummary) -> None:
+    """Render a metrics summary — JSON under ``--json``, a table otherwise.
+
+    The three reason groups are three rows, never one: a baseline run with the
+    experiment off must not read as one where every call failed.
+    """
+    if get_state().json_output:
+        typer.echo(json.dumps(summary.model_dump(mode="json")))
+        return
+    console = stdout_console()
+    if not summary.turns:
+        console.print(
+            "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code"
+        )
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("METRIC", no_wrap=True)
+    table.add_column("VALUE", justify="right")
+    table.add_row("turns", str(summary.turns))
+    if summary.by_trigger:
+        table.add_row("by trigger", _counts(summary.by_trigger))
+    table.add_row("CI consulted", str(summary.consulted))
+    table.add_row("baseline (never asked)", str(summary.baseline))
+    table.add_row("skipped by design", str(summary.skipped))
+    table.add_row("failed", str(summary.failed))
+    table.add_row("turns with injection", str(summary.injected_turns))
+    table.add_row("deadline breaches", str(summary.deadline_breaches))
+    table.add_row("median wall", _ms(summary.median_wall_ms))
+    table.add_row("median round trip", _ms(summary.median_round_trip_ms))
+    table.add_row("p95 round trip", _ms(summary.p95_round_trip_ms))
+    console.print(table)
+
+    if summary.by_reason:
+        console.print(f"reasons: {_counts(summary.by_reason)}")
+    if summary.by_status:
+        console.print(f"server statuses: {_counts(summary.by_status)}")
+    if summary.deadline_breaches:
+        console.print(
+            f"⚠ {summary.deadline_breaches} turn(s) hit the client ceiling — "
+            "that is a server-side latency problem, not a result"
+        )
+    if summary.override_turns:
+        console.print(
+            f"⚠ {summary.override_turns} turn(s) ran under the staging delivery override — "
+            "kept out of the round-trip figures; they measure nothing"
+        )
+    if not summary.turns_with_tokens:
+        console.print(
+            "note: no token counts recorded — hook payloads do not carry them (they will "
+            "come from Explainability spans), so token savings cannot be read from this yet"
+        )
+
+
+def _counts(bucket: dict[str, int]) -> str:
+    return ", ".join(f"{key} {count}" for key, count in sorted(bucket.items()))
+
+
+def emit_turn_metrics(turns: list[TurnMetric]) -> None:
+    """Render recent turns — a JSON array under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps([turn.model_dump(mode="json") for turn in turns]))
+        return
+    if not turns:
+        stdout_console().print("No turns recorded yet.")
+        return
+    # The trace id is printed WHOLE and never wraps: it is the join key to the
+    # server's ledger and to `refs/aisquare/wip/`, and a truncated id cannot be
+    # looked up anywhere. The vocabulary columns wrap instead when the terminal
+    # is narrow.
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("WHEN", no_wrap=True)
+    table.add_column("TRACE", no_wrap=True, min_width=30)
+    table.add_column("TRIGGER", overflow="fold")
+    table.add_column("REASON", overflow="fold")
+    table.add_column("STATUS", overflow="fold")
+    table.add_column("ACTION", overflow="fold")
+    # Which document ruled delivery. A consulted row under the staging override
+    # must never read as one the descriptor allowed (services/ci_override.py).
+    table.add_column("SOURCE", overflow="fold")
+    table.add_column("WALL", justify="right")
+    table.add_column("TRIP", justify="right")
+    for turn in turns:
+        table.add_row(
+            local_time(turn.started_at).strftime("%m-%d %H:%M:%S"),
+            turn.trace_id,
+            turn.trigger or "—",
+            turn.client_reason.value,
+            turn.status or "—",
+            turn.action or "—",
+            turn.delivery_source or "—",
+            _ms(turn.wall_ms),
+            _ms(turn.round_trip_ms),
+        )
+    stdout_console().print(table)
+
+
+def _ms(value: int | None) -> str:
+    """A millisecond count, or an em dash when the turn never recorded one."""
+    return "—" if value is None else f"{value} ms"
 
 
 def emit_disconnected(name: str) -> None:

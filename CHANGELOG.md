@@ -75,7 +75,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bump (#73) went red on mypy and the `<2` pin was the only thing keeping a
   fresh install green. The port is confined to `services/mcp_server.py`, the
   `serve` dependency guard, and the two test files that drive them; the nine
-  tools, their wording, and both transports' behaviour are unchanged.
+  tools and their wording are unchanged. What a client can observe differently
+  is listed below — a second protocol era (2026-07-28, which no 1.x could
+  serve), a crash's detail kept off the wire, `serverInfo.version` and
+  `-32601` for an unknown method, on both transports — and, on HTTP alone, no
+  Host/Origin validation on a non-loopback `--bind`, which `serve` now says
+  out loud.
   - **The error-wording contract survives, on the seam the SDK now provides.**
     mcp 2 still folds a tool's `ToolError` into `Error executing tool <name>:
     <msg>`, so the handler that unwraps our own message back out is still
@@ -85,7 +90,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what the SDK itself uses to wrap this method for extensions). A remote
     agent still sees `error: reopen requires a note (the feedback)`, verbatim,
     as an `isError` result — `tests/test_serve.py` asserts every one of those
-    strings end-to-end through a real client session.
+    strings through a real client session, the `ClaimLostError` mapping
+    included (no tool can reach that branch today; the test pins the mapping
+    for the day one claims by ref). Which of the SDK's two in-memory paths the
+    suite takes, and why, is the test bullet below.
   - **A crashed tool is now logged server-side.** New in mcp 2.1, not chosen
     here: the SDK tells a crash apart from a deliberate failure by type
     (`UnexpectedToolError`) and keeps the crash's detail off the wire, so the
@@ -98,22 +106,104 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     one. `test_a_crashed_tool_is_an_error_result_logged_server_side` pins both
     halves: nothing of the exception on the wire, all of it in the log.
   - HTTP transport settings moved off the server object: `host` is passed to
-    `streamable_http_app()`, whose only use for it is deciding whether loopback
-    DNS-rebinding protection auto-enables (it does, as before), and the port is
-    uvicorn's alone, as it already was.
+    `streamable_http_app()`, whose only use for it is deciding whether
+    DNS-rebinding protection auto-enables, and the port is uvicorn's alone, as
+    it already was. **That decision now follows the actual bind, which changes
+    one thing on HTTP.** From mcp 1.23.0 (2025-12-02, "Auto-enable DNS
+    rebinding protection for localhost servers") the SDK decided in its
+    constructor from the default host (`127.0.0.1`), and the pre-change code set
+    `settings.host = bind` only afterwards, so Host/Origin validation with a
+    loopback-only allowlist was on for every bind — `--bind 0.0.0.0` answered
+    every LAN client with `421 Invalid Host header` (measured against the
+    pre-change tree on 1.23.0 and 1.29.1). On 1.14 through 1.22 the protection
+    defaulted to off and the LAN bind worked (measured on 1.14.0 and 1.22.0);
+    below 1.14 this server did not construct at all — `FastMCP` ran
+    `issubclass` on the string annotations `from __future__ import annotations`
+    leaves behind — so the old `>=1.10` floor was never right either. 1.23.0
+    predates both the pin and the module docstring's LAN use case (2026-07), so
+    the mcp a fresh install resolves to — the newest the pin admits — never
+    supported that use case; an environment already holding a 1.14–1.22 did,
+    since pip leaves a satisfied requirement alone. In 2.x a bind spelled
+    exactly `127.0.0.1`, `localhost` or `::1` — `LOOPBACK_BINDS` in
+    `services/mcp_server.py` — keeps the protection (Host allowlist
+    `127.0.0.1:*`, `localhost:*`, `[::1]:*`); anything else — `0.0.0.0`, a LAN
+    address, another `127/8` address such as `127.0.0.2`, even `LOCALHOST` or a
+    hosts-file alias, since the match is on the string — runs with no
+    Host/Origin validation, so LAN clients work and the bearer token is the
+    sole gate there. It is checked outermost, before anything else in the app,
+    and a DNS-rebinding page cannot present it, which is why that trade is
+    acceptable — with one caveat the operator has to own: the token is a
+    long-lived credential (`auth rotate` is still a stub) sent in clear over
+    plain HTTP on every request, so a non-loopback bind belongs on a trusted
+    network or behind a TLS-terminating proxy. **`serve` now says so.** A
+    `--bind` outside those three spellings prints a second stderr line at
+    startup naming what is off and what remains; `--bind --help` says the same
+    in a sentence; the README's serve section covers the flag. An operator who
+    wants a Host allowlist on such a bind as well passes
+    `transport_security=TransportSecuritySettings(...)` (from
+    `mcp.server.transport_security`) to `streamable_http_app()` for that bind
+    only — supplying it replaces the SDK's loopback default rather than
+    extending it. Found by an independent review of #75 after it merged, which
+    measured both trees. `test_http_answers_by_bind_host_and_token` pins every
+    combination that matters: a LAN `Host` is 200 on `0.0.0.0` and 421 on
+    `127.0.0.1`, the loopback bind still answers its own client, and a missing
+    token is 401 on either bind, before any Host check — driven through the
+    ASGI lifespan as uvicorn drives it, so the guard's lifespan pass-through is
+    pinned too. Until now nothing exercised `run_http` at all: dropping the
+    `host` argument left every test green while the LAN bind reverted to 421.
+  - **`--show-token` and the startup line print a URL a client can dial.**
+    They interpolated the bind verbatim, so `--bind ::1` — one of the three
+    spellings that keep the protection — printed `http://::1:8747/mcp`, which
+    is not a URL, and `--bind 0.0.0.0` printed a listen address nobody can
+    reach. IPv6 literals are bracketed and a wildcard bind is replaced by this
+    machine's hostname; the JSON output gains a `bind` field so nothing is
+    lost. Pre-existing, but newly consequential: before mcp 2 a LAN client got
+    421 before the URL mattered.
   - The `serve` guard probes `mcp.server.mcpserver`, and its message for an
     incompatible major points the other way now — a 1.x is the one that cannot
     work — with `pip install 'mcp>=2.1,<3'`. The distribution-versus-module
     distinction it was written for (#55) is exactly what makes a 1.x a
     sentence rather than a traceback. It tells majors apart, not minors: the
-    pin is what keeps a 2.0.x out, and pip reports that at install time.
-  - `tests/test_serve.py` drives the server through `mcp.client.Client(server)`,
-    the in-memory replacement for the removed
-    `create_connected_server_and_client_session`, and reads `is_error`: field
-    names are snake_case in 2.x.
-  - Also inherited from 2.x: synchronous tool bodies run on a worker thread
-    rather than inline on the event loop. Each of the nine opens its own store
-    session per call and touches nothing thread-affine, so nothing crosses.
+    pin is what keeps a 2.0.x out, and pip reports that at install time. A
+    third case, found by the review: mcp present but unimportable because one
+    of *its* dependencies is missing or broken. `find_spec` imports the parents,
+    and `mcp.server` imports `sse_starlette` at package-import time, so a venv
+    with `sse-starlette` gone raised inside the probe, was read as "no such
+    module", and told the user to install the mcp they already had. That now
+    reports the failing import by name and says to reinstall the extra.
+  - `tests/test_serve.py` drives the server through
+    `mcp.client.Client(server, mode="legacy")`, the in-memory replacement for
+    the removed `create_connected_server_and_client_session` and the same path
+    it took: memory streams, an initialize handshake, JSON-RPC framing, results
+    sieved at the negotiated 2025-11-25 surface — what a handshake-era remote
+    agent gets. The default `mode="auto"` is, for an in-process server, a
+    `DirectDispatcher` pair: 2026-07-28, no initialize handshake, no JSON-RPC
+    framing — each request carries its own `_meta` envelope instead — though
+    the result is still JSON-dumped, sieved and re-parsed on that path too. One
+    test runs the same failing call on the default path and gets the same exact
+    text, so the replaced handler is proven on both eras, and both the helper
+    and that test assert the protocol version they negotiated, so a mode
+    change cannot pass silently. The suite reads `is_error`: field names are
+    snake_case in 2.x.
+  - **`serverInfo.version` is now this CLI's version.** mcp 1.x filled an
+    omitted version with the SDK's own package version, so clients saw
+    `"1.29.1"` — a number that named nothing of ours — and 2.x fills it with
+    the empty string. `build_server` now passes `aisquare-cli`'s version, and a
+    test pins it. Found by the same post-merge review, which diffed the two
+    trees' wire output step for step: with this, on the 2025-11-25 handshake
+    era, `tools/list`, every success result and every error result are
+    identical as parsed JSON between 1.x and 2.x, with two exceptions — the
+    crash case described above and the `-32601` code below (2.x orders object
+    keys differently, so the raw frames are not byte-for-byte equal; the error
+    texts themselves are). On the 2026-07-28 era every result also carries a
+    `_meta` serverInfo stamp, which this version now populates; no 1.x served
+    that era, so there is nothing to compare it with.
+  - Also inherited from 2.x, and not the project's to change: a request for an
+    unknown method is answered with the JSON-RPC-specified `-32601 Method not
+    found` (was `-32602 Invalid request parameters`), and synchronous tool
+    bodies run on a worker thread rather than inline on the event loop. Each of
+    the nine opens its own store session per call and touches nothing
+    thread-affine, so nothing crosses.
   - The floor is measured, not guessed: against every 2.x release on PyPI,
     the serve suite, the stdio idle-deadline suite and mypy strict are green on
     2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`

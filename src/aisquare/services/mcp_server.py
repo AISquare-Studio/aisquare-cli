@@ -19,7 +19,10 @@ Transports:
 - ``stdio`` — for Claude Desktop launching the server itself (on Windows:
   ``wsl -e … aisquare serve --stdio``). No network, no token.
 - ``streamable HTTP`` — bound to 127.0.0.1 by default and always guarded by
-  the static bearer token stored in ``~/.aisquare/credentials`` (0600).
+  the static bearer token stored in ``~/.aisquare/credentials`` (0600). A
+  bind outside ``LOOPBACK_BINDS`` also drops the SDK's Host/Origin
+  validation, leaving that token — long-lived, and sent in clear over plain
+  HTTP — as the only gate; ``aisquare serve`` says so on stderr when it does.
 
 This module needs the optional ``mcp`` dependency (``pip install
 aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
@@ -51,6 +54,17 @@ _TOKEN_KEY = "serve_token"
 DEFAULT_PORT = 8747
 DEFAULT_CLOSE_AFTER = 300
 """Idle seconds before a stdio server closes itself (0 = run forever)."""
+
+LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
+"""The exact three spellings mcp 2's ``streamable_http_app`` keys on.
+
+A bind that IS one of these gets the SDK's DNS-rebinding protection — a Host
+allowlist of the same three — and anything else gets no Host/Origin validation
+at all. It is a string match, not an address test: ``127.0.0.2``, ``LOCALHOST``
+and a hosts-file alias for loopback all fall outside it. The CLI announces a
+bind that falls outside, and derives that from this tuple so the two cannot
+drift.
+"""
 
 #: Server-side only. mcp 2 keeps the detail of a CRASHED tool off the wire (the
 #: agent sees ``Error executing tool <name>`` and nothing else), so the one
@@ -365,8 +379,15 @@ def build_server() -> MCPServer:
     from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
     from mcp.shared.exceptions import MCPError
 
+    from aisquare.core.version import __version__
+
+    # ``version`` is the CLI's own. Left out, 1.x substituted the SDK's package
+    # version into ``serverInfo.version`` (clients saw "1.29.1", which named
+    # nothing of ours); 2.x sends the empty string. The one that means
+    # something in a client's connector list is this distribution's.
     server = MCPServer(
         "aisquare-team",
+        version=__version__,
         instructions=(
             "The shared task board and working memory of a team of coding-agent "
             "sessions. Check team_board first; add work with task_add (idempotent); "
@@ -411,9 +432,12 @@ def build_server() -> MCPServer:
         a deliberate failure in this scheme (the caller's mistake, reported to
         the caller), not a crash, and is not logged as one.
 
-        The request context is threaded through as the SDK's handler does, so
-        a tool that takes ``ctx`` (none of the nine does) would still see its
-        request rather than a request-less stand-in.
+        The request context and the call's own params are threaded through as
+        the SDK's handler does, so a tool that takes ``ctx`` (none of the nine
+        does) sees its request rather than a request-less stand-in. Not
+        threaded: the subscriptions bus behind ``ctx.notify_*`` — a second
+        private attribute, ``server._subscriptions``, that no tool needs. The
+        day one notifies, that is the kwarg to add here.
         """
         context = Context(request_context=ctx, mcp_server=server, input_params=params)
         try:
@@ -564,7 +588,24 @@ def run_http(*, bind: str, port: int) -> None:
     server = build_server()
     # mcp 2 moved transport settings off the server object. ``host`` goes to
     # the app factory, whose only use for it is deciding whether DNS-rebinding
-    # protection auto-enables (it does for loopback, as before); the port is
-    # uvicorn's alone, which is what binds it.
+    # protection auto-enables; the port is uvicorn's alone, which is what
+    # binds it. That decision now follows the ACTUAL bind: one of
+    # LOOPBACK_BINDS, spelled exactly so, keeps the protection (Host allowlist
+    # 127.0.0.1:*, localhost:*, [::1]:*); anything else — 0.0.0.0, a LAN
+    # address, 127.0.0.2, LOCALHOST, a hosts-file alias — runs with no
+    # Host/Origin validation. mcp 1.23+ decided in the constructor from its
+    # default host, before this function set the bind, so the loopback
+    # allowlist applied to every bind and `--bind 0.0.0.0` answered every LAN
+    # client with 421 (measured on 1.23.0 and 1.29.1; 1.14 through 1.22
+    # shipped the protection off and let it through; below 1.14 this server
+    # did not construct at all). What gates a non-loopback bind here is
+    # _BearerGuard, outermost, and a rebinding page cannot present the token —
+    # which is nonetheless long-lived and crosses the wire in clear, hence the
+    # stderr notice cli/serve.py prints for such a bind. An operator who wants
+    # a Host allowlist there as well passes, for that bind only,
+    # transport_security=TransportSecuritySettings(...) (importable from
+    # mcp.server.transport_security) on this call; supplying it REPLACES the
+    # SDK's loopback default rather than extending it. tests/test_serve.py
+    # pins every combination of bind, Host and token that matters.
     app = server.streamable_http_app(host=bind)
     uvicorn.run(_BearerGuard(app, token), host=bind, port=port, log_level="warning")

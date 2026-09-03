@@ -94,7 +94,7 @@ X-Device-Name: anmol-laptop
 
 client_id=aisquare-cli&scope=openid+profile+email+aisquare
 
-200 {"device_code": "<opaque, at least 43 chars>",
+200 {"device_code": "<opaque, 30 characters>",
      "user_code": "WDJB-MJHT",
      "verification_uri": "https://home.aisquare.studio/cli",
      "verification_uri_complete": "https://home.aisquare.studio/cli?code=WDJB-MJHT",
@@ -119,11 +119,11 @@ grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=...&client_i
 200 {"access_token": "aisq_...",
      "token_type": "Bearer",
      "expires_in": 7776000,
-     "scope": "openid profile email aisquare",
-     "id_token": "<RS256 JWT>"}
+     "scope": "openid profile email aisquare"}
 ```
 
-No `refresh_token` is issued to the CLI client. `expires_in` is 90 days.
+No `refresh_token` is issued to the CLI client, and the device grant carries no
+`id_token`: identity comes from the userinfo call. `expires_in` is 90 days.
 
 Userinfo:
 
@@ -152,7 +152,8 @@ token=aisq_...&client_id=aisquare-cli
 
 All under `/api/v2/iam/oauth/device/`, JSON bodies, header-only JWT
 authentication, `IsAuthenticated` plus the default email-verified permission.
-Errors use the house `ProductError` envelope with `error_code`.
+Errors are 400s in the house envelope: `{"error": {...}, "code": "CODE_NOT_FOUND"}`;
+branch on `code`.
 
 | Endpoint | Body | Success | Error codes |
 |---|---|---|---|
@@ -197,7 +198,8 @@ Under `/api/v2/iam/oauth/sessions/`:
 ### 3.4 Token and client facts
 
 - Access token: `aisq_` followed by 43 URL-safe characters (256 bits). Stored
-  as a row with a SHA-256 checksum index. Lifetime per client, 90 days for
+  as a row with a SHA-256 checksum index. The device code is a 30-character
+  opaque string from oauthlib. Lifetime per client, 90 days for
   `aisquare-cli`. Idle expiry: a token unused for 30 days stops working.
   `last_used_at` and `last_used_ip` are updated at most once a minute.
 - Scopes: `openid`, `profile`, `email`, `aisquare` (full API access as the user;

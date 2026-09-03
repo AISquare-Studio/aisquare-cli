@@ -106,6 +106,9 @@ class Augmentation:
     observed_at: str | None = None
     delivery_source: DeliverySource | None = None
     """Which document ruled delivery here; ``None`` when none was in hand."""
+    frame_version: str = FRAME_VERSION
+    """What ``rendered`` went through: the injection frame on the hook path, the
+    tool treatment on the pull path. Recorded only when something was rendered."""
 
     @property
     def consulted(self) -> bool:
@@ -153,7 +156,7 @@ class Augmentation:
             error_codes=call.error_codes if call is not None else [],
             rendered_chars=self.rendered.rendered_chars if self.rendered else None,
             injected_chars=self.rendered.injected_chars if self.rendered else None,
-            frame_version=FRAME_VERSION if self.rendered else None,
+            frame_version=self.frame_version if self.rendered else None,
             instruction_version=(
                 INSTRUCTION_VERSION if descriptor and descriptor.mcp_pull else None
             ),
@@ -192,7 +195,7 @@ class Augmentation:
             "server_ms": call.server_ms if call is not None else None,
             "deadline_breached": call.deadline_breached if call is not None else None,
             "injected_chars": self.rendered.injected_chars if self.rendered else None,
-            "frame_version": FRAME_VERSION if self.rendered else None,
+            "frame_version": self.frame_version if self.rendered else None,
             "tokens_in": None,
             "tokens_out": None,
             "tool_calls": None,

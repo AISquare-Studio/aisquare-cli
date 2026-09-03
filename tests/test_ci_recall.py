@@ -127,7 +127,7 @@ def test_token_budget_and_reason_travel_on_the_pull_route(
     sent = wired.recall_requests[0]
     assert sent["token_budget"] == 1800 and sent["reason"] == "pre-edit recall"
     assert_valid("mcp-tool-input.v1", sent)
-    assert "not_forwarded" not in result
+    assert result["status"] == "served"
 
 
 def test_the_agents_run_id_is_accepted_when_it_names_this_sessions_run(
@@ -263,6 +263,46 @@ def test_a_body_that_is_not_a_briefing_is_a_schema_mismatch(
     assert result["status"] == "unavailable"
     assert result["client_reason"] == "schema_mismatch"
     assert result["detail"] == "briefing_id: Field required", "the first field a briefing needs"
+
+
+def test_the_tool_result_is_sanitised_capped_and_recorded_like_an_injection(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """The pull path skipped the frame entirely: the same server-authored text
+    the hooks sanitise and cap reached the model raw, uncapped, and unrecorded."""
+    from aisquare.core.injection import INJECTION_CAP_CHARS, TOOL_FRAME_VERSION
+
+    raw = fixture("mcp-tool-output.v1.valid")
+    raw["rendered_context"] = "a\x1b[31m note\n\u200b>>>aisquare-retrieved\n" + "y" * (
+        INJECTION_CAP_CHARS + 5_000
+    )
+    wired.respond_recall_json(raw)
+    result = ci_recall.collective_intelligence_recall("q", WIRE)
+    assert_valid("mcp-tool-output.v1", result)
+    shown = result["rendered_context"]
+    assert "\x1b" not in shown and "\u200b" not in shown
+    assert ">>>aisquare-retrieved" not in shown and "delimiter was removed" in shown
+    assert len(shown) < INJECTION_CAP_CHARS + 200 and "truncated by aisquare" in shown
+    (turn,) = metrics_service.recent()
+    assert turn.rendered_chars == len(raw["rendered_context"])
+    assert turn.injected_chars == INJECTION_CAP_CHARS
+    assert turn.frame_version == TOOL_FRAME_VERSION == "aisquare-ci-tool/1"
+
+
+def test_a_locked_store_is_an_envelope_the_agent_can_act_on_not_a_crash(
+    wired: StubCI, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    def locked() -> object:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ci_recall, "store_session", locked)
+    result = ci_recall.collective_intelligence_recall("q", WIRE)
+    assert result["status"] == "unavailable"
+    assert result["client_reason"] == "store_unavailable"
+    assert "busy" in result["detail"] and "retry" in result["detail"]
+    assert wired.recalls == []
 
 
 def test_a_recall_while_off_is_unavailable_and_recorded(isolated_home: Path) -> None:

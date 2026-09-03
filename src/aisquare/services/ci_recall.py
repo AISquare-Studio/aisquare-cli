@@ -22,6 +22,14 @@ gate refused, the request was refused here, the ceiling passed, the body was
 not a briefing) is a small CLI envelope, because the CLI cannot mint the
 ``qry_`` id a briefing would need.
 
+The briefing's ``rendered_context`` reaches the agent through the same sanitiser
+and the same cap as the injection frame — a tool result the agent asked for
+needs no caveat around it, but it is the same server-authored text, and a buggy
+or hostile briefing must not bill the whole context window on the path the
+standing instruction tells the agent to take. The row records what the agent
+saw under ``frame_version`` ``aisquare-ci-tool/1``, so the pull arm is measured
+like the push arm (plan C5).
+
 Every recall the gate lets through is recorded like a hook call — a closed
 ``agent_request`` row and a join record — so a pull and a push over the same
 run can be compared. The row's ``trace_id`` is the CLI's own: the pull contract
@@ -36,6 +44,7 @@ and must cost the base install nothing.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +52,9 @@ from pydantic import ValidationError
 
 from aisquare.core import insights
 from aisquare.core.ids import new_trace_id
+from aisquare.core.injection import TOOL_FRAME_VERSION, build_tool_context
 from aisquare.core.redaction import redact
-from aisquare.core.store import store_session
+from aisquare.core.store import is_locked_error, store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ClientReason
 from aisquare.services import ci_augment, ci_client
@@ -95,14 +105,29 @@ def collective_intelligence_recall(
             reason=reason,
         )
     except ValidationError as exc:
-        return _envelope("unavailable", ClientReason.schema_mismatch, first_error(exc))
-    call, augmentation = forward_recall(recall)
+        return _envelope("unavailable", ClientReason.schema_mismatch.value, first_error(exc))
+    try:
+        call, augmentation = forward_recall(recall)
+    except (sqlite3.DatabaseError, OSError) as exc:
+        # The store, not the server: a locked database is routine with two
+        # sessions. No row can be written to a store that cannot be opened, so
+        # the envelope carries the reason the agent can act on — the same
+        # wording the nine team tools use — rather than an opaque SDK crash.
+        what = (
+            "busy" if isinstance(exc, sqlite3.DatabaseError) and is_locked_error(exc) else "error"
+        )
+        return _envelope(
+            "unavailable", "store_unavailable", f"context store {what} ({exc}) — retry shortly"
+        )
     if call is None:
-        return _envelope("unavailable", augmentation.reason, augmentation.detail)
+        return _envelope("unavailable", augmentation.reason.value, augmentation.detail)
     briefing = call.briefing
     if briefing is not None:
-        return briefing.model_dump(mode="json")
-    return _envelope("unavailable", call.reason, call.detail)
+        result = briefing.model_dump(mode="json")
+        if augmentation.rendered is not None:
+            result["rendered_context"] = augmentation.rendered.text
+        return result
+    return _envelope("unavailable", call.reason.value, call.detail)
 
 
 def forward_recall(
@@ -174,6 +199,7 @@ def forward_recall(
         url=f"{opened.base}{RECALL_ROUTE}{pull.tool}",
         deadline_ms=ci_augment.ceiling_for(descriptor),
     )
+    rendered = build_tool_context(call.briefing.rendered_context) if call.briefing else None
     augmentation = ci_augment.Augmentation(
         "agent_request",
         trace_id,
@@ -182,9 +208,11 @@ def forward_recall(
         call=call,
         run_id=opened.run_id,
         descriptor=descriptor,
+        rendered=rendered,
         redaction=level,
         observed_at=observed,
         delivery_source=source,
+        frame_version=TOOL_FRAME_VERSION,
     )
     _record(augmentation, project.id, recall.session_id)
     return call, augmentation
@@ -215,5 +243,11 @@ def _record(augmentation: ci_augment.Augmentation, project_id: str, wire_session
         )
 
 
-def _envelope(status: str, reason: ClientReason, detail: str) -> dict[str, Any]:
-    return {"status": status, "client_reason": reason.value, "detail": detail, "briefing": None}
+def _envelope(status: str, reason: str, detail: str) -> dict[str, Any]:
+    """The CLI's own small result for a recall that produced no briefing.
+
+    ``client_reason`` is a :class:`ClientReason` value whenever a row was
+    written for the attempt; ``store_unavailable`` is the one envelope-only
+    word, for the case where no row could be written at all.
+    """
+    return {"status": status, "client_reason": reason, "detail": detail, "briefing": None}

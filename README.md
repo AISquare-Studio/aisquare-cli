@@ -549,6 +549,11 @@ aisquare metrics show                     # what was recorded, per turn, for thi
 | `AISQUARE_CI_RUN` | unset | The `run_…` whose delivery descriptor drives this machine. Or `[experiment].run`. No run ⇒ no calls |
 | `AISQUARE_CI_DELIVERY_OVERRIDE` | unset | **Staging only, dated.** Stands in for the server's delivery list while a run's descriptor still says `direct_api`; ignored otherwise. Every row it produces says `override` and measures nothing. See `docs/ci-live-wiring-handoff.md` |
 
+Each prompt against a dirty working tree also keeps a snapshot of that tree
+alive for replay, as a commit object behind a ref under `refs/aisquare/wip/`
+(outside branches and tags, never pushed by a default refspec). Refs older than
+seven days are dropped the next time a snapshot is taken.
+
 What the CLI does with a run is decided by the server, not by a flag here (the
 one dated exception is the staging override above, which applies only to a
 `direct_api`-only descriptor and marks every row it touches). At

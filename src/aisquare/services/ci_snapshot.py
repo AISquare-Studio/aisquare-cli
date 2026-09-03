@@ -38,6 +38,13 @@ GIT_BUDGET_SECONDS = 2.0
 
 WIP_REF_PREFIX = "refs/aisquare/wip/"
 
+WIP_REF_TTL_DAYS = 7
+"""How long a turn's stash object is kept alive for replay before its ref is
+dropped. Without a bound the refs grew with every dirty-tree prompt forever,
+``git gc`` could reclaim nothing behind them, and a secret that was in a tracked
+file for one turn stayed recoverable behind a ref the developer did not know
+existed. Pruning happens when a new snapshot is taken, within the same budget."""
+
 _OBJECT_ID = re.compile(r"^[0-9a-f]{40}$")
 _REF_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -83,6 +90,8 @@ def capture(root: Path, trace_id: str) -> Snapshot | None:
             ref = WIP_REF_PREFIX + tail
             if _git(root, "update-ref", ref, stashed, timeout=budget.remaining()) is None:
                 ref = None  # the object is still valid for this turn; only its lifetime is not
+            else:
+                _prune(root, budget)
         return Snapshot(object_id=stashed, dirty=True, untracked_excluded=True, ref=ref)
     head = _git(root, "rev-parse", "HEAD", timeout=budget.remaining())
     if head is None or not _OBJECT_ID.match(head):
@@ -131,6 +140,32 @@ def repo_slug(remote_url: str) -> str | None:
     tail = parts[-2:] if len(parts) >= 2 else parts
     slug = "/".join(tail).removesuffix(".git")
     return slug or None
+
+
+def _prune(root: Path, budget: _Budget, *, now: float | None = None) -> int:
+    """Drop ``refs/aisquare/wip/*`` older than :data:`WIP_REF_TTL_DAYS`; returns how many.
+
+    Fail-open like everything here: a listing that does not come back within
+    the budget prunes nothing, and the next snapshot tries again.
+    """
+    listed = _git(
+        root,
+        "for-each-ref",
+        "--format=%(refname)%09%(creatordate:unix)",
+        WIP_REF_PREFIX,
+        timeout=budget.remaining(),
+    )
+    if not listed:
+        return 0
+    cutoff = (now if now is not None else time.time()) - WIP_REF_TTL_DAYS * 86_400
+    dropped = 0
+    for line in listed.splitlines():
+        ref, _, stamp = line.partition("\t")
+        if not (ref.startswith(WIP_REF_PREFIX) and stamp.isdigit() and int(stamp) < cutoff):
+            continue
+        if _git(root, "update-ref", "-d", ref, timeout=budget.remaining()) is not None:
+            dropped += 1
+    return dropped
 
 
 class _Budget:

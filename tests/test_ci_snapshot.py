@@ -26,6 +26,67 @@ def test_a_clean_tree_snapshots_as_head(tmp_path: Path) -> None:
     assert snapshot.ref is None
 
 
+def _dated_commit(root: Path, when: str) -> str:
+    """A commit object with the given author and committer date, on HEAD's tree."""
+    env = dict(os.environ)
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            "GIT_AUTHOR_DATE": when,
+            "GIT_COMMITTER_DATE": when,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+    )
+    result = subprocess.run(
+        ["git", "-C", str(root), "commit-tree", "HEAD^{tree}", "-m", f"snapshot at {when}"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_taken(
+    tmp_path: Path,
+) -> None:
+    """One ref per dirty-tree prompt and nothing ever deleted them: .git grew
+    forever and a secret from one turn stayed recoverable behind a ref the
+    developer did not know existed."""
+    root = repo(tmp_path / "r")
+    old = _dated_commit(root, "2026-01-01T00:00:00+0000")
+    recent = _dated_commit(root, "2026-09-02T00:00:00+0000")
+    git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "old", old)
+    git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "recent", recent)
+    (root / "tracked.txt").write_text("edited\n", encoding="utf-8")
+
+    snapshot = ci_snapshot.capture(root, "trc_new")
+
+    assert snapshot is not None and snapshot.ref == ci_snapshot.WIP_REF_PREFIX + "new"
+    refs = set(git(root, "for-each-ref", "--format=%(refname)", ci_snapshot.WIP_REF_PREFIX).split())
+    assert refs == {ci_snapshot.WIP_REF_PREFIX + "recent", ci_snapshot.WIP_REF_PREFIX + "new"}
+    assert git(root, "cat-file", "-t", old) == "commit", "pruning drops the ref, not the object"
+
+
+def test_pruning_fails_open_and_reports_what_it_dropped(tmp_path: Path) -> None:
+    root = repo(tmp_path / "r")
+    git(
+        root,
+        "update-ref",
+        ci_snapshot.WIP_REF_PREFIX + "old",
+        _dated_commit(root, "2026-01-01T00:00:00+0000"),
+    )
+    not_a_repo = tmp_path / "elsewhere"
+    not_a_repo.mkdir()
+    assert ci_snapshot._prune(not_a_repo, ci_snapshot._Budget(2.0)) == 0, "no git, no pruning"
+    assert ci_snapshot._prune(root, ci_snapshot._Budget(2.0)) == 1
+    assert ci_snapshot._prune(root, ci_snapshot._Budget(2.0)) == 0, "nothing old is left"
+
+
 def test_a_dirty_tree_becomes_a_stash_object_kept_alive_by_a_ref(tmp_path: Path) -> None:
     root = repo(tmp_path / "r")
     (root / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")

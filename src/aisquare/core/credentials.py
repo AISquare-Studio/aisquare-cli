@@ -61,3 +61,22 @@ def store(**values: str) -> dict[str, str]:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     return data
+
+
+def drop(*keys: str) -> dict[str, str]:
+    """Remove ``keys`` from the file, keeping everything else. Returns what remains.
+
+    Signing out must not take the explainability key (or any future value)
+    with it, and the file must stay valid JSON afterwards, so this is the same
+    read-merge-write as ``store`` with a subtraction instead of an addition.
+    A missing file is already the wanted state.
+    """
+    data = load_all()
+    remaining = {k: v for k, v in data.items() if k not in keys}
+    if remaining == data:
+        return data
+    paths.ensure_home()
+    path = paths.credentials_path()
+    path.write_text(json.dumps(remaining, indent=2) + "\n", encoding="utf-8")
+    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    return remaining

@@ -13,8 +13,10 @@ sessions work one problem as a coordinated team, with shared tasks, live
 status, and a board you can watch.
 
 It's a single CLI, local-first, backed by one SQLite file. No daemon, no
-account, no cloud dependency. Install it, connect it to Claude Code once, and
-every session after that starts oriented instead of cold.
+cloud dependency, no account required. Install it, connect it to Claude Code
+once, and every session after that starts oriented instead of cold. Sign in
+with `aisquare login` only when a command needs to act as you on AISquare
+(see [docs/signing-in.md](docs/signing-in.md)).
 
 ```sh
 pipx install aisquare-cli              # or: pip install aisquare-cli
@@ -496,6 +498,8 @@ aisquare
 │                   role = planner|coder|runner, a numbered seat (coder1), or
 │                   any role you have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
+├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
+├── auth            status [--live] · token
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```
 
@@ -512,9 +516,8 @@ registered but hidden until they do something real.
 
 ### Roadmap commands
 
-`auth` / `login` / `logout` / `whoami`, `sync`, `connectors`, `capture`,
-`policy` / `enforce`, `open`, `upgrade` and `uninstall` are the cloud roadmap
-(sync across machines, managed connectors). They are **hidden from `--help`**
+`sync`, `connectors`, `capture`, `policy` / `enforce`, `open`, `upgrade` and
+`uninstall` are the cloud roadmap (sync across machines, managed connectors). They are **hidden from `--help`**
 so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in

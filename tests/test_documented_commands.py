@@ -112,6 +112,7 @@ DOCUMENTED = (
     # is the rule, not because this command is likely to drift.
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "docs/runbooks/MORNING-HANDOFF.md",
+    "docs/signing-in.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -853,6 +854,7 @@ CENSUS = {
     "docs/connecting-your-agents-to-explainability.md": (11, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
+    "docs/signing-in.md": (8, 0),
 }
 
 

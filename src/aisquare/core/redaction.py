@@ -94,6 +94,8 @@ _CREDENTIAL_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bglpat-[A-Za-z0-9_-]{16,256}\b"), MARKER),
     (re.compile(r"\bxox[baprse]-[A-Za-z0-9-]{10,256}\b"), MARKER),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), MARKER),
+    # Our own sign-in tokens (services/iam.py). Issued, never typed by hand.
+    (re.compile(r"\baisqr?_[A-Za-z0-9_-]{16,256}\b"), MARKER),
     # A RANGE, not the documented exact length. The published Google key shape
     # is AIza + 35, and a pattern pinned to 35 misses a key that is 36 long —
     # which is exactly how a scrubber passes its tests and leaks in the field.

@@ -94,10 +94,10 @@ def main_callback(
 
 root.register(app)
 
-# Roadmap groups (auth, connectors, capture, policy, enforce) are hidden: every
+# Roadmap groups (connectors, capture, policy, enforce) are hidden: every
 # leaf still reports the not-implemented contract when invoked, but listing them
 # in --help alongside working commands made a third of the surface look real.
-app.add_typer(auth.app, name="auth", hidden=True)
+app.add_typer(auth.app, name="auth")
 app.add_typer(agents.app, name="agents")
 app.add_typer(connectors.app, name="connectors", hidden=True)
 app.add_typer(context.app, name="context")

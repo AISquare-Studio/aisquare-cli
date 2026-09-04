@@ -67,7 +67,7 @@ UNINVOKED = {
     "serve": "binds a port and blocks",
     "launch": "spawns a real agent process",
     "team spawn": "spawns a real agent process",
-    "login": "waits on interactive input",
+    "login": "polls the identity provider until a browser approval arrives",
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",
     "uninstall": "removes the installation running the test",

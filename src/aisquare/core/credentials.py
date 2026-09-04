@@ -19,7 +19,6 @@ empty" is the exact reading that lost data.
 from __future__ import annotations
 
 import json
-import stat
 from typing import Any
 
 from aisquare.core import paths
@@ -52,12 +51,18 @@ def load_all() -> dict[str, str]:
     return {}
 
 
-def store(**values: str) -> dict[str, str]:
-    """Merge ``values`` into whatever is already there, 0600. Returns the result."""
+def store(**values: str) -> tuple[dict[str, str], bool]:
+    """Merge ``values`` into whatever is already there, owner-only.
+
+    Returns the merged result and whether the file could actually be restricted
+    to this account. The second half is not decoration: on NTFS
+    ``chmod(0o600)`` returns cleanly and protects nothing, so a caller that
+    assumed success would promise a guard it does not have. The one writer
+    reports both facts so neither caller has to ask a second question.
+    """
     data = load_all()
     data.update({k: v for k, v in values.items() if v})
     paths.ensure_home()
     path = paths.credentials_path()
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    return data
+    return data, paths.restrict_to_owner(path)

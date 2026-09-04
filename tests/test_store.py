@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -204,6 +205,14 @@ def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
 
 def test_add_and_list_prompts(store: ContextStore) -> None:
     store.add_prompt("first prompt", PROJECT.id)
+    # Recency ordering is only defined down to the millisecond: `recent_prompts`
+    # sorts by `created_at DESC, id DESC`, and an id is a millisecond stamp
+    # followed by 128 RANDOM bits — so two prompts written inside one tick sort
+    # by coin flip. That is a real (if minor) wart worth knowing about, but it
+    # is not what this test is for, and asserting through it makes the test
+    # flaky rather than strict. Windows shows it most: its clock is coarse
+    # enough that back-to-back inserts routinely land in the same millisecond.
+    time.sleep(0.005)
     store.add_prompt("second prompt", PROJECT.id)
     prompts = store.recent_prompts(PROJECT.id)
     assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first

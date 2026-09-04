@@ -118,7 +118,99 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the serve suite, the stdio idle-deadline suite and mypy strict are green on
     2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`
     import — the distinction above did not exist yet, so `>=2.1`.
+- **CI runs on Windows.** The `check` job gains a `windows-latest` leg (3.12;
+  the platform branches read `sys.platform` at call time, so a second
+  interpreter would only re-run the same branches), and `package` runs on both
+  platforms — building the wheel, smoke-testing the console scripts, and
+  installing it again WITH the `explainability` extra, whose whole point is a
+  collision inside one shared `site-packages/aisquare/` and therefore a
+  filesystem question Windows answers differently. Getting there meant fixing
+  the suite's own POSIX-only assumptions rather than skipping past them: the
+  gbrain fake is now reachable through `PATHEXT`, the #20 bulk-delivery storm
+  and both printed-command shell tests are ported instead of skipped, test
+  file reads no longer go through the locale codec, and the #56 tilde test
+  sets the variable `expanduser` actually reads on each platform.
 
+  Merging 0.5.0 brought ~130 test files that no Windows runner had ever
+  executed, and 26 of them were red. They are ported here rather than left for
+  later, because a lane that is red on arrival is a lane nobody reads. The
+  recurring shape is a POSIX idiom used as a test PREMISE that silently stops
+  being one on Windows — which does not fail the test, it makes it pass for
+  the wrong reason. `tests/fsperms.py` now owns the two that recur, and
+  verifies its own effect rather than trusting the syscall's return:
+  `os.chmod(dir, 0o500)` denies nothing on Windows (and nothing under root
+  either), and creating a symlink needs a privilege the CI runner holds and a
+  developer account does not.
+
+  One class of assertion needed changing rather than skipping, and it is the
+  subtlest of the lot: `str(path) in str(some_error)` and `str(path) in
+  json.dumps(payload)` are both a raw path compared against an ESCAPED
+  rendering of itself — `OSError` renders its filename through `repr()`, and
+  JSON escapes backslashes. A Windows path is present in both outputs with
+  every separator doubled, and matches neither. POSIX paths carry no
+  backslashes, so the escaping is a no-op and the mistake is invisible there.
+  Those now assert against the structured value (`exc.filename`,
+  `payload["hint"]`) instead of a rendered string.
+
+  Three skips remain, all structural rather than deferred. The stdio-daemon
+  leak probe needs each process's ENVIRONMENT to tell our daemons from a
+  sibling checkout's and `Win32_Process` carries only the command line, so it
+  and its two self-tests are `/proc`-only. Mount-table matching needs POSIX
+  path semantics, and Windows has no mount table — the Windows answer
+  (`None`, through the existing fail-open) is asserted separately so the
+  behaviour is pinned rather than merely skipped.
+
+### Fixed
+- **`~/.aisquare` is no longer treated as a project root.** `.aisquare` is
+  overloaded — `<project>/.aisquare` is the opt-in project marker, but
+  `~/.aisquare` is where config, the context database and the agent registry
+  live. The marker walk could not tell them apart, so **every markerless
+  directory under `$HOME` resolved to `$HOME`** and shared one context pool.
+  It also defeated the guard written against exactly that: `serve --stdio`
+  refuses to activate a directory that is not a project root *because* Claude
+  Desktop launches from `$HOME`, and since `$HOME` always holds `.aisquare`
+  the refusal never fired — the server silently activated the home directory
+  instead. An aisquare home is now recognised by its layout and skipped as a
+  marker. A hand-made `<project>/.aisquare` still works, and `.git`/`.hg`
+  are untouched. Not a Windows bug, though Windows shows it most (temporary
+  directories live under `%USERPROFILE%`).
+- **Credentials and the serve token are now restricted on Windows.**
+  `chmod(0o600)` is the whole story on POSIX and does nothing on NTFS, where
+  the group/other bits have no equivalent — so the API key and the bearer
+  token guarding the HTTP server stayed readable by every other account on the
+  machine, with no error to say so. The credentials file that holds both now
+  gets a DACL rebuilt from scratch — explicit entries reset, inheritance
+  stripped, then the owner granted — which matters because an explicit
+  `BUILTIN\Users` ACE survives the obvious `/inheritance:r` + `/grant:r`
+  pairing and would have left the file readable by everyone anyway. An
+  `Administrators` entry can remain, as root does for a 0600 file on POSIX.
+  The single credentials writer reports whether the restriction actually
+  landed, so `init` and `serve` say so explicitly when it did not, rather than
+  implying a protection that is not there. POSIX behaviour is unchanged.
+- **A config write no longer fails because someone was reading the file.**
+  `os.replace` is atomic on POSIX and a concurrent reader keeps its own inode;
+  on NTFS `MoveFileEx` refuses to replace a file that ANY other handle has
+  open, including one opened purely for reading, and for the width of that
+  rename the reader takes an `Access is denied` of its own. Both directions
+  were measured under a read/write storm. The reader half was the more
+  expensive: `cli/launch.py` treats an unreadable config as "launch untraced"
+  by design, so a config write racing a launch silently cost tracing with
+  nothing raised anywhere to say so. Both sides now retry through one bounded
+  helper (~1.1s, then the original error unchanged). The two paths report
+  contention DIFFERENTLY — `os.replace` sets `winerror` 5/32, `Path.open`
+  goes through the C runtime and sets `errno` 13 with `winerror` **None** —
+  and matching only the obvious one covered just the writer.
+- **The explainability workspace key is restricted on Windows too.** The third
+  secret file to have this bug and the first that landed after the fix for the
+  other two: `store_api_key` used `chmod(0o600)`, which is the whole story on
+  POSIX and nothing on NTFS, leaving the key readable by every other account
+  on the machine. Now through `paths.restrict_to_owner` like the credentials
+  file and the serve token, and it says so when the restriction cannot be
+  applied.
+- **The spawn-seam registry is no longer separator-dependent.** `core.spawn.SEAMS`
+  is keyed by `<path>::<function>` with forward slashes; the guard built its
+  keys with `str(Path)`, so on Windows every call site read as undecided AND
+  every ruling read as stale, against a registry that was entirely correct.
 
 ## [0.5.0] - 2026-08-27
 

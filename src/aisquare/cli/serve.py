@@ -121,7 +121,7 @@ def serve(
     # so remote calls never activate a directory as a side effect.
     from aisquare.cli.team import STORE_ERRORS, _fail_team
     from aisquare.core.orchestrator import team_project
-    from aisquare.core.workspace import find_project_root
+    from aisquare.core.workspace import find_project_root, marks_project_root
     from aisquare.services import team as team_service
 
     if stdio:
@@ -130,8 +130,8 @@ def serve(
         # refuse to silently activate a directory that is not a project.
         target = team_project(None)
         marker_root = find_project_root(Path.cwd())
-        if not os.environ.get("AISQUARE_TEAM_HUB", "").strip() and not any(
-            (marker_root / marker).exists() for marker in (".git", ".hg", ".aisquare")
+        if not os.environ.get("AISQUARE_TEAM_HUB", "").strip() and not marks_project_root(
+            marker_root
         ):
             fail(
                 f"refusing to activate {target.root}: not a project root (no .git/.hg/"

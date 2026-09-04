@@ -19,7 +19,8 @@ Transports:
 - ``stdio`` — for Claude Desktop launching the server itself (on Windows:
   ``wsl -e … aisquare serve --stdio``). No network, no token.
 - ``streamable HTTP`` — bound to 127.0.0.1 by default and always guarded by
-  the static bearer token stored in ``~/.aisquare/credentials`` (0600).
+  the static bearer token stored in ``~/.aisquare/credentials``, restricted to
+  the current user (0600 on POSIX, an equivalent ACL on Windows).
 
 This module needs the optional ``mcp`` dependency (``pip install
 aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
@@ -37,6 +38,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import credentials as credentials_store
+from aisquare.core import paths
 from aisquare.core.store import is_locked_error
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
@@ -347,14 +349,22 @@ def recall(query: str) -> str:
 
 
 def serve_token() -> str:
-    """The static bearer token for HTTP serving (created on first use, 0600)."""
+    """The static bearer token for HTTP serving, created on first use, owner-only."""
     # Read-merge-write through the shared helper: this file also holds the API
     # key that `init --api-key` stores, and reading a non-JSON file as "no data"
     # is what silently discarded it.
     token = credentials_store.load_all().get(_TOKEN_KEY)
     if not isinstance(token, str) or not token:
         token = secrets.token_urlsafe(32)
-        credentials_store.store(**{_TOKEN_KEY: token})
+        _, restricted = credentials_store.store(**{_TOKEN_KEY: token})
+        if not restricted:
+            # The token is the only thing standing in front of the HTTP
+            # server, so an unrestricted file is worth a word on stderr.
+            print(
+                f"warning: could not restrict {paths.credentials_path()} to your account — "
+                "other users on this machine may be able to read the serve token.",
+                file=sys.stderr,
+            )
     return token
 
 

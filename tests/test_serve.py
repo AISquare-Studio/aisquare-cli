@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from mcp.types import CallToolResult, TextContent
 
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
+from tests import winacl
 
 
 @pytest.fixture(autouse=True)
@@ -61,7 +63,26 @@ def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path)
     second = mcp_server.serve_token()
     assert first == second and len(first) > 30
     creds = isolated_home / "credentials"
-    assert stat.S_IMODE(creds.stat().st_mode) == 0o600
+    if sys.platform == "win32":
+        # Mode bits are advisory on NTFS -- S_IMODE reports 0o666 however the
+        # file is really protected -- so assert the ACL that was actually
+        # applied. Compare SIDs, not the names icacls prints: those contain
+        # spaces ("OWNER RIGHTS", "NT AUTHORITY\\SYSTEM") so they do not parse
+        # on whitespace, and they are localized, so an English-only assertion
+        # would fail on a German runner for no real reason.
+        granted = winacl.dacl_trustees(creds)
+        assert granted, "no ACEs read back from the credentials file"
+        # The invariant is "no ORDINARY account other than me" -- not "nobody
+        # else". The privileged SIDs below are the machine's own plumbing, and
+        # an admin can take ownership regardless; that is the same deal POSIX
+        # offers, where 0600 never excluded root. What must not appear is
+        # Users, Everyone or Authenticated Users.
+        me = winacl.current_user_sid()
+        mine = winacl.user_trustees(granted, me)
+        assert mine, (granted, me)
+        assert not (granted - winacl.PRIVILEGED_TRUSTEES - mine), granted
+    else:
+        assert stat.S_IMODE(creds.stat().st_mode) == 0o600
 
 
 def test_remote_tools_act_as_an_attributed_virtual_session(

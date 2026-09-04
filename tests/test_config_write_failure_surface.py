@@ -32,6 +32,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, save_config
+from tests.fsperms import can_deny_writes, can_symlink, unwritable
 
 
 def _config_symlinked_into_an_unwritable_directory(tmp_path: Path) -> Path:
@@ -45,16 +46,25 @@ def _config_symlinked_into_an_unwritable_directory(tmp_path: Path) -> Path:
     link.parent.mkdir(parents=True, exist_ok=True)
     link.unlink(missing_ok=True)
     link.symlink_to(real)
-
-    vault.chmod(0o500)
     return vault
 
 
 @pytest.fixture
 def unwritable_vault(tmp_path: Path) -> Iterator[Path]:
+    """The vault, genuinely unwritable — which `chmod` alone does not achieve.
+
+    `vault.chmod(0o500)` is a no-op against a directory on Windows, so the write
+    these tests require to FAIL was succeeding and every assertion here read as
+    "exit 0, expected 1". `unwritable` applies a DENY ace there and the mode
+    bits on POSIX, so the premise actually holds on both.
+    """
+    if not can_symlink():
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
+    if not can_deny_writes():
+        pytest.skip("writes cannot be denied here (running as root?)")
     vault = _config_symlinked_into_an_unwritable_directory(tmp_path)
-    yield vault
-    vault.chmod(0o700)
+    with unwritable(vault):
+        yield vault
 
 
 def test_config_set_reports_the_convention_not_a_traceback(
@@ -97,7 +107,11 @@ def test_the_json_surface_carries_a_machine_readable_error(
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert payload["error"]
-    assert str(unwritable_vault) in json.dumps(payload)
+    # Against the DECODED value, not `json.dumps(payload)`: JSON escapes
+    # backslashes, so a Windows path is doubled in the dumped text and never
+    # matches `str(vault)`. `json.loads` above already handed back the real
+    # string; re-dumping it only reintroduced the escaping.
+    assert str(unwritable_vault) in payload["hint"], payload
 
 
 def test_an_unexpected_oserror_still_raises_with_its_traceback(
@@ -283,3 +297,42 @@ def test_the_redaction_command_translates_too(
     assert result.exit_code == 1
     assert "Traceback" not in result.output, result.output
     assert "✗" in result.output
+
+
+def test_a_windows_path_survives_the_json_surface_unescaped(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller must be able to match the payload against a real path object.
+
+    This runs WITHOUT a symlink on purpose, and that is the whole reason it
+    exists. The tests above need one, and creating a symlink on Windows takes a
+    privilege the CI runner has and a developer machine does not — so on a
+    developer box they skip, and the only place this surface met a Windows path
+    was CI. It failed there, on exactly this: `str(directory) in
+    json.dumps(payload)` is False for a Windows path, because JSON doubles
+    every backslash. The path was in the payload the whole time.
+
+    Driving `expected_config_write_errors` through a raised PermissionError
+    reaches the same handler with no filesystem privilege at all, so the
+    contract is now pinned on every platform rather than only where symlinks
+    happen to work.
+    """
+    from aisquare.services import settings as settings_service
+
+    directory = paths.config_path().parent
+    target = directory / "config.toml"
+
+    def _denied(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", str(target))
+
+    monkeypatch.setattr(settings_service, "save_config", _denied)
+
+    result = runner.invoke(app, ["--json", "config", "set", "explainability.proxy_url", "http://x"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["error"] == "config_not_writable"
+    # The decoded value, matched against a real path. `json.dumps(payload)`
+    # would re-escape it and this would be False on Windows for no reason that
+    # concerns the caller.
+    assert str(directory) in payload["hint"], payload

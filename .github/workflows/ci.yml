@@ -16,12 +16,19 @@ permissions:
 
 jobs:
   check:
-    name: check (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        include:
+          # Windows on one interpreter rather than the full cross-product: the
+          # platform-specific branches read sys.platform at call time, so a
+          # second Python version re-runs the same branches for ~3x the minutes.
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v7
 
@@ -293,8 +300,12 @@ jobs:
           assert_proxy after
 
   package:
-    name: package (build + install)
-    runs-on: ubuntu-latest
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -308,16 +319,33 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
-      - name: Install the wheel in a clean environment
+      # One Python driver instead of two shell dialects: the venv layout differs
+      # (bin/ vs Scripts/) and `dist/*.whl` is a shell glob that cmd.exe does not
+      # expand, so the portable way to smoke-test the artifact is to resolve both
+      # in Python and hand subprocess an argv.
+      - name: Install the wheel and smoke-test the console scripts
+        shell: python
         run: |
-          python -m venv "$RUNNER_TEMP/smoke"
-          "$RUNNER_TEMP"/smoke/bin/pip install dist/*.whl
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
 
-      - name: Smoke-test the console scripts
-        run: |
-          "$RUNNER_TEMP"/smoke/bin/aisquare --version
-          "$RUNNER_TEMP"/smoke/bin/asq --version
-          "$RUNNER_TEMP"/smoke/bin/aisquare --help
+          wheels = sorted(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+
+          venv = Path(os.environ["RUNNER_TEMP"]) / "smoke"
+          subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+          bindir = venv / ("Scripts" if sys.platform == "win32" else "bin")
+          suffix = ".exe" if sys.platform == "win32" else ""
+
+          subprocess.run([str(bindir / f"pip{suffix}"), "install", str(wheels[0])], check=True)
+          for argv in (
+              [f"aisquare{suffix}", "--version"],
+              [f"asq{suffix}", "--version"],
+              [f"aisquare{suffix}", "--help"],
+          ):
+              subprocess.run([str(bindir / argv[0]), *argv[1:]], check=True)
 
       # THE INSTALL LINE THE SETUP GUIDE ACTUALLY GIVES PEOPLE, which nothing
       # tested until now. It is a different environment from every other job
@@ -330,33 +358,67 @@ jobs:
       # A separate venv from the one above so the plain install stays proven
       # too: an extra that starts pulling something harmful must not be able to
       # hide behind an earlier green step.
+      #
+      # Driven from Python for the same reason the step above is, and run on
+      # BOTH legs rather than gated to ubuntu: the collision is a fact about one
+      # shared directory on disk, and Windows is where "overwrite a file some
+      # other process is holding open" is a different answer.
       - name: Install the wheel WITH the explainability extra
+        shell: python
         run: |
-          python -m venv "$RUNNER_TEMP/extra"
-          # Exactly one wheel, asserted: `$(echo dist/*.whl)[explainability]`
-          # collapses two paths into ONE argument if dist/ ever holds a second
-          # wheel, and pip would then fail on a nonsense requirement rather than
-          # on the real problem.
-          wheels=(dist/*.whl)
-          [ "${#wheels[@]}" -eq 1 ] || { echo "expected one wheel, found ${wheels[*]}"; exit 1; }
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          # Exactly one wheel, asserted: `<path>[explainability]` collapses two
+          # paths into ONE argument if dist/ ever holds a second wheel, and pip
+          # would then fail on a nonsense requirement rather than on the real
+          # problem.
+          wheels = sorted(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+
+          venv = Path(os.environ["RUNNER_TEMP"]) / "extra"
+          subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+          bindir = venv / ("Scripts" if sys.platform == "win32" else "bin")
+          suffix = ".exe" if sys.platform == "win32" else ""
+
           # This resolves aisquare[explainability] from PyPI UNPINNED, on purpose:
           # the SDK shares our top-level import name, so an SDK release that
           # breaks the collision should turn CI red here rather than turn a
           # developer's install red after a merge. The cost is a merge-time
           # external dependency.
-          "$RUNNER_TEMP"/extra/bin/pip install "${wheels[0]}[explainability]"
+          requirement = f"{wheels[0]}[explainability]"
+          subprocess.run([str(bindir / f"pip{suffix}"), "install", requirement], check=True)
 
+      # Its own step rather than folded into the install above, so the summary
+      # says at a glance which half broke: the unpinned resolve, or the
+      # collision it exists to prove survivable.
       - name: Smoke-test the extra
+        shell: python
         run: |
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          venv = Path(os.environ["RUNNER_TEMP"]) / "extra"
+          bindir = venv / ("Scripts" if sys.platform == "win32" else "bin")
+          suffix = ".exe" if sys.platform == "win32" else ""
+          aisquare = str(bindir / f"aisquare{suffix}")
+
           # Survives the shared-__init__ collision, whichever distribution won it.
-          "$RUNNER_TEMP"/extra/bin/aisquare --version
+          subprocess.run([aisquare, "--version"], check=True)
           # The extra's whole job: the SDK importable in the CLI's environment.
-          "$RUNNER_TEMP"/extra/bin/python -c "import aisquare.explainability, aisquare.cli.app"
+          probe = "import aisquare.explainability, aisquare.cli.app"
+          subprocess.run([str(bindir / f"python{suffix}"), "-c", probe], check=True)
           # And the surface the guide sends people to. Six subcommands, asserted
           # by name — `--version` cannot distinguish a build with this
           # integration from one without it, which is exactly how a release
           # shipped that could not connect.
-          for cmd in status enable disable register ship env; do
-            "$RUNNER_TEMP"/extra/bin/aisquare explainability "$cmd" --help >/dev/null \
-              || { echo "explainability $cmd is missing"; exit 1; }
-          done
+          for cmd in ("status", "enable", "disable", "register", "ship", "env"):
+              subprocess.run(
+                  [aisquare, "explainability", cmd, "--help"],
+                  check=True,
+                  stdout=subprocess.DEVNULL,
+              )

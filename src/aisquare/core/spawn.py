@@ -48,6 +48,10 @@ narrowing their environment would be change without a reason:
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
+    credentials file to this account on Windows. A permissions tool, not a
+    model process; it is also the seam that guards the API key, so an
+    inherited base URL is irrelevant to it either way.
   * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
   * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
@@ -130,6 +134,9 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
+    ),
+    "aisquare/core/paths.py::restrict_to_owner": Seam(
+        EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
     ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"

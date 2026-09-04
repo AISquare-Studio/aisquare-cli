@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import stat
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from aisquare.cli.app import app
 pytest.importorskip("mcp", reason="the [serve] extra is not installed")
 
 import anyio
-from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.client import Client
 from mcp.types import CallToolResult, TextContent
 
 from aisquare.services import mcp_server
@@ -31,20 +32,25 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def call_remote(tool: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
-    """Call one tool end-to-end through an in-memory MCP client session."""
+    """Call one tool end-to-end through an in-memory MCP client session.
+
+    ``Client(server)`` is the SDK's in-memory pair (it replaced
+    ``create_connected_server_and_client_session`` in mcp 2): a real client
+    session over memory streams, so the request crosses the wire format and the
+    server's registered ``tools/call`` handler — the one that preserves error
+    wording — exactly as a remote agent's would.
+    """
 
     async def go() -> CallToolResult:
-        async with create_connected_server_and_client_session(
-            mcp_server.build_server()._mcp_server
-        ) as client:
+        async with Client(mcp_server.build_server()) as client:
             return await client.call_tool(tool, arguments or {})
 
     return anyio.run(go)
 
 
 def error_text(result: CallToolResult) -> str:
-    """The message of an MCP error result (asserting ``isError`` on the way)."""
-    assert result.isError, f"expected an MCP error result, got success: {result.content!r}"
+    """The message of an MCP error result (asserting ``is_error`` on the way)."""
+    assert result.is_error, f"expected an MCP error result, got success: {result.content!r}"
     block = result.content[0]
     assert isinstance(block, TextContent)
     return block.text
@@ -175,7 +181,7 @@ def test_remote_success_results_stay_plain_tool_results(work_dir: Path) -> None:
     # The wording-preserving handler must leave the success path untouched.
     team_service.activate()
     result = call_remote("task_add", {"title": "wire auth flow"})
-    assert not result.isError
+    assert not result.is_error
     block = result.content[0]
     assert isinstance(block, TextContent)
     assert block.text.startswith("created: tsk_")
@@ -336,3 +342,45 @@ def test_signal_tool_set_read_and_errors(work_dir: Path) -> None:
     assert error_text(missing).startswith("error: no signal named")
     invalid = call_remote("signal", {"name": "Bad Name", "value": "x"})
     assert error_text(invalid).startswith("error: signal name")
+
+
+def test_a_crashed_tool_is_an_error_result_logged_server_side(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bug in a tool: an ``isError`` result naming the tool, the detail in the log.
+
+    mcp 2.1 keeps a crash's detail off the wire — the agent sees ``Error
+    executing tool <name>`` and nothing else — where 1.x sent the exception's
+    text in the result. That text was the only place a crash was ever visible,
+    so the wording-preserving handler logs it server-side instead. Both halves
+    are asserted: the wire carries the tool's name and NOT the exception, and
+    the log carries the exception, with its traceback.
+
+    The other two kinds of failure must NOT be logged as crashes: a deliberate
+    ``error: …`` (every other test in this file) and a rejected argument set,
+    which is the caller's mistake, reported to the caller.
+    """
+    team_service.activate()
+    ours = "aisquare.services.mcp_server"
+
+    def fell_over() -> object:
+        raise RuntimeError("the board renderer fell over")
+
+    monkeypatch.setattr(team_service, "board_data", fell_over)
+    with caplog.at_level(logging.ERROR, logger=ours):
+        crashed = call_remote("team_board")
+    text = error_text(crashed)
+    assert text == "Error executing tool team_board"  # the SDK's text, unprefixed by us
+    assert "fell over" not in text  # ...and nothing of the exception itself
+    crashes = [record for record in caplog.records if record.name == ours]
+    assert len(crashes) == 1 and crashes[0].exc_info is not None, caplog.text
+    assert "the board renderer fell over" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=ours):
+        deliberate = call_remote("task_update", {"ref": "tsk_x", "action": "bogus"})
+        rejected = call_remote("task_add", {})  # `title` is required
+    assert error_text(deliberate).startswith("error: action must be")
+    assert error_text(rejected).startswith("Error executing tool task_add")
+    assert "title" in error_text(rejected)  # the caller learns which argument
+    assert not [record for record in caplog.records if record.name == ours], caplog.text

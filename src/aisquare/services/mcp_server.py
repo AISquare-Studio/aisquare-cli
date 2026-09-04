@@ -29,6 +29,7 @@ aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -44,15 +45,21 @@ from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from mcp.server.fastmcp import FastMCP
-    from mcp.types import CallToolResult, ContentBlock
+    from mcp.server import ServerRequestContext
+    from mcp.server.mcpserver import MCPServer
+    from mcp.types import CallToolRequestParams, CallToolResult, InputRequiredResult
 
 _TOKEN_KEY = "serve_token"
 DEFAULT_PORT = 8747
 DEFAULT_CLOSE_AFTER = 300
 """Idle seconds before a stdio server closes itself (0 = run forever)."""
+
+#: Server-side only. mcp 2 keeps the detail of a CRASHED tool off the wire (the
+#: agent sees ``Error executing tool <name>`` and nothing else), so the one
+#: place that detail can still be read is the server's own log, on stderr —
+#: which the SDK configures at ``MCPServer()`` construction and which is never
+#: the protocol channel, on either transport.
+_log = logging.getLogger(__name__)
 
 
 def client_session_id(project_id: str) -> str:
@@ -110,7 +117,7 @@ def _ensure_virtual_session() -> str:
 
 def _tool_error(message: str) -> Exception:
     """A ``ToolError`` carrying ``message`` verbatim (``mcp`` imports lazily)."""
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     return ToolError(message)
 
@@ -155,7 +162,7 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         raise _tool_error(f"error: {exc}") from exc
 
 
-# --- the nine tools (plain functions; registered on FastMCP below) -----------
+# --- the nine tools (plain functions; registered on the MCPServer below) ------
 
 
 def team_board() -> str:
@@ -361,13 +368,14 @@ def serve_token() -> str:
     return token
 
 
-def build_server() -> FastMCP:
-    """A FastMCP server exposing the orchestrator tools."""
+def build_server() -> MCPServer:
+    """An ``MCPServer`` exposing the orchestrator tools."""
     from mcp import types
-    from mcp.server.fastmcp import FastMCP
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver import Context, MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+    from mcp.shared.exceptions import MCPError
 
-    server = FastMCP(
+    server = MCPServer(
         "aisquare-team",
         instructions=(
             "The shared task board and working memory of a team of coding-agent "
@@ -393,28 +401,53 @@ def build_server() -> FastMCP:
         server.add_tool(tool)
 
     async def call_tool_with_exact_errors(
-        name: str, arguments: dict[str, Any]
-    ) -> Sequence[ContentBlock] | dict[str, Any] | CallToolResult:
-        """FastMCP's tool dispatch, minus its message-mangling exception wrap.
+        ctx: ServerRequestContext[Any], params: CallToolRequestParams
+    ) -> CallToolResult | InputRequiredResult:
+        """The SDK's tool dispatch, minus its message-mangling exception wrap.
 
-        The SDK's ``Tool.run`` folds every exception — ``ToolError`` included —
-        into ``ToolError("Error executing tool <name>: <msg>")``, so the wording
-        a failing tool chose would reach remote agents prefixed and broken.
+        ``Tool.run`` folds every exception — ``ToolError`` included — into
+        ``ToolError("Error executing tool <name>: <msg>")``, so the wording a
+        failing tool chose would reach remote agents prefixed and broken.
         Unwrap our own ``ToolError`` (carried as ``__cause__``) back to its
-        exact message; any other cause is a genuine bug and keeps the SDK's
-        text. Either way the client gets a real error result, not a success.
-        """
-        try:
-            return await server.call_tool(name, arguments)
-        except ToolError as exc:
-            message = str(exc.__cause__) if isinstance(exc.__cause__, ToolError) else str(exc)
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=message)], isError=True
-            )
+        exact message; anything else keeps the SDK's text. Either way the
+        client gets a real error result, not a success.
 
-    # Replace the handler FastMCP registered for itself (last registration
-    # wins; validate_input=False matches its own).
-    server._mcp_server.call_tool(validate_input=False)(call_tool_with_exact_errors)
+        mcp 2.1 tells a crash apart from a deliberate failure by type
+        (``UnexpectedToolError``) and keeps the crash's detail off the wire:
+        the agent sees ``Error executing tool <name>`` and nothing else. In 1.x
+        that detail rode along in the result, which was the only place it went,
+        so it is logged here — where the SDK's own handler would have — or a
+        bug in a tool becomes unreadable everywhere. A rejected argument set is
+        a deliberate failure in this scheme (the caller's mistake, reported to
+        the caller), not a crash, and is not logged as one.
+
+        The request context is threaded through as the SDK's handler does, so
+        a tool that takes ``ctx`` (none of the nine does) would still see its
+        request rather than a request-less stand-in.
+        """
+        context = Context(request_context=ctx, mcp_server=server, input_params=params)
+        try:
+            return await server.call_tool(params.name, params.arguments or {}, context)
+        except MCPError:
+            raise  # a protocol error the tool chose to raise — the SDK's rule too
+        except UnexpectedToolError as exc:
+            _log.exception("tool %r raised an unexpected exception", params.name)
+            message = str(exc)
+        except ToolError as exc:
+            cause = exc.__cause__
+            message = str(cause) if isinstance(cause, ToolError) else str(exc)
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=message)], is_error=True
+        )
+
+    # Replace the handler MCPServer registered for itself on ``tools/call``.
+    # ``add_request_handler`` replaces an existing handler for the method, and
+    # is how the SDK wraps this very method for its own extension interceptor;
+    # ``_lowlevel_server`` is the private seam its migration guide names for
+    # reaching it, pending a public one.
+    server._lowlevel_server.add_request_handler(
+        "tools/call", types.CallToolRequestParams, call_tool_with_exact_errors
+    )
     return server
 
 
@@ -441,7 +474,7 @@ class _StampedStdin:
         return line
 
 
-async def _serve_stdio_until_idle(server: FastMCP, close_after: int) -> None:
+async def _serve_stdio_until_idle(server: MCPServer, close_after: int) -> None:
     """Run the stdio transport with an idle deadline (#19).
 
     The deadline counts seconds since the last inbound client message; any
@@ -478,13 +511,13 @@ async def _serve_stdio_until_idle(server: FastMCP, close_after: int) -> None:
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(watchdog)
-        # Mirrors FastMCP.run_stdio_async, which offers no seam to inject the
+        # Mirrors MCPServer.run_stdio_async, which offers no seam to inject the
         # activity-stamping stdin — the public stdio_server(stdin=...) does.
         async with stdio_server(stdin=cast(Any, stdin)) as (read_stream, write_stream):
-            await server._mcp_server.run(
+            await server._lowlevel_server.run(
                 read_stream,
                 write_stream,
-                server._mcp_server.create_initialization_options(),
+                server._lowlevel_server.create_initialization_options(),
             )
         tg.cancel_scope.cancel()  # EOF: stop the watchdog, exit normally
 
@@ -539,7 +572,9 @@ def run_http(*, bind: str, port: int) -> None:
 
     token = serve_token()
     server = build_server()
-    server.settings.host = bind
-    server.settings.port = port
-    app = server.streamable_http_app()
+    # mcp 2 moved transport settings off the server object. ``host`` goes to
+    # the app factory, whose only use for it is deciding whether DNS-rebinding
+    # protection auto-enables (it does for loopback, as before); the port is
+    # uvicorn's alone, which is what binds it.
+    app = server.streamable_http_app(host=bind)
     uvicorn.run(_BearerGuard(app, token), host=bind, port=port, log_level="warning")

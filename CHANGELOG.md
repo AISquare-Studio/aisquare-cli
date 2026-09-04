@@ -6,8 +6,161 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+### Added
+- **CI runs the suite against a machine that looks like a developer's.** The
+  `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
+  nothing listening on any port, no optional extra — while anyone who followed
+  the setup guide has all three. Three fixtures in this repo were green here and
+  red for them, and the third was introduced while fixing the second, which is
+  what moves this from "be careful" to "have a job".
+  - **Two variants, because the leaks need opposite proxy states.** Measured in
+    CI, not assumed: with both regressions reintroduced on a throwaway branch,
+    `proxy-down` errored on the three `test_runbook_json_paths.py` tests and
+    `proxy-up` on `test_json_stdout_is_empty_or_parseable[proxy-down]` — disjoint,
+    neither catching the other's, while all three `check` variants stayed green.
+    One configuration would have covered half the class and looked like it
+    covered the class.
+  - **Both variants assert their own premise, on both sides of the suite**, using
+    `aisquare explainability status` rather than a `curl` at a literal port: it
+    probes whatever the config says, so it cannot drift from what the suite
+    reads, and it checks the `service`/`mode` contract rather than "something
+    answered 200". A variant whose distinguishing condition never held, or which
+    lost it midway, is a job reporting the other variant twice — so it fails
+    instead, before or after the suite, saying which.
+  - The ambient environment has **one definition**, exported through
+    `$GITHUB_ENV`: `AISQUARE_HOME` plus the explainability variables
+    `tests/conftest.py` goes out of its way to clear, whose own comment notes an
+    operator's shell has them sourced. A per-step home could be dropped from the
+    step that runs pytest, degrading the job to `check` twice, green. Deliberately
+    NOT a job-level `env:` block — that was tried and rejected: `runner.temp` is
+    unavailable there and GitHub rejects the whole workflow file for it, a
+    near-silent failure that yields a run with zero jobs and no log, and reads
+    from outside as "CI has not started".
+  - **The variant name is checked against a closed set** before anything
+    dispatches on it. Every dispatch is `[ "$AMBIENT" = "proxy-up" ]`, so any
+    other value — including the empty string, which is what deleting the export
+    or renaming the matrix key produces, since an unknown `matrix` property
+    expands to `""` with no error — is silently proxy-down, and the matrix reports
+    both of its names having run one ambient.
+  - It reuses `tests/proxy_stub.py` rather than inlining a server: `probe_proxy`
+    checks `service` and `mode`, so a stub is a contract, and the copy nobody
+    runs locally is the one that drifts.
+  - Two of the three conditions above are reproduced, and the job says so: the
+    extra cannot be installed where the suite runs (it shadows an editable
+    checkout), so `package` covers that axis at import level instead.
+- **The packaging job installs the extra.** `pip install
+  "aisquare-cli[explainability]"` is the line the setup guide gives people and
+  nothing tested it. The SDK shares this package's top-level import name, so both
+  distributions land in one `site-packages/aisquare/` and the last writer wins
+  the shared `__init__.py` — a build that read `__version__` off that module died
+  at import with the extra installed, and no job would have caught it. The job
+  asserts both packages import and names the six `explainability` subcommands,
+  because `--version` cannot distinguish a build that has this integration from
+  one that does not.
+- `tests/test_ci_covers_the_ambient_environment.py` pins all of the above. Its
+  checks assert the **order and placement** of things inside the job rather than
+  the presence of a string in the file, because an independent review mutated the
+  literal version and found five ways to make the job vacuous with every guard
+  green — drop the home from the step that matters, hardcode the stub's port,
+  delete either premise assertion, run pytest ahead of the listener, or invert
+  the variant condition so the two run under each other's names. Each of those is
+  caught now, and the edits a maintainer would legitimately make — reordering the
+  variants, adding a third, rewriting the matrix in block style — do not cause a
+  false failure.
 
+### Changed
+- **`aisquare serve` runs on mcp 2.x.** The `serve` and `dev` extras require
+  `mcp>=2.1,<3` (was `>=1.10,<2`). mcp 2.0.0 renamed `FastMCP` to `MCPServer` and
+  deleted `mcp.server.fastmcp`, the module this CLI imported, so the Dependabot
+  bump (#73) went red on mypy and the `<2` pin was the only thing keeping a
+  fresh install green. The port is confined to `services/mcp_server.py`, the
+  `serve` dependency guard, and the two test files that drive them; the nine
+  tools, their wording, and both transports' behaviour are unchanged.
+  - **The error-wording contract survives, on the seam the SDK now provides.**
+    mcp 2 still folds a tool's `ToolError` into `Error executing tool <name>:
+    <msg>`, so the handler that unwraps our own message back out is still
+    needed. It moves from the removed `_mcp_server.call_tool()` decorator to
+    `add_request_handler("tools/call", …)` on `_lowlevel_server`, which is what
+    the SDK's own migration guide names for replacing a protocol handler (and
+    what the SDK itself uses to wrap this method for extensions). A remote
+    agent still sees `error: reopen requires a note (the feedback)`, verbatim,
+    as an `isError` result — `tests/test_serve.py` asserts every one of those
+    strings end-to-end through a real client session.
+  - **A crashed tool is now logged server-side.** New in mcp 2.1, not chosen
+    here: the SDK tells a crash apart from a deliberate failure by type
+    (`UnexpectedToolError`) and keeps the crash's detail off the wire, so the
+    agent sees `Error executing tool <name>` and nothing else. In 1.x the
+    message rode along in the result, which was the only place it went. The
+    replacement handler logs the traceback on the server (stderr, which is
+    never the protocol channel on either transport) where the SDK's own handler
+    would have, so a bug in a tool is still readable somewhere. A rejected
+    argument set is the caller's mistake, not a crash, and is not logged as
+    one. `test_a_crashed_tool_is_an_error_result_logged_server_side` pins both
+    halves: nothing of the exception on the wire, all of it in the log.
+  - HTTP transport settings moved off the server object: `host` is passed to
+    `streamable_http_app()`, whose only use for it is deciding whether loopback
+    DNS-rebinding protection auto-enables (it does, as before), and the port is
+    uvicorn's alone, as it already was.
+  - The `serve` guard probes `mcp.server.mcpserver`, and its message for an
+    incompatible major points the other way now — a 1.x is the one that cannot
+    work — with `pip install 'mcp>=2.1,<3'`. The distribution-versus-module
+    distinction it was written for (#55) is exactly what makes a 1.x a
+    sentence rather than a traceback. It tells majors apart, not minors: the
+    pin is what keeps a 2.0.x out, and pip reports that at install time.
+  - `tests/test_serve.py` drives the server through `mcp.client.Client(server)`,
+    the in-memory replacement for the removed
+    `create_connected_server_and_client_session`, and reads `is_error`: field
+    names are snake_case in 2.x.
+  - Also inherited from 2.x: synchronous tool bodies run on a worker thread
+    rather than inline on the event loop. Each of the nine opens its own store
+    session per call and touches nothing thread-affine, so nothing crosses.
+  - The floor is measured, not guessed: against every 2.x release on PyPI,
+    the serve suite, the stdio idle-deadline suite and mypy strict are green on
+    2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`
+    import — the distinction above did not exist yet, so `>=2.1`.
+- **CI runs on Windows.** The `check` job gains a `windows-latest` leg (3.12;
+  the platform branches read `sys.platform` at call time, so a second
+  interpreter would only re-run the same branches), and `package` runs on both
+  platforms — building the wheel, smoke-testing the console scripts, and
+  installing it again WITH the `explainability` extra, whose whole point is a
+  collision inside one shared `site-packages/aisquare/` and therefore a
+  filesystem question Windows answers differently. Getting there meant fixing
+  the suite's own POSIX-only assumptions rather than skipping past them: the
+  gbrain fake is now reachable through `PATHEXT`, the #20 bulk-delivery storm
+  and both printed-command shell tests are ported instead of skipped, test
+  file reads no longer go through the locale codec, and the #56 tilde test
+  sets the variable `expanduser` actually reads on each platform.
+
+  Merging 0.5.0 brought ~130 test files that no Windows runner had ever
+  executed, and 26 of them were red. They are ported here rather than left for
+  later, because a lane that is red on arrival is a lane nobody reads. The
+  recurring shape is a POSIX idiom used as a test PREMISE that silently stops
+  being one on Windows — which does not fail the test, it makes it pass for
+  the wrong reason. `tests/fsperms.py` now owns the two that recur, and
+  verifies its own effect rather than trusting the syscall's return:
+  `os.chmod(dir, 0o500)` denies nothing on Windows (and nothing under root
+  either), and creating a symlink needs a privilege the CI runner holds and a
+  developer account does not.
+
+  One class of assertion needed changing rather than skipping, and it is the
+  subtlest of the lot: `str(path) in str(some_error)` and `str(path) in
+  json.dumps(payload)` are both a raw path compared against an ESCAPED
+  rendering of itself — `OSError` renders its filename through `repr()`, and
+  JSON escapes backslashes. A Windows path is present in both outputs with
+  every separator doubled, and matches neither. POSIX paths carry no
+  backslashes, so the escaping is a no-op and the mistake is invisible there.
+  Those now assert against the structured value (`exc.filename`,
+  `payload["hint"]`) instead of a rendered string.
+
+  Three skips remain, all structural rather than deferred. The stdio-daemon
+  leak probe needs each process's ENVIRONMENT to tell our daemons from a
+  sibling checkout's and `Win32_Process` carries only the command line, so it
+  and its two self-tests are `/proc`-only. Mount-table matching needs POSIX
+  path semantics, and Windows has no mount table — the Windows answer
+  (`None`, through the existing fail-open) is asserted separately so the
+  behaviour is pinned rather than merely skipped.
+
+### Fixed
 - **`~/.aisquare` is no longer treated as a project root.** `.aisquare` is
   overloaded — `<project>/.aisquare` is the opt-in project marker, but
   `~/.aisquare` is where config, the context database and the agent registry
@@ -58,48 +211,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is keyed by `<path>::<function>` with forward slashes; the guard built its
   keys with `str(Path)`, so on Windows every call site read as undecided AND
   every ruling read as stale, against a registry that was entirely correct.
-
-
-### Changed
-
-- **CI runs on Windows.** The `check` job gains a `windows-latest` leg (3.12;
-  the platform branches read `sys.platform` at call time, so a second
-  interpreter would only re-run the same branches), and `package` builds and
-  smoke-tests the wheel on both platforms. Getting there meant fixing the
-  suite's own POSIX-only assumptions rather than skipping past them: the
-  gbrain fake is now reachable through `PATHEXT`, the #20 bulk-delivery storm
-  and both printed-command shell tests are ported instead of skipped, test
-  file reads no longer go through the locale codec, and the #56 tilde test
-  sets the variable `expanduser` actually reads on each platform.
-
-  Merging 0.5.0 brought ~130 test files that no Windows runner had ever
-  executed, and 26 of them were red. They are ported here rather than left for
-  later, because a lane that is red on arrival is a lane nobody reads. The
-  recurring shape is a POSIX idiom used as a test PREMISE that silently stops
-  being one on Windows — which does not fail the test, it makes it pass for
-  the wrong reason. `tests/fsperms.py` now owns the two that recur, and
-  verifies its own effect rather than trusting the syscall's return:
-  `os.chmod(dir, 0o500)` denies nothing on Windows (and nothing under root
-  either), and creating a symlink needs a privilege the CI runner holds and a
-  developer account does not.
-
-  One class of assertion needed changing rather than skipping, and it is the
-  subtlest of the lot: `str(path) in str(some_error)` and `str(path) in
-  json.dumps(payload)` are both a raw path compared against an ESCAPED
-  rendering of itself — `OSError` renders its filename through `repr()`, and
-  JSON escapes backslashes. A Windows path is present in both outputs with
-  every separator doubled, and matches neither. POSIX paths carry no
-  backslashes, so the escaping is a no-op and the mistake is invisible there.
-  Those now assert against the structured value (`exc.filename`,
-  `payload["hint"]`) instead of a rendered string.
-
-  Three skips remain, all structural rather than deferred. The stdio-daemon
-  leak probe needs each process's ENVIRONMENT to tell our daemons from a
-  sibling checkout's and `Win32_Process` carries only the command line, so it
-  and its two self-tests are `/proc`-only. Mount-table matching needs POSIX
-  path semantics, and Windows has no mount table — the Windows answer
-  (`None`, through the existing fail-open) is asserted separately so the
-  behaviour is pinned rather than merely skipped.
 
 ## [0.5.0] - 2026-08-27
 

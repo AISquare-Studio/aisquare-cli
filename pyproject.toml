@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.5.0"
+version = "0.6.0"
 description = "Portable memory layer for coding agents — persistent user and project context across sessions."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,11 @@ dependencies = [
   "rich>=13.7",
   "pydantic>=2.13.4",
   "tomli-w>=1.2.0",
+  # Core since the fleet UI became the default surface (bare `asq` opens it —
+  # docs/plans/fleet-tui.md §3.7). Pinned to the major the code targets:
+  # cli/watch.py and cli/ui/ lean on 8.2.x internals. Imported lazily, only by
+  # the UI entry, so the hook path pays nothing for it.
+  "textual>=8.2,<9",
 ]
 
 [project.optional-dependencies]
@@ -68,7 +73,9 @@ explainability = [
   "aisquare[explainability]>=1.1",
 ]
 tui = [
-  "textual>=1.0",
+  # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
+  # was the documented way to get the board TUI before textual became core.
+  "textual>=8.2,<9",
 ]
 dev = [
   "pytest>=9.1.1",
@@ -86,7 +93,9 @@ dev = [
   # guard turns an out-of-range install into a sentence, but only the pin
   # keeps one from being resolved in the first place.
   "mcp>=2.1,<3",
-  "textual>=1.0",
+  # Same bounds as the core dependency: the dev env must resolve the major the
+  # UI code actually targets, not merely "some textual".
+  "textual>=8.2,<9",
 ]
 
 [project.scripts]

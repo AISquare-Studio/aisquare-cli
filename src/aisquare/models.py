@@ -94,6 +94,9 @@ class ProjectInfo(BaseModel):
     id: str
     root: Path
     linked_repos: list[str] = Field(default_factory=list)
+    codename: str | None = None
+    """The fleet codename (``amber-otter``) — assigned the first time the project
+    enters the fleet, never at ``init``; see ``core.codenames``."""
 
 
 class InjectionRecord(BaseModel):
@@ -312,3 +315,51 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+
+
+FleetAgentState = Literal["working", "waiting", "attention", "exited", "lost", "unknown"]
+"""What a fleet agent is doing, DERIVED at read time and never stored: a fresh
+``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
+pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
+when neither source can answer."""
+
+
+class FleetAgent(BaseModel):
+    """One agent the fleet started: a tmux pane, the role it runs, and its board row.
+
+    ``session_id`` is minted BEFORE launch (``claude --session-id``) so the row
+    joins its ``TeamSession`` with no heuristics; it is ``None`` only for a
+    binary that cannot be started on a chosen id. The tmux *session* name is not
+    stored — it derives from the project's codename, so a rename never strands a
+    row — only the stable ``pane_id`` is.
+    """
+
+    id: str
+    project_id: str
+    label: str
+    """Unique among the project's LIVE agents; an ended agent frees its label."""
+    role: str
+    binary: str = "claude"
+    tmux_socket: str = "asq"
+    pane_id: str
+    session_id: str | None = None
+    cwd: Path
+    worktree: bool = False
+    task_id: str | None = None
+    spawned_by: str | None = None
+    """``"user"``, or the id of the session (a manager) that asked for it."""
+    created_at: datetime
+    ended_at: datetime | None = None
+    exit_status: int | None = None
+
+
+class FleetAgentStatus(BaseModel):
+    """A fleet agent with its derived state — what ``fleet ls`` and the sidebar show."""
+
+    agent: FleetAgent
+    state: FleetAgentState = "unknown"
+    detail: str | None = None
+    """Why the state is what it is, when that is not obvious: an exit code, "no
+    hooks" for a binary without lifecycle hooks, "pane gone"."""
+    session: TeamSession | None = None
+    tmux_session: str | None = None

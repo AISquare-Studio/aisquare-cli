@@ -5,36 +5,91 @@
 [![CI](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/AISquare-Studio/aisquare-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Memory and orchestration for coding agents.** aisquare gives agents like
-Claude Code two things they don't have out of the box: a **memory** that
-persists across sessions — your preferences, each project's conventions, how
-you actually prompt — and an **orchestration layer** that lets several
-sessions work one problem as a coordinated team, with shared tasks, live
-status, and a board you can watch.
+**One terminal UI over every project and every coding agent you have running.**
+Type `asq` and you get a full-screen, mouse-driven view: your projects on the
+left, and on the right a **manager** agent you task in prose — it plans, spawns
+coders, testers and reviewers, and loops until the goal is met. Click any of
+them and you are inside its *real* Claude Code session, typing at it directly.
+Nothing is relayed or re-rendered as a chat.
+
+Underneath, agents get a **memory** that persists across sessions — your
+preferences, each project's conventions — so every session starts oriented
+instead of cold.
 
 It's a single CLI, local-first, backed by one SQLite file. No daemon, no
-cloud dependency, no account required. Install it, connect it to Claude Code
-once, and every session after that starts oriented instead of cold. Sign in
-with `aisquare login` only when a command needs to act as you on AISquare
-(see [docs/signing-in.md](docs/signing-in.md)).
+account, no cloud dependency. Sign in with `aisquare login` only when a command
+needs to act as you on AISquare (see [docs/signing-in.md](docs/signing-in.md)).
+
+## Install
 
 ```sh
 pipx install aisquare-cli              # or: pip install aisquare-cli
-cd your/repo
-aisquare init                          # register the project + snapshot the codebase
-aisquare agents connect claude-code    # wire aisquare into Claude Code
-aisquare doctor                        # verify everything (and how to fix anything)
 ```
 
-That's the whole setup. Requires **Python 3.11+**. The package is
-`aisquare-cli`; the command is `aisquare` (with an `asq` alias). Codebase
-snapshots use [Repomix](https://github.com/yamadashy/repomix) via Node/`npx`
-when available — `aisquare doctor` tells you if it's missing, and nothing
-breaks without it.
+Requires **Python 3.11+**. The package is `aisquare-cli`; the command is
+`aisquare`, with `asq` as the short alias.
 
-That's the whole setup — you are done. Everything below is reference.
+The UI runs agents inside a private tmux server, so you also need **tmux 3.2+**
+(3.5+ recommended — that is where shift+enter reaches the agent):
 
-aisquare has **two halves, and they are independent**:
+```sh
+sudo apt install tmux        # Debian / Ubuntu
+sudo dnf install tmux        # Fedora / RHEL
+brew install tmux            # macOS
+tmux -V                      # 3.2 or newer
+```
+
+Agents run on **[Claude Code](https://claude.com/claude-code)** (`claude`
+2.1.x), so install that too if you haven't. On Windows, run everything inside
+WSL2. `git` is used for the per-agent worktrees; `gh` is optional and only
+needed if you want agents opening and reviewing PRs. Codebase snapshots use
+[Repomix](https://github.com/yamadashy/repomix) via Node/`npx` when available —
+`aisquare doctor` tells you if it's missing, and nothing breaks without it.
+
+## Start the GUI
+
+```sh
+aisquare agents connect claude-code    # once — wires the hooks the UI reads state from
+asq                                    # open the UI
+```
+
+That's the whole setup. From inside the UI:
+
+1. **Click `+` beside Fleet** and point it at a directory. It registers the
+   project and runs a health check in the background, streaming the log — you
+   never leave the UI. The project appears in the navigator on the left.
+2. **Click the project**, then press *Start manager*. Its live Claude Code
+   session fills the pane. **Type your goal in prose**, exactly as you would to
+   any Claude session.
+3. **Watch the agents appear** under the project, each with a role icon
+   (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a live
+   state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU**, **💤 exited**.
+   Click one to see and drive its session.
+4. **Press `F12`** to hand focus back to the sidebar — it's the one key a pane
+   never swallows. There, `t` picks a theme and `q` quits. **The agents keep
+   running**; reopen `asq` and it re-attaches to what it finds.
+
+The manager never writes code and never merges — a human does that.
+
+Everything the UI does is also a plain command, and every one takes `--json`:
+
+```sh
+aisquare fleet ls                      # this project's agents and their live state
+aisquare fleet attach                  # the same session in raw tmux, full fidelity
+aisquare doctor                        # is everything wired? (and how to fix anything)
+```
+
+Scripts never meet a full-screen app: bare `aisquare` in a pipe, or under
+`TERM=dumb`, prints usage and exits 2 exactly as before, and under `--json` it
+prints one usage object so a `jq` pipeline gets JSON rather than a help page.
+
+**[The fleet guide](docs/fleet.md)** has the roles in full, the
+`aisquare fleet …` command reference and every default you can change.
+
+## The rest of aisquare
+
+The UI is a view over two halves, and they are **independent** — neither needs
+the UI, and you can use either on its own:
 
 | | What it is | Who it's for |
 | --- | --- | --- |
@@ -460,6 +515,7 @@ concurrency-tested against racing parallel sessions):
 ~/.aisquare/
 ├── context.db    # context entries, projects, prompt history, tasks, events, sessions
 ├── config.toml   # typed configuration
+├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
 ├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
@@ -495,9 +551,16 @@ aisquare
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [… agent args]
-│                   role = planner|coder|runner, a numbered seat (coder1), or
-│                   any role you have bound; env merges over `team bind`
+│                   role = planner|coder|runner|validator, a fleet role (manager,
+│                   tester, reviewer), a numbered seat (coder1), or any role you
+│                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
+├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
+├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
+│                             [--permission-mode M] [--bin B] [--prompt TEXT] [-- agent args]
+│                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
+│                   attach · reap [--all] · rename <codename> · pause · resume
+│                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
 ├── auth            status [--live] · token
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>

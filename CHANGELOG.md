@@ -7,6 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
 - **`aisquare login`, `logout`, `whoami` and `aisquare auth status|token` do
   something real.** Sign-in is the OAuth 2.0 device flow (RFC 8628) against the
   AISquare identity provider: the terminal shows a one-time code and a link,
@@ -23,6 +24,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   locally. `--json` puts exactly one object on stdout. Redaction learns the
   `aisq_` token shape. Contract: `docs/plans/aisquare-login.md`; guide:
   `docs/signing-in.md`. The `auth rotate` stub is gone (sessions do not rotate).
+
+## [0.6.0] - 2026-09-03
+
+**The fleet UI: bare `asq` opens one view over every project, agent and
+session.** This is the first release where the CLI has a front door — a
+two-pane, mouse-driven terminal UI over your projects, the manager agent in
+each, and the agents that manager spawns, every one of them a real Claude Code
+session you can type into. Everything it does is still a plain command with
+`--json`, and both halves below it — memory and orchestration — work exactly as
+they did without ever opening it.
+
+Shipping ahead of feature-complete on purpose, to make internal testing easier;
+known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
+
+### Added
+- **The fleet: `asq` with no arguments opens one view over every project,
+  agent and session.** A two-pane, mouse-driven UI — a navigator of projects,
+  the agents running in each and a Doctor summary on the left; onboarding, a
+  project's **manager** (an agent you task in prose, which plans, spawns and
+  steers the others), any agent's *real* Claude Code session, the board and
+  doctor findings with their fixes on the right. Never a chat relayed through
+  us: agents run as windows of a per-project session on a private tmux server
+  (`tmux -L asq`, bundled config, tmux ≥ 3.2), so they outlive the UI and
+  `aisquare fleet attach` shows the same session from any terminal. New `fleet`
+  group — `spawn · ls · status · tell · stop · attach · reap · rename · pause ·
+  resume`, `--json` everywhere — and an explicit `ui` command. Fleet roles
+  `manager` (the planner with fleet authority), `tester` (the fleet's name for
+  `runner`) and `reviewer` (read-only PR review), which `launch` accepts too.
+  Store schema v11: `fleet_agent`, and a per-project `codename`
+  (`adjective-animal`, deterministic from the project id; `fleet rename`
+  changes it) that names the tmux session and the `fleet/<codename>/…`
+  branches. A `[fleet]` config section in which every value is a default —
+  permission mode `auto` for every role, a worktree per coder and reviewer,
+  four agents per project, `F12` as the escape key, Claude's native agent
+  teams off in fleet launches — overridable per spawn or
+  in config. Scripts, pipes and `--json` callers of bare `aisquare` still get
+  usage and exit 2. User guide: `docs/fleet.md`; the plan and its decisions
+  log: `docs/plans/fleet-tui.md`. Delivered in phases (plan §9); the plan's
+  Decisions log records what has landed.
 - **CI runs the suite against a machine that looks like a developer's.** The
   `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
   nothing listening on any port, no optional extra — while anyone who followed
@@ -905,7 +945,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
 [0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
 [0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1

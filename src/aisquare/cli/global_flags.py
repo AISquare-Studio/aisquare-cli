@@ -38,7 +38,7 @@ from typing import Any
 import typer
 from typer.core import TyperGroup, TyperOption
 
-from aisquare.cli.common import fail
+from aisquare.cli.common import expected_home_creation_errors, fail
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     StoreUnopenable,
@@ -261,22 +261,30 @@ class GlobalFlagsGroup(TyperGroup):
     def invoke(self, ctx: Any) -> Any:
         """Dispatch, translating usage errors per the #21 contract.
 
-        ``StoreUnopenable`` is translated here for the same reason the flags are
-        injected here: every command in the tree passes through this one place,
-        on every entry path. Eleven commands were measured printing 59-75 lines
-        of traceback against a damaged store — they all die in ``open_store``,
-        so wrapping each call site would be eleven chances to miss one and a
-        twelfth defect the day someone adds a command.
+                ``StoreUnopenable`` is translated here for the same reason the flags are
+                injected here: every command in the tree passes through this one place,
+                on every entry path. Eleven commands were measured printing 59-75 lines
+                of traceback against a damaged store — they all die in ``open_store``,
+                so wrapping each call site would be eleven chances to miss one and a
+                twelfth defect the day someone adds a command.
 
-        Narrow on purpose, and not a general tidier: ONE exception type whose
-        entire meaning is "the store would not open", raised from one function.
-        Every other error — including a ``DatabaseError`` from a later query,
-        which may be a bug in our SQL against a healthy store — keeps its
-        traceback, because burying one of those costs whoever debugs it far
-        more than a buried message costs an operator.
+        ``expected_home_creation_errors`` sits here for the same reason: ``open_store``
+                calls ``ensure_home()`` unconditionally, so a home that CANNOT exist (an
+                ``AISQUARE_HOME`` pointing at a file) kills every command that touches
+                the store — measured at ~90 lines of traceback with empty stdout, under
+                ``--json`` included. Wrapping the one dispatch point translates all of
+                them; the alternative was the same three lines in forty commands.
+
+                Narrow on purpose, and not a general tidier: ONE exception type whose
+                entire meaning is "the store would not open", raised from one function.
+                Every other error — including a ``DatabaseError`` from a later query,
+                which may be a bug in our SQL against a healthy store — keeps its
+                traceback, because burying one of those costs whoever debugs it far
+                more than a buried message costs an operator.
         """
         try:
-            return super().invoke(ctx)
+            with expected_home_creation_errors():
+                return super().invoke(ctx)
         except StoreUnopenable as damaged:
             fail(
                 damaged_store_message(damaged),

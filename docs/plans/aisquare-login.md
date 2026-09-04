@@ -1,9 +1,10 @@
 # `aisquare login`: browser sign-in through the AISquare identity provider
 
-Status: contract frozen 2026-09-03. Backend implemented in AISquare-Studio-BE
-PR #3419 (branch `feat/oauth-oidc-provider`, draft). CLI implemented in this
-repo's PR #77 against section 4 and verified end to end against that backend.
-Web approval page is the handoff in section 5 and is not started.
+Status: contract frozen 2026-09-03. All three parts are implemented and were
+verified together end to end on 2026-09-04: backend AISquare-Studio-BE PR #3419
+(branch `feat/oauth-oidc-provider`), CLI in this repo's PR #77 (section 4), web
+approval page and Settings sessions card in aisquare-studio-unified PR #970
+(section 5). Merge order: backend, then the web app, then the CLI release.
 
 This document is a reference, not a script: commands appear as inline code, and
 the transcript blocks are illustrations of terminal output. The user guide is

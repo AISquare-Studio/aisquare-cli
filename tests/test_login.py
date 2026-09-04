@@ -129,9 +129,7 @@ def test_discovery_is_cached_for_the_next_command(
 ) -> None:
     assert _login(runner, idp.url).exit_code == 0
     discovery_calls = idp.paths().count("/o/.well-known/openid-configuration")
-    result = runner.invoke(
-        app, ["auth", "status", "--live", "--api-url"] if False else ["auth", "status", "--live"]
-    )
+    result = runner.invoke(app, ["auth", "status", "--live"])
     assert result.exit_code == 0, result.output
     assert idp.paths().count("/o/.well-known/openid-configuration") == discovery_calls
 

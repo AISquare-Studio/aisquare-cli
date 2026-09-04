@@ -213,6 +213,37 @@ Fedora both).
 - `--with` puts extra packages in the tool's own environment, which is how
   `tiktoken` gets fixed in the same breath as the install (§1.2).
 
+**What `uv` is, and what it does to a machine** — asked directly by the owner,
+so it is answered directly and it was measured, not assumed:
+
+- **It is not preinstalled anywhere.** No OS ships it. The `uv` on the machine
+  these measurements came from is Fedora's own package
+  (`uv-0.12.3-1.fc44.x86_64`), and some distributions do package it — but the
+  script can never assume it, so step 5 installs it when absent. What it does
+  *not* need is a per-OS branch: one curl installer covers macOS and every
+  Linux, which is a large part of why §2 lands on one script.
+- **It installs to a dedicated virtual environment per tool, never the base
+  environment.** Measured layout for
+  `uv tool install --python 3.13 --with tiktoken aisquare-cli`:
+
+```text
+~/.local/share/uv/tools/aisquare-cli/     a real venv (pyvenv.cfg present,
+                                          include-system-site-packages = false)
+~/.local/share/uv/python/cpython-3.13…/   uv's OWN managed interpreter (3.13.15)
+~/.local/bin/aisquare  ->  symlink into that venv's bin/
+```
+
+  So the system Python is untouched, the system `site-packages` is untouched,
+  and `tiktoken` lands inside the tool's venv rather than anywhere global. This
+  is the same isolation model as `pipx`; the differences are that uv brings its
+  own interpreter and needs no Python to bootstrap.
+- **It still satisfies the `install` doctor check**, which is not automatic and
+  is the reason this shape was verified rather than assumed. That check warns
+  when the resolved binary's path contains a `.venv` or `venv` component.
+  `shutil.which` returns the PATH entry — `~/.local/bin/aisquare` — which has no
+  such component, and neither does the symlink's target
+  (`…/tools/aisquare-cli/bin/aisquare`). Measured `ok` either way.
+
 Pinning Python to **3.13**: the highest version CI actually tests
 (`.github/workflows/ci.yml` matrix is 3.11–3.13). Deliberately not "whatever is
 newest" — 3.14 works locally today but no CI job proves it, and an installer is
@@ -320,7 +351,7 @@ made so:
 | Step | On a second run |
 | --- | --- |
 | `uv` installer | detects its own install; skipped entirely when `uv` is on PATH |
-| `uv tool install` | needs `--force` to replace an existing tool, so: skip when the installed version already matches, `--force` when upgrading |
+| `uv tool install` | a measured no-op — `` `aisquare-cli` is already installed ``, exit 0. The version is compared first anyway (§3.9), so on a current machine the command is not even reached |
 | package manager | `apt install tmux` on a machine that has tmux is a no-op |
 | Claude Code installer | manages its own versions dir and symlink |
 | `agents connect claude-code` | already idempotent by construction — `install_hooks` filters out aisquare's own hook groups before re-appending them, so hooks never accumulate |
@@ -346,6 +377,9 @@ precedence rule the rest of the project already uses.
 | `--python <v>` | — | `3.13` | the interpreter uv resolves |
 | `--dry-run` | — | off | print every command, run none |
 | `--verbose` | — | off | stream sub-installer output |
+| `--upgrade-all` | — | off | also move `uv` itself and system packages, not just what is below a floor (§3.9.4) |
+| `--offline` | — | off | skip the PyPI lookup; report versions without claiming to know what is current (§3.9.2) |
+| `--force` | — | off | reinstall `aisquare-cli` even when the version already matches |
 
 Piped invocation takes arguments through `sh -s`, which is worth documenting
 because the syntax is not obvious:
@@ -424,31 +458,175 @@ Exit codes: `0` when nothing is unexpected, `1` when a fatal class failed, `2`
 when the install completed but an unexpected check is amber. A script that exits
 0 onto a broken machine is worse than one that never ran.
 
+### 3.9 Detecting an existing install, and upgrading it
+
+Required by the owner: the script must notice what is already installed, report
+and stop when it is current, and upgrade it when it is behind. Every command
+below was measured, and two of them do not behave the way their names suggest.
+
+**The rule, per dependency.** Each one is detected before anything is installed,
+so a fully-current machine does no network writes at all:
+
+| Dependency | Detect | Compare against | If current | If behind |
+| --- | --- | --- | --- | --- |
+| `aisquare-cli` | `aisquare --version` -> `aisquare 0.6.0` | PyPI JSON (§3.9.2) | report, no change | `uv tool install --force` (§3.9.1) |
+| `uv` | `uv --version` -> `uv 0.12.3 (…)` | not compared | leave alone | `uv self update`, only with `--upgrade-all` |
+| Claude Code | `claude --version` -> `2.1.260 (Claude Code)` | its own updater | `claude update` | `claude update` |
+| `tmux` | `tmux -V` -> `tmux 3.7c` | 3.2 floor, 3.5 preferred | report | package manager, only below 3.2 |
+| `gh` | `gh --version` -> `gh version 2.97.0 (…)` | none | report | never — any release works |
+| Node | `node --version` -> `v26.7.0` | 22 floor (§1.4) | report | install, only below 22 |
+
+Note that the version *strings* all differ in shape — `aisquare 0.6.0`,
+`uv 0.12.3 (x86_64-…)`, `2.1.260 (Claude Code)`, `tmux 3.7c`,
+`gh version 2.97.0 (2026-07-31)`, `v26.7.0`. Six formats, six parsers; `tmux
+3.7c` also carries a non-numeric suffix, which is why the existing tmux check
+compares a parsed `(major, minor)` tuple rather than a string. The script reuses
+that discipline instead of inventing a seventh parser.
+
+#### 3.9.1 `uv tool upgrade` is not the command to use — measured
+
+The obvious command is wrong in a way that fails silently, which is worth
+recording because it would otherwise be discovered by a user whose install
+never moved.
+
+A tool installed with an exact pin is **not** upgraded by `uv tool upgrade`:
+
+```text
+$ uv tool install --with tiktoken 'aisquare-cli==0.5.0'
+$ uv tool upgrade aisquare-cli
+Nothing to upgrade
+
+hint: `aisquare-cli` is pinned to `0.5.0` (installed with an exact version pin);
+      reinstall with `uv tool install aisquare-cli@latest` to upgrade
+$ aisquare --version
+aisquare 0.5.0
+```
+
+Exit 0, the word "Nothing", and a machine still on the old version. A script
+that trusted the exit code would report a successful upgrade that did not
+happen — the precise failure this requirement exists to prevent.
+
+The command that does work, and what it costs:
+
+```text
+$ uv tool install --force --python 3.13 --with tiktoken 'aisquare-cli@latest'
+$ aisquare --version
+aisquare 0.6.0                    # upgraded
+                                  # tiktoken still present (0.14.0)
+                                  # receipt's `==0.5.0` pin now cleared
+```
+
+So the script always upgrades with `install --force … @latest`, never
+`uv tool upgrade`. Three properties make it the right choice: it moves a pinned
+install, it **re-states `--with tiktoken`** so the extra cannot be silently
+dropped, and it is deterministic rather than dependent on how the existing
+install was created. `--force` here means "replace this tool", not "ignore
+errors".
+
+`uv tool install` with no version change is *already* a safe no-op — measured:
+`` `aisquare-cli` is already installed ``, exit 0. So `--force` is used only on
+the upgrade path, never on the install path, and never as a blanket flag.
+
+#### 3.9.2 Reading the latest version without a Python
+
+The comparison target comes from PyPI, and the script cannot assume a Python
+exists at the point it needs it (that is the whole premise of §3.1). Measured,
+in pure `sh`:
+
+```text
+curl -fsSL https://pypi.org/pypi/aisquare-cli/json \
+  | sed -n 's/.*"info":{.*"version":"\([^"]*\)".*/\1/p' | head -1
+   -> 0.6.0
+```
+
+A regex over JSON is normally the wrong instrument, and it is worth saying why
+it is acceptable here rather than leaving it as a smell. It reads exactly one
+short, stable field from a first-party API; it is not parsing user data; and its
+failure mode is bounded and handled — an empty result means "could not
+determine the latest version", which the script reports and then proceeds with
+the install rather than treating as fatal. When a Python is already present
+(after step 6, always) the script prefers `json.load`.
+
+Reachability is not assumed either. **`--offline` skips the PyPI lookup
+entirely**, reporting what is installed without claiming to know whether it is
+current — the honest answer on a machine with no network, and better than a
+timeout that reads as a broken installer.
+
+#### 3.9.3 Claude Code updates itself, and the script must not fight it
+
+Claude Code ships its own updater, and native installs auto-update by default.
+It also has the two commands the script would otherwise reimplement:
+
+```text
+claude update      # "Check for updates and install if available"
+claude install [stable|latest|<version>]
+```
+
+So the rule is: **absent -> install via the curl installer; present -> `claude
+update` and report.** The script never compares Claude Code versions itself and
+never pins one. Two reasons. A pin would fight the auto-updater and lose,
+leaving a machine that silently drifts from what the script claims it installed.
+And the fleet's requirement is a *floor* (2.1.x, for `--session-id`,
+`--permission-mode`, `--restricted`, `--effort`), not an exact version — so
+"newest" is always acceptable and the tool's own updater is the right authority.
+
+#### 3.9.4 The all-current path
+
+When nothing needs doing, the script must say so and stop rather than
+re-running installers. That is §0.8 with teeth:
+
+```text
+aisquare 0.6.0 is already the latest.
+  uv 0.12.3 · Claude Code 2.1.260 · tmux 3.7c · gh 2.97.0 · Node 26.7.0
+  ~/.aisquare configured · claude-code hooks installed
+  doctor: 16/17 ok (brain: gbrain not installed — out of scope)
+
+Nothing to do. Open the fleet UI with: asq
+```
+
+Exit 0, no writes, no prompt to install anything. `--upgrade-all` opts into
+moving `uv` itself and the system packages; without it, the script upgrades only
+what is below a floor it actually needs.
+
 ---
 
 ## 4. The script, step by step
 
-Fifteen steps. Each is one shell function, which is also the unit the tests in
-§8 address.
+Eighteen steps. Each is one shell function, which is also the unit the tests
+in §8 address. Steps 4-6 exist so that a machine which needs nothing does
+nothing (§3.9.4); the install steps are all reached only when step 5 said so.
 
 ```text
  1  preflight      not root; sh is POSIX; curl or wget present; $HOME writable
- 2  detect         uname -s/-m -> os, arch; /proc/version or $WSL_DISTRO_NAME -> wsl
+ 2  detect_os      uname -s/-m -> os, arch; /proc/version or $WSL_DISTRO_NAME -> wsl
  3  pkg_manager    apt|dnf|pacman|zypper|apk|brew  (§5)
- 4  banner         what this will install and where (§3.7); honour --dry-run
- 5  install_uv     skip if on PATH; else the astral installer; export
+ 4  survey         what is ALREADY here, and its version: uv, aisquare, claude,
+                   tmux, gh, node -- six version-string formats, six parsers
+                   (§3.9). No writes; this step only reads.
+ 5  resolve        latest aisquare-cli from PyPI unless --offline; decide per
+                   dependency: current | behind | absent  (§3.9.2)
+ 6  short_circuit  everything current and configured -> print the summary and
+                   EXIT 0 without installing anything  (§3.9.4)
+ 7  banner         what this will install or upgrade, and where (§3.7);
+                   honour --dry-run
+ 8  install_uv     skip if on PATH; else the astral installer; always export
                    UV_PYTHON_DOWNLOADS=automatic  (§3.1)
- 6  install_cli    uv tool install --python 3.13 --with tiktoken aisquare-cli
-                   (--force only when upgrading; §3.4)
- 7  path_check     is ~/.local/bin on PATH? if not, say the line to add (§3.6)
- 8  install_tmux   >= 3.2 required, >= 3.5 preferred; warn-only
- 9  install_gh     warn-only
-10  install_node   only if absent or < 22; prefer system, else fnm (§3.2)
-11  install_claude claude.ai/install.sh; warn-only
-12  init           aisquare init --local --yes --agent claude-code [<project>]
-13  doctor         aisquare --json doctor; classify (§3.8)
-14  summary        what was installed, what is amber and why, what is next
-15  handoff        /dev/tty guard; prompt; exec asq < /dev/tty  (§3.3)
+ 9  install_cli    absent -> uv tool install --python 3.13 --with tiktoken
+                   aisquare-cli
+                   behind -> the SAME command with --force and @latest, never
+                   `uv tool upgrade`  (§3.9.1)
+10  path_check     is ~/.local/bin on PATH? if not, say the line to add (§3.6)
+11  install_tmux   only below the 3.2 floor; warn-only  (§3.2)
+12  install_gh     only when absent; warn-only
+13  install_node   only when absent or below 22; prefer system, else fnm (§3.2)
+14  install_claude absent -> claude.ai/install.sh; present -> claude update.
+                   Never version-pinned by us  (§3.9.3); warn-only
+15  init           aisquare init --local --yes --agent claude-code [<project>].
+                   Never --reinit  (§3.4)
+16  doctor         aisquare --json doctor; classify expected/actionable/
+                   unexpected  (§3.8)
+17  summary        installed, upgraded, left alone, amber and why, what is next
+18  handoff        /dev/tty guard; prompt; exec asq < /dev/tty  (§3.3)
 ```
 
 Step 12 is where the four warnings of §1.2 collapse to one. `--agent
@@ -675,8 +853,16 @@ now, as the fleet's key matrix already is.
 ### 8.4 Idempotence, as an assertion
 
 Every container cell runs the installer **twice** and asserts the second run
-exits 0, changes no version, and leaves `~/.claude/settings.json` byte-identical
-to after the first. §3.4 is a claim; this is what makes it true. Hook
+exits 0, changes no version, leaves `~/.claude/settings.json` byte-identical to
+after the first, and — because §3.9.4 promises it — **installs nothing at all**,
+asserted by running the second pass with a PATH whose package manager is a stub
+that fails if called.
+
+One cell per platform also runs the **upgrade** path, since §3.9.1 is where a
+silent no-op would hide: install `aisquare-cli==0.5.0` deliberately, run the
+installer, then assert the version moved to latest *and* that `tiktoken` is
+still importable from the tool environment. That single assertion is what stops
+a future edit from reverting to `uv tool upgrade`. §3.4 is a claim; this is what makes it true. Hook
 accumulation is exactly the kind of bug that only shows up on the second run,
 and `install_hooks` filtering its own groups is what prevents it — so the test
 belongs here rather than in the description.
@@ -713,6 +899,49 @@ Phase 2 is the one to review hardest. It is where §3.3 lives.
 
 ---
 
+## 10b. Recommended path forward
+
+Asked directly by the owner, so stated as a recommendation rather than a menu.
+
+**Ship the three doctor fixes now as 0.6.1, then the installer spine as 0.6.2.**
+
+The reasoning is that phase 1 is not really part of this feature — it is a live
+defect in what shipped yesterday. `aisquare doctor` on 0.6.0 tells a new user to
+run `pipx install aisquare`, which installs a different project's SDK into the
+one dependency shape `pyproject.toml` warns about at length. That is worth a
+patch release on its own merits, it is small and well-understood, and it fits
+the 0.6.x cadence already chosen. It also has to land first for a mechanical
+reason: the installer's acceptance test asserts a green doctor, so a check that
+lies (§6.3, `repomix` green on Node 18) would be baked into the definition of
+success.
+
+Then the spine, 0.6.2. Steps 1-10 and 15-18 — survey, uv, the CLI, `init`,
+doctor, handoff — with the Linux and macOS paths and no package-manager matrix
+yet. On any machine that already has tmux, gh and Node, which is most developer
+machines and every one of ours, that is the complete experience: one command to
+16/17 green and into the UI. It is also where the two decisions worth reviewing
+live (§3.3's `/dev/tty` handling and §3.9.1's upgrade command), so it deserves
+the careful review while it is small rather than buried in a matrix PR.
+
+Phase 3 — the six package managers and the container matrix — is the long tail
+and the right thing to defer. It is where the effort is and where the value is
+lowest per hour, because it serves machines that are missing system tools, and
+those users are currently well served by `doctor` telling them the exact
+`apt install` line.
+
+**What I would not do:** build the whole thing behind one PR. It is four
+platforms times six package managers times an interactive handoff, and the
+review that matters would drown. The phases in §9 are sized so each one can be
+read.
+
+**One thing to decide before phase 2 rather than after** — §11.4. A fresh
+install has one project and no manager running, so pressing `Y` today lands on
+the Welcome page: a checklist, as a first impression, at the exact moment the
+install has just promised something better. Landing on the project with its
+Manager tab open is a small change and a much better first thirty seconds.
+
+---
+
 ## 11. Open questions for the owner
 
 Everything else in this document is decided. These four need an answer that is
@@ -745,3 +974,6 @@ not in the code.
 | 2026-09-04 | `uv` chosen as the bootstrap over `pipx` + system Python (§3.1). `UV_PYTHON_DOWNLOADS=automatic` forced, after a measured failure on a distro-packaged uv with `python-downloads = manual`. |
 | 2026-09-04 | Python pinned to 3.13 — the highest version CI tests. |
 | 2026-09-04 | Three pre-existing bugs found while measuring and folded in as phase 1 (§6): two `doctor` fixes naming the SDK instead of this CLI, and `repomix` green on Node < 22. |
+| 2026-09-04 | Owner asked for existing-install detection and upgrade; added as §3.9. Measured: `uv tool upgrade` will NOT move a pinned install (exit 0, "Nothing to upgrade"), so the script always upgrades with `uv tool install --force … @latest --with tiktoken`, which moves it and re-states the extra. |
+| 2026-09-04 | Claude Code's version is never managed by us (§3.9.3) — it ships `claude update` and auto-updates by default, and the fleet needs a floor, not an exact version. |
+| 2026-09-04 | Owner asked what `uv` does to a machine; answered in §3.1 from a measured install. Not preinstalled on any OS, but its installer needs no per-OS branch. Installs a per-tool venv plus its own managed interpreter under `~/.local/share/uv/`; the base and system Pythons are untouched. Verified this shape still reports `ok` from the `install` doctor check. |

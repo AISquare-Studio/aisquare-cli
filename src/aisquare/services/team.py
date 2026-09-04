@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import brain, harness, insights, orchestrator, workspace
+from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
@@ -47,6 +48,77 @@ _STALE_AFTER = timedelta(minutes=30)
 #: So presence goes at ``_STALE_AFTER`` and claims wait for this. A caller that
 #: genuinely knows the session is dead passes ``release_claims=True``.
 _CLAIM_ORPHAN_AFTER = timedelta(hours=4)
+
+MANAGER_ROLE = "manager"
+"""The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
+
+#: A numbered SEAT: a first-class role with a crew index glued on — ``coder1``,
+#: ``reviewer2``. ``cli/launch.py`` accepts these because crews run several agents
+#: in one role and need them apart on the board; the base is derived by stripping
+#: the digits rather than matched against a second copy of the role list, so the
+
+
+def base_role(role: str) -> str:
+    """The first-class role a numbered seat belongs to — ``coder1`` → ``coder``.
+
+    A one-line delegate to :func:`aisquare.core.harness.base_role`, which is the
+    one home for the rule: the harness itself now keys its profile lookups on
+    it, so a seat gets its role's cycle, ladder and effort offset. Kept as a
+    name here because this module's callers read as board logic, not harness
+    plumbing.
+    """
+    return harness.base_role(role)
+
+
+#: The board events worth waking a manager for: a sub-agent's verdict or hand-off
+#: (``task_review``, ``task_done``), a task that needs the manager back
+#: (``task_blocked``, ``task_reopened``), a result or a question on the board, and
+#: an agent that went away (``agent_exited`` is the fleet's, emitted by ``reap``).
+#: A plain note, a decision or a claim is news, not a decision the manager has to
+#: make — it arrives with the next prompt's delta like everyone else's.
+MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
+    {
+        "task_review",
+        "task_done",
+        "task_blocked",
+        "task_reopened",
+        "result",
+        "question",
+        "agent_exited",
+    }
+)
+
+#: The last sentence of every wake-up reason. Claude Code continues the turn with
+#: the reason as its instruction, so the instruction must license stopping — a
+#: reason that only says "here is news" is an invitation to loop.
+WAKEUP_CLOSE = "If nothing needs you, stop."
+
+
+def _addressed_to_manager(to_role: str | None) -> bool:
+    """Whether a board write is addressed to the manager (``--to manager``).
+
+    The fleet's manager label and the manager role are the same word
+    (``services.fleet.MANAGER_LABEL``), so one comparison covers both
+    ``note --to manager`` and ``fleet tell manager``'s board-note fallback.
+    Case- and space-insensitive because the CLI passes through whatever the
+    operator typed.
+    """
+    return (to_role or "").strip().lower() == MANAGER_ROLE
+
+
+def _wakes_manager(event: TeamEvent) -> bool:
+    """Whether one board event is something the manager has to come back for (§7.3).
+
+    Two ways in. Its KIND is one of :data:`MANAGER_WAKE_KINDS` — a verdict, a
+    hand-off, a result, a question, an exit. Or it is ADDRESSED to the manager:
+    §7.3 path 2 counts ``note --to manager`` as wake-worthy, and a mailbox that
+    delivers only while the recipient happens to be idle is not a mailbox. The
+    same note written while the manager is WORKING has no other path — path 2
+    refuses a working manager by design, and 'note' is not a wake kind — so
+    without this it would sit past the cursor until an unrelated event arrived.
+    Unaddressed news (a plain note, a decision, a claim) still waits its turn.
+    """
+    return event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role)
 
 
 class TeamDisabledError(RuntimeError):
@@ -79,6 +151,50 @@ class DeliveryUnconfirmedError(RuntimeError):
         )
         self.ref = ref
         self.board_name = board_name
+
+
+class ManagerWakeupError(RuntimeError):
+    """The manager's wake-up branch failed; the row still says ``waiting``, as before.
+
+    Raised only AFTER the session is marked waiting, so the CLI can swallow it and
+    report the wake-up's own cost line ("the manager will not be woken by this
+    turn's board updates") instead of the generic Stop line — which would be a
+    wrong sentence: the board does show the session as waiting.
+    """
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(f"manager wake-up failed ({type(cause).__name__}: {cause})")
+        self.cause = cause
+
+
+@dataclass(frozen=True)
+class StopDecision:
+    """What a manager's ``Stop`` hook tells Claude Code: keep going, and why (§7.3).
+
+    Printed by ``aisquare hook stop`` as the top-level ``{"decision": "block",
+    "reason": …}`` object — the shape the hooks reference documents for Stop and
+    SubagentStop (re-checked 2026-08-28: "Other events like PostToolUse and Stop
+    continue to use top-level `decision` and `reason`"). The same reference
+    offers ``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext":
+    …}}``, which continues the conversation too but is labelled "Stop hook
+    feedback" in the transcript rather than a hook error; switching is one
+    method. Claude Code itself ends the turn after 8 consecutive blocks and caps
+    hook output at 10,000 characters, truncating the rest — mid-JSON-string if it
+    must, which costs the whole payload and not just the tail. The event COUNT
+    does not bound that: ``event.text`` is unbounded board text, and the coder's
+    own standing cycle asks for ``--note "how to verify + evidence"``. Measured
+    with the real renderer: ten ``task_review`` events carrying a 2 KB note each
+    rendered a 20,541-character reason, 20,603 as the JSON object — twice the
+    cap. So :func:`_render_wakeup` budgets CHARACTERS (see
+    :data:`_WAKEUP_REASON_BUDGET`) and the count limit is only the other half.
+    """
+
+    reason: str
+    cursor: int
+    """The event seq the manager's cursor advanced to — what the reason covers."""
+
+    def as_hook_output(self) -> dict[str, str]:
+        return {"decision": "block", "reason": self.reason}
 
 
 @dataclass(frozen=True)
@@ -293,6 +409,26 @@ def task_key(title: str) -> str:
     """Derive the idempotency key for a task: a slug of its title."""
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return slug[:64] or "task"
+
+
+def _nudge_manager(project_id: str, *, reason: str) -> None:
+    """Wake the project's WAITING manager after a board write it must act on (§7.3, path 2).
+
+    Runs inside the writing agent's CLI process, after the write is confirmed, so
+    it is an observer of the write: it may never raise, and a fleet that is not
+    wired (no tmux, no manager, an older ``services.fleet``) costs exactly the
+    nudge. The fleet decides whether a nudge is due — state ``waiting``, pane
+    alive, debounced — and what the one fixed line says; the details reach the
+    manager through the delta its next prompt injects, never through the nudge.
+    """
+    try:
+        from aisquare.services import fleet as fleet_service  # lazy: fleet imports the store
+
+        nudge = getattr(fleet_service, "nudge_manager", None)
+        if nudge is not None:
+            nudge(project_id, reason=reason)
+    except Exception:  # the write already succeeded; a lost nudge is the whole cost
+        return
 
 
 # --- commands ----------------------------------------------------------------
@@ -666,6 +802,15 @@ def add_note(
     stored = _record_delivery(event, board)
     if kind in distill_service.DISTILL_KINDS:
         distill_service.spawn_drain(root=board.root)
+    if kind in ("result", "question"):
+        _nudge_manager(board.id, reason=kind)
+    elif _addressed_to_manager(to_role):
+        # §7.3 path 2 lists `note --to manager` among the writes that wake a
+        # waiting manager, and only the KIND was consulted here: a note
+        # addressed to the manager reached a waiting one on no path at all —
+        # 'note' is not a MANAGER_WAKE_KIND either, so its Stop hook did not
+        # deliver it and it sat past the cursor until some unrelated event.
+        _nudge_manager(board.id, reason=f"{kind}_to_manager")
     return stored
 
 
@@ -874,6 +1019,7 @@ def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = 
     _require_enabled()
     task, board = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
     distill_service.spawn_drain(root=board.root)
+    _nudge_manager(board.id, reason="task_done")
     return task
 
 
@@ -882,6 +1028,7 @@ def review_task(ref: str, *, note: str | None = None, session_ref: str | None = 
     _require_enabled()
     task, board = _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
     distill_service.spawn_drain(root=board.root)
+    _nudge_manager(board.id, reason="task_review")
     return task
 
 
@@ -910,6 +1057,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         board = _board_of(store, reopened.project_id)
     _record_delivery(event, board)
     distill_service.spawn_drain(root=board.root)
+    _nudge_manager(board.id, reason="task_reopened")
     return reopened
 
 
@@ -966,6 +1114,7 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
     _require_enabled()
     task, board = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
     distill_service.spawn_drain(root=board.root)
+    _nudge_manager(board.id, reason="task_blocked")
     return task
 
 
@@ -1207,20 +1356,157 @@ def hook_prompt_heartbeat(
         return collision + _render_delta(shown, roles, truncated=truncated)
 
 
-def hook_stop(session_id: str, cwd: Path | None) -> None:
+def hook_stop(
+    session_id: str, cwd: Path | None, *, stop_hook_active: bool = False
+) -> StopDecision | None:
     """The session finished its turn: it is now waiting for input.
 
     Also renews claim leases — the end of a long agentic turn is exactly when
     a lease is at its oldest.
+
+    A MANAGER may not get to wait (docs/plans/fleet-tui.md §7.3). When teammates
+    put decisions on the board since its cursor — see :data:`MANAGER_WAKE_KINDS`
+    — the returned :class:`StopDecision` keeps it going with the delta as the
+    reason, its cursor advances past what it was shown, and the row says
+    ``working``. Three guards keep that from becoming a loop: ``stop_hook_active``
+    (Claude Code is already continuing on a stop hook, so this turn's news waits
+    for the next prompt's delta or a nudge — nothing is lost, only deferred), the
+    hourly cap in ``[fleet] max_continuations_per_hour``, and the cursor itself,
+    which is why the same events can never wake it twice. Every other role gets
+    ``None`` and exactly the behaviour it always had.
+
+    The wake-up is an extra on top of the contract, so it fails open on its own:
+    the row is marked waiting first, then :class:`ManagerWakeupError` carries the
+    cause to the CLI's cost line.
     """
     if not orchestrator.team_enabled():
-        return
+        return None
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
-            return
+            return None
         store.renew_leases(session.id, _now() + timedelta(minutes=orchestrator.lease_minutes()))
+        failure: Exception | None = None
+        deferred: str | None = None
+        if session.role == MANAGER_ROLE:
+            try:
+                decision = _manager_wakeup(store, session, stop_hook_active=stop_hook_active)
+                if decision is None and stop_hook_active:
+                    deferred = _deferred_wake_reason(store, session)
+            except Exception as exc:  # waiting is the contract; the wake-up is the extra
+                failure = exc
+            else:
+                if decision is not None:
+                    return decision
         store.touch_session(session.id, state="waiting")
+    if deferred is not None:
+        # After the row says waiting, never before: nudge_manager refuses every
+        # other state. Outside the `with` too — it opens its own connection.
+        _nudge_manager(session.project_id, reason=deferred)
+    if failure is not None:
+        raise ManagerWakeupError(failure)
+    return None
+
+
+def continuation_key(session_id: str, when: datetime) -> str:
+    """The ``team_meta`` key counting a manager's continuations in the UTC hour of ``when``."""
+    return f"continuations:{session_id}:{when.astimezone(UTC).strftime('%Y-%m-%dT%H')}"
+
+
+def continuation_cap() -> int:
+    """``[fleet] max_continuations_per_hour`` — a default like every other one (§3.10).
+
+    A config that will not load costs the customisation, never the wake-up:
+    the same fail-open shape as ``services.fleet.settings``.
+    """
+    try:
+        return load_config().fleet.max_continuations_per_hour
+    except Exception:
+        return FleetSettings().max_continuations_per_hour
+
+
+def _count(raw: str | None) -> int:
+    try:
+        return int(raw or 0)
+    except ValueError:
+        return 0
+
+
+def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
+    """The board since a manager's cursor, exactly as its next prompt would read it.
+
+    One function so the wake-up and the deferral below can never disagree about
+    the window they are judging — same source, same exclusions, same limit as
+    :func:`hook_prompt_heartbeat`. Attention notices are for the human board,
+    not teammate context.
+    """
+    raw = store.events_since(
+        me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
+    )
+    return [event for event in raw if event.kind != "attention"]
+
+
+def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
+    """The kind of the first wake event a ``stop_hook_active`` Stop left undelivered.
+
+    ``None`` when nothing wake-worthy is pending, or when deltas are muted (the
+    nudge's whole payload is the delta the next prompt injects, so a nudge with
+    that door shut is noise).
+
+    Why this exists: ``stop_hook_active`` defers this turn's news to "the next
+    prompt's delta or a nudge", and neither was scheduled. The Stop that ends a
+    stop-hook continuation is *precisely* the Stop Claude Code marks
+    ``stop_hook_active``, so "the next Stop will deliver it" is not true of the
+    next Stop; and the write-time nudges of those events were already refused
+    while the manager was working. At the end of a burst — every coder finished
+    — no further board write is coming to nudge it, and the manager parks as
+    waiting with unseen ``question``/``task_done`` events past its cursor. That
+    is a stalled fleet, not a deferral, so the deferral schedules its own
+    delivery: path 2's nudge, from the manager's own process, which produces the
+    ``UserPromptSubmit`` the delta rides on. Bounded by construction — the
+    prompt's delta advances the cursor, and the nudge is debounced and refused
+    for any state but ``waiting``.
+    """
+    if not orchestrator.delta_enabled():
+        return None
+    for event in _wake_candidates(store, me):
+        if _wakes_manager(event):
+            return f"deferred:{event.kind}"
+    return None
+
+
+def _manager_wakeup(
+    store: ContextStore, me: TeamSession, *, stop_hook_active: bool
+) -> StopDecision | None:
+    """Keep a manager going on fresh board decisions, or ``None`` to let it wait.
+
+    Reads the delta exactly as :func:`hook_prompt_heartbeat` does — same source,
+    same exclusions, same limit — because the reason IS that delta, delivered a
+    turn early. Muted deltas (``AISQUARE_TEAM_DELTA=0``) mute this too: it is the
+    same injection through a different door.
+
+    Order of the writes matters. The hourly counter is bumped BEFORE the cursor
+    moves and the row flips to ``working``: a lost increment costs one of thirty
+    continuations, while a moved cursor with no continuation printed would cost
+    the events themselves.
+    """
+    if stop_hook_active or not orchestrator.delta_enabled():
+        return None
+    events = _wake_candidates(store, me)
+    if not any(_wakes_manager(event) for event in events):
+        return None
+    key = continuation_key(me.id, _now())
+    used = _count(store.get_meta(key))
+    if used >= continuation_cap():
+        return None
+    truncated = len(events) > _DELTA_LIMIT
+    shown = events[:_DELTA_LIMIT]
+    roles = {s.id: s.role for s in store.team_sessions(me.project_id)}
+    store.set_meta(key, str(used + 1))
+    store.touch_session(me.id, cursor=shown[-1].seq, state="working")
+    return StopDecision(
+        reason=_render_wakeup(shown, roles, truncated=truncated), cursor=shown[-1].seq
+    )
 
 
 def hook_notification(session_id: str, cwd: Path | None, message: str | None) -> None:
@@ -1460,7 +1746,9 @@ def _render_board(
                 parts.append(f"[{label}]")
             if session.model:
                 parts.append(f"[{session.model}]")
-                mismatch = harness.model_mismatch(session.role, session.model)
+                # base_role: a seat rides its role's ladder, so `coder1` on a
+                # model outside the coder ladder is flagged like `coder` is.
+                mismatch = harness.model_mismatch(base_role(session.role), session.model)
                 if mismatch:
                     parts.append("⚠ off-ladder")
             if session.focus:
@@ -1509,8 +1797,12 @@ def _role_cycle(me: TeamSession) -> list[str]:
 
     The cycles themselves live in :mod:`aisquare.core.harness` (one source of
     truth for the whole harness: profiles, ladders, and briefings).
+
+    Keyed on :func:`base_role`, so a numbered seat (``coder1``) receives its
+    role's cycle. Without that a seat got an empty briefing — the one thing the
+    seat's own comment in ``cli/launch.py`` promises it does not lose.
     """
-    return harness.role_cycle(me.role, short_id(me.id))
+    return harness.role_cycle(base_role(me.role), short_id(me.id))
 
 
 def event_line(event: TeamEvent, roles: dict[str, str]) -> str:
@@ -1535,4 +1827,95 @@ def _render_delta(events: list[TeamEvent], roles: dict[str, str], *, truncated: 
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")
     lines.append("</aisquare-team-delta>")
+    return "\n".join(lines)
+
+
+#: What one Stop reason may cost in the hook's OUTPUT — the thing Claude Code caps
+#: at 10,000 characters. Set below the cap because the reason travels inside
+#: ``{"decision":"block","reason":…}``: a reason that goes over does not lose its
+#: tail, it loses the closing quote and brace, and then Claude Code parses nothing
+#: at all and the wake-up is silently gone.
+_WAKEUP_REASON_BUDGET = 8_000
+
+#: The most one rendered event line may cost. Board text is unbounded and the
+#: coder's own cycle asks for ``--note "how to verify + evidence"``, so one 2 KB
+#: note must not crowd out the other nine events — every event the reason shows
+#: has to stay legible, because ``_manager_wakeup`` advances the cursor past all
+#: of them and nothing will show them again.
+_WAKEUP_LINE_BUDGET = 400
+
+
+def _output_cost(text: str) -> int:
+    """What ``text`` costs in the hook's JSON output, escaping included.
+
+    Measured rather than assumed: ``cli/hook.py`` prints the decision through
+    ``json.dumps``, whose default escaping turns every non-ASCII character into
+    ``\\uXXXX`` (six characters) and every quote or newline into two. A budget
+    counted in raw characters therefore bounds nothing at all for a note written
+    in a non-Latin script — 1,700 such characters already exceed the cap on their
+    own. The ``- 2`` drops the quotes ``json.dumps`` puts around a string.
+    """
+    return len(json.dumps(text)) - 2
+
+
+def _clip(text: str, budget: int) -> str:
+    """``text`` costing at most ``budget`` characters of hook output.
+
+    An ellipsis rather than a silent truncation: the manager is being asked to
+    act on this line, so "there was more here" is part of what it needs.
+
+    Halving rather than one proportional guess, because the relationship between
+    characters and output cost depends on the characters: ASCII text needs one
+    pass, and the loop terminates because ``keep`` strictly decreases (at most
+    ~log2(budget) passes, each encoding at most ``budget`` characters).
+    """
+    if _output_cost(text) <= budget:
+        return text
+    keep = budget
+    while keep > 1 and _output_cost(_shorten(text, keep)) > budget:
+        keep //= 2
+    return _shorten(text, keep)
+
+
+def _shorten(text: str, keep: int) -> str:
+    """``text`` cut to ``keep`` characters with the cut marked, or unchanged."""
+    if len(text) <= keep:
+        return text
+    return text[: max(keep - 1, 0)].rstrip() + "…"
+
+
+#: What the mark a clip leaves behind costs on its own — the floor for a line's
+#: share, because a line clipped to less than this still costs this.
+_ELLIPSIS_COST = _output_cost("…")
+
+
+def _render_wakeup(events: list[TeamEvent], roles: dict[str, str], *, truncated: bool) -> str:
+    """The Stop reason: the delta in the same lines the prompt hook would have used,
+    framed as the instruction Claude Code continues the turn with.
+
+    Bounded in OUTPUT COST, not only in events (:class:`StopDecision` says what
+    going over costs). Each event line gets a share derived from the remaining
+    budget and the number of events, so raising ``_DELTA_LIMIT`` clips lines
+    harder instead of overflowing, and no event the cursor consumed is ever
+    dropped from the reason — ``_manager_wakeup`` advances past every event it
+    shows, so a dropped line is a lost board update.
+
+    The sum is under budget by arithmetic: the head and frame are paid for first,
+    and each of the ``n`` lines costs at most ``share`` plus the four characters
+    of ``"- "`` and its newline. That holds while the share stays above
+    :data:`_ELLIPSIS_COST` — a clipped line cannot cost less than the mark it
+    ends with — which is every event count up to roughly 700. ``_DELTA_LIMIT`` is
+    10; the test beside this renders at both counts, so the margin is measured
+    rather than assumed.
+    """
+    count = f"{len(events)}{'+' if truncated else ''}"
+    head = f"{count} board update(s) from your fleet arrived while you were finishing this turn:"
+    frame = [
+        *(["… more waiting — run `aisquare board` for the full picture."] if truncated else []),
+        f"Act on what needs the manager — reopen, re-spec, spawn, report. {WAKEUP_CLOSE}",
+    ]
+    spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
+    share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)
+    per_line = min(_WAKEUP_LINE_BUDGET, share)
+    lines = [head, *(f"- {_clip(event_line(event, roles), per_line)}" for event in events), *frame]
     return "\n".join(lines)

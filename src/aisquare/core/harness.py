@@ -619,22 +619,30 @@ def clean_effort(value: str | None) -> str | None:
     return candidate if candidate in {*EFFORT_SCALE, ULTRACODE} else None
 
 
+#: Env vars that override model selection behind the harness's back. Module-level
+#: rather than local to ``interfering_env`` because the suite has to clear exactly
+#: these to be hermetic, and a copy retyped in ``tests/conftest.py`` is what
+#: drifted: three of them went unwatched there, so ``interfering_env() == []`` —
+#: which ``tests/test_harness.py`` asserts — silently depended on who ran pytest.
+#: ``tests/test_conftest_is_hermetic.py`` now pins the two against each other.
+INTERFERING_ENV_VARS = (
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # A redirected endpoint can answer a probe with any modelUsage it likes,
+    # so it undermines availability evidence just as much as a model pin.
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+)
+
+
 def interfering_env() -> list[str]:
     """Env vars set right now that override model selection behind the harness's back."""
-    suspects = (
-        "ANTHROPIC_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        # A redirected endpoint can answer a probe with any modelUsage it likes,
-        # so it undermines availability evidence just as much as a model pin.
-        "ANTHROPIC_BASE_URL",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-    )
-    return [name for name in suspects if os.environ.get(name, "").strip()]
+    return [name for name in INTERFERING_ENV_VARS if os.environ.get(name, "").strip()]
 
 
 # --- role work cycles -----------------------------------------------------------

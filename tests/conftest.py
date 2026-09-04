@@ -140,6 +140,64 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         )
 
 
+#: Every variable this package reads off the AMBIENT environment, cleared before
+#: each test so the suite grades this tree rather than the shell that started it.
+#: A module constant rather than an inline tuple because
+#: ``tests/test_conftest_is_hermetic.py`` compares it against the product's own
+#: lists — the four routing names below were missing for exactly as long as there
+#: was nothing to compare against.
+AMBIENT_ENV_VARS = (
+    "AISQUARE_TEAM",
+    "AISQUARE_ROLE",
+    "AISQUARE_TEAM_HUB",
+    "AISQUARE_TEAM_DELTA",
+    "AISQUARE_TEAM_LEASE_MIN",
+    "AISQUARE_DB_BUSY_MS",
+    "AISQUARE_BRAIN",
+    "AISQUARE_BRAIN_EMBED",
+    "AISQUARE_BRAIN_EMBED_MODEL",
+    "AISQUARE_HARNESS_PROBE",
+    "AISQUARE_EFFORT",
+    "AISQUARE_EFFORT_PLANNER",
+    "AISQUARE_EFFORT_CODER",
+    "AISQUARE_EFFORT_RUNNER",
+    "AISQUARE_EFFORT_VALIDATOR",
+    "CLAUDE_EFFORT",
+    "AISQUARE_MODEL_PLANNER",
+    "AISQUARE_MODEL_CODER",
+    "AISQUARE_MODEL_RUNNER",
+    "AISQUARE_MODEL_VALIDATOR",
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # An operator's shell has these sourced from their explainability env
+    # file; leaving them set would resolve THEIR gateway and key inside the
+    # suite, so "this target is unconfigured" would pass or fail depending
+    # on whose terminal ran it.
+    "AISQUARE_EXPLAINABILITY_TARGET",
+    "EXPLAINABILITY_GATEWAY_URL",
+    "EXPLAINABILITY_API_KEY",
+    # The routing half, and the half that was missing. Two mechanisms read these
+    # and both do the right thing on finding them set, which is what made the
+    # omission invisible: `core.harness.interfering_env` REPORTS them, and
+    # `wire_session` STANDS DOWN — "already set — not overriding your routing,
+    # launching untraced". So a test asserting an unpinned model or a traced
+    # launch passed in CI and failed for anyone whose shell had them.
+    #
+    # EVERY Claude Code session exports ANTHROPIC_BASE_URL — that is, the
+    # machine of anyone who develops this with an agent. Measured here: the four
+    # tests named in tests/test_conftest_is_hermetic.py fail with these set and
+    # pass with them unset, on one tree, one commit, one machine.
+    "ANTHROPIC_BASE_URL",  # both mechanisms
+    "ANTHROPIC_CUSTOM_HEADERS",  # wire_session
+    "CLAUDE_CODE_USE_BEDROCK",  # interfering_env
+    "CLAUDE_CODE_USE_VERTEX",  # interfering_env
+)
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point AISQUARE_HOME at a temp dir so tests never touch ``~/.aisquare``.
@@ -151,44 +209,10 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    # The orchestrator and brain knobs are read from the ambient env; clear them so
-    # the suite is hermetic (an embedding user's AISQUARE_BRAIN_EMBED=1 must not
-    # change what tests build/assert), each test opting in explicitly instead.
-    for knob in (
-        "AISQUARE_TEAM",
-        "AISQUARE_ROLE",
-        "AISQUARE_TEAM_HUB",
-        "AISQUARE_TEAM_DELTA",
-        "AISQUARE_TEAM_LEASE_MIN",
-        "AISQUARE_DB_BUSY_MS",
-        "AISQUARE_BRAIN",
-        "AISQUARE_BRAIN_EMBED",
-        "AISQUARE_BRAIN_EMBED_MODEL",
-        "AISQUARE_HARNESS_PROBE",
-        "AISQUARE_EFFORT",
-        "AISQUARE_EFFORT_PLANNER",
-        "AISQUARE_EFFORT_CODER",
-        "AISQUARE_EFFORT_RUNNER",
-        "AISQUARE_EFFORT_VALIDATOR",
-        "CLAUDE_EFFORT",
-        "AISQUARE_MODEL_PLANNER",
-        "AISQUARE_MODEL_CODER",
-        "AISQUARE_MODEL_RUNNER",
-        "AISQUARE_MODEL_VALIDATOR",
-        "ANTHROPIC_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        # An operator's shell has these sourced from their explainability env
-        # file; leaving them set would resolve THEIR gateway and key inside the
-        # suite, so "this target is unconfigured" would pass or fail depending
-        # on whose terminal ran it.
-        "AISQUARE_EXPLAINABILITY_TARGET",
-        "EXPLAINABILITY_GATEWAY_URL",
-        "EXPLAINABILITY_API_KEY",
-    ):
+    # Read from the ambient env; cleared so the suite is hermetic (an embedding
+    # user's AISQUARE_BRAIN_EMBED=1 must not change what tests build/assert),
+    # each test opting in explicitly instead.
+    for knob in AMBIENT_ENV_VARS:
         monkeypatch.delenv(knob, raising=False)
     return home
 

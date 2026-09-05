@@ -92,8 +92,8 @@ def doctor(
     explainability gateway round-trip). Everything else stays offline, so a
     plain ``aisquare doctor`` still answers on a train.
 
-    ``cwd`` is the directory whose PROJECT the three project-scoped checks
-    (snapshot, brain, harness) report on; ``None`` is the process cwd, which is
+    ``cwd`` is the directory whose PROJECT the project-scoped checks (snapshot,
+    brain, harness, self-invocation) report on; ``None`` is the process cwd, which is
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
@@ -115,6 +115,7 @@ def doctor(
         _check_snapshot(cwd),
         _check_brain(cwd),
         _check_harness(cwd),
+        _check_self_invocation(cwd),
         _check_fleet(),
         *explainability_ops.checks(live=live, target_name=target),
     ]
@@ -830,6 +831,32 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
         return _ok(name, detail)
     except Exception:  # diagnostics must never crash
         return _ok(name, "not evaluated")
+
+
+def _check_self_invocation(cwd: Path | None = None) -> DoctorCheck:
+    """Whether a bare ``python -m aisquare`` typed in ``cwd`` would run US (#81).
+
+    ``-m`` puts the cwd first on ``sys.path``, so a project whose root holds a
+    regular ``aisquare/`` package (an ``__init__.py`` — a bare directory is a
+    namespace portion and loses to the real package) or an ``aisquare.py``
+    shadows the installed CLI. The CLI's own re-invocations pass ``-P``
+    (:func:`aisquare.core.selfcli.argv_for`) and are immune; this row is for the
+    human who types the module form, and for hooks a pre-``-P`` CLI wrote.
+    """
+    root = Path.cwd() if cwd is None else cwd
+    shadow = next(
+        (p for p in (root / "aisquare" / "__init__.py", root / "aisquare.py") if p.is_file()),
+        None,
+    )
+    if shadow is None:
+        return _ok("self-invocation", "no ./aisquare package or aisquare.py shadows the CLI here")
+    return _warn(
+        "self-invocation",
+        f"{shadow.relative_to(root)} in {root} shadows `python -m aisquare` run from here "
+        "(the cwd goes first on sys.path); the CLI's own re-invocations pass -P and are fine",
+        "By hand, use the `aisquare`/`asq` script or `python -P -m aisquare`; hooks written by "
+        "an earlier CLI use the bare module form — re-run `aisquare agents connect <agent>`",
+    )
 
 
 def _fleet_conf() -> Path:

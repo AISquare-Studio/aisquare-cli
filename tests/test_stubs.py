@@ -109,7 +109,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     *(
         (group, command)
         for group in ("project", "workspace")
-        for command in ("info", "list", "switch", "link", "onboard")
+        for command in ("info", "list", "switch", "link", "onboard", "forget", "prune")
     ),
     *(("config", command) for command in ("list", "get", "set", "redaction")),
     *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),

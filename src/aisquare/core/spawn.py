@@ -52,6 +52,9 @@ otherwise inherit a live identity:
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
+  * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
+    a string: doctor asking another install of this CLI what version it is,
+    so hooks that name a stale binary stop grading as healthy (#84).
   * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
     ``git rev-parse``.
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
@@ -166,6 +169,13 @@ SEAMS: dict[str, Seam] = {
         strips_identity=True,
     ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
+    "aisquare/core/agents.py::hook_binary_version": Seam(
+        EXCLUDED,
+        "`<the aisquare a hook names> --version`, a string — doctor asking another "
+        "install of this CLI its version, so hooks pointing at a stale binary stop "
+        "grading as healthy (#84). An eager callback that exits before any command "
+        "runs; no model process",
+    ),
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
     "aisquare/core/workspace.py::git_common_root": Seam(EXCLUDED, "`git rev-parse`"),

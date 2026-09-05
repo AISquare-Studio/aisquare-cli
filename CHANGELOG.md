@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`doctor` now checks WHICH `aisquare` the Claude Code hooks run, not just
+  that hooks are there** (#84). A hook was recognised by its text, so every
+  hook on a box could name `…/aisquare-cli/.venv/bin/aisquare` — a 0.3-era
+  editable checkout — while the live install was 0.6.0, and `doctor` said
+  "all lifecycle hooks installed" for weeks. Per config dir it now resolves the
+  program each hook names and compares it to this install by path, or by
+  running `<path> --version` when the path differs; a stale, missing or
+  unreadable binary turns the row into a warning that names the dir, the
+  hook's path and version, this install's path and version, and the one-line
+  fix (`aisquare agents connect claude-code --config-dir <dir>`).
+- **`doctor` discovers Claude Code config dirs on disk** — `$CLAUDE_CONFIG_DIR`,
+  `~/.claude` and every `~/.claude*` whose `settings.json` carries aisquare
+  hooks — and grades them the same way, labelled "found on disk, not connected
+  in this home". A fresh `AISQUARE_HOME` previously knew no sites, so a
+  `~/.claude3` reached through `CLAUDE_CONFIG_DIR` was invisible until someone
+  ran `agents connect --config-dir` for it. Still read-only: `doctor` never
+  rewrites `settings.json`.
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and

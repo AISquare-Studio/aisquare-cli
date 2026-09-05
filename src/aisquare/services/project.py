@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core.config import SnapshotSettings, load_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.core.workspace import (
@@ -92,13 +93,26 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     return OnboardReport(seeded=seeded, snapshot=_ensure_snapshot(project, refresh=refresh))
 
 
+def snapshot_settings() -> SnapshotSettings:
+    """The ``[snapshot]`` section; the defaults when the config is unreadable (fail-open)."""
+    try:
+        return load_config().snapshot
+    except Exception:  # a broken config costs the knobs, never the onboarding
+        return SnapshotSettings()
+
+
 def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
     """Generate (or reuse) the codebase snapshot; ``None`` if repomix is unavailable."""
     if snapshot_core.exists(project.id) and not refresh:
         return snapshot_core.load(project.id)
+    settings = snapshot_settings()
     try:
         return snapshot_core.generate(
-            project.id, project.root, head=snapshot_core.head_sha(project.root)
+            project.id,
+            project.root,
+            head=snapshot_core.head_sha(project.root),
+            max_tokens=settings.max_tokens,
+            ignore=settings.ignore,
         )
     except snapshot_core.RepomixUnavailableError:
         return None

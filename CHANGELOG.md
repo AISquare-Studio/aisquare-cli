@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`project forget <id|name|codename|path>` and `project prune`** (#83), so a
+  store with hundreds of dead registrations can be cleaned. Measured on the
+  owner's box: 305 registered projects, most of them throwaway git worktrees,
+  and the fleet UI loaded state for every one before its first frame. `forget`
+  drops one registration and refuses (exit 2) while the project has live fleet
+  agents; `prune --missing` drops registrations whose root is gone from disk,
+  `prune --worktrees` those whose root is a linked git worktree of a repository
+  that is itself registered (neither flag: both). `prune` prints its plan and
+  asks at a terminal; off one it is a dry run unless `--yes`, and `--json`
+  without `--yes` lists the candidates and changes nothing. A plain forget is a
+  tombstone (store schema v12, `project.forgotten_at` — the `entry` and
+  `prompt` tables hold foreign keys to the project row, so a project with any
+  history cannot be deleted from under them): the project's context entries,
+  prompt history and board rows stay in the store, hidden, and come back if the
+  root is registered again. `--purge` deletes them, the ended fleet-agent rows
+  and `~/.aisquare/projects/<id>/`. Forgetting the ACTIVE project moves the pin
+  to the most recently touched remaining project, or clears it, and says so.
+
+### Fixed
+- `--json project list` objects now carry the `name` the table shows, so a
+  script can pick a project by name (#83).
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and

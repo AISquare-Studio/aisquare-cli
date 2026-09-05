@@ -161,6 +161,20 @@ one board. Set a repo's conventions up once and every worktree of it starts
 oriented; identity comes from `git rev-parse --git-common-dir`, not from
 walking up to the nearest marker.
 
+Registrations accumulate — every directory a command once ran in is one, and
+the fleet UI loads state for all of them. `aisquare project forget` drops one
+(its context, prompt history and board rows stay in the store, hidden, until
+the root is registered again; `--purge` deletes them and the snapshot too), and
+`aisquare project prune` sweeps the stale ones: roots that no longer exist, and
+worktrees of a repository that is itself registered. It shows the plan and asks
+before dropping anything; off a terminal it is a dry run unless `--yes`. Both
+refuse a project that has live fleet agents.
+
+```sh
+aisquare project forget ../old-checkout       # one registration; --purge deletes its history too
+aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
+```
+
 `aisquare project onboard` (also run by `init`) packs the codebase with
 Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
 **full pack** (every file), a **skeleton** (structure + signatures — the
@@ -536,7 +550,8 @@ aisquare
 ├── context (ctx)   add · list · show · edit · remove · search · preview
 │                   promote · import · export · —  your persistent memory
 ├── inject · why · log · status · doctor
-├── project (workspace)  info · list · switch · link · onboard [--refresh]
+├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
+│                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]

@@ -858,7 +858,9 @@ _NOT_AN_INVOCATION = (
 CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
-    "README.md": (55, 5),
+    # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
+    # fenced example to the memory section.
+    "README.md": (58, 5),
     "docs/connecting-your-agents-to-explainability.md": (11, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),

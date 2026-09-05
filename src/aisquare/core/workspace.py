@@ -84,6 +84,42 @@ def find_project_root(start: Path) -> Path:
     return start
 
 
+def worktree_principal(root: Path) -> Path | None:
+    """The principal repository a LINKED worktree at ``root`` belongs to, else ``None``.
+
+    Only a root whose ``.git`` is a FILE can be a linked worktree — a main
+    checkout has a ``.git`` directory and a plain directory has none — so that
+    is the precondition, and it is what keeps a subdirectory registered as its
+    own project (git would happily name the repo enclosing it) from being
+    mistaken for one. The file is read first: ``gitdir: <common>/worktrees/<n>``
+    is the shape git writes, needs no subprocess, still resolves after the
+    principal has been deleted, and covers a bare principal
+    (``repo.git/worktrees/x``). Any other content is put to git itself, whose
+    ``--git-common-dir`` differs from ``--git-dir`` exactly for a worktree.
+    """
+    dotgit = root / ".git"
+    try:
+        if not dotgit.is_file():
+            return None
+        text = dotgit.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if not line.startswith("gitdir:"):
+            continue
+        gitdir = Path(line[len("gitdir:") :].strip())
+        if not gitdir.is_absolute():
+            gitdir = root / gitdir
+        if gitdir.parent.name == "worktrees":
+            common = gitdir.parent.parent
+            principal = common.parent if common.name == ".git" else common
+            return principal.resolve()
+    principal_root = git_common_root(root)
+    if principal_root is None or principal_root == root.resolve():
+        return None
+    return principal_root
+
+
 def project_id_for(root: Path) -> str:
     """Derive a stable project id from a resolved root path."""
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()

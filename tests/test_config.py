@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from typer.testing import CliRunner
+
+from aisquare.cli.app import app
+from aisquare.core import snapshot
 from aisquare.core.config import (
     AppConfig,
     CaptureSettings,
     RedactionSettings,
+    SnapshotSettings,
     load_config,
     save_config,
 )
@@ -61,3 +66,42 @@ def test_ensure_home_creates_layout(isolated_home: Path) -> None:
     assert home == aisquare_home()
     assert cache_dir().is_dir()
     assert log_dir().is_dir()
+
+
+# --- [snapshot] max_tokens (#82) -----------------------------------------------------------
+
+
+def test_snapshot_budget_defaults_to_the_packers_constant() -> None:
+    """The knob exists, and its default IS the 150 000 the packer used to hardcode.
+
+    Nobody who has not set it sees a change: ``core.snapshot.MAX_TOKENS`` is now
+    read off this default rather than the other way round, so the two cannot
+    drift.
+    """
+    assert AppConfig().snapshot == SnapshotSettings(max_tokens=150_000)
+    assert AppConfig().snapshot.max_tokens == snapshot.MAX_TOKENS
+
+
+def test_snapshot_budget_loads_from_the_file_and_round_trips(tmp_path: Path) -> None:
+    target = tmp_path / "config.toml"
+    target.write_text("[snapshot]\nmax_tokens = 300000\n", encoding="utf-8")
+    loaded = load_config(target)
+    assert loaded.snapshot.max_tokens == 300_000
+    save_config(loaded, target)
+    assert load_config(target).snapshot.max_tokens == 300_000
+    assert "[snapshot]" in target.read_text(encoding="utf-8")
+
+
+def test_config_set_writes_the_snapshot_budget_and_rejects_a_non_number(
+    runner: CliRunner,
+) -> None:
+    """The command the failure message names, typed the way it names it."""
+    result = runner.invoke(app, ["config", "set", "snapshot.max_tokens", "300000"])
+    assert result.exit_code == 0, result.output
+    assert load_config().snapshot.max_tokens == 300_000
+    shown = runner.invoke(app, ["config", "get", "snapshot.max_tokens"])
+    assert shown.stdout.strip() == "snapshot.max_tokens = 300000"
+
+    rejected = runner.invoke(app, ["config", "set", "snapshot.max_tokens", "lots"])
+    assert rejected.exit_code != 0
+    assert load_config().snapshot.max_tokens == 300_000, "a rejected value must not land"

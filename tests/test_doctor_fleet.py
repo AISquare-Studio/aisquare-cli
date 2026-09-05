@@ -42,6 +42,7 @@ from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, S
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from aisquare.services.onboarding import fix_commands
 
 # --- fakes and seeds -------------------------------------------------------------------
 
@@ -670,6 +671,52 @@ def _ready_snapshot(project_id: str) -> None:
         file_count=3,
     )
     snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
+
+
+def _too_large_snapshot(project_id: str) -> Snapshot:
+    directory = snapshot_core.snapshot_dir(project_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    meta = Snapshot(
+        project_id=project_id,
+        generated_at=datetime.now(tz=UTC),
+        pack_path=snapshot_core.pack_path(project_id),
+        skeleton_path=snapshot_core.skeleton_path(project_id),
+        index_path=snapshot_core.index_path(project_id),
+        token_count=203_991,
+        compressed=True,
+        status="too_large",
+        full_token_count=412_318,
+        max_tokens=150_000,
+    )
+    snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
+    return meta
+
+
+def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#82: a ``too_large`` verdict is not "no codebase snapshot" — it has numbers and a way out.
+
+    The fix is ``--refresh`` on purpose: the old hint, ``Pack one: aisquare
+    project onboard``, reloaded the same verdict, which is how the line stayed a
+    warning forever. The detail is the SAME sentence ``project onboard`` prints,
+    by identity, so the two can never disagree on the numbers; and the UI turns
+    the hint into the ``--refresh`` button its fix table already knows.
+    """
+    root = tmp_path / "big"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
+    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    verdict = _too_large_snapshot(_seed(root).id)
+
+    check = _by_name(diagnostics.doctor())["snapshot"]
+
+    assert check.status is CheckStatus.warn
+    assert check.detail == snapshot_core.too_large_detail(verdict)
+    assert "full 412318 tokens, compressed 203991 tokens, budget 150000" in check.detail
+    assert check.fix == "Re-pack: aisquare project onboard --refresh"
+    assert [fix.argv for fix in fix_commands([check])] == [("project", "onboard", "--refresh")]
 
 
 def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(

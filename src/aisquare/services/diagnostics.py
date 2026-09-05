@@ -678,6 +678,11 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         return _ok(
             "snapshot", f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
         )
+    if snap is not None and snap.status == "too_large":
+        # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
+        # The fix is `--refresh` because a plain `onboard` only reloads this
+        # verdict — which is how the line stayed a warning forever.
+        return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
     return _warn(
         "snapshot",
         "no codebase snapshot for the active project",

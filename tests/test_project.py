@@ -114,3 +114,44 @@ def test_workspace_alias_works(runner: CliRunner, work_dir: Path) -> None:
     result = runner.invoke(app, ["--json", "workspace", "info"])
     assert result.exit_code == 0, result.output
     assert _json(result.stdout)["root"] == str(work_dir.resolve())
+
+
+def test_onboard_over_budget_names_its_numbers_and_the_knob_is_what_it_measures_against(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#82: not "too large to pack within the token budget" — which numbers, and what to type.
+
+    Then the loop the message describes actually closes: raise the knob it
+    names, re-pack with the flag it names, and the compressed pack is kept.
+    Rendered output, not the string passed in — ``[snapshot]`` is bracketed text
+    that Rich would eat with markup on.
+    """
+    from aisquare.core import snapshot
+
+    def _fake(_root: Path, *, compress: bool) -> tuple[str, str]:
+        count = "Total Tokens: 203,991" if compress else "Total Tokens: 412,318"
+        return "<files>\n</files>\n", count
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
+    # Read repomix's own count, whether or not this machine has tiktoken.
+    monkeypatch.setattr(snapshot, "_tiktoken_count", lambda _text: None)
+
+    result = runner.invoke(app, ["project", "onboard"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "snapshot: codebase too large: full 412318 tokens, compressed 203991 tokens, "
+        "budget 150000. Raise [snapshot] max_tokens (aisquare config set "
+        "snapshot.max_tokens <n>) or add a .repomixignore to exclude generated or vendored "
+        "trees. Re-pack: aisquare project onboard --refresh"
+    ) in result.stdout
+
+    assert runner.invoke(app, ["config", "set", "snapshot.max_tokens", "250000"]).exit_code == 0
+    again = runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
+    assert again.exit_code == 0, again.output
+    snap = _json(again.stdout)["snapshot"]
+    assert (snap["status"], snap["compressed"]) == ("ready", True)
+    assert (snap["full_token_count"], snap["token_count"], snap["max_tokens"]) == (
+        412318,
+        203991,
+        250000,
+    )

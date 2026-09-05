@@ -218,6 +218,25 @@ class FleetSettings(BaseModel):
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 
+class SnapshotSettings(BaseModel):
+    """The codebase snapshot ``aisquare project onboard`` packs with Repomix.
+
+    ``max_tokens`` is the budget a pack must fit. The full pack is tried first,
+    then the compressed one (signatures only); a repo whose compressed pack is
+    STILL over it gets no pack, a ``too_large`` snapshot, and a message naming
+    all three numbers. 150 000 mirrors the server's ``REPO_PACK_MAX_TOKENS`` so
+    artifacts stay consistent for a future sync — raise it for a repo you know
+    is big, or add a ``.repomixignore`` at the repo root to keep generated and
+    vendored trees out of the pack (#82).
+
+    Read from the config file alone, like ``[fleet]``: there is no
+    ``AISQUARE_SNAPSHOT_*`` variable, because this layer has no per-key
+    environment rung and one knob is not the place to grow one.
+    """
+
+    max_tokens: int = 150_000
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -229,6 +248,7 @@ class AppConfig(BaseModel):
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
+    snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
 
 
 def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:

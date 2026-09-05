@@ -7,8 +7,10 @@ future sync:
 - **skeleton** — ``repomix --compress --style xml`` (signatures/imports, bodies dropped);
 - **index** — a per-file map of char offsets + token counts, parsed from the pack.
 
-Adaptive, like the server: use the full pack when it fits the token cap; else the
-compressed pack; else mark the snapshot ``too_large`` and store no pack. Repomix
+Adaptive, like the server: use the full pack when it fits the token budget
+(``[snapshot] max_tokens``, default 150k); else the compressed pack; else mark
+the snapshot ``too_large``, store no pack, and record the three numbers so the
+failure can say what it measured (:func:`too_large_detail`). Repomix
 is a Node CLI — we shell out to ``repomix`` (or ``npx repomix``); if neither is
 available the snapshot is skipped, not fatal.
 """
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from aisquare.core import paths
+from aisquare.core.config import SnapshotSettings
 from aisquare.models import Snapshot
 
 
@@ -38,7 +41,10 @@ class IndexEntry(TypedDict):
     token_count: int
 
 
-MAX_TOKENS = 150_000  # mirrors REPO_PACK_MAX_TOKENS
+#: The built-in budget — ``[snapshot] max_tokens`` at its default. Callers that
+#: honour the operator's config (``services.project``) read the section and pass
+#: it to :func:`generate`; this is what everyone else gets.
+MAX_TOKENS = SnapshotSettings().max_tokens
 _PACK_TIMEOUT = 600
 _FILE_TAG = re.compile(r'<file path="([^"]+)">')
 _TOTAL_TOKENS = re.compile(r"Total Tokens:\s*([\d,]+)", re.IGNORECASE)
@@ -190,10 +196,15 @@ def _build_index(pack_text: str) -> list[IndexEntry]:
     return entries
 
 
-def generate(project_id: str, root: Path, *, head: str | None = None) -> Snapshot:
+def generate(
+    project_id: str, root: Path, *, head: str | None = None, max_tokens: int = MAX_TOKENS
+) -> Snapshot:
     """Pack ``root`` and write the snapshot artifacts under the project's data dir.
 
-    Raises :class:`RepomixUnavailableError` if repomix cannot be run.
+    ``max_tokens`` is the budget both packs are held to. The verdict records it
+    and the full pack's size whatever the outcome, so a ``too_large`` result can
+    say what it saw. Raises :class:`RepomixUnavailableError` if repomix cannot
+    be run.
     """
     directory = snapshot_dir(project_id)
     directory.mkdir(parents=True, exist_ok=True)
@@ -204,12 +215,14 @@ def generate(project_id: str, root: Path, *, head: str | None = None) -> Snapsho
         pack_path=pack_path(project_id),
         skeleton_path=skeleton_path(project_id),
         index_path=index_path(project_id),
+        max_tokens=max_tokens,
     )
 
     full_text, full_stdout = _run_repomix(root, compress=False)
     full_tokens = _total_tokens(full_text, full_stdout)
+    meta.full_token_count = full_tokens
 
-    if full_tokens <= MAX_TOKENS:
+    if full_tokens <= max_tokens:
         _write_pack(meta, full_text, tokens=full_tokens, compressed=False)
         try:  # best-effort skeleton; the full pack still ships if this fails
             skeleton_text, skeleton_stdout = _run_repomix(root, compress=True)
@@ -220,7 +233,7 @@ def generate(project_id: str, root: Path, *, head: str | None = None) -> Snapsho
     else:
         compressed_text, compressed_stdout = _run_repomix(root, compress=True)
         compressed_tokens = _total_tokens(compressed_text, compressed_stdout)
-        if compressed_tokens <= MAX_TOKENS:
+        if compressed_tokens <= max_tokens:
             _write_pack(meta, compressed_text, tokens=compressed_tokens, compressed=True)
         else:
             meta.token_count = compressed_tokens
@@ -229,6 +242,32 @@ def generate(project_id: str, root: Path, *, head: str | None = None) -> Snapsho
 
     meta_path(project_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
     return meta
+
+
+#: What to do about a ``too_large`` verdict once a remedy is in place. A plain
+#: ``project onboard`` reuses the stored verdict — only ``--refresh`` re-measures.
+REPACK_HINT = "Re-pack: aisquare project onboard --refresh"
+
+
+def too_large_detail(meta: Snapshot) -> str:
+    """The one sentence a ``too_large`` snapshot is reported with — CLI and doctor alike.
+
+    Names what was measured and the two ways out, so the operator never has to
+    guess how far over they are or what to type. A snapshot.json from before the
+    numbers were recorded (0.6.0) has none to name; it says so rather than
+    printing zeros, and its only way out is :data:`REPACK_HINT`.
+    """
+    if meta.max_tokens is None or meta.full_token_count is None:
+        return (
+            "codebase too large to pack within the token budget "
+            "(packed before the numbers were recorded)."
+        )
+    return (
+        f"codebase too large: full {meta.full_token_count} tokens, compressed "
+        f"{meta.token_count} tokens, budget {meta.max_tokens}. Raise [snapshot] max_tokens "
+        "(aisquare config set snapshot.max_tokens <n>) or add a .repomixignore to exclude "
+        "generated or vendored trees."
+    )
 
 
 def _write_pack(meta: Snapshot, pack_text: str, *, tokens: int, compressed: bool) -> None:

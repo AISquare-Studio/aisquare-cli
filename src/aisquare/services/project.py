@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core.config import load_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.core.workspace import (
@@ -92,13 +93,24 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     return OnboardReport(seeded=seeded, snapshot=_ensure_snapshot(project, refresh=refresh))
 
 
+def snapshot_budget() -> int:
+    """``[snapshot] max_tokens``; the built-in default when the config is unreadable (fail-open)."""
+    try:
+        return load_config().snapshot.max_tokens
+    except Exception:  # a broken config costs the knob, never the onboarding
+        return snapshot_core.MAX_TOKENS
+
+
 def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> Snapshot | None:
     """Generate (or reuse) the codebase snapshot; ``None`` if repomix is unavailable."""
     if snapshot_core.exists(project.id) and not refresh:
         return snapshot_core.load(project.id)
     try:
         return snapshot_core.generate(
-            project.id, project.root, head=snapshot_core.head_sha(project.root)
+            project.id,
+            project.root,
+            head=snapshot_core.head_sha(project.root),
+            max_tokens=snapshot_budget(),
         )
     except snapshot_core.RepomixUnavailableError:
         return None

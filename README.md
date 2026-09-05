@@ -168,6 +168,22 @@ cheap thing agents read first), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
 
+A pack has to fit a **token budget**: `[snapshot] max_tokens` in
+`~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
+The full pack is tried first, then a compressed one; when even that is over, no
+pack is stored and the failure names its numbers — `snapshot: codebase too
+large: full 412318 tokens, compressed 203991 tokens, budget 150000` — and its
+two ways out. `aisquare doctor` repeats the same line until one is taken:
+
+```sh
+aisquare config set snapshot.max_tokens 300000   # raise the budget for a repo you know is big
+aisquare project onboard --refresh               # re-pack; a plain onboard only reuses the verdict
+```
+
+or add a `.repomixignore` at the repo root (`.gitignore` syntax, read by
+Repomix) to keep generated and vendored trees out of the pack — a smaller pack
+is also a cheaper one for every agent that reads it.
+
 ---
 
 # Part 2 — Orchestration (advanced)

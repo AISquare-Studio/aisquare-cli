@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The snapshot token budget is a config knob, and the failure names its
+  numbers (#82).** `aisquare project onboard` on a large repo printed only
+  "codebase too large to pack within the token budget" against a hardcoded
+  150 000, and the `snapshot` doctor line stayed a warning whose fix — a plain
+  `onboard` — only reloaded the same verdict. The budget is now `[snapshot]
+  max_tokens` in `config.toml` (`aisquare config set snapshot.max_tokens <n>`;
+  the default is unchanged), the snapshot records the full-pack and
+  compressed-pack sizes it measured alongside the budget, and `onboard` and
+  `doctor` print the same sentence with all three numbers and both remedies —
+  raise the budget, or add a `.repomixignore` — followed by the `--refresh`
+  re-pack that actually re-measures. A `snapshot.json` written by 0.6.0 has no
+  numbers to name and says so rather than printing zeros. Read from the config
+  file alone, like `[fleet]`: no environment variable, because the config layer
+  has no per-key env rung and one knob is not the place to grow one.
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and

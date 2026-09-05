@@ -15,6 +15,7 @@ import typer
 from rich.table import Table
 
 from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -307,7 +308,11 @@ def emit_onboard(report: OnboardReport) -> None:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
         console.print(line)
     elif snapshot is not None and snapshot.status == "too_large":
-        console.print("snapshot: codebase too large to pack within the token budget")
+        # The same sentence the doctor prints (one definition, so the two never
+        # disagree on the numbers), plus what to run once a remedy is in place.
+        console.print(
+            f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
+        )
     else:
         console.print("snapshot: skipped (repomix/Node not available)")
     if report.seeded:

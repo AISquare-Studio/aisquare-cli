@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The selected project row in the fleet sidebar showed its folder glyph and an
+  empty highlighted band — no name, no codename.** Any project whose basename is
+  wider than the sidebar's title column (25 cells at the default width;
+  `AISquare-Explainability-SDK` is 27) was affected, in every theme. The row's
+  Rich `Text` asks for `no_wrap` and an ellipsis, but Textual keeps only the
+  text and its spans and lets the widget's CSS `text-wrap` decide; its default
+  wraps, so the name landed on a second line that the one-line row clipped. The
+  sidebar's one-line rows — project title, agent rows, the path subtitle, the
+  Doctor lines — now declare `text-wrap: nowrap; text-overflow: ellipsis`, so a
+  long name is cut with `…` where it stands. (#86)
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and

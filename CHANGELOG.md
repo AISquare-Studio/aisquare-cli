@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Self-invocation is no longer shadowed by a project's own `aisquare/`
+  package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
+  `init`, `doctor` and `project onboard` from the fleet UI, for every fleet
+  window, for the detached distiller, and as the last-resort hook command.
+  `-m` puts the current directory first on `sys.path`, so from any repo whose
+  root holds a top-level `aisquare/` package — the explainability SDK's own
+  repo ships one — every one of those died with `No module named
+  aisquare.__main__`, and a fleet window did so even with `PYTHONSAFEPATH`
+  exported by the spawner, because a window inherits the tmux server's
+  environment. All four now build their argv through one helper that passes
+  the interpreter `-P` (the flag form of `PYTHONSAFEPATH`, Python 3.11+): it
+  ends with that process, so a coder's own `python -m pytest` inherits
+  nothing, and it needs no environment to travel. `aisquare doctor` gains a
+  `self-invocation` row that warns when the directory would shadow a
+  hand-typed `python -m aisquare`.
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and

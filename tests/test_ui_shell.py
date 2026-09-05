@@ -30,6 +30,7 @@ import pytest
 from textual import events
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
+from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widgets import Button, Static, Switch
 from textual.widgets._toast import Toast
@@ -184,6 +185,16 @@ def shown(widget: Static) -> str:
     plain = getattr(visual, "plain", None)
     assert isinstance(plain, str), f"{widget!r} renders a {type(visual).__name__}, not text"
     return plain
+
+
+def composited(widget: Static) -> str:
+    """The one strip Textual composites for a ``height: 1`` row — what the eye gets.
+
+    ``shown`` reads the widget's visual, which is the WHOLE text it was handed; a
+    row that wraps and clips shows less than that, and only the strip sees it.
+    """
+    (strip,) = widget.render_lines(Region(0, 0, widget.size.width, 1))
+    return strip.text
 
 
 async def settle(app: FleetApp) -> None:
@@ -354,6 +365,56 @@ def test_codename_badge_and_duplicate_basename_subtitle(tmp_path: Path, script: 
     assert cards["prj_w"][1] and cards["prj_w"][2].endswith("work/api")
     assert cards["prj_o"][1] and cards["prj_o"][2].endswith("oss/api")
     assert cards["prj_u"][1] is False and cards["prj_u"][2] == ""
+
+
+def test_a_long_project_name_is_cut_with_an_ellipsis_not_wrapped_out_of_sight(
+    tmp_path: Path, script: Script
+) -> None:
+    """What the ROW shows, not what the widget holds — ``shown()`` cannot see this one.
+
+    Reported 2026-09-05 from a live fleet (WSL2, tmux 3.2): the selected project
+    row was the disclosure, the folder glyph, then a highlighted band with no
+    name and no codename, while the manager row under it was fine. Reproduced
+    headless against a copy of that store: ``ProjectTitle.visual.plain`` was
+    ``'🗂 AISquare-Explainability-SDK  cosmic-narwhal  1'`` — the data was never
+    the bug — and the one strip Textual composited for the row was
+    ``'🗂                        '``, in textual-dark, textual-light, nord and
+    gruvbox alike. ``project_title_text`` builds its Rich ``Text`` with
+    ``no_wrap=True, overflow="ellipsis"``, but Textual's
+    ``Content.from_rich_text`` keeps only the plain text and the spans; the
+    widget's CSS ``text-wrap`` decides, its default is ``wrap``, the 27-cell name
+    did not fit the 25-cell title and wrapped onto a second line that
+    ``Activatable { height: 1 }`` clipped. Every ``shown()`` assertion in this
+    file read the full title and passed (#86).
+    """
+    seed(
+        tmp_path,
+        ("prj_l", "AISquare-Explainability-SDK", "cosmic-narwhal"),
+        ("prj_s", "api", "amber-otter"),
+    )
+    script["prj_l"] = [status("prj_l", "manager", "manager", "waiting")]
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str, bool, str]:
+        app = fleet_app(pilot)
+        title = card_for(app, "prj_l").query_one(ProjectTitle)
+        await pilot.click(title)  # the selected, highlighted row the report was about
+        await pilot.pause()
+        return (
+            shown(title),
+            composited(title),
+            composited(card_for(app, "prj_s").query_one(ProjectTitle)),
+            title.has_class("selected"),
+            composited(row_for(app, "agt_l_manager")),
+        )
+
+    held, long_row, short_row, selected, manager_row = drive(go)
+    assert selected
+    assert held.startswith("🗂 AISquare-Explainability-SDK  cosmic-narwhal")  # the data, intact
+    assert long_row.startswith("🗂 AISquare-Explainabilit")  # the NAME reaches the row
+    assert long_row.rstrip().endswith("…")  # and the cut is declared, not silent
+    # Controls: a name that fits is shown whole and uncut; the agent row still renders.
+    assert short_row.rstrip() == "🗂 api  amber-otter"
+    assert manager_row.split()[:2] == ["🧭", "manager"]
 
 
 def test_disclosure_collapses_the_agent_rows_without_selecting(

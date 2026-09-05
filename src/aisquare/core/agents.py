@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from aisquare.core import paths
+from aisquare.core import paths, selfcli
 from aisquare.models import AgentHookSite, AgentInfo
 
 # Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
@@ -128,9 +128,12 @@ def _aisquare_command() -> str:
 
     The running executable wins: whoever installs hooks is the aisquare the
     hooks should call, even when it was invoked as ``.venv/bin/aisquare``
-    without being on PATH. Falls back to PATH lookup, then to ``python -m
-    aisquare`` via the current interpreter — never to a bare name a hook
-    shell might not resolve.
+    without being on PATH. Falls back to PATH lookup, then to ``python -P -m
+    aisquare`` via the current interpreter (:func:`selfcli.argv_for`, so the
+    ``-P`` that keeps a project's own ``aisquare/`` off ``sys.path`` has one
+    home — #81) — never to a bare name a hook shell might not resolve. A flag
+    rather than ``env PYTHONSAFEPATH=1 …`` because hooks run under ``cmd.exe``
+    too, where ``env`` is not a program.
     """
     argv0 = Path(sys.argv[0])
     if _is_aisquare_program(argv0.name) and argv0.exists():
@@ -138,7 +141,7 @@ def _aisquare_command() -> str:
     found = shutil.which("aisquare")
     if found:
         return _quote(found)
-    return f"{_quote(sys.executable)} -m aisquare"
+    return " ".join(_quote(part) for part in selfcli.argv_for([]))
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
@@ -156,7 +159,9 @@ def _is_aisquare_hook_command(command: str) -> bool:
 
     Deliberately strict: the command must *end* with ``hook <subcommand>``
     AND the invoked program must be aisquare itself (an ``aisquare``/``asq``
-    executable, or ``python -m aisquare``). A bare-substring match would
+    executable, or ``python [-P] -m aisquare`` — the ``-m aisquare`` pair is
+    matched by position, so hooks written before ``-P`` still count as ours
+    and ``connect`` replaces rather than duplicates them). A bare-substring match would
     classify unrelated user hooks like ``webhook stop`` or ``~/bin/my-hook
     stop`` as ours and silently delete them on connect/disconnect. Parsing
     uses shlex so aisquare paths containing spaces (quoted at install time)

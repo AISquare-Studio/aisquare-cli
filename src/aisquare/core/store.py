@@ -12,7 +12,9 @@ On-disk shape (``~/.aisquare/context.db``):
 - ``project``    — projects referenced by ``project``-pool entries.
 
 Deletes are soft: ``delete`` stamps ``deleted_at`` and leaves a tombstone so the
-removal can propagate when sync lands. Every read filters tombstones out.
+removal can propagate when sync lands. Every read filters tombstones out. A
+project is forgotten the same way (``forgotten_at``, see v12); only
+``purge_project`` deletes rows for real.
 """
 
 from __future__ import annotations
@@ -252,6 +254,18 @@ ALTER TABLE project ADD COLUMN codename TEXT;
 CREATE UNIQUE INDEX project_codename ON project (codename);
 """
 
+# v12: ``project forget`` — a tombstone on the registration, in the same spirit as
+# ``entry.deleted_at``. A hard delete is not available to a plain forget:
+# ``entry.project_id`` and ``prompt.project_id`` are FOREIGN KEYS to this row
+# with no cascade and ``PRAGMA foreign_keys = ON``, so a project with any
+# context or prompt history cannot be deleted from under them. Every project
+# read filters ``forgotten_at IS NOT NULL`` out; ``ensure_project`` clears it, so
+# a registration comes back the moment something registers the root again.
+# ``forget --purge`` deletes the dependents first and then the row, for real.
+_SCHEMA_V12 = """
+ALTER TABLE project ADD COLUMN forgotten_at TEXT;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -265,8 +279,11 @@ _MIGRATIONS = (
     _SCHEMA_V9,
     _SCHEMA_V10,
     _SCHEMA_V11,
+    _SCHEMA_V12,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+
+_PROJECT_COLUMNS = "id, root, linked_repos, codename"
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
@@ -314,6 +331,9 @@ class ContextStore(Protocol):
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
+    def forget_project(self, project_id: str) -> None: ...
+    def purge_project(self, project_id: str) -> dict[str, int]: ...
+    def project_activity(self) -> dict[str, str]: ...
     def add_prompt(
         self, text: str, project_id: str | None, source: str = "claude-code"
     ) -> PromptRecord: ...
@@ -651,9 +671,17 @@ class SqliteStore:
         return promoted
 
     def ensure_project(self, project: ProjectInfo) -> None:
+        """Register the project, or revive a forgotten registration of the same root.
+
+        Registering IS the revival: ``project forget`` hides a row rather than
+        deleting it (see v12), and the next thing that registers the root —
+        ``init``, a hook recording a prompt, ``context add --project`` — wants the
+        project visible again, with whatever history the row still carries.
+        """
         self._conn.execute(
-            "INSERT OR IGNORE INTO project (id, root, name, linked_repos, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO project (id, root, name, linked_repos, created_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
             (
                 project.id,
                 str(project.root),
@@ -666,23 +694,113 @@ class SqliteStore:
 
     def list_projects(self) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos, codename FROM project ORDER BY name"
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
     def get_project(self, project_id: str) -> ProjectInfo | None:
         row = self._conn.execute(
-            "SELECT id, root, linked_repos, codename FROM project WHERE id = ?", (project_id,)
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ? AND forgotten_at IS NULL",
+            (project_id,),
         ).fetchone()
         return _row_to_project(row) if row is not None else None
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos, codename FROM project "
-            "WHERE id GLOB ? OR name = ? OR codename = ? ORDER BY name",
+            f"SELECT {_PROJECT_COLUMNS} FROM project "
+            "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
+            "ORDER BY name",
             (_glob_prefix(term), term, term),
         ).fetchall()
         return [_row_to_project(row) for row in rows]
+
+    def forget_project(self, project_id: str) -> None:
+        """Hide the registration; everything that references it stays put.
+
+        A tombstone, not a delete — the FOREIGN KEYS from ``entry`` and
+        ``prompt`` forbid deleting a project with history, and a plain forget
+        should not cost history anyway. The context entries, prompt history,
+        board rows and ended fleet-agent rows remain in the store, unreachable
+        through any project read until the root is registered again.
+        """
+        cursor = self._conn.execute(
+            "UPDATE project SET forgotten_at = ? WHERE id = ? AND forgotten_at IS NULL",
+            (_now_iso(), project_id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(project_id)
+
+    def purge_project(self, project_id: str) -> dict[str, int]:
+        """Delete the registration AND every row that belongs to it, in one transaction.
+
+        Dependents go first, in FK order, so the ``project`` delete is legal
+        under ``PRAGMA foreign_keys = ON``; the counts say what each table gave
+        up. The team tables and ``fleet_agent`` carry no FK — deleted by
+        ``project_id`` the way every read of them is keyed. ``team_meta`` is a
+        key/value bag whose keys embed either the project id (the distiller's
+        watermark, signals) or a session id (nudge debounce, continuation
+        counters), so its rows are matched on both. LIVE fleet agents are the
+        caller's problem to refuse before getting here: this deletes their rows
+        too, and a pane that is still running would then be unaccounted for.
+        """
+        sessions = [
+            str(row["id"])
+            for row in self._conn.execute(
+                "SELECT id FROM team_session WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        ]
+        removed: dict[str, int] = {}
+        with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+            for table in ("entry", "prompt", "team_event", "team_task", "team_session"):
+                cursor = self._conn.execute(
+                    f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
+                )
+                removed[table] = cursor.rowcount
+            cursor = self._conn.execute(
+                "DELETE FROM fleet_agent WHERE project_id = ?", (project_id,)
+            )
+            removed["fleet_agent"] = cursor.rowcount
+            meta_keys = [f"distill_seq:{project_id}", *(f"nudge:{sid}" for sid in sessions)]
+            meta_globs = [
+                f"signal/{_glob_prefix(project_id)[:-1]}/*",
+                *(f"continuations:{_glob_prefix(sid)[:-1]}:*" for sid in sessions),
+            ]
+            clauses = ["key = ?"] * len(meta_keys) + ["key GLOB ?"] * len(meta_globs)
+            cursor = self._conn.execute(
+                f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}",
+                (*meta_keys, *meta_globs),
+            )
+            removed["team_meta"] = cursor.rowcount
+            cursor = self._conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
+            removed["project"] = cursor.rowcount
+        if removed["project"] != 1:
+            raise KeyError(project_id)
+        return removed
+
+    def project_activity(self) -> dict[str, str]:
+        """When each visible project was last touched, as an ISO-8601 UTC string.
+
+        The project row itself records only ``created_at``; "touched" is the
+        newest of that and every timestamp the project's rows carry — a fact
+        updated, a prompt captured, a session seen, a task moved, an event
+        posted, an agent spawned. Uniform ISO strings compare lexicographically,
+        which is what lets one ``MAX`` span six tables. Used to pick where the
+        active pin lands when the active project is forgotten.
+        """
+        rows = self._conn.execute(
+            "SELECT p.id, MAX(t.at) AS at FROM project p JOIN ("
+            "  SELECT id AS project_id, created_at AS at FROM project"
+            "  UNION ALL SELECT project_id, updated_at FROM entry WHERE project_id IS NOT NULL"
+            "  UNION ALL SELECT project_id, created_at FROM prompt WHERE project_id IS NOT NULL"
+            "  UNION ALL SELECT project_id, last_seen_at FROM team_session"
+            "  UNION ALL SELECT project_id, updated_at FROM team_task"
+            "  UNION ALL SELECT project_id, created_at FROM team_event"
+            "  UNION ALL SELECT project_id, created_at FROM fleet_agent"
+            ") t ON t.project_id = p.id "
+            "WHERE p.forgotten_at IS NULL GROUP BY p.id"
+        ).fetchall()
+        return {str(row["id"]): str(row["at"]) for row in rows}
 
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo:
         project = self.get_project(project_id)

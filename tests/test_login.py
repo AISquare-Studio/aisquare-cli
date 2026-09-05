@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import stat
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -189,6 +190,17 @@ def test_ctrl_c_stores_nothing_and_exits_130(
     assert result.exit_code == 130
     assert "Sign-in cancelled. Nothing was stored." in result.output
     assert "iam_token" not in _stored()
+
+
+def test_the_escape_watcher_stop_waits_for_its_thread() -> None:
+    # The thread's ``finally`` restores the terminal; stop() must not return
+    # while it could still be running, or a cancelled login leaves the shell
+    # in cbreak mode. (Off a TTY the thread ends at once; the join is what is
+    # under test.)
+    watcher = auth_cli._EscapeWatcher(threading.Event())
+    watcher.start()
+    watcher.stop()
+    assert not watcher._thread.is_alive()
 
 
 def test_the_local_deadline_ends_an_endless_pending(
@@ -394,6 +406,74 @@ def test_a_second_login_replaces_and_revokes_the_first(
     assert "Already signed in as anmol@example.com" in result.output
     assert _stored()["iam_token"] == idp.issued[1]
     assert idp.revoked == [first]
+
+
+def test_a_login_to_another_host_never_hands_it_the_first_hosts_token(
+    runner: CliRunner, idp: IdentityProviderStub
+) -> None:
+    assert _login(runner, idp.url).exit_code == 0
+    other = IdentityProviderStub()
+    try:
+        result = _login(runner, other.url)
+        assert result.exit_code == 0, result.output
+        # The old token is neither sent to the new server nor revoked on the old
+        # one (the CLI is no longer talking to it); it expires on its own.
+        assert "/o/revoke_token/" not in other.paths()
+        assert other.revoked == []
+        assert _stored()["iam_token"] == other.issued[0]
+    finally:
+        other.close()
+    assert idp.revoked == []
+    assert "/o/revoke_token/" not in idp.paths()
+    assert _stored()["iam_api_url"] == other.url
+
+
+def test_login_with_token_retires_the_previous_session_on_the_same_host(
+    runner: CliRunner, idp: IdentityProviderStub
+) -> None:
+    assert _login(runner, idp.url).exit_code == 0
+    first = idp.issued[0]
+    idp.issued.append("aisq_" + "v" * 43)
+    result = runner.invoke(
+        app, ["login", "--with-token", "--api-url", idp.url], input="aisq_" + "v" * 43 + "\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert idp.revoked == [first]
+    assert _stored()["iam_token"] == "aisq_" + "v" * 43
+
+
+def test_discovered_endpoints_must_share_the_servers_origin(runner: CliRunner) -> None:
+    idp = IdentityProviderStub(
+        discovery_overrides={"token_endpoint": "https://elsewhere.example/o/token/"}
+    )
+    try:
+        result = _login(runner, idp.url, json_mode=True)
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["error"] == "unsupported_server"
+        # Refused before any code was requested, so nothing could be redirected.
+        assert "/o/device-authorization/" not in idp.paths()
+    finally:
+        idp.close()
+    assert "iam_token" not in _stored()
+
+
+def test_a_sign_in_link_over_plain_http_to_a_remote_host_is_refused(runner: CliRunner) -> None:
+    idp = IdentityProviderStub(verification_uri="http://elsewhere.example/cli")
+    try:
+        result = _login(runner, idp.url, json_mode=True)
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["error"] == "unsupported_server"
+        assert idp.polls() == 0
+    finally:
+        idp.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_the_discovery_cache_is_private(runner: CliRunner, idp: IdentityProviderStub) -> None:
+    assert _login(runner, idp.url).exit_code == 0
+    cached = sorted((paths.cache_dir() / "oidc").glob("*.json"))
+    assert cached, "discovery was not cached"
+    assert stat.S_IMODE(cached[0].stat().st_mode) == 0o600
 
 
 # --------------------------------------------------------------------------- the API helper

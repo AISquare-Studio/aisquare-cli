@@ -30,14 +30,33 @@ def complete_sign_in(
         scope=scope,
         claims=claims,
     )
-    if previous is not None and previous.token != access_token:
-        # Best effort: a failure here leaves a token that expires on its own.
-        iam.revoke(endpoints, previous.token)
+    _retire(previous, api_url, endpoints, access_token)
     return session
 
 
+def _retire(
+    previous: iam.Session | None, api_url: str, endpoints: iam.Endpoints, new_token: str
+) -> None:
+    """Revoke the session this sign-in replaced, but only against its own host.
+
+    A stored token belongs to ``previous.api_url``. Sending it to any other
+    server's revocation endpoint would hand that server a live bearer for the
+    first one, so a sign-in to a different host leaves the old token alone (it
+    expires on its own). Best effort: a failed revoke is not a failed sign-in.
+    """
+    if previous is None or previous.token == new_token:
+        return
+    if previous.api_url.rstrip("/") != api_url.rstrip("/"):
+        return
+    iam.revoke(endpoints, previous.token)
+
+
 def sign_in_with_token(api_url: str, token: str) -> iam.Session:
-    """``login --with-token``: a token obtained elsewhere, checked against userinfo, then stored."""
+    """``login --with-token``: a token obtained elsewhere, checked against userinfo, then stored.
+
+    Retires the session it replaces exactly like the browser flow does, so the
+    two ways of signing in agree about what "replaces" means.
+    """
     if not token:
         raise iam.IamError("invalid_token", "No token was read from stdin.")
     endpoints = iam.discover(api_url)
@@ -49,7 +68,12 @@ def sign_in_with_token(api_url: str, token: str) -> iam.Session:
                 "invalid_token", "That token was not accepted. It may be expired or revoked."
             ) from exc
         raise
-    return iam.store_session(api_url=api_url, token=token, expires_in=None, scope="", claims=claims)
+    previous = iam.stored_session()
+    session = iam.store_session(
+        api_url=api_url, token=token, expires_in=None, scope="", claims=claims
+    )
+    _retire(previous, api_url, endpoints, token)
+    return session
 
 
 def sign_out(session: iam.Session) -> bool:

@@ -64,6 +64,9 @@ it like a password. Every command accepts `--json` for machine-readable output.
 For CI and other machines without a browser, set `AISQUARE_TOKEN` in the
 environment. It is used read-only and wins over the file; `aisquare login`
 refuses to run while it is set, so a shell cannot end up with two identities.
+Unlike a stored session, it is not tied to a host: it is sent to whatever
+server `--api-url` or `AISQUARE_API_URL` names, so set it only where every
+command talks to the server that issued it.
 
 To sign in with a token obtained elsewhere instead of the browser:
 

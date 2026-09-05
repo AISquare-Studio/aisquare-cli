@@ -270,12 +270,21 @@ def discover(api_url: str, *, refresh: bool = False) -> Endpoints:
         cache_file.write_text(
             json.dumps({"fetched_at": time.time(), "document": result.body}), encoding="utf-8"
         )
+        # The document names where the token goes; nobody else on the machine
+        # gets to edit that. (Every URL in it is also re-checked on read.)
+        cache_file.chmod(0o600)
     except OSError:
         pass  # the cache is a convenience
     return endpoints
 
 
 def _endpoints_from(document: dict[str, Any], api_url: str) -> Endpoints:
+    """Read the discovery document, refusing any endpoint off the API's origin.
+
+    ``resolve_api_url`` only lets https (or loopback http) through the front
+    door; a document, from the server or from the on-disk cache, must not be
+    able to point the device code and then the bearer somewhere else.
+    """
     required = ("device_authorization_endpoint", "token_endpoint", "userinfo_endpoint")
     missing = [key for key in required if not document.get(key)]
     if missing:
@@ -283,13 +292,46 @@ def _endpoints_from(document: dict[str, Any], api_url: str) -> Endpoints:
             "unsupported_server",
             f"{api_url} does not offer device sign-in (discovery lacks {', '.join(missing)}).",
         )
+    revocation = document.get("revocation_endpoint") or f"{api_url}/o/revoke_token/"
     return Endpoints(
         issuer=str(document.get("issuer", api_url)),
-        device_authorization=str(document["device_authorization_endpoint"]),
-        token=str(document["token_endpoint"]),
-        userinfo=str(document["userinfo_endpoint"]),
-        revocation=str(document.get("revocation_endpoint") or f"{api_url}/o/revoke_token/"),
+        device_authorization=_same_origin(document["device_authorization_endpoint"], api_url),
+        token=_same_origin(document["token_endpoint"], api_url),
+        userinfo=_same_origin(document["userinfo_endpoint"], api_url),
+        revocation=_same_origin(revocation, api_url),
     )
+
+
+def _safe_scheme(url: str) -> bool:
+    parsed = urlparse(url)
+    loopback = parsed.scheme == "http" and (parsed.hostname or "") in LOOPBACK_HOSTS
+    return bool(parsed.hostname) and (parsed.scheme == "https" or loopback)
+
+
+def _same_origin(value: Any, api_url: str) -> str:
+    """An endpoint credentials will be sent to: https (or loopback) AND the API's own origin."""
+    url = str(value)
+    parsed, api = urlparse(url), urlparse(api_url)
+    if not _safe_scheme(url) or (parsed.scheme, parsed.netloc.lower()) != (
+        api.scheme,
+        api.netloc.lower(),
+    ):
+        raise IamError(
+            "unsupported_server",
+            f"{api_url} advertises an endpoint on another server ({url}). "
+            "Refusing to send credentials there.",
+        )
+    return url
+
+
+def _safe_link(value: Any, issuer: str) -> str:
+    """A link the person will open: any host, but never plain http off the loopback."""
+    url = str(value)
+    if not _safe_scheme(url):
+        raise IamError(
+            "unsupported_server", f"{issuer} sent a sign-in link over plain http ({url}). Refusing."
+        )
+    return url
 
 
 # --------------------------------------------------------------------------- device flow
@@ -328,9 +370,9 @@ def start_device_authorization(endpoints: Endpoints) -> DeviceAuthorization:
         return DeviceAuthorization(
             device_code=str(body["device_code"]),
             user_code=str(body["user_code"]),
-            verification_uri=str(body["verification_uri"]),
-            verification_uri_complete=str(
-                body.get("verification_uri_complete") or body["verification_uri"]
+            verification_uri=_safe_link(body["verification_uri"], endpoints.issuer),
+            verification_uri_complete=_safe_link(
+                body.get("verification_uri_complete") or body["verification_uri"], endpoints.issuer
             ),
             expires_in=int(body.get("expires_in", 900)),
             interval=int(body.get("interval", 5)),
@@ -442,6 +484,8 @@ def store_session(
         KEY_SUB: str(claims.get("sub", "")),
         KEY_EMAIL: str(claims.get("email", "")),
         KEY_NAME: str(claims.get("name", "")),
+        # Recorded, not read back yet: a second client_id in this file would mean
+        # a second stored session, and the reader that handles that is not here.
         KEY_CLIENT_ID: CLIENT_ID,
     }
     credentials.store(**values)

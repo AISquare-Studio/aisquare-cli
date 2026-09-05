@@ -282,7 +282,12 @@ class _EscapeWatcher:
         self._thread.start()
 
     def stop(self) -> None:
+        # Wait for the thread: its ``finally`` puts the terminal back into
+        # line mode, and a daemon thread killed at interpreter exit never
+        # runs it. The join is bounded by the watcher's own select() timeout.
         self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=0.5)
 
     def _run(self) -> None:
         try:

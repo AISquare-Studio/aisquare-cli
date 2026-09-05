@@ -33,9 +33,13 @@ class IdentityProviderStub:
         interval: int = 0,
         expires_in: int = 900,
         start_status: int = 200,
+        discovery_overrides: dict[str, Any] | None = None,
+        verification_uri: str | None = None,
     ) -> None:
         self.token_script = list(token_script or ["pending", "token"])
         self.discovery = discovery
+        self.discovery_overrides = dict(discovery_overrides or {})
+        self.verification_uri = verification_uri
         self.interval = interval
         self.expires_in = expires_in
         self.start_status = start_status
@@ -103,19 +107,18 @@ class IdentityProviderStub:
             if not self.discovery:
                 handler._send(404, {"detail": "Not found."})
                 return
-            handler._send(
-                200,
-                {
-                    "issuer": f"{self.url}/o",
-                    "device_authorization_endpoint": f"{self.url}/o/device-authorization/",
-                    "token_endpoint": f"{self.url}/o/token/",
-                    "userinfo_endpoint": f"{self.url}/o/userinfo/",
-                    "revocation_endpoint": f"{self.url}/o/revoke_token/",
-                    "jwks_uri": f"{self.url}/o/.well-known/jwks.json",
-                    "grant_types_supported": ["urn:ietf:params:oauth:grant-type:device_code"],
-                    "scopes_supported": ["openid", "profile", "email", "aisquare"],
-                },
-            )
+            document = {
+                "issuer": f"{self.url}/o",
+                "device_authorization_endpoint": f"{self.url}/o/device-authorization/",
+                "token_endpoint": f"{self.url}/o/token/",
+                "userinfo_endpoint": f"{self.url}/o/userinfo/",
+                "revocation_endpoint": f"{self.url}/o/revoke_token/",
+                "jwks_uri": f"{self.url}/o/.well-known/jwks.json",
+                "grant_types_supported": ["urn:ietf:params:oauth:grant-type:device_code"],
+                "scopes_supported": ["openid", "profile", "email", "aisquare"],
+            }
+            document.update(self.discovery_overrides)
+            handler._send(200, document)
             return
         if path == "/o/device-authorization/":
             if self.start_status == 429:
@@ -131,8 +134,10 @@ class IdentityProviderStub:
                 {
                     "device_code": DEVICE_CODE,
                     "user_code": USER_CODE,
-                    "verification_uri": f"{self.url}/cli",
-                    "verification_uri_complete": f"{self.url}/cli?code={USER_CODE}",
+                    "verification_uri": self.verification_uri or f"{self.url}/cli",
+                    "verification_uri_complete": (
+                        f"{self.verification_uri or f'{self.url}/cli'}?code={USER_CODE}"
+                    ),
                     "expires_in": self.expires_in,
                     "interval": self.interval,
                 },

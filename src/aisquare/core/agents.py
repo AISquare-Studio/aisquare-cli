@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from aisquare.core import paths
+from aisquare.core import paths, selfcli
+from aisquare.core.version import __version__
 from aisquare.models import AgentHookSite, AgentInfo
 
 # Claude Code lifecycle events aisquare hooks into → the `aisquare hook` subcommand.
@@ -128,9 +132,12 @@ def _aisquare_command() -> str:
 
     The running executable wins: whoever installs hooks is the aisquare the
     hooks should call, even when it was invoked as ``.venv/bin/aisquare``
-    without being on PATH. Falls back to PATH lookup, then to ``python -m
-    aisquare`` via the current interpreter — never to a bare name a hook
-    shell might not resolve.
+    without being on PATH. Falls back to PATH lookup, then to ``python -P -m
+    aisquare`` via the current interpreter (:func:`selfcli.argv_for`, so the
+    ``-P`` that keeps a project's own ``aisquare/`` off ``sys.path`` has one
+    home — #81) — never to a bare name a hook shell might not resolve. A flag
+    rather than ``env PYTHONSAFEPATH=1 …`` because hooks run under ``cmd.exe``
+    too, where ``env`` is not a program.
     """
     argv0 = Path(sys.argv[0])
     if _is_aisquare_program(argv0.name) and argv0.exists():
@@ -138,7 +145,7 @@ def _aisquare_command() -> str:
     found = shutil.which("aisquare")
     if found:
         return _quote(found)
-    return f"{_quote(sys.executable)} -m aisquare"
+    return " ".join(_quote(part) for part in selfcli.argv_for([]))
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
@@ -156,7 +163,9 @@ def _is_aisquare_hook_command(command: str) -> bool:
 
     Deliberately strict: the command must *end* with ``hook <subcommand>``
     AND the invoked program must be aisquare itself (an ``aisquare``/``asq``
-    executable, or ``python -m aisquare``). A bare-substring match would
+    executable, or ``python [-P] -m aisquare`` — the ``-m aisquare`` pair is
+    matched by position, so hooks written before ``-P`` still count as ours
+    and ``connect`` replaces rather than duplicates them). A bare-substring match would
     classify unrelated user hooks like ``webhook stop`` or ``~/bin/my-hook
     stop`` as ours and silently delete them on connect/disconnect. Parsing
     uses shlex so aisquare paths containing spaces (quoted at install time)
@@ -392,3 +401,314 @@ def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
     """Existing context files for an agent (its content, for ingestion)."""
     spec = _spec(name, config_dir)
     return [path for path in spec.context_files if path.exists()] if spec else []
+
+
+# --- which aisquare do the hooks actually RUN? (#84) -------------------------------------
+#
+# ``_is_aisquare_hook_command`` recognises a hook by its text, which is the right
+# test for "is this ours to rewrite on connect/disconnect" and the wrong one for
+# "is this healthy". Measured 2026-09-04: every hook in ``~/.claude`` and
+# ``~/.claude3`` named ``…/aisquare-cli/.venv/bin/aisquare`` — an editable install
+# of a 0.3-era checkout — while the live ``aisquare`` was 0.6.0, and doctor said
+# "all lifecycle hooks installed" for weeks because the TEXT was ours. What the
+# hooks run is the program the text names; whether that is this install is what
+# these functions answer. Nothing here writes: doctor reports, ``connect`` fixes.
+
+HOOK_BINARY_CURRENT = "current"
+"""The hooks run this install: the console script beside this interpreter, or one
+that reports the same version."""
+HOOK_BINARY_STALE = "stale"
+"""The hooks run an aisquare that reports a different version from this one."""
+HOOK_BINARY_MISSING = "missing"
+"""The program the hooks name is not on disk — every hook fails, every session."""
+HOOK_BINARY_UNKNOWN = "unknown"
+"""The program is on disk but its version could not be read: it did not run, exited
+non-zero, or printed nothing that parses as a version."""
+
+#: Worst-first, so a directory whose five hooks disagree is graded by its worst one.
+_HOOK_BINARY_SEVERITY = {
+    HOOK_BINARY_CURRENT: 0,
+    HOOK_BINARY_UNKNOWN: 1,
+    HOOK_BINARY_STALE: 2,
+    HOOK_BINARY_MISSING: 3,
+}
+
+#: The first thing in ``aisquare --version`` output that reads as a version
+#: (``0.6.0``, ``0.4.0rc1``, ``1.0.0+local``). Anchored on nothing else because
+#: the prefix has already changed once and may again.
+_VERSION_TOKEN = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+!-]*")
+
+
+@dataclass(frozen=True)
+class HookBinary:
+    """The program one hook command would start, as the hook's shell would resolve it.
+
+    ``module_form`` is the ``<python> -m aisquare`` fallback ``_aisquare_command``
+    writes when no console script is findable: then ``program`` is an
+    interpreter and the install is the one in that interpreter's environment.
+    """
+
+    program: Path
+    module_form: bool = False
+
+    def version_argv(self) -> list[str]:
+        argv = [str(self.program)]
+        if self.module_form:
+            argv += ["-m", "aisquare"]
+        return [*argv, "--version"]
+
+
+@dataclass(frozen=True)
+class HookSiteHealth:
+    """One config directory, graded for doctor.
+
+    ``recorded`` says whether THIS ``AISQUARE_HOME`` connected the directory; a
+    site found on disk with our hooks in it is graded the same way and labelled,
+    because a fresh home knows no sites and would otherwise never see them.
+    ``binary_state`` is ``None`` when the directory carries no hooks of ours at
+    all — there is nothing to compare.
+    """
+
+    config_dir: Path
+    hooks_installed: bool
+    recorded: bool
+    binary: Path | None = None
+    binary_version: str | None = None
+    binary_state: str | None = None
+
+
+def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
+    """Every aisquare hook command in the agent's settings, across all events.
+
+    Any event counts, not only the full set ``hooks_installed`` demands: a
+    partial install from an older version still RUNS on the events it has, so
+    what it runs is still worth grading.
+    """
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return []
+    hooks = _read_settings(spec.settings_path).get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    found: list[str] = []
+    for event, _ in _HOOKS:
+        for group in hooks.get(event) or []:
+            if not _is_aisquare_group(group):
+                continue
+            for item in group["hooks"]:
+                command = item.get("command") if isinstance(item, dict) else None
+                if isinstance(command, str) and _is_aisquare_hook_command(command):
+                    found.append(command)
+    return found
+
+
+def _resolve_program(token: str) -> Path:
+    """An absolute path for the program token, the way the hook's shell would find it.
+
+    ``_aisquare_command`` has written absolute paths since the bare-name bug was
+    fixed, but hooks installed before that are still on disk; a bare name goes
+    through PATH exactly as the shell would send it, and an unfindable one is
+    returned as written so it grades as missing rather than crashing.
+    """
+    path = Path(token).expanduser()
+    if not path.is_absolute() and path.parent == Path("."):
+        found = shutil.which(token)
+        return Path(found) if found else path
+    return path
+
+
+def hook_binary(command: str) -> HookBinary | None:
+    """The program ``command`` would run, or ``None`` when it is not one of our hooks."""
+    if not _is_aisquare_hook_command(command):
+        return None
+    tokens = _split_command(command)
+    if tokens[-4:-2] == ["-m", "aisquare"]:
+        return HookBinary(_resolve_program(tokens[0]), module_form=True)
+    return HookBinary(_resolve_program(tokens[0]))
+
+
+def current_install() -> Path:
+    """The ``aisquare`` console script beside THIS interpreter.
+
+    What ``agents connect`` run from here would write into the hooks, and so the
+    thing every hook binary is compared against. It may not exist (a checkout
+    driven as ``python -m aisquare``); the directory is what the comparison uses.
+    """
+    name = "aisquare.exe" if sys.platform == "win32" else "aisquare"
+    return Path(sys.executable).with_name(name)
+
+
+def _same_install(binary: HookBinary) -> bool:
+    """Whether ``binary`` is this install, decided from paths alone — no process.
+
+    Directories are compared UNRESOLVED on purpose. Every venv's ``python`` is a
+    symlink to the same base interpreter, so resolving ``~/a/.venv/bin/python``
+    and ``~/b/.venv/bin/python`` gives one path for two different installs — and
+    ``-m aisquare`` picks its package from the venv beside the symlink, not the
+    target. A different spelling of the same directory (a shim, a symlinked
+    parent) merely falls through to the version probe, which answers correctly.
+    """
+    program = binary.program
+    if binary.module_form:
+        return program.parent == Path(sys.executable).parent
+    current = current_install()
+    if program.parent == current.parent and _is_aisquare_program(program.name):
+        return True
+    try:
+        return program.resolve() == current.resolve()
+    except OSError:
+        return False
+
+
+def hook_binary_version(argv: Sequence[str], *, timeout: float = 10.0) -> str | None:
+    """Run ``<program> --version`` and return the version it prints, or ``None``.
+
+    A registered spawn seam (``core.spawn.SEAMS``), EXCLUDED and not stripped:
+    it is another install of this CLI asked for a string, and ``--version`` is
+    an eager callback that exits before any command runs. ``None`` for every
+    way the question can fail to be answered — the program will not start, exits
+    non-zero, hangs past ``timeout``, or prints nothing that reads as a version
+    — so the caller reports "could not read" rather than guessing.
+    """
+    try:
+        completed = subprocess.run(
+            list(argv),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    match = _VERSION_TOKEN.search(completed.stdout)
+    return match.group(0) if match else None
+
+
+def classify_hook_binary(binary: HookBinary) -> tuple[str, str | None]:
+    """``(state, version)`` for one hook binary, measured against this install.
+
+    Path first, process second: the common case — hooks written by this very
+    install — is decided without starting anything. Only a program in another
+    directory is asked its version, and it is asked ONCE per doctor run however
+    many directories name it (see ``hook_site_health``'s cache).
+    """
+    if not binary.program.exists():
+        return HOOK_BINARY_MISSING, None
+    if _same_install(binary):
+        return HOOK_BINARY_CURRENT, __version__
+    found = hook_binary_version(binary.version_argv())
+    if found is None:
+        return HOOK_BINARY_UNKNOWN, None
+    return (HOOK_BINARY_CURRENT if found == __version__ else HOOK_BINARY_STALE), found
+
+
+def hook_site_health(
+    name: str,
+    config_dir: Path,
+    *,
+    recorded: bool,
+    cache: dict[HookBinary, tuple[str, str | None]] | None = None,
+) -> HookSiteHealth:
+    """Grade one config directory: are the hooks all there, and what do they run?"""
+    installed = hooks_installed(name, config_dir)
+    binaries: list[HookBinary] = []
+    for command in hook_commands(name, config_dir):
+        binary = hook_binary(command)
+        if binary is not None and binary not in binaries:
+            binaries.append(binary)
+    if not binaries:
+        return HookSiteHealth(config_dir=config_dir, hooks_installed=installed, recorded=recorded)
+    verdicts = cache if cache is not None else {}
+    graded: list[tuple[HookBinary, str, str | None]] = []
+    for binary in binaries:
+        if binary not in verdicts:
+            verdicts[binary] = classify_hook_binary(binary)
+        state, version = verdicts[binary]
+        graded.append((binary, state, version))
+    worst, state, version = max(graded, key=lambda item: _HOOK_BINARY_SEVERITY[item[1]])
+    return HookSiteHealth(
+        config_dir=config_dir,
+        hooks_installed=installed,
+        recorded=recorded,
+        binary=worst.program,
+        binary_version=version,
+        binary_state=state,
+    )
+
+
+def _claude_dirs_on_disk() -> list[Path]:
+    """Claude Code config directories on this machine that carry our hooks.
+
+    ``$CLAUDE_CONFIG_DIR``, ``~/.claude`` and every ``~/.claude*`` directory —
+    the ``[0-9]`` siblings of a parallel-install setup and the
+    ``~/.claude-account1`` naming the README documents. Only directories whose
+    ``settings.json`` holds at least one aisquare hook are returned: a hook that
+    is on disk runs whether or not this home ever heard of the directory, and
+    that is the only thing that makes a directory doctor's business.
+    """
+    candidates: list[Path] = []
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if env:
+        candidates.append(Path(env).expanduser())
+    home = _home()
+    candidates.append(home / ".claude")
+    if home.is_dir():
+        candidates.extend(sorted(path for path in home.glob(".claude*") if path.is_dir()))
+    seen: set[Path] = set()
+    found: list[Path] = []
+    for candidate in candidates:
+        key = _dir_key(candidate)
+        if key in seen or not candidate.is_dir():
+            continue
+        seen.add(key)
+        if hook_commands("claude-code", candidate):
+            found.append(candidate)
+    return found
+
+
+def _dir_key(path: Path) -> Path:
+    """One identity for the several spellings of a directory (``~``, symlinks)."""
+    try:
+        return path.expanduser().resolve()
+    except OSError:
+        return path.expanduser().absolute()
+
+
+def hook_sites(name: str) -> list[HookSiteHealth]:
+    """Every config directory doctor should grade, each with its verdict.
+
+    Recorded sites first (the registry's order), then the ambient directory a
+    session from THIS shell would use, then anything found on disk with our
+    hooks in it. The first group is ``recorded``; the rest are not — they are
+    real installs this home never connected, which is the gap a fresh
+    ``AISQUARE_HOME`` opens (#84). Each directory appears once however many
+    lists name it.
+    """
+    registry = _registry()
+    sites: list[tuple[Path, bool]] = []
+    seen: set[Path] = set()
+
+    def add(path: Path, *, recorded: bool) -> None:
+        key = _dir_key(path)
+        if key not in seen:
+            seen.add(key)
+            sites.append((path, recorded))
+
+    for path in connected_dirs(name, registry):
+        add(path, recorded=True)
+    ambient = ambient_hook_dir(name)
+    if ambient is not None and ambient.is_dir():
+        add(ambient, recorded=False)
+    if name == "claude-code":
+        for path in _claude_dirs_on_disk():
+            add(path, recorded=False)
+
+    cache: dict[HookBinary, tuple[str, str | None]] = {}
+    return [
+        hook_site_health(name, path, recorded=recorded, cache=cache) for path, recorded in sites
+    ]

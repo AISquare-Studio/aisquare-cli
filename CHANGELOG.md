@@ -4,6 +4,94 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The snapshot token budget is a config knob, and the failure names its
+  numbers (#82).** `aisquare project onboard` on a large repo printed only
+  "codebase too large to pack within the token budget" against a hardcoded
+  150 000, and the `snapshot` doctor line stayed a warning whose fix — a plain
+  `onboard` — only reloaded the same verdict. The budget is now `[snapshot]
+  max_tokens` in `config.toml` (`aisquare config set snapshot.max_tokens <n>`;
+  the default is unchanged), the snapshot records the full-pack and
+  compressed-pack sizes it measured alongside the budget, and `onboard` and
+  `doctor` print the same sentence with all three numbers and both remedies —
+  raise the budget, or add a `.repomixignore` — followed by the `--refresh`
+  re-pack that actually re-measures. A `snapshot.json` written by 0.6.0 has no
+  numbers to name and says so rather than printing zeros. Read from the config
+  file alone, like `[fleet]`: no environment variable, because the config layer
+  has no per-key env rung and one knob is not the place to grow one.
+- **`[snapshot] ignore`: what a pack leaves out, and a built-in list it
+  extends.** Repomix glob patterns, passed to `--ignore`; `aisquare config set
+  snapshot.ignore '**/fixtures/**,docs/generated/**'` (a list key now takes
+  comma-separated items, and `config get` prints them the same way). The
+  built-ins go first whatever the operator sets — `node_modules`, `.venv`,
+  `venv`, `.git`, `__pycache__`, `dist`, `build`, `coverage`,
+  `.aisquare-worktrees`, `*.worktrees` — plus any nested git repository or
+  worktree found below the root, detected by its `.git` entry, so another
+  project's checkout is never packed into this one. The repo's `.gitignore` and
+  `.repomixignore` still apply, read by Repomix itself; the too-large message
+  names both knobs.
+- **Over budget even compressed, the snapshot keeps the skeleton instead of
+  nothing.** The 150 000 cap mirrors a server cap on a pack that is read into a
+  model context. The CLI never does that — `hook session-start` hands the agent
+  the skeleton, pack and index *paths* — so the cap bounded no prompt, only
+  whether a snapshot existed; and the skeleton (`repomix --compress`) was built
+  only when the FULL pack fit, so the repos that most needed one were the only
+  ones without it (measured: 10.99M tokens full, 2.03M compressed). Now the
+  compressed pack is written as `skeleton.repomix.xml` with its per-file index,
+  status `skeleton_only`, every count recorded, any stale full pack removed;
+  the session-start directive lists the skeleton and index and omits the full
+  pack; `doctor` reports it green as `skeleton only: N tokens, F files indexed;
+  full pack skipped over budget B (M tokens)` with no fix, because a fix here
+  was the button pressed forever with a green tick. `max_tokens` now gates
+  only the full pack. `too_large` survives only as a status loaded from a
+  0.6.0 `snapshot.json`.
+
+### Fixed
+- **Self-invocation is no longer shadowed by a project's own `aisquare/`
+  package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
+  `init`, `doctor` and `project onboard` from the fleet UI, for every fleet
+  window, for the detached distiller, and as the last-resort hook command.
+  `-m` puts the current directory first on `sys.path`, so from any repo whose
+  root holds a top-level `aisquare/` package — the explainability SDK's own
+  repo ships one — every one of those died with `No module named
+  aisquare.__main__`, and a fleet window did so even with `PYTHONSAFEPATH`
+  exported by the spawner, because a window inherits the tmux server's
+  environment. All four now build their argv through one helper that passes
+  the interpreter `-P` (the flag form of `PYTHONSAFEPATH`, Python 3.11+): it
+  ends with that process, so a coder's own `python -m pytest` inherits
+  nothing, and it needs no environment to travel. `aisquare doctor` gains a
+  `self-invocation` row that warns when the directory would shadow a
+  hand-typed `python -m aisquare`.
+- **`doctor` now checks WHICH `aisquare` the Claude Code hooks run, not just
+  that hooks are there** (#84). A hook was recognised by its text, so every
+  hook on a box could name `…/aisquare-cli/.venv/bin/aisquare` — a 0.3-era
+  editable checkout — while the live install was 0.6.0, and `doctor` said
+  "all lifecycle hooks installed" for weeks. Per config dir it now resolves the
+  program each hook names and compares it to this install by path, or by
+  running `<path> --version` when the path differs; a stale, missing or
+  unreadable binary turns the row into a warning that names the dir, the
+  hook's path and version, this install's path and version, and the one-line
+  fix (`aisquare agents connect claude-code --config-dir <dir>`).
+- **`doctor` discovers Claude Code config dirs on disk** — `$CLAUDE_CONFIG_DIR`,
+  `~/.claude` and every `~/.claude*` whose `settings.json` carries aisquare
+  hooks — and grades them the same way, labelled "found on disk, not connected
+  in this home". A fresh `AISQUARE_HOME` previously knew no sites, so a
+  `~/.claude3` reached through `CLAUDE_CONFIG_DIR` was invisible until someone
+  ran `agents connect --config-dir` for it. Still read-only: `doctor` never
+  rewrites `settings.json`.
+- **The selected project row in the fleet sidebar showed its folder glyph and an
+  empty highlighted band — no name, no codename.** Any project whose basename is
+  wider than the sidebar's title column (25 cells at the default width;
+  `AISquare-Explainability-SDK` is 27) was affected, in every theme. The row's
+  Rich `Text` asks for `no_wrap` and an ellipsis, but Textual keeps only the
+  text and its spans and lets the widget's CSS `text-wrap` decide; its default
+  wraps, so the name landed on a second line that the one-line row clipped. The
+  sidebar's one-line rows — project title, agent rows, the path subtitle, the
+  Doctor lines — now declare `text-wrap: nowrap; text-overflow: ellipsis`, so a
+  long name is cut with `…` where it stands. (#86)
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and

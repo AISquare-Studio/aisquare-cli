@@ -181,7 +181,8 @@ def test_hook_commands_are_never_a_bare_name(
     command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert command == f"{fake_bin.resolve()} hook session-start"
 
-    # 2) With no usable argv0 and nothing on PATH: python -m aisquare, never bare.
+    # 2) With no usable argv0 and nothing on PATH: python -P -m aisquare, never bare
+    #    (-P so a project's own aisquare/ cannot shadow the hook — #81).
     import sys as real_sys
 
     monkeypatch.setattr("aisquare.core.agents.sys.argv", ["pytest"])
@@ -189,7 +190,7 @@ def test_hook_commands_are_never_a_bare_name(
     assert result.exit_code == 0, result.output
     settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    assert command == f"{real_sys.executable} -m aisquare hook session-start"
+    assert command == f"{real_sys.executable} -P -m aisquare hook session-start"
 
 
 def test_third_party_hooks_containing_our_words_survive_connect(

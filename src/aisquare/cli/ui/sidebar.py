@@ -173,8 +173,18 @@ class Activatable(Static):
     after a rebuild without holding widget references.
     """
 
+    # ``text-wrap`` / ``text-overflow`` live HERE, not on the Rich ``Text`` the rows
+    # are handed. Every row's Text is built ``no_wrap=True, overflow="ellipsis"``
+    # and Textual drops both: ``Content.from_rich_text`` keeps the plain text and
+    # the spans, and the widget's CSS decides how the line is fitted. The default
+    # is ``text-wrap: wrap``, so a name wider than the row broke onto a second line
+    # that ``height: 1`` then clipped — the selected project row showed its glyph
+    # and an empty highlighted band. Measured 2026-09-05 against the reporter's
+    # store: a 27-cell basename in the 25-cell title composited as
+    # ``'🗂                        '`` while ``visual.plain`` held the whole title,
+    # in textual-dark, textual-light, nord and gruvbox alike.
     DEFAULT_CSS = """
-    Activatable { height: 1; }
+    Activatable { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     Activatable.selected { text-style: bold; background: $primary 35%; }
     Activatable.cursor { background: $accent 30%; }
     """
@@ -322,7 +332,10 @@ class ProjectCard(Vertical):
     ProjectCard.even { background: $surface; }
     ProjectCard.odd { background: $panel; }
     ProjectCard #card-header { height: 1; }
-    ProjectCard .card-subtitle { height: 1; padding-left: 3; color: $text-muted; }
+    ProjectCard .card-subtitle {
+        height: 1; padding-left: 3; color: $text-muted;
+        text-wrap: nowrap; text-overflow: ellipsis;
+    }
     ProjectCard .card-notice { height: auto; padding-left: 3; color: $text-muted; }
     ProjectCard #agents { height: auto; }
     """
@@ -426,7 +439,9 @@ class DoctorSection(Vertical):
 
     DEFAULT_CSS = """
     DoctorSection { height: auto; max-height: 6; border-top: solid $primary; padding: 0 1; }
-    DoctorSection .doctor-line { height: 1; color: $text-muted; }
+    DoctorSection .doctor-line {
+        height: 1; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     DoctorSection .doctor-notice { height: auto; color: $warning; }
     """
 

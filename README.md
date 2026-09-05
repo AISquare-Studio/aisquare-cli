@@ -177,12 +177,18 @@ two ways out. `aisquare doctor` repeats the same line until one is taken:
 
 ```sh
 aisquare config set snapshot.max_tokens 300000   # raise the budget for a repo you know is big
+aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'   # leave generated trees out
 aisquare project onboard --refresh               # re-pack; a plain onboard only reuses the verdict
 ```
 
-or add a `.repomixignore` at the repo root (`.gitignore` syntax, read by
-Repomix) to keep generated and vendored trees out of the pack — a smaller pack
-is also a cheaper one for every agent that reads it.
+`[snapshot] ignore` takes Repomix glob patterns (comma-separated on the command
+line) and **extends** the built-in list rather than replacing it:
+`node_modules`, `.venv`/`venv`, `.git`, `__pycache__`, `dist`, `build`,
+`coverage`, `.aisquare-worktrees`, `*.worktrees`, and any nested git repository
+or worktree found below the root — another project's checkout is never packed
+into this one. The repo's own `.gitignore` and a `.repomixignore` at the repo
+root apply on top, read by Repomix itself. A smaller pack is also a cheaper one
+for every agent that reads it.
 
 ---
 

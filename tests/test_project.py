@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -128,7 +129,10 @@ def test_onboard_over_budget_names_its_numbers_and_the_knob_is_what_it_measures_
     """
     from aisquare.core import snapshot
 
-    def _fake(_root: Path, *, compress: bool) -> tuple[str, str]:
+    seen: dict[str, list[str]] = {}
+
+    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
+        seen["ignore"] = list(ignore)
         count = "Total Tokens: 203,991" if compress else "Total Tokens: 412,318"
         return "<files>\n</files>\n", count
 
@@ -141,12 +145,22 @@ def test_onboard_over_budget_names_its_numbers_and_the_knob_is_what_it_measures_
     assert (
         "snapshot: codebase too large: full 412318 tokens, compressed 203991 tokens, "
         "budget 150000. Raise [snapshot] max_tokens (aisquare config set "
-        "snapshot.max_tokens <n>) or add a .repomixignore to exclude generated or vendored "
-        "trees. Re-pack: aisquare project onboard --refresh"
+        "snapshot.max_tokens <n>), or exclude generated or vendored trees with [snapshot] "
+        "ignore (aisquare config set snapshot.ignore '<glob>,<glob>') or a .repomixignore at "
+        "the repo root. Re-pack: aisquare project onboard --refresh"
     ) in result.stdout
 
     assert runner.invoke(app, ["config", "set", "snapshot.max_tokens", "250000"]).exit_code == 0
+    assert (
+        runner.invoke(
+            app, ["config", "set", "snapshot.ignore", "docs/generated/**,**/fixtures/**"]
+        ).exit_code
+        == 0
+    )
     again = runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
+    # The operator's patterns reach repomix AFTER the built-ins, never instead of them.
+    assert seen["ignore"][: len(snapshot.DEFAULT_IGNORE)] == list(snapshot.DEFAULT_IGNORE)
+    assert seen["ignore"][-2:] == ["docs/generated/**", "**/fixtures/**"]
     assert again.exit_code == 0, again.output
     snap = _json(again.stdout)["snapshot"]
     assert (snap["status"], snap["compressed"]) == ("ready", True)

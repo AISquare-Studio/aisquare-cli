@@ -21,6 +21,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   numbers to name and says so rather than printing zeros. Read from the config
   file alone, like `[fleet]`: no environment variable, because the config layer
   has no per-key env rung and one knob is not the place to grow one.
+- **`[snapshot] ignore`: what a pack leaves out, and a built-in list it
+  extends.** Repomix glob patterns, passed to `--ignore`; `aisquare config set
+  snapshot.ignore '**/fixtures/**,docs/generated/**'` (a list key now takes
+  comma-separated items, and `config get` prints them the same way). The
+  built-ins go first whatever the operator sets — `node_modules`, `.venv`,
+  `venv`, `.git`, `__pycache__`, `dist`, `build`, `coverage`,
+  `.aisquare-worktrees`, `*.worktrees` — plus any nested git repository or
+  worktree found below the root, detected by its `.git` entry, so another
+  project's checkout is never packed into this one. The repo's `.gitignore` and
+  `.repomixignore` still apply, read by Repomix itself; the too-large message
+  names both knobs.
 
 ## [0.6.0] - 2026-09-03
 

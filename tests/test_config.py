@@ -105,3 +105,23 @@ def test_config_set_writes_the_snapshot_budget_and_rejects_a_non_number(
     rejected = runner.invoke(app, ["config", "set", "snapshot.max_tokens", "lots"])
     assert rejected.exit_code != 0
     assert load_config().snapshot.max_tokens == 300_000, "a rejected value must not land"
+
+
+def test_config_set_takes_the_snapshot_ignore_list_comma_separated(runner: CliRunner) -> None:
+    """A list key is settable from a shell at all — comma-separated, the way repomix's own flag is.
+
+    Whitespace around items is trimmed, ``get`` prints the same shape ``set``
+    accepts, and an empty string clears the list.
+    """
+    assert AppConfig().snapshot.ignore == []
+    result = runner.invoke(
+        app, ["config", "set", "snapshot.ignore", "**/fixtures/**, docs/generated/**"]
+    )
+    assert result.exit_code == 0, result.output
+    assert load_config().snapshot.ignore == ["**/fixtures/**", "docs/generated/**"]
+    shown = runner.invoke(app, ["config", "get", "snapshot.ignore"])
+    assert shown.stdout.strip() == "snapshot.ignore = **/fixtures/**,docs/generated/**"
+
+    cleared = runner.invoke(app, ["config", "set", "snapshot.ignore", ""])
+    assert cleared.exit_code == 0, cleared.output
+    assert load_config().snapshot.ignore == []

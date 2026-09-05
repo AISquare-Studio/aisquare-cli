@@ -67,7 +67,9 @@ def test_session_start_directive_points_at_the_snapshot(
     from aisquare.core.workspace import current_project
 
     monkeypatch.setattr(
-        snapshot, "_run_repomix", lambda _root, *, compress: (_PACK, "Total Tokens: 9")
+        snapshot,
+        "_run_repomix",
+        lambda _root, *, compress, ignore=(): (_PACK, "Total Tokens: 9"),
     )
     monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 100)
     snapshot.generate(current_project(work_dir).id, work_dir)

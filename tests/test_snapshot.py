@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,13 +18,17 @@ FULL = (
 )
 SKEL = '<files>\n<file path="a.py">\nprint ⋮\n</file>\n<file path="b.py">\ny ⋮\n</file>\n</files>\n'
 
-# Type of the faked _run_repomix(root, *, compress) -> (pack_text, stdout).
+# Type of the faked _run_repomix(root, *, compress, ignore) -> (pack_text, stdout).
 FakeRepomix = Callable[..., tuple[str, str]]
+
+# The real one, taken before the autouse ``no_repomix`` fixture swaps it for a raiser,
+# for the one test that checks the argv it builds.
+_REAL_RUN_REPOMIX: FakeRepomix = snapshot._run_repomix
 
 
 @pytest.fixture
 def fake_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _fake(_root: Path, *, compress: bool) -> tuple[str, str]:
+    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
         return (SKEL, "Total Tokens: 4") if compress else (FULL, "Total Tokens: 9")
 
     monkeypatch.setattr(snapshot, "_run_repomix", _fake)
@@ -61,7 +65,7 @@ def test_generate_marks_too_large(fake_repomix: None, monkeypatch: pytest.Monkey
 
 
 def test_generate_falls_back_to_compressed(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _fake(_root: Path, *, compress: bool) -> tuple[str, str]:
+    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
         return (SKEL, "") if compress else (FULL, "")
 
     monkeypatch.setattr(snapshot, "_run_repomix", _fake)
@@ -192,8 +196,9 @@ def test_too_large_detail_names_all_three_numbers_and_both_ways_out() -> None:
     verdict = _verdict(token_count=203_991, full_token_count=412_318, max_tokens=150_000)
     assert snapshot.too_large_detail(verdict) == (
         "codebase too large: full 412318 tokens, compressed 203991 tokens, budget 150000. "
-        "Raise [snapshot] max_tokens (aisquare config set snapshot.max_tokens <n>) or add a "
-        ".repomixignore to exclude generated or vendored trees."
+        "Raise [snapshot] max_tokens (aisquare config set snapshot.max_tokens <n>), or exclude "
+        "generated or vendored trees with [snapshot] ignore (aisquare config set snapshot.ignore "
+        "'<glob>,<glob>') or a .repomixignore at the repo root."
     )
 
 
@@ -221,3 +226,98 @@ def test_too_large_detail_for_a_pre_knob_snapshot_says_the_numbers_were_not_reco
     assert "before the numbers were recorded" in detail
     assert " 0 tokens" not in detail
     assert "budget 0" not in detail
+
+
+# --- what a pack leaves out: defaults, nested checkouts, the operator's list (#82) ----------
+
+
+def test_ignore_patterns_start_with_the_defaults_and_extend_with_the_operators(
+    tmp_path: Path,
+) -> None:
+    """The operator's list EXTENDS the built-ins: setting one pattern never loses node_modules.
+
+    Blanks drop, whitespace is trimmed, a default repeated by the operator is not
+    sent twice, and the order is defaults first so a reader of the argv sees
+    the same shape every time.
+    """
+    patterns = snapshot.ignore_patterns(
+        tmp_path, ["docs/generated/**", " **/fixtures/** ", "", "**/dist/**"]
+    )
+    assert patterns[: len(snapshot.DEFAULT_IGNORE)] == list(snapshot.DEFAULT_IGNORE)
+    assert patterns[len(snapshot.DEFAULT_IGNORE) :] == ["docs/generated/**", "**/fixtures/**"]
+    for name in (
+        "node_modules",
+        ".venv",
+        "venv",
+        ".git",
+        "__pycache__",
+        "dist",
+        "build",
+        "coverage",
+        ".aisquare-worktrees",
+        "*.worktrees",
+    ):
+        assert f"**/{name}/**" in snapshot.DEFAULT_IGNORE, name
+
+
+def test_nested_repos_below_the_root_are_excluded_and_not_walked(tmp_path: Path) -> None:
+    """Another project's checkout inside this one is that project's snapshot, not ours.
+
+    A repository (``.git`` directory) and a worktree (``.git`` FILE) are both
+    found; the root's own ``.git`` is not "nested"; a checkout inside a
+    default-ignored tree is never even visited; and a found checkout is not
+    descended, so a repo inside a repo yields one pattern, not two.
+    """
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    (root / "src").mkdir()
+    (root / "vendor" / "lib" / ".git").mkdir(parents=True)
+    (root / "vendor" / "lib" / "deeper" / ".git").mkdir(parents=True)
+    (root / "checkouts" / "wt").mkdir(parents=True)
+    (root / "checkouts" / "wt" / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+    (root / "node_modules" / "pkg" / ".git").mkdir(parents=True)
+    (root / "proj.worktrees" / "feature" / ".git").mkdir(parents=True)
+
+    assert snapshot.nested_repos(root) == ["checkouts/wt/**", "vendor/lib/**"]
+
+
+def test_run_repomix_passes_the_ignore_list_comma_joined(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--ignore a,b`` is how repomix takes it; no list, no flag."""
+    seen: list[list[str]] = []
+
+    def _capture(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("aisquare.core.snapshot.subprocess.run", _capture)
+    monkeypatch.setattr(snapshot, "_repomix_base", lambda: ["repomix"])
+
+    _REAL_RUN_REPOMIX(tmp_path, compress=True, ignore=["**/node_modules/**", "docs/generated/**"])
+    assert seen[0][:2] == ["repomix", "--compress"]
+    assert seen[0][seen[0].index("--ignore") + 1] == "**/node_modules/**,docs/generated/**"
+
+    _REAL_RUN_REPOMIX(tmp_path, compress=False)
+    assert "--ignore" not in seen[1]
+
+
+def test_generate_hands_the_operators_patterns_to_repomix_after_the_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Both runs — full pack and skeleton — get one list: defaults, nested repos, operator's."""
+    seen: list[list[str]] = []
+
+    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
+        seen.append(list(ignore))
+        return (SKEL, "") if compress else (FULL, "")
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 1)
+    (tmp_path / "vendor" / "fork" / ".git").mkdir(parents=True)
+
+    snapshot.generate("prj_ign", tmp_path, ignore=["docs/generated/**"])
+
+    expected = [*snapshot.DEFAULT_IGNORE, "vendor/fork/**", "docs/generated/**"]
+    assert len(seen) == 2, "the full pack and the best-effort skeleton"
+    assert seen == [expected, expected]

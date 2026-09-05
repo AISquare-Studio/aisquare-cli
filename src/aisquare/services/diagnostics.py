@@ -21,6 +21,7 @@ from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
+from aisquare.core.version import __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CheckStatus,
@@ -485,31 +486,91 @@ def claude_code_version(binary: str | None = None) -> str | None:
     return None
 
 
+def _site_label(site: agent_core.HookSiteHealth) -> str:
+    """A directory, marked when this home never connected it (#84's second gap)."""
+    if site.recorded:
+        return str(site.config_dir)
+    return f"{site.config_dir} (found on disk, not connected in this home)"
+
+
+def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
+    """One clause per distinct (binary, verdict): what the hooks run, and why that is wrong.
+
+    Grouped by binary rather than listed per directory because the real case is
+    every directory naming the same stale venv, and five copies of one path
+    bury the one comparison that matters — which is stated once, at the end:
+    this install's path and version.
+    """
+    groups: dict[tuple[str | None, Path | None, str | None], list[str]] = {}
+    for site in sites:
+        key = (site.binary_state, site.binary, site.binary_version)
+        groups.setdefault(key, []).append(_site_label(site))
+    clauses: list[str] = []
+    for (state, binary, version), dirs in groups.items():
+        where = ", ".join(dirs)
+        if state == agent_core.HOOK_BINARY_MISSING:
+            clauses.append(f"hooks in {where} point at {binary}, which does not exist")
+        elif state == agent_core.HOOK_BINARY_UNKNOWN:
+            clauses.append(f"hooks in {where} point at {binary}, whose version could not be read")
+        else:
+            clauses.append(f"hooks in {where} point at {binary} ({version})")
+    return clauses
+
+
 def _check_claude_code() -> DoctorCheck:
+    """Claude Code: are our hooks in every config dir, and do they run THIS install?
+
+    Graded per directory over recorded sites UNION the ambient dir UNION every
+    ``~/.claude*`` on disk that carries our hooks (``agent_core.hook_sites``).
+    Two ways a directory goes red, both with the same one-line fix:
+
+    * hooks missing or partial — the check this always made;
+    * hooks present but naming an aisquare that is not this install — the #84
+      gap. The text of a hook is ours whichever binary it names; for weeks every
+      board update on one box ran a 0.3-era checkout while this line was green.
+
+    Read-only, like every check here: doctor never rewrites ``settings.json``.
+    """
     info = agent_core.detect("claude-code")
-    if info is None or not info.detected:
+    sites = agent_core.hook_sites("claude-code")
+    if info is None or (not info.detected and not sites):
         return _ok("claude-code", "Claude Code not detected on this machine")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
-    # Checked: recorded sites UNION the ambient dir. Parallel installs
-    # (CLAUDE_CONFIG_DIR=~/.claude2) each own a settings.json, so registry
-    # health alone hid unhooked siblings — and site health alone says nothing
-    # about the AMBIENT dir, the one a `claude` from this shell actually
-    # starts from, when it was never registered.
-    health = {site.config_dir: site.hooks_installed for site in info.sites}
-    ambient = agent_core.ambient_hook_dir("claude-code")
-    if ambient is not None and ambient not in health:
-        health[ambient] = agent_core.hooks_installed("claude-code")
-    if not health:
+    if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
-    broken = [path for path, hooked in health.items() if not hooked]
-    if not broken:
-        where = f" in {len(health)} config dirs" if len(health) > 1 else ""
-        return _ok("claude-code", f"{product} connected{where} (all lifecycle hooks installed)")
-    listed = ", ".join(str(path) for path in broken)
+
+    unhooked = [site for site in sites if not site.hooks_installed]
+    wrong_binary = [
+        site for site in sites if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT)
+    ]
+    if not unhooked and not wrong_binary:
+        where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
+        unrecorded = [str(site.config_dir) for site in sites if not site.recorded]
+        note = (
+            f"; {', '.join(unrecorded)} found on disk, not connected in this home"
+            if unrecorded
+            else ""
+        )
+        return _ok(
+            "claude-code", f"{product} connected{where} (all lifecycle hooks installed{note})"
+        )
+
+    problems: list[str] = []
+    if unhooked:
+        listed = ", ".join(_site_label(site) for site in unhooked)
+        problems.append(f"{_STALE_HOOKS} in: {listed}")
+    if wrong_binary:
+        clauses = "; ".join(_hook_binary_problems(wrong_binary))
+        this = f"{agent_core.current_install()} ({__version__})"
+        problems.append(f"{clauses} — this install is {this}")
+    broken: list[Path] = []
+    for site in sites:
+        if (site in unhooked or site in wrong_binary) and site.config_dir not in broken:
+            broken.append(site.config_dir)
     return _warn(
         "claude-code",
-        f"{product} {_STALE_HOOKS} in: {listed}",
+        f"{product} {'; '.join(problems)}",
         "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
     )
 

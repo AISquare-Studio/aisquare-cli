@@ -202,6 +202,43 @@ def fresh_state() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point agent detection at a temp home so tests never read ``~/.claude*``.
+
+    ``core.agents._home`` is the indirection its own docstring offers for this.
+    Without it the claude-code doctor row read the developer's REAL
+    ``~/.claude/settings.json`` — and since #84 it also globs ``~/.claude*`` for
+    sibling installs and grades the binary each one's hooks name. A doctor row
+    that depends on how the author's own machine is hooked is the ambient leak
+    ``.github/workflows/ci.yml``'s ``ambient`` job exists to catch; green there
+    and red on a hooked laptop, or the reverse. Tests that want Claude Code
+    detected build the tree under their own fixture (``fake_home`` in
+    test_agents.py) and re-point ``_home`` at it, which overrides this.
+    """
+    home = tmp_path / "agent-home"
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    return home
+
+
+@pytest.fixture(autouse=True)
+def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never run a hook's aisquare for its version; answer as this install.
+
+    Hooks written by ``agents connect`` under the suite name whatever
+    ``_aisquare_command`` resolves: the console script beside this interpreter
+    when PATH has it, otherwise the machine's ``aisquare`` — a pyenv shim on the
+    author's box. Which one is ambient state, and running it would grade the
+    developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
+    Tests of the probe itself capture the real function at import and call it
+    against fake scripts they write (test_doctor_stale_hook_binary.py).
+    """
+    from aisquare.core import agents
+    from aisquare.core.version import __version__
+
+    monkeypatch.setattr(agents, "hook_binary_version", lambda argv, **_kwargs: __version__)
+
+
+@pytest.fixture(autouse=True)
 def no_repomix(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable the repomix subprocess by default so tests never shell out.
 

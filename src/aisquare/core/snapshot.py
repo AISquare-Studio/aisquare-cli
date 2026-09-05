@@ -8,9 +8,13 @@ future sync:
 - **index** — a per-file map of char offsets + token counts, parsed from the pack.
 
 Adaptive, like the server: use the full pack when it fits the token budget
-(``[snapshot] max_tokens``, default 150k); else the compressed pack; else mark
-the snapshot ``too_large``, store no pack, and record the three numbers so the
-failure can say what it measured (:func:`too_large_detail`). Repomix
+(``[snapshot] max_tokens``, default 150k); else the compressed pack; else keep
+the compressed pack as the skeleton with its per-file index and mark the
+snapshot ``skeleton_only``, recording the three numbers. The budget mirrors a
+server cap on a pack that is read INTO a model context — nothing in the CLI
+does that (the session-start directive hands the agent paths), so it gates only
+the full pack. A ``too_large`` verdict, nothing stored, is only ever loaded from
+a snapshot.json written before ``skeleton_only`` existed. Repomix
 is a Node CLI — we shell out to ``repomix`` (or ``npx repomix``); if neither is
 available the snapshot is skipped, not fatal.
 """
@@ -307,9 +311,7 @@ def generate(
         if compressed_tokens <= max_tokens:
             _write_pack(meta, compressed_text, tokens=compressed_tokens, compressed=True)
         else:
-            meta.token_count = compressed_tokens
-            meta.compressed = True
-            meta.status = "too_large"
+            _write_skeleton_only(meta, compressed_text, tokens=compressed_tokens)
 
     meta_path(project_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
     return meta
@@ -320,13 +322,23 @@ def generate(
 REPACK_HINT = "Re-pack: aisquare project onboard --refresh"
 
 
+def skeleton_only_detail(meta: Snapshot) -> str:
+    """The one sentence a ``skeleton_only`` snapshot is reported with — CLI and doctor alike."""
+    return (
+        f"skeleton only: {meta.skeleton_token_count} tokens, {meta.file_count} files indexed; "
+        f"full pack skipped over budget {meta.max_tokens} ({meta.full_token_count} tokens)"
+    )
+
+
 def too_large_detail(meta: Snapshot) -> str:
     """The one sentence a ``too_large`` snapshot is reported with — CLI and doctor alike.
 
-    Names what was measured and the two ways out, so the operator never has to
-    guess how far over they are or what to type. A snapshot.json from before the
-    numbers were recorded (0.6.0) has none to name; it says so rather than
-    printing zeros, and its only way out is :data:`REPACK_HINT`.
+    Only a snapshot.json written before ``skeleton_only`` existed carries this
+    status now; :data:`REPACK_HINT` turns it into a skeleton. The sentence still
+    names what was measured and the two ways to keep the full pack, so the
+    operator never has to guess how far over they are or what to type. A
+    snapshot.json from before the numbers were recorded (0.6.0) has none to
+    name; it says so rather than printing zeros.
     """
     if meta.max_tokens is None or meta.full_token_count is None:
         return (
@@ -340,6 +352,28 @@ def too_large_detail(meta: Snapshot) -> str:
         "trees with [snapshot] ignore (aisquare config set snapshot.ignore '<glob>,<glob>') "
         "or a .repomixignore at the repo root."
     )
+
+
+def _write_skeleton_only(meta: Snapshot, skeleton_text: str, *, tokens: int) -> None:
+    """Over budget even compressed: keep the skeleton and its per-file index, skip the full pack.
+
+    The budget mirrors a server cap on a pack that is READ INTO a model context.
+    Nothing in the CLI does that — the session-start directive hands the agent
+    paths and it opens slices through the index — so the cap gates only the
+    full pack, and the repos that most need a skeleton are exactly the ones
+    over it. The old verdict stored nothing for them. A full pack left by an
+    earlier, smaller run is removed so nothing points at contents that no
+    longer match the tree.
+    """
+    meta.skeleton_path.write_text(skeleton_text, encoding="utf-8")
+    index = _build_index(skeleton_text)
+    meta.index_path.write_text(json.dumps(index), encoding="utf-8")
+    meta.pack_path.unlink(missing_ok=True)
+    meta.token_count = tokens
+    meta.skeleton_token_count = tokens
+    meta.compressed = True
+    meta.file_count = len(index)
+    meta.status = "skeleton_only"
 
 
 def _write_pack(meta: Snapshot, pack_text: str, *, tokens: int, compressed: bool) -> None:

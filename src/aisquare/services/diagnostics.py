@@ -678,6 +678,11 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         return _ok(
             "snapshot", f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
         )
+    if snap is not None and snap.status == "skeleton_only":
+        # Usable: the session-start directive points agents at the skeleton and
+        # its index. No fix, deliberately — re-packing would not change it, and a
+        # fix here is the button that was pressed forever with a green tick.
+        return _ok("snapshot", snapshot_core.skeleton_only_detail(snap))
     if snap is not None and snap.status == "too_large":
         # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
         # The fix is `--refresh` because a plain `onboard` only reloads this

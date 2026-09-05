@@ -692,6 +692,54 @@ def _too_large_snapshot(project_id: str) -> Snapshot:
     return meta
 
 
+def _skeleton_only_snapshot(project_id: str) -> Snapshot:
+    directory = snapshot_core.snapshot_dir(project_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    meta = Snapshot(
+        project_id=project_id,
+        generated_at=datetime.now(tz=UTC),
+        pack_path=snapshot_core.pack_path(project_id),
+        skeleton_path=snapshot_core.skeleton_path(project_id),
+        index_path=snapshot_core.index_path(project_id),
+        token_count=2_030_000,
+        skeleton_token_count=2_030_000,
+        file_count=1234,
+        compressed=True,
+        status="skeleton_only",
+        full_token_count=10_990_000,
+        max_tokens=150_000,
+    )
+    snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
+    return meta
+
+
+def test_doctor_treats_a_skeleton_only_snapshot_as_usable_and_offers_no_fix(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skeleton and its index are what agents are handed, so this is green — and has no fix.
+
+    Measured on the issue: the Doctor tab's fix ran ``onboard --refresh``, showed a
+    tick, and changed nothing, forever. A fix here would be that button again.
+    """
+    root = tmp_path / "huge"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
+    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    verdict = _skeleton_only_snapshot(_seed(root).id)
+
+    check = _by_name(diagnostics.doctor())["snapshot"]
+
+    assert check.status is CheckStatus.ok
+    assert check.detail == snapshot_core.skeleton_only_detail(verdict)
+    assert check.detail == (
+        "skeleton only: 2030000 tokens, 1234 files indexed; "
+        "full pack skipped over budget 150000 (10990000 tokens)"
+    )
+    assert check.fix is None
+    assert fix_commands([check]) == []
+
+
 def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

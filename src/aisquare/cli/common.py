@@ -307,6 +307,8 @@ def emit_onboard(report: OnboardReport) -> None:
         if snapshot.skeleton_token_count:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
         console.print(line)
+    elif snapshot is not None and snapshot.status == "skeleton_only":
+        console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
     elif snapshot is not None and snapshot.status == "too_large":
         # The same sentence the doctor prints (one definition, so the two never
         # disagree on the numbers), plus what to run once a remedy is in place.

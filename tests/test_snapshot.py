@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -57,11 +58,26 @@ def test_generate_full_pack(fake_repomix: None, monkeypatch: pytest.MonkeyPatch)
     assert snapshot.load("prj_test") == meta
 
 
-def test_generate_marks_too_large(fake_repomix: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_over_budget_keeps_the_skeleton_and_the_index(
+    fake_repomix: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even the compressed pack is over: the skeleton and its index are kept, the full pack is not.
+
+    The budget mirrors a server cap on a pack read INTO a context; the CLI hands
+    agents paths, so the cap gates only the full pack. The old ``too_large``
+    verdict stored nothing, which left the repos that most need a skeleton —
+    the big ones — as the only repos without one.
+    """
     monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: snapshot.MAX_TOKENS + 1)
     meta = snapshot.generate("prj_big", Path("/tmp/repo"))
-    assert meta.status == "too_large"
+    assert meta.status == "skeleton_only"
     assert not snapshot.pack_path("prj_big").exists()
+    assert snapshot.skeleton_path("prj_big").read_text(encoding="utf-8") == SKEL
+    index = json.loads(snapshot.index_path("prj_big").read_text(encoding="utf-8"))
+    assert [entry["path"] for entry in index] == ["a.py", "b.py"]
+    assert meta.file_count == 2
+    assert meta.skeleton_token_count == meta.token_count == snapshot.MAX_TOKENS + 1
+    assert snapshot.load("prj_big") == meta
 
 
 def test_generate_falls_back_to_compressed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,10 +175,37 @@ def test_generate_holds_both_packs_to_the_budget_it_is_given(
     assert (squeezed.full_token_count, squeezed.token_count, squeezed.max_tokens) == (9, 4, 5)
 
     over = snapshot.generate("prj_over", Path("/tmp/repo"), max_tokens=3)
-    assert over.status == "too_large"
+    assert over.status == "skeleton_only"
     assert (over.full_token_count, over.token_count, over.max_tokens) == (9, 4, 3)
+    assert over.skeleton_token_count == 4
     assert not snapshot.pack_path("prj_over").exists()
+    assert snapshot.skeleton_path("prj_over").read_text(encoding="utf-8") == SKEL
     assert snapshot.load("prj_over") == over, "the numbers survive the trip through snapshot.json"
+
+
+def test_a_shrunken_budget_removes_the_stale_full_pack(
+    fake_repomix: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A skeleton-only re-pack must not leave an earlier run's full pack beside it."""
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda text, _out: 4 if text == SKEL else 9)
+    assert snapshot.generate("prj_shrink", Path("/tmp/repo"), max_tokens=9).status == "ready"
+    assert snapshot.pack_path("prj_shrink").exists()
+
+    again = snapshot.generate("prj_shrink", Path("/tmp/repo"), max_tokens=3)
+    assert again.status == "skeleton_only"
+    assert not snapshot.pack_path("prj_shrink").exists()
+    assert snapshot.skeleton_path("prj_shrink").exists()
+
+
+def test_skeleton_only_detail_names_the_counts_and_the_budget() -> None:
+    meta = _verdict(token_count=2_030_000, full_token_count=10_990_000, max_tokens=150_000)
+    meta.status = "skeleton_only"
+    meta.skeleton_token_count = 2_030_000
+    meta.file_count = 1234
+    assert snapshot.skeleton_only_detail(meta) == (
+        "skeleton only: 2030000 tokens, 1234 files indexed; "
+        "full pack skipped over budget 150000 (10990000 tokens)"
+    )
 
 
 def test_generate_without_a_budget_uses_the_built_in_default(

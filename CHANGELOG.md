@@ -32,6 +32,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   project's checkout is never packed into this one. The repo's `.gitignore` and
   `.repomixignore` still apply, read by Repomix itself; the too-large message
   names both knobs.
+- **Over budget even compressed, the snapshot keeps the skeleton instead of
+  nothing.** The 150 000 cap mirrors a server cap on a pack that is read into a
+  model context. The CLI never does that — `hook session-start` hands the agent
+  the skeleton, pack and index *paths* — so the cap bounded no prompt, only
+  whether a snapshot existed; and the skeleton (`repomix --compress`) was built
+  only when the FULL pack fit, so the repos that most needed one were the only
+  ones without it (measured: 10.99M tokens full, 2.03M compressed). Now the
+  compressed pack is written as `skeleton.repomix.xml` with its per-file index,
+  status `skeleton_only`, every count recorded, any stale full pack removed;
+  the session-start directive lists the skeleton and index and omits the full
+  pack; `doctor` reports it green as `skeleton only: N tokens, F files indexed;
+  full pack skipped over budget B (M tokens)` with no fix, because a fix here
+  was the button pressed forever with a green tick. `max_tokens` now gates
+  only the full pack. `too_large` survives only as a status loaded from a
+  0.6.0 `snapshot.json`.
 
 ## [0.6.0] - 2026-09-03
 

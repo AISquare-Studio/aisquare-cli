@@ -170,10 +170,14 @@ all of it). Re-run with `--refresh` after big changes.
 
 A pack has to fit a **token budget**: `[snapshot] max_tokens` in
 `~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
-The full pack is tried first, then a compressed one; when even that is over, no
-pack is stored and the failure names its numbers — `snapshot: codebase too
-large: full 412318 tokens, compressed 203991 tokens, budget 150000` — and its
-two ways out. `aisquare doctor` repeats the same line until one is taken:
+The full pack is tried first, then a compressed one; when even that is over,
+the compressed pack is kept as the **skeleton** with its per-file index and the
+full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
+skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
+budget 150000 (10990000 tokens)`, and agents are oriented from it as usual.
+The budget gates only the full pack: an agent is handed paths and opens slices
+through the index, never a whole pack in a prompt. To keep the full pack too,
+raise the budget or leave more out, then re-pack:
 
 ```sh
 aisquare config set snapshot.max_tokens 300000   # raise the budget for a repo you know is big

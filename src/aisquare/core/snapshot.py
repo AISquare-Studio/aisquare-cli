@@ -7,25 +7,35 @@ future sync:
 - **skeleton** — ``repomix --compress --style xml`` (signatures/imports, bodies dropped);
 - **index** — a per-file map of char offsets + token counts, parsed from the pack.
 
-Adaptive, like the server: use the full pack when it fits the token cap; else the
-compressed pack; else mark the snapshot ``too_large`` and store no pack. Repomix
+Adaptive, like the server: use the full pack when it fits the token budget
+(``[snapshot] max_tokens``, default 150k); else the compressed pack; else keep
+the compressed pack as the skeleton with its per-file index and mark the
+snapshot ``skeleton_only``, recording the three numbers. The budget mirrors a
+server cap on a pack that is read INTO a model context — nothing in the CLI
+does that (the session-start directive hands the agent paths), so it gates only
+the full pack. A ``too_large`` verdict, nothing stored, is only ever loaded from
+a snapshot.json written before ``skeleton_only`` existed. Repomix
 is a Node CLI — we shell out to ``repomix`` (or ``npx repomix``); if neither is
 available the snapshot is skipped, not fatal.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import importlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
 from aisquare.core import paths
+from aisquare.core.config import SnapshotSettings
 from aisquare.models import Snapshot
 
 
@@ -38,7 +48,29 @@ class IndexEntry(TypedDict):
     token_count: int
 
 
-MAX_TOKENS = 150_000  # mirrors REPO_PACK_MAX_TOKENS
+#: The built-in budget — ``[snapshot] max_tokens`` at its default. Callers that
+#: honour the operator's config (``services.project``) read the section and pass
+#: it to :func:`generate`; this is what everyone else gets.
+MAX_TOKENS = SnapshotSettings().max_tokens
+
+#: What no pack should carry whatever the repo's ``.gitignore`` says: dependency
+#: trees, build output, caches, and this tool's own worktree directories. In the
+#: glob syntax repomix's ``--ignore`` takes (its own defaults have this shape), so
+#: a name matches at any depth. The operator's ``[snapshot] ignore`` EXTENDS this
+#: list; :func:`nested_repos` adds any checkout found below the root; the repo's
+#: ``.gitignore`` and ``.repomixignore`` apply on top, read by repomix itself.
+DEFAULT_IGNORE: tuple[str, ...] = (
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/.git/**",
+    "**/__pycache__/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/.aisquare-worktrees/**",
+    "**/*.worktrees/**",
+)
 _PACK_TIMEOUT = 600
 _FILE_TAG = re.compile(r'<file path="([^"]+)">')
 _TOTAL_TOKENS = re.compile(r"Total Tokens:\s*([\d,]+)", re.IGNORECASE)
@@ -119,14 +151,56 @@ def _repomix_base() -> list[str]:
     )
 
 
-def _run_repomix(root: Path, *, compress: bool) -> tuple[str, str]:
-    """Run repomix in ``root``; return (pack text, repomix stdout)."""
+def nested_repos(root: Path) -> list[str]:
+    """Checkouts below ``root`` — repositories or worktrees of their own — as ignore patterns.
+
+    A sibling repo cloned into the project, a worktree directory, a vendored
+    fork: each is another project's codebase, and packing it here would put a
+    second codebase in this project's orientation. Detected by a ``.git`` entry
+    below the root (a directory for a repository, a file for a worktree or
+    submodule) — never the root's own. The walk prunes :data:`DEFAULT_IGNORE`
+    names so a ``node_modules`` tree is never descended, never follows
+    symlinks, does not enter a checkout once found (its contents are its own
+    business), and skips what it cannot read.
+    """
+    stems = [pattern.removeprefix("**/").removesuffix("/**") for pattern in DEFAULT_IGNORE]
+    found: list[str] = []
+    for current, dirs, files in os.walk(root, topdown=True, onerror=lambda _exc: None):
+        here = Path(current)
+        if here != root and (".git" in dirs or ".git" in files):
+            found.append(here.relative_to(root).as_posix() + "/**")
+            dirs[:] = []
+            continue
+        dirs[:] = [
+            name for name in dirs if not any(fnmatch.fnmatchcase(name, stem) for stem in stems)
+        ]
+    return sorted(found)
+
+
+def ignore_patterns(root: Path, extra: Sequence[str] = ()) -> list[str]:
+    """What a pack of ``root`` leaves out: the defaults, nested checkouts, then the operator's."""
+    patterns = [*DEFAULT_IGNORE, *nested_repos(root)]
+    for pattern in extra:
+        cleaned = pattern.strip()
+        if cleaned and cleaned not in patterns:
+            patterns.append(cleaned)
+    return patterns
+
+
+def _run_repomix(root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
+    """Run repomix in ``root``; return (pack text, repomix stdout).
+
+    ``ignore`` goes to ``--ignore`` comma-joined, which is how repomix takes it;
+    the repo's ``.gitignore`` and ``.repomixignore`` it reads on its own.
+    """
     base = _repomix_base()
     with tempfile.TemporaryDirectory(prefix="aisquare-repomix-") as tmp:
         out = Path(tmp) / "pack.xml"
         argv = [*base, "--style", "xml", "-o", str(out)]
         if compress:
             argv.insert(len(base), "--compress")
+        if ignore:
+            argv += ["--ignore", ",".join(ignore)]
         result = subprocess.run(
             argv,
             cwd=root,
@@ -190,10 +264,21 @@ def _build_index(pack_text: str) -> list[IndexEntry]:
     return entries
 
 
-def generate(project_id: str, root: Path, *, head: str | None = None) -> Snapshot:
+def generate(
+    project_id: str,
+    root: Path,
+    *,
+    head: str | None = None,
+    max_tokens: int = MAX_TOKENS,
+    ignore: Sequence[str] = (),
+) -> Snapshot:
     """Pack ``root`` and write the snapshot artifacts under the project's data dir.
 
-    Raises :class:`RepomixUnavailableError` if repomix cannot be run.
+    ``max_tokens`` is the budget both packs are held to. The verdict records it
+    and the full pack's size whatever the outcome, so a ``too_large`` result can
+    say what it saw. ``ignore`` is the operator's list, laid over
+    :func:`ignore_patterns`'s defaults and nested checkouts. Raises
+    :class:`RepomixUnavailableError` if repomix cannot be run.
     """
     directory = snapshot_dir(project_id)
     directory.mkdir(parents=True, exist_ok=True)
@@ -204,31 +289,91 @@ def generate(project_id: str, root: Path, *, head: str | None = None) -> Snapsho
         pack_path=pack_path(project_id),
         skeleton_path=skeleton_path(project_id),
         index_path=index_path(project_id),
+        max_tokens=max_tokens,
     )
 
-    full_text, full_stdout = _run_repomix(root, compress=False)
+    excluded = ignore_patterns(root, ignore)
+    full_text, full_stdout = _run_repomix(root, compress=False, ignore=excluded)
     full_tokens = _total_tokens(full_text, full_stdout)
+    meta.full_token_count = full_tokens
 
-    if full_tokens <= MAX_TOKENS:
+    if full_tokens <= max_tokens:
         _write_pack(meta, full_text, tokens=full_tokens, compressed=False)
         try:  # best-effort skeleton; the full pack still ships if this fails
-            skeleton_text, skeleton_stdout = _run_repomix(root, compress=True)
+            skeleton_text, skeleton_stdout = _run_repomix(root, compress=True, ignore=excluded)
             meta.skeleton_path.write_text(skeleton_text, encoding="utf-8")
             meta.skeleton_token_count = _total_tokens(skeleton_text, skeleton_stdout)
         except (subprocess.SubprocessError, OSError):
             pass
     else:
-        compressed_text, compressed_stdout = _run_repomix(root, compress=True)
+        compressed_text, compressed_stdout = _run_repomix(root, compress=True, ignore=excluded)
         compressed_tokens = _total_tokens(compressed_text, compressed_stdout)
-        if compressed_tokens <= MAX_TOKENS:
+        if compressed_tokens <= max_tokens:
             _write_pack(meta, compressed_text, tokens=compressed_tokens, compressed=True)
         else:
-            meta.token_count = compressed_tokens
-            meta.compressed = True
-            meta.status = "too_large"
+            _write_skeleton_only(meta, compressed_text, tokens=compressed_tokens)
 
     meta_path(project_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
     return meta
+
+
+#: What to do about a ``too_large`` verdict once a remedy is in place. A plain
+#: ``project onboard`` reuses the stored verdict — only ``--refresh`` re-measures.
+REPACK_HINT = "Re-pack: aisquare project onboard --refresh"
+
+
+def skeleton_only_detail(meta: Snapshot) -> str:
+    """The one sentence a ``skeleton_only`` snapshot is reported with — CLI and doctor alike."""
+    return (
+        f"skeleton only: {meta.skeleton_token_count} tokens, {meta.file_count} files indexed; "
+        f"full pack skipped over budget {meta.max_tokens} ({meta.full_token_count} tokens)"
+    )
+
+
+def too_large_detail(meta: Snapshot) -> str:
+    """The one sentence a ``too_large`` snapshot is reported with — CLI and doctor alike.
+
+    Only a snapshot.json written before ``skeleton_only`` existed carries this
+    status now; :data:`REPACK_HINT` turns it into a skeleton. The sentence still
+    names what was measured and the two ways to keep the full pack, so the
+    operator never has to guess how far over they are or what to type. A
+    snapshot.json from before the numbers were recorded (0.6.0) has none to
+    name; it says so rather than printing zeros.
+    """
+    if meta.max_tokens is None or meta.full_token_count is None:
+        return (
+            "codebase too large to pack within the token budget "
+            "(packed before the numbers were recorded)."
+        )
+    return (
+        f"codebase too large: full {meta.full_token_count} tokens, compressed "
+        f"{meta.token_count} tokens, budget {meta.max_tokens}. Raise [snapshot] max_tokens "
+        "(aisquare config set snapshot.max_tokens <n>), or exclude generated or vendored "
+        "trees with [snapshot] ignore (aisquare config set snapshot.ignore '<glob>,<glob>') "
+        "or a .repomixignore at the repo root."
+    )
+
+
+def _write_skeleton_only(meta: Snapshot, skeleton_text: str, *, tokens: int) -> None:
+    """Over budget even compressed: keep the skeleton and its per-file index, skip the full pack.
+
+    The budget mirrors a server cap on a pack that is READ INTO a model context.
+    Nothing in the CLI does that — the session-start directive hands the agent
+    paths and it opens slices through the index — so the cap gates only the
+    full pack, and the repos that most need a skeleton are exactly the ones
+    over it. The old verdict stored nothing for them. A full pack left by an
+    earlier, smaller run is removed so nothing points at contents that no
+    longer match the tree.
+    """
+    meta.skeleton_path.write_text(skeleton_text, encoding="utf-8")
+    index = _build_index(skeleton_text)
+    meta.index_path.write_text(json.dumps(index), encoding="utf-8")
+    meta.pack_path.unlink(missing_ok=True)
+    meta.token_count = tokens
+    meta.skeleton_token_count = tokens
+    meta.compressed = True
+    meta.file_count = len(index)
+    meta.status = "skeleton_only"
 
 
 def _write_pack(meta: Snapshot, pack_text: str, *, tokens: int, compressed: bool) -> None:

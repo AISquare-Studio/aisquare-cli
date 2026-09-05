@@ -164,6 +164,17 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
             f"- Per-file index (char offsets + token counts): {snap.index_path}",
             "Orient from the skeleton; open the full pack only for implementation detail.",
         ]
+    elif snap is not None and snap.status == "skeleton_only" and snap.skeleton_path.exists():
+        # Over budget even compressed: the skeleton and its index are still the
+        # cheapest orientation there is. No full pack to offer, so none is named.
+        lines += [
+            "aisquare has a packed skeleton of this codebase (structure + signatures; the",
+            "full pack was skipped as over budget) — use it to understand the project fast",
+            "and cheaply instead of grepping or listing files:",
+            f"- Skeleton (read this FIRST): {snap.skeleton_path}",
+            f"- Per-file index into the skeleton (char offsets + token counts): {snap.index_path}",
+            "Orient from the skeleton; open source files directly for implementation detail.",
+        ]
     if has_prompts:
         lines.append(
             "Past user prompts here are captured — run `aisquare log` to see how the user "

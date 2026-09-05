@@ -218,6 +218,37 @@ class FleetSettings(BaseModel):
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 
+class SnapshotSettings(BaseModel):
+    """The codebase snapshot ``aisquare project onboard`` packs with Repomix.
+
+    ``max_tokens`` is the budget a pack must fit. The full pack is tried first,
+    then the compressed one (signatures only); a repo whose compressed pack is
+    STILL over it gets no pack, a ``too_large`` snapshot, and a message naming
+    all three numbers. 150 000 mirrors the server's ``REPO_PACK_MAX_TOKENS`` so
+    artifacts stay consistent for a future sync — raise it for a repo you know
+    is big, or add a ``.repomixignore`` at the repo root to keep generated and
+    vendored trees out of the pack (#82).
+
+    ``ignore`` is the operator's own list of what to leave out of the pack, in
+    the glob syntax repomix's ``--ignore`` takes (``**/fixtures/**``,
+    ``docs/generated/**``, ``*.snap``). It EXTENDS the built-in list
+    (``core.snapshot.DEFAULT_IGNORE``: dependency trees, build output, caches,
+    this tool's worktrees, and any nested git repository or worktree found
+    below the root) rather than replacing it, and the repo's own ``.gitignore``
+    and ``.repomixignore`` apply on top, read by repomix itself. On the command
+    line the items are comma-separated, as repomix's own flag is::
+
+        aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'
+
+    Read from the config file alone, like ``[fleet]``: there is no
+    ``AISQUARE_SNAPSHOT_*`` variable for either key, because this layer has no
+    per-key environment rung and one section is not the place to grow one.
+    """
+
+    max_tokens: int = 150_000
+    ignore: list[str] = Field(default_factory=list)
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -229,6 +260,7 @@ class AppConfig(BaseModel):
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
+    snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
 
 
 def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:

@@ -300,6 +300,13 @@ class Snapshot(BaseModel):
     file_count: int = 0
     compressed: bool = False
     status: str = "ready"
+    # What a ``too_large`` verdict was made of, so the failure can say what it
+    # measured: the full pack's size and the budget it was held to
+    # (``token_count`` is the pack that was kept — or, when none was, the
+    # compressed pack's size). Both are None on a snapshot.json written before
+    # they were recorded (0.6.0 and earlier); see ``core.snapshot.too_large_detail``.
+    full_token_count: int | None = None
+    max_tokens: int | None = None
 
 
 class OnboardReport(BaseModel):

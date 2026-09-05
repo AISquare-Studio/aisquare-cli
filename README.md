@@ -17,7 +17,8 @@ preferences, each project's conventions — so every session starts oriented
 instead of cold.
 
 It's a single CLI, local-first, backed by one SQLite file. No daemon, no
-account, no cloud dependency.
+account, no cloud dependency. Sign in with `aisquare login` only when a command
+needs to act as you on AISquare (see [docs/signing-in.md](docs/signing-in.md)).
 
 ## Install
 
@@ -560,6 +561,8 @@ aisquare
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
 │                   attach · reap [--all] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
+├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
+├── auth            status [--live] · token
 └── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 ```
 
@@ -576,9 +579,8 @@ registered but hidden until they do something real.
 
 ### Roadmap commands
 
-`auth` / `login` / `logout` / `whoami`, `sync`, `connectors`, `capture`,
-`policy` / `enforce`, `open`, `upgrade` and `uninstall` are the cloud roadmap
-(sync across machines, managed connectors). They are **hidden from `--help`**
+`sync`, `connectors`, `capture`, `policy` / `enforce`, `open`, `upgrade` and
+`uninstall` are the cloud roadmap (sync across machines, managed connectors). They are **hidden from `--help`**
 so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in

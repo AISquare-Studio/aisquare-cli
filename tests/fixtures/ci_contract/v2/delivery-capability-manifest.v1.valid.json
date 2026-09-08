@@ -1,0 +1,28 @@
+{
+  "manifest_version": 1,
+  "descriptor_contract": "client-delivery-descriptor.v1",
+  "capabilities": [
+    {
+      "kind": "hook_push",
+      "contract": 2,
+      "endpoint": "/v1/hook",
+      "triggers": [
+        "session_start",
+        "prompt_submit",
+        "agent_request"
+      ],
+      "request_contract": "hook-request.experimental-v2",
+      "response_contract": "hook-response.experimental-v2"
+    },
+    {
+      "kind": "mcp_pull",
+      "contract": 1,
+      "tool": "collective_intelligence_recall",
+      "input_contract": "mcp-tool-input.v1",
+      "output_contract": "mcp-tool-output.v1"
+    }
+  ],
+  "client_safety_ms": 60000,
+  "server_deadline_ms": 55000,
+  "published_at": "2026-08-22T14:59:00Z"
+}

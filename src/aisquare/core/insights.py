@@ -24,6 +24,7 @@ only the outbound copy is scrubbed.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from functools import lru_cache
 
@@ -157,6 +158,44 @@ def record_team_event(
         seq=seq,
         role=role,
     )
+
+
+def record_turn(
+    facts: Mapping[str, object],
+    *,
+    session_id: str | None = None,
+    project_id: str | None = None,
+) -> None:
+    """Spool one CI turn's join record. No-op unless shipping is configured.
+
+    ``facts`` are the ledger-join fields the seam document (§5) names — run,
+    session, trace and query ids, the client reason beside the server status,
+    the timings — and nothing free-text: the prompt is never here. The record
+    reaches the gateway inside the same Run as the session's spans, keyed by
+    the pipeline id, which is how the server's ledger rows and the CLI's turn
+    rows meet without sharing an id space.
+    """
+    if not shipping_enabled():
+        return
+    try:
+        record: dict[str, object] = {
+            "v": RECORD_VERSION,
+            "kind": "ci_turn",
+            "at": datetime.now(tz=UTC).isoformat(),
+            "text": "",
+            "run_key": run_key(session_id),
+            "event_id": None,
+            "session_id": session_id,
+            "project_id": project_id,
+            "event_kind": None,
+            "task_id": None,
+            "seq": None,
+            "role": None,
+            "ci": {key: value for key, value in facts.items()},
+        }
+        outbox.enqueue(record)
+    except Exception:  # an observer may not break its subject
+        return
 
 
 def _spool(

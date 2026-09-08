@@ -692,3 +692,73 @@ def test_the_hook_boundary_survives_a_gate_that_raises(
     assert hooks_service.prompt_submitted("q", tmp_path, session_id=SESSION) == delta
     context = hooks_service.session_start_context(tmp_path, session_id=SESSION)
     assert "Retrieved by aisquare" not in context
+
+
+def test_the_row_starts_when_the_turn_did_not_when_the_call_returned(
+    wired: StubCI, isolated_home: Path, tmp_path: Path
+) -> None:
+    """``wall_ms`` is the headline ``median wall`` figure and it is measured from
+    the row's ``started_at``. Stamped inside ``metric()`` that clock ran after
+    the exchange had already returned, so a turn whose CI call took 250 ms was
+    recorded as starting 250 ms late and ``median wall`` excluded the very
+    latency the experiment exists to measure — while ``median round trip`` was
+    reported beside it, making the two look independent.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    wired.respond(status=200, body=json.dumps(_response()), delay_s=0.25)
+
+    before = datetime.now(tz=UTC)
+    hooks_service.prompt_submitted(
+        "why does the brain lock use msvcrt", tmp_path, session_id=SESSION
+    )
+
+    turn = _turn()
+    assert turn.round_trip_ms is not None and turn.round_trip_ms >= 200, (
+        "precondition: the stub really did hold the call"
+    )
+    assert turn.started_at <= before + timedelta(milliseconds=100), (
+        "started_at must precede the round trip, not follow it"
+    )
+
+
+def test_a_ci_failure_does_not_cost_the_prompt_its_spool(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spooling the prompt is an observer of the job; it must not sit downstream
+    of the job. With `record_prompt` behind the CI call and inside the same
+    `try`, a raise in the CI path — `metric()` is a bare pydantic construction —
+    silently dropped the prompt from the Explainability spool."""
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("the CI path exploded")
+
+    monkeypatch.setattr(ci_augment, "for_prompt", boom)
+
+    assert hooks_service.capture_prompt("remember this prompt", tmp_path, session_id=SESSION) == ""
+
+    records = [json.loads(path.read_text(encoding="utf-8")) for path in outbox.pending()]
+    assert any("remember this prompt" in json.dumps(record) for record in records), (
+        "the prompt must reach the spool even when CI fails"
+    )
+
+
+def test_an_empty_prompt_still_registers_the_project_its_row_names(
+    wired: StubCI, isolated_home: Path, tmp_path: Path
+) -> None:
+    """A metric row is written for every turn, empty prompt included. A row whose
+    project_id has no `project` row is unreachable from `metrics show --project
+    <name>`, which resolves names through that table.
+
+    Driven through ``capture_prompt`` rather than ``prompt_submitted``: the team
+    heartbeat that runs after it registers the project itself, which would make
+    this pass whatever ``capture_prompt`` did.
+    """
+    hooks_service.capture_prompt("   ", tmp_path, session_id=SESSION)
+
+    from aisquare.core.store import store_session
+
+    turn = _turn()
+    with store_session() as store:
+        matches = store.find_projects(turn.project_id)
+    assert matches, f"metric row names {turn.project_id}, which no project row has"

@@ -385,9 +385,10 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
             f"⚠ {summary.deadline_breaches} turn(s) hit the client ceiling — "
             "that is a server-side latency problem, not a result"
         )
-    if summary.override_turns:
+    override_turns = summary.by_delivery_source.get("override", 0)
+    if override_turns:
         console.print(
-            f"⚠ {summary.override_turns} turn(s) ran under the staging delivery override — "
+            f"⚠ {override_turns} turn(s) ran under the staging delivery override — "
             "kept out of the round-trip figures; they measure nothing"
         )
     if not summary.turns_with_tokens:

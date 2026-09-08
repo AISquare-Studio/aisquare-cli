@@ -90,6 +90,38 @@ class RetrievedBlock:
     truncated: bool
 
 
+def _capped(rendered_context: str) -> RetrievedBlock:
+    """Sanitise then cap. See :func:`_capped_body` for the already-sanitised case."""
+    return _capped_body(_sanitise(rendered_context), sanitised=True, original=rendered_context)
+
+
+def _capped_body(
+    body: str, *, sanitised: bool = False, original: str | None = None
+) -> RetrievedBlock:
+    """Cap an already-sanitised body and record both sizes — one policy, one place.
+
+    ``injected_chars`` counts the payload and NOT the truncation note: the note
+    is aisquare's own sentence, and the column means "how much of the server's
+    text the agent saw". Both paths used to carry this block verbatim, so a
+    change to the cap or the wording had to be made twice and the pull path was
+    the one likely to be missed.
+    """
+    if not sanitised:
+        body = _sanitise(body)
+    truncated = len(body) > INJECTION_CAP_CHARS
+    payload = body[:INJECTION_CAP_CHARS] if truncated else body
+    shown = payload
+    if truncated:
+        omitted = len(body) - INJECTION_CAP_CHARS
+        shown += f"\n[truncated by aisquare: {omitted} more characters not shown]"
+    return RetrievedBlock(
+        text=shown,
+        rendered_chars=len(original if original is not None else body),
+        injected_chars=len(payload),
+        truncated=truncated,
+    )
+
+
 def build_retrieved_block(rendered_context: str) -> RetrievedBlock:
     """Frame server-rendered context as candidate material, not fact or instruction.
 
@@ -107,13 +139,8 @@ def build_retrieved_block(rendered_context: str) -> RetrievedBlock:
     The server's bytes are otherwise untouched — ``rendered_context`` is
     identical across arms by construction, and rewriting it would break that.
     """
-    body = _sanitise(rendered_context)
-    truncated = len(body) > INJECTION_CAP_CHARS
-    payload = body[:INJECTION_CAP_CHARS] if truncated else body
-    shown = payload
-    if truncated:
-        omitted = len(body) - INJECTION_CAP_CHARS
-        shown += f"\n[truncated by aisquare: {omitted} more characters not shown]"
+    capped = _capped(rendered_context)
+    shown = capped.text
     lines = [
         "## Retrieved by aisquare — you did not fetch this",
         "",
@@ -131,9 +158,9 @@ def build_retrieved_block(rendered_context: str) -> RetrievedBlock:
     ]
     return RetrievedBlock(
         text="\n".join(lines) + "\n",
-        rendered_chars=len(rendered_context),
-        injected_chars=len(payload),
-        truncated=truncated,
+        rendered_chars=capped.rendered_chars,
+        injected_chars=capped.injected_chars,
+        truncated=capped.truncated,
     )
 
 
@@ -153,27 +180,79 @@ def _sanitise(text: str) -> str:
     return "\n".join(kept)
 
 
-def build_tool_context(rendered_context: str) -> RetrievedBlock:
-    """The recall tool's ``rendered_context`` as the agent receives it.
+def sanitise_payload(value: object) -> object:
+    """Every string anywhere in a server-authored structure, made safe to show.
 
-    A tool result the agent asked for needs no caveat around it, but it is the
-    same server-authored text the frame distrusts: sanitised the same way and
-    capped the same way, with both sizes recorded, so a buggy or hostile
-    briefing cannot bill the whole context window on the path the standing
-    instruction tells the agent to take.
+    ``rendered_context`` is not the only free text the server sends: a briefing
+    also carries ``items[].text`` and an open ``structured_facts`` map, and on
+    the pull path both reach the agent verbatim. One recursive pass, through the
+    same sanitiser the frame uses — delimiter neutralisation included, because
+    the agent may hold a framed block from the same session — so a new field on
+    the contract cannot arrive unsanitised.
     """
-    body = _sanitise(rendered_context)
-    truncated = len(body) > INJECTION_CAP_CHARS
-    payload = body[:INJECTION_CAP_CHARS] if truncated else body
-    shown = payload
-    if truncated:
-        omitted = len(body) - INJECTION_CAP_CHARS
-        shown += f"\n[truncated by aisquare: {omitted} more characters not shown]"
-    return RetrievedBlock(
-        text=shown,
-        rendered_chars=len(rendered_context),
-        injected_chars=len(payload),
-        truncated=truncated,
+    if isinstance(value, str):
+        return _sanitise(value)
+    if isinstance(value, dict):
+        return {key: sanitise_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitise_payload(item) for item in value]
+    return value
+
+
+def cap_tool_payload(raw: dict[str, object]) -> tuple[dict[str, object], RetrievedBlock]:
+    """A briefing as the recall tool may return it: sanitised, and capped whole.
+
+    Two budgets of :data:`INJECTION_CAP_CHARS`, not one: ``rendered_context``
+    keeps its own, so ``rendered_chars``/``injected_chars`` mean exactly what
+    they mean on the push path and the two arms stay comparable; all of
+    ``items[].text`` shares a second. The total the agent can receive is
+    therefore bounded, which it was not before — ``items`` is an unbounded array
+    in the schema and its ``text`` has no maximum, so a ``served`` briefing whose
+    first item was megabytes (anything under the 8 MiB body cap) went straight
+    into the agent's context, the outcome the cap exists to prevent.
+
+    ``token_count`` is passed through untouched even when text was cut. It is
+    the server's statement about its OWN rendering ("tokens in rendered_context
+    under the frozen render configuration"), the schema types it as a required
+    integer with no null, and this result is validated against that schema — so
+    there is no honest replacement, and inventing a smaller number would be
+    worse than leaving the server's fact alone. What was cut is stated in the
+    payload by the truncation marker and measured on the row by
+    ``rendered_chars`` against ``injected_chars``.
+    """
+    payload: dict[str, object] = {key: sanitise_payload(value) for key, value in raw.items()}
+
+    # ``rendered_chars`` means "what the server sent, before any cap", so it is
+    # measured on the RAW string: sanitising can lengthen it (a neutralised
+    # delimiter line is longer than the line it replaced) and the column would
+    # then report more than the server ever sent.
+    sent = raw.get("rendered_context")
+    rendered = payload.get("rendered_context")
+    block = (
+        _capped_body(rendered, sanitised=True, original=sent if isinstance(sent, str) else rendered)
+        if isinstance(rendered, str)
+        else None
+    )
+    if block is not None:
+        payload["rendered_context"] = block.text
+
+    spent = 0
+    items = payload.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                continue
+            text = item["text"]
+            room = max(0, INJECTION_CAP_CHARS - spent)
+            spent += min(len(text), room)
+            if len(text) > room:
+                omitted = len(text) - room
+                item["text"] = (
+                    text[:room] + f"\n[truncated by aisquare: {omitted} more characters not shown]"
+                )
+
+    return payload, block or RetrievedBlock(
+        text="", rendered_chars=0, injected_chars=0, truncated=False
     )
 
 

@@ -252,12 +252,15 @@ def test_partial_install_is_reported_not_healthy(runner: CliRunner, fake_home: P
     assert agent_core.hooks_installed("claude-code") is True
 
 
-def test_hooks_without_the_context_timeout_are_not_installed(
+def test_hooks_without_the_context_timeout_are_installed_but_short(
     runner: CliRunner, fake_home: Path
 ) -> None:
-    """A settings file written before the context hooks carried ``timeout``
-    reported healthy while Claude Code cut the CI hook off at its 60 s default.
-    The value is reconciled, not just the marker; ``connect`` is the fix."""
+    """A settings file written before the context hooks carried ``timeout`` is
+    INSTALLED — the hooks fire — and separately short of the ceiling the CI hook
+    may wait for. Calling that "not installed" made ``doctor`` misdescribe a
+    working install (0.6.0's settings.json, or a hand-edited one) and send the
+    operator to a command that would rewrite entries they had chosen.
+    """
     from aisquare.core import agents as agent_core
 
     assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
@@ -268,15 +271,48 @@ def test_hooks_without_the_context_timeout_are_not_installed(
             for item in group["hooks"]:
                 item.pop("timeout", None)
     path.write_text(json.dumps(settings), encoding="utf-8")
-    assert agent_core.hooks_installed("claude-code") is False
+
+    assert agent_core.hooks_installed("claude-code") is True, "the hooks are there and firing"
+    assert agent_core.hook_timeout_shortfall("claude-code") == ["SessionStart", "UserPromptSubmit"]
+
     runner.invoke(app, ["agents", "connect", "claude-code"])
-    assert agent_core.hooks_installed("claude-code") is True
+
+    assert agent_core.hook_timeout_shortfall("claude-code") == []
     refreshed = json.loads(path.read_text(encoding="utf-8"))
     assert all(
         item["timeout"] == agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
         for group in refreshed["hooks"]["UserPromptSubmit"]
         for item in group["hooks"]
     )
+
+
+def test_a_longer_operator_timeout_is_kept_not_reconciled_down(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """180 is a deliberate choice with more headroom than we need. Exact
+    equality read it as "not installed" and ``connect`` overwrote it."""
+    from aisquare.core import agents as agent_core
+
+    assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
+    path = fake_home / ".claude" / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    for group in settings["hooks"]["UserPromptSubmit"]:
+        for item in group["hooks"]:
+            item["timeout"] = 180
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+    assert agent_core.hooks_installed("claude-code") is True
+    assert agent_core.hook_timeout_shortfall("claude-code") == [], "180 clears our ceiling"
+
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+
+    refreshed = json.loads(path.read_text(encoding="utf-8"))
+    kept = [
+        item["timeout"]
+        for group in refreshed["hooks"]["UserPromptSubmit"]
+        for item in group["hooks"]
+    ]
+    assert kept == [180], "connect must not reduce a ceiling the operator raised"
 
 
 def test_spaced_install_path_roundtrips_through_hooks(

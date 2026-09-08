@@ -601,6 +601,24 @@ def _check_claude_code() -> DoctorCheck:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
     broken = [path for path, hooked in health.items() if not hooked]
     if not broken:
+        # Installed and firing, but a context hook may carry a shorter timeout
+        # than the CI hook can wait for — a settings.json from 0.6.0, or one
+        # hand-edited. Its own sentence: the hooks are not "missing", and saying
+        # so sent the operator to a command that rewrites entries they chose.
+        short = {
+            path: agent_core.hook_timeout_shortfall("claude-code", path)
+            for path in health
+            if agent_core.hook_timeout_shortfall("claude-code", path)
+        }
+        if short:
+            listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
+            return _warn(
+                "claude-code",
+                f"{product} connected, but the context hooks allow less than "
+                f"{agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS} s in: {listed} — a CI hook still "
+                "inside the run's ceiling would be cut off and its row never written",
+                "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in short),
+            )
         where = f" in {len(health)} config dirs" if len(health) > 1 else ""
         return _ok("claude-code", f"{product} connected{where} (all lifecycle hooks installed)")
     listed = ", ".join(str(path) for path in broken)

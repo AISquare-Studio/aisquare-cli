@@ -198,6 +198,48 @@ def test_a_prompt_with_nothing_in_it_is_never_sent(wired: StubCI, isolated_home:
     assert turn.client_reason is ClientReason.no_prompt
 
 
+def test_the_raw_session_id_the_agent_actually_holds_is_repaired_not_refused(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """Claude Code hands the agent a bare UUID. ``wire_session_id`` exists so
+    "a value the agent hands us can never produce a request the server rejects
+    on shape alone", and the tool boundary was not applying it — so the id the
+    agent actually holds was bounced with `schema_mismatch` and no row."""
+    result = ci_recall.collective_intelligence_recall("q", SESSION)
+
+    assert result["status"] != "unavailable", result
+    assert wired.recalls, "the call was made"
+    assert wired.recall_requests[0]["session_id"] == wire_session_id(SESSION)
+
+
+def test_an_over_long_prompt_is_clipped_at_the_boundary_not_refused(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """The docstring promises clipping to the contract; it happened only in the
+    second ``RecallInput``, which an over-long prompt never reached."""
+    from aisquare.services.ci_contract import MAX_PROMPT_CHARS
+
+    result = ci_recall.collective_intelligence_recall("q" * (MAX_PROMPT_CHARS + 20_000), WIRE)
+
+    assert result["status"] != "unavailable", result
+    assert wired.recalls and len(wired.recall_requests[0]["prompt"]) <= MAX_PROMPT_CHARS
+
+
+def test_an_argument_the_cli_cannot_repair_is_still_recorded(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """ "Every recall the gate lets through is recorded like a hook call" — and a
+    refusal at the boundary wrote no row at all, so the pull arm's key negative
+    outcome was a silent gap."""
+    result = ci_recall.collective_intelligence_recall("q", WIRE, token_budget=-5)
+
+    assert result["client_reason"] == "schema_mismatch"
+    (turn,) = metrics_service.recent()
+    assert turn.trigger == "agent_request"
+    assert turn.client_reason is ClientReason.schema_mismatch
+    assert turn.ended_at is not None, "a call, not a turn: closed at creation"
+
+
 def test_a_scope_id_offered_as_authority_is_refused_by_the_schema_not_by_prose(
     wired: StubCI, isolated_home: Path
 ) -> None:
@@ -287,6 +329,37 @@ def test_the_tool_result_is_sanitised_capped_and_recorded_like_an_injection(
     assert turn.rendered_chars == len(raw["rendered_context"])
     assert turn.injected_chars == INJECTION_CAP_CHARS
     assert turn.frame_version == TOOL_FRAME_VERSION == "aisquare-ci-tool/1"
+
+
+def test_item_text_is_sanitised_and_capped_too_not_just_rendered_context(
+    wired: StubCI, isolated_home: Path
+) -> None:
+    """`items` is an unbounded array whose `text` has no maximum, so capping
+    only `rendered_context` left the rest bounded by nothing but the 8 MiB body
+    cap: a `served` briefing whose first item was megabytes went straight into
+    the agent's context — the outcome the cap exists to prevent."""
+    from aisquare.core.injection import INJECTION_CAP_CHARS
+
+    raw = fixture("mcp-tool-output.v1.valid")
+    raw["rendered_context"] = "short rendering"
+    item = dict(raw["items"][0])
+    item["text"] = "b\x1b[31m\u200b" + "z" * (INJECTION_CAP_CHARS * 3)
+    raw["items"] = [item, {**item, "text": "y" * (INJECTION_CAP_CHARS * 3)}]
+    wired.respond_recall_json(raw)
+
+    result = ci_recall.collective_intelligence_recall("q", WIRE)
+
+    assert_valid("mcp-tool-output.v1", result)
+    texts = [entry["text"] for entry in result["items"]]
+    assert "\x1b" not in texts[0] and "\u200b" not in texts[0], "item text is sanitised too"
+    assert "truncated by aisquare" in texts[0]
+    total = sum(len(text) for text in texts)
+    assert total < INJECTION_CAP_CHARS + 500, (
+        f"all item text shares one budget; got {total} characters"
+    )
+    assert result["token_count"] == raw["token_count"], (
+        "the server's count of its own rendering is a fact, and the schema has no null for it"
+    )
 
 
 def test_a_locked_store_is_an_envelope_the_agent_can_act_on_not_a_crash(

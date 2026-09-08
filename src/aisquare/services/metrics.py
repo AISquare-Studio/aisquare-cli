@@ -142,8 +142,6 @@ def summarize(turns: list[TurnMetric], *, project_id: str | None = None) -> Metr
             _count(summary.by_trigger, turn.trigger)
         if turn.delivery_source is not None:
             _count(summary.by_delivery_source, turn.delivery_source)
-        if turn.delivery_source == "override":
-            summary.override_turns += 1
         if reason is ClientReason.none:
             summary.consulted += 1
         elif reason in BASELINE_REASONS:

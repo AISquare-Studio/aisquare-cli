@@ -237,3 +237,39 @@ def test_parse_descriptor_reports_the_first_shape_error() -> None:
     descriptor, detail = ci_descriptor.parse_descriptor(json.dumps(raw))
     assert descriptor is None
     assert "client_safety_ms" in detail
+
+
+def test_a_successful_uncached_fetch_clears_a_cached_refusal(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    """`doctor` fetches with ``cache=False``. A refusal it has just disproved has
+    to go, or the diagnostic prints a healthy run while every hook keeps
+    recording ``descriptor_unavailable`` from the stale detail for a minute."""
+    stub.descriptor_status = 401
+    assert _current(stub).descriptor is None
+    assert ci_descriptor._refusal_path(RUN).exists(), "precondition: a refusal is cached"
+
+    stub.descriptor_status = 200
+    fresh = ci_descriptor.fetch(RUN, base=stub.url, key="k", cache=False)
+
+    assert fresh.descriptor is not None
+    assert not ci_descriptor._refusal_path(RUN).exists(), "the refusal was disproved"
+    assert not paths.ci_descriptor_path(RUN).exists(), "cache=False still leaves no descriptor"
+    assert _current(stub).descriptor is not None, "and the hooks stop being told no"
+
+
+def test_a_refusal_against_one_endpoint_does_not_silence_another(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    """Keyed on the run alone, a 401 from one server kept answering for the
+    next, so repointing ``AISQUARE_CI_URL`` did not invalidate it."""
+    stub.descriptor_status = 401
+    assert _current(stub).descriptor is None
+    assert ci_descriptor._refusal_path(RUN).exists()
+
+    stub.descriptor_status = 200
+    other = stub.url.replace("127.0.0.1", "localhost")
+    result = ci_descriptor.current(RUN, base=other, key="k")
+
+    assert result.descriptor is not None, "a different endpoint gets its own answer"
+    assert not result.from_cache

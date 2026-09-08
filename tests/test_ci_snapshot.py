@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 from pathlib import Path
@@ -70,6 +71,45 @@ def test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_tak
     refs = set(git(root, "for-each-ref", "--format=%(refname)", ci_snapshot.WIP_REF_PREFIX).split())
     assert refs == {ci_snapshot.WIP_REF_PREFIX + "recent", ci_snapshot.WIP_REF_PREFIX + "new"}
     assert git(root, "cat-file", "-t", old) == "commit", "pruning drops the ref, not the object"
+
+
+def test_a_clean_tree_turn_still_prunes_expired_refs(tmp_path: Path) -> None:
+    """The retention is a promise about the refs on disk, not about what this
+    turn wrote. The prune used to sit in the success arm of the dirty-tree
+    ``update-ref``, so a developer who spent a week on dirty trees and then
+    worked from clean checkouts never pruned again — and the README promises
+    refs older than seven days go "the next time a snapshot is taken"."""
+    root = repo(tmp_path / "r")
+    old = _dated_commit(root, "2026-01-01T00:00:00+0000")
+    git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "old", old)
+
+    snapshot = ci_snapshot.capture(root, "trc_clean")  # tree is clean: no stash, no new ref
+
+    assert snapshot is not None and not snapshot.dirty and snapshot.ref is None
+    refs = git(root, "for-each-ref", "--format=%(refname)", ci_snapshot.WIP_REF_PREFIX).split()
+    assert refs == [], "a clean-tree snapshot must still drop what has expired"
+
+
+def test_capture_and_project_ref_share_one_budget_when_given_one(tmp_path: Path) -> None:
+    """The module docstring promises "every git call shares one small time
+    budget". Two separately-constructed budgets made that two allowances, so a
+    slow repository could spend twice the stated bound in front of a developer.
+    """
+    root = repo(tmp_path / "r")
+    spent = ci_snapshot._Budget(0.0)
+    assert spent.spent()
+
+    # Both accept the turn's budget; an exhausted one is still usable (remaining()
+    # floors) but neither may quietly start a second allowance.
+    ci_snapshot.capture(root, "trc_shared", spent)
+    ci_snapshot.project_ref(root, spent)
+
+    source = inspect.getsource(ci_snapshot)
+    assert source.count("_Budget(GIT_BUDGET_SECONDS)") == 1, (
+        "only new_budget() may construct the turn's allowance"
+    )
+    assert "def capture(root: Path, trace_id: str, budget: _Budget | None = None)" in source
+    assert "def project_ref(root: Path, budget: _Budget | None = None)" in source
 
 
 def test_pruning_fails_open_and_reports_what_it_dropped(tmp_path: Path) -> None:

@@ -373,10 +373,6 @@ class MetricsSummary(BaseModel):
     """Rows where the client tried and got no usable answer."""
     injected_turns: int = 0
     deadline_breaches: int = 0
-    override_turns: int = 0
-    """Rows delivered under the staging override (``delivery_source override``).
-    They measure nothing and are kept out of the round-trip figures below;
-    counted here so their presence is never invisible."""
     by_delivery_source: dict[str, int] = Field(default_factory=dict)
     by_reason: dict[str, int] = Field(default_factory=dict)
     by_status: dict[str, int] = Field(default_factory=dict)

@@ -280,17 +280,6 @@ CREATE UNIQUE INDEX project_codename ON project (codename);
 # a fabricated number here is worse than a null because it survives into a
 # published comparison.
 #
-#
-# There is no arm, no architecture, no flags hash and no run table: the client
-# never sees an arm (the descriptor is blinding by construction), and a column
-# for one here would be a place to leak it into. opaque_config_id is the only
-# handle on which configuration served a turn, and it is recorded verbatim.
-#
-# Token and tool columns are nullable and stay unwritten until they come from
-# real evidence (Explainability spans): hook payloads do not carry counts, and
-# a fabricated number here is worse than a null because it survives into a
-# published comparison.
-#
 # IF NOT EXISTS, and delivery_source inline rather than as a later ALTER,
 # because this step is reached by databases that already have the table: this
 # branch numbered the metric table v11 and v12 before `main` released v0.6.0

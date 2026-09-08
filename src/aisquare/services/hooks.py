@@ -195,13 +195,26 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     problem costs the record, not the teammate delta the hook still owes the
     session. Returns the retrieved block to inject, or ``""`` — which is what
     every turn returns while the experiment is off.
+
+    Recording the prompt — locally AND into the Explainability spool — happens
+    in the first block, before the server is consulted. Spooling it after the CI
+    call, inside the same ``try``, put an observer of the job downstream of the
+    job: a raise anywhere in the CI path (``metric()`` is a bare pydantic
+    construction) dropped the prompt from the spool, and even without a raise it
+    waited out the descriptor's whole ceiling first.
     """
     try:
         with store_session() as store:
             project = active_project(store, cwd)
+            # Unconditionally, even for an empty prompt: a metric row is written
+            # for every turn below, and a row whose project_id has no `project`
+            # row is unreachable from `metrics show --project <name>`, which
+            # resolves names through that table.
+            store.ensure_project(project)
             if prompt is not None and prompt.strip():
-                store.ensure_project(project)
                 store.add_prompt(prompt, project.id, source="claude-code")
+        if prompt is not None and prompt.strip():
+            insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
     except Exception as exc:  # never disrupt the session to record it — but say what it cost
         # Swallowed here so the teammate delta still reaches the session; on
         # stderr, never stdout, for the reason cli/hook.py gives — stdout is
@@ -218,8 +231,6 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
         )
         block = augmentation.block
         metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=False))
-        if prompt is not None and prompt.strip():
-            insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
         if augmentation.run_id:
             insights.record_turn(
                 augmentation.join_facts(session_id), session_id=session_id, project_id=project.id

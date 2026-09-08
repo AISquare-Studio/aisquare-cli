@@ -990,13 +990,40 @@ ensure_pkg_manager() {
 
 # Install one package with whatever manager this machine has. The `case` that
 # §2 says is the only OS-varying part of the script.
+# THE PACKAGE DATABASE HAS TO BE REFRESHED FIRST, and forgetting it for one
+# manager cost a whole platform. `apt-get install` without `apt-get update` fails
+# on any image more than a few days old; so does `pacman -S` without `-Sy`, and
+# `zypper install` without a refresh. Measured on `archlinux`: tmux, gh AND git
+# all failed with the image's stale database, and because the System class is
+# warn-only the installer sailed on and reported three warnings instead of doing
+# its job. `apk add --no-cache` fetches the index itself, which is why Alpine was
+# never affected; `dnf` expires its own metadata; Homebrew auto-updates on
+# install.
+#
+# Refreshed ONCE per run, not per package — four packages meant four `apt-get
+# update`s in the log, which is slow and reads like a bug.
+_pkg_refreshed=0
+
+pkg_refresh() {
+    [ "$_pkg_refreshed" = 0 ] || return 0
+    _pkg_refreshed=1
+    case "$PKG" in
+        apt) sudo_run apt-get update || true ;;
+        # `-Sy` and NOT `-Syu`. Refreshing the database is the minimum needed to
+        # install anything at all; a full system upgrade is not something an
+        # installer should do to somebody's machine unasked. Arch's own caution
+        # about partial upgrades applies, and the summary says so if a package
+        # then fails.
+        pacman) sudo_run pacman -Sy --noconfirm || true ;;
+        zypper) sudo_run zypper --non-interactive refresh || true ;;
+    esac
+}
+
 pkg_install() {
     _package=$1
+    pkg_refresh
     case "$PKG" in
-        apt)
-            sudo_run apt-get update || true
-            sudo_run apt-get install -y "$_package"
-            ;;
+        apt) sudo_run apt-get install -y "$_package" ;;
         dnf) sudo_run dnf install -y "$_package" ;;
         pacman) sudo_run pacman -S --noconfirm --needed "$_package" ;;
         zypper) sudo_run zypper --non-interactive install "$_package" ;;
@@ -1114,6 +1141,8 @@ _gh_add_apt_repo() {
     printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages stable main\n' \
         "$_arch" "$_key" |
         ${PKG_SUDO:+sudo }tee /etc/apt/sources.list.d/github-cli.list >/dev/null || return 1
+    # Unconditional, and NOT `pkg_refresh`: a brand-new source has to be read
+    # whether or not the database was refreshed earlier in this run.
     sudo_run apt-get update || true
 }
 

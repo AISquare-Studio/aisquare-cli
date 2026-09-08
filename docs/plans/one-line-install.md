@@ -1194,7 +1194,36 @@ claimed it used `local` and justified the choice at length; it never did.
 `tests/test_install_script_is_posix.py` now fails on any `_name` assigned in two
 functions, which turned up two more latent collisions on the way.
 
-### 12.9 The acceptance criterion, measured
+### 12.9 A stale package database, and how warn-only hid it
+
+§5's matrix lists the install command per platform and says nothing about
+refreshing the package database first. `apt-get update` was in the script from
+the start because it is impossible to forget — apt fails loudly without it — but
+`pacman` and `zypper` were not, and `pacman -S` without `-Sy` uses whatever
+database the machine already has.
+
+Measured on `archlinux`, which is a rolling release and so goes stale within
+days: **tmux, gh AND git all failed to install.** Every one of them.
+
+WHAT MAKES THIS WORTH A SECTION IS HOW IT PRESENTED. The System class is
+warn-only by design (§3.2), so the installer did not fail — it printed three
+warnings, finished, and reported success. A person reading that log sees three
+separate "could not install" lines and reasonably concludes their machine has
+three separate problems, when the truth is one missing `-Sy`. Warn-only is the
+right policy and it is also very good at hiding a systematic failure as a
+scattering of individual ones.
+
+The cell only caught it because run 2 needs `git` to create a project to
+register, and the assertion it failed on was two steps downstream of the cause.
+
+`pkg_refresh` now runs once per invocation before the first install: `apt-get
+update`, `pacman -Sy`, `zypper refresh`. `apk add --no-cache` fetches its own
+index (which is why Alpine was never affected), dnf expires its own metadata,
+and Homebrew auto-updates on install. `-Sy` rather than `-Syu` deliberately: a
+full system upgrade is not a thing an installer should do to someone's machine
+unasked, and refreshing the database is the minimum needed to install at all.
+
+### 12.10 The acceptance criterion, measured
 
 `tests/install/cell.sh` on five bare distributions, each installing a wheel
 built from this tree, each run three times:
@@ -1242,6 +1271,7 @@ no package manager at all**.
 | 2026-09-04 | Owner asked for existing-install detection and upgrade; added as §3.9. Measured: `uv tool upgrade` will NOT move a pinned install (exit 0, "Nothing to upgrade"), so the script always upgrades with `uv tool install --force … @latest --with tiktoken`, which moves it and re-states the extra. |
 | 2026-09-04 | Claude Code's version is never managed by us (§3.9.3) — it ships `claude update` and auto-updates by default, and the fleet needs a floor, not an exact version. |
 | 2026-09-08 | Owner answered §11: `uv` confirmed as the bootstrap; the raw GitHub URL now with the vanity redirect later; Homebrew installed only if the user agrees; the fleet UI's first-launch view left alone for a follow-up. |
+| 2026-09-08 | `pacman -S` without `-Sy` failed to install tmux, gh AND git on Arch's rolling image (§12.9) — and the warn-only System class reported it as three unrelated warnings over a successful run. `pkg_refresh` now syncs the database once per run for apt, pacman and zypper. |
 | 2026-09-08 | Added a non-root cell (§12.8) — every other cell ran as root, which is the branch where `sudo_run` never calls sudo. It found a shell variable collision that doubled a line of the user-facing summary, and that install.sh's own header comment claimed a `local` the file never used. A guard now fails on any `_name` assigned in two functions. |
 | 2026-09-08 | macOS CI found the worst bug in the feature (§12.7): `\|` alternation in a `sed` BRE is a GNU extension that **BSD sed lacks**, so the amber-check filter matched nothing on macOS and the installer reported every Mac as fully healthy. Five Linux cells passed it, BusyBox included. Fixed with two `-e` expressions and a static guard. Same run showed `short_circuit` demanded an EQUAL amber set rather than a subset, so a healthier-than-expected machine was refused the no-op path. |
 | 2026-09-08 | #103 fixed §6's three doctor defects on `main` while this branch was in flight, and per-path rather than against one constant (§12.6). This branch dropped its own phase 1 and took main's. The Node floor now lives in two languages, with a test asserting they are equal. |

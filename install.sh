@@ -1628,8 +1628,16 @@ summary() {
     if [ -n "$_expected" ]; then
         say ""
         note "expected:$_expected"
-        note "  brain    — gbrain is out of scope for this installer; team"
-        note "             decisions are simply not distilled without it."
+        # Each line explained only if it is actually there. `brain` was printed
+        # unconditionally, which is wrong on a machine that HAS gbrain: the
+        # macOS runner reported brain green with snapshot amber, and the summary
+        # would have explained a check that was fine.
+        case " $_expected " in
+            *" brain "*)
+                note "  brain    — gbrain is out of scope for this installer; team"
+                note "             decisions are simply not distilled without it."
+                ;;
+        esac
         case " $_expected " in
             *" snapshot "*)
                 # NOT "run project onboard": there is no project to onboard.

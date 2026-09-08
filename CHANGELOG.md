@@ -4,6 +4,90 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Follow-ups to the mcp 2.x port that 0.6.0 shipped, from an independent review
+of it. The port itself was sound; what the review found was one behaviour
+change nobody outside the source could see, two messages that sent the reader
+somewhere useless, and a set of tests that could pass without proving what
+they claimed. The 0.6.0 entry below has also been corrected in place — six of
+its statements about the SDK were measurably wrong, and are marked as measured
+where they now say something specific.
+
+### Added
+- **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
+  0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
+  `localhost` and `::1` runs with no Host/Origin validation — described at
+  length in the entry below, and visible nowhere else. The SDK logs nothing
+  when it skips that protection, the CLI printed the same startup line for
+  every bind, and `--bind`'s help predated the change, so the entire
+  disclosure reached changelog readers and source readers and never the person
+  opening the port. Such a bind now prints a second stderr line at startup
+  naming what is off and what is left — the bearer token, a long-lived
+  credential (`auth rotate` is still a stub) sent in clear over plain HTTP on
+  every request, so a trusted network or a TLS-terminating proxy — `--bind`'s
+  help says it in a sentence, and the README's serve section covers the flag.
+  The notice keys on `LOOPBACK_BINDS` in `services/mcp_server.py`, the same
+  tuple the server hands the SDK, so the words and the behaviour cannot drift.
+
+### Changed
+- **`serverInfo.version` reports this CLI's version.** mcp 1.x filled an
+  omitted server version with the SDK's own package version, so clients saw
+  `1.29.1` — a number that named nothing of ours — and 2.x sends the empty
+  string, which 0.6.0 therefore shipped. `build_server` now passes
+  `aisquare-cli`'s own version, pinned by a test over a legacy connection
+  where `serverInfo` is mandatory, so an absent identity fails loudly rather
+  than reading as `None`. With this, on the 2025-11-25 handshake era,
+  `tools/list`, every success result and every error result are identical as
+  parsed JSON between 1.x and 2.x, with two exceptions: the crash case and the
+  `-32601` code, both described below. (2.x orders object keys differently, so
+  the raw frames are not byte-for-byte equal; the error texts themselves are.)
+  On the 2026-07-28 era every result also carries a `_meta` serverInfo stamp,
+  which this version now populates; no 1.x served that era, so there is
+  nothing to compare it with.
+- **The serve suite proves what it says it proves.** Three gaps, each of which
+  let a mutation pass:
+  - `call_remote` drove the server through `Client(server)` at its default
+    mode, which for an in-process server is a `DirectDispatcher` pair —
+    2026-07-28, no initialize handshake, no JSON-RPC framing — while its
+    docstring claimed a wire-shaped round trip. It now asks for
+    `mode="legacy"`, the path the removed
+    `create_connected_server_and_client_session` took: memory streams, a
+    handshake, framing, results sieved at the 2025-11-25 surface. Both it and
+    the modern-path test now assert the protocol version they negotiated, so
+    swapping either mode fails instead of silently testing the other era.
+  - Nothing exercised `run_http` at all. Dropping its `host` argument left
+    every test green while `--bind 0.0.0.0` reverted to answering every LAN
+    client with `421`. `test_http_answers_by_bind_host_and_token` now pins
+    every combination that matters — a LAN `Host` is 200 on `0.0.0.0` and 421
+    on `127.0.0.1`, a loopback bind still answers its own client, and a
+    missing token is 401 on either bind before any Host check runs — driven
+    through the ASGI lifespan the way uvicorn drives it, so `_BearerGuard`'s
+    lifespan pass-through is pinned along the way.
+  - The `ClaimLostError` arm of the MCP error guard had no test. It now has
+    one, with the truth in its docstring: no tool can reach that arm today —
+    `next_task` moves on when a claim is lost and nothing calls `claim_task` —
+    so the test pins the mapping for the day a tool claims by ref.
+
+### Fixed
+- **`--show-token` and the startup line print a URL a client can dial.** Both
+  interpolated the bind verbatim, so `--bind ::1` — one of the three spellings
+  that keep the transport's Host validation — printed `http://::1:8747/mcp`,
+  which is not a URL at all, and `--bind 0.0.0.0` printed a listen address no
+  client can reach. IPv6 literals are bracketed, a wildcard bind is replaced
+  by this machine's hostname, and the JSON output gains a `bind` field so
+  nothing is lost. Pre-existing, but newly consequential: before mcp 2 a LAN
+  client was refused with 421 before the URL ever mattered.
+- **A broken mcp install is no longer reported as the wrong problem.** The
+  serve guard had two branches — extra missing, or mcp out of range — and a
+  third case fell into the second. `find_spec` on a dotted name imports the
+  parents, and `mcp.server` imports `sse_starlette` at package-import time, so
+  a venv holding mcp 2.1.1 with `sse-starlette` uninstalled or broken raised
+  inside the probe, was read as "no such module", and told the user to install
+  the mcp they already had. mcp pins `sse-starlette>=3.0.0` with no upper
+  bound, so an ordinary `pip install` can reach this. The guard now reports
+  the failing import by name and says to reinstall the extra.
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and
@@ -114,8 +198,7 @@ known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
   is listed below — a second protocol era (2026-07-28, which no 1.x could
   serve), a crash's detail kept off the wire, `serverInfo.version` and
   `-32601` for an unknown method, on both transports — and, on HTTP alone, no
-  Host/Origin validation on a non-loopback `--bind`, which `serve` now says
-  out loud.
+  Host/Origin validation on a non-loopback `--bind`.
   - **The error-wording contract survives, on the seam the SDK now provides.**
     mcp 2 still folds a tool's `ToolError` into `Error executing tool <name>:
     <msg>`, so the handler that unwraps our own message back out is still
@@ -125,10 +208,7 @@ known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
     what the SDK itself uses to wrap this method for extensions). A remote
     agent still sees `error: reopen requires a note (the feedback)`, verbatim,
     as an `isError` result — `tests/test_serve.py` asserts every one of those
-    strings through a real client session, the `ClaimLostError` mapping
-    included (no tool can reach that branch today; the test pins the mapping
-    for the day one claims by ref). Which of the SDK's two in-memory paths the
-    suite takes, and why, is the test bullet below.
+    strings through a real client session.
   - **A crashed tool is now logged server-side.** New in mcp 2.1, not chosen
     here: the SDK tells a crash apart from a deliberate failure by type
     (`UnexpectedToolError`) and keeps the crash's detail off the wire, so the
@@ -170,75 +250,33 @@ known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
     acceptable — with one caveat the operator has to own: the token is a
     long-lived credential (`auth rotate` is still a stub) sent in clear over
     plain HTTP on every request, so a non-loopback bind belongs on a trusted
-    network or behind a TLS-terminating proxy. **`serve` now says so.** A
-    `--bind` outside those three spellings prints a second stderr line at
-    startup naming what is off and what remains; `--bind --help` says the same
-    in a sentence; the README's serve section covers the flag. An operator who
-    wants a Host allowlist on such a bind as well passes
+    network or behind a TLS-terminating proxy — which nothing in this release
+    says outside this entry; see `[Unreleased]`. An operator who wants a Host
+    allowlist on such a bind as well passes
     `transport_security=TransportSecuritySettings(...)` (from
     `mcp.server.transport_security`) to `streamable_http_app()` for that bind
     only — supplying it replaces the SDK's loopback default rather than
-    extending it. Found by an independent review of #75 after it merged, which
-    measured both trees. `test_http_answers_by_bind_host_and_token` pins every
-    combination that matters: a LAN `Host` is 200 on `0.0.0.0` and 421 on
-    `127.0.0.1`, the loopback bind still answers its own client, and a missing
-    token is 401 on either bind, before any Host check — driven through the
-    ASGI lifespan as uvicorn drives it, so the guard's lifespan pass-through is
-    pinned too. Until now nothing exercised `run_http` at all: dropping the
-    `host` argument left every test green while the LAN bind reverted to 421.
-  - **`--show-token` and the startup line print a URL a client can dial.**
-    They interpolated the bind verbatim, so `--bind ::1` — one of the three
-    spellings that keep the protection — printed `http://::1:8747/mcp`, which
-    is not a URL, and `--bind 0.0.0.0` printed a listen address nobody can
-    reach. IPv6 literals are bracketed and a wildcard bind is replaced by this
-    machine's hostname; the JSON output gains a `bind` field so nothing is
-    lost. Pre-existing, but newly consequential: before mcp 2 a LAN client got
-    421 before the URL mattered.
+    extending it. Found by an independent review of this release after it
+    shipped, which measured both trees.
   - The `serve` guard probes `mcp.server.mcpserver`, and its message for an
     incompatible major points the other way now — a 1.x is the one that cannot
     work — with `pip install 'mcp>=2.1,<3'`. The distribution-versus-module
     distinction it was written for (#55) is exactly what makes a 1.x a
     sentence rather than a traceback. It tells majors apart, not minors: the
-    pin is what keeps a 2.0.x out, and pip reports that at install time. A
-    third case, found by the review: mcp present but unimportable because one
-    of *its* dependencies is missing or broken. `find_spec` imports the parents,
-    and `mcp.server` imports `sse_starlette` at package-import time, so a venv
-    with `sse-starlette` gone raised inside the probe, was read as "no such
-    module", and told the user to install the mcp they already had. That now
-    reports the failing import by name and says to reinstall the extra.
-  - `tests/test_serve.py` drives the server through
-    `mcp.client.Client(server, mode="legacy")`, the in-memory replacement for
-    the removed `create_connected_server_and_client_session` and the same path
-    it took: memory streams, an initialize handshake, JSON-RPC framing, results
-    sieved at the negotiated 2025-11-25 surface — what a handshake-era remote
-    agent gets. The default `mode="auto"` is, for an in-process server, a
-    `DirectDispatcher` pair: 2026-07-28, no initialize handshake, no JSON-RPC
-    framing — each request carries its own `_meta` envelope instead — though
-    the result is still JSON-dumped, sieved and re-parsed on that path too. One
-    test runs the same failing call on the default path and gets the same exact
-    text, so the replaced handler is proven on both eras, and both the helper
-    and that test assert the protocol version they negotiated, so a mode
-    change cannot pass silently. The suite reads `is_error`: field names are
-    snake_case in 2.x.
-  - **`serverInfo.version` is now this CLI's version.** mcp 1.x filled an
-    omitted version with the SDK's own package version, so clients saw
-    `"1.29.1"` — a number that named nothing of ours — and 2.x fills it with
-    the empty string. `build_server` now passes `aisquare-cli`'s version, and a
-    test pins it. Found by the same post-merge review, which diffed the two
-    trees' wire output step for step: with this, on the 2025-11-25 handshake
-    era, `tools/list`, every success result and every error result are
-    identical as parsed JSON between 1.x and 2.x, with two exceptions — the
-    crash case described above and the `-32601` code below (2.x orders object
-    keys differently, so the raw frames are not byte-for-byte equal; the error
-    texts themselves are). On the 2026-07-28 era every result also carries a
-    `_meta` serverInfo stamp, which this version now populates; no 1.x served
-    that era, so there is nothing to compare it with.
-  - Also inherited from 2.x, and not the project's to change: a request for an
-    unknown method is answered with the JSON-RPC-specified `-32601 Method not
-    found` (was `-32602 Invalid request parameters`), and synchronous tool
-    bodies run on a worker thread rather than inline on the event loop. Each of
-    the nine opens its own store session per call and touches nothing
-    thread-affine, so nothing crosses.
+    pin is what keeps a 2.0.x out, and pip reports that at install time.
+  - `tests/test_serve.py` drives the server through `mcp.client.Client`, the
+    in-memory replacement for the removed
+    `create_connected_server_and_client_session`, and reads `is_error`: field
+    names are snake_case in 2.x. (Which of the SDK's two in-memory paths that
+    takes, and why it matters, is a correction made under `[Unreleased]`.)
+  - Also inherited from 2.x, and not the project's to change: a server with no
+    version of its own reports an empty `serverInfo.version`, where 1.x
+    substituted the SDK's own package version (corrected under `[Unreleased]`);
+    a request for an unknown method is answered with the JSON-RPC-specified
+    `-32601 Method not found` (was `-32602 Invalid request parameters`); and
+    synchronous tool bodies run on a worker thread rather than inline on the
+    event loop. Each of the nine opens its own store session per call and
+    touches nothing thread-affine, so nothing crosses.
   - The floor is measured, not guessed: against every 2.x release on PyPI,
     the serve suite, the stdio idle-deadline suite and mypy strict are green on
     2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`

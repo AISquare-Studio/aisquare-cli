@@ -458,6 +458,8 @@ def test_a_missing_sdk_is_advice_on_a_stock_box_and_a_warning_once_wired(
 ) -> None:
     """The SDK only matters to the lane that ships CLI insights, so it is not
     a finding until this machine is being wired for it."""
+    from aisquare.services.explainability import install_hint as explainability_install_hint
+
     monkeypatch.setattr(
         ops,
         "sdk_presence",
@@ -469,7 +471,14 @@ def test_a_missing_sdk_is_advice_on_a_stock_box_and_a_warning_once_wired(
         if c.name == "explainability sdk"
     )
     assert stock.status is CheckStatus.ok
-    assert ops.INSTALL_HINT in stock.detail
+    # `install_hint()`, not the bare constant: both rows below are reachable from
+    # an editable checkout, where installing the extra SHADOWS this package
+    # instead of merging with it, and the raw hint would be the one command that
+    # breaks the machine while claiming to fix it. That is the same ruling
+    # `test_the_remedy_does_not_tell_an_editable_checkout_to_install_the_extra`
+    # already pins for the script-only row; these two had been left on a stale
+    # module-local constant that also named the SDK rather than the CLI.
+    assert explainability_install_hint() in stock.detail
 
     wired = next(
         c
@@ -478,7 +487,7 @@ def test_a_missing_sdk_is_advice_on_a_stock_box_and_a_warning_once_wired(
     )
     assert wired.status is CheckStatus.warn
     assert wired.fix is not None
-    assert ops.INSTALL_HINT in wired.fix
+    assert explainability_install_hint() in wired.fix
 
 
 def test_a_checks_detail_is_data_not_markup(capsys: pytest.CaptureFixture[str]) -> None:

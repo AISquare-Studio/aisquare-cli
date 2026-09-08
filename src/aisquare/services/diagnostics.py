@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from collections.abc import Callable
 from importlib import metadata
@@ -22,6 +21,7 @@ from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
+from aisquare.core.version import DISTRIBUTION
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CheckStatus,
@@ -138,22 +138,25 @@ def _check_python() -> DoctorCheck:
     return _ok("python", f"Python {info.major}.{info.minor}.{info.micro}")
 
 
-#: THE DISTRIBUTION NAME, once, because getting it wrong is not a typo.
-#: `aisquare` on PyPI is a DIFFERENT project — the Explainability SDK — and it
-#: ships its own `aisquare/__init__.py` into the same top-level package
-#: directory this one occupies. pip's RECORD for the two overlaps on exactly
-#: that file and the last writer wins it silently (the long comment on the
-#: `explainability` extra in pyproject.toml is about precisely that shape). So a
-#: fix string saying `pipx install aisquare` does not merely fail to install
-#: this CLI: it lands the reader in the one dependency shape this project
-#: documents at length as a hazard. Both `install` fixes and the tiktoken fix
-#: said it before docs/plans/one-line-install.md §6.1 measured it.
-_INSTALL_GLOBALLY = (
-    "Install as a global tool: uv tool install --with tiktoken aisquare-cli "
-    "(or: pipx install aisquare-cli)"
-)
-"""The uv form first because it is what install.sh uses, and because it fixes
-the `tiktoken` line in the same command. Never `aisquare` — see above."""
+#: How to install this CLI globally, built from :data:`DISTRIBUTION` rather than
+#: written out.
+#:
+#: THE NAME IS LOAD-BEARING AND WAS WRONG. Both hints below said ``pipx install
+#: aisquare`` -- and ``aisquare`` on PyPI is the *Explainability SDK*, a
+#: different distribution (1.2.0, "Explainability SDK for tracing, graphing, and
+#: policy auditing of AI agents"). This CLI is ``aisquare-cli``. So the one check
+#: whose job is "you have not installed this properly" answered it with a command
+#: that installs somebody else's package.
+#:
+#: Worse than a typo, for a reason this tree already documents at length: the SDK
+#: ships its own ``aisquare/__init__.py`` into the directory this package
+#: occupies and pip's RECORD for the two overlaps on that file, so the advice
+#: landed an operator in the exact dependency shape ``pyproject.toml``'s
+#: ``explainability`` extra has twelve lines of comment warning about -- whose
+#: own conclusion is that our advice must "never [be] a bare `pip install
+#: aisquare[explainability]`". Interpolating the constant is what stops the next
+#: rename from reintroducing it.
+_GLOBAL_INSTALL = f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})"
 
 
 def _check_install() -> DoctorCheck:
@@ -163,13 +166,13 @@ def _check_install() -> DoctorCheck:
         return _warn(
             "install",
             "aisquare is not on your PATH",
-            _INSTALL_GLOBALLY,
+            f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
         return _warn(
             "install",
             f"aisquare runs from a virtualenv ({binary})",
-            f"For stable Claude Code hooks, install globally instead. {_INSTALL_GLOBALLY}",
+            f"For stable Claude Code hooks, install globally: {_GLOBAL_INSTALL}",
         )
     return _ok("install", f"aisquare at {binary}")
 
@@ -442,125 +445,98 @@ def _read_line(path: Path) -> str:
         return ""
 
 
-MIN_NODE = 22
-"""The Node major Repomix needs, read from its own package.json rather than recalled.
+_NODE_FLOOR = ".".join(str(part) for part in snapshot_core.MIN_NODE)
 
-``repomix@1.18.0`` declares ``"engines": {"node": ">=22.0.0"}`` (registry.npmjs.org,
-2026-09-08). This is not a theoretical floor: **Debian 12 ships Node 18 and
-Ubuntu 22.04 ships Node 12**, so on both of them ``npx`` exists, the old form of
-this check reported ``ok``, and the first ``project onboard`` failed at runtime —
-a green line over a feature that cannot run (docs/plans/one-line-install.md §1.4,
-§6.3). A floor, deliberately, not an exact version: anything newer is fine.
-"""
-
-_NODE_MAJOR = re.compile(r"^v?(\d+)\.")
-"""``v26.7.0`` → 26. Anchored, so it reads a version and not the ``18`` out of
-some banner line; the major is all that ``>=22.0.0`` turns on."""
-
-
-def _node_major(binary: str) -> int | None:
-    """Node's major version, or ``None`` when it cannot be read.
-
-    ``None`` is a real answer and not an error: an unreadable version means
-    *untested against the floor*, which the caller reports at ``ok`` rather than
-    guessing — the same rule ``_check_tmux`` follows for a version string that
-    does not parse. Refusing on a guess would lock a fork or a distro build with
-    its own banner out of snapshots.
-    """
-    try:
-        result = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    match = _NODE_MAJOR.match(result.stdout.strip())
-    return int(match.group(1)) if match else None
-
-
-_UPGRADE_NODE = (
-    f"Upgrade Node to {MIN_NODE}+ — a distro package this old will not do it: "
-    "fnm install --install-if-missing 22 (or nvm install 22)"
+#: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
+#: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
+#: so ``apt install nodejs`` is advice to reinstall what they already have, and
+#: the check would send them in a circle. The `tmux` check can use the package
+#: manager because every distribution's tmux clears its floor; Node's does not.
+_NODE_UPGRADE = (
+    f"Upgrade Node.js to {_NODE_FLOOR} or newer — from nodejs.org, or a version "
+    "manager such as fnm or nvm. Not your package manager's `nodejs`: on the "
+    "distributions that ship an old one, that is the version you already have."
 )
-"""Named rather than deferred to ``install_hint``: on the two distributions this
-check exists for, ``apt install nodejs`` installs the very version that is too
-old, so the platform hint would be advice that does not work."""
 
 
 def _check_repomix() -> DoctorCheck:
-    """Repomix, and whether this machine's Node is new enough to run it.
+    """Repomix, and the Node it actually has to run on.
 
-    The Node version is checked and not merely ``npx``'s presence: see
-    :data:`MIN_NODE`. Warn-only either way — snapshots are one feature, and a
-    machine without them is not unhealthy.
+    ``npx`` EXISTING was the whole test, and it is true of machines that cannot
+    run repomix at all. Repomix 1.18.0 declares ``node >= 22``; Debian 12 ships
+    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolved, this line was
+    green, and the first ``project onboard`` failed -- a green check over a
+    broken feature, which is the one shape a diagnostic must never have.
+
+    THE FLOOR IS PER PATH, because the two paths run different repomixes.
+    ``npx --yes repomix`` fetches the LATEST release, so :data:`MIN_NODE` is its
+    floor. An installed ``repomix`` is whatever version was pinned, and a
+    machine running ``repomix@0.2`` on Node 18 may pack perfectly well -- so its
+    own ``engines.node`` is read and preferred, and judging it by the latest
+    release's floor would be the same false positive in the other direction.
+
+    THREE OUTCOMES, not two. ``node_version()`` answers ``None`` for a Node that
+    is absent, one that exits non-zero, and one whose output will not parse; the
+    first is a different fact from the other two. ``repomix`` and ``npx`` are
+    both ``#!/usr/bin/env node`` scripts, so no Node at all means packing cannot
+    run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
+    open costs this line its verdict, while guessing "too old" would send
+    someone to reinstall a working toolchain.
     """
     name = "repomix"
-    try:
-        installed = shutil.which("repomix")
-        launcher = installed or shutil.which("npx")
-        if launcher is None:
-            return _warn(
-                name,
-                "repomix not found — codebase snapshots are disabled",
-                f"Install Node {MIN_NODE}+, then: npm install -g repomix",
-            )
-        node = shutil.which("node")
-        major = _node_major(node) if node else None
-        # An installed `repomix` still runs on THIS machine's node, so a too-old
-        # node is a warning even when the binary is right there on PATH.
-        if major is not None and major < MIN_NODE:
-            found = "repomix is installed" if installed else "repomix is available via npx"
-            return _warn(
-                name,
-                f"{found} but Node {major} is too old to run it "
-                f"(Repomix needs {MIN_NODE}+) — codebase snapshots will fail",
-                _UPGRADE_NODE,
-            )
-        if major is None:
-            # No node on PATH at all, or a version string that did not parse.
-            # Reported, never guessed at: `npx` present with no `node` beside it
-            # is unusual enough to say out loud rather than to grade.
-            detail = "Node version not readable" if node else "no node on PATH"
-            if installed:
-                return _ok(
-                    name, f"repomix found — {detail}, so untested against the {MIN_NODE} floor"
-                )
-            return _ok(
-                name,
-                f"repomix available on demand via npx — {detail}, so untested "
-                f"against the {MIN_NODE} floor",
-            )
-        if installed:
-            return _ok(name, f"repomix found (Node {major}) — codebase snapshots enabled")
-        return _ok(name, f"repomix available on demand via npx (Node {major})")
-    except Exception as exc:  # diagnostics must never crash
-        # Same rule as every sibling: failing open costs this line its verdict
-        # and nothing else — `project onboard` reports a Repomix it cannot run
-        # itself, at the moment it needs it.
-        return _ok(name, f"not evaluated ({exc}) — project onboard reports a failing pack itself")
+    direct = shutil.which("repomix")
+    if direct is None and shutil.which("npx") is None:
+        return _warn(
+            name,
+            "repomix not found — codebase snapshots are disabled",
+            f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
+        )
+    how = "repomix found" if direct else "repomix available on demand via npx"
+    if shutil.which("node") is None:
+        # Not "untested": repomix and npx are Node scripts, so this machine
+        # cannot pack, and saying so is the whole point of the rewrite.
+        return _warn(
+            name,
+            f"{how}, but Node is not on PATH — repomix is a Node script, so "
+            "codebase snapshots cannot run",
+            f"Install Node.js {_NODE_FLOOR} or newer, or put the Node you have on PATH "
+            "(a version manager's shims are not on PATH for non-interactive shells)",
+        )
+    node = snapshot_core.node_version()
+    if node is None:
+        return _ok(
+            name,
+            f"{how} — Node version not readable, so untested against the "
+            f"{_NODE_FLOOR} minimum; snapshots enabled",
+        )
+    floor = snapshot_core.installed_repomix_floor() if direct else None
+    required = floor or snapshot_core.MIN_NODE
+    found = ".".join(str(part) for part in node)
+    if node < required:
+        wanted = ".".join(str(part) for part in required)
+        whose = "the installed repomix needs" if floor else "repomix needs"
+        return _warn(
+            name,
+            f"{how}, but Node {found} is older than {whose} "
+            f"({wanted}+) — codebase snapshots will fail when packed",
+            _NODE_UPGRADE,
+        )
+    return _ok(name, f"{how} on Node {found} — codebase snapshots enabled")
 
 
 def _check_tiktoken() -> DoctorCheck:
     if _has_module("tiktoken"):
         return _ok("tiktoken", "exact snapshot token counts enabled")
+    # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
+    # this distribution -- so `pipx inject aisquare tiktoken` failed on every
+    # machine that had followed the documented install, naming an environment
+    # that does not exist there. Same root cause as `_GLOBAL_INSTALL`.
     return _warn(
         "tiktoken",
         "tiktoken not installed — snapshot token counts are estimated",
-        # `pipx inject` takes the name of an installed pipx ENVIRONMENT, and
-        # the documented install makes that `aisquare-cli`; `pipx inject
-        # aisquare tiktoken` fails on every machine that followed the docs
-        # (§6.2). The uv form is first because it is one command rather than
-        # two and is what install.sh runs.
-        "Install it into this CLI's own environment: "
-        "uv tool install --with tiktoken aisquare-cli "
-        "(or: pipx inject aisquare-cli tiktoken)",
+        f"Install it into the same environment as aisquare: "
+        f"pipx inject {DISTRIBUTION} tiktoken (or: uv tool install --with tiktoken "
+        f"{DISTRIBUTION}; in a plain virtualenv: pip install tiktoken)",
     )
 
 

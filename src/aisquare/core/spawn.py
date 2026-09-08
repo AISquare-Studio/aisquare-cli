@@ -52,10 +52,9 @@ otherwise inherit a live identity:
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
-  * ``services/diagnostics.py::_node_major`` — ``node --version``, a string.
-    Reads the major so the ``repomix`` check can compare it against Repomix's
-    own ``>=22.0.0`` engine floor instead of trusting that ``npx`` exists
-    (docs/plans/one-line-install.md §6.3).
+  * ``core/snapshot.py::node_version`` — ``node --version``, a string. Backs the
+    doctor's repomix line, which has to gate on the floor repomix declares
+    (``node >= 22``) rather than on whether ``npx`` exists.
   * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
     ``git rev-parse``.
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
@@ -170,10 +169,10 @@ SEAMS: dict[str, Seam] = {
         strips_identity=True,
     ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
-    "aisquare/services/diagnostics.py::_node_major": Seam(
-        EXCLUDED, "`node --version`, a string — the Repomix floor check"
-    ),
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
+    "aisquare/core/snapshot.py::node_version": Seam(
+        EXCLUDED, "`node --version`, a string — the floor repomix declares"
+    ),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
     "aisquare/core/workspace.py::git_common_root": Seam(EXCLUDED, "`git rev-parse`"),
     "aisquare/core/editor.py::edit_text": Seam(

@@ -1062,6 +1062,19 @@ def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> Shi
 def _emit_span(sdk: Any, record: dict[str, object]) -> None:
     """Replay one spooled record as a span inside the open Run."""
     text = str(record.get("text") or "")
+    if record.get("kind") == "ci_turn":
+        # The CI test bed's ledger-join record: ids and timings, no prose. It
+        # is a fact about the turn rather than a decision anyone took, but a
+        # DecisionTracer span is the shape the gateway indexes by type, and the
+        # trace id in the reason is what a reader joins on.
+        facts = record.get("ci")
+        facts = facts if isinstance(facts, dict) else {}
+        with sdk.DecisionTracer(decision_type="ci.turn") as decision:
+            decision.set_selected(
+                json.dumps(facts, sort_keys=True, default=str),
+                reason=f"ci trace {facts.get('trace_id')}",
+            )
+        return
     if record.get("kind") == "prompt":
         with sdk.HumanInterventionTracer(
             human_id=str(record.get("session_id") or "unknown"),

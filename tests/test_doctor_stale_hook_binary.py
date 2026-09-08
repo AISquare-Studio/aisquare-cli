@@ -55,12 +55,18 @@ def _write_hooks(
     """A ``settings.json`` with our hooks, all naming ``command`` — the shape connect writes."""
     config_dir.mkdir(parents=True, exist_ok=True)
     settings = config_dir / "settings.json"
-    hooks = {
-        event: [{"hooks": [{"type": "command", "command": f"{command} hook {sub}"}]}]
-        for event, sub in events
-    }
+    hooks = {event: [{"hooks": [_hook_entry(command, event, sub)]}] for event, sub in events}
     settings.write_text(json.dumps({"hooks": hooks}, indent=2) + "\n", encoding="utf-8")
     return settings
+
+
+def _hook_entry(command: str | Path, event: str, sub: str) -> dict[str, object]:
+    """One hook entry as connect writes it — context hooks carry the CI timeout,
+    or the doctor's shortfall check (main) would grade a healthy dir as a warning."""
+    entry: dict[str, object] = {"type": "command", "command": f"{command} hook {sub}"}
+    if event in agents._CONTEXT_HOOKS:
+        entry["timeout"] = agents.CONTEXT_HOOK_TIMEOUT_SECONDS
+    return entry
 
 
 def _fake_aisquare(path: Path, *, prints: str | None = None, exit_code: int = 0) -> Path:
@@ -259,11 +265,8 @@ def test_a_dir_is_graded_by_its_worst_hook(
     gone = tmp_path / "gone" / "aisquare"
     config = isolated_agent_home / ".claude"
     config.mkdir(parents=True)
-    hooks = {
-        event: [{"hooks": [{"type": "command", "command": f"{current} hook {sub}"}]}]
-        for event, sub in agents._HOOKS
-    }
-    hooks["Stop"] = [{"hooks": [{"type": "command", "command": f"{gone} hook stop"}]}]
+    hooks = {event: [{"hooks": [_hook_entry(current, event, sub)]}] for event, sub in agents._HOOKS}
+    hooks["Stop"] = [{"hooks": [_hook_entry(gone, "Stop", "stop")]}]
     (config / "settings.json").write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
 
     site = agents.hook_site_health("claude-code", config, recorded=True)
@@ -455,6 +458,7 @@ def test_hook_binary_parses_the_shapes_connect_writes(tmp_path: Path) -> None:
     assert agents.HookBinary(spaced).version_argv() == [str(spaced), "--version"]
     assert agents.HookBinary(python, module_form=True).version_argv() == [
         sys.executable,
+        "-P",  # the probe must not import a checkout's own aisquare/ (#81)
         "-m",
         "aisquare",
         "--version",

@@ -1,0 +1,15 @@
+{
+  "schema_version": "error/v1",
+  "code": "TraceBatch trace_id did not match the span trace_id",
+  "http_status": 422,
+  "message": "TraceBatch.trace_id does not equal a contained SpanPayload.trace_id. The upstream gateway does not validate this, so the CI adapter quarantines the batch.",
+  "subject_ref": "batch_20260822T150001",
+  "retryable": false,
+  "detail": {
+    "batch_trace_id": "trc_0af1c2d3e4f5",
+    "span_trace_id": "trc_ffffffffffff",
+    "span_id": "spn_9b8c7d6e5f40",
+    "upstream_model": "Explainability SDK/AISquare-Explainability-SDK/gateway/models.py:33 TraceBatch"
+  },
+  "occurred_at": "2026-08-22T15:00:01Z"
+}

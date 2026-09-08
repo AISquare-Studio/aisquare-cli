@@ -11,6 +11,7 @@ import sys
 from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
@@ -21,7 +22,7 @@ from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
-from aisquare.core.version import __version__
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CheckStatus,
@@ -32,11 +33,12 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
+from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from aisquare.services.ci_contract import DeliveryDescriptor
 
 
 def status() -> StatusReport:
@@ -117,6 +119,7 @@ def doctor(
         _check_brain(cwd),
         _check_harness(cwd),
         _check_fleet(),
+        *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
     ]
 
@@ -138,6 +141,27 @@ def _check_python() -> DoctorCheck:
     return _ok("python", f"Python {info.major}.{info.minor}.{info.micro}")
 
 
+#: How to install this CLI globally, built from :data:`DISTRIBUTION` rather than
+#: written out.
+#:
+#: THE NAME IS LOAD-BEARING AND WAS WRONG. Both hints below said ``pipx install
+#: aisquare`` -- and ``aisquare`` on PyPI is the *Explainability SDK*, a
+#: different distribution (1.2.0, "Explainability SDK for tracing, graphing, and
+#: policy auditing of AI agents"). This CLI is ``aisquare-cli``. So the one check
+#: whose job is "you have not installed this properly" answered it with a command
+#: that installs somebody else's package.
+#:
+#: Worse than a typo, for a reason this tree already documents at length: the SDK
+#: ships its own ``aisquare/__init__.py`` into the directory this package
+#: occupies and pip's RECORD for the two overlaps on that file, so the advice
+#: landed an operator in the exact dependency shape ``pyproject.toml``'s
+#: ``explainability`` extra has twelve lines of comment warning about -- whose
+#: own conclusion is that our advice must "never [be] a bare `pip install
+#: aisquare[explainability]`". Interpolating the constant is what stops the next
+#: rename from reintroducing it.
+_GLOBAL_INSTALL = f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})"
+
+
 def _check_install() -> DoctorCheck:
     """Where aisquare runs from — the Claude Code hook needs a stable path."""
     binary = shutil.which("aisquare")
@@ -145,13 +169,13 @@ def _check_install() -> DoctorCheck:
         return _warn(
             "install",
             "aisquare is not on your PATH",
-            "Install as a global tool: pipx install aisquare",
+            f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
         return _warn(
             "install",
             f"aisquare runs from a virtualenv ({binary})",
-            "For stable Claude Code hooks, install globally: pipx install aisquare",
+            f"For stable Claude Code hooks, install globally: {_GLOBAL_INSTALL}",
         )
     return _ok("install", f"aisquare at {binary}")
 
@@ -424,25 +448,98 @@ def _read_line(path: Path) -> str:
         return ""
 
 
+_NODE_FLOOR = ".".join(str(part) for part in snapshot_core.MIN_NODE)
+
+#: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
+#: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
+#: so ``apt install nodejs`` is advice to reinstall what they already have, and
+#: the check would send them in a circle. The `tmux` check can use the package
+#: manager because every distribution's tmux clears its floor; Node's does not.
+_NODE_UPGRADE = (
+    f"Upgrade Node.js to {_NODE_FLOOR} or newer — from nodejs.org, or a version "
+    "manager such as fnm or nvm. Not your package manager's `nodejs`: on the "
+    "distributions that ship an old one, that is the version you already have."
+)
+
+
 def _check_repomix() -> DoctorCheck:
-    if shutil.which("repomix"):
-        return _ok("repomix", "repomix found — codebase snapshots enabled")
-    if shutil.which("npx"):
-        return _ok("repomix", "repomix available on demand via npx")
-    return _warn(
-        "repomix",
-        "repomix not found — codebase snapshots are disabled",
-        "Install Node.js, then: npm install -g repomix",
-    )
+    """Repomix, and the Node it actually has to run on.
+
+    ``npx`` EXISTING was the whole test, and it is true of machines that cannot
+    run repomix at all. Repomix 1.18.0 declares ``node >= 22``; Debian 12 ships
+    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolved, this line was
+    green, and the first ``project onboard`` failed -- a green check over a
+    broken feature, which is the one shape a diagnostic must never have.
+
+    THE FLOOR IS PER PATH, because the two paths run different repomixes.
+    ``npx --yes repomix`` fetches the LATEST release, so :data:`MIN_NODE` is its
+    floor. An installed ``repomix`` is whatever version was pinned, and a
+    machine running ``repomix@0.2`` on Node 18 may pack perfectly well -- so its
+    own ``engines.node`` is read and preferred, and judging it by the latest
+    release's floor would be the same false positive in the other direction.
+
+    THREE OUTCOMES, not two. ``node_version()`` answers ``None`` for a Node that
+    is absent, one that exits non-zero, and one whose output will not parse; the
+    first is a different fact from the other two. ``repomix`` and ``npx`` are
+    both ``#!/usr/bin/env node`` scripts, so no Node at all means packing cannot
+    run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
+    open costs this line its verdict, while guessing "too old" would send
+    someone to reinstall a working toolchain.
+    """
+    name = "repomix"
+    direct = shutil.which("repomix")
+    if direct is None and shutil.which("npx") is None:
+        return _warn(
+            name,
+            "repomix not found — codebase snapshots are disabled",
+            f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
+        )
+    how = "repomix found" if direct else "repomix available on demand via npx"
+    if shutil.which("node") is None:
+        # Not "untested": repomix and npx are Node scripts, so this machine
+        # cannot pack, and saying so is the whole point of the rewrite.
+        return _warn(
+            name,
+            f"{how}, but Node is not on PATH — repomix is a Node script, so "
+            "codebase snapshots cannot run",
+            f"Install Node.js {_NODE_FLOOR} or newer, or put the Node you have on PATH "
+            "(a version manager's shims are not on PATH for non-interactive shells)",
+        )
+    node = snapshot_core.node_version()
+    if node is None:
+        return _ok(
+            name,
+            f"{how} — Node version not readable, so untested against the "
+            f"{_NODE_FLOOR} minimum; snapshots enabled",
+        )
+    floor = snapshot_core.installed_repomix_floor() if direct else None
+    required = floor or snapshot_core.MIN_NODE
+    found = ".".join(str(part) for part in node)
+    if node < required:
+        wanted = ".".join(str(part) for part in required)
+        whose = "the installed repomix needs" if floor else "repomix needs"
+        return _warn(
+            name,
+            f"{how}, but Node {found} is older than {whose} "
+            f"({wanted}+) — codebase snapshots will fail when packed",
+            _NODE_UPGRADE,
+        )
+    return _ok(name, f"{how} on Node {found} — codebase snapshots enabled")
 
 
 def _check_tiktoken() -> DoctorCheck:
     if _has_module("tiktoken"):
         return _ok("tiktoken", "exact snapshot token counts enabled")
+    # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
+    # this distribution -- so `pipx inject aisquare tiktoken` failed on every
+    # machine that had followed the documented install, naming an environment
+    # that does not exist there. Same root cause as `_GLOBAL_INSTALL`.
     return _warn(
         "tiktoken",
         "tiktoken not installed — snapshot token counts are estimated",
-        "Install it: pip install tiktoken (or: pipx inject aisquare tiktoken)",
+        f"Install it into the same environment as aisquare: "
+        f"pipx inject {DISTRIBUTION} tiktoken (or: uv tool install --with tiktoken "
+        f"{DISTRIBUTION}; in a plain virtualenv: pip install tiktoken)",
     )
 
 
@@ -544,6 +641,25 @@ def _check_claude_code() -> DoctorCheck:
         site for site in sites if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT)
     ]
     if not unhooked and not wrong_binary:
+        # Installed, firing, and running THIS install — but a context hook may
+        # still carry a shorter timeout than the CI hook can wait for (a
+        # settings.json from 0.6.0, or one hand-edited). Its own sentence: the
+        # hooks are not "missing", and saying so sent the operator to a command
+        # that rewrites entries they chose.
+        short = {
+            site.config_dir: shortfall
+            for site in sites
+            if (shortfall := agent_core.hook_timeout_shortfall("claude-code", site.config_dir))
+        }
+        if short:
+            listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
+            return _warn(
+                "claude-code",
+                f"{product} connected, but the context hooks allow less than "
+                f"{agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS} s in: {listed} — a CI hook still "
+                "inside the run's ceiling would be cut off and its row never written",
+                "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in short),
+            )
         where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
         unrecorded = [str(site.config_dir) for site in sites if not site.recorded]
         note = (
@@ -806,6 +922,233 @@ def _check_brain(cwd: Path | None = None) -> DoctorCheck:
             "brain", f"gbrain {version}, brain ready{embed} ({lag} pipe events awaiting distill)"
         )
     return _ok("brain", f"gbrain {version}, brain ready and fully distilled{embed}")
+
+
+def _experiment_checks() -> list[DoctorCheck]:
+    """The CI test bed's state, one line per question a developer would ask.
+
+    Off is reported as ``ok`` rather than as a warning: off is the intended
+    state for everyone who has not been asked to run the experiment, and a
+    permanent warning trains people to ignore the one line that matters.
+
+    Switched on, the questions are asked in the order the hooks would hit
+    them: is the URL usable, is there a token, is there a run; can the server
+    be reached at all (``GET /ready``, public); and does the descriptor come
+    back — which is the real question, because it is where a bad token, an
+    unknown run, an expired run or a contract skew each show up with their own
+    answer. The descriptor is fetched without caching it: a diagnostic must not
+    create state. Every probe is bounded by the transport's own deadline.
+    """
+    name = "ci test bed"
+    if not ci_client.enabled():
+        return [_ok(name, "off — no requests, no added latency (AISQUARE_CI=1 enables)")]
+    raw = ci_client.raw_endpoint()
+    if not raw:
+        return [
+            _warn(
+                name,
+                "enabled but no endpoint configured — every prompt records not_configured",
+                "Point it at the server: export AISQUARE_CI_URL=https://…",
+            )
+        ]
+    base = ci_client.endpoint()
+    if not base:
+        return [
+            _warn(
+                name,
+                f"enabled, but {_display_url(raw)} is not a usable URL — it needs an "
+                "http(s):// scheme; every prompt records not_configured",
+                "Give it a scheme: export AISQUARE_CI_URL=https://…",
+            )
+        ]
+    shown = _display_url(base)
+    key = ci_client.api_key()
+    raw_run = ci_client.raw_run_id()
+    run = ci_client.run_id()
+    checks: list[DoctorCheck] = []
+    if not key:
+        problem = ci_client.api_key_problem()
+        checks.append(
+            _warn(
+                name,
+                f"enabled for {shown}, but {problem} — not usable; the server will reject "
+                "every request"
+                if problem
+                else f"enabled for {shown}, but no bearer token — the server will reject every "
+                "request",
+                "Re-export the token on one line: export AISQUARE_CI_KEY=…"
+                if problem
+                else "Set the experiment token: export AISQUARE_CI_KEY=…",
+            )
+        )
+    elif not raw_run:
+        checks.append(
+            _warn(
+                name,
+                f"enabled for {shown}, but no run id — every prompt records no_run",
+                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
+            )
+        )
+    elif not run:
+        checks.append(
+            _warn(
+                name,
+                f"enabled for {shown}, but {raw_run!r} is not a run id (run_…) — "
+                "every prompt records no_run",
+                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
+            )
+        )
+    else:
+        checks.append(_ok(name, f"enabled for {shown}, run {run}"))
+    checks.append(_check_ci_endpoint(base, shown))
+    descriptor: DeliveryDescriptor | None = None
+    if key and run:
+        descriptor_check, descriptor = _check_ci_descriptor(base, key, run)
+        checks.append(descriptor_check)
+        stale = _check_ci_cache(run, descriptor)
+        if stale is not None:
+            checks.append(stale)
+    # Outside the gate above: a set override is named whenever it is set, even
+    # when no descriptor could be fetched for it to apply to.
+    override = _check_ci_override(descriptor)
+    if override is not None:
+        checks.append(override)
+    return checks
+
+
+_CI_PROBE_MS = 3_000
+"""Doctor must stay fast; an unreachable endpoint is the common case here, and
+the transport's wall-clock deadline is what bounds each probe."""
+
+
+def _check_ci_endpoint(base: str, shown: str) -> DoctorCheck:
+    """``GET /ready`` — public, cheap, and proof of a live server rather than a
+    listener. It follows the same proxies the hook does, because it is the
+    same transport."""
+    result = ci_client.exchange(
+        f"{base}/ready", method="GET", deadline_ms=_CI_PROBE_MS, max_body=4096
+    )
+    if result.reason is None and result.status == 200:
+        return _ok("ci endpoint", f"{shown}/ready answered 200 in {result.elapsed_ms} ms")
+    why = result.detail if result.reason is not None else f"http {result.status}"
+    return _warn(
+        "ci endpoint",
+        f"{shown}/ready did not answer ({why}) — prompts still work; whether the hooks can "
+        "deliver is what the descriptor line says, not this one",
+        "Check the server is up, or turn the test bed off: export AISQUARE_CI=0",
+    )
+
+
+def _check_ci_descriptor(
+    base: str, key: str, run: str
+) -> tuple[DoctorCheck, DeliveryDescriptor | None]:
+    """The question that matters: will the hooks be told how to deliver?
+
+    Returns the descriptor too, so the override line can be judged against it."""
+    result = ci_descriptor.fetch(run, base=base, key=key, cache=False, deadline_ms=_CI_PROBE_MS)
+    descriptor = result.descriptor
+    if descriptor is None:
+        detail = result.detail
+        # The fix follows the status the server sent, never a word in its
+        # message: an error.v1 sentence is quoted into the detail now, and a
+        # word inside it ("expired", the server's own contract_version_mismatch
+        # code, a TLS certificate that "has expired") must not pick a fix. The
+        # two phrase-based branches match the client's OWN parse details at
+        # their start, and nothing else.
+        if result.status in (401, 403):
+            fix = "Check AISQUARE_CI_KEY is the experiment token for this server"
+        elif result.status == 404:
+            fix = "Check AISQUARE_CI_RUN names a run this server has published"
+        elif detail.startswith("descriptor speaks contract_version"):
+            fix = "Upgrade aisquare-cli, or ask for a run published for this contract"
+        elif detail.startswith("descriptor expired at"):
+            fix = "Ask the experiment controller for a fresh run"
+        else:
+            fix = "Check the server, or turn the test bed off: export AISQUARE_CI=0"
+        return (
+            _warn(
+                "ci descriptor",
+                f"run {run}: {detail} — every turn records descriptor_unavailable",
+                fix,
+            ),
+            None,
+        )
+    # The server's ruling is always shown as the server's. But "the hooks will
+    # not call" is a promise the line beneath would break while the override is
+    # active, so that clause defers to it instead.
+    note = ci_override.DIRECT_API_NOTE
+    if ci_override.apply(descriptor).active:
+        note = "direct_api only — overridden, see ci delivery override below"
+    return (
+        _ok(
+            "ci descriptor",
+            f"run {run}: {ci_override.describe(descriptor, direct_api_note=note)}; "
+            f"ceiling {descriptor.client_safety_ms} ms; expires {descriptor.expires_at}",
+        ),
+        descriptor,
+    )
+
+
+def _check_ci_cache(run: str, fresh: DeliveryDescriptor | None) -> DoctorCheck | None:
+    """The hooks read the cached descriptor; this probe fetched a fresh one.
+
+    When the two disagree on delivery, every line above describes a descriptor
+    the hooks are not using until the cache expires — so say so, once.
+    """
+    cached = ci_descriptor.cached(run)
+    if cached is None or fresh is None or cached.delivery == fresh.delivery:
+        return None
+    return _warn(
+        "ci descriptor cache",
+        f"the hooks use a cached descriptor until {cached.expires_at} that lists "
+        f"{ci_override.describe(cached)}; the server now says "
+        f"{ci_override.describe(fresh)}",
+        "Wait for the cache to expire, or start a new session after it does",
+    )
+
+
+def _check_ci_override(descriptor: DeliveryDescriptor | None) -> DoctorCheck | None:
+    """The staging override, on its own line whenever the variable is set.
+
+    Silent when it is unset — the common case, and the one every row should
+    come from. Set, it is always a warning: active means every row this
+    machine writes says ``delivery_source override`` and measures nothing;
+    ignored means someone exported it and it is doing nothing, which is worth
+    a line before they wonder why.
+    """
+    if not ci_override.requested():
+        return None
+    if descriptor is None:
+        return _warn(
+            "ci delivery override",
+            f"{ci_override.ENV_VAR} is set, but there is no fetched descriptor to apply it to — "
+            "nothing is delivered",
+            "Fix the descriptor line first, or unset it",
+        )
+    ruling = ci_override.apply(descriptor)
+    if ruling.active:
+        return _warn(
+            "ci delivery override",
+            f"{ruling.detail}; every row records delivery_source override and measures nothing",
+            f"Unset {ci_override.ENV_VAR} once the server publishes real delivery modes",
+        )
+    return _warn("ci delivery override", ruling.detail, f"Fix or unset {ci_override.ENV_VAR}")
+
+
+def _display_url(url: str) -> str:
+    """A URL as ``doctor`` may print it: scheme, host and path, never ``user:secret@``.
+
+    ``doctor`` output is the most pasteable artefact there is, and a credential
+    in the URL would leak by being ordinary. The path stays, so a base URL with
+    one prints the route that was actually probed.
+    """
+    try:
+        parts = urlsplit(url if "://" in url else f"//{url}", scheme="")
+    except ValueError:
+        return re.sub(r"[^@/]*@", "", url)
+    host = parts.netloc.rsplit("@", 1)[-1]
+    path = parts.path.rstrip("/")
+    return f"{parts.scheme}://{host}{path}" if parts.scheme else f"{host}{path}"
 
 
 def _has_module(name: str) -> bool:

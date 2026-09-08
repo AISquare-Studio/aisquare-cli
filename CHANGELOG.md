@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`doctor` told new users to install a different project.** Three
+  remediations named `aisquare`, which on PyPI is the *Explainability SDK*
+  (1.2.0), not this CLI (`aisquare-cli`): `install` on both its branches
+  (`pipx install aisquare`), `tiktoken` (`pipx inject aisquare tiktoken` —
+  which also names a pipx environment that exists on no machine that followed
+  the documented install), and `explainability sdk`
+  (`pip install "aisquare[explainability]"`, from a stale constant that
+  shadowed the correct, editable-aware hint one import away). So the checks
+  whose whole job is "this machine is not set up properly" answered it with
+  commands that install somebody else's package — and, because the SDK ships
+  its own `aisquare/__init__.py` into the directory this package occupies, into
+  the exact dependency shape `pyproject.toml` carries twelve lines warning
+  about. Every hint is now built from `core.version.DISTRIBUTION`, and a new
+  class-level guard sweeps the real `doctor()` output so a fourth instance
+  fails the build instead of shipping. The `--force-reinstall aisquare` row is
+  untouched: it repairs the SDK's own package root and means the SDK.
+- **The `repomix` check was green on a machine that cannot pack a snapshot.**
+  `npx` merely *existing* was the whole test, while repomix 1.18.0 declares
+  `node >= 22` — and Debian 12 ships Node 18, Ubuntu 22.04 ships 12. On those,
+  the line read `ok` and the first `project onboard` failed at run time. The
+  check now reads Node's version through a registered spawn seam
+  (`core/snapshot.py::node_version`) and warns below the floor, naming the
+  version found. A Node that will not answer is reported as untested rather
+  than as too old, and the advice points at nodejs.org or a version manager
+  rather than the package manager whose `nodejs` *is* the old one.
+
 ## [0.6.0] - 2026-09-03
 
 **The fleet UI: bare `asq` opens one view over every project, agent and

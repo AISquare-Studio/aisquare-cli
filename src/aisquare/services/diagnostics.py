@@ -21,6 +21,7 @@ from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
+from aisquare.core.version import DISTRIBUTION
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CheckStatus,
@@ -137,6 +138,27 @@ def _check_python() -> DoctorCheck:
     return _ok("python", f"Python {info.major}.{info.minor}.{info.micro}")
 
 
+#: How to install this CLI globally, built from :data:`DISTRIBUTION` rather than
+#: written out.
+#:
+#: THE NAME IS LOAD-BEARING AND WAS WRONG. Both hints below said ``pipx install
+#: aisquare`` -- and ``aisquare`` on PyPI is the *Explainability SDK*, a
+#: different distribution (1.2.0, "Explainability SDK for tracing, graphing, and
+#: policy auditing of AI agents"). This CLI is ``aisquare-cli``. So the one check
+#: whose job is "you have not installed this properly" answered it with a command
+#: that installs somebody else's package.
+#:
+#: Worse than a typo, for a reason this tree already documents at length: the SDK
+#: ships its own ``aisquare/__init__.py`` into the directory this package
+#: occupies and pip's RECORD for the two overlaps on that file, so the advice
+#: landed an operator in the exact dependency shape ``pyproject.toml``'s
+#: ``explainability`` extra has twelve lines of comment warning about -- whose
+#: own conclusion is that our advice must "never [be] a bare `pip install
+#: aisquare[explainability]`". Interpolating the constant is what stops the next
+#: rename from reintroducing it.
+_GLOBAL_INSTALL = f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})"
+
+
 def _check_install() -> DoctorCheck:
     """Where aisquare runs from — the Claude Code hook needs a stable path."""
     binary = shutil.which("aisquare")
@@ -144,13 +166,13 @@ def _check_install() -> DoctorCheck:
         return _warn(
             "install",
             "aisquare is not on your PATH",
-            "Install as a global tool: pipx install aisquare",
+            f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
         return _warn(
             "install",
             f"aisquare runs from a virtualenv ({binary})",
-            "For stable Claude Code hooks, install globally: pipx install aisquare",
+            f"For stable Claude Code hooks, install globally: {_GLOBAL_INSTALL}",
         )
     return _ok("install", f"aisquare at {binary}")
 
@@ -423,25 +445,74 @@ def _read_line(path: Path) -> str:
         return ""
 
 
+_NODE_FLOOR = ".".join(str(part) for part in snapshot_core.MIN_NODE)
+
+#: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
+#: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
+#: so ``apt install nodejs`` is advice to reinstall what they already have, and
+#: the check would send them in a circle. The `tmux` check can use the package
+#: manager because every distribution's tmux clears its floor; Node's does not.
+_NODE_UPGRADE = (
+    f"Upgrade Node.js to {_NODE_FLOOR} or newer — from nodejs.org, or a version "
+    "manager such as fnm or nvm. Not your package manager's `nodejs`: on the "
+    "distributions that ship an old one, that is the version you already have."
+)
+
+
 def _check_repomix() -> DoctorCheck:
-    if shutil.which("repomix"):
-        return _ok("repomix", "repomix found — codebase snapshots enabled")
-    if shutil.which("npx"):
-        return _ok("repomix", "repomix available on demand via npx")
-    return _warn(
-        "repomix",
-        "repomix not found — codebase snapshots are disabled",
-        "Install Node.js, then: npm install -g repomix",
-    )
+    """Repomix, and the Node it actually has to run on.
+
+    ``npx`` EXISTING was the whole test, and it is true of machines that cannot
+    run repomix at all. Repomix 1.18.0 declares ``node >= 22``; Debian 12 ships
+    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolves, this line was
+    green, and the first ``project onboard`` failed -- a green check over a
+    broken feature, which is the one shape a diagnostic must never have.
+
+    Unreadable is reported as unreadable, not as too old (``node_version``
+    returns ``None`` for a Node that will not answer): failing open costs this
+    line its verdict, while guessing "too old" would send someone to reinstall a
+    working toolchain.
+    """
+    name = "repomix"
+    direct = shutil.which("repomix")
+    if direct is None and shutil.which("npx") is None:
+        return _warn(
+            name,
+            "repomix not found — codebase snapshots are disabled",
+            f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
+        )
+    how = "repomix found" if direct else "repomix available on demand via npx"
+    node = snapshot_core.node_version()
+    if node is None:
+        return _ok(
+            name,
+            f"{how} — Node version not readable, so untested against the "
+            f"{_NODE_FLOOR} minimum; snapshots enabled",
+        )
+    found = ".".join(str(part) for part in node)
+    if node < snapshot_core.MIN_NODE:
+        return _warn(
+            name,
+            f"{how}, but Node {found} is older than repomix needs "
+            f"({_NODE_FLOOR}+) — codebase snapshots will fail when packed",
+            _NODE_UPGRADE,
+        )
+    return _ok(name, f"{how} on Node {found} — codebase snapshots enabled")
 
 
 def _check_tiktoken() -> DoctorCheck:
     if _has_module("tiktoken"):
         return _ok("tiktoken", "exact snapshot token counts enabled")
+    # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
+    # this distribution -- so `pipx inject aisquare tiktoken` failed on every
+    # machine that had followed the documented install, naming an environment
+    # that does not exist there. Same root cause as `_GLOBAL_INSTALL`.
     return _warn(
         "tiktoken",
         "tiktoken not installed — snapshot token counts are estimated",
-        "Install it: pip install tiktoken (or: pipx inject aisquare tiktoken)",
+        f"Install it into the same environment as aisquare: "
+        f"pipx inject {DISTRIBUTION} tiktoken (or: uv tool install --with tiktoken "
+        f"{DISTRIBUTION}; in a plain virtualenv: pip install tiktoken)",
     )
 
 

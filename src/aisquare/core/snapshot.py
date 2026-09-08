@@ -49,6 +49,52 @@ class RepomixUnavailableError(RuntimeError):
     """Neither a ``repomix`` binary nor ``npx`` is available to pack the repo."""
 
 
+#: Repomix is a Node CLI and declares its own floor: repomix 1.18.0's package
+#: metadata says ``"node": ">=22.0.0"``. Below it, ``npx repomix`` still
+#: RESOLVES and then fails at run time, which is why the doctor gates on this
+#: rather than on whether ``npx`` exists -- Debian 12 ships Node 18 and Ubuntu
+#: 22.04 ships 12, so "npx is here" was true on machines that cannot pack at all.
+MIN_NODE = (22,)
+
+_NODE_VERSION = re.compile(r"v?(\d+(?:\.\d+)*)")
+
+
+def node_version() -> tuple[int, ...] | None:
+    """Node's version as a comparable tuple, or ``None`` when it cannot be read.
+
+    ``node --version`` prints ``v26.7.0``; a pre-release prints something like
+    ``v23.0.0-nightly2024``, so the leading dotted-numeric run is taken and the
+    suffix ignored rather than parsed. A tuple, not a string, for the reason
+    ``core.tmux.version`` returns one: ``tmux 3.7c`` and ``v22.0.0-nightly``
+    both compare wrongly as text.
+
+    Never raises. This backs a diagnostic line, and a machine must not fail
+    ``doctor`` because its Node is odd -- unknown is an honest answer, and the
+    caller reports it as unknown rather than as too old.
+    """
+    binary = shutil.which("node")
+    if binary is None:
+        return None
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    match = _NODE_VERSION.match(result.stdout.strip())
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
 def snapshot_dir(project_id: str) -> Path:
     return paths.project_data_dir(project_id) / "snapshot"
 

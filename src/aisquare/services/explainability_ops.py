@@ -64,6 +64,9 @@ from aisquare.services.explainability import (
     running_editable,
     stored_api_key,
 )
+from aisquare.services.explainability import (
+    INSTALL_HINT as _EXTRA_INSTALL_HINT,
+)
 
 #: Distribution that provides the SDK, and the console script it installs. The
 #: script is the collision-free way to reach it: it runs in whatever
@@ -72,8 +75,23 @@ _SDK_DIST = "aisquare"
 _SDK_SCRIPT = "explainability-doctor"
 _SDK_MODULE = "aisquare.explainability"
 
-#: What to type when the SDK is missing. Quoted for shells that glob brackets.
-INSTALL_HINT = 'pip install "aisquare[explainability]"'
+#: What to type when the SDK is missing.
+#:
+#: A STALE DUPLICATE, now delegating. This module defined its own
+#: ``pip install "aisquare[explainability]"`` while
+#: ``services/explainability.py`` -- already imported here, one line up -- held
+#: ``pip install --upgrade "aisquare-cli[explainability]"`` under eleven lines
+#: explaining why the bare form is wrong: the two distributions share
+#: ``aisquare/__init__.py`` and the last writer wins it, so naming the CLI first
+#: is what lets pip resolve both in one transaction. ``pyproject.toml`` states
+#: the same rule, and ``tests/test_insight_sweeper.py`` already asserts the bare
+#: form never reaches a user. The doctor printed it anyway, from here.
+#:
+#: Kept as a name because three call sites and four tests use it, but it is no
+#: longer a second source of truth. ``install_hint()`` is preferred at a call
+#: site that can be reached from an editable checkout, where the extra SHADOWS
+#: this package rather than merging with it.
+INSTALL_HINT = _EXTRA_INSTALL_HINT
 
 #: Override the configured target for one command, e.g. during a cutover:
 #: ``AISQUARE_EXPLAINABILITY_TARGET=prod aisquare doctor --live``.
@@ -710,8 +728,8 @@ def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
             "CLI cannot ship its own insights as spans"
         )
         if not on:
-            return _ok(name, f"{detail} (install: {INSTALL_HINT})")
-        return _warn(name, detail, f"Install it: {INSTALL_HINT}")
+            return _ok(name, f"{detail} (install: {install_hint()})")
+        return _warn(name, detail, f"Install it: {install_hint()}")
     if deployable and not presence.importable:
         # `present` is an OR — importable or a console script on PATH — but the
         # CLIENT lane needs the import: `sdk_available()` is `find_spec(...)`

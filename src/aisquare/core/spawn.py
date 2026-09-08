@@ -52,6 +52,9 @@ otherwise inherit a live identity:
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
+  * ``core/snapshot.py::node_version`` — ``node --version``, a string. Backs the
+    doctor's repomix line, which has to gate on the floor repomix declares
+    (``node >= 22``) rather than on whether ``npx`` exists.
   * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
     ``git rev-parse``.
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
@@ -167,6 +170,9 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
+    "aisquare/core/snapshot.py::node_version": Seam(
+        EXCLUDED, "`node --version`, a string — the floor repomix declares"
+    ),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
     "aisquare/core/workspace.py::git_common_root": Seam(EXCLUDED, "`git rev-parse`"),
     "aisquare/core/editor.py::edit_text": Seam(

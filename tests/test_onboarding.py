@@ -458,7 +458,9 @@ def test_fix_commands_leaves_everything_that_is_not_our_command_as_text() -> Non
     not_buttons = [
         WARN_REPOMIX,  # npm, not us
         _fix(
-            "install", "Install as a global tool: pipx install aisquare"
+            "install",
+            "Install as a global tool: pipx install aisquare-cli "
+            "(or: uv tool install aisquare-cli)",
         ),  # our NAME, not our command
         FAIL_HOME,  # `aisquare init` from the UI is the Onboard flow, not a fix
         _fix("config", "Fix or reset: aisquare init --reinit"),

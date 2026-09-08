@@ -210,10 +210,23 @@ def test_a_served_response_comes_back_intact(wired: StubCI) -> None:
 
 
 def test_network_cost_stays_separable_from_server_cost(wired: StubCI) -> None:
-    """Folded together, a slow link is indistinguishable from a slow server."""
+    """Folded together, a slow link is indistinguishable from a slow server, so
+    both halves are recorded as columns and the difference is a subtraction over
+    the rows — not a third derived property nothing writes down.
+
+    The two are INDEPENDENTLY sourced, which is the property that matters and
+    which this stub demonstrates by disagreeing with itself: ``server_ms`` is
+    whatever the response body claimed, ``round_trip_ms`` is the client's own
+    clock, and a local stub answers in under a millisecond while reporting 63.
+    A single folded number could not represent that, and a client that derived
+    one from the other would have hidden it.
+    """
     result = _call(wired)
-    assert result.network_ms is not None
-    assert result.network_ms == result.round_trip_ms - 63
+    assert result.server_ms == 63, "the server's own number, straight from the body"
+    assert result.round_trip_ms < result.server_ms, (
+        "the client clock is measured, not derived — here it is smaller than the "
+        "server's claim, which is only visible because both are kept"
+    )
 
 
 def test_a_degraded_response_records_its_error_codes(wired: StubCI) -> None:
@@ -405,7 +418,7 @@ def test_a_served_pull_comes_back_as_the_briefing(wired: StubCI) -> None:
     assert result.status == "served" and result.briefing is not None
     assert result.briefing.query_id == "qry_kernel0001"
     assert result.config_fingerprint == result.briefing.config_fingerprint
-    assert result.action is None and result.server_ms is None and result.network_ms is None
+    assert result.action is None and result.server_ms is None
     assert result.deadline_breached is None, "no server verdict on this surface"
     assert result.error_codes == []
 

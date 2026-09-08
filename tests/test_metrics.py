@@ -366,7 +366,6 @@ def test_override_rows_are_counted_apart_and_kept_out_of_the_round_trip_figures(
         _turn(n=4, client_reason=ClientReason.disabled),
     ]
     summary = metrics_service.summarize(turns)
-    assert summary.override_turns == 2
     assert summary.by_delivery_source == {"descriptor": 2, "override": 2}
     assert summary.consulted == 4, "what happened is still counted"
     assert (summary.median_round_trip_ms, summary.p95_round_trip_ms) == (300, 320)

@@ -47,6 +47,7 @@ import threading
 import time
 import urllib.error
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -180,16 +181,37 @@ def run_id() -> str:
     return value if RUN_ID.match(value) else ""
 
 
+@lru_cache(maxsize=1)
 def _settings() -> ExperimentSettings:
     """``experiment`` from config; the defaults when the config is unreadable.
 
     A broken config must not enable anything, and must not cost the hook its
     output either.
+
+    Read once per process, like :func:`aisquare.core.insights._config` and for
+    the same reason. ``load_config()`` is a stat plus a ``tomllib`` parse plus a
+    full ``AppConfig`` validation, and this is consulted three times by one
+    ``gate()`` and five or six by ``doctor`` — and, because ``enabled()`` falls
+    through to it whenever ``AISQUARE_CI`` is unset, once on EVERY hook of every
+    user who never opted in. "Off costs nothing" was paying for a config read
+    on every prompt. A CLI process lives for one command, so there is no window
+    in which the file can change under us that matters; the environment
+    variables are still read live, which is what a kill switch needs.
     """
     try:
         return load_config().experiment
     except Exception:
         return ExperimentSettings()
+
+
+def reset_cache() -> None:
+    """Forget the cached ``experiment`` settings.
+
+    The mirror of :func:`aisquare.core.insights.reset_cache`, for tests and for
+    anything that writes ``config.toml`` and then asks a question of it in the
+    same process.
+    """
+    _settings.cache_clear()
 
 
 # --- one HTTP exchange under a wall-clock deadline ----------------------------
@@ -395,10 +417,12 @@ def headers_for(key: str, *, json_body: bool) -> dict[str, str]:
 class Call:
     """One attempted hook call, and everything a metrics row needs from it.
 
-    Timing is two numbers rather than one. ``round_trip_ms`` minus the
-    response's ``server_ms`` is the network cost; folded together, a slow link
-    is indistinguishable from a slow server and the wrong team spends a week
-    on it.
+    Timing is two numbers rather than one: ``round_trip_ms`` and the response's
+    ``server_ms`` are both recorded as columns, so the network cost is a
+    subtraction anyone can do over the rows. Folded into one number it would
+    not be — a slow link would be indistinguishable from a slow server and the
+    wrong team would spend a week on it — which is why both are kept, and why
+    neither needs a third derived property that nothing records.
     """
 
     outcome: Outcome
@@ -430,12 +454,6 @@ class Call:
     @property
     def server_ms(self) -> int | None:
         return None if self.outcome.response is None else self.outcome.response.server_ms
-
-    @property
-    def network_ms(self) -> int | None:
-        """Round trip minus the server's own timing, when it reported any."""
-        server_ms = self.server_ms
-        return None if server_ms is None else self.round_trip_ms - server_ms
 
     @property
     def deadline_breached(self) -> bool | None:
@@ -525,10 +543,6 @@ class RecallCall:
 
     @property
     def server_ms(self) -> int | None:
-        return None
-
-    @property
-    def network_ms(self) -> int | None:
         return None
 
     @property

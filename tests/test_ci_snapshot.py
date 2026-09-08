@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 from pathlib import Path
@@ -72,6 +73,45 @@ def test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_tak
     assert git(root, "cat-file", "-t", old) == "commit", "pruning drops the ref, not the object"
 
 
+def test_a_clean_tree_turn_still_prunes_expired_refs(tmp_path: Path) -> None:
+    """The retention is a promise about the refs on disk, not about what this
+    turn wrote. The prune used to sit in the success arm of the dirty-tree
+    ``update-ref``, so a developer who spent a week on dirty trees and then
+    worked from clean checkouts never pruned again — and the README promises
+    refs older than seven days go "the next time a snapshot is taken"."""
+    root = repo(tmp_path / "r")
+    old = _dated_commit(root, "2026-01-01T00:00:00+0000")
+    git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "old", old)
+
+    snapshot = ci_snapshot.capture(root, "trc_clean")  # tree is clean: no stash, no new ref
+
+    assert snapshot is not None and not snapshot.dirty and snapshot.ref is None
+    refs = git(root, "for-each-ref", "--format=%(refname)", ci_snapshot.WIP_REF_PREFIX).split()
+    assert refs == [], "a clean-tree snapshot must still drop what has expired"
+
+
+def test_capture_and_project_ref_share_one_budget_when_given_one(tmp_path: Path) -> None:
+    """The module docstring promises "every git call shares one small time
+    budget". Two separately-constructed budgets made that two allowances, so a
+    slow repository could spend twice the stated bound in front of a developer.
+    """
+    root = repo(tmp_path / "r")
+    spent = ci_snapshot._Budget(0.0)
+    assert spent.spent()
+
+    # Both accept the turn's budget; an exhausted one is still usable (remaining()
+    # floors) but neither may quietly start a second allowance.
+    ci_snapshot.capture(root, "trc_shared", spent)
+    ci_snapshot.project_ref(root, spent)
+
+    source = inspect.getsource(ci_snapshot)
+    assert source.count("_Budget(GIT_BUDGET_SECONDS)") == 1, (
+        "only new_budget() may construct the turn's allowance"
+    )
+    assert "def capture(root: Path, trace_id: str, budget: _Budget | None = None)" in source
+    assert "def project_ref(root: Path, budget: _Budget | None = None)" in source
+
+
 def test_pruning_fails_open_and_reports_what_it_dropped(tmp_path: Path) -> None:
     root = repo(tmp_path / "r")
     git(
@@ -85,6 +125,29 @@ def test_pruning_fails_open_and_reports_what_it_dropped(tmp_path: Path) -> None:
     assert ci_snapshot._prune(not_a_repo, ci_snapshot._Budget(2.0)) == 0, "no git, no pruning"
     assert ci_snapshot._prune(root, ci_snapshot._Budget(2.0)) == 1
     assert ci_snapshot._prune(root, ci_snapshot._Budget(2.0)) == 0, "nothing old is left"
+
+
+def test_pruning_a_backlog_stops_at_the_budget_and_finishes_on_later_turns(
+    tmp_path: Path,
+) -> None:
+    """The first prune after an unbounded stretch has thousands of refs to drop,
+    one ``update-ref`` spawn each. It used to run them all: 6.6 s of a 2 s
+    budget, on the synchronous prompt path. Now it stops at the budget and the
+    next turn takes the rest — the work is idempotent, so nothing is lost."""
+    root = repo(tmp_path / "r")
+    old = _dated_commit(root, "2026-01-01T00:00:00+0000")
+    for n in range(40):
+        git(root, "update-ref", f"{ci_snapshot.WIP_REF_PREFIX}stale{n}", old)
+
+    spent = ci_snapshot._Budget(0.0)  # already gone before the first deletion
+    assert spent.spent(), "a zero budget must read as spent even though remaining() floors"
+    assert ci_snapshot._prune(root, spent) == 0, "no ref is dropped once the budget is gone"
+
+    remaining = len(
+        git(root, "for-each-ref", "--format=%(refname)", ci_snapshot.WIP_REF_PREFIX).split()
+    )
+    assert remaining == 40, "and the backlog is still there to drop next turn"
+    assert ci_snapshot._prune(root, ci_snapshot._Budget(30.0)) == 40, "a real budget drains it"
 
 
 def test_a_dirty_tree_becomes_a_stash_object_kept_alive_by_a_ref(tmp_path: Path) -> None:

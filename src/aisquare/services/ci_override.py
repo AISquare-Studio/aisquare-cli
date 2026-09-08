@@ -27,12 +27,20 @@ things make it impossible to mistake for the descriptor's ruling:
 - it is never written to the descriptor cache — the cache holds what the
   server said, nothing else.
 
-It is removed, or demoted to a test-only seam, once the server publishes real
-delivery modes (one constant: ``app/api/runs.py::DIRECT_API_DELIVERY``). The
-design rejected client-side delivery flags because they are "a second place the
-experiment's shape lives"; that argument stands. This is a connectivity
-instrument for a host whose runs are ``comparison_eligible: false`` anyway, and
-a row it produced must never be read as a measurement.
+**Settled 2026-09-05 (owner's call): this ships as it stands, and its removal
+is scheduled rather than optional.** It goes when the server publishes real
+delivery modes (one constant: ``app/api/runs.py::DIRECT_API_DELIVERY``) —
+tracked as §C5 of ``docs/ci-user-identity-handoff.md``, which deletes this
+module, the ``delivery_source`` branch in the gate, the ``doctor`` line and the
+tests that pin them; the column stays and reads ``descriptor`` on every new row.
+Until then it is the only way to exercise the wire against a descriptor that
+says ``direct_api``, which is what the joint smoke needed.
+
+The design rejected client-side delivery flags because they are "a second place
+the experiment's shape lives"; that argument stands, and the four properties
+above are what makes a bounded exception to it safe rather than a hole. This is
+a connectivity instrument for a host whose runs are ``comparison_eligible:
+false`` anyway, and a row it produced must never be read as a measurement.
 
 Environment only, like the token: there is deliberately no config field.
 """

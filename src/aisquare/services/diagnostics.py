@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -16,14 +17,17 @@ from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
+from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
+from aisquare.core.version import DISTRIBUTION
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CheckStatus,
     DoctorCheck,
+    FleetAgent,
     InjectionRecord,
     PromptRecord,
     ShippingStatus,
@@ -32,6 +36,8 @@ from aisquare.models import (
 from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
+from aisquare.services import fleet as fleet_service
+from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
 
 
@@ -80,12 +86,21 @@ def _shipping_status() -> ShippingStatus | None:
     )
 
 
-def doctor(*, live: bool = False, target: str | None = None) -> list[DoctorCheck]:
+def doctor(
+    *, live: bool = False, target: str | None = None, cwd: Path | None = None
+) -> list[DoctorCheck]:
     """Run health checks over the install, dependencies and integration.
 
     ``live`` opts into the checks that leave this machine (today: the
     explainability gateway round-trip). Everything else stays offline, so a
     plain ``aisquare doctor`` still answers on a train.
+
+    ``cwd`` is the directory whose PROJECT the three project-scoped checks
+    (snapshot, brain, harness) report on; ``None`` is the process cwd, which is
+    what the CLI means. The fleet UI hosts many projects in one process and
+    must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
+    selected project's root here and gets that project's report in-process.
+    The machine-wide checks ignore it — they are about this machine.
     """
     return [
         _check_python(),
@@ -98,9 +113,12 @@ def doctor(*, live: bool = False, target: str | None = None) -> list[DoctorCheck
         _check_repomix(),
         _check_tiktoken(),
         _check_claude_code(),
-        _check_snapshot(),
-        _check_brain(),
-        _check_harness(),
+        _check_tmux(),
+        _check_gh(),
+        _check_snapshot(cwd),
+        _check_brain(cwd),
+        _check_harness(cwd),
+        _check_fleet(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
     ]
@@ -123,6 +141,27 @@ def _check_python() -> DoctorCheck:
     return _ok("python", f"Python {info.major}.{info.minor}.{info.micro}")
 
 
+#: How to install this CLI globally, built from :data:`DISTRIBUTION` rather than
+#: written out.
+#:
+#: THE NAME IS LOAD-BEARING AND WAS WRONG. Both hints below said ``pipx install
+#: aisquare`` -- and ``aisquare`` on PyPI is the *Explainability SDK*, a
+#: different distribution (1.2.0, "Explainability SDK for tracing, graphing, and
+#: policy auditing of AI agents"). This CLI is ``aisquare-cli``. So the one check
+#: whose job is "you have not installed this properly" answered it with a command
+#: that installs somebody else's package.
+#:
+#: Worse than a typo, for a reason this tree already documents at length: the SDK
+#: ships its own ``aisquare/__init__.py`` into the directory this package
+#: occupies and pip's RECORD for the two overlaps on that file, so the advice
+#: landed an operator in the exact dependency shape ``pyproject.toml``'s
+#: ``explainability`` extra has twelve lines of comment warning about -- whose
+#: own conclusion is that our advice must "never [be] a bare `pip install
+#: aisquare[explainability]`". Interpolating the constant is what stops the next
+#: rename from reintroducing it.
+_GLOBAL_INSTALL = f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})"
+
+
 def _check_install() -> DoctorCheck:
     """Where aisquare runs from — the Claude Code hook needs a stable path."""
     binary = shutil.which("aisquare")
@@ -130,13 +169,13 @@ def _check_install() -> DoctorCheck:
         return _warn(
             "install",
             "aisquare is not on your PATH",
-            "Install as a global tool: pipx install aisquare",
+            f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
         return _warn(
             "install",
             f"aisquare runs from a virtualenv ({binary})",
-            "For stable Claude Code hooks, install globally: pipx install aisquare",
+            f"For stable Claude Code hooks, install globally: {_GLOBAL_INSTALL}",
         )
     return _ok("install", f"aisquare at {binary}")
 
@@ -185,9 +224,29 @@ def _check_provenance() -> DoctorCheck:
 
 
 def _check_home() -> DoctorCheck:
+    """Whether the aisquare home is a directory we could work in.
+
+    ``exists()`` was the whole test, and it is true of a regular FILE — so the
+    one check whose entire job is the home reported ``ok`` for a home that can
+    never be created, and the failure surfaced two checks later as
+    ``context.db is unreadable: [Errno 17] File exists`` with the corrupt-store
+    remedy attached: a ``mv <file>/context.db …`` that cannot run, because there
+    is no directory to move anything out of. Measured with
+    ``AISQUARE_HOME=<a 1-byte file> aisquare --json doctor``.
+
+    Three shapes, three verdicts. A symlink to a directory is a directory here,
+    which is right: ``ensure_home`` follows it and everything works.
+    """
     home = paths.aisquare_home()
-    if home.exists():
+    if home.is_dir():
         return _ok("home", f"{home} exists")
+    if home.exists():
+        return _fail(
+            "home",
+            f"{home} exists but is not a directory — nothing can be created inside it",
+            f"AISQUARE_HOME must point at a directory: move {home} aside, or repoint "
+            "AISQUARE_HOME and run `aisquare init`",
+        )
     return _fail("home", f"{home} is missing", "Set it up: aisquare init")
 
 
@@ -323,9 +382,20 @@ def _uncreated_home(name: str) -> DoctorCheck | None:
     Reported at ok status because ``home`` owns that verdict and already fails:
     a second failure here would send an operator to look at the database when
     the answer is that nothing has been set up yet.
+
+    A home that EXISTS but is not a directory short-circuits for the same
+    reason and a sharper one. ``ensure_home`` cannot mkdir over a file, so every
+    check downstream fails with the raw ``FileExistsError`` and offers its own
+    remediation for it — ``database`` was measured printing the corrupt-store
+    recovery, a ``mv`` inside a path that is not a directory. One wrong verdict
+    the operator can act on is worse than a quiet deferral to the check that has
+    the right one.
     """
-    if paths.aisquare_home().exists():
+    home = paths.aisquare_home()
+    if home.is_dir():
         return None
+    if home.exists():
+        return _ok(name, f"not evaluated — {home} is not a directory (see the `home` check)")
     return _ok(name, "not created yet — set it up: aisquare init")
 
 
@@ -378,25 +448,98 @@ def _read_line(path: Path) -> str:
         return ""
 
 
+_NODE_FLOOR = ".".join(str(part) for part in snapshot_core.MIN_NODE)
+
+#: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
+#: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
+#: so ``apt install nodejs`` is advice to reinstall what they already have, and
+#: the check would send them in a circle. The `tmux` check can use the package
+#: manager because every distribution's tmux clears its floor; Node's does not.
+_NODE_UPGRADE = (
+    f"Upgrade Node.js to {_NODE_FLOOR} or newer — from nodejs.org, or a version "
+    "manager such as fnm or nvm. Not your package manager's `nodejs`: on the "
+    "distributions that ship an old one, that is the version you already have."
+)
+
+
 def _check_repomix() -> DoctorCheck:
-    if shutil.which("repomix"):
-        return _ok("repomix", "repomix found — codebase snapshots enabled")
-    if shutil.which("npx"):
-        return _ok("repomix", "repomix available on demand via npx")
-    return _warn(
-        "repomix",
-        "repomix not found — codebase snapshots are disabled",
-        "Install Node.js, then: npm install -g repomix",
-    )
+    """Repomix, and the Node it actually has to run on.
+
+    ``npx`` EXISTING was the whole test, and it is true of machines that cannot
+    run repomix at all. Repomix 1.18.0 declares ``node >= 22``; Debian 12 ships
+    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolved, this line was
+    green, and the first ``project onboard`` failed -- a green check over a
+    broken feature, which is the one shape a diagnostic must never have.
+
+    THE FLOOR IS PER PATH, because the two paths run different repomixes.
+    ``npx --yes repomix`` fetches the LATEST release, so :data:`MIN_NODE` is its
+    floor. An installed ``repomix`` is whatever version was pinned, and a
+    machine running ``repomix@0.2`` on Node 18 may pack perfectly well -- so its
+    own ``engines.node`` is read and preferred, and judging it by the latest
+    release's floor would be the same false positive in the other direction.
+
+    THREE OUTCOMES, not two. ``node_version()`` answers ``None`` for a Node that
+    is absent, one that exits non-zero, and one whose output will not parse; the
+    first is a different fact from the other two. ``repomix`` and ``npx`` are
+    both ``#!/usr/bin/env node`` scripts, so no Node at all means packing cannot
+    run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
+    open costs this line its verdict, while guessing "too old" would send
+    someone to reinstall a working toolchain.
+    """
+    name = "repomix"
+    direct = shutil.which("repomix")
+    if direct is None and shutil.which("npx") is None:
+        return _warn(
+            name,
+            "repomix not found — codebase snapshots are disabled",
+            f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
+        )
+    how = "repomix found" if direct else "repomix available on demand via npx"
+    if shutil.which("node") is None:
+        # Not "untested": repomix and npx are Node scripts, so this machine
+        # cannot pack, and saying so is the whole point of the rewrite.
+        return _warn(
+            name,
+            f"{how}, but Node is not on PATH — repomix is a Node script, so "
+            "codebase snapshots cannot run",
+            f"Install Node.js {_NODE_FLOOR} or newer, or put the Node you have on PATH "
+            "(a version manager's shims are not on PATH for non-interactive shells)",
+        )
+    node = snapshot_core.node_version()
+    if node is None:
+        return _ok(
+            name,
+            f"{how} — Node version not readable, so untested against the "
+            f"{_NODE_FLOOR} minimum; snapshots enabled",
+        )
+    floor = snapshot_core.installed_repomix_floor() if direct else None
+    required = floor or snapshot_core.MIN_NODE
+    found = ".".join(str(part) for part in node)
+    if node < required:
+        wanted = ".".join(str(part) for part in required)
+        whose = "the installed repomix needs" if floor else "repomix needs"
+        return _warn(
+            name,
+            f"{how}, but Node {found} is older than {whose} "
+            f"({wanted}+) — codebase snapshots will fail when packed",
+            _NODE_UPGRADE,
+        )
+    return _ok(name, f"{how} on Node {found} — codebase snapshots enabled")
 
 
 def _check_tiktoken() -> DoctorCheck:
     if _has_module("tiktoken"):
         return _ok("tiktoken", "exact snapshot token counts enabled")
+    # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
+    # this distribution -- so `pipx inject aisquare tiktoken` failed on every
+    # machine that had followed the documented install, naming an environment
+    # that does not exist there. Same root cause as `_GLOBAL_INSTALL`.
     return _warn(
         "tiktoken",
         "tiktoken not installed — snapshot token counts are estimated",
-        "Install it: pip install tiktoken (or: pipx inject aisquare tiktoken)",
+        f"Install it into the same environment as aisquare: "
+        f"pipx inject {DISTRIBUTION} tiktoken (or: uv tool install --with tiktoken "
+        f"{DISTRIBUTION}; in a plain virtualenv: pip install tiktoken)",
     )
 
 
@@ -406,10 +549,45 @@ _STALE_HOOKS = (
 _RECONNECT = "(Re)connect it: aisquare agents connect claude-code"
 
 
+_CLAUDE_VERSION_DIR = re.compile(r"^\d+\.\d+\.\d+\S*$")
+
+
+def claude_code_version(binary: str | None = None) -> str | None:
+    """The installed Claude Code version, read from the install layout on disk.
+
+    NO PROCESS IS STARTED: ``claude --version`` from a diagnostic would be a new
+    spawn seam, and the answer is already on the filesystem for both layouts
+    the installer produces. The native installer links ``claude`` to
+    ``…/share/claude/versions/<version>`` (the target's name IS the version);
+    an npm install links it to ``…/node_modules/@anthropic-ai/claude-code/cli.js``
+    with a ``package.json`` beside it. Anything else is ``None`` — an honest
+    blank in the detail beats a guess, and the check is unchanged without it.
+
+    ``binary`` is the resolved executable for tests; the default is PATH.
+    """
+    found = binary if binary is not None else shutil.which("claude")
+    if found is None:
+        return None
+    try:
+        real = Path(found).resolve()
+        if _CLAUDE_VERSION_DIR.match(real.name):
+            return real.name
+        package = real.parent / "package.json"
+        if package.is_file():
+            version = json.loads(package.read_text(encoding="utf-8")).get("version")
+            if isinstance(version, str) and version:
+                return version
+    except (OSError, ValueError, AttributeError):
+        return None
+    return None
+
+
 def _check_claude_code() -> DoctorCheck:
     info = agent_core.detect("claude-code")
     if info is None or not info.detected:
         return _ok("claude-code", "Claude Code not detected on this machine")
+    version = claude_code_version()
+    product = f"Claude Code {version}" if version else "Claude Code"
     # Checked: recorded sites UNION the ambient dir. Parallel installs
     # (CLAUDE_CONFIG_DIR=~/.claude2) each own a settings.json, so registry
     # health alone hid unhooked siblings — and site health alone says nothing
@@ -420,26 +598,193 @@ def _check_claude_code() -> DoctorCheck:
     if ambient is not None and ambient not in health:
         health[ambient] = agent_core.hooks_installed("claude-code")
     if not health:
-        return _warn("claude-code", f"Claude Code {_STALE_HOOKS}", _RECONNECT)
+        return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
     broken = [path for path, hooked in health.items() if not hooked]
     if not broken:
+        # Installed and firing, but a context hook may carry a shorter timeout
+        # than the CI hook can wait for — a settings.json from 0.6.0, or one
+        # hand-edited. Its own sentence: the hooks are not "missing", and saying
+        # so sent the operator to a command that rewrites entries they chose.
+        short = {
+            path: agent_core.hook_timeout_shortfall("claude-code", path)
+            for path in health
+            if agent_core.hook_timeout_shortfall("claude-code", path)
+        }
+        if short:
+            listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
+            return _warn(
+                "claude-code",
+                f"{product} connected, but the context hooks allow less than "
+                f"{agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS} s in: {listed} — a CI hook still "
+                "inside the run's ceiling would be cut off and its row never written",
+                "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in short),
+            )
         where = f" in {len(health)} config dirs" if len(health) > 1 else ""
-        return _ok("claude-code", f"Claude Code connected{where} (all lifecycle hooks installed)")
+        return _ok("claude-code", f"{product} connected{where} (all lifecycle hooks installed)")
     listed = ", ".join(str(path) for path in broken)
     return _warn(
         "claude-code",
-        f"Claude Code {_STALE_HOOKS} in: {listed}",
+        f"{product} {_STALE_HOOKS} in: {listed}",
         "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
     )
 
 
-def _check_snapshot() -> DoctorCheck:
+# --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------
+
+_OS_RELEASE = Path("/etc/os-release")
+_APT_FAMILY = frozenset({"debian", "ubuntu", "linuxmint", "pop", "raspbian", "kali", "elementary"})
+_DNF_FAMILY = frozenset({"fedora", "rhel", "centos", "rocky", "almalinux", "amzn", "nobara", "ol"})
+_RECOMMENDED_TMUX = (3, 5)
+"""``S-Enter`` (and the other extended chords) reach an agent pane from 3.5 —
+measured: 3.3/3.4 type their names literally, so the key table drops them there —
+below it the fleet works without them."""
+
+
+def install_hint(
+    package: str, *, platform: str = sys.platform, os_release: Path = _OS_RELEASE
+) -> str:
+    """The install command for THIS machine's package manager — or all three when unsure.
+
+    Read from ``/etc/os-release`` (``ID`` and ``ID_LIKE``), which is a file, not
+    a process. A distribution this table does not know gets every hint rather
+    than a wrong one; Windows gets the plan's answer (§3.9): the fleet runs in
+    WSL2. Never raises — an unreadable os-release is "unsure", not a crash, and
+    "unreadable" includes bytes that are not UTF-8: ``read_text`` answers those
+    with ``UnicodeDecodeError``, which is a ``ValueError`` and so slips straight
+    past an ``OSError``-only guard.
+    """
+    if platform == "darwin":
+        return f"brew install {package}"
+    if platform == "win32":
+        return f"on Windows the fleet runs inside WSL2 — there: apt install {package}"
+    families: set[str] = set()
+    try:
+        for line in os_release.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() in {"ID", "ID_LIKE"}:
+                families.update(value.strip().strip('"').lower().split())
+    except (OSError, UnicodeDecodeError):
+        pass
+    if families & _APT_FAMILY:
+        return f"apt install {package}"
+    if families & _DNF_FAMILY:
+        return f"dnf install {package}"
+    return f"apt install {package} / dnf install {package} / brew install {package}"
+
+
+def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
+    """tmux: present and new enough to be the fleet's substrate (§8.2).
+
+    Absent or too old is a WARNING, never a failure: the fleet is the one
+    feature that needs it, and a machine that runs every other command is not
+    unhealthy. ``version()`` reads ``tmux -V`` through the one tmux seam and
+    never touches the home, so this runs on an uninitialised machine too.
+    ``server`` is for tests; the default is the real binary on PATH.
+    """
+    name = "tmux"
+    try:
+        server = server or tmux_core.TmuxServer()
+        if not server.available():
+            return _warn(
+                name,
+                "tmux not found — the fleet is unavailable; everything else works",
+                f"Install it: {install_hint('tmux')}",
+            )
+        version = server.version()
+        minimum = f"{tmux_core.MIN_VERSION[0]}.{tmux_core.MIN_VERSION[1]}"
+        if version is None:
+            return _ok(
+                name,
+                f"tmux at {server.binary()} — version not readable, so untested against "
+                f"the {minimum} minimum; fleet available",
+            )
+        found = f"{version[0]}.{version[1]}"
+        if version < tmux_core.MIN_VERSION:
+            return _warn(
+                name,
+                f"tmux {found} is too old — the fleet needs {minimum} or newer; "
+                "everything else works",
+                f"Upgrade it: {install_hint('tmux')}",
+            )
+        if version < _RECOMMENDED_TMUX:
+            wanted = f"{_RECOMMENDED_TMUX[0]}.{_RECOMMENDED_TMUX[1]}"
+            return _ok(
+                name, f"tmux {found} — fleet available ({wanted}+ adds Shift+Enter in agent panes)"
+            )
+        return _ok(name, f"tmux {found} — fleet available")
+    except Exception as exc:  # diagnostics must never crash
+        # Failing open costs this line its verdict, not the operator anything
+        # else: the fleet re-checks tmux on its first spawn and says so then.
+        return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
+
+
+def _gh_config_dir() -> Path:
+    """Where ``gh`` keeps ``hosts.yml`` — its own precedence, mirrored so we read the right one."""
+    explicit = os.environ.get("GH_CONFIG_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / "gh"
+
+
+def _gh_login_note() -> str:
+    """Empty when a login is visible; otherwise the one command that supplies it.
+
+    ``gh`` records logins in ``hosts.yml`` and also honours ``GH_TOKEN`` /
+    ``GITHUB_TOKEN``; this reads the file and the env, never ``gh auth status``
+    (a process, and one that goes to the network). Unreadable is treated as
+    logged in: a wrong "log in" nag is worse than a missing one, and the PR
+    step itself says clearly when it is refused.
+
+    "Unreadable" has to include *undecodable*. A ``hosts.yml`` holding non-UTF-8
+    bytes raises ``UnicodeDecodeError`` — a ``ValueError``, not an ``OSError`` —
+    so an ``OSError``-only guard let it out of the one command whose whole job
+    is to diagnose damage; measured before the fix: ``aisquare doctor`` exited 1
+    with a Rich traceback on a 4-byte ``\\xff\\xfe\\x00bad`` hosts file.
+    """
+    if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+        return ""
+    try:
+        hosts = _gh_config_dir() / "hosts.yml"
+        if hosts.is_file() and hosts.read_text(encoding="utf-8").strip():
+            return ""
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return " (no login found: gh auth login)"
+
+
+def _check_gh() -> DoctorCheck:
+    """GitHub CLI: the fleet's coder and reviewer open and review PRs through it (§3.5)."""
+    name = "gh"
+    try:
+        found = shutil.which("gh")
+        if found is None:
+            return _warn(
+                name,
+                "gh not found — the fleet's PR flow for coder/reviewer needs it; "
+                "everything else works",
+                f"Install GitHub CLI: {install_hint('gh')}, then: gh auth login",
+            )
+        return _ok(name, f"gh at {found} — PR flow available{_gh_login_note()}")
+    except Exception as exc:  # diagnostics must never crash
+        # The last check in this file without the guard every sibling has, and
+        # the gap was reachable: see _gh_login_note. Failing open costs this
+        # line its verdict and nothing else — the coder/reviewer PR step names
+        # a missing or logged-out gh itself, at the moment it needs it.
+        return _ok(
+            name, f"not evaluated ({exc}) — the PR step reports a missing or logged-out gh itself"
+        )
+
+
+def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
+    """The active project's codebase snapshot; ``cwd`` picks the project (default: process cwd)."""
     absent = _uncreated_home("snapshot")
     if absent is not None:
         return absent
     try:
         with store_session() as store:
-            project = active_project(store)
+            project = active_project(store, cwd)
         snap = snapshot_core.load(project.id)
     except Exception as exc:  # diagnostics must never crash
         return _warn(
@@ -456,8 +801,12 @@ def _check_snapshot() -> DoctorCheck:
     )
 
 
-def _check_brain() -> DoctorCheck:
-    """The team's long-term memory: gbrain presence, brain state, distill lag."""
+def _check_brain(cwd: Path | None = None) -> DoctorCheck:
+    """The team's long-term memory: gbrain presence, brain state, distill lag.
+
+    ``cwd`` picks the project the way the team hooks do (``team_project``);
+    ``None`` is the process cwd.
+    """
     absent = _uncreated_home("brain")
     if absent is not None:
         return absent
@@ -472,7 +821,7 @@ def _check_brain() -> DoctorCheck:
             "(not the unrelated 'gbrain' on public npm)",
         )
     try:
-        project = orchestrator.team_project()
+        project = orchestrator.team_project(cwd)
         with store_session() as store:
             if not store.team_active(project.id):
                 return _ok("brain", f"gbrain {version} ready (orchestrator not active here)")
@@ -765,13 +1114,14 @@ def open_home() -> None:
     stub("open")
 
 
-def _check_harness() -> DoctorCheck:
+def _check_harness(cwd: Path | None = None) -> DoctorCheck:
     """Role→model harness health: env interference, mismatched live sessions, cache.
 
     Read-only and offline by design (doctor makes no network calls): ladder
     availability comes from the probe cache; live verification is
     ``aisquare team spawn <role>``. Warns, never fails — a stale cache or an
-    off-ladder session is advice, not breakage.
+    off-ladder session is advice, not breakage. ``cwd`` picks the project
+    (``team_project``); ``None`` is the process cwd.
     """
     absent = _uncreated_home("harness")
     if absent is not None:
@@ -783,14 +1133,18 @@ def _check_harness() -> DoctorCheck:
         if not orchestrator.team_enabled():
             return _ok(name, "orchestrator disabled")
         with store_session() as store:
-            project = orchestrator.team_project(None)
+            project = orchestrator.team_project(cwd)
             if not store.team_active(project.id):
                 return _ok(name, "not activated for this project")
             live = [s for s in store.team_sessions(project.id) if s.ended_at is None]
         interference = harness.interfering_env()
         mismatches: list[str] = []
         for session in live:
-            complaint = harness.model_mismatch(session.role, session.model)
+            # `base_role`: a numbered seat (`coder1`, the shape README documents
+            # for a parallel crew) rides its role's ladder, so it is judged
+            # against it. Keyed on the raw role, `ROLE_PROFILES.get` missed and
+            # every seat was silently exempt from the board's only tiering signal.
+            complaint = harness.model_mismatch(team_service.base_role(session.role), session.model)
             if complaint:
                 mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
         problems: list[str] = []
@@ -819,3 +1173,123 @@ def _check_harness() -> DoctorCheck:
         return _ok(name, detail)
     except Exception:  # diagnostics must never crash
         return _ok(name, "not evaluated")
+
+
+def _fleet_conf() -> Path:
+    """The bundled tmux conf's PATH, without writing it.
+
+    ``TmuxServer.argv`` resolves the conf through ``conf_path``, which calls
+    ``ensure_home`` and rewrites the file when it drifts — right for the fleet,
+    wrong for a diagnostic (``_uncreated_home`` says why). Handing the server
+    the path up front skips both. tmux only reads ``-f`` when it STARTS a
+    server, and nothing here starts one, so a missing file costs nothing.
+    """
+    return paths.aisquare_home() / tmux_core.CONF_NAME
+
+
+def _fleet_server(socket: str) -> tmux_core.TmuxServer:
+    return tmux_core.TmuxServer(socket, conf=_fleet_conf())
+
+
+def _fleet_labels(agents: list[FleetAgent], names: dict[str, str], *, limit: int = 6) -> str:
+    """``label (project), …`` — capped, so one runaway fleet cannot flood a doctor line."""
+    shown = [f"{a.label} ({names.get(a.project_id, a.project_id[:12])})" for a in agents[:limit]]
+    if len(agents) > limit:
+        shown.append(f"+{len(agents) - limit} more")
+    return ", ".join(shown)
+
+
+def _check_fleet(
+    server_for: Callable[[str], tmux_core.TmuxServer] | None = None,
+) -> DoctorCheck:
+    """``fleet_agent`` rows against tmux: every row recorded live must still have its pane.
+
+    A row outlives its process in three ways — the pane was killed outside the
+    fleet, the private server was stopped (a reboot ends every agent), or the
+    agent exited and ``remain-on-exit`` kept the pane — and each one leaves a
+    label taken and a project looking staffed. ``aisquare fleet reap`` is the
+    reconciliation; this check is where an operator learns it is due. Read-only:
+    the store is opened, tmux is asked, nothing is written or started.
+
+    Machine-wide on purpose: a stale row in ANY project is this machine's, and
+    ``fleet reap`` with no project reaps them all. Each row is checked on the
+    socket IT was spawned on — the socket is a default the user may change
+    (§3.10), and a row must not read as lost because the config moved after it.
+    ``server_for`` builds the server for a socket; tests hand in fakes.
+    """
+    absent = _uncreated_home("fleet")
+    if absent is not None:
+        return absent
+    name = "fleet"
+    server_for = server_for or _fleet_server
+    try:
+        socket = fleet_service.settings().tmux_socket
+        servers: dict[str, tmux_core.TmuxServer] = {socket: server_for(socket)}
+        if not servers[socket].available():
+            # Failing open costs this line: nothing here can be stale in a way
+            # that matters when nothing can run, and the tmux check has the verdict.
+            return _ok(name, "not evaluated — tmux is not installed (see the tmux check)")
+        with store_session() as store:
+            projects = store.list_projects()
+            names = {p.id: p.codename or p.root.name or p.id for p in projects}
+            live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
+        gone: list[FleetAgent] = []
+        exited: list[FleetAgent] = []
+        for agent in live:
+            server = servers.setdefault(agent.tmux_socket, server_for(agent.tmux_socket))
+            try:
+                facts = server.pane_facts(agent.pane_id)
+            except tmux_core.TmuxError:
+                facts = None
+            # tmux 3.7c answers a vanished target with exit 0 and every field
+            # empty, so "gone" is "no facts OR facts about no pane", not only None.
+            if facts is None or facts.pane_id != agent.pane_id:
+                gone.append(agent)
+            elif facts.dead:
+                exited.append(agent)
+        problems: list[str] = []
+        by_socket: dict[str, list[FleetAgent]] = {}
+        for agent in gone:
+            by_socket.setdefault(agent.tmux_socket, []).append(agent)
+        for sock, agents in by_socket.items():
+            listed = _fleet_labels(agents, names)
+            if servers[sock].list_sessions():
+                problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
+            else:
+                problems.append(
+                    f"{len(agents)} recorded live but the private tmux server "
+                    f"'{sock}' is not running: {listed}"
+                )
+        if exited:
+            problems.append(
+                f"{len(exited)} exited but still recorded live: {_fleet_labels(exited, names)}"
+            )
+        if problems:
+            return _warn(
+                name,
+                "; ".join(problems),
+                "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap",
+            )
+        sessions = servers[socket].list_sessions()
+        if live:
+            return _ok(
+                name,
+                f"{len(live)} live agent(s) across {len(sessions)} session(s) on the private "
+                f"tmux server '{socket}'",
+            )
+        if sessions:
+            return _ok(
+                name,
+                f"private tmux server '{socket}' running with {len(sessions)} session(s); "
+                "no agents recorded live",
+            )
+        return _ok(name, f"no fleet agents; the private tmux server '{socket}' is not running")
+    except Exception as exc:  # diagnostics must never crash
+        # A store that will not open is the database check's verdict. Failing
+        # open here costs the stale-row report — a label can stay taken and a
+        # project can look staffed until the store opens — and the line says so.
+        return _ok(
+            name,
+            f"not evaluated ({exc}) — stale fleet rows, if any, go unreported until "
+            "the store opens",
+        )

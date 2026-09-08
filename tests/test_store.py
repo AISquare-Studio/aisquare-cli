@@ -225,7 +225,7 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 12
+    assert version == SCHEMA_VERSION == 13  # v11 fleet, v12 metric, v13 converges the two
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -236,7 +236,7 @@ def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
     import re
     from typing import get_args
 
-    from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V12
+    from aisquare.core.store import _SCHEMA_V12
     from aisquare.models import (
         BriefingStatus,
         CacheStatus,
@@ -247,7 +247,7 @@ def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
         RunKind,
     )
 
-    def sql_set(column: str, schema: str = _SCHEMA_V11) -> set[str]:
+    def sql_set(column: str, schema: str = _SCHEMA_V12) -> set[str]:
         match = re.search(rf"{column} TEXT[^,]*?IN \(([^)]*)\)", schema, re.DOTALL)
         assert match is not None, column
         return {value.strip().strip("'") for value in match.group(1).split(",")}
@@ -260,20 +260,20 @@ def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
     assert sql_set("trigger") == set(get_args(HookTrigger))
     assert sql_set("cache_status") == set(get_args(CacheStatus))
     assert sql_set("run_kind") == set(get_args(RunKind))
-    assert sql_set("delivery_source", _SCHEMA_V12) == set(get_args(DeliverySource))
+    assert sql_set("delivery_source") == set(get_args(DeliverySource))
 
 
 def test_the_metric_table_has_no_column_that_could_name_an_arm() -> None:
-    from aisquare.core.store import _SCHEMA_V11, _SCHEMA_V12
+    from aisquare.core.store import _SCHEMA_V12, _SCHEMA_V13
 
     for forbidden in ("arm", "flags_hash", "architecture", "CREATE TABLE run"):
-        assert forbidden not in _SCHEMA_V11 and forbidden not in _SCHEMA_V12, forbidden
+        assert forbidden not in _SCHEMA_V12 and forbidden not in _SCHEMA_V13, forbidden
 
 
 def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_intact() -> None:
     """The migration real machines take: every row that existed before the
-    metric table survives it, the table arrives with the v2 columns and the
-    v12 one, and no ``run`` table comes along."""
+    metric table survives it, the table arrives with the v2 columns and
+    ``delivery_source``, and no ``run`` table comes along."""
     from aisquare.core.store import _MIGRATIONS
 
     db = _db_path()
@@ -309,7 +309,7 @@ def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_
 
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
         assert (
             raw.execute("SELECT text FROM entry WHERE id = 'ctx_old'").fetchone()[0] == "survives"
         )
@@ -354,6 +354,53 @@ def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> P
 # The metric table the branch's v1 contract created (7557751..31956f2), stamped
 # user_version 11 like the v2 one that replaced it in place. Column names as
 # they were; the arm and flags_hash columns are the reason it must not stay.
+CI_V11_METRIC_DDL = """
+CREATE TABLE metric (
+    trace_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    wall_ms INTEGER,
+    run_id TEXT,
+    run_kind TEXT CHECK (run_kind IN ('live', 'replay')),
+    opaque_config_id TEXT,
+    trigger TEXT CHECK (trigger IN ('session_start', 'prompt_submit', 'agent_request')),
+    client_reason TEXT NOT NULL DEFAULT 'disabled',
+    status TEXT,
+    action TEXT,
+    query_id TEXT,
+    briefing_id TEXT,
+    config_fingerprint TEXT,
+    input_checkpoint TEXT,
+    resolved_scope_version INTEGER,
+    round_trip_ms INTEGER,
+    server_ms INTEGER,
+    deadline_breached INTEGER,
+    token_count INTEGER,
+    items_count INTEGER,
+    cache_status TEXT,
+    error_codes TEXT NOT NULL DEFAULT '[]',
+    rendered_chars INTEGER,
+    injected_chars INTEGER,
+    frame_version TEXT,
+    instruction_version TEXT,
+    redaction_level TEXT,
+    snapshot_ref TEXT,
+    snapshot_untracked_excluded INTEGER,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tool_calls INTEGER
+);
+CREATE INDEX metric_project_started ON metric (project_id, started_at);
+CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_at IS NULL;
+"""
+"""The ``metric`` table as THIS BRANCH stamped ``user_version 11`` before the
+merge — no ``delivery_source``. It is spelled out here rather than taken from
+``_SCHEMA_V11`` because that name now holds the fleet tables v0.6.0 shipped:
+two branches claimed 11, which is the whole reason _SCHEMA_V13 exists."""
+
+
 V1_METRIC_DDL = """
 CREATE TABLE metric (
     trace_id TEXT PRIMARY KEY,
@@ -399,9 +446,10 @@ def _metric_columns(db: Path) -> set[str]:
 
 def test_a_v11_database_gains_the_column_and_keeps_its_rows() -> None:
     """The machine that ran the branch's stub smoke: at 11 with a populated
-    metric table. v12 adds the column; the rows stay and read back with a
-    ``None`` source, which is the truth about them."""
-    db = _at_version(11)
+    metric table and no fleet tables. The merged ladder adds the column and the
+    fleet tables; the rows stay and read back with a ``None`` source, which is
+    the truth about them."""
+    db = _at_version(10, after=CI_V11_METRIC_DDL, stamp=11)
     raw = sqlite3.connect(str(db))
     try:
         raw.execute(
@@ -421,15 +469,15 @@ def test_a_v11_database_gains_the_column_and_keeps_its_rows() -> None:
 
 
 def test_a_v11_database_whose_metric_table_was_deleted_by_hand_heals() -> None:
-    """The state the PR body's own advice for the v1-shaped table leaves behind
-    — and the state this was written on: ``user_version`` 11, no ``metric``
-    table, every row silently lost. v12 creates the table before it alters it,
-    and a write lands afterwards."""
+    """``user_version`` 11 with no ``metric`` table — two ways to arrive: the
+    PR body's own withdrawn advice for the v1-shaped table, and every v0.6.0
+    install from PyPI, whose 11 is the fleet tables. The merged ladder creates
+    the table before anything alters it, and a write lands afterwards."""
     from datetime import UTC, datetime
 
     from aisquare.models import TurnMetric
 
-    db = _at_version(11, after="DROP TABLE metric;")
+    db = _at_version(11)
     assert _metric_columns(db) == set(), "the precondition: no metric table at all"
     store = open_store()
     try:
@@ -447,7 +495,7 @@ def test_a_v11_database_whose_metric_table_was_deleted_by_hand_heals() -> None:
     assert row.delivery_source == "override"
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
     finally:
         raw.close()
 
@@ -477,7 +525,7 @@ def test_a_v11_database_with_the_v1_shaped_metric_table_is_moved_aside_and_rebui
     assert {"run_kind", "delivery_source"} <= columns and "arm" not in columns
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
         tables = {
             row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
@@ -507,7 +555,7 @@ def test_a_v1_shaped_table_is_moved_aside_even_when_an_orphan_already_exists() -
     open_store().close()
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
         tables = {
             row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
@@ -603,3 +651,85 @@ def _db_path() -> Path:
     from aisquare.core.paths import db_path
 
     return db_path()
+
+
+# Every shape `user_version` 11 or 12 has in the wild, and what each must reach.
+# Two branches claimed 11 at once — v0.6.0 shipped the fleet tables under it
+# (and is on PyPI), this branch had the metric table — so the merged ladder is
+# built to CONVERGE rather than to count, and this is the test that says so.
+# Renumbering alone cannot pass this table: put the fleet first and every CI
+# machine wedges on `table metric already exists`; put the metric first and
+# every v0.6.0 install wedges on `table fleet_agent already exists`.
+_COHORTS: tuple[tuple[str, str, int], ...] = (
+    ("a fresh install", "", 10),
+    ("v0.6.0 from PyPI: fleet at 11, no metric", "FLEET", 11),
+    ("this branch at 11: metric, no fleet", "CI11", 11),
+    ("this branch at 12: metric with the column", "CI12", 12),
+    ("11 with no metric table at all", "", 11),
+    ("11 with the v1-contract metric table", "V1", 11),
+    ("11 with a v1 table and an orphan already aside", "V1ORPHAN", 11),
+)
+
+
+@pytest.mark.parametrize(("label", "shape", "stamp"), _COHORTS, ids=[c[0] for c in _COHORTS])
+def test_every_shape_of_user_version_11_converges_on_one_schema(
+    label: str, shape: str, stamp: int
+) -> None:
+    """No cohort is wedged, and none is left silently short of a table.
+
+    "Silently short" is the half that is easy to miss: a store that opens but
+    has no ``fleet_agent`` breaks the fleet UI at the first query, and one with
+    no ``metric`` loses every CI row with nothing raising. So this asserts the
+    end state by WRITING to both tables, not by reading the version.
+    """
+    from datetime import UTC, datetime
+
+    from aisquare.core.store import _SCHEMA_V11
+    from aisquare.models import TurnMetric
+
+    after = {
+        "": "",
+        "FLEET": _SCHEMA_V11,
+        "CI11": CI_V11_METRIC_DDL,
+        "CI12": CI_V11_METRIC_DDL + "\nALTER TABLE metric ADD COLUMN delivery_source TEXT;",
+        "V1": V1_METRIC_DDL,
+        "V1ORPHAN": V1_METRIC_DDL + "\nCREATE TABLE metric_v1_orphaned (trace_id TEXT);",
+    }[shape]
+    db = _at_version(10, after=after, stamp=stamp)
+
+    store = open_store()  # migrates on open; a wedge raises out of here
+    try:
+        store.open_turn(
+            TurnMetric(
+                trace_id="trc_cohort",
+                project_id="prj_x",
+                started_at=datetime.now(tz=UTC),
+                delivery_source="descriptor",
+            )
+        )
+        (row,) = store.turn_metrics(project_id="prj_x")
+    finally:
+        store.close()
+    assert row.delivery_source == "descriptor", label
+
+    raw = sqlite3.connect(str(db))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13, label
+        # the fleet half must be there and usable too, whichever way in
+        raw.execute(
+            "INSERT INTO project (id, name, root, linked_repos, created_at, codename) "
+            "VALUES ('prj_f', 'f', '/tmp/f', '[]', '2026-01-01T00:00:00+00:00', 'kestrel')"
+        )
+        raw.execute(
+            "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at) "
+            "VALUES ('agt_1', 'prj_f', 'a', 'dev', '%1', '/tmp/f', '2026-01-01T00:00:00+00:00')"
+        )
+        raw.commit()
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        raw.close()
+    if shape.startswith("V1"):
+        # the v1 rows are the developer's; renamed aside, never dropped
+        assert any(t.startswith("metric_v1_orphaned") for t in tables), label
+    if shape == "V1ORPHAN":
+        assert "metric_v1_orphaned_2" in tables, "a taken orphan name must not wedge the rename"

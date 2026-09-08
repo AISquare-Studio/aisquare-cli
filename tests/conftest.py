@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 import aisquare
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+from aisquare.services import ci_client
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -201,6 +202,10 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_CI_DELIVERY_OVERRIDE",
     ):
         monkeypatch.delenv(knob, raising=False)
+    # The experiment settings are read once per process (ci_client._settings is
+    # lru_cached, like core.insights._config), so a cached read from the previous
+    # test's HOME would outlive the home it came from.
+    ci_client.reset_cache()
     return home
 
 

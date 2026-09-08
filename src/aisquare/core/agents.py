@@ -223,7 +223,10 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
         entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {subcommand}"}
         if event in _CONTEXT_HOOKS:
-            entry["timeout"] = CONTEXT_HOOK_TIMEOUT_SECONDS
+            # Never below the ceiling the CI hook may wait for; never *reducing*
+            # a longer one the operator chose deliberately.
+            existing = _installed_timeout(groups, event)
+            entry["timeout"] = max(CONTEXT_HOOK_TIMEOUT_SECONDS, existing or 0)
         kept.append({"hooks": [entry]})
         hooks[event] = kept
     settings["hooks"] = hooks
@@ -279,26 +282,77 @@ def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
     False so ``doctor`` tells the user to re-run ``agents connect`` — an
     any-marker check would report healthy while Stop/Notification/SessionEnd
     silently never fire.
+
+    A short or missing context-hook ``timeout`` is NOT counted here: the hooks
+    are installed and firing, and calling that "not installed" made ``doctor``
+    misdescribe a working install (a settings.json from 0.6.0, or one an
+    operator hand-edited). :func:`hook_timeout_shortfall` reports that, on its
+    own line, with the same fix.
     """
+    return not _missing_events(name, config_dir, reconciled=False)
+
+
+def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[str]:
+    """Context events whose installed ``timeout`` is below what the CI hook needs.
+
+    Empty when there is nothing to reconcile — including when the hooks are not
+    installed at all, which :func:`hooks_installed` is the question for.
+    """
+    if not hooks_installed(name, config_dir):
+        return []
+    return _missing_events(name, config_dir, reconciled=True)
+
+
+def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> list[str]:
+    """Lifecycle events with no aisquare group — or, with ``reconciled``, none
+    whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`."""
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
-        return False
+        return [event for event, _ in _HOOKS]
     hooks = _read_settings(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
-        return False
-    return all(
-        any(_is_current_aisquare_group(group, event) for group in (hooks.get(event) or []))
+        return [event for event, _ in _HOOKS]
+    accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
+    return [
+        event
         for event, _ in _HOOKS
-    )
+        if not any(accepts(group, event) for group in (hooks.get(event) or []))
+    ]
+
+
+def _installed_timeout(groups: Any, event: str) -> int | None:
+    """The ``timeout`` an existing aisquare entry for ``event`` already carries.
+
+    Read before rewriting so ``connect`` raises a short one to our ceiling and
+    leaves a longer one alone — an operator who set 180 chose more headroom
+    than we need, and reconciling that down would discard their choice.
+    """
+    if event not in _CONTEXT_HOOKS or not isinstance(groups, list):
+        return None
+    for group in groups:
+        if not _is_aisquare_group(group):
+            continue
+        for item in (group or {}).get("hooks", []) if isinstance(group, dict) else []:
+            if not isinstance(item, dict) or not isinstance(item.get("command"), str):
+                continue
+            if not _is_aisquare_hook_command(item["command"]):
+                continue
+            value = item.get("timeout")
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+    return None
 
 
 def _is_current_aisquare_group(group: Any, event: str) -> bool:
-    """An aisquare hook group that is also what ``connect`` writes today.
+    """An aisquare hook group whose context events carry a sufficient timeout.
 
     Presence alone reported a settings file written before the context hooks
     carried ``timeout`` as healthy, so ``doctor`` said the hooks were installed
-    while Claude Code cut the CI hook off at its 60 s default. The value is
-    reconciled, not just the marker.
+    while Claude Code cut the CI hook off at its 60 s default.
+
+    "Sufficient", not "equal to ours": an operator who set 180 chose a longer
+    ceiling than we need and reconciling that back down to 120 would discard
+    their choice. Only a missing or too-short value is a shortfall.
     """
     if not _is_aisquare_group(group):
         return False
@@ -308,7 +362,9 @@ def _is_current_aisquare_group(group: Any, event: str) -> bool:
         isinstance(item, dict)
         and isinstance(item.get("command"), str)
         and _is_aisquare_hook_command(item["command"])
-        and item.get("timeout") == CONTEXT_HOOK_TIMEOUT_SECONDS
+        and isinstance(item.get("timeout"), int)
+        and not isinstance(item.get("timeout"), bool)
+        and item["timeout"] >= CONTEXT_HOOK_TIMEOUT_SECONDS
         for item in group.get("hooks", [])
     )
 

@@ -93,12 +93,12 @@ def current(run: str, *, base: str, key: str, now: datetime | None = None) -> De
     cached = _read_cache(run, moment)
     if cached is not None:
         return DescriptorResult(cached, "cached", from_cache=True)
-    refused = _read_refusal(run, moment)
+    refused = _read_refusal(run, moment, base)
     if refused is not None:
         return DescriptorResult(None, f"{refused} (refusal cached)", from_cache=True)
     result = fetch(run, base=base, key=key, now=now)
     if result.descriptor is None:
-        _write_refusal(run, result.detail, moment)
+        _write_refusal(run, result.detail, moment, base)
     return result
 
 
@@ -115,6 +115,12 @@ def fetch(
 
     ``cache=False`` answers the question without leaving a file behind —
     ``doctor`` uses it, because a diagnostic must not create state.
+
+    A descriptor that arrives still CLEARS a cached refusal, ``cache=False`` and
+    all: the refusal is a claim about the server that this answer just refuted,
+    and leaving it made ``doctor`` print a healthy run while every hook kept
+    recording ``descriptor_unavailable`` from the stale detail for up to a
+    minute. Dropping a wrong negative is not creating state.
     """
     result = ci_client.exchange(
         f"{base}{DESCRIPTOR_PATH}{run}",
@@ -136,6 +142,8 @@ def fetch(
         return DescriptorResult(None, f"descriptor names {descriptor.run_id}, not {run}")
     if cache:
         _write_cache(run, result.body)
+    else:
+        _clear_refusal(run)
     return DescriptorResult(descriptor, "fetched")
 
 
@@ -204,30 +212,52 @@ def _read_cache(run: str, now: datetime) -> DeliveryDescriptor | None:
 def _write_cache(run: str, body: str) -> None:
     """Replace the cached descriptor in one step. Never raises."""
     _replace(paths.ci_descriptor_path(run), body)
+    _clear_refusal(run)  # a descriptor arrived; nothing is refused now
+
+
+def _clear_refusal(run: str) -> None:
+    """Drop a cached refusal. Never raises."""
     with contextlib.suppress(OSError):
-        _refusal_path(run).unlink()  # a descriptor arrived; nothing is refused now
+        _refusal_path(run).unlink()
 
 
 def _refusal_path(run: str) -> Path:
     return paths.ci_descriptor_path(run).with_suffix(".refused.json")
 
 
-def _read_refusal(run: str, now: datetime) -> str | None:
-    """The detail of a recent refusal, or ``None`` when none is fresh."""
+def _refusal_scope(base: str) -> str:
+    """Which endpoint a refusal was recorded against.
+
+    Keyed on the run alone, a 401 from one server kept answering for the next:
+    repointing ``AISQUARE_CI_URL`` did not invalidate it. Stored beside the
+    detail and compared on read, so a refusal only ever silences the endpoint
+    that produced it.
+    """
+    return base.rstrip("/")
+
+
+def _read_refusal(run: str, now: datetime, base: str) -> str | None:
+    """The detail of a recent refusal against ``base``, or ``None``."""
     try:
         raw = json.loads(_refusal_path(run).read_text(encoding="utf-8"))
         until = datetime.fromisoformat(raw["until"])
         detail = raw["detail"]
+        scope = raw.get("endpoint")
     except (OSError, ValueError, KeyError, TypeError):
         return None
     if not isinstance(detail, str) or now >= until:
         return None
+    if scope != _refusal_scope(base):
+        return None
     return detail
 
 
-def _write_refusal(run: str, detail: str, now: datetime) -> None:
+def _write_refusal(run: str, detail: str, now: datetime, base: str) -> None:
     until = (now + timedelta(seconds=REFUSAL_TTL_SECONDS)).isoformat()
-    _replace(_refusal_path(run), json.dumps({"detail": detail, "until": until}))
+    _replace(
+        _refusal_path(run),
+        json.dumps({"detail": detail, "until": until, "endpoint": _refusal_scope(base)}),
+    )
 
 
 def _replace(target: Path, body: str) -> None:

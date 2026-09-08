@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
+  0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
+  `localhost` and `::1` runs with no Host/Origin validation — described at
+  length in the entry below, and visible nowhere else. The SDK logs nothing
+  when it skips that protection, the CLI printed the same startup line for
+  every bind, and `--bind`'s help predated the change, so the entire
+  disclosure reached changelog readers and source readers and never the person
+  opening the port. Such a bind now prints a second stderr line at startup
+  naming what is off and what is left — the bearer token, a long-lived
+  credential (`auth rotate` is still a stub) sent in clear over plain HTTP on
+  every request, so a trusted network or a TLS-terminating proxy — `--bind`'s
+  help says it in a sentence, and the README's serve section covers the flag.
+  The notice keys on `LOOPBACK_BINDS` in `services/mcp_server.py`. That tuple
+  mirrors the literal the SDK matches on rather than being handed to it —
+  `run_http` passes only `host=bind` — so a test is the only thing that can
+  hold the two equal, and one drives all three spellings, plus a `127/8`
+  address deliberately outside them, against the real transport. Without it,
+  dropping a spelling passes every test while the CLI starts announcing an
+  exposure the SDK is in fact still preventing.
+
 - **Collective Intelligence test bed — retrieval in front of the agent, off by
   default (experimental).** When a prompt is submitted, aisquare can ask a CI
   server whether the workspace already knows something relevant and hand that to
@@ -91,14 +111,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     on its own line whenever it is set — active, ignored, or malformed. Rows it
     produces measure nothing; it goes when the server publishes real delivery
     modes.
-  - The column arrives as **schema v12**, a healing migration, because v11 has
-    reached developer machines in three shapes: the v2 table, no table at all
-    (following the earlier advice to delete the v1-shaped table — every row
-    silently lost), and the v1-shaped table itself. A v1-shaped `metric` (and
-    its `run` sibling) is renamed to `*_v1_orphaned`, never dropped; `CREATE
-    TABLE IF NOT EXISTS metric` then `ALTER TABLE` bring the other two to v12.
-    Deleting the `metric` table by hand is no longer needed and, at version 12,
-    no longer safe.
+  - The column arrives as **schema v13**, a converging migration, because
+    `user_version 11` means two incompatible things in the wild: 0.6.0 from PyPI
+    stamped it for the fleet tables, and this branch stamped it for the `metric`
+    table. Renumbering cannot serve both — whichever meaning keeps the number,
+    the other cohort's next step hits a table that already exists and the store
+    stops opening, which takes every command and every hook with it. So v11 is
+    left exactly as released (it only ever runs below 11, where neither table
+    can exist), v12 creates `metric` only if it is absent, and v13 gives the
+    fleet tables to anyone who reached 11 or 12 down this branch. On top of
+    that, v11 reached developer machines in three further shapes — the v2 table,
+    no table at all (following the earlier advice to delete the v1-shaped one),
+    and the v1-shaped table itself, which is renamed to `*_v1_orphaned` onto a
+    free name and never dropped. Every shape is a case in
+    `test_every_shape_of_user_version_11_converges_on_one_schema`, which asserts
+    the end state by writing to both tables rather than by reading the version.
+    Deleting the `metric` table by hand is no longer needed and no longer safe.
 - **The review of the CI branch at `ee422b5`, acted on.** Every item sits where
   server-controlled bytes cross into the client, and each has a test that failed
   before its fix:
@@ -122,6 +150,169 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Also: the compare-and-set in `close_turn` and five CHECK vocabularies are now
   actually tested, the vendored-contract drift guard is pinned to the deployed
   server commit, and the cap is stated in characters, which is what it is.
+
+### Changed
+- **`serverInfo.version` reports this CLI's version.** mcp 1.x filled an
+  omitted server version with the SDK's own package version, so clients saw
+  `1.29.1` — a number that named nothing of ours — and 2.x sends the empty
+  string, which 0.6.0 therefore shipped. `build_server` now passes
+  `aisquare-cli`'s own version, pinned by a test over a legacy connection
+  where `serverInfo` is mandatory, so an absent identity fails loudly rather
+  than reading as `None`. With this, on the 2025-11-25 handshake era,
+  `tools/list`, every success result and every error result are identical as
+  parsed JSON between 1.x and 2.x, with two exceptions: the crash case and the
+  `-32601` code, both described below. (2.x orders object keys differently, so
+  the raw frames are not byte-for-byte equal; the error texts themselves are.)
+  On the 2026-07-28 era every result also carries a `_meta` serverInfo stamp,
+  which this version now populates; no 1.x served that era, so there is
+  nothing to compare it with.
+- **The serve suite proves what it says it proves.** Three gaps, each of which
+  let a mutation pass:
+  - `call_remote` drove the server through `Client(server)` at its default
+    mode, which for an in-process server is a `DirectDispatcher` pair —
+    2026-07-28, no initialize handshake, no JSON-RPC framing — while its
+    docstring claimed a wire-shaped round trip. It now asks for
+    `mode="legacy"`, the path the removed
+    `create_connected_server_and_client_session` took: memory streams, a
+    handshake, framing, results sieved at the 2025-11-25 surface. Both it and
+    the modern-path test now assert the protocol version they negotiated, so
+    swapping either mode fails instead of silently testing the other era.
+  - Nothing exercised `run_http` at all. Dropping its `host` argument left
+    every test green while `--bind 0.0.0.0` reverted to answering every LAN
+    client with `421`. `test_http_answers_by_bind_host_and_token` now pins
+    every combination that matters — a LAN `Host` is 200 on `0.0.0.0` and 421
+    on `127.0.0.1`, each of the three loopback spellings rejects a LAN `Host`
+    and still answers its own client, a `127/8` address outside the tuple is
+    served unchecked, and a missing token is 401 on either kind of bind before
+    any Host check runs — driven through the ASGI lifespan the way uvicorn
+    drives it, so `_BearerGuard`'s lifespan pass-through is pinned along the
+    way.
+  - The `ClaimLostError` arm of the MCP error guard had no test. It now has
+    one, with the truth in its docstring: no tool can reach that arm today —
+    `next_task` moves on when a claim is lost and nothing calls `claim_task` —
+    so the test pins the mapping for the day a tool claims by ref.
+- **The 0.6.0 entry below is corrected in place.** Six of its statements
+  about the mcp SDK were measurably wrong — the version range in which the
+  loopback protection existed, which transports encode JSON, the scope of a
+  wire-parity claim, what a fresh install resolves to, the SDK's own word for
+  a 2026-era `_meta`, and which spellings count as loopback. The tag is
+  immutable, so the repo's copy is the only one that can be made true, and a
+  reader of 0.6.0 looks there rather than here. Everything those follow-ups
+  *add* is in this section instead, so 0.6.0 does not advertise behaviour it
+  never shipped.
+
+### Fixed
+- **The ceiling holds on mcp 2.2.0.** Released after 0.6.0 measured its floor,
+  and admitted by the same `>=2.1,<3` pin, so a fresh install already resolves
+  to it — CI's `check` jobs install it and are green, which is what proves it
+  rather than the local venv, still pinned at 2.1.1.
+- **`--show-token` and the startup line print a URL a client can dial.** Both
+  interpolated the bind verbatim, so `--bind ::1` — one of the three spellings
+  that keep the transport's Host validation — printed `http://::1:8747/mcp`,
+  which is not a URL at all, and `--bind 0.0.0.0` printed a listen address no
+  client can reach. IPv6 literals are bracketed — that half is unambiguous —
+  and a wildcard bind is replaced by this machine's name, which is a better
+  starting point than `0.0.0.0` without being a promise: whether that name
+  resolves, and to something reachable rather than back to loopback, is the
+  operator's network to know. The bind is printed alongside and added to the
+  JSON as a `bind` field, so nothing is hidden either way. Pre-existing, but
+  newly consequential: before mcp 2 a LAN client was refused with 421 before
+  the URL ever mattered.
+- **A broken mcp install is no longer reported as the wrong problem.** The
+  serve guard had two branches — extra missing, or mcp out of range — and a
+  third case fell into the second. `find_spec` on a dotted name imports the
+  parents, and `mcp.server` imports `sse_starlette` at package-import time, so
+  a venv holding mcp 2.1.1 with `sse-starlette` uninstalled or broken raised
+  inside the probe, was read as "no such module", and told the user to install
+  the mcp they already had. mcp pins `sse-starlette>=3.0.0` with no upper
+  bound, so an ordinary `pip install` can reach this. The guard now reports
+  the failing import by name and says to reinstall the extra.
+- **`doctor` told new users to install a different project.** Three
+  remediations named `aisquare`, which on PyPI is the *Explainability SDK*
+  (1.2.0), not this CLI (`aisquare-cli`): `install` on both its branches
+  (`pipx install aisquare`), `tiktoken` (`pipx inject aisquare tiktoken` —
+  which also names a pipx environment that exists on no machine that followed
+  the documented install), and `explainability sdk`
+  (`pip install "aisquare[explainability]"`, from a stale constant that
+  shadowed the correct, editable-aware hint one import away). So the checks
+  whose whole job is "this machine is not set up properly" answered it with
+  commands that install somebody else's package — and, because the SDK ships
+  its own `aisquare/__init__.py` into the directory this package occupies, into
+  the exact dependency shape `pyproject.toml` carries twelve lines warning
+  about. Every hint is now built from `core.version.DISTRIBUTION`, and a new
+  class-level guard sweeps the real `doctor()` output so a fourth instance
+  fails the build instead of shipping. The `--force-reinstall aisquare` row is
+  untouched: it repairs the SDK's own package root and means the SDK.
+- **`doctor --fix` *ran* the install its own advice forbids.** `install_sdk()`
+  shelled out to `pip install aisquare[explainability]` while every printed hint
+  was being corrected away from that exact form, so the two halves of one code
+  path disagreed. It now installs through our own extra
+  (`aisquare-cli[explainability]`), which is also the only form that carries the
+  `>=1.1` floor — the SDK release where `AgentRunTracer` accepts `run_id`. The
+  bare form had no floor and could resolve an SDK too old for the lane the
+  install exists to enable, and succeed while doing it.
+- **`explainability sdk` remediations read as self-contradictions on a
+  checkout.** `install_hint()` returns a command on a normal install and a
+  *sentence* on an editable one, so an unconditional `Install it: …` prefix
+  rendered as "Install it: this is an editable checkout — installing the extra
+  here shadows it and every command dies…", telling the operator to do the thing
+  the rest of the line says will break their machine. The prefix is now
+  conditional on there being a command to prefix. Affected all three SDK rows,
+  one of them before this release.
+- **The `repomix` check was green on a machine that cannot pack a snapshot.**
+  `npx` merely *existing* was the whole test, while repomix 1.18.0 declares
+  `node >= 22` — and Debian 12 ships Node 18, Ubuntu 22.04 ships 12. On those,
+  the line read `ok` and the first `project onboard` failed at run time. The
+  check now reads Node's version through a registered spawn seam
+  (`core/snapshot.py::node_version`) and warns below the floor, naming the
+  version found. The floor is read **per path**: `npx --yes repomix` fetches the
+  latest release, so the constant applies there, while an installed `repomix`
+  is judged by its own `engines.node` — a pinned `repomix@0.2` on Node 18 packs
+  fine and must not be warned about, and a repomix that *raises* its floor must
+  not be under-warned. No Node on PATH at all is now its own warning rather
+  than "untested", because `repomix` and `npx` are both `#!/usr/bin/env node`
+  scripts and neither can run without one; a Node that is present but will not
+  report a version stays untested. The advice points at nodejs.org or a version
+  manager rather than the package manager whose `nodejs` *is* the old one.
+
+## [0.6.0] - 2026-09-03
+
+**The fleet UI: bare `asq` opens one view over every project, agent and
+session.** This is the first release where the CLI has a front door — a
+two-pane, mouse-driven terminal UI over your projects, the manager agent in
+each, and the agents that manager spawns, every one of them a real Claude Code
+session you can type into. Everything it does is still a plain command with
+`--json`, and both halves below it — memory and orchestration — work exactly as
+they did without ever opening it.
+
+Shipping ahead of feature-complete on purpose, to make internal testing easier;
+known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
+
+### Added
+- **The fleet: `asq` with no arguments opens one view over every project,
+  agent and session.** A two-pane, mouse-driven UI — a navigator of projects,
+  the agents running in each and a Doctor summary on the left; onboarding, a
+  project's **manager** (an agent you task in prose, which plans, spawns and
+  steers the others), any agent's *real* Claude Code session, the board and
+  doctor findings with their fixes on the right. Never a chat relayed through
+  us: agents run as windows of a per-project session on a private tmux server
+  (`tmux -L asq`, bundled config, tmux ≥ 3.2), so they outlive the UI and
+  `aisquare fleet attach` shows the same session from any terminal. New `fleet`
+  group — `spawn · ls · status · tell · stop · attach · reap · rename · pause ·
+  resume`, `--json` everywhere — and an explicit `ui` command. Fleet roles
+  `manager` (the planner with fleet authority), `tester` (the fleet's name for
+  `runner`) and `reviewer` (read-only PR review), which `launch` accepts too.
+  Store schema v11: `fleet_agent`, and a per-project `codename`
+  (`adjective-animal`, deterministic from the project id; `fleet rename`
+  changes it) that names the tmux session and the `fleet/<codename>/…`
+  branches. A `[fleet]` config section in which every value is a default —
+  permission mode `auto` for every role, a worktree per coder and reviewer,
+  four agents per project, `F12` as the escape key, Claude's native agent
+  teams off in fleet launches — overridable per spawn or
+  in config. Scripts, pipes and `--json` callers of bare `aisquare` still get
+  usage and exit 2. User guide: `docs/fleet.md`; the plan and its decisions
+  log: `docs/plans/fleet-tui.md`. Delivered in phases (plan §9); the plan's
+  Decisions log records what has landed.
 - **CI runs the suite against a machine that looks like a developer's.** The
   `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
   nothing listening on any port, no optional extra — while anyone who followed
@@ -190,7 +381,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bump (#73) went red on mypy and the `<2` pin was the only thing keeping a
   fresh install green. The port is confined to `services/mcp_server.py`, the
   `serve` dependency guard, and the two test files that drive them; the nine
-  tools, their wording, and both transports' behaviour are unchanged.
+  tools and their wording are unchanged. What a client can observe differently
+  is listed below — a second protocol era (2026-07-28, which no 1.x could
+  serve), a crash's detail kept off the wire, `serverInfo.version` and
+  `-32601` for an unknown method, on both transports — and, on HTTP alone, no
+  Host/Origin validation on a non-loopback `--bind`.
   - **The error-wording contract survives, on the seam the SDK now provides.**
     mcp 2 still folds a tool's `ToolError` into `Error executing tool <name>:
     <msg>`, so the handler that unwraps our own message back out is still
@@ -200,7 +395,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     what the SDK itself uses to wrap this method for extensions). A remote
     agent still sees `error: reopen requires a note (the feedback)`, verbatim,
     as an `isError` result — `tests/test_serve.py` asserts every one of those
-    strings end-to-end through a real client session.
+    strings through a real client session.
   - **A crashed tool is now logged server-side.** New in mcp 2.1, not chosen
     here: the SDK tells a crash apart from a deliberate failure by type
     (`UnexpectedToolError`) and keeps the crash's detail off the wire, so the
@@ -213,26 +408,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     one. `test_a_crashed_tool_is_an_error_result_logged_server_side` pins both
     halves: nothing of the exception on the wire, all of it in the log.
   - HTTP transport settings moved off the server object: `host` is passed to
-    `streamable_http_app()`, whose only use for it is deciding whether loopback
-    DNS-rebinding protection auto-enables (it does, as before), and the port is
-    uvicorn's alone, as it already was.
+    `streamable_http_app()`, whose only use for it is deciding whether
+    DNS-rebinding protection auto-enables, and the port is uvicorn's alone, as
+    it already was. **That decision now follows the actual bind, which changes
+    one thing on HTTP.** From mcp 1.23.0 (2025-12-02, "Auto-enable DNS
+    rebinding protection for localhost servers") the SDK decided in its
+    constructor from the default host (`127.0.0.1`), and the pre-change code set
+    `settings.host = bind` only afterwards, so Host/Origin validation with a
+    loopback-only allowlist was on for every bind — `--bind 0.0.0.0` answered
+    every LAN client with `421 Invalid Host header` (measured against the
+    pre-change tree on 1.23.0 and 1.29.1). On 1.14 through 1.22 the protection
+    defaulted to off and the LAN bind worked (measured on 1.14.0 and 1.22.0);
+    below 1.14 this server did not construct at all — `FastMCP` ran
+    `issubclass` on the string annotations `from __future__ import annotations`
+    leaves behind — so the old `>=1.10` floor was never right either. 1.23.0
+    predates both the pin and the module docstring's LAN use case (2026-07), so
+    the mcp a fresh install resolves to — the newest the pin admits — never
+    supported that use case; an environment already holding a 1.14–1.22 did,
+    since pip leaves a satisfied requirement alone. In 2.x a bind spelled
+    exactly `127.0.0.1`, `localhost` or `::1` — `LOOPBACK_BINDS` in
+    `services/mcp_server.py` — keeps the protection (Host allowlist
+    `127.0.0.1:*`, `localhost:*`, `[::1]:*`); anything else — `0.0.0.0`, a LAN
+    address, another `127/8` address such as `127.0.0.2`, even `LOCALHOST` or a
+    hosts-file alias, since the match is on the string — runs with no
+    Host/Origin validation, so LAN clients work and the bearer token is the
+    sole gate there. It is checked outermost, before anything else in the app,
+    and a DNS-rebinding page cannot present it, which is why that trade is
+    acceptable — with one caveat the operator has to own: the token is a
+    long-lived credential (`auth rotate` is still a stub) sent in clear over
+    plain HTTP on every request, so a non-loopback bind belongs on a trusted
+    network or behind a TLS-terminating proxy — which nothing in this release
+    says outside this entry; see `[Unreleased]`. An operator who wants a Host
+    allowlist on such a bind as well passes
+    `transport_security=TransportSecuritySettings(...)` (from
+    `mcp.server.transport_security`) to `streamable_http_app()` for that bind
+    only — supplying it replaces the SDK's loopback default rather than
+    extending it. Found by an independent review of this release after it
+    shipped, which measured both trees.
   - The `serve` guard probes `mcp.server.mcpserver`, and its message for an
     incompatible major points the other way now — a 1.x is the one that cannot
     work — with `pip install 'mcp>=2.1,<3'`. The distribution-versus-module
     distinction it was written for (#55) is exactly what makes a 1.x a
     sentence rather than a traceback. It tells majors apart, not minors: the
     pin is what keeps a 2.0.x out, and pip reports that at install time.
-  - `tests/test_serve.py` drives the server through `mcp.client.Client(server)`,
-    the in-memory replacement for the removed
+  - `tests/test_serve.py` drives the server through `mcp.client.Client`, the
+    in-memory replacement for the removed
     `create_connected_server_and_client_session`, and reads `is_error`: field
-    names are snake_case in 2.x.
-  - Also inherited from 2.x: synchronous tool bodies run on a worker thread
-    rather than inline on the event loop. Each of the nine opens its own store
-    session per call and touches nothing thread-affine, so nothing crosses.
-  - The floor is measured, not guessed: against every 2.x release on PyPI,
-    the serve suite, the stdio idle-deadline suite and mypy strict are green on
-    2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`
-    import — the distinction above did not exist yet, so `>=2.1`.
+    names are snake_case in 2.x. (Which of the SDK's two in-memory paths that
+    takes, and why it matters, is a correction made under `[Unreleased]`.)
+  - Also inherited from 2.x, and not the project's to change: a server with no
+    version of its own reports an empty `serverInfo.version`, where 1.x
+    substituted the SDK's own package version (corrected under `[Unreleased]`);
+    a request for an unknown method is answered with the JSON-RPC-specified
+    `-32601 Method not found` (was `-32602 Invalid request parameters`); and
+    synchronous tool bodies run on a worker thread rather than inline on the
+    event loop. Each of the nine opens its own store session per call and
+    touches nothing thread-affine, so nothing crosses.
+  - The floor is measured, not guessed: against every 2.x release on PyPI at
+    the time, the serve suite, the stdio idle-deadline suite and mypy strict
+    are green on 2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the
+    `UnexpectedToolError` import — the distinction above did not exist yet, so
+    `>=2.1`. (2.2.0 has since shipped inside the same `<3` ceiling; see
+    `[Unreleased]`.)
 
 
 ## [0.5.0] - 2026-08-27
@@ -1004,7 +1241,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
 [0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
 [0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1

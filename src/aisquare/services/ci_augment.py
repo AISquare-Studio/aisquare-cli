@@ -30,7 +30,7 @@ answered.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -109,6 +109,14 @@ class Augmentation:
     frame_version: str = FRAME_VERSION
     """What ``rendered`` went through: the injection frame on the hook path, the
     tool treatment on the pull path. Recorded only when something was rendered."""
+    started_at: datetime | None = None
+    """When the event began — BEFORE the round trip, not after it.
+
+    ``metric()`` used to stamp its own clock, which runs once the exchange has
+    already returned: a turn whose CI call took 800 ms was recorded as starting
+    800 ms late, so ``wall_ms`` (the ``median wall`` figure) excluded the very
+    latency the experiment exists to measure, and made it look independent of
+    ``median round trip`` when it should contain it."""
 
     @property
     def consulted(self) -> bool:
@@ -125,6 +133,7 @@ class Augmentation:
         ``session_start`` or ``agent_request`` is a call, not a turn, and a later
         ``Stop`` must not pick it up as one."""
         now = datetime.now(tz=UTC)
+        started = self.started_at or now
         call = self.call
         briefing = call.briefing if call is not None else None
         descriptor = self.descriptor
@@ -132,7 +141,7 @@ class Augmentation:
             trace_id=self.trace_id,
             project_id=project_id,
             session_id=session_id,
-            started_at=now,
+            started_at=started,
             ended_at=now if closed else None,
             run_id=self.run_id,
             run_kind=RUN_KIND if self.run_id else None,
@@ -292,6 +301,26 @@ def _event(
     session_id: str | None,
     cwd: Path | None,
 ) -> Augmentation:
+    """One hook event, stamped with when it BEGAN.
+
+    The stamp is taken here and applied to whatever comes back, so every one of
+    the gate's early returns and the full round-trip path carry the same
+    ``started_at`` — the moment the developer hit enter, not the moment the
+    exchange finished. ``wall_ms`` is measured from it.
+    """
+    began = datetime.now(tz=UTC)
+    outcome = _gated_event(trigger, prompt, project=project, session_id=session_id, cwd=cwd)
+    return replace(outcome, started_at=began)
+
+
+def _gated_event(
+    trigger: HookTrigger,
+    prompt: str | None,
+    *,
+    project: ProjectInfo,
+    session_id: str | None,
+    cwd: Path | None,
+) -> Augmentation:
     trace_id = new_trace_id()
     opened = gate()
     if not opened.open:
@@ -305,7 +334,19 @@ def _event(
             delivery_source=opened.delivery_source,
         )
     descriptor = opened.descriptor
-    assert descriptor is not None and opened.run_id is not None  # gate().open says so
+    if descriptor is None or opened.run_id is None:
+        # gate().open says these are set, so this is unreachable — as an
+        # `assert` was, until `python -O` stripped it and left an AttributeError
+        # to escape a hook that is meant to be total. Everything else in this
+        # module answers with a ClientReason; so does this.
+        return Augmentation(
+            trigger,
+            trace_id,
+            ClientReason.descriptor_unavailable,
+            "gate opened without a descriptor",
+            run_id=opened.run_id,
+            delivery_source=opened.delivery_source,
+        )
     run_id = opened.run_id
     source = opened.delivery_source
     if not session_id:
@@ -338,7 +379,9 @@ def _event(
         )
 
     root = cwd or project.root
-    snapshot = ci_snapshot.capture(root, trace_id)
+    # One allowance for both git calls this turn, not one each.
+    git_budget = ci_snapshot.new_budget()
+    snapshot = ci_snapshot.capture(root, trace_id, git_budget)
     level = insights.redaction_level()
     observed = observed_now()
     request = HookRequest(
@@ -346,14 +389,23 @@ def _event(
         run_id=run_id,
         session_id=wire_session_id(session_id),
         trace_id=trace_id,
-        project_ref=ci_snapshot.project_ref(root),
+        project_ref=ci_snapshot.project_ref(root, git_budget),
         snapshot_ref=snapshot.object_id if snapshot else None,
         prompt=outbound_prompt(prompt, level) if trigger != "session_start" else None,
         client_safety_ms=ceiling_for(descriptor),
         client_observed_at=observed,
     )
     push = descriptor.hook_push
-    assert push is not None  # pushes() was true
+    if push is None:  # pushes() was true, so unreachable — see the note above
+        return Augmentation(
+            trigger,
+            trace_id,
+            ClientReason.trigger_not_in_descriptor,
+            "descriptor lists no hook_push",
+            run_id=run_id,
+            descriptor=descriptor,
+            delivery_source=source,
+        )
     call = ci_client.call(request, url=opened.base + push.endpoint)
     rendered = _render(call, project.id)
     return Augmentation(

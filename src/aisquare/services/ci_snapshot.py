@@ -64,13 +64,38 @@ class Snapshot:
     """The ref keeping a stash object alive, or ``None`` for a clean tree."""
 
 
-def capture(root: Path, trace_id: str) -> Snapshot | None:
+def new_budget() -> _Budget:
+    """One turn's whole git allowance.
+
+    The caller makes it and hands the SAME one to :func:`capture` and
+    :func:`project_ref`, because the module docstring promises "every git call
+    shares one small time budget" and two separately-constructed budgets made
+    that two allowances — worst case twice the stated bound of synchronous
+    subprocess time in front of a developer who has just hit enter.
+    """
+    return _Budget(GIT_BUDGET_SECONDS)
+
+
+def capture(root: Path, trace_id: str, budget: _Budget | None = None) -> Snapshot | None:
     """Snapshot ``root``'s working tree for ``trace_id``. Never raises.
 
     ``None`` when the tree cannot be captured within the budget — the caller
-    sends ``snapshot_ref: null`` and records the turn anyway.
+    sends ``snapshot_ref: null`` and records the turn anyway. Pass the turn's
+    :func:`new_budget` to share the allowance with :func:`project_ref`.
     """
-    budget = _Budget(GIT_BUDGET_SECONDS)
+    budget = budget if budget is not None else new_budget()
+    snapshot = _snapshot(root, trace_id, budget)
+    # Outside the dirty-tree branch: the retention is a promise about the refs
+    # on disk, not about what this turn happened to write. It used to sit in the
+    # success arm of the dirty-tree ``update-ref``, so a developer who spent a
+    # week on dirty trees and then worked from clean checkouts never pruned
+    # again and kept every ref — and every object behind it — indefinitely.
+    _prune(root, budget)
+    return snapshot
+
+
+def _snapshot(root: Path, trace_id: str, budget: _Budget) -> Snapshot | None:
+    """The capture itself: a stash object for a dirty tree, ``HEAD`` for a clean one."""
     stashed = _git(
         root,
         "-c",
@@ -90,8 +115,6 @@ def capture(root: Path, trace_id: str) -> Snapshot | None:
             ref = WIP_REF_PREFIX + tail
             if _git(root, "update-ref", ref, stashed, timeout=budget.remaining()) is None:
                 ref = None  # the object is still valid for this turn; only its lifetime is not
-            else:
-                _prune(root, budget)
         return Snapshot(object_id=stashed, dirty=True, untracked_excluded=True, ref=ref)
     head = _git(root, "rev-parse", "HEAD", timeout=budget.remaining())
     if head is None or not _OBJECT_ID.match(head):
@@ -99,15 +122,18 @@ def capture(root: Path, trace_id: str) -> Snapshot | None:
     return Snapshot(object_id=head, dirty=False, untracked_excluded=True, ref=None)
 
 
-def project_ref(root: Path) -> str | None:
+def project_ref(root: Path, budget: _Budget | None = None) -> str | None:
     """``<owner/repo>@<branch>`` for ``root`` — a selector, never authority.
 
     Built from ``origin``'s path component only, so a remote URL carrying
     ``user:token@`` never contributes the credential. Falls back to the
     directory name when there is no remote, and to ``None`` when there is no
     repository at all. Always within the contract's 500 characters.
+
+    Pass the turn's :func:`new_budget` so this shares the allowance
+    :func:`capture` spent from rather than starting a second one.
     """
-    budget = _Budget(GIT_BUDGET_SECONDS)
+    budget = budget if budget is not None else new_budget()
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD", timeout=budget.remaining())
     if branch is None:
         return None
@@ -163,6 +189,11 @@ def _prune(root: Path, budget: _Budget, *, now: float | None = None) -> int:
         ref, _, stamp = line.partition("\t")
         if not (ref.startswith(WIP_REF_PREFIX) and stamp.isdigit() and int(stamp) < cutoff):
             continue
+        if budget.spent():
+            # The first prune after an unbounded stretch has thousands to drop,
+            # one spawn each. Stop at the budget and take the rest next turn:
+            # the work is idempotent, and no turn owes the backlog its latency.
+            break
         if _git(root, "update-ref", "-d", ref, timeout=budget.remaining()) is not None:
             dropped += 1
     return dropped
@@ -174,6 +205,17 @@ class _Budget:
 
     def remaining(self) -> float:
         return max(0.05, self._deadline - time.monotonic())
+
+    def spent(self) -> bool:
+        """Whether the budget is gone.
+
+        :meth:`remaining` floors at 50 ms so a call always gets a usable
+        timeout, which means it can never say "stop" — a loop that asks it
+        instead of this runs as long as it has work. Pruning a backlog of
+        thousands of refs took 6.6 s of a 2 s budget that way, in front of a
+        developer who had just hit enter.
+        """
+        return time.monotonic() >= self._deadline
 
 
 def _git(root: Path, *args: str, timeout: float) -> str | None:

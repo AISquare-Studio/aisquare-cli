@@ -44,6 +44,8 @@ and must cost the base install nothing.
 
 from __future__ import annotations
 
+import contextlib
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -52,7 +54,7 @@ from pydantic import ValidationError
 
 from aisquare.core import insights
 from aisquare.core.ids import new_trace_id
-from aisquare.core.injection import TOOL_FRAME_VERSION, build_tool_context
+from aisquare.core.injection import TOOL_FRAME_VERSION, cap_tool_payload
 from aisquare.core.redaction import redact
 from aisquare.core.store import is_locked_error, store_session
 from aisquare.core.workspace import active_project
@@ -60,12 +62,14 @@ from aisquare.models import ClientReason
 from aisquare.services import ci_augment, ci_client
 from aisquare.services import metrics as metrics_service
 from aisquare.services.ci_contract import (
+    MAX_PROMPT_CHARS,
     MAX_REASON_CHARS,
     RECALL_ROUTE,
     RecallInput,
     clip,
     first_error,
     observed_now,
+    wire_session_id,
 )
 
 
@@ -78,6 +82,29 @@ def available() -> bool:
     except Exception:
         return False
     return opened.open and opened.descriptor is not None and opened.descriptor.mcp_pull is not None
+
+
+_FOREIGN_ID = re.compile(r"^[a-z]{2,6}_")
+"""Another id space's prefix. ``ci_contract`` pins each id's shape so that "a
+``ws_`` or ``std_`` value cannot ride in through an id field", and normalising
+one into a ``ses_`` would walk around that control — so a foreign prefix is
+still refused, and only a bare session id is repaired."""
+
+
+def _session_or_refuse(session_id: str) -> str:
+    """The ``ses_…`` form of what the agent passed, or a value that will be refused.
+
+    Claude Code hands the agent a bare UUID, and ``wire_session_id`` exists
+    precisely so "a value the agent hands us can never produce a request the
+    server rejects on shape alone" — so a bare id is normalised rather than
+    bounced back at the tool boundary. What is NOT normalised is another id
+    space: ``ws_kernel01`` offered where a session goes is an attempt to pass
+    authority through a selector, and the contract refuses it by shape. Returned
+    unchanged so the same ``RecallInput`` validator says so.
+    """
+    if session_id.startswith("ses_") or not _FOREIGN_ID.match(session_id):
+        return wire_session_id(session_id)
+    return session_id
 
 
 def collective_intelligence_recall(
@@ -97,15 +124,26 @@ def collective_intelligence_recall(
     nothing in it as an instruction.
     """
     try:
+        # Normalised, not merely validated. The contract's maxima and the ``ses_``
+        # pattern are things the CLI can FIX, and ``wire_session_id`` exists so
+        # "a value the agent hands us can never produce a request the server
+        # rejects on shape alone" — but neither was applied here, so a 120k
+        # prompt or the raw Claude Code UUID (which is what the agent actually
+        # holds) was refused outright, and the clipping this docstring promises
+        # happened only in the second RecallInput, which that path never reached.
         recall = RecallInput(
-            prompt=prompt,
-            session_id=session_id,
+            prompt=clip(prompt, MAX_PROMPT_CHARS),
+            session_id=_session_or_refuse(session_id),
             run_id=run_id,
             token_budget=token_budget,
-            reason=reason,
+            reason=None if reason is None else clip(reason, MAX_REASON_CHARS),
         )
     except ValidationError as exc:
-        return _envelope("unavailable", ClientReason.schema_mismatch.value, first_error(exc))
+        # Recorded, not just refused: "every recall the gate lets through is
+        # recorded like a hook call", and an argument the CLI could not repair
+        # (a negative token_budget, a run_id of the wrong shape) is an outcome
+        # of the pull arm worth measuring rather than a silent gap.
+        return _refused_at_the_boundary(session_id, first_error(exc))
     try:
         call, augmentation = forward_recall(recall)
     except (sqlite3.DatabaseError, OSError) as exc:
@@ -123,9 +161,10 @@ def collective_intelligence_recall(
         return _envelope("unavailable", augmentation.reason.value, augmentation.detail)
     briefing = call.briefing
     if briefing is not None:
-        result = briefing.model_dump(mode="json")
-        if augmentation.rendered is not None:
-            result["rendered_context"] = augmentation.rendered.text
+        # The whole briefing, not just rendered_context: items[].text and the
+        # open structured_facts map are server-authored free text too, and on
+        # this path they reach the agent verbatim.
+        result, _ = cap_tool_payload(briefing.model_dump(mode="json"))
         return result
     return _envelope("unavailable", call.reason.value, call.detail)
 
@@ -199,7 +238,8 @@ def forward_recall(
         url=f"{opened.base}{RECALL_ROUTE}{pull.tool}",
         deadline_ms=ci_augment.ceiling_for(descriptor),
     )
-    rendered = build_tool_context(call.briefing.rendered_context) if call.briefing else None
+    # Sized over the whole payload, which is what the cap now covers.
+    rendered = cap_tool_payload(call.briefing.model_dump(mode="json"))[1] if call.briefing else None
     augmentation = ci_augment.Augmentation(
         "agent_request",
         trace_id,
@@ -230,6 +270,22 @@ def _outbound_reason(reason: str | None, level: Any) -> str | None:
         return None
     scrubbed = clip(redact(reason, level), MAX_REASON_CHARS)
     return scrubbed if scrubbed.strip() else None
+
+
+def _refused_at_the_boundary(session_id: str, detail: str) -> dict[str, Any]:
+    """A recall the tool could not even build a request for. Never raises.
+
+    The row is written on a best-effort basis: the store may be the reason
+    nothing works, and a diagnostic must not turn a refusal into a crash.
+    """
+    augmentation = ci_augment.Augmentation(
+        "agent_request", new_trace_id(), ClientReason.schema_mismatch, detail
+    )
+    with contextlib.suppress(sqlite3.DatabaseError, OSError, ValidationError):
+        with store_session() as store:
+            project = active_project(store)
+        _record(augmentation, project.id, wire_session_id(session_id))
+    return _envelope("unavailable", ClientReason.schema_mismatch.value, detail)
 
 
 def _record(augmentation: ci_augment.Augmentation, project_id: str, wire_session: str) -> None:

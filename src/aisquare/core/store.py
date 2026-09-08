@@ -35,6 +35,7 @@ from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
     ContextEntry,
+    FleetAgent,
     Pool,
     ProjectInfo,
     PromptRecord,
@@ -222,7 +223,37 @@ ALTER TABLE team_session ADD COLUMN model TEXT;
 ALTER TABLE team_session ADD COLUMN effort TEXT;
 """
 
-# v11: the Collective Intelligence test bed's per-turn metrics. One row per
+# v11: the fleet — one row per agent the fleet started (a tmux pane + the role it
+# runs + the board session id minted for it), and the project's fleet codename.
+# The label is unique only among LIVE agents (partial index), so an ended agent
+# frees its name. ``ALTER TABLE`` cannot add a UNIQUE constraint in SQLite, so the
+# codename's uniqueness is an index too.
+_SCHEMA_V11 = """
+CREATE TABLE fleet_agent (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    binary        TEXT NOT NULL DEFAULT 'claude',
+    tmux_socket   TEXT NOT NULL DEFAULT 'asq',
+    pane_id       TEXT NOT NULL,
+    session_id    TEXT,
+    cwd           TEXT NOT NULL,
+    worktree      INTEGER NOT NULL DEFAULT 0,
+    task_id       TEXT,
+    spawned_by    TEXT,
+    created_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    exit_status   INTEGER
+);
+CREATE INDEX fleet_agent_project ON fleet_agent (project_id, created_at);
+CREATE UNIQUE INDEX fleet_agent_live_label ON fleet_agent (project_id, label)
+    WHERE ended_at IS NULL;
+ALTER TABLE project ADD COLUMN codename TEXT;
+CREATE UNIQUE INDEX project_codename ON project (codename);
+"""
+
+# v12: the Collective Intelligence test bed's per-turn metrics. One row per
 # turn, opened by the UserPromptSubmit hook and closed by Stop, so a row exists
 # whether or not CI was consulted — which is what makes the stretch before the
 # endpoint goes live a usable baseline rather than a gap in the record.
@@ -249,11 +280,13 @@ ALTER TABLE team_session ADD COLUMN effort TEXT;
 # a fabricated number here is worse than a null because it survives into a
 # published comparison.
 #
-# Rewritten in place before it ever shipped in a release: the earlier v11 on
-# this branch recorded hook contract v1 columns, and a v12 for a schema that
-# reached no user would be a migration with no one to migrate.
-_SCHEMA_V11 = """
-CREATE TABLE metric (
+# IF NOT EXISTS, and delivery_source inline rather than as a later ALTER,
+# because this step is reached by databases that already have the table: this
+# branch numbered the metric table v11 and v12 before `main` released v0.6.0
+# with a *different* v11 (the fleet tables above). See _SCHEMA_V13.
+_SCHEMA_V12 = """
+CREATE TABLE IF NOT EXISTS metric (
+
     trace_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     session_id TEXT,
@@ -292,40 +325,57 @@ CREATE TABLE metric (
     snapshot_untracked_excluded INTEGER,
     tokens_in INTEGER,
     tokens_out INTEGER,
-    tool_calls INTEGER
+    tool_calls INTEGER,
+    delivery_source TEXT CHECK (delivery_source IN ('descriptor', 'override'))
 );
 
-CREATE INDEX metric_project_started ON metric (project_id, started_at);
-CREATE INDEX metric_open_session ON metric (session_id, started_at) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS metric_project_started ON metric (project_id, started_at);
+CREATE INDEX IF NOT EXISTS metric_open_session ON metric (session_id, started_at)
+    WHERE ended_at IS NULL;
 """
 
-# v12: delivery_source on the metric row — which document ruled how a turn was
-# delivered: the descriptor the server published, or the staging override
-# (services/ci_override.py) standing in for it while the server's descriptor
-# still says direct_api. Rows the two produce are never summed, and a column is
-# the only place that distinction survives into a comparison.
+# v13: converge the two v11s.
 #
-# A migration this time, not another in-place rewrite of v11, because v11 has
-# reached machines in three shapes, all stamped user_version 11:
-#   - the v2 metric table, from anyone who ran this branch's stub smoke;
-#   - NO metric table, from anyone who followed the PR's advice for the v1
-#     table — "delete the metric table" (measured on the machine this was
-#     written on: every row silently lost);
-#   - the v1-contract metric table (ci_action, degradation_reason, arm,
-#     flags_hash, plus a `run` table), from anyone who ran the branch between
-#     7557751 and 31956f2 — which cannot take a v2 row either.
-# _retire_v1_metric_table runs first, inside the same transaction, and renames
-# the third shape out of the way (renamed, never dropped — the rows are theirs);
-# CREATE TABLE IF NOT EXISTS then builds the v2 shape for the second and third;
-# ALTER TABLE adds the column to all three. Nothing is dropped, no row is
-# touched, and the CHECK is mirrored in tests/test_store.py like the others.
-_SCHEMA_V12 = (
-    _SCHEMA_V11.replace("CREATE TABLE metric", "CREATE TABLE IF NOT EXISTS metric").replace(
-        "CREATE INDEX metric_", "CREATE INDEX IF NOT EXISTS metric_"
-    )
-    + "\nALTER TABLE metric ADD COLUMN delivery_source TEXT"
-    " CHECK (delivery_source IN ('descriptor', 'override'));\n"
-)
+# `user_version 11` means one of two incompatible things in the wild, because
+# two branches claimed it at once:
+#   - v0.6.0 from PyPI: the fleet tables (_SCHEMA_V11 above) and no metric table;
+#   - this branch, before the merge: the metric table and no fleet tables —
+#     at 11 without delivery_source, or at 12 with it.
+# Renumbering cannot serve both. Whichever meaning keeps the number, the other
+# cohort's next migration hits a table that already exists (`table metric
+# already exists`, `duplicate column name: delivery_source`) or silently never
+# gets the tables it skipped, and a store that cannot open takes every command
+# and every hook with it.
+#
+# So the ladder is made to converge instead of to count: V11 stays exactly as
+# released (it only runs below 11, where neither table can exist), V12 creates
+# the metric table only if it is absent, and this step gives the fleet tables to
+# anyone who reached 11 or 12 down the CI branch and so never ran V11. Every
+# cohort passes through here, so the end state is the same whichever way in.
+# The two columns SQLite cannot add conditionally in SQL are in _PREPARE[12].
+_SCHEMA_V13 = """
+CREATE TABLE IF NOT EXISTS fleet_agent (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    binary        TEXT NOT NULL DEFAULT 'claude',
+    tmux_socket   TEXT NOT NULL DEFAULT 'asq',
+    pane_id       TEXT NOT NULL,
+    session_id    TEXT,
+    cwd           TEXT NOT NULL,
+    worktree      INTEGER NOT NULL DEFAULT 0,
+    task_id       TEXT,
+    spawned_by    TEXT,
+    created_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    exit_status   INTEGER
+);
+CREATE INDEX IF NOT EXISTS fleet_agent_project ON fleet_agent (project_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS fleet_agent_live_label ON fleet_agent (project_id, label)
+    WHERE ended_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS project_codename ON project (codename);
+"""
 
 V1_ORPHAN_SUFFIX = "_v1_orphaned"
 """Where the v1-contract ``metric`` and ``run`` tables go at v12. Nothing reads
@@ -375,11 +425,50 @@ def _free_name(connection: sqlite3.Connection, base: str) -> str:
     return name
 
 
+def _add_column_if_absent(
+    connection: sqlite3.Connection, table: str, column: str, declaration: str
+) -> None:
+    """``ALTER TABLE … ADD COLUMN`` only when the column is not already there.
+
+    SQLite has no ``ADD COLUMN IF NOT EXISTS``, and a second ALTER raises
+    ``duplicate column name``, which would abort the migration and leave the
+    store unopenable. A missing *table* is not this function's business either:
+    a cohort that has no ``metric`` yet gets the column from the CREATE in
+    _SCHEMA_V12, so there is nothing to add.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+    if connection.execute(query, (table,)).fetchone() is None:
+        return
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column in columns:
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _converge_v11_fork(connection: sqlite3.Connection) -> None:
+    """Before v13's statements: add the columns the other v11 would have added.
+
+    ``project.codename`` is missing for anyone who came down the CI branch (they
+    never ran V11); ``metric.delivery_source`` is missing for anyone who stopped
+    at this branch's old v11. Both are no-ops for a database that already has
+    them, so every cohort can run this and land in the same shape.
+    """
+    _add_column_if_absent(connection, "project", "codename", "TEXT")
+    _add_column_if_absent(
+        connection,
+        "metric",
+        "delivery_source",
+        "TEXT CHECK (delivery_source IN ('descriptor', 'override'))",
+    )
+
+
 # Python that must run before a migration's statements, inside its transaction,
 # keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
 # scripts stay plain SQL that executescript and _statements build identically.
-_PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {11: _retire_v1_metric_table}
-
+_PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
+    11: _retire_v1_metric_table,
+    12: _converge_v11_fork,
+}
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -394,6 +483,7 @@ _MIGRATIONS = (
     _SCHEMA_V10,
     _SCHEMA_V11,
     _SCHEMA_V12,
+    _SCHEMA_V13,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -455,6 +545,10 @@ _TASK_COLUMNS = (
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
+_FLEET_AGENT_COLUMNS = (
+    "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
+    "task_id, spawned_by, created_at, ended_at, exit_status"
+)
 
 
 class AmbiguousIdError(LookupError):
@@ -554,6 +648,15 @@ class ContextStore(Protocol):
     ) -> list[TeamEvent]: ...
     def latest_seq(self, project_id: str) -> int: ...
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]: ...
+    def set_codename(self, project_id: str, codename: str) -> ProjectInfo: ...
+    def codenames_in_use(self) -> set[str]: ...
+    def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
+    def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
+    def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agent_by_label(
+        self, project_id: str, label: str, *, live_only: bool = True
+    ) -> FleetAgent | None: ...
+    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
     def close(self) -> None: ...
 
 
@@ -581,6 +684,27 @@ def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
         id=row["id"],
         root=Path(row["root"]),
         linked_repos=json.loads(row["linked_repos"]),
+        codename=row["codename"],
+    )
+
+
+def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
+    return FleetAgent(
+        id=row["id"],
+        project_id=row["project_id"],
+        label=row["label"],
+        role=row["role"],
+        binary=row["binary"],
+        tmux_socket=row["tmux_socket"],
+        pane_id=row["pane_id"],
+        session_id=row["session_id"],
+        cwd=Path(row["cwd"]),
+        worktree=bool(row["worktree"]),
+        task_id=row["task_id"],
+        spawned_by=row["spawned_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        ended_at=_maybe_dt(row["ended_at"]),
+        exit_status=row["exit_status"],
     )
 
 
@@ -859,20 +983,21 @@ class SqliteStore:
 
     def list_projects(self) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos FROM project ORDER BY name"
+            "SELECT id, root, linked_repos, codename FROM project ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
     def get_project(self, project_id: str) -> ProjectInfo | None:
         row = self._conn.execute(
-            "SELECT id, root, linked_repos FROM project WHERE id = ?", (project_id,)
+            "SELECT id, root, linked_repos, codename FROM project WHERE id = ?", (project_id,)
         ).fetchone()
         return _row_to_project(row) if row is not None else None
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos FROM project WHERE id GLOB ? OR name = ? ORDER BY name",
-            (_glob_prefix(term), term),
+            "SELECT id, root, linked_repos, codename FROM project "
+            "WHERE id GLOB ? OR name = ? OR codename = ? ORDER BY name",
+            (_glob_prefix(term), term, term),
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
@@ -1607,6 +1732,103 @@ class SqliteStore:
             (project_id,),
         ).fetchone()
         return int(row[0])
+
+    # --- fleet -----------------------------------------------------------------
+
+    def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
+        """Give a project its fleet codename (unique: the index raises on a clash)."""
+        self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
+        self._conn.commit()
+        project = self.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        return project
+
+    def codenames_in_use(self) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT codename FROM project WHERE codename IS NOT NULL"
+        ).fetchall()
+        return {str(row["codename"]) for row in rows}
+
+    def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent:
+        """Insert a fleet agent, or update the mutable facts of one already known.
+
+        A second LIVE agent with the same label in the same project trips the
+        partial unique index and raises ``sqlite3.IntegrityError`` — the service
+        layer picks the suffixed label and retries; the store never guesses.
+        """
+        self._conn.execute(
+            f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET "
+            "pane_id = excluded.pane_id, session_id = excluded.session_id, "
+            "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
+            "ended_at = excluded.ended_at, exit_status = excluded.exit_status",
+            (
+                agent.id,
+                agent.project_id,
+                agent.label,
+                agent.role,
+                agent.binary,
+                agent.tmux_socket,
+                agent.pane_id,
+                agent.session_id,
+                str(agent.cwd),
+                int(agent.worktree),
+                agent.task_id,
+                agent.spawned_by,
+                agent.created_at.isoformat(),
+                agent.ended_at.isoformat() if agent.ended_at else None,
+                agent.exit_status,
+            ),
+        )
+        self._conn.commit()
+        stored = self.get_fleet_agent(agent.id)
+        assert stored is not None  # just written
+        return stored
+
+    def get_fleet_agent(self, ref: str) -> FleetAgent | None:
+        """A fleet agent by id or unambiguous id prefix (git-style)."""
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent WHERE id GLOB ? LIMIT 2",
+            (_glob_prefix(ref),),
+        ).fetchall()
+        if len(rows) > 1:
+            raise AmbiguousIdError(ref)
+        return _row_to_fleet_agent(rows[0]) if rows else None
+
+    def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
+        clause = " AND ended_at IS NULL" if live_only else ""
+        rows = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"WHERE project_id = ?{clause} ORDER BY created_at, id",
+            (project_id,),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agent_by_label(
+        self, project_id: str, label: str, *, live_only: bool = True
+    ) -> FleetAgent | None:
+        clause = " AND ended_at IS NULL" if live_only else ""
+        row = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
+            (project_id, label),
+        ).fetchone()
+        return _row_to_fleet_agent(row) if row is not None else None
+
+    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
+        """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
+        self._conn.execute(
+            "UPDATE fleet_agent SET ended_at = ?, exit_status = ? "
+            "WHERE id = ? AND ended_at IS NULL",
+            (_now_iso(), exit_status, agent_id),
+        )
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
 
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
         """The latest done/dropped event per task — archive attribution.

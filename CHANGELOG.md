@@ -6,6 +6,237 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
+  0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
+  `localhost` and `::1` runs with no Host/Origin validation — described at
+  length in the entry below, and visible nowhere else. The SDK logs nothing
+  when it skips that protection, the CLI printed the same startup line for
+  every bind, and `--bind`'s help predated the change, so the entire
+  disclosure reached changelog readers and source readers and never the person
+  opening the port. Such a bind now prints a second stderr line at startup
+  naming what is off and what is left — the bearer token, a long-lived
+  credential (`auth rotate` is still a stub) sent in clear over plain HTTP on
+  every request, so a trusted network or a TLS-terminating proxy — `--bind`'s
+  help says it in a sentence, and the README's serve section covers the flag.
+  The notice keys on `LOOPBACK_BINDS` in `services/mcp_server.py`. That tuple
+  mirrors the literal the SDK matches on rather than being handed to it —
+  `run_http` passes only `host=bind` — so a test is the only thing that can
+  hold the two equal, and one drives all three spellings, plus a `127/8`
+  address deliberately outside them, against the real transport. Without it,
+  dropping a spelling passes every test while the CLI starts announcing an
+  exposure the SDK is in fact still preventing.
+
+- **Collective Intelligence test bed — retrieval in front of the agent, off by
+  default (experimental).** When a prompt is submitted, aisquare can ask a CI
+  server whether the workspace already knows something relevant and hand that to
+  the agent *before* it starts exploring, through the `UserPromptSubmit` hook
+  installed since day one. **Nothing runs unless `AISQUARE_CI=1`, a URL, a token
+  and a run id are set:** with the switch off there is no request, no connection
+  and no measurable latency, and any unrecognised value of the switch is off.
+  - The CLI speaks **hook contract v2**, the server's frozen contract. Its seven
+    schemas and their fixtures are vendored byte for byte
+    (`tests/fixtures/ci_contract/v2/`); every request the CLI can emit is
+    validated against the server's schema with `jsonschema` in the suite, and
+    the models refuse what the schemas refuse — an unknown key, a scope id in an
+    id field, `allow`/`block`/`substitute`, an `inject` with no briefing.
+  - **The server's delivery descriptor decides delivery.** Fetched once per
+    session and cached until it expires, it says which hooks call the server,
+    where, under what ceiling, and whether the `collective_intelligence_recall`
+    MCP tool is exposed in `aisquare serve`. It carries no architecture or arm,
+    so the CLI is structurally unable to know which arm it is running.
+  - **The ceiling is wall clock.** The descriptor's `client_safety_ms` bounds the
+    whole exchange — a server dribbling bytes cannot hold the hook past it, a
+    response that lands late is a breach, bodies are capped, and nothing retries.
+    `agents connect` gives the two context hooks a 120 s Claude Code timeout so
+    the agent does not discard the hook's answer first.
+  - `aisquare metrics show|list` (hidden) — one row per hook event, scoped to the
+    current project (`--project`, `--all`). The row carries the join keys the
+    server ledger pairs on (`run_id`, `session_id`, `trace_id`, `query_id`), the
+    server's `status`/`action`, and a **client reason** in three groups that are
+    never summed: baseline (never asked), by design (chose not to), failure
+    (tried). Round-trip percentiles cover consulted turns only.
+  - Each turn snapshots the working tree (`git stash create`, kept alive under
+    `refs/aisquare/wip/<trace_id>`) so it can be replayed later; the object id
+    travels, the ref name does not, and the row records that untracked files are
+    excluded.
+  - Retrieved material is framed as candidate reference — caveat before and
+    after, a delimited region the payload cannot close, control characters
+    stripped, a 16 384-character cap with both sizes recorded. `aisquare why` names the
+    items shown without clobbering the entry counts.
+  - The prompt is scrubbed at the configured `redaction` level before it leaves,
+    and the level is recorded. A `ci_turn` join record is spooled through the
+    Explainability client lane when shipping is configured, so server rows and
+    CLI rows meet through the pipeline id.
+  - `doctor` reports the switch, the URL (scheme required, credentials never
+    echoed), the token and run, `GET /ready`, and the descriptor fetch — a
+    rejected token, an unknown run, an expired run and a contract skew each get
+    their own line and fix. Every probe is bounded.
+  - Token counts are **not** recorded — hook payloads do not carry them, and
+    `metrics show` says so rather than reporting a zero that reads as "no tokens
+    were used". The contract pointer and the CLI's standing assumptions are in
+    `docs/ci-contract.md`; the server seam is `docs/ci-integration-handoff.md`.
+  - `tests/stub_ci_server.py` speaks v2 and can be run by hand
+    (`python -m tests.stub_ci_server --port 8765`) to point a real session at it.
+- **The CI test bed is wired to the live staging server** (`ci-api.aisquare.studio`,
+  2026-09-02) — three changes the real server asked for, all off unless the
+  switch is on:
+  - **Refusals are read, not just counted.** A non-200 from either route carries
+    an `error.v1` body live (`scope_resolution_failed` on a 401,
+    `dependency_unavailable` with "has no completed build" on a 503). The code
+    lands on the row's `error_codes` and the clipped sentence in the detail;
+    `doctor` quotes both on its descriptor line and picks the fix from the
+    status rather than from words in a message the server wrote. Nothing
+    branches on `retryable`; nothing retries.
+  - **The recall tool uses the server's pull route.**
+    `collective_intelligence_recall` forwards to
+    `POST /v1/mcp/collective_intelligence_recall` as `mcp-tool-input.v1` — so
+    `token_budget` and `reason` travel instead of being reported as dropped —
+    with `run_id` the descriptor's (the server has no default run and refuses
+    its absence; an agent-supplied value naming another run is refused, so the
+    row and the ledger always agree). `prompt` and `reason` leave scrubbed and
+    clipped to the contract on both sides of the scrub. The answer is the bare
+    briefing; an `empty` answer is the server's own briefing with no items,
+    returned as such. The stub grew the route; the suite drives the tool end to
+    end through a real in-memory MCP client.
+  - **A loud, recorded staging override.** The staging descriptor still says
+    `direct_api` for every run, so the descriptor-gated hooks never call.
+    `AISQUARE_CI_DELIVERY_OVERRIDE=hook_push:session_start,prompt_submit;mcp_pull`
+    (environment only) stands in for the delivery list **only** when the fetched
+    descriptor is `direct_api`-only — ignored otherwise, ignored when malformed,
+    never cached — and cannot be mistaken for the descriptor's ruling: every
+    row and join record carries `delivery_source` (`descriptor` | `override`),
+    `metrics list` shows it as `SOURCE`, `metrics show` counts override rows
+    apart and keeps them out of the round-trip percentiles, and `doctor` warns
+    on its own line whenever it is set — active, ignored, or malformed. Rows it
+    produces measure nothing; it goes when the server publishes real delivery
+    modes.
+  - The column arrives as **schema v13**, a converging migration, because
+    `user_version 11` means two incompatible things in the wild: 0.6.0 from PyPI
+    stamped it for the fleet tables, and this branch stamped it for the `metric`
+    table. Renumbering cannot serve both — whichever meaning keeps the number,
+    the other cohort's next step hits a table that already exists and the store
+    stops opening, which takes every command and every hook with it. So v11 is
+    left exactly as released (it only ever runs below 11, where neither table
+    can exist), v12 creates `metric` only if it is absent, and v13 gives the
+    fleet tables to anyone who reached 11 or 12 down this branch. On top of
+    that, v11 reached developer machines in three further shapes — the v2 table,
+    no table at all (following the earlier advice to delete the v1-shaped one),
+    and the v1-shaped table itself, which is renamed to `*_v1_orphaned` onto a
+    free name and never dropped. Every shape is a case in
+    `test_every_shape_of_user_version_11_converges_on_one_schema`, which asserts
+    the end state by writing to both tables rather than by reading the version.
+    Deleting the `metric` table by hand is no longer needed and no longer safe.
+- **The review of the CI branch at `ee422b5`, acted on.** Every item sits where
+  server-controlled bytes cross into the client, and each has a test that failed
+  before its fix:
+  - the injection frame could be escaped by one invisible character (a
+    zero-width space, a byte-order mark, a bidi override) or an odd line break
+    (U+2028, U+2029, U+0085, `\r`); a lone surrogate in a briefing turned
+    `session-start` into a traceback because the write sat outside the guard;
+  - the transport followed redirects and would have re-sent the bearer token to
+    another origin; a multi-line token was echoed by the header parser into a
+    detail `doctor` prints;
+  - the strict models refused `63.0` where the schema says `integer`;
+  - the v12 healing migration could wedge a store on a fixed orphan name;
+  - a credential straddling the 100 000-character cut shipped in the clear;
+    the descriptor's `client_safety_ms` had no client-side maximum, so a run
+    could publish a ceiling past the installed hook timeout; a failed descriptor
+    fetch cost a fresh 10 s probe on every prompt; snapshot refs grew forever;
+  - the recall tool returned the briefing text raw, uncapped and unmeasured,
+    and a locked store escaped it as an opaque crash;
+  - the hook install check ignored the timeout value; an unrecorded prompt was
+    silent; three `doctor` lines asserted more than their probe established.
+  Also: the compare-and-set in `close_turn` and five CHECK vocabularies are now
+  actually tested, the vendored-contract drift guard is pinned to the deployed
+  server commit, and the cap is stated in characters, which is what it is.
+
+- **`install.sh` — the one-line installer.** macOS, Linux and WSL2, in POSIX
+  `sh` (it runs as Debian's `dash` and Alpine's BusyBox `ash`).
+  [`uv`](https://docs.astral.sh/uv/) is the bootstrap, so nothing depends on the
+  machine already having a Python — it brings its own 3.13 for the CLI alone,
+  leaving the system Python untouched. It surveys before it writes: a machine
+  that is already current prints its summary and exits 0 having installed
+  nothing, and running it twice is a no-op. Installs `uv`, Python, `aisquare-cli`
+  with `tiktoken`, tmux, `gh`, `git`, Node 22+ and Claude Code; then
+  `aisquare init --agent claude-code`, which wires the hooks and packs the
+  snapshot in the same run. Refuses to run as root outside a container, uses
+  `sudo` for one command at a time, never edits your shell profile beyond what
+  `uv` and the Claude Code installer do themselves, and never `--reinit` (which
+  would discard `team bind` role bindings on every re-run). `--dry-run` prints
+  every command and runs none — that is how you decide whether to trust it.
+  Full flag table in the README; design, measurements and the rejected
+  alternatives in `docs/plans/one-line-install.md`.
+- **`install.ps1` — a WSL2 shim for Windows.** Not an installer: the fleet gives
+  every agent a real tmux pane and Windows has no tmux, so it detects WSL2 and
+  delegates into it, or prints the one command that installs WSL.
+- **A container matrix for the installer** (`tests/install/`, and its own CI
+  workflow). Five bare distributions — Debian 12, Ubuntu 22.04, Fedora 41, Arch,
+  Alpine 3.22 — each installing a wheel built from the tree under review, plus a
+  cell that runs as a **normal user with sudo** (the primary case, and the only
+  one where the script's `sudo` path is exercised at all), one that installs
+  Claude Code for real, and a macOS job. Each cell runs the installer four
+  times: bare, with a project — where the acceptance criterion is asserted,
+  *every check ok except `brain`* — then again with every package manager
+  replaced by a stub that records being called, asserting the re-run installs
+  nothing, moves no version, leaves `~/.claude/settings.json` byte-identical and
+  calls no package manager; and finally the upgrade path, staging an exact
+  `==0.5.0` pin and asserting the version moves *and* that `tiktoken` survives.
+  The criterion is asserted as a *set* with the total floored rather than pinned,
+  which is why it kept holding when `doctor` gained an eighteenth check. It runs
+  on a schedule as well as on pushes, because four of the things the script
+  fetches belong to other people.
+
+### Changed
+- **`serverInfo.version` reports this CLI's version.** mcp 1.x filled an
+  omitted server version with the SDK's own package version, so clients saw
+  `1.29.1` — a number that named nothing of ours — and 2.x sends the empty
+  string, which 0.6.0 therefore shipped. `build_server` now passes
+  `aisquare-cli`'s own version, pinned by a test over a legacy connection
+  where `serverInfo` is mandatory, so an absent identity fails loudly rather
+  than reading as `None`. With this, on the 2025-11-25 handshake era,
+  `tools/list`, every success result and every error result are identical as
+  parsed JSON between 1.x and 2.x, with two exceptions: the crash case and the
+  `-32601` code, both described below. (2.x orders object keys differently, so
+  the raw frames are not byte-for-byte equal; the error texts themselves are.)
+  On the 2026-07-28 era every result also carries a `_meta` serverInfo stamp,
+  which this version now populates; no 1.x served that era, so there is
+  nothing to compare it with.
+- **The serve suite proves what it says it proves.** Three gaps, each of which
+  let a mutation pass:
+  - `call_remote` drove the server through `Client(server)` at its default
+    mode, which for an in-process server is a `DirectDispatcher` pair —
+    2026-07-28, no initialize handshake, no JSON-RPC framing — while its
+    docstring claimed a wire-shaped round trip. It now asks for
+    `mode="legacy"`, the path the removed
+    `create_connected_server_and_client_session` took: memory streams, a
+    handshake, framing, results sieved at the 2025-11-25 surface. Both it and
+    the modern-path test now assert the protocol version they negotiated, so
+    swapping either mode fails instead of silently testing the other era.
+  - Nothing exercised `run_http` at all. Dropping its `host` argument left
+    every test green while `--bind 0.0.0.0` reverted to answering every LAN
+    client with `421`. `test_http_answers_by_bind_host_and_token` now pins
+    every combination that matters — a LAN `Host` is 200 on `0.0.0.0` and 421
+    on `127.0.0.1`, each of the three loopback spellings rejects a LAN `Host`
+    and still answers its own client, a `127/8` address outside the tuple is
+    served unchecked, and a missing token is 401 on either kind of bind before
+    any Host check runs — driven through the ASGI lifespan the way uvicorn
+    drives it, so `_BearerGuard`'s lifespan pass-through is pinned along the
+    way.
+  - The `ClaimLostError` arm of the MCP error guard had no test. It now has
+    one, with the truth in its docstring: no tool can reach that arm today —
+    `next_task` moves on when a claim is lost and nothing calls `claim_task` —
+    so the test pins the mapping for the day a tool claims by ref.
+- **The 0.6.0 entry below is corrected in place.** Six of its statements
+  about the mcp SDK were measurably wrong — the version range in which the
+  loopback protection existed, which transports encode JSON, the scope of a
+  wire-parity claim, what a fresh install resolves to, the SDK's own word for
+  a 2026-era `_meta`, and which spellings count as loopback. The tag is
+  immutable, so the repo's copy is the only one that can be made true, and a
+  reader of 0.6.0 looks there rather than here. Everything those follow-ups
+  *add* is in this section instead, so 0.6.0 does not advertise behaviour it
+  never shipped.
+
 ### Fixed
 - **The selected project row in the fleet sidebar showed its folder glyph and an
   empty highlighted band — no name, no codename.** Any project whose basename is
@@ -17,6 +248,78 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sidebar's one-line rows — project title, agent rows, the path subtitle, the
   Doctor lines — now declare `text-wrap: nowrap; text-overflow: ellipsis`, so a
   long name is cut with `…` where it stands. (#86)
+- **The ceiling holds on mcp 2.2.0.** Released after 0.6.0 measured its floor,
+  and admitted by the same `>=2.1,<3` pin, so a fresh install already resolves
+  to it — CI's `check` jobs install it and are green, which is what proves it
+  rather than the local venv, still pinned at 2.1.1.
+- **`--show-token` and the startup line print a URL a client can dial.** Both
+  interpolated the bind verbatim, so `--bind ::1` — one of the three spellings
+  that keep the transport's Host validation — printed `http://::1:8747/mcp`,
+  which is not a URL at all, and `--bind 0.0.0.0` printed a listen address no
+  client can reach. IPv6 literals are bracketed — that half is unambiguous —
+  and a wildcard bind is replaced by this machine's name, which is a better
+  starting point than `0.0.0.0` without being a promise: whether that name
+  resolves, and to something reachable rather than back to loopback, is the
+  operator's network to know. The bind is printed alongside and added to the
+  JSON as a `bind` field, so nothing is hidden either way. Pre-existing, but
+  newly consequential: before mcp 2 a LAN client was refused with 421 before
+  the URL ever mattered.
+- **A broken mcp install is no longer reported as the wrong problem.** The
+  serve guard had two branches — extra missing, or mcp out of range — and a
+  third case fell into the second. `find_spec` on a dotted name imports the
+  parents, and `mcp.server` imports `sse_starlette` at package-import time, so
+  a venv holding mcp 2.1.1 with `sse-starlette` uninstalled or broken raised
+  inside the probe, was read as "no such module", and told the user to install
+  the mcp they already had. mcp pins `sse-starlette>=3.0.0` with no upper
+  bound, so an ordinary `pip install` can reach this. The guard now reports
+  the failing import by name and says to reinstall the extra.
+- **`doctor` told new users to install a different project.** Three
+  remediations named `aisquare`, which on PyPI is the *Explainability SDK*
+  (1.2.0), not this CLI (`aisquare-cli`): `install` on both its branches
+  (`pipx install aisquare`), `tiktoken` (`pipx inject aisquare tiktoken` —
+  which also names a pipx environment that exists on no machine that followed
+  the documented install), and `explainability sdk`
+  (`pip install "aisquare[explainability]"`, from a stale constant that
+  shadowed the correct, editable-aware hint one import away). So the checks
+  whose whole job is "this machine is not set up properly" answered it with
+  commands that install somebody else's package — and, because the SDK ships
+  its own `aisquare/__init__.py` into the directory this package occupies, into
+  the exact dependency shape `pyproject.toml` carries twelve lines warning
+  about. Every hint is now built from `core.version.DISTRIBUTION`, and a new
+  class-level guard sweeps the real `doctor()` output so a fourth instance
+  fails the build instead of shipping. The `--force-reinstall aisquare` row is
+  untouched: it repairs the SDK's own package root and means the SDK.
+- **`doctor --fix` *ran* the install its own advice forbids.** `install_sdk()`
+  shelled out to `pip install aisquare[explainability]` while every printed hint
+  was being corrected away from that exact form, so the two halves of one code
+  path disagreed. It now installs through our own extra
+  (`aisquare-cli[explainability]`), which is also the only form that carries the
+  `>=1.1` floor — the SDK release where `AgentRunTracer` accepts `run_id`. The
+  bare form had no floor and could resolve an SDK too old for the lane the
+  install exists to enable, and succeed while doing it.
+- **`explainability sdk` remediations read as self-contradictions on a
+  checkout.** `install_hint()` returns a command on a normal install and a
+  *sentence* on an editable one, so an unconditional `Install it: …` prefix
+  rendered as "Install it: this is an editable checkout — installing the extra
+  here shadows it and every command dies…", telling the operator to do the thing
+  the rest of the line says will break their machine. The prefix is now
+  conditional on there being a command to prefix. Affected all three SDK rows,
+  one of them before this release.
+- **The `repomix` check was green on a machine that cannot pack a snapshot.**
+  `npx` merely *existing* was the whole test, while repomix 1.18.0 declares
+  `node >= 22` — and Debian 12 ships Node 18, Ubuntu 22.04 ships 12. On those,
+  the line read `ok` and the first `project onboard` failed at run time. The
+  check now reads Node's version through a registered spawn seam
+  (`core/snapshot.py::node_version`) and warns below the floor, naming the
+  version found. The floor is read **per path**: `npx --yes repomix` fetches the
+  latest release, so the constant applies there, while an installed `repomix`
+  is judged by its own `engines.node` — a pinned `repomix@0.2` on Node 18 packs
+  fine and must not be warned about, and a repomix that *raises* its floor must
+  not be under-warned. No Node on PATH at all is now its own warning rather
+  than "untested", because `repomix` and `npx` are both `#!/usr/bin/env node`
+  scripts and neither can run without one; a Node that is present but will not
+  report a version stays untested. The advice points at nodejs.org or a version
+  manager rather than the package manager whose `nodejs` *is* the old one.
 
 ## [0.6.0] - 2026-09-03
 
@@ -124,7 +427,11 @@ known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
   bump (#73) went red on mypy and the `<2` pin was the only thing keeping a
   fresh install green. The port is confined to `services/mcp_server.py`, the
   `serve` dependency guard, and the two test files that drive them; the nine
-  tools, their wording, and both transports' behaviour are unchanged.
+  tools and their wording are unchanged. What a client can observe differently
+  is listed below — a second protocol era (2026-07-28, which no 1.x could
+  serve), a crash's detail kept off the wire, `serverInfo.version` and
+  `-32601` for an unknown method, on both transports — and, on HTTP alone, no
+  Host/Origin validation on a non-loopback `--bind`.
   - **The error-wording contract survives, on the seam the SDK now provides.**
     mcp 2 still folds a tool's `ToolError` into `Error executing tool <name>:
     <msg>`, so the handler that unwraps our own message back out is still
@@ -134,7 +441,7 @@ known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
     what the SDK itself uses to wrap this method for extensions). A remote
     agent still sees `error: reopen requires a note (the feedback)`, verbatim,
     as an `isError` result — `tests/test_serve.py` asserts every one of those
-    strings end-to-end through a real client session.
+    strings through a real client session.
   - **A crashed tool is now logged server-side.** New in mcp 2.1, not chosen
     here: the SDK tells a crash apart from a deliberate failure by type
     (`UnexpectedToolError`) and keeps the crash's detail off the wire, so the
@@ -147,26 +454,68 @@ known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
     one. `test_a_crashed_tool_is_an_error_result_logged_server_side` pins both
     halves: nothing of the exception on the wire, all of it in the log.
   - HTTP transport settings moved off the server object: `host` is passed to
-    `streamable_http_app()`, whose only use for it is deciding whether loopback
-    DNS-rebinding protection auto-enables (it does, as before), and the port is
-    uvicorn's alone, as it already was.
+    `streamable_http_app()`, whose only use for it is deciding whether
+    DNS-rebinding protection auto-enables, and the port is uvicorn's alone, as
+    it already was. **That decision now follows the actual bind, which changes
+    one thing on HTTP.** From mcp 1.23.0 (2025-12-02, "Auto-enable DNS
+    rebinding protection for localhost servers") the SDK decided in its
+    constructor from the default host (`127.0.0.1`), and the pre-change code set
+    `settings.host = bind` only afterwards, so Host/Origin validation with a
+    loopback-only allowlist was on for every bind — `--bind 0.0.0.0` answered
+    every LAN client with `421 Invalid Host header` (measured against the
+    pre-change tree on 1.23.0 and 1.29.1). On 1.14 through 1.22 the protection
+    defaulted to off and the LAN bind worked (measured on 1.14.0 and 1.22.0);
+    below 1.14 this server did not construct at all — `FastMCP` ran
+    `issubclass` on the string annotations `from __future__ import annotations`
+    leaves behind — so the old `>=1.10` floor was never right either. 1.23.0
+    predates both the pin and the module docstring's LAN use case (2026-07), so
+    the mcp a fresh install resolves to — the newest the pin admits — never
+    supported that use case; an environment already holding a 1.14–1.22 did,
+    since pip leaves a satisfied requirement alone. In 2.x a bind spelled
+    exactly `127.0.0.1`, `localhost` or `::1` — `LOOPBACK_BINDS` in
+    `services/mcp_server.py` — keeps the protection (Host allowlist
+    `127.0.0.1:*`, `localhost:*`, `[::1]:*`); anything else — `0.0.0.0`, a LAN
+    address, another `127/8` address such as `127.0.0.2`, even `LOCALHOST` or a
+    hosts-file alias, since the match is on the string — runs with no
+    Host/Origin validation, so LAN clients work and the bearer token is the
+    sole gate there. It is checked outermost, before anything else in the app,
+    and a DNS-rebinding page cannot present it, which is why that trade is
+    acceptable — with one caveat the operator has to own: the token is a
+    long-lived credential (`auth rotate` is still a stub) sent in clear over
+    plain HTTP on every request, so a non-loopback bind belongs on a trusted
+    network or behind a TLS-terminating proxy — which nothing in this release
+    says outside this entry; see `[Unreleased]`. An operator who wants a Host
+    allowlist on such a bind as well passes
+    `transport_security=TransportSecuritySettings(...)` (from
+    `mcp.server.transport_security`) to `streamable_http_app()` for that bind
+    only — supplying it replaces the SDK's loopback default rather than
+    extending it. Found by an independent review of this release after it
+    shipped, which measured both trees.
   - The `serve` guard probes `mcp.server.mcpserver`, and its message for an
     incompatible major points the other way now — a 1.x is the one that cannot
     work — with `pip install 'mcp>=2.1,<3'`. The distribution-versus-module
     distinction it was written for (#55) is exactly what makes a 1.x a
     sentence rather than a traceback. It tells majors apart, not minors: the
     pin is what keeps a 2.0.x out, and pip reports that at install time.
-  - `tests/test_serve.py` drives the server through `mcp.client.Client(server)`,
-    the in-memory replacement for the removed
+  - `tests/test_serve.py` drives the server through `mcp.client.Client`, the
+    in-memory replacement for the removed
     `create_connected_server_and_client_session`, and reads `is_error`: field
-    names are snake_case in 2.x.
-  - Also inherited from 2.x: synchronous tool bodies run on a worker thread
-    rather than inline on the event loop. Each of the nine opens its own store
-    session per call and touches nothing thread-affine, so nothing crosses.
-  - The floor is measured, not guessed: against every 2.x release on PyPI,
-    the serve suite, the stdio idle-deadline suite and mypy strict are green on
-    2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`
-    import — the distinction above did not exist yet, so `>=2.1`.
+    names are snake_case in 2.x. (Which of the SDK's two in-memory paths that
+    takes, and why it matters, is a correction made under `[Unreleased]`.)
+  - Also inherited from 2.x, and not the project's to change: a server with no
+    version of its own reports an empty `serverInfo.version`, where 1.x
+    substituted the SDK's own package version (corrected under `[Unreleased]`);
+    a request for an unknown method is answered with the JSON-RPC-specified
+    `-32601 Method not found` (was `-32602 Invalid request parameters`); and
+    synchronous tool bodies run on a worker thread rather than inline on the
+    event loop. Each of the nine opens its own store session per call and
+    touches nothing thread-affine, so nothing crosses.
+  - The floor is measured, not guessed: against every 2.x release on PyPI at
+    the time, the serve suite, the stdio idle-deadline suite and mypy strict
+    are green on 2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the
+    `UnexpectedToolError` import — the distinction above did not exist yet, so
+    `>=2.1`. (2.2.0 has since shipped inside the same `<3` ceiling; see
+    `[Unreleased]`.)
 
 
 ## [0.5.0] - 2026-08-27

@@ -252,6 +252,69 @@ def test_partial_install_is_reported_not_healthy(runner: CliRunner, fake_home: P
     assert agent_core.hooks_installed("claude-code") is True
 
 
+def test_hooks_without_the_context_timeout_are_installed_but_short(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """A settings file written before the context hooks carried ``timeout`` is
+    INSTALLED — the hooks fire — and separately short of the ceiling the CI hook
+    may wait for. Calling that "not installed" made ``doctor`` misdescribe a
+    working install (0.6.0's settings.json, or a hand-edited one) and send the
+    operator to a command that would rewrite entries they had chosen.
+    """
+    from aisquare.core import agents as agent_core
+
+    assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
+    path = fake_home / ".claude" / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    for event in ("SessionStart", "UserPromptSubmit"):
+        for group in settings["hooks"][event]:
+            for item in group["hooks"]:
+                item.pop("timeout", None)
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+    assert agent_core.hooks_installed("claude-code") is True, "the hooks are there and firing"
+    assert agent_core.hook_timeout_shortfall("claude-code") == ["SessionStart", "UserPromptSubmit"]
+
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+
+    assert agent_core.hook_timeout_shortfall("claude-code") == []
+    refreshed = json.loads(path.read_text(encoding="utf-8"))
+    assert all(
+        item["timeout"] == agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
+        for group in refreshed["hooks"]["UserPromptSubmit"]
+        for item in group["hooks"]
+    )
+
+
+def test_a_longer_operator_timeout_is_kept_not_reconciled_down(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """180 is a deliberate choice with more headroom than we need. Exact
+    equality read it as "not installed" and ``connect`` overwrote it."""
+    from aisquare.core import agents as agent_core
+
+    assert runner.invoke(app, ["agents", "connect", "claude-code"]).exit_code == 0
+    path = fake_home / ".claude" / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    for group in settings["hooks"]["UserPromptSubmit"]:
+        for item in group["hooks"]:
+            item["timeout"] = 180
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+    assert agent_core.hooks_installed("claude-code") is True
+    assert agent_core.hook_timeout_shortfall("claude-code") == [], "180 clears our ceiling"
+
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+
+    refreshed = json.loads(path.read_text(encoding="utf-8"))
+    kept = [
+        item["timeout"]
+        for group in refreshed["hooks"]["UserPromptSubmit"]
+        for item in group["hooks"]
+    ]
+    assert kept == [180], "connect must not reduce a ceiling the operator raised"
+
+
 def test_spaced_install_path_roundtrips_through_hooks(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -472,3 +535,22 @@ def test_posix_quoting_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert command == "'/opt/my tools/bin/aisquare'"
     assert agents._is_aisquare_hook_command(f"{command} hook stop")
+
+
+def test_connect_gives_the_context_hooks_room_for_the_ci_ceiling(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """Claude Code cancels a command hook at 60 s by default and discards its
+    output; the CI test bed's prompt call may wait up to the descriptor's
+    ceiling (60 s today) before degrading. The two context hooks therefore
+    carry a longer timeout, and the bookkeeping hooks keep the default."""
+    from aisquare.core.agents import CONTEXT_HOOK_TIMEOUT_SECONDS
+
+    runner.invoke(app, ["agents", "connect", "claude-code"])
+    settings = json.loads((fake_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    for event in ("SessionStart", "UserPromptSubmit"):
+        entry = settings["hooks"][event][0]["hooks"][0]
+        assert entry["timeout"] == CONTEXT_HOOK_TIMEOUT_SECONDS, event
+    for event in ("Stop", "SessionEnd", "Notification"):
+        assert "timeout" not in settings["hooks"][event][0]["hooks"][0], event
+    assert CONTEXT_HOOK_TIMEOUT_SECONDS > 60

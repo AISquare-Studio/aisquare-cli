@@ -695,6 +695,12 @@ three hints rather than a wrong one, and this script should behave the same way.
 
 ## 6. Bugs in the current tree this work must fix
 
+> **Resolved on `main` by #103, not by this branch.** All three were fixed there
+> on 2026-09-08 while this work was in flight, and #103 goes further than the
+> descriptions below — see §12.7. This section is kept as written because it is
+> the measurement that found them and the reason phase 1 was sequenced first;
+> what actually shipped is #103's.
+
 Found while measuring §1. All three are in the path a new user walks, which is
 this plan's whole subject.
 
@@ -1094,7 +1100,38 @@ boundaries survive as the commit boundaries. Two smaller departures:
   two of this branch's changes are *to doctor checks*, so grading against the
   last release would have graded the wrong code.
 
-### 12.6 The acceptance criterion, measured
+### 12.6 Phase 1 landed on `main` separately, and better
+
+§9 sequences the three doctor fixes first, and §10b argues for shipping them as
+0.6.1 ahead of the installer. Both were right, and while this branch was in
+flight **#103 did exactly that** — independently, and further than §6 describes.
+
+The difference worth recording, because it is a real correction to §6.3 rather
+than a duplication: this branch's `repomix` check compared the machine's Node
+against ONE constant, the floor of the repomix that `npx --yes repomix` would
+fetch. #103 reads the floor **per path** — that constant for the npx case, and
+an *installed* repomix's own `engines.node` where one exists, from a
+`package.json` on disk without starting a process. Both directions of the false
+positive follow, and §6.3 as written had both: a pinned `repomix@0.2` on Node 18
+packs perfectly well and would have been warned about, and a repomix that raised
+its floor above 22 would have been under-warned. #103 also treats "no Node on
+PATH at all" as its own warning rather than "untested", which is correct —
+`repomix` and `npx` are both `#!/usr/bin/env node` scripts and neither runs
+without one.
+
+It also fixes two things §6 never noticed: `doctor --fix` was *running*
+`pip install aisquare[explainability]` while every printed hint was being
+corrected away from that exact form, and the `explainability sdk` remediations
+rendered as self-contradictions on an editable checkout.
+
+So this branch took `main`'s version wholesale and deleted its own, and the plan
+is one phase shorter than it looks. The one coupling left is the Node floor
+living in two languages — `core/snapshot.py`'s `MIN_NODE` and `install.sh`'s
+`MIN_NODE_MAJOR`, which cannot import it because the script runs before any
+Python exists. `tests/test_install_script_is_posix.py` asserts they are equal,
+and does the same for the tmux floor.
+
+### 12.7 The acceptance criterion, measured
 
 `tests/install/cell.sh` on five bare distributions, each installing a wheel
 built from this tree, each run three times:
@@ -1129,6 +1166,7 @@ no package manager at all**.
 | 2026-09-04 | Owner asked for existing-install detection and upgrade; added as §3.9. Measured: `uv tool upgrade` will NOT move a pinned install (exit 0, "Nothing to upgrade"), so the script always upgrades with `uv tool install --force … @latest --with tiktoken`, which moves it and re-states the extra. |
 | 2026-09-04 | Claude Code's version is never managed by us (§3.9.3) — it ships `claude update` and auto-updates by default, and the fleet needs a floor, not an exact version. |
 | 2026-09-08 | Owner answered §11: `uv` confirmed as the bootstrap; the raw GitHub URL now with the vanity redirect later; Homebrew installed only if the user agrees; the fleet UI's first-launch view left alone for a follow-up. |
+| 2026-09-08 | #103 fixed §6's three doctor defects on `main` while this branch was in flight, and per-path rather than against one constant (§12.6). This branch dropped its own phase 1 and took main's. The Node floor now lives in two languages, with a test asserting they are equal. |
 | 2026-09-08 | Implemented on this branch. Five things in the plan were wrong — §12. The one that mattered: §3.3's own `/dev/tty` sketch. `[ -r /dev/tty ]` passes where `open(2)` fails, and `{ : </dev/tty; }` **exits** a non-interactive shell on a redirection error because `:` is a special built-in — fatal under bash (Fedora/RHEL/Arch/macOS `/bin/sh`), harmless under dash. Fixed to `(true </dev/tty)`. The container matrix could not see it: every cell passes `--yes`, which short-circuits before the probe. |
 | 2026-09-08 | Node's fallback re-ordered to platform package → NodeSource → fnm (§12.3): fnm needs `unzip` (absent on bare Debian) and its Node is invisible to later processes, so it cannot be the primary path on the machines the floor exists for. `npm` installed beside `nodejs` where it is a separate package, because Repomix is reached through `npx`. |
 | 2026-09-08 | `git` added to the System class (§12.4) — the fleet's per-agent worktrees need it and no doctor check measures it. `choose_project` rewritten to find a repo WITHOUT git, since it runs before `install_git`. |

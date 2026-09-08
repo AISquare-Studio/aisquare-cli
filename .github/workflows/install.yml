@@ -187,6 +187,92 @@ jobs:
             -e HOME=/root \
             "${{ matrix.image }}" sh /mnt/tests/install/cell.sh
 
+  macos:
+    name: macOS (Homebrew path)
+    runs-on: macos-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build a wheel from THIS tree
+        run: |
+          python -m pip install --upgrade pip build >/dev/null
+          python -m build --wheel --outdir dist .
+
+      # NOT tests/install/cell.sh, and the reason is worth stating rather than
+      # working around: that script prepares a BARE machine and asserts the full
+      # acceptance criterion, and a macOS runner is neither bare nor
+      # preparable — Homebrew, git and Node are preinstalled, and there is no
+      # way to take them away. So this job asserts what a Mac runner can
+      # honestly prove: that the script detects Darwin, picks brew, bootstraps
+      # uv, installs the CLI into the shape the `install` doctor check wants,
+      # and is a no-op on a second run.
+      #
+      # WHAT THIS STILL DOES NOT COVER: a Mac with NO Homebrew, which is the one
+      # macOS branch §5 actually worries about and the reason §11.3 was a
+      # question at all. A runner cannot uninstall Homebrew safely, so that path
+      # stays covered only by the unit tests in
+      # tests/test_install_script_functions.py.
+      - name: Dry run
+        run: |
+          set -- dist/*.whl
+          test "$#" -eq 1 || { echo "expected one wheel, found $#: $*"; exit 1; }
+          AISQUARE_INSTALL_PACKAGE="$PWD/$1" NO_COLOR=1 \
+            sh install.sh --dry-run --yes --no-project --no-agent
+
+      - name: Install for real, into a scratch HOME
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -- dist/*.whl
+          wheel="$PWD/$1"
+          export HOME="$RUNNER_TEMP/scratch-home"
+          mkdir -p "$HOME"
+          AISQUARE_INSTALL_PACKAGE="$wheel" sh install.sh --yes --no-project --no-agent
+          export PATH="$HOME/.local/bin:$PATH"
+          aisquare --version
+          asq --version
+
+      - name: The machine-wide checks that do not depend on a bare machine
+        env:
+          NO_COLOR: "1"
+        run: |
+          export HOME="$RUNNER_TEMP/scratch-home"
+          export PATH="$HOME/.local/bin:$PATH"
+          amber=$(aisquare --json doctor \
+            | tr '{' '\n' \
+            | sed -n 's/.*"name": *"\([^"]*\)".*"status": *"\(warn\|fail\)".*/\1/p' \
+            | sort | tr '\n' ' ')
+          echo "not ok: [$amber]"
+          # `install` amber would mean uv produced a shape doctor rejects — the
+          # §3.1 claim this whole bootstrap choice rests on. `tiktoken` amber
+          # would mean `--with tiktoken` did not take.
+          case "$amber" in
+            *install*)  echo "::error::the install check is amber on macOS"; exit 1 ;;
+            *tiktoken*) echo "::error::tiktoken is amber — --with tiktoken did not take"; exit 1 ;;
+          esac
+          # `snapshot` and `brain` are expected here: --no-project registers
+          # nothing, and gbrain is out of scope.
+
+      - name: Re-run — a current machine installs nothing
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -- dist/*.whl
+          export HOME="$RUNNER_TEMP/scratch-home"
+          export PATH="$HOME/.local/bin:$PATH"
+          # The PyPI-named target and --offline, for the same reason
+          # tests/install/cell.sh's run 3 uses them: the short-circuit never
+          # fires for a local build, and --offline makes "current" independent
+          # of what PyPI happens to serve.
+          sh install.sh --yes --offline --no-project --no-agent | tee /tmp/rerun.log
+          grep -q 'Nothing to do' /tmp/rerun.log \
+            || { echo "::error::the re-run did not short-circuit"; exit 1; }
+
   with-claude-code:
     name: one cell with Claude Code installed for real
     runs-on: ubuntu-latest

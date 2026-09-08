@@ -67,11 +67,17 @@ RECOMMENDED_TMUX_MINOR=5
 # 3.5 is where S-Enter reaches an agent pane; below it the fleet works without.
 
 MIN_NODE_MAJOR=22
-# repomix@1.18.0 declares "engines": {"node": ">=22.0.0"} (registry.npmjs.org,
-# 2026-09-08). Debian 12 ships Node 18 and Ubuntu 22.04 ships 12, which is why
-# this is a real floor and not a formality (§1.4).
+# THE SAME NUMBER AS `core/snapshot.py`'s MIN_NODE, which is the source of truth
+# — repomix@1.18.0 declares "engines": {"node": ">=22.0.0"}. It has to be
+# duplicated here because this script runs before any Python exists, which is
+# the whole premise of §3.1; tests/test_install_script_is_posix.py asserts the
+# two are equal so they cannot drift.
+#
+# Debian 12 ships Node 18 and Ubuntu 22.04 ships 12, which is why this is a real
+# floor and not a formality (§1.4).
 
-# The one check that is EXPECTED to be amber when the script finishes (§0.4).
+# `brain` is always expected to be amber when this finishes — gbrain is out of
+# scope (§0.4). `expected_amber` adds to it when the run asked for no project.
 EXPECTED_AMBER="brain"
 
 # --- options (§3.5) ---------------------------------------------------------
@@ -682,7 +688,7 @@ short_circuit() {
     have aisquare || return 1
 
     _amber=$(doctor_amber 2>/dev/null || true)
-    [ "$_amber" = "$EXPECTED_AMBER" ] || return 1
+    [ "$_amber" = "$(expected_amber)" ] || return 1
 
     say ""
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
@@ -692,7 +698,11 @@ short_circuit() {
     else
         note "~/.aisquare configured (--no-agent: no agent hooks)"
     fi
-    note "doctor: everything ok except ${EXPECTED_AMBER} (gbrain not installed — out of scope)"
+    _why="gbrain is out of scope"
+    if [ "$WANT_PROJECT" = 0 ] || [ -z "$PROJECT_DIR" ]; then
+        _why="$_why; no project registered"
+    fi
+    note "doctor: everything ok except $(expected_amber) ($_why)"
     say ""
     say "Nothing to do. Open the fleet UI with: ${C_BOLD}asq${C_RESET}"
     return 0
@@ -1421,16 +1431,46 @@ init_home() {
 DOCTOR_RAW=""
 DOCTOR_AMBER=""
 
-# The names of every check that is not ok, space-separated. `--json` and not the
-# rendered table: that is Rich output wrapped to terminal width, which is a bad
-# parsing target for the same reason tests/test_documented_commands.py refuses to
-# read --help.
+# The checks that SHOULD be amber when this run finishes, sorted.
+#
+# `brain` always. And `snapshot` whenever no project was registered — which is
+# not a defect but the state `--no-project` asks for, and the state a run from a
+# directory that is not a git repo lands in (§4). Measured: with the set
+# hardcoded to `brain`, a `--no-project` machine could NEVER reach §3.9.4's
+# "nothing to do" however current it was, because `snapshot` was always there —
+# the short-circuit was unreachable in that whole mode, and the summary told the
+# user to run `project onboard` for a project that does not exist.
+expected_amber() {
+    if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
+        printf '%s' "$EXPECTED_AMBER"
+    else
+        # Sorted, to match doctor_amber's own ordering.
+        printf '%s' "$EXPECTED_AMBER snapshot"
+    fi
+}
+
+# True when $1 is one of the names `expected_amber` returns.
+is_expected_amber() {
+    for _expected in $(expected_amber); do
+        [ "$1" = "$_expected" ] && return 0
+    done
+    return 1
+}
+
+# The names of every check that is not ok, SORTED and space-separated.
+#
+# Sorted so a comparison is about the SET rather than the order checks happen to
+# run in — a reordering inside `doctor()` is not a regression and must not read
+# as one. `--json` and not the rendered table: that is Rich output wrapped to
+# terminal width, which is a bad parsing target for the same reason
+# tests/test_documented_commands.py refuses to read --help.
 doctor_amber() {
     _raw=$(aisquare --json doctor 2>/dev/null || true)
     [ -n "$_raw" ] || return 1
     printf '%s' "$_raw" |
         tr '{' '\n' |
         sed -n 's/.*"name": *"\([^"]*\)".*"status": *"\(warn\|fail\)".*/\1/p' |
+        sort |
         tr '\n' ' ' |
         sed 's/  */ /g; s/^ //; s/ $//'
 }
@@ -1506,7 +1546,7 @@ summary() {
     _actionable=""
     _unexpected=""
     for _check in $DOCTOR_AMBER; do
-        if [ "$_check" = "$EXPECTED_AMBER" ]; then
+        if is_expected_amber "$_check"; then
             _expected="$_expected $_check"
             continue
         fi
@@ -1521,8 +1561,17 @@ summary() {
 
     if [ -n "$_expected" ]; then
         say ""
-        note "expected:$_expected — gbrain is out of scope for this installer (§0.4);"
-        note "          team decisions are simply not distilled without it."
+        note "expected:$_expected"
+        note "  brain    — gbrain is out of scope for this installer; team"
+        note "             decisions are simply not distilled without it."
+        case " $_expected " in
+            *" snapshot "*)
+                # NOT "run project onboard": there is no project to onboard.
+                # Advice that cannot work is worse than no advice.
+                note "  snapshot — no project is registered yet. From a git repo, run:"
+                note "             aisquare init"
+                ;;
+        esac
     fi
 
     if [ -n "$_actionable" ]; then

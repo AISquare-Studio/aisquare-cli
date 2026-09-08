@@ -895,6 +895,14 @@ def _piped_into_sh_with_a_terminal(
     return output.decode(errors="replace")
 
 
+#: The same, for a run that registered no project: `snapshot` is amber too, and
+#: that is the requested state rather than a defect.
+_DOCTOR_PAYLOAD_NO_PROJECT = (
+    '[{"name": "home", "status": "ok", "detail": "ok", "fix": null},'
+    '{"name": "snapshot", "status": "warn", "detail": "no snapshot", "fix": "onboard"},'
+    '{"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "optional"}]'
+)
+
 #: One doctor payload in the target state — `brain` the only non-ok check — so
 #: the stub machine reaches the happy summary and the closing prompt.
 _DOCTOR_PAYLOAD = (
@@ -1030,3 +1038,123 @@ def test_an_empty_answer_takes_the_default_and_opens_the_ui(
 
     assert "[Y/n]" in output, f"the prompt must show Y as the default:\n{output}"
     assert "UI-STARTED stdin=terminal" in output, f"a bare Enter should open the UI:\n{output}"
+
+
+# ---------------------------------------------------------------------------
+# expected_amber — which amber lines are the REQUESTED state, not a defect
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_is_expected_amber_when_no_project_was_registered(tmp_path: Path) -> None:
+    """`--no-project` asks for a machine with no project. So `snapshot` is amber
+    by design, and calling that unexpected has two consequences that were both
+    measured before this was fixed:
+
+    * §3.9.4's "nothing to do" became UNREACHABLE in the whole `--no-project`
+      mode. However current the machine was, `snapshot` was in the amber set,
+      the set never equalled `brain`, and every re-run walked the full flow —
+      installing nothing, but printing a page of steps and never saying the one
+      thing the user wanted to hear.
+    * the summary told the reader to run `aisquare project onboard` for a
+      project that does not exist. Advice that cannot work is worse than no
+      advice.
+    """
+    for flag, expected in (("WANT_PROJECT=0", "brain snapshot"), ("", "brain")):
+        setup = flag or "PROJECT_DIR=/somewhere; WANT_PROJECT=1"
+        result = sh(f"{setup}; expected_amber; echo", path=base_path(tmp_path))
+        assert result.stdout.strip() == expected, (
+            f"with `{setup}` expected_amber said {result.stdout.strip()!r}, "
+            f"wanted {expected!r}\n{result.stderr}"
+        )
+
+
+def test_a_repoless_directory_also_expects_snapshot_amber(tmp_path: Path) -> None:
+    """Not just the flag: running from a directory that is no git repo lands in
+    the same state (§4), and the honest report is the same."""
+    result = sh('WANT_PROJECT=1; PROJECT_DIR=""; expected_amber; echo', path=base_path(tmp_path))
+    assert result.stdout.strip() == "brain snapshot", result.stderr
+
+
+def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Path) -> None:
+    """A reordering inside `doctor()` is not a regression and must not read as one.
+
+    The short-circuit compares the amber list against `expected_amber` as a
+    STRING, so both sides have to be sorted or a harmless reshuffle of the check
+    order would silently disable the whole no-op path.
+    """
+    payload = (
+        '[{"name": "snapshot", "status": "warn", "detail": "x", "fix": "y"},'
+        '{"name": "home", "status": "ok", "detail": "x", "fix": null},'
+        '{"name": "brain", "status": "warn", "detail": "x", "fix": "y"}]'
+    )
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=f"case \"$1\" in --json) printf '%s' '{payload}' ;; esac\nexit 0",
+    )
+    result = sh("doctor_amber; echo", path=f"{cli}:{base_path(tmp_path)}")
+    assert result.stdout.strip() == "brain snapshot", (
+        f"doctor_amber returned {result.stdout.strip()!r} — it must sort, or the "
+        f"short-circuit breaks on a reordering\n{result.stderr}"
+    )
+
+
+def test_the_short_circuit_fires_for_a_current_no_project_machine(tmp_path: Path) -> None:
+    """§3.9.4 end to end, in the mode where it was unreachable.
+
+    A machine that has everything, with `--no-project`, must print its summary
+    and exit 0 having installed nothing. The stubs record any call that is not a
+    version read, so "installed nothing" is observed rather than asserted.
+    """
+    log = tmp_path / "calls.log"
+    record = f'printf "%s %s\\n" "$(basename "$0")" "$*" >>"{log}"\nexit 1'
+    tools = stub_dir(tmp_path, "bin", "apt-get", "dnf", "pacman", "apk", "brew", body=record)
+    versions = tmp_path / "versions"
+    versions.mkdir()
+    for name, output in (
+        ("uv", "uv 0.12.3 (stub)"),
+        ("tmux", "tmux 3.7c"),
+        ("gh", "gh version 2.97.0 (2026-07-31)"),
+        ("git", "git version 2.55.0"),
+        ("node", "v26.7.0"),
+        ("curl", ""),
+    ):
+        script = versions / name
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "{output}"\nexit 0\n', encoding="utf-8")
+        script.chmod(0o755)
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=(
+            'case "$1" in\n'
+            '  --version) printf "aisquare 0.6.0\\n"; exit 0 ;;\n'
+            f"  --json) printf '%s' '{_DOCTOR_PAYLOAD_NO_PROJECT}'; exit 0 ;;\n"
+            "esac\n"
+            f'printf "%s %s\\n" aisquare "$*" >>"{log}"\nexit 1'
+        ),
+    )
+    asq = stub_dir(tmp_path, "asqbin", "asq")
+
+    result = sh(
+        "main --yes --offline --no-project --no-agent",
+        # The helper's default pin has to be cleared here: a pinned version is
+        # a version to move TO, so `resolve` calls the CLI "behind" and the
+        # short-circuit cannot fire. Found by this test failing with the
+        # §3.9.1 verification error — which is itself a small proof that the
+        # upgrade check works, since it caught a version that had not moved.
+        env={"AISQUARE_INSTALL_VERSION": ""},
+        path=f"{versions}:{tools}:{cli}:{asq}:{base_path(tmp_path)}",
+        no_terminal=True,
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "Nothing to do" in result.stdout, (
+        f"a fully current --no-project machine must short-circuit:\n{result.stdout}"
+    )
+    assert "no project registered" in result.stdout, (
+        f"and it must say WHY snapshot is amber:\n{result.stdout}"
+    )
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    assert not calls, f"the short-circuit still ran something: {calls}"

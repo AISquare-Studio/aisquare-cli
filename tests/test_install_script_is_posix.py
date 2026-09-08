@@ -447,3 +447,46 @@ def test_no_unescaped_backticks_in_double_quotes() -> None:
         "backticks inside a double-quoted string are a command substitution, "
         f"not markdown — escape them or use single quotes: {offenders}"
     )
+
+
+# --- the constants the script duplicates from Python ------------------------
+
+
+def test_the_node_floor_matches_the_pythons(source: str) -> None:
+    """`install.sh`'s Node floor and `core/snapshot.py`'s MIN_NODE must be equal.
+
+    The number genuinely has to exist twice: `install.sh` runs BEFORE any Python
+    is on the machine — that is the whole premise of §3.1 — so it cannot import
+    the constant. What it must not do is drift from it. If repomix raises its
+    floor and only the Python side is updated, the installer would leave a Node
+    the `repomix` check then calls too old, and the container matrix would fail
+    on the acceptance criterion with nothing pointing at the cause.
+    """
+    from aisquare.core.snapshot import MIN_NODE
+
+    match = re.search(r"^MIN_NODE_MAJOR=(\d+)$", source, re.MULTILINE)
+    assert match, "install.sh no longer declares MIN_NODE_MAJOR"
+    assert int(match.group(1)) == MIN_NODE[0], (
+        f"install.sh installs Node {match.group(1)}+ while "
+        f"core/snapshot.py's MIN_NODE is {MIN_NODE[0]} — the installer would "
+        "leave a Node that `doctor` then calls too old"
+    )
+
+
+def test_the_tmux_floor_matches_the_pythons(source: str) -> None:
+    """Same rule for tmux, whose floor lives in `core/tmux.py MIN_VERSION`.
+
+    Included because it is the same class of duplication and the same failure —
+    an installer that installs below the floor the product enforces — and
+    because tmux's floor is the one a distro package can genuinely fail to
+    clear, so the script already has a branch that reports it.
+    """
+    from aisquare.core.tmux import MIN_VERSION
+
+    major = re.search(r"^MIN_TMUX_MAJOR=(\d+)$", source, re.MULTILINE)
+    minor = re.search(r"^MIN_TMUX_MINOR=(\d+)$", source, re.MULTILINE)
+    assert major and minor, "install.sh no longer declares the tmux floor"
+    assert (int(major.group(1)), int(minor.group(1))) == MIN_VERSION, (
+        f"install.sh's tmux floor is {major.group(1)}.{minor.group(1)} while "
+        f"core/tmux.py's MIN_VERSION is {MIN_VERSION[0]}.{MIN_VERSION[1]}"
+    )

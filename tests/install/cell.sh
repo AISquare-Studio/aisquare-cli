@@ -49,6 +49,7 @@ head1() { printf '\n=== %s ===\n' "$*"; }
 # purpose: if this script pre-installed tmux or Node, the cell would be grading
 # its own preparation instead of the installer's package matrix.
 
+# shellcheck source=/dev/null  # a file on the container, not in this repo.
 . /etc/os-release
 head1 "cell: $ID ${VERSION_ID:-} — /bin/sh is $(readlink -f /bin/sh)"
 

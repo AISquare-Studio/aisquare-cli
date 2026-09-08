@@ -61,9 +61,15 @@ LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
 A bind that IS one of these gets the SDK's DNS-rebinding protection — a Host
 allowlist of the same three — and anything else gets no Host/Origin validation
 at all. It is a string match, not an address test: ``127.0.0.2``, ``LOCALHOST``
-and a hosts-file alias for loopback all fall outside it. The CLI announces a
-bind that falls outside, and derives that from this tuple so the two cannot
-drift.
+and a hosts-file alias for loopback all fall outside it.
+
+This is a MIRROR of the SDK's own literal, not something handed to it —
+``run_http`` passes only ``host=bind``, and the SDK consults its own tuple. So
+nothing but a test can keep the two equal, and
+``test_http_answers_by_bind_host_and_token`` is that test: it drives all three
+spellings, plus a ``127/8`` address that is deliberately outside, against the
+real transport. An SDK that widens, narrows or replaces its check fails there
+instead of quietly turning the CLI's notice into a lie.
 """
 
 #: Server-side only. mcp 2 keeps the detail of a CRASHED tool off the wire (the

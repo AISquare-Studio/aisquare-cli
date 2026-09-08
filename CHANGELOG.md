@@ -27,8 +27,13 @@ where they now say something specific.
   credential (`auth rotate` is still a stub) sent in clear over plain HTTP on
   every request, so a trusted network or a TLS-terminating proxy — `--bind`'s
   help says it in a sentence, and the README's serve section covers the flag.
-  The notice keys on `LOOPBACK_BINDS` in `services/mcp_server.py`, the same
-  tuple the server hands the SDK, so the words and the behaviour cannot drift.
+  The notice keys on `LOOPBACK_BINDS` in `services/mcp_server.py`. That tuple
+  mirrors the literal the SDK matches on rather than being handed to it —
+  `run_http` passes only `host=bind` — so a test is the only thing that can
+  hold the two equal, and one drives all three spellings, plus a `127/8`
+  address deliberately outside them, against the real transport. Without it,
+  dropping a spelling passes every test while the CLI starts announcing an
+  exposure the SDK is in fact still preventing.
 
 ### Changed
 - **`serverInfo.version` reports this CLI's version.** mcp 1.x filled an
@@ -60,24 +65,34 @@ where they now say something specific.
     every test green while `--bind 0.0.0.0` reverted to answering every LAN
     client with `421`. `test_http_answers_by_bind_host_and_token` now pins
     every combination that matters — a LAN `Host` is 200 on `0.0.0.0` and 421
-    on `127.0.0.1`, a loopback bind still answers its own client, and a
-    missing token is 401 on either bind before any Host check runs — driven
-    through the ASGI lifespan the way uvicorn drives it, so `_BearerGuard`'s
-    lifespan pass-through is pinned along the way.
+    on `127.0.0.1`, each of the three loopback spellings rejects a LAN `Host`
+    and still answers its own client, a `127/8` address outside the tuple is
+    served unchecked, and a missing token is 401 on either kind of bind before
+    any Host check runs — driven through the ASGI lifespan the way uvicorn
+    drives it, so `_BearerGuard`'s lifespan pass-through is pinned along the
+    way.
   - The `ClaimLostError` arm of the MCP error guard had no test. It now has
     one, with the truth in its docstring: no tool can reach that arm today —
     `next_task` moves on when a claim is lost and nothing calls `claim_task` —
     so the test pins the mapping for the day a tool claims by ref.
 
 ### Fixed
+- **The ceiling holds on mcp 2.2.0.** Released after 0.6.0 measured its floor,
+  and admitted by the same `>=2.1,<3` pin, so a fresh install already resolves
+  to it — CI's `check` jobs install it and are green, which is what proves it
+  rather than the local venv, still pinned at 2.1.1.
 - **`--show-token` and the startup line print a URL a client can dial.** Both
   interpolated the bind verbatim, so `--bind ::1` — one of the three spellings
   that keep the transport's Host validation — printed `http://::1:8747/mcp`,
   which is not a URL at all, and `--bind 0.0.0.0` printed a listen address no
-  client can reach. IPv6 literals are bracketed, a wildcard bind is replaced
-  by this machine's hostname, and the JSON output gains a `bind` field so
-  nothing is lost. Pre-existing, but newly consequential: before mcp 2 a LAN
-  client was refused with 421 before the URL ever mattered.
+  client can reach. IPv6 literals are bracketed — that half is unambiguous —
+  and a wildcard bind is replaced by this machine's name, which is a better
+  starting point than `0.0.0.0` without being a promise: whether that name
+  resolves, and to something reachable rather than back to loopback, is the
+  operator's network to know. The bind is printed alongside and added to the
+  JSON as a `bind` field, so nothing is hidden either way. Pre-existing, but
+  newly consequential: before mcp 2 a LAN client was refused with 421 before
+  the URL ever mattered.
 - **A broken mcp install is no longer reported as the wrong problem.** The
   serve guard had two branches — extra missing, or mcp out of range — and a
   third case fell into the second. `find_spec` on a dotted name imports the
@@ -277,10 +292,12 @@ known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
     synchronous tool bodies run on a worker thread rather than inline on the
     event loop. Each of the nine opens its own store session per call and
     touches nothing thread-affine, so nothing crosses.
-  - The floor is measured, not guessed: against every 2.x release on PyPI,
-    the serve suite, the stdio idle-deadline suite and mypy strict are green on
-    2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the `UnexpectedToolError`
-    import — the distinction above did not exist yet, so `>=2.1`.
+  - The floor is measured, not guessed: against every 2.x release on PyPI at
+    the time, the serve suite, the stdio idle-deadline suite and mypy strict
+    are green on 2.1.0 and 2.1.1, and 2.0.0 and 2.0.1 fail on the
+    `UnexpectedToolError` import — the distinction above did not exist yet, so
+    `>=2.1`. (2.2.0 has since shipped inside the same `<3` ceiling; see
+    `[Unreleased]`.)
 
 
 ## [0.5.0] - 2026-08-27

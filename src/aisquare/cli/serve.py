@@ -58,9 +58,15 @@ def _dependency_error() -> str | None:
         # it, and the second would send someone to install the mcp they have.
         # The exception names the module that failed; a bare re-raise from a
         # test stub does not, and takes the absent-mcp path as before.
+        #
+        # Checked ahead of the out-of-range verdict, which an mcp 1.x with a
+        # broken transitive dependency would otherwise get. Deliberate: the
+        # hint below installs the extra, which pins `mcp>=2.1,<3`, so it fixes
+        # the range and the broken import together, while "pin mcp" alone
+        # leaves the import broken.
         if getattr(exc, "name", None) not in (None, "mcp"):
             return (
-                f"mcp{_installed_mcp()} is installed but cannot be imported — {exc}. "
+                f"the installed mcp{_installed_mcp()} cannot be imported — {exc}. "
                 f"Reinstall the serve extra: {_INSTALL_HINT}"
             )
     if _find_spec("mcp") is None:
@@ -91,12 +97,18 @@ _WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
 
 
 def _client_url(bind: str, port: int) -> str:
-    """The URL a client dials for ``bind`` — a listen address is not always one.
+    """A URL for ``bind``, since a listen address is not always addressable.
 
-    An IPv6 literal needs brackets: ``http://::1:8747/mcp`` is not a URL, and
-    ``::1`` is one of the spellings that keeps the transport's Host validation,
-    so it has to print. A wildcard bind names every interface and no
-    destination, so this machine's hostname stands in for it.
+    An IPv6 literal needs brackets: ``http://::1:8747/mcp`` is not a URL at
+    all, and ``::1`` is one of the spellings that keeps the transport's Host
+    validation, so it has to print. That half is unambiguous.
+
+    A wildcard bind names every interface and no destination, so this
+    machine's name stands in for it. Whether that name resolves, and to
+    something a client can reach, is the operator's network to know: it may be
+    absent from DNS, or map straight back to loopback. It is a better starting
+    point than ``0.0.0.0``, which is never dialable, and the caller prints the
+    bind alongside so nothing is hidden.
     """
     import socket
 
@@ -104,6 +116,32 @@ def _client_url(bind: str, port: int) -> str:
     if ":" in host:
         host = f"[{host}]"
     return f"http://{host}:{port}/mcp"
+
+
+def _announce_open_bind(bind: str) -> None:
+    """Say what a non-loopback bind gives up, or say nothing.
+
+    On stderr, so ``--json`` stdout stays machine-readable, and from every
+    path that hands this bind to the transport — serving it, and
+    ``--show-token``, which is the command an operator reads while wiring a
+    client up and is often the only one they read at all.
+
+    Keyed on ``LOOPBACK_BINDS``, which mirrors the literal the SDK matches on;
+    ``tests/test_serve.py`` drives all three of its spellings against the real
+    transport, so a mirror that stopped matching fails there rather than
+    turning this notice into a lie.
+    """
+    from aisquare.services import mcp_server
+
+    if bind in mcp_server.LOOPBACK_BINDS:
+        return
+    shown = bind or '""'
+    stderr_console().print(
+        f"--bind {shown} is not one of {', '.join(mcp_server.LOOPBACK_BINDS)}: the MCP "
+        "transport's Host/Origin validation is off for it, and the bearer token is the "
+        "only gate — a long-lived credential sent in clear over plain HTTP on every "
+        "request. Keep this on a trusted network, or behind a TLS-terminating proxy."
+    )
 
 
 def serve(
@@ -158,6 +196,7 @@ def serve(
             if bind in _WILDCARD_BINDS:
                 console.print(f"Bind:   {bind} (every interface — the URL names this machine)")
             console.print(f"Header: Authorization: Bearer {token}")
+        _announce_open_bind(bind)
         return
     # Starting a server here IS the opt-in for this project: activate it
     # explicitly (and visibly — `team on` semantics, with the pipe event),
@@ -204,15 +243,5 @@ def serve(
         f"{_client_url(bind, port)} "
         "(bearer token required — see `aisquare serve --show-token`). Ctrl-C stops."
     )
-    if bind not in mcp_server.LOOPBACK_BINDS:
-        # The one HTTP behaviour mcp 2 changed, said where the operator opening
-        # the port can see it: neither the SDK nor anything else says what a
-        # non-loopback bind gives up. Keyed on the same tuple the server keys
-        # on, so the notice cannot drift from what actually happens.
-        stderr_console().print(
-            f"--bind {bind} is not one of {', '.join(mcp_server.LOOPBACK_BINDS)}: the MCP "
-            "transport's Host/Origin validation is off for it, and the bearer token is the "
-            "only gate — a long-lived credential sent in clear over plain HTTP on every "
-            "request. Keep this on a trusted network, or behind a TLS-terminating proxy."
-        )
+    _announce_open_bind(bind)
     mcp_server.run_http(bind=bind, port=port)

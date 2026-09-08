@@ -174,15 +174,19 @@ def test_show_token_prints_a_url_a_client_can_dial(runner: CliRunner) -> None:
     assert "0.0.0.0" not in payload["url"] and payload["url"].endswith(":8747/mcp")
 
 
-def test_a_non_loopback_bind_is_announced_before_serving(
+def test_a_non_loopback_bind_is_announced_on_every_path_that_opens_one(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The operator opening the port is told what a non-loopback bind gives up.
 
     The SDK says nothing when it skips its Host/Origin protection, and neither
     did the CLI: the disclosure lived in a comment and the CHANGELOG. One
-    stderr line, on exactly the binds outside ``LOOPBACK_BINDS`` — the tuple
-    the server keys on, so the notice cannot drift from the behaviour.
+    stderr line, on exactly the binds outside ``LOOPBACK_BINDS``.
+
+    Both paths, because ``--show-token`` returns before serving and is the
+    command someone reads while wiring up a client — often the only serve
+    invocation they read, since the real one scrolls away under a log. And on
+    stderr, so ``--json`` stdout stays machine-readable while it fires.
     """
     served: list[tuple[str, int]] = []
 
@@ -190,13 +194,35 @@ def test_a_non_loopback_bind_is_announced_before_serving(
         served.append((bind, port))
 
     monkeypatch.setattr(mcp_server, "run_http", do_not_serve)
+
     lan = runner.invoke(app, ["serve", "--bind", "0.0.0.0"])
     assert lan.exit_code == 0, lan.output
     assert served == [("0.0.0.0", 8747)]
     assert "Host/Origin validation is off" in lan.output and "in clear" in lan.output
-    local = runner.invoke(app, ["serve"])
-    assert local.exit_code == 0, local.output
-    assert "Host/Origin validation is off" not in local.output
+
+    setup = runner.invoke(app, ["serve", "--bind", "0.0.0.0", "--show-token"])
+    assert setup.exit_code == 0, setup.output
+    assert "Host/Origin validation is off" in setup.output
+    assert served == [("0.0.0.0", 8747)], "--show-token must not start a server"
+
+    machine = runner.invoke(app, ["--json", "serve", "--bind", "0.0.0.0", "--show-token"])
+    assert machine.exit_code == 0, machine.output
+    assert "Host/Origin validation is off" in machine.output  # said, on stderr...
+    assert json.loads(machine.stdout)["bind"] == "0.0.0.0"  # ...and stdout still parses
+
+    # Both directions, against the SDK rather than against the tuple. The rows
+    # in test_http_answers_by_bind_host_and_token measure what the transport
+    # actually does for these same five binds; these assert the CLI says so.
+    # Narrowing LOOPBACK_BINDS makes it cry wolf, widening it makes it silent
+    # about a real exposure, and the second is the worse one.
+    for spoken in (["--bind", "0.0.0.0"], ["--bind", "127.0.0.2"]):
+        result = runner.invoke(app, ["serve", *spoken])
+        assert result.exit_code == 0, result.output
+        assert "Host/Origin validation is off" in result.output, spoken
+    for quiet in ([], ["--show-token"], ["--bind", "localhost"], ["--bind", "::1"]):
+        result = runner.invoke(app, ["serve", *quiet])
+        assert result.exit_code == 0, result.output
+        assert "Host/Origin validation is off" not in result.output, quiet
 
 
 def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
@@ -395,6 +421,17 @@ _LOOPBACK_HOST = "127.0.0.1:8747"
         pytest.param("0.0.0.0", _LAN_HOST, True, 200, id="lan-bind-serves-a-lan-client"),
         pytest.param("127.0.0.1", _LAN_HOST, True, 421, id="loopback-bind-rejects-a-lan-host"),
         pytest.param("127.0.0.1", _LOOPBACK_HOST, True, 200, id="loopback-bind-serves-itself"),
+        # The other two spellings in LOOPBACK_BINDS. Without these, dropping
+        # either from the tuple passes every test while the CLI starts telling
+        # an operator the protection is off when the SDK has it on.
+        pytest.param("localhost", _LAN_HOST, True, 421, id="localhost-bind-rejects-a-lan-host"),
+        pytest.param("localhost", _LOOPBACK_HOST, True, 200, id="localhost-bind-serves-itself"),
+        pytest.param("::1", _LAN_HOST, True, 421, id="ipv6-loopback-rejects-a-lan-host"),
+        pytest.param("::1", _LOOPBACK_HOST, True, 200, id="ipv6-loopback-serves-itself"),
+        # The negative control: loopback by address, outside the tuple by
+        # spelling. This is what makes "a string match, not an address test"
+        # a measurement rather than an assertion.
+        pytest.param("127.0.0.2", _LAN_HOST, True, 200, id="another-127-address-is-not-loopback"),
         pytest.param("0.0.0.0", _LAN_HOST, False, 401, id="lan-bind-the-token-is-the-gate"),
         pytest.param("127.0.0.1", _LAN_HOST, False, 401, id="guard-answers-before-host-check"),
     ],
@@ -409,12 +446,15 @@ def test_http_answers_by_bind_host_and_token(
     allowlist, anything else gets no Host/Origin check. Row by row: a LAN
     client reaches a LAN bind — what the port made possible; nothing exercised
     ``run_http`` before, and dropping the ``host`` argument left every test
-    green while this reverted to 421. A loopback bind still rejects a LAN
-    ``Host`` — the protection is on where it should be — and still answers its
-    own client, the positive control: an SDK whose allowlist drifted would fail
-    here and nowhere else. And without the token it is 401 on either bind,
-    before any Host check runs — the ordering that makes the token an
-    acceptable sole gate on a LAN bind.
+    green while this reverted to 421. Each of the three loopback spellings
+    rejects a LAN ``Host`` and still answers its own client, while a ``127/8``
+    address outside the tuple is served unchecked — together those pin
+    ``LOOPBACK_BINDS`` against the SDK's own literal, which it mirrors but is
+    never handed, so a tuple edited on either side fails here rather than
+    leaving `aisquare serve` announcing an exposure that is not real. And
+    without the token it is 401 on either kind of bind, before any Host check
+    runs — the ordering that makes the token an acceptable sole gate on a LAN
+    bind.
     """
     app, uvicorn_kwargs = _http_app_for(bind, monkeypatch)
     assert uvicorn_kwargs == {"host": bind, "port": 8747, "log_level": "warning"}

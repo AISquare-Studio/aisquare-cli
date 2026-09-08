@@ -687,8 +687,15 @@ short_circuit() {
     [ "$WANT_AGENT" = 0 ] || [ -n "$CLAUDE_VERSION" ] || return 1
     have aisquare || return 1
 
+    # A SUBSET, not an equal set. Measured on macOS, where the amber list came
+    # back empty: the machine was HEALTHIER than expected and an equality test
+    # refused to short-circuit because of it — exactly backwards. The condition
+    # is "nothing amber that we did not expect"; fewer amber lines than expected
+    # is good news and must never block the no-op path.
     _amber=$(doctor_amber 2>/dev/null || true)
-    [ "$_amber" = "$(expected_amber)" ] || return 1
+    for _check in $_amber; do
+        is_expected_amber "$_check" || return 1
+    done
 
     say ""
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
@@ -702,7 +709,11 @@ short_circuit() {
     if [ "$WANT_PROJECT" = 0 ] || [ -z "$PROJECT_DIR" ]; then
         _why="$_why; no project registered"
     fi
-    note "doctor: everything ok except $(expected_amber) ($_why)"
+    if [ -n "$_amber" ]; then
+        note "doctor: everything ok except $_amber ($_why)"
+    else
+        note "doctor: every check ok"
+    fi
     say ""
     say "Nothing to do. Open the fleet UI with: ${C_BOLD}asq${C_RESET}"
     return 0
@@ -1464,12 +1475,25 @@ is_expected_amber() {
 # as one. `--json` and not the rendered table: that is Rich output wrapped to
 # terminal width, which is a bad parsing target for the same reason
 # tests/test_documented_commands.py refuses to read --help.
+#
+# TWO `-e` EXPRESSIONS RATHER THAN `\(warn\|fail\)`, and that is not a style
+# choice. `\|` alternation in a BASIC regular expression is a GNU extension:
+# GNU sed has it, BusyBox sed has it, and **BSD sed — which is macOS's sed —
+# does not**. There it matches the literal text `warn|fail`, so the amber list
+# came back EMPTY on every Mac. Measured in CI the first time this ran on
+# macos-latest: `doctor: 17 checks, 0 not ok` on a machine whose gbrain is
+# absent. That is the worst failure this function has — an installer that calls
+# every Mac perfectly healthy, never short-circuits, and can never surface an
+# unexpected check, which is exactly what §3.8 exists to prevent. Every
+# container cell in the matrix passed it, because none of them is a Mac.
 doctor_amber() {
     _raw=$(aisquare --json doctor 2>/dev/null || true)
     [ -n "$_raw" ] || return 1
     printf '%s' "$_raw" |
         tr '{' '\n' |
-        sed -n 's/.*"name": *"\([^"]*\)".*"status": *"\(warn\|fail\)".*/\1/p' |
+        sed -n \
+            -e 's/.*"name": *"\([^"]*\)".*"status": *"warn".*/\1/p' \
+            -e 's/.*"name": *"\([^"]*\)".*"status": *"fail".*/\1/p' |
         sort |
         tr '\n' ' ' |
         sed 's/  */ /g; s/^ //; s/ $//'

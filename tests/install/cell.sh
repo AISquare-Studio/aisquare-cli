@@ -93,10 +93,15 @@ export PATH
 # The names of every doctor check that is not ok, space-separated and sorted.
 # Sorted so the assertion is about the SET and not about the order checks happen
 # to run in — an ordering change is not a regression and must not read as one.
+# Two `-e` expressions rather than `\(warn\|fail\)`: `\|` in a BRE is a GNU
+# extension that BSD sed lacks, and a cell that silently matched nothing would
+# assert "no amber checks" and pass on a broken machine.
 amber_checks() {
     aisquare --json doctor 2>/dev/null |
         tr '{' '\n' |
-        sed -n 's/.*"name": *"\([^"]*\)".*"status": *"\(warn\|fail\)".*/\1/p' |
+        sed -n \
+            -e 's/.*"name": *"\([^"]*\)".*"status": *"warn".*/\1/p' \
+            -e 's/.*"name": *"\([^"]*\)".*"status": *"fail".*/\1/p' |
         sort |
         tr '\n' ' ' |
         sed 's/  */ /g; s/^ //; s/ $//'
@@ -281,5 +286,82 @@ fi
 
 amber_again=$(amber_checks)
 [ "$amber_again" = "brain" ] || fail "after the re-run, not-ok = [$amber_again], expected [brain]"
+
+# ---------------------------------------------------------------------------
+# RUN 4 — the upgrade path (§3.9.1, §8.4)
+# ---------------------------------------------------------------------------
+#
+# THE ONE MEASURED TRAP IN THE WHOLE PLAN, asserted on a real machine rather
+# than described. `uv tool upgrade` does NOT move a tool installed with an EXACT
+# PIN: it prints "Nothing to upgrade" and exits 0, leaving the old version in
+# place. A script that trusted that exit code would report an upgrade that never
+# happened — the precise failure the upgrade requirement exists to prevent, and
+# one that is invisible from outside.
+#
+# So this run creates exactly that machine — `aisquare-cli==0.5.0`, an exact pin
+# — and asserts the installer moves it. There is a static guard against the
+# string `uv tool upgrade` appearing in install.sh at all
+# (tests/test_install_script_is_posix.py), but a guard on the TEXT cannot prove
+# the replacement works. This can.
+#
+# It also asserts `tiktoken` survives, because `--force` REPLACES the tool
+# environment: an upgrade that forgot to re-state `--with tiktoken` would move
+# the version, exit 0, and silently turn the `tiktoken` doctor line amber — a
+# regression that only ever appears after an upgrade, which is the hardest kind
+# to attribute.
+#
+# PyPI is the target here, not the local wheel: "did it move to latest" needs a
+# latest to move to. Skipped when the published version happens to BE 0.5.0,
+# which would make the assertion vacuous.
+
+head1 "RUN 4: the upgrade path — an exact pin must still move"
+
+pinned=0.5.0
+latest=$(
+    aisquare --json doctor >/dev/null 2>&1
+    curl -fsSL https://pypi.org/pypi/aisquare-cli/json 2>/dev/null ||
+        wget -qO- https://pypi.org/pypi/aisquare-cli/json 2>/dev/null
+)
+latest=$(printf '%s' "$latest" | tr ',' '\n' | sed -n 's/^"version":"\([^"]*\)".*/\1/p' | head -1)
+
+if [ -z "$latest" ]; then
+    echo "SKIP: could not read the latest version from PyPI"
+elif [ "$latest" = "$pinned" ]; then
+    echo "SKIP: PyPI's latest IS $pinned, so an upgrade assertion would be vacuous"
+else
+    echo "pinning to $pinned, expecting the installer to reach $latest"
+    # An EXACT PIN, deliberately — that is the shape `uv tool upgrade` refuses
+    # to move, and installing without the pin would test nothing.
+    uv tool install --force --python 3.13 --with tiktoken "aisquare-cli==$pinned" >/dev/null 2>&1 ||
+        fail "could not stage the $pinned install"
+    hash -r 2>/dev/null || true
+    staged=$(aisquare --version | cut -d' ' -f2)
+    [ "$staged" = "$pinned" ] || fail "staging did not take: aisquare is $staged, wanted $pinned"
+
+    # No AISQUARE_INSTALL_PACKAGE: the PyPI-named target is the only one with a
+    # "latest" to move to.
+    # shellcheck disable=SC2086
+    env -u AISQUARE_INSTALL_PACKAGE sh "$INSTALLER" --yes $AGENT_FLAG >/tmp/run4.log 2>&1 ||
+        {
+            cat /tmp/run4.log
+            fail "the upgrade run failed"
+        }
+    tail -20 /tmp/run4.log
+
+    moved=$(aisquare --version | cut -d' ' -f2)
+    [ "$moved" != "$pinned" ] || fail "the version did NOT move off the $pinned pin — this is exactly the \`uv tool upgrade\` silent no-op of section 3.9.1"
+    [ "$moved" = "$latest" ] || fail "expected $latest after the upgrade, got $moved"
+    head1 "upgrade: $pinned -> $moved"
+
+    # tiktoken, in the CLI's OWN environment. `--force` replaces that
+    # environment, so this is the assertion that keeps `--with tiktoken` in the
+    # upgrade command.
+    case "$(amber_checks)" in
+        *tiktoken*)
+            fail "tiktoken is amber after the upgrade — --with tiktoken was not re-stated (section 3.9.1)"
+            ;;
+    esac
+    head1 "tiktoken survived the --force upgrade"
+fi
 
 head1 "CELL PASSED: $ID ${VERSION_ID:-}"

@@ -162,6 +162,12 @@ jobs:
             exit 1
           }
           Write-Host "no-WSL branch: exits 1 with the wsl --install advice"
+          # EXPLICIT, and required. `$LASTEXITCODE` is still 1 from the call
+          # above when this block ends, and pwsh hands that to the runner — so
+          # the step failed while asserting, correctly, that the script exits 1.
+          # Measured: the log read "no-WSL branch: exits 1 …" immediately above
+          # "##[error]Process completed with exit code 1".
+          exit 0
 
   matrix:
     name: ${{ matrix.image }}
@@ -269,7 +275,9 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           amber=$(aisquare --json doctor \
             | tr '{' '\n' \
-            | sed -n 's/.*"name": *"\([^"]*\)".*"status": *"\(warn\|fail\)".*/\1/p' \
+            | sed -n \
+                -e 's/.*"name": *"\([^"]*\)".*"status": *"warn".*/\1/p' \
+                -e 's/.*"name": *"\([^"]*\)".*"status": *"fail".*/\1/p' \
             | sort | tr '\n' ' ')
           echo "not ok: [$amber]"
           # `install` amber would mean uv produced a shape doctor rejects — the

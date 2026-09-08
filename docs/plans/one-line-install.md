@@ -1131,7 +1131,47 @@ living in two languages — `core/snapshot.py`'s `MIN_NODE` and `install.sh`'s
 Python exists. `tests/test_install_script_is_posix.py` asserts they are equal,
 and does the same for the tmux floor.
 
-### 12.7 The acceptance criterion, measured
+### 12.7 What only a Mac could tell us — and it was the worst bug in here
+
+`macos-latest` was added to the workflow late, and its first run found the one
+defect in this whole feature that was invisible to everything else. Recorded at
+length because the *shape* of it is the lesson, not the fix.
+
+`doctor_amber` filtered checks with one `sed` expression:
+
+```text
+s/.*"name": *"\([^"]*\)".*"status": *"\(warn\|fail\)".*/\1/p
+```
+
+**`\|` alternation in a basic regular expression is a GNU extension.** GNU sed
+has it. BusyBox sed has it — verified, which matters because Alpine was in the
+matrix precisely to catch this class. **BSD sed does not**, and BSD sed is
+macOS's sed: there the pattern matches the literal text `warn|fail` and nothing
+else, so the amber list came back empty.
+
+Measured on the first `macos-latest` run: `doctor: 17 checks, 0 not ok`, on a
+machine with no gbrain installed. Which is to say the installer would have
+reported **every Mac as perfectly healthy** — never short-circuiting, never
+surfacing an unexpected check, and exiting 0 onto whatever state the machine was
+actually in. §3.8's own words for that outcome are "a script that exits 0 onto a
+broken machine is worse than one that never ran".
+
+Five container cells passed it. All five are Linux; none of them is a Mac, and
+BusyBox's sed happens to have the extension, so the one image chosen to catch
+GNU-isms could not catch this one. §8.3 says "macOS via `runs-on: macos-latest`
+for the Homebrew path", and the actual value turned out to be nothing to do with
+Homebrew.
+
+Two `-e` expressions have no alternation to get wrong, and
+`tests/test_install_script_is_posix.py` now refuses `\|`, `\+`, `\?` and
+`sed -E`/`-r` anywhere in these scripts.
+
+The same run found a second, smaller inversion: `short_circuit` compared the
+amber set to `expected_amber` for EQUALITY, so the Mac — being *healthier* than
+expected — was refused the no-op path for it. The condition is "nothing amber
+that we did not expect"; fewer amber lines than expected is good news.
+
+### 12.8 The acceptance criterion, measured
 
 `tests/install/cell.sh` on five bare distributions, each installing a wheel
 built from this tree, each run three times:
@@ -1166,6 +1206,7 @@ no package manager at all**.
 | 2026-09-04 | Owner asked for existing-install detection and upgrade; added as §3.9. Measured: `uv tool upgrade` will NOT move a pinned install (exit 0, "Nothing to upgrade"), so the script always upgrades with `uv tool install --force … @latest --with tiktoken`, which moves it and re-states the extra. |
 | 2026-09-04 | Claude Code's version is never managed by us (§3.9.3) — it ships `claude update` and auto-updates by default, and the fleet needs a floor, not an exact version. |
 | 2026-09-08 | Owner answered §11: `uv` confirmed as the bootstrap; the raw GitHub URL now with the vanity redirect later; Homebrew installed only if the user agrees; the fleet UI's first-launch view left alone for a follow-up. |
+| 2026-09-08 | macOS CI found the worst bug in the feature (§12.7): `\|` alternation in a `sed` BRE is a GNU extension that **BSD sed lacks**, so the amber-check filter matched nothing on macOS and the installer reported every Mac as fully healthy. Five Linux cells passed it, BusyBox included. Fixed with two `-e` expressions and a static guard. Same run showed `short_circuit` demanded an EQUAL amber set rather than a subset, so a healthier-than-expected machine was refused the no-op path. |
 | 2026-09-08 | #103 fixed §6's three doctor defects on `main` while this branch was in flight, and per-path rather than against one constant (§12.6). This branch dropped its own phase 1 and took main's. The Node floor now lives in two languages, with a test asserting they are equal. |
 | 2026-09-08 | Implemented on this branch. Five things in the plan were wrong — §12. The one that mattered: §3.3's own `/dev/tty` sketch. `[ -r /dev/tty ]` passes where `open(2)` fails, and `{ : </dev/tty; }` **exits** a non-interactive shell on a redirection error because `:` is a special built-in — fatal under bash (Fedora/RHEL/Arch/macOS `/bin/sh`), harmless under dash. Fixed to `(true </dev/tty)`. The container matrix could not see it: every cell passes `--yes`, which short-circuits before the probe. |
 | 2026-09-08 | Node's fallback re-ordered to platform package → NodeSource → fnm (§12.3): fnm needs `unzip` (absent on bare Debian) and its Node is invisible to later processes, so it cannot be the primary path on the machines the floor exists for. `npm` installed beside `nodejs` where it is a separate package, because Repomix is reached through `npx`. |

@@ -490,3 +490,43 @@ def test_the_tmux_floor_matches_the_pythons(source: str) -> None:
         f"install.sh's tmux floor is {major.group(1)}.{minor.group(1)} while "
         f"core/tmux.py's MIN_VERSION is {MIN_VERSION[0]}.{MIN_VERSION[1]}"
     )
+
+
+def test_no_gnu_only_regex_in_a_sed_expression() -> None:
+    """`\\|`, `\\+` and `\\?` in a BRE are GNU extensions. macOS is BSD sed.
+
+    THE BUG THIS EXISTS FOR, and it is the one CI caught that nothing local
+    could. `doctor_amber` filtered checks with
+    `s/…"status": *"\\(warn\\|fail\\)".*/\\1/p`. GNU sed supports that
+    alternation and so does BusyBox — so it worked on every container cell,
+    which is every cell in the matrix. **BSD sed does not**, and BSD sed is
+    macOS's sed: there the pattern matches the literal text `warn|fail` and
+    nothing else, so the amber list came back EMPTY on every Mac.
+
+    Measured the first time this ran on `macos-latest`: `doctor: 17 checks, 0
+    not ok` on a machine with no gbrain installed. That is the worst outcome
+    this function has — an installer that calls every Mac perfectly healthy,
+    never short-circuits, and can never surface an unexpected check, which is
+    exactly what §3.8 exists to prevent. Two `-e` expressions have no
+    alternation to get wrong.
+
+    `-E`/`-r` are flagged too: both are non-POSIX as flags (BSD has `-E`, GNU
+    has both, BusyBox has `-E`), and the safe answer in a script that has to run
+    on all three is to write a BRE.
+    """
+    offenders = []
+    for path in POSIX_SCRIPTS:
+        for number, line in _code_lines(path.read_text(encoding="utf-8")):
+            if "sed" not in line:
+                continue
+            for pattern, why in (
+                (r"\\\|", r"`\|` alternation in a BRE is a GNU extension; BSD sed lacks it"),
+                (r"\\\+", r"`\+` in a BRE is a GNU extension"),
+                (r"\\\?", r"`\?` in a BRE is a GNU extension"),
+                (r"sed\s+-[a-zA-Z]*[Er]", "`sed -E`/`-r` is not POSIX"),
+            ):
+                if re.search(pattern, line):
+                    offenders.append((path.name, number, why, line.strip()))
+    assert not offenders, (
+        f"GNU-only sed construct — install.sh runs on macOS, whose sed is BSD: {offenders}"
+    )

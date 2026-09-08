@@ -13,6 +13,74 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Progress, 2026-09-08.** The joint contract and the client half of C1–C4 are
+> built and green; the identity-provider adapter is the remaining server work.
+>
+> **`me.v1` is settled and implemented** (`aisquare-ci` #141, `cf92959`):
+> `GET /v1/me` returns the principal plus, per workspace, the run published
+> there. Closed at the root and inside every `workspaces[]` member, because this
+> is the second document a client fetches and the descriptor's blinding argument
+> holds only while this one stays identity and routing. The role enum is
+> **inlined rather than `$ref`-ed into `principal.v1`** — the first draft
+> `$ref`-ed it and the CLI's own conformance suite refused it in one run, because
+> a `$ref` by absolute `$id` resolves only for a consumer that also holds the
+> referenced schema and the CLI has no business vendoring a server kernel record
+> it never sees. The two copies are held equal by a server test.
+> `active_run_id` is nullable rather than omitted, so "no run here" is a fact
+> the client reads instead of an absence it infers.
+>
+> **C1 (bearer precedence) is done.** `ci_client.api_key()` is
+> `AISQUARE_CI_KEY`, else the signed-in session (`iam.current_session()`, which
+> itself prefers `AISQUARE_TOKEN` over the stored token). The experiment token
+> keeps precedence, so the harness and the joint smoke are untouched. `iam` is
+> imported inside the function, so "off costs nothing" still holds and `iam`
+> stays the one reader of the `iam_*` keys.
+>
+> **C4 (scrubbing) is done, and wider than the plan said.** `scrub_secret`
+> replaces every fragment of *every* candidate bearer, not only the one
+> precedence picked: a detail being scrubbed may have been produced while a
+> different source was winning, and a scrubber that tracked the winner would
+> leak the loser.
+>
+> **C3 (doctor) is partly done.** The `ci test bed` line now names which
+> credential is in use — "experiment token from `AISQUARE_CI_KEY`" or "signed in
+> as <email> (aisquare login)" — never its value. The two dedicated `ci
+> identity` / `ci workspace` lines are still owed.
+>
+> **C2 (`GET /v1/me` at session start) is done, with the bound the plan did not
+> ask for.** `services/ci_me.py` fetches once per bearer, caches for five
+> minutes, and **caches a refusal for sixty seconds** — this call sits in front
+> of the descriptor fetch on the synchronous session-start path, so an
+> unbounded, uncached one would have cost every session its own ceiling and then
+> the descriptor's on top. That was a review finding against this document, not
+> something it planned. The cache is keyed by a hash of the bearer, so signing
+> in as somebody else cannot serve the previous identity's routing.
+>
+> **C2a (workspace binding) is a config field, not yet a command.**
+> `[experiment].workspace` binds a project to one workspace; a developer in a
+> single workspace needs nothing. Several workspaces and none bound **refuses to
+> guess** and says to set the field. The hidden `aisquare ci bind-workspace`
+> convenience is still owed.
+>
+> **C5 (retire the override) is unchanged and still waiting on server item S10.**
+>
+> Verified locally: `ruff format` · `ruff check` · `mypy --strict` (252 files) ·
+> **3142 passed, 2 skipped**, including 24 new tests over the `/v1/me` client and
+> a stub `GET /v1/me` route the suite drives end to end. The server side is green
+> too: **3674 passed / 148 skipped**, and its new SQL was run against a
+> throwaway Postgres 15 with all 18 migrations applied.
+>
+> **What is still blocked, and on what.** Everything identity-shaped needs
+> `AISquare-Studio-BE` #3419 (the provider) and `aisquare-cli` #77 (`aisquare
+> login`) to merge — both are open. Server items S1–S3, S5, S6 and S8 (the
+> introspection adapter, the `aisq_` branch, memberships as the trusted session
+> mapping, the run-scoped workspace check, the three `CITEST_IDP_*` names) are
+> not built: they cannot be exercised until the provider seeds a `service`
+> client for `aisquare-ci` with the `introspection` scope, which is the ask in
+> `AISquare-Studio-BE` #3420.
+
+---
+
 ## 1. What changes for a user, in one sentence
 
 After `aisquare login`, the hooks and the recall tool talk to the CI server **as that user**: the

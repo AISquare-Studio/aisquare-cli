@@ -120,23 +120,81 @@ def endpoint() -> str:
     return url if url.lower().startswith(("http://", "https://")) else ""
 
 
-def api_key() -> str:
-    """The bearer token. Environment only — never read from ``config.toml``.
+EXPERIMENT_TOKEN_SOURCE = KEY_ENV_VAR
+"""What ``doctor`` calls the bearer when it came from the environment."""
 
-    A value spanning more than one line is treated as unset: it can never make
-    a valid header, and letting it reach ``http.client`` produced a
-    ``ValueError`` whose text — the token, verbatim — became a recorded detail.
-    :func:`api_key_problem` says why for ``doctor``.
+SIGNED_IN_SOURCE = "aisquare login"
+"""What ``doctor`` calls the bearer when it came from the signed-in user."""
+
+
+def api_key() -> str:
+    """The bearer token this build sends, or ``""``.
+
+    Two sources, in this order (``docs/ci-user-identity-handoff.md`` C1):
+
+    1. ``AISQUARE_CI_KEY`` — the experiment token. **Unchanged semantics, and it
+       keeps precedence**, because the harness, the joint smoke and every
+       ``CITEST_*`` identity depend on being able to say "be this credential"
+       from one shell variable.
+    2. the signed-in user's ``aisq_`` token, through
+       :func:`aisquare.services.iam.current_session`, which itself prefers
+       ``AISQUARE_TOKEN`` over the stored credential.
+
+    Nothing is read from ``config.toml``: a bearer in a file the CLI writes is a
+    credential in a place people paste.
+
+    A value spanning more than one line is treated as unset whichever source it
+    came from: it can never make a valid header, and letting it reach
+    ``http.client`` produced a ``ValueError`` whose text — the token, verbatim —
+    became a recorded detail. :func:`api_key_problem` says why for ``doctor``.
     """
-    value = _raw_api_key()
-    return value if _single_line(value) else ""
+    return api_key_and_source()[0]
+
+
+def api_key_and_source() -> tuple[str, str]:
+    """The bearer and the human name of where it came from.
+
+    One function returning both, because ``doctor`` must never answer "which
+    credential am I using" by re-deriving the precedence: two copies of that
+    order would be two answers, and the wrong one would be the one printed to
+    somebody debugging an authentication failure.
+    """
+    configured = _raw_api_key()
+    if configured:
+        return (configured if _single_line(configured) else ""), EXPERIMENT_TOKEN_SOURCE
+    token = _signed_in_token()
+    if token:
+        return (token if _single_line(token) else ""), SIGNED_IN_SOURCE
+    return "", ""
+
+
+def _signed_in_token() -> str:
+    """The signed-in user's access token, or ``""``. Never raises.
+
+    Imported inside the function, not at module scope, so "off costs nothing"
+    stays true: with ``AISQUARE_CI`` unset nothing here runs at all, and this
+    module must not pull the credentials reader into the base import closure
+    (``tests/test_iam_single_reader.py`` pins ``iam`` as the ONE reader of the
+    ``iam_*`` keys, and this is a caller rather than a second reader).
+    """
+    try:
+        from aisquare.services import iam
+
+        session = iam.current_session()
+    except Exception:  # a damaged credentials file must not cost the hook a turn
+        return ""
+    return session.token.strip() if session is not None else ""
 
 
 def api_key_problem() -> str:
-    """Why the configured token cannot be used, or ``""``. Never the value."""
-    value = _raw_api_key()
-    if value and not _single_line(value):
+    """Why the bearer cannot be used, or ``""``. Never the value."""
+    configured = _raw_api_key()
+    if configured and not _single_line(configured):
         return f"{KEY_ENV_VAR} spans more than one line"
+    if not configured:
+        signed_in = _signed_in_token()
+        if signed_in and not _single_line(signed_in):
+            return "the signed-in token spans more than one line; run aisquare login again"
     return ""
 
 
@@ -149,19 +207,21 @@ def _single_line(value: str) -> bool:
 
 
 def scrub_secret(text: str) -> str:
-    """``text`` with any appearance of the configured token replaced.
+    """``text`` with any appearance of any candidate bearer replaced.
 
     Details quote exception text, and ``http.client`` quotes header values in
-    its. Every fragment of the raw environment value that is long enough to be
-    a secret is replaced, so no path that records or prints a detail can echo
-    the token — whatever shape the value had.
+    its. Every fragment of every value that COULD be the bearer is replaced —
+    not only the one precedence happened to pick — because the detail being
+    scrubbed may have been produced while a different source was winning, and a
+    scrubber that tracked the winner would leak the loser. Each is labelled with
+    its own source so a redacted detail still says which credential failed.
     """
-    raw = _raw_api_key()
-    fragments = {raw, *raw.splitlines()}
-    for fragment in sorted(
-        (f.strip() for f in fragments if len(f.strip()) >= 8), key=len, reverse=True
-    ):
-        text = text.replace(fragment, f"[{KEY_ENV_VAR}]")
+    for raw, label in ((_raw_api_key(), KEY_ENV_VAR), (_signed_in_token(), "signed-in token")):
+        fragments = {raw, *raw.splitlines()}
+        for fragment in sorted(
+            (f.strip() for f in fragments if len(f.strip()) >= 8), key=len, reverse=True
+        ):
+            text = text.replace(fragment, f"[{label}]")
     return text
 
 
@@ -169,6 +229,17 @@ def raw_run_id() -> str:
     """The configured run id as written, or ``""``. For diagnostics."""
     from_env = os.environ.get(RUN_ENV_VAR, "").strip()
     return from_env or _settings().run.strip()
+
+
+def workspace_id() -> str:
+    """Which workspace this project asks in, or "".
+
+    Config only, deliberately: it is a property of the checkout rather than of
+    the shell, and a per-shell override would silently re-tenant a project
+    between terminals. A selector and never authority — the server refuses a run
+    in a workspace the user is not a member of whatever this says.
+    """
+    return _settings().workspace.strip()
 
 
 def run_id() -> str:

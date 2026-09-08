@@ -88,6 +88,8 @@ BRIEFING_ID = re.compile(r"^brf_" + _ID_TAIL)
 CHECKPOINT_ID = re.compile(r"^ckp_" + _ID_TAIL)
 ITEM_ID = re.compile(r"^ki_" + _ID_TAIL)
 CONFIG_ID = re.compile(r"^cfg_public_" + _ID_TAIL)
+PRINCIPAL_ID = re.compile(r"^usr_" + _ID_TAIL)
+WORKSPACE_ID = re.compile(r"^ws_" + _ID_TAIL)
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_OBJECT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -463,6 +465,71 @@ class DeliveryDescriptor(BaseModel):
 
     def expired(self, now: datetime | None = None) -> bool:
         return (now or datetime.now(tz=UTC)) >= self.expires()
+
+
+# --- who the server says we are -----------------------------------------------
+
+
+class WorkspaceMembership(BaseModel):
+    """One ``me.v1`` ``workspaces[]`` member: a workspace and the run in it."""
+
+    model_config = _STRICT
+
+    workspace_id: str
+    role: str
+    active_run_id: str | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> WorkspaceMembership:
+        _match(WORKSPACE_ID, self.workspace_id, "workspace_id")
+        if self.active_run_id is not None:
+            _match(RUN_ID, self.active_run_id, "active_run_id")
+        return self
+
+
+class MeDocument(BaseModel):
+    """``me.v1`` — identity and routing, and nothing this client can branch on.
+
+    Fetched at ``SessionStart`` so a signed-in developer can learn which run to
+    ask against; the run id used to be an environment variable a controller
+    handed out per cohort, which works for a harness and not for a person.
+
+    Closed like every other wire model, and the closure matters more here than
+    usual: this is the second document the client fetches, and the blinding
+    argument in :class:`DeliveryDescriptor` holds only while the first stays the
+    only one that can say anything about a configuration. An ``arm_kind`` on a
+    workspace member is refused by the same validator that refuses one on the
+    descriptor — the vendored invalid fixture is exactly that case.
+    """
+
+    model_config = _STRICT
+
+    contract_version: Literal[1]
+    principal_id: str
+    auth_subject: str
+    roles: list[str] = Field(min_length=1)
+    workspaces: list[WorkspaceMembership]
+
+    @model_validator(mode="after")
+    def _shape(self) -> MeDocument:
+        _match(PRINCIPAL_ID, self.principal_id, "principal_id")
+        seen = [member.workspace_id for member in self.workspaces]
+        if len(set(seen)) != len(seen):
+            raise ValueError("at most one entry per workspace")
+        return self
+
+    def membership(self, workspace_id: str | None) -> WorkspaceMembership | None:
+        """The named workspace's entry, or the only one when nothing is named.
+
+        "The only one" is deliberately narrow: with a single workspace there is
+        no choice to make and asking the developer to configure one would be
+        ceremony, but with several, guessing would silently bind a project to
+        whichever the server happened to list first. That case answers ``None``
+        and the caller reports it, which is the fail-closed direction.
+        """
+        if workspace_id:
+            return next((m for m in self.workspaces if m.workspace_id == workspace_id), None)
+        return self.workspaces[0] if len(self.workspaces) == 1 else None
 
 
 # --- MCP tool input -----------------------------------------------------------

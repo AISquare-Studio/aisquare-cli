@@ -901,7 +901,7 @@ def _experiment_checks() -> list[DoctorCheck]:
             )
         ]
     shown = _display_url(base)
-    key = ci_client.api_key()
+    key, key_source = ci_client.api_key_and_source()
     raw_run = ci_client.raw_run_id()
     run = ci_client.run_id()
     checks: list[DoctorCheck] = []
@@ -917,7 +917,11 @@ def _experiment_checks() -> list[DoctorCheck]:
                 "request",
                 "Re-export the token on one line: export AISQUARE_CI_KEY=…"
                 if problem
-                else "Set the experiment token: export AISQUARE_CI_KEY=…",
+                # Two ways in now, and the fix names both rather than assuming
+                # the operator is running the harness: a developer who has
+                # simply not signed in should be told to sign in.
+                else "Sign in with: aisquare login — or export the experiment "
+                "token: export AISQUARE_CI_KEY=…",
             )
         )
     elif not raw_run:
@@ -938,7 +942,11 @@ def _experiment_checks() -> list[DoctorCheck]:
             )
         )
     else:
-        checks.append(_ok(name, f"enabled for {shown}, run {run}"))
+        # Which credential is in play, never its value. An authentication
+        # failure is the commonest thing to debug here and "whose token is this"
+        # was unanswerable from the output: an operator with both an experiment
+        # token exported and a signed-in session had no way to see which one won.
+        checks.append(_ok(name, f"enabled for {shown}, run {run}, {_bearer_note(key_source)}"))
     checks.append(_check_ci_endpoint(base, shown))
     descriptor: DeliveryDescriptor | None = None
     if key and run:
@@ -953,6 +961,28 @@ def _experiment_checks() -> list[DoctorCheck]:
     if override is not None:
         checks.append(override)
     return checks
+
+
+def _bearer_note(source: str) -> str:
+    """How ``doctor`` names the credential in use. Never its value.
+
+    The signed-in case names the email, which is what ``aisquare whoami`` prints
+    and is not a secret; the token itself never appears in either branch. The
+    email is read through the ``iam`` module rather than the credentials file,
+    because that module is the one reader of the ``iam_*`` keys.
+    """
+    if source == ci_client.EXPERIMENT_TOKEN_SOURCE:
+        return f"experiment token from {ci_client.EXPERIMENT_TOKEN_SOURCE}"
+    if source == ci_client.SIGNED_IN_SOURCE:
+        try:
+            from aisquare.services import iam
+
+            session = iam.current_session()
+        except Exception:
+            session = None
+        who = session.email or session.sub if session is not None else ""
+        return f"signed in as {who} (aisquare login)" if who else "signed in (aisquare login)"
+    return "no bearer"
 
 
 _CI_PROBE_MS = 3_000

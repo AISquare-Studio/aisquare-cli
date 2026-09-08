@@ -34,7 +34,26 @@ CONTRACTS = (
     "client-delivery-descriptor.v1",
     "delivery-capability-manifest.v1",
     "error.v1",
+    "me.v1",
 )
+
+FAMILIES = {"error.v1": "kernel", "me.v1": "identity"}
+"""Which ``contracts/jsonschema/<family>/`` a contract lives in on the server.
+Everything unlisted is ``delivery``. Needed because the vendored copies are flat
+and the drift guard has to find the original."""
+
+PENDING_VENDOR = {
+    "me.v1": "aisquare-ci#141",
+}
+"""Contracts vendored from a server BRANCH because they are not on its ``main``
+yet, with the pull request that lands them.
+
+The byte-exact drift guard cannot hold these to :data:`VENDORED_AT`, because at
+that commit the file does not exist. Naming them here rather than quietly
+skipping them is what makes the exception self-retiring: the guard asserts each
+one is still absent at the pin, so the day the server commit that adds it is
+pinned, the assertion fails and says to move the name out of this map. An
+exception nothing checks is one that outlives its reason."""
 
 
 def schema(name: str) -> dict[str, Any]:

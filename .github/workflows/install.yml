@@ -64,19 +64,34 @@ jobs:
 
       - name: shellcheck
         # --shell=sh so the POSIX dialect is checked, not bash's.
-        run: shellcheck --shell=sh install.sh tests/install/cell.sh tests/install/matrix.sh
+        run: |
+          shellcheck --shell=sh install.sh \
+            tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh
 
       - name: shfmt (format check)
-        run: shfmt -i 4 -ci -d install.sh tests/install/cell.sh tests/install/matrix.sh
+        run: |
+          shfmt -i 4 -ci -d install.sh \
+            tests/install/cell.sh tests/install/cell-nonroot.sh tests/install/matrix.sh
 
       - name: Parse under dash and BusyBox ash
         # `sh -n` under BOTH, because bash accepts things neither does and
         # /bin/sh is dash on Debian and Ubuntu and BusyBox ash on Alpine. A
         # bashism that reaches a user's /bin/sh does not degrade — it fails.
+        # NO `&&`. GitHub runs `run:` blocks as `bash -e {0}`, and under `set -e`
+        # a command that fails as the NON-FINAL element of an `&&` list does not
+        # exit the shell — it only makes the list return non-zero. The loop then
+        # carried on, and the loop's own status is that of its LAST command. So a
+        # construct that dash rejects and BusyBox ash accepts left this job
+        # GREEN — and dash is /bin/sh on Debian and Ubuntu, the two largest
+        # targets. Exactly the shape of the /dev/tty bug: invisible on the
+        # platforms that matter most.
         run: |
-          for script in install.sh tests/install/cell.sh tests/install/matrix.sh; do
-            dash -n "$script"     && echo "dash  ok: $script"
-            busybox ash -n "$script" && echo "ash   ok: $script"
+          for script in install.sh tests/install/cell.sh \
+            tests/install/cell-nonroot.sh tests/install/matrix.sh; do
+            dash -n "$script"
+            echo "dash  ok: $script"
+            busybox ash -n "$script"
+            echo "ash   ok: $script"
           done
 
       - name: Set up Python

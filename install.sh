@@ -234,17 +234,55 @@ fetch() {
     fi
 }
 
-# Pipe a remote installer into a shell. $2 is the interpreter, because uv's
-# installer is POSIX sh and Claude Code's needs bash.
+# Download to a private temporary file, or fail. Echoes the path on success.
+#
+# `mktemp` and not `"$TMPDIR/name-$$"`: `$$` is a small guessable number and
+# /tmp is world-writable, so a predictable path is a symlink target and a race
+# window — and one of these files is then executed BY ROOT (`_nodesource_setup`).
+# mktemp gives an unpredictable name, O_EXCL creation and mode 600 in one call.
+#
+# The file is also asserted NON-EMPTY. A downloader that fails after the
+# redirect has already created the file leaves a zero-byte one behind, and an
+# empty script is a silent no-op rather than an error.
+fetch_to_file() {
+    _ft_url=$1
+    _ft_file=$(mktemp "${TMPDIR:-/tmp}/aisquare-fetch-XXXXXX") || return 1
+    if ! fetch "$_ft_url" >"$_ft_file" 2>/dev/null; then
+        rm -f "$_ft_file"
+        return 1
+    fi
+    if [ ! -s "$_ft_file" ]; then
+        rm -f "$_ft_file"
+        return 1
+    fi
+    printf '%s' "$_ft_file"
+}
+
+# Run a remote installer. $2 is the interpreter, because uv's installer is POSIX
+# sh and Claude Code's needs bash.
+#
+# VIA A FILE, NOT A PIPE, and that is a bug fix rather than a preference. The
+# exit status of `curl … | sh` is the SHELL'S, not curl's: when the download
+# fails the interpreter reads an empty stdin and exits 0, so a failed fetch
+# reported success. Measured with a curl stub exiting 22 — this function
+# returned 0. Every caller then misdiagnosed it: `install_uv`'s carefully
+# written `die` about the uv installer (with the pipx fallback) was UNREACHABLE,
+# and the user got "uv installed but is not on PATH — open a new shell instead",
+# which is false and sends them chasing a PATH problem that does not exist. Same
+# for Claude Code, fnm and Homebrew.
+#
+# `set -o pipefail` would be the obvious fix and is not POSIX — dash rejects it.
+# A file gets the status of the fetch AND of the interpreter, separately, and it
+# is the shape `_nodesource_setup` already used.
 fetch_into_shell() {
     _url=$1
     _shell=$2
     shift 2
-    if [ "$HAVE_CURL" = 1 ]; then
-        curl -fsSL "$_url" | "$_shell" -s -- "$@"
-    else
-        wget -qO- "$_url" | "$_shell" -s -- "$@"
-    fi
+    _script=$(fetch_to_file "$_url") || return 1
+    "$_shell" "$_script" "$@"
+    _rc=$?
+    rm -f "$_script"
+    return "$_rc"
 }
 
 # True when the CONTROLLING TERMINAL can actually be opened.
@@ -284,15 +322,28 @@ tty_available() {
 }
 
 # Ask a yes/no question. Reads /dev/tty, NEVER stdin (§3.3) — stdin is this
-# script's own bytes. `--yes` and "no terminal" both answer without asking, and
-# they answer DIFFERENTLY, which is the point of having both: --yes means "do
-# not stop to ask me", no-terminal means "there is nobody to ask".
+# script's own bytes.
+#
+# `--yes` MEANS "NEVER BLOCK ON A QUESTION; TAKE THE STATED DEFAULT" — it does
+# NOT mean "answer yes to everything". It used to return 0 unconditionally, and
+# the only prompt that reaches here has a default of `n` for a reason: it
+# installs Homebrew. So `sh install.sh --yes` on a Mac at a terminal SILENTLY
+# INSTALLED HOMEBREW — a very large thing to put on somebody's machine, and the
+# exact opposite of the answer given to §11.3 ("ask, and degrade to warn-only if
+# declined"). CI could not see it: macos-latest ships Homebrew, so
+# `ensure_pkg_manager` returns before the prompt every time.
+#
+# So `--yes` and "no terminal" now answer the same way — the default — and the
+# distinction that does matter lives where it belongs: `handoff` checks
+# ASSUME_YES separately, because "do not ask me" and "do not launch a TUI at
+# me" are genuinely different instructions.
 confirm() {
     _prompt=$1
     _default=$2
     if [ "$ASSUME_YES" = 1 ]; then
-        debug "confirm: --yes, answering y to: $_prompt"
-        return 0
+        debug "confirm: --yes, taking the default ($_default) for: $_prompt"
+        [ "$_default" = y ]
+        return $?
     fi
     if ! tty_available; then
         debug "confirm: no terminal, answering $_default to: $_prompt"
@@ -371,6 +422,15 @@ Run it as your own user (it uses sudo only for tmux/gh/Node), or set
 AISQUARE_INSTALL_ALLOW_ROOT=1 if you really mean root's home."
         fi
     fi
+
+    # THE PATH AS INHERITED, before anything here touches it. `install_uv` and
+    # `install_cli` both prepend ~/.local/bin to $PATH in this very shell, so by
+    # the time `path_check` ran the entry was ALWAYS present and the §3.6
+    # warning could never fire on the one path where it matters — a first-time
+    # user whose profile lacks ~/.local/bin got no warning, opened a new shell,
+    # and `aisquare` was not found. The question is about their profile, so the
+    # answer has to be sampled before we start editing our own environment.
+    INHERITED_PATH=$PATH
 
     have curl && HAVE_CURL=1
     have wget && HAVE_WGET=1
@@ -453,9 +513,14 @@ pkg_manager() {
             if have apt-get; then
                 PKG=apt
             elif have dnf; then
+                # DNF_MAJOR is NOT read here. `pkg_manager` runs before
+                # `short_circuit`, in the phase §3.9.4 promises makes no writes
+                # and calls no package manager — and `dnf --version` broke that
+                # on every Fedora/RHEL machine. Measured with a recording stub:
+                # `dnf --version` appeared in the read-only phase's log. It is
+                # only ever needed by `_gh_add_dnf_repo`, which runs long after
+                # the decision, so it is read there (`dnf_major`).
                 PKG=dnf
-                DNF_MAJOR=$(dnf --version 2>/dev/null | head -1 | cut -d. -f1 | tr -cd '0-9')
-                [ -n "$DNF_MAJOR" ] || DNF_MAJOR=4
             elif have pacman; then
                 PKG=pacman
             elif have zypper; then
@@ -479,7 +544,7 @@ pkg_manager() {
     if [ "$PKG" = "" ]; then
         debug "no known package manager"
     else
-        debug "package manager: $PKG${DNF_MAJOR:+ (dnf$DNF_MAJOR)}${PKG_SUDO:+, via sudo}"
+        debug "package manager: $PKG${PKG_SUDO:+, via sudo}"
     fi
 }
 
@@ -603,6 +668,19 @@ resolve() {
         CLI_ACTION=install
     elif [ "$FORCE" = 1 ]; then
         CLI_ACTION=upgrade
+    elif [ -n "$PIN_VERSION" ]; then
+        # A PIN IS AN INSTRUCTION, not a floor. `--version V` is documented as
+        # "pin aisquare-cli to V", so any version that is not V has to move —
+        # including DOWN. The old code compared `version_lt CLI PIN`, which is
+        # false for a downgrade, so `--version 0.5.0` on a 0.6.0 machine left
+        # 0.6.0 in place and reported "aisquare-cli 0.6.0 is current". Untested
+        # because the test helper pinned 9.9.9 everywhere — always an upgrade,
+        # never a downgrade.
+        if [ "$CLI_VERSION" = "$PIN_VERSION" ]; then
+            CLI_ACTION=current
+        else
+            CLI_ACTION=upgrade
+        fi
     elif [ -z "$LATEST_VERSION" ]; then
         CLI_ACTION=current
     elif version_lt "$CLI_VERSION" "$LATEST_VERSION"; then
@@ -679,12 +757,20 @@ _resolve_system() {
 short_circuit() {
     [ "$CLI_ACTION" = current ] || return 1
     [ "$INSTALL_TARGET" = "$PYPI_PACKAGE" ] || return 1
+    # An explicit pin that does not match is work to do, whatever else holds.
+    [ -z "$PIN_VERSION" ] || [ "$PIN_VERSION" = "$CLI_VERSION" ] || return 1
     [ "$FORCE" = 0 ] || return 1
     [ "$UPGRADE_ALL" = 0 ] || return 1
-    [ "$TMUX_ACTION" = current ] || return 1
-    [ "$GH_ACTION" = current ] || return 1
-    [ "$GIT_ACTION" = current ] || return 1
-    [ "$NODE_ACTION" = current ] || return 1
+    # Gated on the flag, exactly as the agent check below already is. Without
+    # it a `--no-system-deps` machine lacking tmux could never short-circuit,
+    # however current everything it DID ask for was — the identical defect that
+    # was found and fixed for WANT_AGENT, just not applied to its neighbour.
+    if [ "$WANT_SYSTEM_DEPS" = 1 ]; then
+        [ "$TMUX_ACTION" = current ] || return 1
+        [ "$GH_ACTION" = current ] || return 1
+        [ "$GIT_ACTION" = current ] || return 1
+        [ "$NODE_ACTION" = current ] || return 1
+    fi
     # Only when we would have installed it: under --no-agent an absent Claude
     # Code IS the requested state, and demanding it here meant a second run
     # never short-circuited — measured in the container matrix, where every
@@ -697,7 +783,16 @@ short_circuit() {
     # refused to short-circuit because of it — exactly backwards. The condition
     # is "nothing amber that we did not expect"; fewer amber lines than expected
     # is good news and must never block the no-op path.
-    _amber=$(doctor_amber 2>/dev/null || true)
+    #
+    # NO `|| true`. That is what made a BROKEN doctor read as a perfect one:
+    # `doctor_amber` returns non-zero when it cannot get a trustworthy payload,
+    # `|| true` threw that away, `_amber` came back empty, the loop below never
+    # ran, and the script printed "doctor: every check ok / Nothing to do" and
+    # exited 0. Measured with an `aisquare` that answers --version and exits 1
+    # for `--json doctor`. §3.8's own words: "a script that exits 0 onto a
+    # broken machine is worse than one that never ran." An unanswerable doctor
+    # is a reason to do the work, not to skip it.
+    _amber=$(doctor_amber 2>/dev/null) || return 1
     for _amber_check in $_amber; do
         is_expected_amber "$_amber_check" || return 1
     done
@@ -710,10 +805,28 @@ short_circuit() {
     else
         note "~/.aisquare configured (--no-agent: no agent hooks)"
     fi
-    _why="gbrain is out of scope"
-    if [ "$WANT_PROJECT" = 0 ] || [ -z "$PROJECT_DIR" ]; then
-        _why="$_why; no project registered"
-    fi
+    # Gated per line, the way `summary` is. The unconditional version named
+    # gbrain as the reason on a machine that HAS gbrain — reachable, since
+    # `brain` reports ok when gbrain is installed and also when AISQUARE_BRAIN=0
+    # — so `--no-project` on such a machine read "everything ok except snapshot
+    # (gbrain is out of scope)", blaming a check that was fine.
+    _why=""
+    case " $_amber " in
+        *" brain "*) _why="gbrain is out of scope" ;;
+    esac
+    case " $_amber " in
+        *" snapshot "*)
+            [ -n "$_why" ] && _why="$_why; "
+            _why="${_why}no project registered"
+            ;;
+    esac
+    case " $_amber " in
+        *" tmux "* | *" gh "* | *" repomix "*)
+            [ -n "$_why" ] && _why="$_why; "
+            _why="${_why}system deps skipped"
+            ;;
+    esac
+    [ -n "$_why" ] || _why="all expected"
     if [ -n "$_amber" ]; then
         note "doctor: everything ok except $_amber ($_why)"
     else
@@ -932,7 +1045,7 @@ PATH_HINT=""
 # (never file-wide, where a real `cd "~/x"` bug would then hide).
 # shellcheck disable=SC2088
 path_check() {
-    case ":$PATH:" in
+    case ":${INHERITED_PATH:-$PATH}:" in
         *":$HOME/.local/bin:"*) return 0 ;;
     esac
     # Said, not silently fixed: uv and the Claude installer each manage their own
@@ -950,25 +1063,40 @@ path_check() {
 # True when we have a package manager we can actually install with. On macOS
 # without Homebrew this asks first (§5): it is a large thing to put on someone's
 # machine unasked, and macOS is where its absence is most likely.
+#: Set once a Mac has answered "no" to Homebrew, or once installing it failed.
+#: Without it the question was asked AGAIN by install_tmux, install_gh,
+#: install_git and install_node — four identical prompts and four separate
+#: warnings for one decision, on the one platform §5 calls awkward, and it is
+#: the only interactive prompt before the handoff so a user who says no is stuck
+#: in it.
+_brew_unavailable=0
+
 ensure_pkg_manager() {
     [ -n "$PKG" ] && return 0
     if [ "$OS" != macos ]; then
         return 1
     fi
+    [ "$_brew_unavailable" = 0 ] || return 1
     say ""
-    note "tmux and gh have no sane source on macOS other than Homebrew, and it is not installed."
-    if ! confirm "Install Homebrew? (declining just skips tmux/gh)" n; then
-        note "leaving Homebrew alone"
+    # Names all four, because install_git and install_node route through here
+    # too — the old wording said "tmux and gh" and undersold what is skipped.
+    note "tmux, gh, git and Node have no sane source on macOS other than Homebrew,"
+    note "and it is not installed."
+    if ! confirm "Install Homebrew? (declining skips tmux/gh/git/Node)" n; then
+        _brew_unavailable=1
+        note "leaving Homebrew alone — the CLI works; the fleet UI will not"
         return 1
     fi
     step "Installing Homebrew"
     if [ "$DRY_RUN" = 1 ]; then
         printf '  %swould run:%s the Homebrew installer\n' "$C_DIM" "$C_RESET"
+        _brew_unavailable=1
         return 1
     fi
     if ! fetch_into_shell \
         "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh" bash; then
-        warn "the Homebrew installer failed — skipping tmux/gh"
+        _brew_unavailable=1
+        warn "the Homebrew installer failed — skipping tmux, gh, git and Node"
         return 1
     fi
     # Apple silicon puts it in /opt/homebrew, Intel in /usr/local.
@@ -980,7 +1108,8 @@ ensure_pkg_manager() {
         fi
     done
     have brew || {
-        warn "Homebrew installed but \`brew\` is not on PATH — skipping tmux/gh"
+        _brew_unavailable=1
+        warn "Homebrew installed but \`brew\` is not on PATH — skipping tmux, gh, git and Node"
         return 1
     }
     PKG=brew
@@ -1132,9 +1261,24 @@ _gh_add_apt_repo() {
     have gpg || pkg_install gpg || true
     sudo_run mkdir -p -m 755 /etc/apt/keyrings || return 1
     _key=/etc/apt/keyrings/githubcli-archive-keyring.gpg
-    if [ ! -f "$_key" ]; then
-        fetch https://cli.github.com/packages/githubcli-archive-keyring.gpg |
-            ${PKG_SUDO:+sudo }tee "$_key" >/dev/null || return 1
+    if [ ! -s "$_key" ]; then
+        # `-s` and not `-f`, and the download goes to a temporary file first.
+        # The old form piped `fetch … | tee "$_key"`, whose exit status is
+        # TEE'S: a failed key download left a ZERO-BYTE keyring, `|| return 1`
+        # never fired, and `apt-get update` then could not verify
+        # cli.github.com. The persistent half was the real damage — `[ -f
+        # "$_key" ]` was true forever after, so every later run skipped the
+        # fetch and reused the empty key, and `gh` could never install on that
+        # machine again with nothing in the output pointing at why.
+        _key_tmp=$(fetch_to_file https://cli.github.com/packages/githubcli-archive-keyring.gpg) || {
+            warn "could not download GitHub's apt signing key — skipping the gh repository"
+            return 1
+        }
+        if ! sudo_run cp "$_key_tmp" "$_key"; then
+            rm -f "$_key_tmp"
+            return 1
+        fi
+        rm -f "$_key_tmp"
         sudo_run chmod go+r "$_key" || return 1
     fi
     _arch=$(dpkg --print-architecture 2>/dev/null || echo amd64)
@@ -1146,6 +1290,16 @@ _gh_add_apt_repo() {
     sudo_run apt-get update || true
 }
 
+# dnf's major version, read on FIRST USE and cached. Lazily, so the read-only
+# phase stays read-only (see `pkg_manager`).
+dnf_major() {
+    if [ -z "$DNF_MAJOR" ]; then
+        DNF_MAJOR=$(dnf --version 2>/dev/null | head -1 | cut -d. -f1 | tr -cd '0-9')
+        [ -n "$DNF_MAJOR" ] || DNF_MAJOR=4
+    fi
+    printf '%s' "$DNF_MAJOR"
+}
+
 _gh_add_dnf_repo() {
     [ "$DRY_RUN" = 1 ] && {
         printf '  %swould run:%s add the cli.github.com dnf repository\n' "$C_DIM" "$C_RESET"
@@ -1155,7 +1309,7 @@ _gh_add_dnf_repo() {
     # and needs the config-manager plugin installed first. Fedora 41+ is dnf5;
     # RHEL 9 and derivatives are dnf4. Branching on the MAJOR rather than on
     # whether a command errors, so a failure is a failure and not a fallback.
-    if [ "${DNF_MAJOR:-4}" -ge 5 ]; then
+    if [ "$(dnf_major)" -ge 5 ]; then
         sudo_run dnf install -y dnf5-plugins || true
         sudo_run dnf config-manager addrepo \
             --overwrite --from-repofile=https://cli.github.com/packages/rpm/gh-cli.repo
@@ -1309,11 +1463,10 @@ _nodesource_setup() {
         debug "NodeSource's setup script needs bash"
         return 1
     }
-    _ns_file="${TMPDIR:-/tmp}/aisquare-nodesource-$$.sh"
-    if ! fetch "$_ns_url" >"$_ns_file" 2>/dev/null; then
-        rm -f "$_ns_file"
-        return 1
-    fi
+    # `fetch_to_file` rather than a `$$`-named path: this is the one thing here
+    # that runs as ROOT, and a guessable name in a world-writable directory is a
+    # symlink target and a race window for an unprivileged local attacker.
+    _ns_file=$(fetch_to_file "$_ns_url") || return 1
     if sudo_run bash "$_ns_file"; then
         rm -f "$_ns_file"
         return 0
@@ -1486,12 +1639,25 @@ DOCTOR_AMBER=""
 # the short-circuit was unreachable in that whole mode, and the summary told the
 # user to run `project onboard` for a project that does not exist.
 expected_amber() {
-    if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
-        printf '%s' "$EXPECTED_AMBER"
-    else
-        # Sorted, to match doctor_amber's own ordering.
-        printf '%s' "$EXPECTED_AMBER snapshot"
+    # Alphabetical, to read the same way as doctor_amber's sorted output.
+    _exp="$EXPECTED_AMBER"
+    if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
+        # `--no-system-deps` ASKED for these to be missing, so their amber lines
+        # are the requested state, not a surprise. Measured before this: a
+        # `--yes --no-system-deps` run classed `tmux` and `repomix` as
+        # UNEXPECTED, incremented UNEXPECTED twice and exited 2 — whose
+        # documented meaning is "amber for a reason this script did not expect".
+        # The script expected them exactly; the user typed the flag. So every
+        # provisioning run with that flag failed its caller, always.
+        _exp="$_exp gh repomix"
     fi
+    if [ "$WANT_PROJECT" = 0 ] || [ -z "$PROJECT_DIR" ]; then
+        _exp="$_exp snapshot"
+    fi
+    if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
+        _exp="$_exp tmux"
+    fi
+    printf '%s' "$_exp"
 }
 
 # True when $1 is one of the names `expected_amber` returns.
@@ -1531,6 +1697,15 @@ is_expected_amber() {
 doctor_amber() {
     _raw=$(aisquare --json doctor 2>/dev/null || true)
     [ -n "$_raw" ] || return 1
+    # THE PAYLOAD IS CROSS-CHECKED HERE, not only in run_doctor. A `{` inside a
+    # check's detail splits an object across two lines and loses it, so a count
+    # of names that disagrees with a count of statuses means the extraction
+    # dropped something — and "dropped something" must never present as
+    # "nothing amber".
+    _names=$(printf '%s' "$_raw" | tr '{' '\n' | grep -c '"name": *"' || true)
+    _states=$(printf '%s' "$_raw" | tr '{' '\n' | grep -c '"status": *"' || true)
+    [ "$_names" = "$_states" ] || return 1
+    [ "${_names:-0}" -gt 0 ] || return 1
     printf '%s' "$_raw" |
         tr '{' '\n' |
         sed -n \
@@ -1644,6 +1819,15 @@ summary() {
                 # Advice that cannot work is worse than no advice.
                 note "  snapshot — no project is registered yet. From a git repo, run:"
                 note "             aisquare init"
+                ;;
+        esac
+        case " $_expected " in
+            *" tmux "* | *" gh "* | *" repomix "*)
+                # Named as a group, because --no-system-deps skipped them
+                # together and explaining each separately would read as three
+                # problems rather than one deliberate choice.
+                note "  tmux/gh/repomix — skipped by --no-system-deps. The CLI works;"
+                note "             the fleet UI needs tmux, PRs need gh, snapshots need Node."
                 ;;
         esac
     fi

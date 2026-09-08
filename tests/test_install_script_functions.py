@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import pty
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -83,6 +84,12 @@ def sh(
         start_new_session=no_terminal,
         stdin=subprocess.DEVNULL,
     )
+
+
+@pytest.fixture(scope="module")
+def source_text() -> str:
+    """`install.sh`'s text, for the assertions that are about how it is written."""
+    return SCRIPT.read_text(encoding="utf-8")
 
 
 def stub_dir(tmp_path: Path, name: str, *commands: str, body: str = "exit 0") -> Path:
@@ -353,8 +360,12 @@ def test_the_dnf_major_is_read_because_the_repo_syntax_differs(
     failure is a failure and not a silent fallback.
     """
     stubs = stub_dir(tmp_path, "bin", "dnf", body=f'echo "{banner}"')
+    # `dnf_major`, not `$DNF_MAJOR` after `pkg_manager`: the read is LAZY now,
+    # because doing it in `pkg_manager` meant the read-only phase invoked a
+    # package manager on every Fedora box (see
+    # test_the_read_only_phase_calls_no_package_manager).
     result = sh(
-        'OS=linux; pkg_manager; printf "%s\\n" "$DNF_MAJOR"',
+        "OS=linux; pkg_manager; dnf_major; echo",
         path=f"{stubs}:{base_path(tmp_path)}",
     )
     assert result.stdout.strip() == expected, result.stderr
@@ -708,20 +719,33 @@ def test_no_terminal_takes_the_default_without_prompting(tmp_path: Path) -> None
     assert "install a thing?" not in result.stdout, "it must not print a prompt nobody can answer"
 
 
-def test_yes_answers_without_a_terminal_and_without_asking(tmp_path: Path) -> None:
-    """`--yes` and "no terminal" are different reasons for the same silence.
+def test_yes_and_no_terminal_both_take_the_stated_default(tmp_path: Path) -> None:
+    """`--yes` means "never block on a question", not "answer yes to anything".
 
-    `--yes` means "do not stop to ask me" and answers y; no-terminal means
-    "there is nobody to ask" and takes the default. Collapsing them would make
-    `--yes` unable to accept anything on a CI box, or make a Dockerfile install
-    Homebrew by accident.
+    THIS TEST USED TO ASSERT THE OPPOSITE, and its docstring had the reasoning
+    backwards: it claimed that collapsing `--yes` with the no-terminal case
+    would "make a Dockerfile install Homebrew by accident", when in fact NOT
+    collapsing them is what made `--yes` install Homebrew. The only prompt that
+    reaches `confirm` has a default of `n` precisely because it installs a
+    system-wide package manager.
+
+    The distinction that does matter is kept where it belongs: `handoff` checks
+    `ASSUME_YES` separately, because "do not ask me" and "do not launch a TUI at
+    me" are genuinely different instructions —
+    `test_yes_names_the_ui_rather_than_launching_it` pins that.
     """
-    result = sh(
-        'ASSUME_YES=1; if confirm "install a thing?" n; then echo yes; else echo no; fi',
-        path=base_path(tmp_path),
-        no_terminal=True,
-    )
-    assert result.stdout.strip() == "yes", result.stdout
+    for default, expected in (("n", "no"), ("y", "yes")):
+        for unattended in (True, False):
+            setup = "ASSUME_YES=1; " if not unattended else ""
+            result = sh(
+                f'{setup}if confirm "install a thing?" {default}; then echo yes; else echo no; fi',
+                path=base_path(tmp_path),
+                no_terminal=True,
+            )
+            assert result.stdout.strip() == expected, (
+                f"default={default} unattended={unattended} -> "
+                f"{result.stdout.strip()!r}, wanted {expected!r}"
+            )
 
 
 def test_the_handoff_survives_having_no_controlling_terminal(tmp_path: Path) -> None:
@@ -895,6 +919,20 @@ def _piped_into_sh_with_a_terminal(
     return output.decode(errors="replace")
 
 
+#: The flags the three pty tests run with. `--force` is load-bearing: without
+#: it these machines now SHORT-CIRCUIT — a `--no-system-deps` run with a current
+#: CLI genuinely has nothing to do, which is the correct behaviour the review
+#: asked for — and `handoff`, the thing under test, is never reached. `--force`
+#: is the documented way to say "do the work anyway", so it puts the run back on
+#: the path that ends at the prompt.
+_HANDOFF_FLAGS = [
+    "--no-project",
+    "--no-agent",
+    "--no-system-deps",
+    "--offline",
+    "--force",
+]
+
 #: The same, for a run that registered no project: `snapshot` is amber too, and
 #: that is the requested state rather than a defect.
 _DOCTOR_PAYLOAD_NO_PROJECT = (
@@ -976,7 +1014,7 @@ def test_the_prompt_reads_the_terminal_and_not_the_script(
         "n\n",
         path=path,
         home=home,
-        extra=["--no-project", "--no-agent", "--no-system-deps", "--offline"],
+        extra=_HANDOFF_FLAGS,
     )
 
     assert "Open the aisquare fleet UI now?" in output, (
@@ -1009,7 +1047,7 @@ def test_answering_yes_hands_over_with_the_terminal_reconnected(
         "y\n",
         path=path,
         home=home,
-        extra=["--no-project", "--no-agent", "--no-system-deps", "--offline"],
+        extra=_HANDOFF_FLAGS,
     )
 
     assert "UI-STARTED" in output, f"answering 'y' did not hand over:\n{output}"
@@ -1033,7 +1071,7 @@ def test_an_empty_answer_takes_the_default_and_opens_the_ui(
         "\n",
         path=path,
         home=home,
-        extra=["--no-project", "--no-agent", "--no-system-deps", "--offline"],
+        extra=_HANDOFF_FLAGS,
     )
 
     assert "[Y/n]" in output, f"the prompt must show Y as the default:\n{output}"
@@ -1158,3 +1196,352 @@ def test_the_short_circuit_fires_for_a_current_no_project_machine(tmp_path: Path
     )
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     assert not calls, f"the short-circuit still ran something: {calls}"
+
+
+# ---------------------------------------------------------------------------
+# Findings from the code review of 2026-09-08. Each of these fires on a bug
+# that shipped in the first implementation and that no existing test could see.
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_download_is_not_reported_as_a_successful_install(tmp_path: Path) -> None:
+    """`curl … | sh` hands you the SHELL's exit status, not curl's.
+
+    When the fetch fails the interpreter reads an empty stdin and exits 0, so
+    `fetch_into_shell` returned success on a download that never happened.
+    Every caller then misdiagnosed it — `install_uv`'s carefully written `die`
+    about the uv installer was unreachable, and the user got "uv installed but
+    is not on PATH — open a new shell", which is false and sends them chasing a
+    PATH problem that does not exist. Same for Claude Code, fnm and Homebrew.
+
+    `set -o pipefail` is not POSIX (dash rejects it), so the fix is a file: the
+    fetch's status and the interpreter's status are then separate things.
+    """
+    failing = stub_dir(tmp_path, "bin", "curl", "wget", body="exit 22")
+    result = sh(
+        'HAVE_CURL=1; if fetch_into_shell "https://example.invalid/x" sh; '
+        "then echo SUCCEEDED; else echo FAILED; fi",
+        path=f"{failing}:{base_path(tmp_path)}",
+    )
+    assert result.stdout.strip() == "FAILED", (
+        "a download that exited 22 was reported as a successful install: "
+        f"{result.stdout!r}\n{result.stderr}"
+    )
+
+
+def test_an_empty_download_is_a_failure_too(tmp_path: Path) -> None:
+    """A downloader that exits 0 having written nothing is not a success.
+
+    The redirect creates the file before the transfer, so a fetch that dies
+    mid-way leaves a zero-byte one behind — and an empty script is a silent
+    no-op rather than an error. That is also the shape that poisoned the `gh`
+    keyring permanently.
+    """
+    empty = stub_dir(tmp_path, "bin", "curl", body="exit 0")
+    result = sh(
+        'HAVE_CURL=1; if fetch_to_file "https://example.invalid/x" >/dev/null; '
+        "then echo SUCCEEDED; else echo FAILED; fi",
+        path=f"{empty}:{base_path(tmp_path)}",
+    )
+    assert result.stdout.strip() == "FAILED", result.stdout
+
+
+def test_the_temporary_file_is_not_a_predictable_name(source_text: str) -> None:
+    """`$$` in /tmp is a symlink target and a race window — and one of these
+    files is executed BY ROOT (`_nodesource_setup`).
+
+    `$$` is a small guessable number and /tmp is world-writable, so a local
+    unprivileged attacker can pre-create the path (mode 666, or a symlink) and
+    have their content run as root. `mktemp` answers both halves: an
+    unpredictable name and O_EXCL creation at mode 600.
+    """
+    offenders = [
+        line.strip()
+        for line in source_text.splitlines()
+        if not line.lstrip().startswith("#") and re.search(r"(TMPDIR|/tmp)[^\n]*\$\$", line)
+    ]
+    assert not offenders, f"a predictable temporary filename in a shared directory: {offenders}"
+    assert "mktemp" in source_text, "fetch_to_file should be using mktemp"
+
+
+def test_a_doctor_that_cannot_be_asked_blocks_the_short_circuit(tmp_path: Path) -> None:
+    """§3.8, and the worst way to get it wrong.
+
+    `doctor_amber` returns non-zero when it cannot get a trustworthy payload,
+    but `short_circuit` discarded that with `|| true` — so `_amber` came back
+    empty, the "is anything unexpected?" loop never ran, and a machine whose
+    `doctor` crashes read as perfectly healthy. Measured output: "doctor: every
+    check ok / Nothing to do", exit 0.
+
+    An unanswerable doctor is a reason to do the work, not to skip it.
+    """
+    broken = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body='case "$1" in --version) echo "aisquare 0.6.0"; exit 0 ;; esac\nexit 1',
+    )
+    versions = tmp_path / "v"
+    versions.mkdir()
+    for name, out in (
+        ("uv", "uv 0.12.3"),
+        ("tmux", "tmux 3.7c"),
+        ("gh", "gh version 2.97.0 (x)"),
+        ("git", "git version 2.55.0"),
+        ("node", "v26.7.0"),
+        ("curl", ""),
+    ):
+        script = versions / name
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "{out}"\nexit 0\n', encoding="utf-8")
+        script.chmod(0o755)
+
+    result = sh(
+        "WANT_AGENT=0; WANT_PROJECT=0; OFFLINE=1; "
+        "survey >/dev/null 2>&1; resolve >/dev/null 2>&1; "
+        "if short_circuit; then echo CLAIMED_HEALTHY; else echo REFUSED; fi",
+        env={"AISQUARE_INSTALL_VERSION": ""},
+        path=f"{versions}:{broken}:{base_path(tmp_path)}",
+    )
+    assert "REFUSED" in result.stdout, (
+        "a broken doctor was read as a healthy machine — the exact §3.8 failure "
+        f"this feature exists to prevent:\n{result.stdout}"
+    )
+
+
+def test_a_truncated_doctor_payload_blocks_the_short_circuit(tmp_path: Path) -> None:
+    """A `{` inside a check's detail splits an object and loses it.
+
+    `run_doctor` cross-checked the name count against the status count;
+    `short_circuit` did not. "The extraction dropped something" must never
+    present as "nothing is amber".
+    """
+    # Three names, two statuses: a payload the extraction cannot be trusted on.
+    payload = (
+        '[{"name": "a", "status": "ok", "detail": "x"},'
+        '{"name": "b", "detail": "y"},'
+        '{"name": "c", "status": "ok", "detail": "z"}]'
+    )
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=(
+            'case "$1" in\n'
+            '  --version) echo "aisquare 0.6.0"; exit 0 ;;\n'
+            f"  --json) printf '%s' '{payload}'; exit 0 ;;\n"
+            "esac\nexit 0"
+        ),
+    )
+    result = sh(
+        "if doctor_amber >/dev/null 2>&1; then echo TRUSTED; else echo DISTRUSTED; fi",
+        path=f"{cli}:{base_path(tmp_path)}",
+    )
+    assert result.stdout.strip() == "DISTRUSTED", result.stdout
+
+
+def test_yes_takes_the_default_so_a_mac_is_not_given_homebrew_unasked(tmp_path: Path) -> None:
+    """`--yes` means "never block on a question", NOT "answer yes to anything".
+
+    `confirm` returned 0 unconditionally under `--yes`, and the only prompt that
+    reaches it has a default of `n` because it installs **Homebrew**. So
+    `sh install.sh --yes` on a Mac at a terminal silently installed a
+    system-wide package manager — the opposite of the answer given to §11.3.
+    CI could not see it: macos-latest ships Homebrew, so the prompt is never
+    reached there.
+
+    The distinction that does matter is kept where it belongs: `handoff` checks
+    `ASSUME_YES` separately, because "do not ask me" and "do not launch a TUI at
+    me" are different instructions.
+    """
+    for default, expected in (("n", "no"), ("y", "yes")):
+        result = sh(
+            f'ASSUME_YES=1; if confirm "big irreversible thing?" {default}; '
+            "then echo yes; else echo no; fi",
+            path=base_path(tmp_path),
+            no_terminal=True,
+        )
+        assert result.stdout.strip() == expected, (
+            f"--yes with a default of {default!r} answered "
+            f"{result.stdout.strip()!r}, wanted {expected!r}"
+        )
+
+
+def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
+    """`--no-system-deps` asked for those tools to be absent.
+
+    Their amber lines are the requested state, not a surprise. Before this,
+    `tmux` and `repomix` were classed UNEXPECTED, `UNEXPECTED` was incremented
+    twice and `handoff` exited **2** — whose documented meaning is "amber for a
+    reason this script did not expect". The script expected them exactly; the
+    user typed the flag. So every `--yes --no-system-deps` provisioning run
+    failed its caller, on every invocation.
+    """
+    result = sh(
+        "WANT_SYSTEM_DEPS=0; WANT_PROJECT=0; expected_amber; echo",
+        path=base_path(tmp_path),
+    )
+    expected = set(result.stdout.split())
+    assert {"tmux", "gh", "repomix"} <= expected, (
+        f"--no-system-deps must expect the checks it skipped, got {sorted(expected)}"
+    )
+    for name in ("tmux", "repomix", "gh"):
+        member = sh(
+            f"WANT_SYSTEM_DEPS=0; WANT_PROJECT=0; "
+            f"if is_expected_amber {name}; then echo yes; else echo no; fi",
+            path=base_path(tmp_path),
+        )
+        assert member.stdout.strip() == "yes", name
+
+
+def test_a_version_pin_moves_a_machine_that_is_ahead_of_it(tmp_path: Path) -> None:
+    """`--version V` is documented as a PIN, so anything that is not V must move.
+
+    The comparison was `version_lt CLI PIN`, which is false for a downgrade — so
+    `--version 0.5.0` on a 0.6.0 machine left 0.6.0 in place and reported
+    "aisquare-cli 0.6.0 is current", and `short_circuit` (which never consulted
+    the pin) printed "Nothing to do" on a machine the user had just asked to
+    hold at 0.5.0.
+
+    Untested before because the helper pins 9.9.9 for every case — always an
+    upgrade, never a downgrade.
+    """
+    for pin, installed, expected in (
+        ("0.5.0", "0.6.0", "upgrade"),  # a downgrade IS work
+        ("0.7.0", "0.6.0", "upgrade"),
+        ("0.6.0", "0.6.0", "current"),
+    ):
+        result = sh(
+            f"PIN_VERSION={pin}; CLI_VERSION={installed}; OFFLINE=1; "
+            "INSTALL_TARGET=$PYPI_PACKAGE; resolve >/dev/null 2>&1; "
+            'printf "%s\\n" "$CLI_ACTION"',
+            path=base_path(tmp_path),
+        )
+        assert result.stdout.strip() == expected, (
+            f"pin {pin} on {installed} -> {result.stdout.strip()}, wanted {expected}"
+        )
+
+
+def test_the_read_only_phase_calls_no_package_manager(tmp_path: Path) -> None:
+    """§3.9.4's headline guarantee, on a dnf machine.
+
+    `pkg_manager` runs before `short_circuit`, and it used to read
+    `dnf --version` to decide dnf4-vs-dnf5 repository syntax — so the phase
+    documented as making no writes and calling no package manager did call one,
+    on every Fedora and RHEL box. `DNF_MAJOR` is only ever needed by
+    `_gh_add_dnf_repo`, which runs long after the decision, so it is read there.
+
+    The container cells could not catch this: they stubbed `apt-get` too, and
+    install.sh's detection tries `apt-get` first, so every cell on every image
+    took the apt branch.
+    """
+    log = tmp_path / "pkg.log"
+    managers = stub_dir(
+        tmp_path,
+        "dnfonly",
+        "dnf",
+        body=f'printf "dnf %s\\n" "$*" >>"{log}"\necho "dnf 5.2.1"',
+    )
+    result = sh(
+        'OS=linux; pkg_manager; printf "PKG=%s\\n" "$PKG"',
+        path=f"{managers}:{base_path(tmp_path)}",
+    )
+    assert "PKG=dnf" in result.stdout, result.stdout
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    assert not calls, f"the read-only phase invoked a package manager: {calls}"
+
+
+def test_the_path_warning_can_fire_after_an_install(tmp_path: Path) -> None:
+    """§3.6's warning is about the user's PROFILE, not this process's `$PATH`.
+
+    `install_uv` and `install_cli` both prepend `~/.local/bin` to `$PATH` in
+    this very shell, so by the time `path_check` looked, the entry was always
+    there and the warning could never fire on the one path where it matters. A
+    first-time user whose profile lacks `~/.local/bin` got no warning, opened a
+    new shell, and `aisquare` was not found — with the installer having said
+    nothing.
+    """
+    curl = stub_dir(tmp_path, "bin", "curl")
+    result = sh(
+        # preflight samples the inherited PATH; then simulate what the install
+        # steps do to it, and ask again.
+        "preflight >/dev/null 2>&1\n"
+        'PATH="$HOME/.local/bin:$PATH"\n'
+        "path_check 2>/dev/null\n"
+        'printf "HINT=[%s]\\n" "$PATH_HINT"',
+        path=f"{curl}:{base_path(tmp_path)}",
+        env={"HOME": str(tmp_path)},
+    )
+    assert "HINT=[export PATH=" in result.stdout, (
+        "path_check saw the PATH this script had already fixed up, so the "
+        f"warning could not fire:\n{result.stdout}"
+    )
+
+
+def test_declining_homebrew_is_only_asked_once(tmp_path: Path) -> None:
+    """Four call sites route through `ensure_pkg_manager`; the decline was not
+    recorded, so a Mac with no Homebrew asked the same question four times.
+
+    Bad on exactly the platform §5 calls awkward, and it is the only interactive
+    prompt before the handoff — so a user who says no was stuck in it.
+    """
+    result = sh(
+        "OS=macos; ASSUME_YES=0\n"
+        "for _ in 1 2 3 4; do ensure_pkg_manager >/dev/null 2>&1 || true; done\n"
+        'printf "declined=%s\\n" "$_brew_unavailable"',
+        path=base_path(tmp_path),
+        no_terminal=True,
+    )
+    assert "declined=1" in result.stdout, (
+        f"the decline was not recorded, so it will be asked again:\n{result.stdout}"
+    )
+
+
+def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
+    tmp_path: Path,
+) -> None:
+    """The bug 98b3626 fixed in `summary`, which was still live in `short_circuit`.
+
+    On a machine that HAS gbrain — reachable, since `brain` reports ok when
+    gbrain is installed and also when `AISQUARE_BRAIN=0` — a `--no-project` run
+    read "everything ok except snapshot (gbrain is out of scope)", blaming a
+    check that was perfectly fine.
+    """
+    payload = (
+        '[{"name": "home", "status": "ok", "detail": "x"},'
+        '{"name": "snapshot", "status": "warn", "detail": "y", "fix": "z"}]'
+    )
+    versions = tmp_path / "v"
+    versions.mkdir()
+    for name, out in (
+        ("uv", "uv 0.12.3"),
+        ("tmux", "tmux 3.7c"),
+        ("gh", "gh version 2.97.0 (x)"),
+        ("git", "git version 2.55.0"),
+        ("node", "v26.7.0"),
+        ("curl", ""),
+    ):
+        script = versions / name
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "{out}"\nexit 0\n', encoding="utf-8")
+        script.chmod(0o755)
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=(
+            'case "$1" in\n'
+            '  --version) echo "aisquare 0.6.0"; exit 0 ;;\n'
+            f"  --json) printf '%s' '{payload}'; exit 0 ;;\n"
+            "esac\nexit 0"
+        ),
+    )
+    result = sh(
+        "WANT_AGENT=0; WANT_PROJECT=0; OFFLINE=1; "
+        "survey >/dev/null 2>&1; resolve >/dev/null 2>&1; short_circuit",
+        env={"AISQUARE_INSTALL_VERSION": ""},
+        path=f"{versions}:{cli}:{base_path(tmp_path)}",
+    )
+    assert "Nothing to do" in result.stdout, result.stdout
+    assert "gbrain" not in result.stdout, (
+        "the reason named gbrain while `brain` was green:\n" + result.stdout
+    )
+    assert "no project registered" in result.stdout, result.stdout

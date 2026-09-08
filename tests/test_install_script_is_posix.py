@@ -33,11 +33,18 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "install.sh"
 CELL = REPO / "tests/install/cell.sh"
+CELL_NONROOT = REPO / "tests/install/cell-nonroot.sh"
 MATRIX = REPO / "tests/install/matrix.sh"
 
 #: Every shell file this project ships that has to run under `dash` and BusyBox
 #: `ash`, not just bash.
-POSIX_SCRIPTS = (SCRIPT, CELL, MATRIX)
+#:
+#: `cell-nonroot.sh` was added last and was missing from here AND from all three
+#: static steps in .github/workflows/install.yml — so the newest shell file in
+#: the tree was checked by nothing at all. Anything added to tests/install/ must
+#: be added here; the test below asserts that, so the next omission fails
+#: instead of going unnoticed.
+POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, MATRIX)
 
 
 @pytest.fixture(scope="module")
@@ -142,8 +149,26 @@ def test_the_terminal_test_opens_the_device_rather_than_stat_ing_it(source: str)
     about, and the run blocks on a prompt nobody can see. The script opens it
     instead.
     """
-    assert ": </dev/tty" in source or ": < /dev/tty" in source, (
-        "tty_available must OPEN /dev/tty, not test its mode bits"
+    # CODE lines, and the real property. The first version asserted that
+    # `: </dev/tty` appeared in `source` — which install.sh does NOT contain as
+    # code: the only match was the COMMENT documenting the spelling that was
+    # thrown away. So the guard was vacuous in the direction it claimed (it
+    # checked that a paragraph of prose still existed, not that the probe opens
+    # the device), it was a false-failure trap for anyone tidying that comment,
+    # and it actively REQUIRED the dangerous spelling to appear in the file.
+    code = "\n".join(line for _, line in _code_lines(source))
+    assert "</dev/tty" in code, "tty_available must OPEN /dev/tty, not test its mode bits"
+    # And the second half of the fix, which the old assertion could not express:
+    # the probe must not use `:`. It is a POSIX SPECIAL BUILT-IN, and a
+    # redirection error on one EXITS a non-interactive shell.
+    special = [
+        (number, line.strip())
+        for number, line in _code_lines(source)
+        if re.search(r"(^|[;&|{(\s]):\s*<\s*/dev/tty", line)
+    ]
+    assert not special, (
+        "`:` is a POSIX special built-in — a redirection error on it exits a "
+        f"non-interactive shell, so it cannot be the /dev/tty probe: {special}"
     )
     # CODE lines only. The script explains at length why `[ -r /dev/tty ]` is
     # wrong, and a guard that reads that explanation as the violation fails on

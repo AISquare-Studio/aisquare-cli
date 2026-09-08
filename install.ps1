@@ -51,20 +51,64 @@ if (-not $wsl) {
 # `wsl -l -q` lists installed distributions. It writes UTF-16 to a pipe, which
 # is why the output is filtered rather than tested for emptiness -- a naive
 # `if ($out)` is true even when the only content is a BOM and blank lines.
-$distros = @()
-try {
-    $raw = & wsl.exe --list --quiet 2>$null
-    $distros = @($raw | ForEach-Object { $_ -replace "`0", '' } |
-        Where-Object { $_.Trim().Length -gt 0 } |
-        ForEach-Object { $_.Trim() })
-}
-catch {
-    $distros = @()
+function Get-WslLines($WslArgs) {
+    try {
+        $raw = & wsl.exe @WslArgs 2>$null
+        return @($raw | ForEach-Object { $_ -replace "`0", '' } |
+            Where-Object { $_.Trim().Length -gt 0 } |
+            ForEach-Object { $_.Trim() })
+    }
+    catch {
+        return @()
+    }
 }
 
-if ($distros.Count -eq 0) {
+$distros = Get-WslLines @('--list', '--quiet')
+
+# DOCKER DESKTOP IS WHY THE FIRST ENTRY IS NOT USED.
+#
+# `--quiet` lists every registered distribution and does NOT mark which is the
+# default -- only the verbose form does. Docker Desktop registers
+# `docker-desktop` (historically `docker-desktop-data` too), and `d` sorts
+# before `Ubuntu`. So on a very ordinary Windows developer machine, taking the
+# first entry ran the installer inside Docker's LinuxKit utility VM: a stripped
+# image with no bash, no curl and no persistent home. The failure advice then
+# named that same VM, sending the user straight back into it.
+#
+# So: read the DEFAULT from the verbose listing, which marks it with `*`; fall
+# back to the first entry that is not one of Docker's; and refuse if that is all
+# there is.
+$DockerPattern = '^docker-desktop'
+$defaultDistro = $null
+foreach ($line in (Get-WslLines @('--list', '--verbose'))) {
+    if ($line -match '^\*\s+(\S+)') { $defaultDistro = $Matches[1]; break }
+}
+
+$usable = @($distros | Where-Object { $_ -notmatch $DockerPattern })
+
+if ($defaultDistro -and ($defaultDistro -notmatch $DockerPattern)) {
+    $target = $defaultDistro
+}
+elseif ($usable.Count -gt 0) {
+    $target = $usable[0]
+    if ($defaultDistro) {
+        Write-Note "the default distribution is '$defaultDistro', which is Docker Desktop's"
+        Write-Note "utility VM and cannot run this -- using '$target' instead"
+    }
+}
+else {
+    $target = $null
+}
+
+if (-not $target) {
     Write-Host ''
-    Write-Host 'WSL is present but no Linux distribution is installed.' -ForegroundColor Yellow
+    if ($distros.Count -gt 0) {
+        Write-Host "WSL has only Docker Desktop's utility VM ($($distros -join ', '))," -ForegroundColor Yellow
+        Write-Host 'which is not a distribution you can install into.' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host 'WSL is present but no Linux distribution is installed.' -ForegroundColor Yellow
+    }
     Write-Host 'Install Ubuntu, then run this same command again:'
     Write-Host ''
     Write-Host '    wsl --install -d Ubuntu' -ForegroundColor White
@@ -73,7 +117,7 @@ if ($distros.Count -eq 0) {
 }
 
 Write-Note "found WSL distribution(s): $($distros -join ', ')"
-Write-Step "Running the installer inside $($distros[0])"
+Write-Step "Running the installer inside $target"
 Write-Host ''
 
 # THE DELEGATION. Two details are load-bearing:
@@ -88,19 +132,19 @@ Write-Host ''
 # Deliberately NOT `--yes`: the point of the one-liner is that it ends by
 # offering the UI, and a user who ran this by hand is sitting at a terminal.
 $inner = "set -e; curl -fsSL '$InstallUrl' | sh -s -- $Forward"
-& wsl.exe -d $distros[0] -- bash -lc $inner
+& wsl.exe -d $target -- bash -lc $inner
 $code = $LASTEXITCODE
 
 if ($code -ne 0) {
     Write-Host ''
     Write-Host "The installer exited $code inside WSL." -ForegroundColor Yellow
     Write-Note 'Open the WSL shell and rerun it there to see the full output:'
-    Write-Note "  wsl -d $($distros[0])"
+    Write-Note "  wsl -d $target"
     Write-Note "  curl -fsSL $InstallUrl | sh"
     exit $code
 }
 
 Write-Host ''
 Write-Step 'Done. aisquare is installed inside WSL.'
-Write-Note "Open it with:  wsl -d $($distros[0]) -- asq"
+Write-Note "Open it with:  wsl -d $target -- asq"
 Write-Note 'Run everything else from that shell too -- the agents live there.'

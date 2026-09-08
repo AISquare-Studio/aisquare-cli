@@ -242,7 +242,14 @@ head1 "RUN 3: re-run with every package manager stubbed"
 # called and swallowed by an `|| true` and the test would never know.
 mkdir -p "$STUBDIR"
 : >"$STUB_LOG"
+# ONLY THE MANAGERS THIS MACHINE ACTUALLY HAS. Stubbing all of them put
+# `apt-get` on PATH everywhere, and install.sh's detection is an if/elif chain
+# that tries `apt-get` FIRST — so every cell, on every image, took the apt
+# branch, and the fedora, arch and alpine cells were silently grading the same
+# code path as debian. Creating a stub only where the real binary exists keeps
+# detection landing where it would on the real machine.
 for pm in apt-get apt dnf yum pacman zypper apk brew npm; do
+    command -v "$pm" >/dev/null 2>&1 || continue
     cat >"$STUBDIR/$pm" <<STUB
 #!/bin/sh
 printf '%s %s\n' "$pm" "\$*" >> "$STUB_LOG"
@@ -331,8 +338,15 @@ amber_again=$(amber_checks)
 head1 "RUN 4: the upgrade path — an exact pin must still move"
 
 pinned=0.5.0
+# NO `aisquare doctor` here. A stray discarded call used to sit at the top of
+# this substitution, and `set -eu` is inherited by the subshell — while
+# `aisquare doctor` raises `typer.Exit(1)` whenever ANY check has status `fail`
+# (src/aisquare/cli/root.py). So a single failing check aborted the subshell
+# before curl ever ran, `latest` came back empty, and the whole of RUN 4 was
+# skipped behind "could not read the latest version from PyPI". Losing the one
+# assertion that proves the section 3.9.1 trap is handled, to a log line that
+# reads like a network blip, is the worst way for it to go.
 latest=$(
-    aisquare --json doctor >/dev/null 2>&1
     curl -fsSL https://pypi.org/pypi/aisquare-cli/json 2>/dev/null ||
         wget -qO- https://pypi.org/pypi/aisquare-cli/json 2>/dev/null
 )

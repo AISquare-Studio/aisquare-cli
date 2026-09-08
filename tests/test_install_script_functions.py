@@ -22,6 +22,7 @@ work under whatever `/bin/sh` the developer has, and CI runs the same file with
 from __future__ import annotations
 
 import os
+import pty
 import shutil
 import subprocess
 from pathlib import Path
@@ -814,3 +815,218 @@ def test_an_unexpected_amber_check_exits_2(tmp_path: Path) -> None:
         no_terminal=True,
     )
     assert result.returncode == 2, f"rc={result.returncode}, wanted 2\n{result.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# The one shape nothing else covers: a HUMAN at a terminal, with the script
+# itself on stdin. §0.5 and §3.3.
+# ---------------------------------------------------------------------------
+
+
+def _piped_into_sh_with_a_terminal(
+    answer: str, *, path: str, home: Path, extra: list[str] | None = None
+) -> str:
+    """Run install.sh exactly as `curl … | sh` does, with a real terminal.
+
+    THE SHAPE IS THE TEST, and no other test in this repo reproduces it:
+
+        stdin           a PIPE carrying the script's own bytes
+        stdout/stderr   a terminal
+        /dev/tty        the same terminal, and openable
+
+    That is the state §3.3 is entirely about, and it is the one state where a
+    `read -r answer` with no `< /dev/tty` does its damage — it consumes the rest
+    of the script instead of the person's answer. Under the container matrix
+    stdin is a pipe but there is no terminal; under `pytest` there is neither. So
+    a pty is the only way to reach it, and `answer` is typed into that pty the
+    way a person would type it.
+
+    `pty.fork()` rather than `subprocess`, because the child has to be a session
+    leader with the pty as its CONTROLLING terminal — not merely have it on fd
+    1. `start_new_session=True` plus a pty on stdout gives the first and not the
+    second, and `/dev/tty` would then fail to open, which would quietly turn this
+    into the no-terminal test that already exists.
+    """
+    script = SCRIPT.read_bytes()
+    argv = [SH, "-s", "--", *(extra or [])]
+
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PATH": path,
+            "HOME": str(home),
+            "NO_COLOR": "1",
+            "AISQUARE_INSTALL_LIB": "0",
+            "AISQUARE_INSTALL_VERSION": "",
+        }
+    )
+
+    read_end, write_end = os.pipe()
+    pid, master = pty.fork()
+    if pid == 0:  # child
+        try:
+            os.close(write_end)
+            os.dup2(read_end, 0)  # stdin IS the pipe — the whole point
+            os.close(read_end)
+            os.execve(argv[0], argv, environment)
+        finally:  # pragma: no cover - only reached if exec fails
+            os._exit(127)
+
+    os.close(read_end)
+    # Feed the script down the pipe and close it, exactly as curl finishing does.
+    with os.fdopen(write_end, "wb") as pipe:
+        pipe.write(script)
+
+    # Type the answer at the terminal.
+    os.write(master, answer.encode())
+
+    output = b""
+    try:
+        while True:
+            chunk = os.read(master, 4096)
+            if not chunk:
+                break
+            output += chunk
+    except OSError:
+        # EIO on Linux when the child closes the slave side. Expected.
+        pass
+    os.waitpid(pid, 0)
+    os.close(master)
+    return output.decode(errors="replace")
+
+
+#: One doctor payload in the target state — `brain` the only non-ok check — so
+#: the stub machine reaches the happy summary and the closing prompt.
+_DOCTOR_PAYLOAD = (
+    '[{"name": "home", "status": "ok", "detail": "ok", "fix": null},'
+    '{"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "optional"}]'
+)
+
+
+@pytest.fixture
+def piped_machine(tmp_path: Path) -> tuple[str, Path]:
+    """A stubbed machine that install.sh will run to completion against.
+
+    Everything that would touch the real system is a stub, so `main` reaches
+    `handoff` — which is the only step under test here — without installing
+    anything. `asq` reports whether ITS stdin is a terminal, which is the
+    assertion the second test rests on.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # `preflight` requires a downloader — every installer this script uses is
+    # fetched over HTTPS — so the stub machine needs one even though --offline
+    # means nothing is actually fetched.
+    (bin_dir / "curl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (bin_dir / "uv").write_text(
+        '#!/bin/sh\ncase "$1" in --version) echo "uv 0.12.3 (stub)" ;; esac\nexit 0\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "aisquare").write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  --version) echo "aisquare 0.6.0" ;;\n'
+        # A payload whose only non-ok check is `brain`: the target state, so the
+        # summary is the happy one and the prompt is reached.
+        "  --json) printf '%s' '" + _DOCTOR_PAYLOAD + "' ;;\n"
+        "esac\nexit 0\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "asq").write_text(
+        "#!/bin/sh\n"
+        "if [ -t 0 ]; then\n"
+        '  echo "UI-STARTED stdin=terminal"\n'
+        "else\n"
+        '  echo "UI-STARTED stdin=NOT-a-terminal"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    return f"{bin_dir}:{base_path(tmp_path)}", home
+
+
+def test_the_prompt_reads_the_terminal_and_not_the_script(
+    piped_machine: tuple[str, Path],
+) -> None:
+    """Answering `n` at the prompt must decline — not consume the script.
+
+    THE BUG THIS EXISTS FOR (§3.3, §10): with `read -r answer` and no
+    `< /dev/tty`, stdin is the pipe carrying install.sh, so the read either eats
+    the remainder of the script or hits EOF and returns instantly — the prompt
+    appears to answer itself and the run ends. Invisible in every other test
+    here, and the first thing a real user would hit.
+
+    A declined prompt must still name the command, because the user has a
+    working install either way.
+    """
+    path, home = piped_machine
+    output = _piped_into_sh_with_a_terminal(
+        "n\n",
+        path=path,
+        home=home,
+        extra=["--no-project", "--no-agent", "--no-system-deps", "--offline"],
+    )
+
+    assert "Open the aisquare fleet UI now?" in output, (
+        f"the prompt never appeared — the read did not reach a terminal:\n{output}"
+    )
+    assert "UI-STARTED" not in output, f"answering 'n' still launched the UI:\n{output}"
+    assert "Open it any time with" in output, (
+        f"a declined prompt must still name the command:\n{output}"
+    )
+
+
+def test_answering_yes_hands_over_with_the_terminal_reconnected(
+    piped_machine: tuple[str, Path],
+) -> None:
+    """`exec asq < /dev/tty` — and the `< /dev/tty` half is what is asserted.
+
+    Measured on 0.6.0: bare `aisquare` with a piped stdin prints the usage page
+    and exits 2. So handing over WITHOUT reconnecting the terminal would end the
+    installer by printing a help page and reporting failure — the worst possible
+    last impression, and one that reads as the install having failed rather than
+    as a handoff bug.
+
+    The `asq` stub reports whether its own stdin is a terminal, so this
+    distinguishes "the UI started" from "the UI started correctly". Nothing else
+    can: with the redirection missing the UI still starts, and still looks fine
+    in a log.
+    """
+    path, home = piped_machine
+    output = _piped_into_sh_with_a_terminal(
+        "y\n",
+        path=path,
+        home=home,
+        extra=["--no-project", "--no-agent", "--no-system-deps", "--offline"],
+    )
+
+    assert "UI-STARTED" in output, f"answering 'y' did not hand over:\n{output}"
+    assert "UI-STARTED stdin=terminal" in output, (
+        "the UI was exec'd with the SCRIPT's pipe still on its stdin rather than "
+        f"the terminal — see §3.3:\n{output}"
+    )
+
+
+def test_an_empty_answer_takes_the_default_and_opens_the_ui(
+    piped_machine: tuple[str, Path],
+) -> None:
+    """The prompt is `[Y/n]`, so a bare Enter means yes (§0.5).
+
+    Worth pinning separately: pressing Enter is what most people do, and a
+    default that silently flipped to `n` would make the closing promise of the
+    whole feature stop working without any error.
+    """
+    path, home = piped_machine
+    output = _piped_into_sh_with_a_terminal(
+        "\n",
+        path=path,
+        home=home,
+        extra=["--no-project", "--no-agent", "--no-system-deps", "--offline"],
+    )
+
+    assert "[Y/n]" in output, f"the prompt must show Y as the default:\n{output}"
+    assert "UI-STARTED stdin=terminal" in output, f"a bare Enter should open the UI:\n{output}"

@@ -140,23 +140,48 @@ def test_the_offender_detector_finds_the_bug_that_shipped() -> None:
     assert _offenders(f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})") == []
 
 
+def _force_the_rows_that_carry_install_advice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the sweep deterministic instead of a reading of this machine.
+
+    ONLY FOUR ROWS in ``doctor()`` can emit an install command: ``install``'s
+    two warn branches, ``tiktoken``'s, and the SDK's not-present branch. Every
+    one of them is SILENT on a well-provisioned machine — aisquare on PATH
+    outside a venv (exactly what ``_GLOBAL_INSTALL`` recommends), tiktoken
+    importable, the SDK installed. So a sweep that simply ran ``doctor()`` was
+    strongest on a broken laptop and vacuous on a correct one: it judged nothing
+    and passed, and the control below would have gone red on a *healthy* machine
+    rather than a wrong one. Both are wrong for the same reason, so both use
+    this.
+
+    Everything else in ``doctor()`` advertises ``apt``/``dnf``/``brew``,
+    ``npm install -g`` or ``aisquare …``, which the extractor does not match.
+    """
+    monkeypatch.setattr(diagnostics, "_has_module", lambda _name: False)
+    monkeypatch.setattr("aisquare.services.diagnostics.shutil.which", lambda _name: None)
+
+
+def _sweep(checks: list[DoctorCheck]) -> list[str]:
+    """Every offending install command in ``checks``, named by where it came from."""
+    return [
+        f"{check.name}.{field}: `{verb} {package}` — should be {DISTRIBUTION}"
+        for check in checks
+        for field, text in (("detail", check.detail), ("fix", check.fix or ""))
+        for verb, package in _offenders(text)
+    ]
+
+
 def test_no_doctor_check_tells_a_user_to_install_the_sdk_instead_of_this_cli(
-    isolated_home: Path,
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The guard: run the real doctor, sweep every detail and fix it produced.
 
     Through ``doctor()`` rather than the private check functions, because the
     string has to be wrong *where a user reads it*, and because a row assembled
-    from a constant elsewhere in the tree is exactly how the fourth instance
-    hid from the first three.
+    from a constant elsewhere in the tree is exactly how the fourth instance hid
+    from the first three.
     """
-    offenders: list[str] = []
-    for check in diagnostics.doctor():
-        for field, text in (("detail", check.detail), ("fix", check.fix or "")):
-            for verb, package in _offenders(text):
-                offenders.append(
-                    f"{check.name}.{field}: `{verb} {package}` — should be {DISTRIBUTION}"
-                )
+    _force_the_rows_that_carry_install_advice(monkeypatch)
+    offenders = _sweep(diagnostics.doctor())
     assert not offenders, (
         "a doctor remediation names the Explainability SDK (`aisquare`) where it "
         f"means this CLI (`{DISTRIBUTION}`). That command installs a different "
@@ -164,19 +189,94 @@ def test_no_doctor_check_tells_a_user_to_install_the_sdk_instead_of_this_cli(
     )
 
 
-def test_the_sweep_actually_read_some_install_commands(isolated_home: Path) -> None:
+def test_the_sweep_actually_read_some_install_commands(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A sweep that found nothing to judge is a green light for no reason.
 
-    The control for the test above. If `doctor()` ever stops emitting install
-    advice — or this environment stops reaching the checks that carry it — that
-    test passes vacuously, which is the failure mode the sweep exists to avoid.
+    The control for the test above, and it is only meaningful now that both
+    force the same state: as a reading of the ambient machine it would have
+    failed on a correctly-provisioned one, which is the opposite of a control.
     """
+    _force_the_rows_that_carry_install_advice(monkeypatch)
     seen = [
         command
         for check in diagnostics.doctor()
         for command in _install_commands(f"{check.detail} {check.fix or ''}")
     ]
     assert seen, "no doctor check produced an install command, so the guard judged nothing"
+
+
+def test_the_explainability_sdk_rows_are_swept_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rows ``doctor()`` alone never reaches — and where the fourth bug was.
+
+    ``explainability_ops.checks`` returns the switch ALONE until the feature has
+    been touched, so on a fresh home the SDK row does not exist and the sweep
+    above cannot see it. That is precisely the row whose stale constant said
+    ``pip install "aisquare[explainability]"``, so leaving it to an untouched
+    home would have been a guard that missed the bug it was written for.
+
+    Both reachable states are swept: enabled (a ``warn`` carrying a ``fix``) and
+    merely configured (an ``ok`` carrying the advice in its ``detail``).
+    """
+    from aisquare.core.config import ExplainabilitySettings
+    from aisquare.services import explainability_ops as ops
+
+    monkeypatch.setattr(
+        ops,
+        "sdk_presence",
+        lambda: ops.SdkPresence(importable=False, script=None, version=None, shadowing=False),
+    )
+    rows = [
+        *ops.checks(ExplainabilitySettings(enabled=True), env={}),
+        *ops.checks(ExplainabilitySettings(), live=True, env={}),
+    ]
+    sdk_rows = [row for row in rows if row.name == "explainability sdk"]
+    assert sdk_rows, "the SDK rows were not reached, so this guard judged nothing"
+    assert not _sweep(sdk_rows), "\n  ".join(_sweep(sdk_rows))
+
+
+def test_the_executed_sdk_install_goes_through_our_own_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The COMMAND RUN, not just the command printed.
+
+    ``install_sdk`` shelled out to ``pip install aisquare[explainability]``
+    while every printed hint was being corrected away from exactly that form, so
+    the two halves of one code path disagreed: the row told the operator the safe
+    command and this ran the other one for them.
+
+    The floor is the checkable difference, and the reason this is a defect rather
+    than a style point: our extra pins ``aisquare[explainability]>=1.1``, which
+    is where ``AgentRunTracer`` accepts ``run_id``. The bare form carries no
+    floor, so it can resolve an SDK too old for the lane the install exists to
+    enable — and succeed while doing it.
+    """
+    from aisquare.services import explainability_ops as ops
+
+    seen: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def capture(argv: list[str], **_kwargs: object) -> _Completed:
+        seen.append(argv)
+        return _Completed()
+
+    monkeypatch.setattr("aisquare.services.explainability_ops.subprocess.run", capture)
+    ok, detail = ops.install_sdk()
+
+    assert ok, detail
+    assert len(seen) == 1, seen
+    requirement = seen[0][-1]
+    assert requirement == f"{DISTRIBUTION}[explainability]", requirement
+    assert requirement != "aisquare[explainability]"
+    assert seen[0][1:4] == ["-m", "pip", "install"], seen[0]
+    # Not --upgrade: consent was for installing the SDK, not for upgrading the
+    # CLI underneath a running process.
+    assert "--upgrade" not in seen[0], seen[0]
 
 
 def test_install_hint_names_this_distribution_on_both_of_its_branches(

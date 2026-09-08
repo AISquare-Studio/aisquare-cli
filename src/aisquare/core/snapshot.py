@@ -58,6 +58,56 @@ MIN_NODE = (22,)
 
 _NODE_VERSION = re.compile(r"v?(\d+(?:\.\d+)*)")
 
+#: The floor out of an npm ``engines.node`` range. Only the lower bound is read:
+#: ``>=22.0.0``, ``>= 22``, ``^22.0.0`` and ``22.x`` all answer 22, and an upper
+#: bound is somebody else's problem -- we are asking "is this Node too old".
+_ENGINE_FLOOR = re.compile(r">=?\s*v?(\d+(?:\.\d+)*)|[\^~]\s*v?(\d+(?:\.\d+)*)")
+
+
+def installed_repomix_floor(binary: str | None = None) -> tuple[int, ...] | None:
+    """The ``engines.node`` floor the INSTALLED repomix declares, or ``None``.
+
+    :data:`MIN_NODE` is the floor of the repomix that ``npx --yes repomix``
+    would fetch -- the latest release. It is the wrong number for a machine
+    that PINNED an older one (``npm install -g repomix@0.2``), which may
+    declare a lower floor and pack perfectly well on a Node this constant calls
+    too old. So where a repomix is actually installed, its own metadata is the
+    authority and this reads it.
+
+    NO PROCESS IS STARTED and no network is touched: the answer is on disk, in
+    the ``package.json`` beside the resolved bin, which is the same technique
+    ``diagnostics.claude_code_version`` uses on an npm layout. It also means
+    this stays right when repomix RAISES its floor -- a hardcoded 22 would
+    under-warn once repomix needs 24.
+
+    Never raises. Unreadable is ``None``, and the caller falls back to
+    :data:`MIN_NODE` rather than treating unknown as satisfied.
+    """
+    found = binary if binary is not None else shutil.which("repomix")
+    if found is None:
+        return None
+    try:
+        # npm links `bin/repomix.cjs` from the package root; a pnpm/yarn layout
+        # nests differently, so both the bin's parent and its grandparent are
+        # tried before giving up.
+        real = Path(found).resolve()
+        for candidate in (real.parent / "package.json", real.parent.parent / "package.json"):
+            if not candidate.is_file():
+                continue
+            engines = json.loads(candidate.read_text(encoding="utf-8")).get("engines")
+            if not isinstance(engines, dict):
+                continue
+            spec = engines.get("node")
+            if not isinstance(spec, str):
+                continue
+            match = _ENGINE_FLOOR.search(spec)
+            if match is None:
+                continue
+            return tuple(int(part) for part in (match.group(1) or match.group(2)).split("."))
+    except (OSError, ValueError, AttributeError):
+        return None
+    return None
+
 
 def node_version() -> tuple[int, ...] | None:
     """Node's version as a comparable tuple, or ``None`` when it cannot be read.

@@ -25,8 +25,10 @@ rather than leniency:
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -47,13 +49,21 @@ Tools = Callable[..., None]
 def tools(monkeypatch: pytest.MonkeyPatch) -> Tools:
     """Control what is on PATH and what Node reports, without touching either."""
 
-    def configure(*, repomix: bool, npx: bool, node: tuple[int, ...] | None) -> None:
-        present = {"repomix": repomix, "npx": npx}
+    def configure(
+        *,
+        repomix: bool,
+        npx: bool,
+        node: tuple[int, ...] | None,
+        node_on_path: bool = True,
+        installed_floor: tuple[int, ...] | None = None,
+    ) -> None:
+        present = {"repomix": repomix, "npx": npx, "node": node_on_path}
         monkeypatch.setattr(
             "aisquare.services.diagnostics.shutil.which",
             lambda name: f"/usr/bin/{name}" if present.get(name) else None,
         )
         monkeypatch.setattr(snapshot_core, "node_version", lambda: node)
+        monkeypatch.setattr(snapshot_core, "installed_repomix_floor", lambda: installed_floor)
 
     return configure
 
@@ -194,3 +204,159 @@ class TestNodeVersionReader:
                 self.returncode = returncode
 
         monkeypatch.setattr("aisquare.core.snapshot.subprocess.run", lambda *_a, **_k: _Result())
+
+
+class TestNodeAbsentIsNotMerelyUnknown:
+    """``node_version() is None`` is three facts, and one of them is a broken machine.
+
+    It answers ``None`` for a Node that is absent, one that exits non-zero, and
+    one whose output will not parse. Reporting all three as "untested, snapshots
+    enabled" put the first back into the shape this whole check was rewritten to
+    remove: ``repomix`` and ``npx`` are both ``#!/usr/bin/env node`` scripts
+    (verified on this machine), so with no Node on PATH packing cannot run at
+    all, and green over that is a lie rather than a gap.
+
+    Reachable without contriving anything: a ``repomix`` shim whose Node came
+    from a version manager that a non-interactive shell never sources, or a
+    container image where Node was pruned after the global install.
+    """
+
+    def test_no_node_on_path_warns_even_though_repomix_is_there(self, tools: Tools) -> None:
+        tools(repomix=True, npx=True, node=None, node_on_path=False)
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.warn
+        assert "Node is not on PATH" in check.detail
+        assert "cannot run" in check.detail
+
+    def test_the_npx_path_is_no_different(self, tools: Tools) -> None:
+        """npx is a Node script too, so it is not a way around a missing Node."""
+        tools(repomix=False, npx=True, node=None, node_on_path=False)
+        assert diagnostics._check_repomix().status is CheckStatus.warn
+
+    def test_an_unreadable_but_present_node_is_still_only_untested(self, tools: Tools) -> None:
+        """The distinction: Node IS installed, it just would not say which version."""
+        tools(repomix=True, npx=True, node=None, node_on_path=True)
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.ok
+        assert "not readable" in check.detail
+
+    def test_the_advice_covers_a_version_manager_shim(self, tools: Tools) -> None:
+        """The likeliest cause is a Node that exists but is not on THIS PATH."""
+        tools(repomix=True, npx=True, node=None, node_on_path=False)
+        fix = diagnostics._check_repomix().fix or ""
+        assert "on PATH" in fix
+
+
+class TestTheFloorIsPerPath:
+    """``MIN_NODE`` is the LATEST repomix's floor, and only the npx path runs that.
+
+    ``npx --yes repomix`` fetches the newest release, so the constant is right
+    there. An installed ``repomix`` is whatever was pinned — ``npm install -g
+    repomix@0.2`` on Node 18 may pack perfectly well — and judging it by the
+    latest release's floor is the same false positive this check's docstring
+    rules out ("would send someone to reinstall a working toolchain"), just from
+    the other direction. So where a repomix is installed, its own
+    ``engines.node`` is the authority.
+    """
+
+    def test_a_pinned_old_repomix_with_a_lower_floor_is_not_warned_about(
+        self, tools: Tools
+    ) -> None:
+        """The false positive: Node 18, repomix@0.2 declaring >=16. It works."""
+        tools(repomix=True, npx=True, node=(18, 19, 1), installed_floor=(16,))
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.ok
+        assert "18.19.1" in check.detail
+
+    def test_the_installed_floor_still_bites_when_it_is_not_met(self, tools: Tools) -> None:
+        tools(repomix=True, npx=True, node=(18, 19, 1), installed_floor=(22, 0, 0))
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.warn
+        assert "the installed repomix needs" in check.detail
+        assert "22.0.0+" in check.detail
+
+    def test_a_higher_installed_floor_is_honoured_so_the_constant_cannot_under_warn(
+        self, tools: Tools
+    ) -> None:
+        """When repomix RAISES its floor, a hardcoded 22 would pass a broken machine."""
+        tools(repomix=True, npx=True, node=(22, 1, 0), installed_floor=(24,))
+        assert diagnostics._check_repomix().status is CheckStatus.warn
+
+    def test_an_unreadable_engines_falls_back_to_the_constant(self, tools: Tools) -> None:
+        """Unknown is not treated as satisfied — the documented floor still applies."""
+        tools(repomix=True, npx=True, node=(18, 19, 1), installed_floor=None)
+        check = diagnostics._check_repomix()
+        assert check.status is CheckStatus.warn
+        assert "repomix needs" in check.detail
+
+    def test_the_npx_path_ignores_any_installed_floor(self, tools: Tools) -> None:
+        """`npx --yes` fetches the latest, so a stale local floor must not apply.
+
+        Without this, a machine with an ancient global repomix AND npx would be
+        judged by the ancient one while `_repomix_base()` prefers... the direct
+        binary. The gate only reads the floor on the path that will actually run.
+        """
+        tools(repomix=False, npx=True, node=(18, 19, 1), installed_floor=(16,))
+        assert diagnostics._check_repomix().status is CheckStatus.warn
+
+
+class TestInstalledRepomixFloor:
+    """``snapshot_core.installed_repomix_floor`` — reading npm metadata off disk."""
+
+    def _package(self, tmp_path: Path, spec: str | None, *, nested: bool = False) -> Path:
+        root = tmp_path / "repomix"
+        binary = root / "bin" / "repomix.cjs"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/usr/bin/env node\n")
+        payload: dict[str, object] = {"name": "repomix", "version": "1.18.0"}
+        if spec is not None:
+            payload["engines"] = {"node": spec}
+        target = binary.parent if nested else root
+        (target / "package.json").write_text(json.dumps(payload))
+        return binary
+
+    def test_reads_the_range_repomix_actually_declares(self, tmp_path: Path) -> None:
+        binary = self._package(tmp_path, ">=22.0.0")
+        assert snapshot_core.installed_repomix_floor(str(binary)) == (22, 0, 0)
+
+    @pytest.mark.parametrize(
+        ("spec", "expected"),
+        [
+            (">=22.0.0", (22, 0, 0)),
+            (">= 22", (22,)),
+            (">22.1", (22, 1)),
+            ("^22.0.0", (22, 0, 0)),
+            ("~18.4.0", (18, 4, 0)),
+            (">=v20.1.0", (20, 1, 0)),
+        ],
+    )
+    def test_the_shapes_an_engines_range_comes_in(
+        self, tmp_path: Path, spec: str, expected: tuple[int, ...]
+    ) -> None:
+        binary = self._package(tmp_path, spec)
+        assert snapshot_core.installed_repomix_floor(str(binary)) == expected
+
+    def test_a_package_json_beside_the_bin_is_found_too(self, tmp_path: Path) -> None:
+        """pnpm and yarn nest differently from npm; both parents are tried."""
+        binary = self._package(tmp_path, ">=22.0.0", nested=True)
+        assert snapshot_core.installed_repomix_floor(str(binary)) == (22, 0, 0)
+
+    def test_no_engines_field_is_none_not_a_guess(self, tmp_path: Path) -> None:
+        binary = self._package(tmp_path, None)
+        assert snapshot_core.installed_repomix_floor(str(binary)) is None
+
+    def test_an_unparseable_range_is_none(self, tmp_path: Path) -> None:
+        binary = self._package(tmp_path, "*")
+        assert snapshot_core.installed_repomix_floor(str(binary)) is None
+
+    def test_malformed_json_is_none_not_a_traceback(self, tmp_path: Path) -> None:
+        root = tmp_path / "repomix"
+        binary = root / "bin" / "repomix.cjs"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/usr/bin/env node\n")
+        (root / "package.json").write_text("{ not json")
+        assert snapshot_core.installed_repomix_floor(str(binary)) is None
+
+    def test_no_repomix_on_path_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("aisquare.core.snapshot.shutil.which", lambda _n: None)
+        assert snapshot_core.installed_repomix_floor() is None

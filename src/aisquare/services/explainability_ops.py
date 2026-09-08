@@ -52,13 +52,13 @@ from aisquare.core.config import (
     load_config,
     save_config,
 )
+from aisquare.core.version import DISTRIBUTION
 from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
 from aisquare.services.explainability import (
     EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
     KEY_ENV_VAR,
     ProxyProbe,
-    install_hint,
     key_path,
     probe_proxy,
     running_editable,
@@ -710,6 +710,33 @@ def _check_switch(
     )
 
 
+def _install_remedy(imperative: str) -> str:
+    """``<imperative>: <command>`` — or the editable explanation, with no imperative.
+
+    ``install_hint()`` is two different KINDS of string. On a normal install it
+    is a command; on an editable checkout it is a sentence beginning "this is an
+    editable checkout — installing the extra here shadows it and every command
+    dies…". So a caller that always prefixes an imperative renders, on every dev
+    machine with tracing enabled and the SDK absent:
+
+        Install it: this is an editable checkout — installing the extra here
+        shadows it and every command dies with "No module named 'aisquare.cli'"
+
+    which instructs the operator to do the thing the rest of the line says will
+    break their machine. Prefixing is therefore conditional on there being a
+    command to prefix. The editable branch returns the explanation alone, which
+    already ends in the only action that applies there (``pip uninstall
+    aisquare``, to recover a checkout that has been shadowed already).
+
+    Every branch still ends with ``install_hint()``, which is what
+    ``test_the_remedy_does_not_tell_an_editable_checkout_to_install_the_extra``
+    pins.
+    """
+    if running_editable():
+        return EDITABLE_INSTALL_HINT
+    return f"{imperative}: {INSTALL_HINT}"
+
+
 def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
     presence = sdk_presence()
     name = "explainability sdk"
@@ -728,8 +755,8 @@ def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
             "CLI cannot ship its own insights as spans"
         )
         if not on:
-            return _ok(name, f"{detail} (install: {install_hint()})")
-        return _warn(name, detail, f"Install it: {install_hint()}")
+            return _ok(name, f"{detail} ({_install_remedy('install')})")
+        return _warn(name, detail, _install_remedy("Install it"))
     if deployable and not presence.importable:
         # `present` is an OR — importable or a console script on PATH — but the
         # CLIENT lane needs the import: `sdk_available()` is `find_spec(...)`
@@ -752,7 +779,7 @@ def _check_sdk(*, on: bool, live: bool, deployable: bool) -> DoctorCheck:
             "lane still traces model traffic, but the client lane is OFF: the "
             "CLI cannot ship its own insights as spans, and 'init "
             "--explainability' will decline to turn shipping on",
-            f"Install the SDK into the same environment as aisquare: {install_hint()}",
+            _install_remedy("Install the SDK into the same environment as aisquare"),
         )
     where = "console script" if presence.script else "importable"
     detail = f"SDK {presence.version or 'present'} ({where})"
@@ -1223,11 +1250,32 @@ def install_sdk() -> tuple[bool, str]:
     environment the CLI itself runs in, which for a pipx install is the CLI's
     own venv.
     """
-    argv = [sys.executable, "-m", "pip", "install", f"{_SDK_DIST}[explainability]"]
+    # THROUGH OUR OWN EXTRA, not the bare SDK. This shelled out to
+    # `pip install aisquare[explainability]` -- the exact command
+    # `pyproject.toml` says must "never" be our advice, and the one every
+    # printed hint in this module was just corrected away from. The two halves
+    # of one code path disagreed: the row told the operator the safe command
+    # and this ran the other one for them.
+    #
+    # The concrete, checkable difference is the FLOOR. Our extra declares
+    # `aisquare[explainability]>=1.1`, and 1.1 is where `AgentRunTracer` accepts
+    # `run_id` -- which is how a session's spans join the proxy's Run instead of
+    # fragmenting into one Run per drain. The bare form carries no floor at all,
+    # so it can resolve an SDK too old for the lane this install exists to turn
+    # on, and succeed while doing it.
+    #
+    # Not `--upgrade`, unlike the printed hint: consent here was for installing
+    # the SDK, and upgrading the CLI underneath a running process is more than
+    # was asked. That leaves pip free not to re-lay our `aisquare/__init__.py`
+    # when `aisquare-cli` is already satisfied, so the SDK's copy can still win
+    # the shared file -- survivable by construction (nothing reads a name out of
+    # the top-level `__init__`; see `core/version.py`) and reported by
+    # `_check_sdk`'s shadowing row, which has the `--force-reinstall` remedy.
+    argv = [sys.executable, "-m", "pip", "install", f"{DISTRIBUTION}[explainability]"]
     try:
         completed = subprocess.run(argv, capture_output=True, text=True, timeout=600)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{' '.join(argv)} failed to start: {exc}"
     if completed.returncode != 0:
         return False, _summarise(completed.stderr or completed.stdout, limit=400)
-    return True, f"installed {_SDK_DIST}[explainability]"
+    return True, f"installed {DISTRIBUTION}[explainability]"

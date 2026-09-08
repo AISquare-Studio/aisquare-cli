@@ -23,15 +23,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   class-level guard sweeps the real `doctor()` output so a fourth instance
   fails the build instead of shipping. The `--force-reinstall aisquare` row is
   untouched: it repairs the SDK's own package root and means the SDK.
+- **`doctor --fix` *ran* the install its own advice forbids.** `install_sdk()`
+  shelled out to `pip install aisquare[explainability]` while every printed hint
+  was being corrected away from that exact form, so the two halves of one code
+  path disagreed. It now installs through our own extra
+  (`aisquare-cli[explainability]`), which is also the only form that carries the
+  `>=1.1` floor — the SDK release where `AgentRunTracer` accepts `run_id`. The
+  bare form had no floor and could resolve an SDK too old for the lane the
+  install exists to enable, and succeed while doing it.
+- **`explainability sdk` remediations read as self-contradictions on a
+  checkout.** `install_hint()` returns a command on a normal install and a
+  *sentence* on an editable one, so an unconditional `Install it: …` prefix
+  rendered as "Install it: this is an editable checkout — installing the extra
+  here shadows it and every command dies…", telling the operator to do the thing
+  the rest of the line says will break their machine. The prefix is now
+  conditional on there being a command to prefix. Affected all three SDK rows,
+  one of them before this release.
 - **The `repomix` check was green on a machine that cannot pack a snapshot.**
   `npx` merely *existing* was the whole test, while repomix 1.18.0 declares
   `node >= 22` — and Debian 12 ships Node 18, Ubuntu 22.04 ships 12. On those,
   the line read `ok` and the first `project onboard` failed at run time. The
   check now reads Node's version through a registered spawn seam
   (`core/snapshot.py::node_version`) and warns below the floor, naming the
-  version found. A Node that will not answer is reported as untested rather
-  than as too old, and the advice points at nodejs.org or a version manager
-  rather than the package manager whose `nodejs` *is* the old one.
+  version found. The floor is read **per path**: `npx --yes repomix` fetches the
+  latest release, so the constant applies there, while an installed `repomix`
+  is judged by its own `engines.node` — a pinned `repomix@0.2` on Node 18 packs
+  fine and must not be warned about, and a repomix that *raises* its floor must
+  not be under-warned. No Node on PATH at all is now its own warning rather
+  than "untested", because `repomix` and `npx` are both `#!/usr/bin/env node`
+  scripts and neither can run without one; a Node that is present but will not
+  report a version stays untested. The advice points at nodejs.org or a version
+  manager rather than the package manager whose `nodejs` *is* the old one.
 
 ## [0.6.0] - 2026-09-03
 

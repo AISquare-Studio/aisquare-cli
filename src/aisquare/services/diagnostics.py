@@ -464,14 +464,24 @@ def _check_repomix() -> DoctorCheck:
 
     ``npx`` EXISTING was the whole test, and it is true of machines that cannot
     run repomix at all. Repomix 1.18.0 declares ``node >= 22``; Debian 12 ships
-    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolves, this line was
+    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolved, this line was
     green, and the first ``project onboard`` failed -- a green check over a
     broken feature, which is the one shape a diagnostic must never have.
 
-    Unreadable is reported as unreadable, not as too old (``node_version``
-    returns ``None`` for a Node that will not answer): failing open costs this
-    line its verdict, while guessing "too old" would send someone to reinstall a
-    working toolchain.
+    THE FLOOR IS PER PATH, because the two paths run different repomixes.
+    ``npx --yes repomix`` fetches the LATEST release, so :data:`MIN_NODE` is its
+    floor. An installed ``repomix`` is whatever version was pinned, and a
+    machine running ``repomix@0.2`` on Node 18 may pack perfectly well -- so its
+    own ``engines.node`` is read and preferred, and judging it by the latest
+    release's floor would be the same false positive in the other direction.
+
+    THREE OUTCOMES, not two. ``node_version()`` answers ``None`` for a Node that
+    is absent, one that exits non-zero, and one whose output will not parse; the
+    first is a different fact from the other two. ``repomix`` and ``npx`` are
+    both ``#!/usr/bin/env node`` scripts, so no Node at all means packing cannot
+    run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
+    open costs this line its verdict, while guessing "too old" would send
+    someone to reinstall a working toolchain.
     """
     name = "repomix"
     direct = shutil.which("repomix")
@@ -482,6 +492,16 @@ def _check_repomix() -> DoctorCheck:
             f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
         )
     how = "repomix found" if direct else "repomix available on demand via npx"
+    if shutil.which("node") is None:
+        # Not "untested": repomix and npx are Node scripts, so this machine
+        # cannot pack, and saying so is the whole point of the rewrite.
+        return _warn(
+            name,
+            f"{how}, but Node is not on PATH — repomix is a Node script, so "
+            "codebase snapshots cannot run",
+            f"Install Node.js {_NODE_FLOOR} or newer, or put the Node you have on PATH "
+            "(a version manager's shims are not on PATH for non-interactive shells)",
+        )
     node = snapshot_core.node_version()
     if node is None:
         return _ok(
@@ -489,12 +509,16 @@ def _check_repomix() -> DoctorCheck:
             f"{how} — Node version not readable, so untested against the "
             f"{_NODE_FLOOR} minimum; snapshots enabled",
         )
+    floor = snapshot_core.installed_repomix_floor() if direct else None
+    required = floor or snapshot_core.MIN_NODE
     found = ".".join(str(part) for part in node)
-    if node < snapshot_core.MIN_NODE:
+    if node < required:
+        wanted = ".".join(str(part) for part in required)
+        whose = "the installed repomix needs" if floor else "repomix needs"
         return _warn(
             name,
-            f"{how}, but Node {found} is older than repomix needs "
-            f"({_NODE_FLOOR}+) — codebase snapshots will fail when packed",
+            f"{how}, but Node {found} is older than {whose} "
+            f"({wanted}+) — codebase snapshots will fail when packed",
             _NODE_UPGRADE,
         )
     return _ok(name, f"{how} on Node {found} — codebase snapshots enabled")

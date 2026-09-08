@@ -21,35 +21,96 @@ account, no cloud dependency.
 
 ## Install
 
-```sh
-pipx install aisquare-cli              # or: pip install aisquare-cli
-```
-
-Requires **Python 3.11+**. The package is `aisquare-cli`; the command is
-`aisquare`, with `asq` as the short alias.
-
-The UI runs agents inside a private tmux server, so you also need **tmux 3.2+**
-(3.5+ recommended — that is where shift+enter reaches the agent):
+One line. It works out what your machine already has, installs only what is
+missing, and ends by offering to open the UI:
 
 ```sh
-sudo apt install tmux        # Debian / Ubuntu
-sudo dnf install tmux        # Fedora / RHEL
-brew install tmux            # macOS
-tmux -V                      # 3.2 or newer
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
 ```
 
-Agents run on **[Claude Code](https://claude.com/claude-code)** (`claude`
-2.1.x), so install that too if you haven't. On Windows, run everything inside
-WSL2. `git` is used for the per-agent worktrees; `gh` is optional and only
-needed if you want agents opening and reviewing PRs. Codebase snapshots use
-[Repomix](https://github.com/yamadashy/repomix) via Node/`npx` when available —
-`aisquare doctor` tells you if it's missing, and nothing breaks without it.
+macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
+3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git, Node and
+[Claude Code](https://claude.com/claude-code), then registers the git repo you
+ran it from and wires Claude Code's hooks. Running it again is a no-op: it
+reports what is current and installs nothing.
+
+On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
+tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:
+
+```text
+irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
+```
+
+<details>
+<summary><b>Piping a script into a shell, and how not to</b></summary>
+
+Fair. Read it first, or skip it entirely — nothing here needs it.
+
+```sh
+# See exactly what it would do, and run none of it:
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh -o install.sh
+less install.sh
+sh install.sh --dry-run
+```
+
+Or install by hand, which stays fully supported:
+
+```sh
+uv tool install --python 3.13 --with tiktoken aisquare-cli   # or: pipx install aisquare-cli
+aisquare init --local --yes --agent claude-code
+```
+
+Useful flags — note the `-s --`, since `sh` is reading the script on stdin:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --yes --no-agent
+```
+
+| Flag | Does |
+| --- | --- |
+| `--yes` | Never prompt, and do not open the UI at the end. For CI and Dockerfiles. |
+| `--dry-run` | Print every command, run none. |
+| `--no-agent` | Skip Claude Code. |
+| `--no-system-deps` | Skip tmux, gh, git and Node. |
+| `--project DIR` | Register `DIR` instead of the current directory. |
+| `--no-project` | Set up the machine, register nothing. |
+| `--offline` | Do not ask PyPI what the latest version is. |
+| `--version V` | Pin `aisquare-cli` to `V`. |
+
+It refuses to run as root outside a container, uses `sudo` only for the system
+packages and one command at a time, and never edits your shell profile beyond
+what uv and the Claude Code installer do themselves. Exit codes: `0` installed,
+`1` a fatal step failed, `2` installed but a health check is unexpectedly amber.
+
+</details>
+
+Requires **Python 3.11+** if you install by hand (the one-liner brings its own
+3.13). The package is `aisquare-cli`; the command is `aisquare`, with `asq` as
+the short alias.
+
+Then check the machine at any time:
+
+```sh
+aisquare doctor
+```
+
+It reports every dependency and gives the exact command for anything missing.
+`gbrain` staying amber is expected — long-term memory is optional
+([below](#long-term-memory-optional-via-gbrain)).
 
 ## Start the GUI
 
+The installer offers this at the end; if you skipped it:
+
 ```sh
-aisquare agents connect claude-code    # once — wires the hooks the UI reads state from
 asq                                    # open the UI
+```
+
+Installed by hand? Wire the hooks the UI reads state from, once:
+
+```sh
+aisquare agents connect claude-code
+asq
 ```
 
 That's the whole setup. From inside the UI:

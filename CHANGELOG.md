@@ -151,6 +151,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   actually tested, the vendored-contract drift guard is pinned to the deployed
   server commit, and the cap is stated in characters, which is what it is.
 
+- **`install.sh` — the one-line installer.** macOS, Linux and WSL2, in POSIX
+  `sh` (it runs as Debian's `dash` and Alpine's BusyBox `ash`).
+  [`uv`](https://docs.astral.sh/uv/) is the bootstrap, so nothing depends on the
+  machine already having a Python — it brings its own 3.13 for the CLI alone,
+  leaving the system Python untouched. It surveys before it writes: a machine
+  that is already current prints its summary and exits 0 having installed
+  nothing, and running it twice is a no-op. Installs `uv`, Python, `aisquare-cli`
+  with `tiktoken`, tmux, `gh`, `git`, Node 22+ and Claude Code; then
+  `aisquare init --agent claude-code`, which wires the hooks and packs the
+  snapshot in the same run. Refuses to run as root outside a container, uses
+  `sudo` for one command at a time, never edits your shell profile beyond what
+  `uv` and the Claude Code installer do themselves, and never `--reinit` (which
+  would discard `team bind` role bindings on every re-run). `--dry-run` prints
+  every command and runs none — that is how you decide whether to trust it.
+  Full flag table in the README; design, measurements and the rejected
+  alternatives in `docs/plans/one-line-install.md`.
+- **`install.ps1` — a WSL2 shim for Windows.** Not an installer: the fleet gives
+  every agent a real tmux pane and Windows has no tmux, so it detects WSL2 and
+  delegates into it, or prints the one command that installs WSL.
+- **A container matrix for the installer** (`tests/install/`, and its own CI
+  workflow). Five bare distributions — Debian 12, Ubuntu 22.04, Fedora 41, Arch,
+  Alpine 3.22 — each installing a wheel built from the tree under review, plus a
+  cell that runs as a **normal user with sudo** (the primary case, and the only
+  one where the script's `sudo` path is exercised at all), one that installs
+  Claude Code for real, and a macOS job. Each cell runs the installer four
+  times: bare, with a project — where the acceptance criterion is asserted,
+  *every check ok except `brain`* — then again with every package manager
+  replaced by a stub that records being called, asserting the re-run installs
+  nothing, moves no version, leaves `~/.claude/settings.json` byte-identical and
+  calls no package manager; and finally the upgrade path, staging an exact
+  `==0.5.0` pin and asserting the version moves *and* that `tiktoken` survives.
+  The criterion is asserted as a *set* with the total floored rather than pinned,
+  which is why it kept holding when `doctor` gained an eighteenth check. It runs
+  on a schedule as well as on pushes, because four of the things the script
+  fetches belong to other people.
+
 ### Changed
 - **`serverInfo.version` reports this CLI's version.** mcp 1.x filled an
   omitted server version with the SDK's own package version, so clients saw

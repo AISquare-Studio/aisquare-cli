@@ -26,11 +26,16 @@
 #     cannot quietly swap in the friendlier-looking command.
 #
 # shellcheck shell=sh
-# shellcheck disable=SC3043  # `local` is not in POSIX, but dash, BusyBox ash,
-# bash, ksh and zsh all implement it; the alternative is prefixed globals in a
-# 700-line script, which trades a theoretical portability risk for a real
-# variable-collision one. Proven rather than assumed: CI runs this script under
-# dash and under BusyBox ash (§8.3).
+#
+# ONE VARIABLE NAMESPACE, and it is worth knowing before you edit. There is no
+# `local` in this file — it is not POSIX, and rather than rely on every shell's
+# extension the convention here is that a function's own temporaries are
+# `_`-prefixed and every one of them is a GLOBAL. That is a real hazard, not a
+# theoretical one: `is_expected_amber` used `_expected` as its loop variable,
+# which is also the list `summary` accumulates while calling it, and each call
+# overwrote the caller's list. So the convention is ENFORCED rather than
+# remembered — tests/test_install_script_is_posix.py fails on any `_name`
+# assigned inside two different functions. Pick a name no other function uses.
 
 set -eu
 
@@ -693,8 +698,8 @@ short_circuit() {
     # is "nothing amber that we did not expect"; fewer amber lines than expected
     # is good news and must never block the no-op path.
     _amber=$(doctor_amber 2>/dev/null || true)
-    for _check in $_amber; do
-        is_expected_amber "$_check" || return 1
+    for _amber_check in $_amber; do
+        is_expected_amber "$_amber_check" || return 1
     done
 
     say ""
@@ -1461,9 +1466,17 @@ expected_amber() {
 }
 
 # True when $1 is one of the names `expected_amber` returns.
+#
+# `_want`, NOT `_expected`, and that rename is a bug fix rather than taste.
+# There is no `local` here (see the header note), so every `_name` is a GLOBAL:
+# this function's loop variable was `_expected`, which is also the accumulator
+# `summary` builds while calling it — so each call overwrote the caller's list
+# with its own last loop value. Measured output: `expected:brain brain`.
+# tests/test_install_script_is_posix.py now fails on any name assigned in two
+# functions, so the next one is caught rather than read.
 is_expected_amber() {
-    for _expected in $(expected_amber); do
-        [ "$1" = "$_expected" ] && return 0
+    for _want in $(expected_amber); do
+        [ "$1" = "$_want" ] && return 0
     done
     return 1
 }
@@ -1791,13 +1804,13 @@ choose_project() {
     # user is standing in. Walking up for `.git` needs nothing installed. A
     # `.git` FILE counts as well as a directory — that is what a worktree and a
     # submodule have, and the fleet's own agents work in worktrees.
-    _dir=$PWD
-    while [ -n "$_dir" ] && [ "$_dir" != / ]; do
-        if [ -e "$_dir/.git" ]; then
-            PROJECT_DIR=$_dir
+    _walk=$PWD
+    while [ -n "$_walk" ] && [ "$_walk" != / ]; do
+        if [ -e "$_walk/.git" ]; then
+            PROJECT_DIR=$_walk
             return 0
         fi
-        _dir=$(dirname "$_dir")
+        _walk=$(dirname "$_walk")
     done
     # The loop stops before `/` on purpose: a repository AT the filesystem root
     # is not a case worth code.

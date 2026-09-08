@@ -33,8 +33,10 @@ set -eu
 
 INSTALLER=${INSTALLER:-/mnt/install.sh}
 WORKDIR=${WORKDIR:-/work}
-STUBDIR=/opt/pkg-stub
-STUB_LOG=/tmp/pkg-stub.log
+# Under $HOME, not /opt: this file also runs as a NORMAL USER
+# (tests/install/cell-nonroot.sh), and /opt is root-owned.
+STUBDIR=${STUBDIR:-$HOME/pkg-stub}
+STUB_LOG=${STUB_LOG:-${TMPDIR:-/tmp}/pkg-stub.log}
 SKIP_AGENT=${CELL_SKIP_AGENT:-1}
 
 fail() {
@@ -53,25 +55,37 @@ head1() { printf '\n=== %s ===\n' "$*"; }
 . /etc/os-release
 head1 "cell: $ID ${VERSION_ID:-} — /bin/sh is $(readlink -f /bin/sh)"
 
-case "$ID" in
-    debian | ubuntu)
-        apt-get update -qq
-        apt-get install -y -qq curl ca-certificates >/dev/null
-        ;;
-    fedora | rhel | centos | rocky | almalinux)
-        # curl and ca-certificates are already in the base image; measured.
-        ;;
-    arch)
-        pacman -Sy --noconfirm --needed --quiet ca-certificates >/dev/null 2>&1 || true
-        ;;
-    alpine)
-        # Deliberately NOT installing curl. Alpine ships BusyBox `wget` and no
-        # curl, so this cell is the one that exercises install.sh's wget
-        # fallback — the branch that is otherwise never taken anywhere.
-        apk add --no-cache ca-certificates >/dev/null
-        ;;
-    *) fail "cell.sh does not know how to prepare '$ID'" ;;
-esac
+# SKIPPED ENTIRELY when a downloader is already there, and that is not just an
+# optimisation. tests/install/cell-nonroot.sh runs this file as a NORMAL USER,
+# having already installed curl as root — and this block cannot run as that
+# user ("Could not open lock file /var/lib/apt/lists/lock", measured). The
+# block's whole job is to supply the one documented prerequisite, so "already
+# supplied" is the same as "done".
+if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+    head1 "a downloader is already present — nothing to prepare"
+elif [ "$(id -u)" != 0 ]; then
+    fail "no curl or wget, and this cell is not root so it cannot install one"
+else
+    case "$ID" in
+        debian | ubuntu)
+            apt-get update -qq
+            apt-get install -y -qq curl ca-certificates >/dev/null
+            ;;
+        fedora | rhel | centos | rocky | almalinux)
+            # curl and ca-certificates are already in the base image; measured.
+            ;;
+        arch)
+            pacman -Sy --noconfirm --needed --quiet ca-certificates >/dev/null 2>&1 || true
+            ;;
+        alpine)
+            # Deliberately NOT installing curl. Alpine ships BusyBox `wget` and no
+            # curl, so this cell is the one that exercises install.sh's wget
+            # fallback — the branch that is otherwise never taken anywhere.
+            apk add --no-cache ca-certificates >/dev/null
+            ;;
+        *) fail "cell.sh does not know how to prepare '$ID'" ;;
+    esac
+fi
 
 if command -v curl >/dev/null 2>&1; then
     head1 "downloader: curl"
@@ -251,20 +265,20 @@ version_before=$(aisquare --version)
 set +e
 # shellcheck disable=SC2086
 PATH="$STUBDIR:$PATH" env -u AISQUARE_INSTALL_PACKAGE \
-    sh "$INSTALLER" --yes --offline $AGENT_FLAG >/tmp/run3.log 2>&1
+    sh "$INSTALLER" --yes --offline $AGENT_FLAG >"${TMPDIR:-/tmp}/run3.log" 2>&1
 run3=$?
 set -e
-cat /tmp/run3.log
+cat "${TMPDIR:-/tmp}/run3.log"
 printf '\nrun 3 exit: %s\n' "$run3"
 
 [ "$run3" = 0 ] || fail "a re-run on a current machine must exit 0, got $run3"
 
 # §3.9.4 with teeth: it must not merely succeed, it must not have DONE anything.
-grep -q 'Nothing to do' /tmp/run3.log ||
+grep -q 'Nothing to do' "${TMPDIR:-/tmp}/run3.log" ||
     fail "run 3 did not short-circuit — §3.9.4 promises a current machine installs nothing"
 
-if grep -qE '^==> Installing' /tmp/run3.log; then
-    fail "run 3 tried to install something: $(grep -E '^==> Installing' /tmp/run3.log)"
+if grep -qE '^==> Installing' "${TMPDIR:-/tmp}/run3.log"; then
+    fail "run 3 tried to install something: $(grep -E '^==> Installing' "${TMPDIR:-/tmp}/run3.log")"
 fi
 
 if [ -s "$STUB_LOG" ]; then
@@ -341,12 +355,12 @@ else
     # No AISQUARE_INSTALL_PACKAGE: the PyPI-named target is the only one with a
     # "latest" to move to.
     # shellcheck disable=SC2086
-    env -u AISQUARE_INSTALL_PACKAGE sh "$INSTALLER" --yes $AGENT_FLAG >/tmp/run4.log 2>&1 ||
+    env -u AISQUARE_INSTALL_PACKAGE sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run4.log" 2>&1 ||
         {
-            cat /tmp/run4.log
+            cat "${TMPDIR:-/tmp}/run4.log"
             fail "the upgrade run failed"
         }
-    tail -20 /tmp/run4.log
+    tail -20 "${TMPDIR:-/tmp}/run4.log"
 
     moved=$(aisquare --version | cut -d' ' -f2)
     [ "$moved" != "$pinned" ] || fail "the version did NOT move off the $pinned pin — this is exactly the \`uv tool upgrade\` silent no-op of section 3.9.1"

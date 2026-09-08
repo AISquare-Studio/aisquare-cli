@@ -305,6 +305,43 @@ jobs:
           grep -q 'Nothing to do' /tmp/rerun.log \
             || { echo "::error::the re-run did not short-circuit"; exit 1; }
 
+  non-root:
+    name: ubuntu:22.04 as a normal user with sudo
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build a wheel from THIS tree
+        run: |
+          python -m pip install --upgrade pip build >/dev/null
+          python -m build --wheel --outdir dist .
+
+      # THE PRIMARY CASE, and the one every other cell cannot reach. A container
+      # gives you root, and root is a legitimate path — §3.7 permits it where
+      # there is no other user, which is what a Dockerfile is — but it is the
+      # path where `PKG_SUDO` is EMPTY and `sudo_run` degrades to a plain `run`.
+      # So the whole matrix was exercising the branch a person never takes.
+      #
+      # This cell creates a user with NOPASSWD sudo and runs the same
+      # assertions as them, which exercises: sudo called for one command at a
+      # time, the apt keyring for `gh` written under /etc as root while uv,
+      # aisquare and Claude Code land in the user's own ~/.local/bin, and
+      # `preflight`'s root refusal correctly NOT firing.
+      - name: Run the cell as a non-root user
+        run: |
+          set -- dist/*.whl
+          test "$#" -eq 1 || { echo "expected one wheel, found $#: $*"; exit 1; }
+          docker run --rm \
+            -v "$PWD:/mnt:ro" \
+            -e "AISQUARE_INSTALL_PACKAGE=/mnt/$1" \
+            -e CELL_SKIP_AGENT=1 \
+            ubuntu:22.04 sh /mnt/tests/install/cell-nonroot.sh
+
   with-claude-code:
     name: one cell with Claude Code installed for real
     runs-on: ubuntu-latest

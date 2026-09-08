@@ -530,3 +530,69 @@ def test_no_gnu_only_regex_in_a_sed_expression() -> None:
     assert not offenders, (
         f"GNU-only sed construct — install.sh runs on macOS, whose sed is BSD: {offenders}"
     )
+
+
+def test_no_shell_variable_is_assigned_in_two_functions(source: str) -> None:
+    """`install.sh` has ONE variable namespace, so a shared name is a live bug.
+
+    There is no `local` in the script — it is not POSIX, and the convention is
+    `_`-prefixed temporaries instead. That makes every one of them a global, and
+    the hazard is not theoretical: `is_expected_amber` used `_expected` as its
+    loop variable, which is also the list `summary` accumulates while calling
+    it, so each call overwrote the caller's list. Measured output:
+    `expected:brain brain` — a doubled entry in a user-facing summary, from two
+    functions a hundred lines apart.
+
+    So the convention is enforced here rather than remembered. Every `_name`
+    assigned inside a function body — including a `for` loop variable, which is
+    an assignment — must belong to exactly one function.
+
+    UPPERCASE names are exempt: those are the script's deliberate globals (the
+    options block, the surveyed versions, the per-dependency decisions), and
+    several functions are supposed to write them.
+    """
+    current: str | None = None
+    owners: dict[str, set[str]] = {}
+
+    function = re.compile(r"^([a-z_][a-z0-9_]*)\(\)\s*\{")
+    assignment = re.compile(r"^\s*(_[a-z0-9_]*)=")
+    loop = re.compile(r"^\s*for\s+(_[a-z0-9_]*)\s+in\b")
+
+    for _number, line in _code_lines(source):
+        opened = function.match(line)
+        if opened:
+            current = opened.group(1)
+            continue
+        if line.startswith("}"):
+            current = None
+            continue
+        if current is None:
+            continue
+        for pattern in (assignment, loop):
+            found = pattern.match(line)
+            if found:
+                owners.setdefault(found.group(1), set()).add(current)
+
+    shared = {name: sorted(fns) for name, fns in owners.items() if len(fns) > 1}
+    assert not shared, (
+        "shell variable(s) assigned in more than one function, and there is no "
+        "`local` in this file — so a nested call silently overwrites its "
+        f"caller's value: {shared}"
+    )
+
+
+def test_the_collision_guard_can_see_a_collision(source: str) -> None:
+    """The census must be able to fail, and must be reading real functions.
+
+    A parser that matched nothing would report "no collisions" forever. So the
+    number of functions it found is floored, and a deliberate collision is
+    injected and must be caught.
+    """
+    poisoned = source + "\nfirst_fn() {\n    _shared=1\n}\nsecond_fn() {\n    _shared=2\n}\n"
+    with pytest.raises(AssertionError, match="_shared"):
+        test_no_shell_variable_is_assigned_in_two_functions(poisoned)
+
+    functions = re.findall(r"^([a-z_][a-z0-9_]*)\(\)\s*\{", source, re.MULTILINE)
+    assert len(functions) >= 25, (
+        f"the parser found only {len(functions)} functions — it is no longer reading the script"
+    )

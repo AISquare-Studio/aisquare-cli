@@ -45,6 +45,13 @@ fi
 
 IMAGES=${*:-"debian:12 ubuntu:22.04 fedora:41 archlinux alpine:3.22"}
 
+# One image also runs as a NORMAL USER WITH SUDO (tests/install/cell-nonroot.sh),
+# which is the primary case and the one every root cell cannot reach: `sudo_run`
+# only calls sudo when `PKG_SUDO` is set, and it is empty for root. Ubuntu,
+# because it is the platform where the `gh` step writes a keyring under /etc as
+# root while everything else lands in a user's $HOME — the split this exercises.
+NONROOT_IMAGE=${NONROOT_IMAGE:-ubuntu:22.04}
+
 # --- build the wheel the cells will install --------------------------------
 
 DIST="$REPO/dist"
@@ -85,6 +92,20 @@ for image in $IMAGES; do
         failed="$failed $image"
     fi
 done
+
+# The non-root cell, unless the caller named specific images.
+if [ "$#" -eq 0 ]; then
+    printf '\n################ %s (as a non-root user) ################\n' "$NONROOT_IMAGE"
+    if "$ENGINE" run --rm \
+        -v "$REPO:/mnt:ro,z" \
+        -e "AISQUARE_INSTALL_PACKAGE=/mnt/dist/$WHEEL" \
+        -e "CELL_SKIP_AGENT=${CELL_SKIP_AGENT:-1}" \
+        "$NONROOT_IMAGE" sh /mnt/tests/install/cell-nonroot.sh; then
+        passed="$passed $NONROOT_IMAGE(non-root)"
+    else
+        failed="$failed $NONROOT_IMAGE(non-root)"
+    fi
+fi
 
 printf '\n================ matrix ================\n'
 [ -n "$passed" ] && printf 'passed:%s\n' "$passed"

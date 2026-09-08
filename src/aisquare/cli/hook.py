@@ -16,6 +16,7 @@ import typer
 
 from aisquare.core import paths
 from aisquare.services import hooks as hooks_service
+from aisquare.services.team import ManagerWakeupError
 
 app = typer.Typer(
     help="Internal hook handlers for agent integrations.",
@@ -29,16 +30,21 @@ app = typer.Typer(
 #: line claiming they did would be a wrong sentence printed on every turn — the
 #: two that matter to a reader are the ones a TEAMMATE sees: a session that
 #: never leaves "running", and a turn that arrives with no delta.
+#:
+#: ``manager-wakeup`` is not a hook but the one branch of ``stop`` that fails
+#: open on its own (docs/plans/fleet-tui.md §5.5): when it does, the row IS
+#: marked waiting, so the ``stop`` line would be the wrong sentence.
 _COST = {
     "session-start": "this session starts with no aisquare context",
     "user-prompt-submit": "no teammate updates reach this turn",
     "session-end": "the board will keep showing this session as running",
     "stop": "the board will not show this session as waiting for input",
     "notification": "the board will not show this session as needing attention",
+    "manager-wakeup": "the manager will not be woken by this turn's board updates",
 }
 
 
-def _cost_of_failing_open(hook: str, exc: Exception) -> None:
+def _cost_of_failing_open(hook: str, exc: Exception, *, cost: str | None = None) -> None:
     """Never disrupt the agent — and never lose the reason either.
 
     Failing open is half the doctrine. The other half is saying what it cost,
@@ -63,7 +69,7 @@ def _cost_of_failing_open(hook: str, exc: Exception) -> None:
         reason = f"{paths.db_path()} unreadable ({exc})"
     else:
         reason = f"{hook} failed ({type(exc).__name__}: {exc})"
-    cost = _COST.get(hook, "this hook did nothing")
+    cost = cost or _COST.get(hook, "this hook did nothing")
     typer.echo(f"aisquare: {reason} — {cost}; run: aisquare doctor", err=True)
 
 
@@ -86,6 +92,18 @@ def _cwd(payload: dict[str, Any]) -> Path | None:
 def _str(payload: dict[str, Any], key: str) -> str | None:
     value = payload.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _flag(payload: dict[str, Any], key: str) -> bool:
+    """A boolean payload field, read the way a LOOP GUARD must be read.
+
+    Absent, ``null`` and ``false`` are off — an older payload without the field
+    must still let the manager be woken, or the feature dies in silence. Any
+    other value is on, a stray string ``"false"`` included: misreading "already
+    continuing" as "not" is the mistake that opens a loop, and the cost of the
+    other mistake is one wake-up deferred to the next prompt.
+    """
+    return bool(payload.get(key))
 
 
 def _effort_level(payload: dict[str, Any]) -> str | None:
@@ -151,13 +169,30 @@ def session_end() -> None:
 
 @app.command("stop")
 def stop() -> None:
-    """Mark the session as waiting for input (turn finished; no output)."""
+    """Mark the session as waiting for input (turn finished).
+
+    stdout is JSON or nothing. It is nothing for every role but ``manager``, and
+    for a manager it is the Stop decision that keeps the turn going when
+    teammates put decisions on the board (docs/plans/fleet-tui.md §7.3):
+    ``{"decision": "block", "reason": "<the delta>"}``. ``stop_hook_active`` is
+    Claude Code saying it is already continuing on a stop hook; it is honoured
+    as the loop guard the reference asks for.
+    """
     try:
         payload = _payload()
-        hooks_service.turn_stopped(_cwd(payload), session_id=_str(payload, "session_id"))
+        decision = hooks_service.turn_stopped(
+            _cwd(payload),
+            session_id=_str(payload, "session_id"),
+            stop_hook_active=_flag(payload, "stop_hook_active"),
+        )
+    except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
+        _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])
+        return
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("stop", exc)
         return
+    if decision is not None:
+        typer.echo(json.dumps(decision.as_hook_output()))
 
 
 @app.command("notification")

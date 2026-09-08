@@ -225,7 +225,7 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 10
+    assert version == SCHEMA_VERSION == 11  # v11: fleet_agent + project.codename
 
 
 def test_data_persists_across_reopen() -> None:

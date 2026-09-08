@@ -25,6 +25,7 @@ PROJECT_PREFIX = "prj_"
 PROMPT_PREFIX = "prm_"
 TASK_PREFIX = "tsk_"
 EVENT_PREFIX = "evt_"
+AGENT_PREFIX = "agt_"
 
 
 def _encode(value: int, length: int) -> str:
@@ -61,3 +62,8 @@ def new_task_id() -> str:
 def new_event_id() -> str:
     """Return a fresh, time-sortable team-event id (``evt_…``)."""
     return _new_id(EVENT_PREFIX)
+
+
+def new_agent_id() -> str:
+    """Return a fresh, time-sortable fleet-agent id (``agt_…``)."""
+    return _new_id(AGENT_PREFIX)

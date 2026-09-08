@@ -51,6 +51,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -132,7 +133,52 @@ ROLE_PROFILES: dict[str, RoleProfile] = {
         effort_offset=1,
         mission="final accountability gate, once, on the assembled deliverable",
     ),
+    # The fleet's roles (docs/plans/fleet-tui.md §3.3). `manager` is the planner
+    # with fleet authority and rides the planner's ladder; `tester` is the
+    # fleet's name for `runner` and shares its shape; `reviewer` reads the PR.
+    "manager": RoleProfile(
+        role="manager",
+        ladder=["fable", "opus", "sonnet"],
+        mission="turns a goal into a fleet that ships it — plans, spawns, steers, reports",
+    ),
+    "tester": RoleProfile(
+        role="tester",
+        ladder=["sonnet", "opus"],
+        mission="fresh-context verifier — tries to make reviewed work fail before it ships",
+    ),
+    "reviewer": RoleProfile(
+        role="reviewer",
+        ladder=["sonnet", "opus"],
+        mission="reads the PR as the stranger who will maintain it — read-only findings",
+    ),
 }
+
+
+#: A numbered SEAT: a first-class role with a crew index glued on (``coder1``).
+_SEAT_SUFFIX = re.compile(r"^(?P<base>[a-z][a-z_-]*)\d+$")
+
+
+def base_role(role: str) -> str:
+    """The first-class role a numbered seat belongs to — ``coder1`` → ``coder``.
+
+    ``cli/launch.py`` accepts numbered seats (a crew runs several agents in one
+    role and needs them apart on the board) and exports the seat VERBATIM as
+    ``AISQUARE_ROLE``, so every lookup in this module is handed ``coder1``.
+    Measured before this existed: ``role_cycle("coder1", …)`` returned ``[]``
+    where ``"coder"`` returns seven lines, ``model_mismatch("coder1", …)``
+    returned ``None`` so the board could never flag a seat as off-ladder, and
+    ``resolve_model("coder1")`` picked no model and no effort offset — the seat
+    launched on the session default. The number is an identity, not a new role.
+
+    Anything that is not a seat of a role this module PROFILES comes back
+    unchanged, so a declared role called ``bot7`` stays ``bot7`` and a typo is
+    never silently promoted to a real role.
+    """
+    match = _SEAT_SUFFIX.match(role)
+    if match is None:
+        return role
+    base = match.group("base")
+    return base if base in ROLE_PROFILES else role
 
 
 def normalize_effort(value: str | None) -> str | None:
@@ -198,7 +244,7 @@ def resolve_effort(role: str, *, explicit: str | None = None) -> tuple[str, str]
         if rung is not None:
             return rung, source
     base, base_source = base_effort()
-    profile = ROLE_PROFILES.get(role)
+    profile = ROLE_PROFILES.get(base_role(role))
     offset = profile.effort_offset if profile else 0
     wants_ultracode = os.environ.get("AISQUARE_EFFORT", "").strip().lower() == ULTRACODE
     return _apply_offset(base, offset, ultracode=wants_ultracode), base_source
@@ -481,7 +527,7 @@ def resolve_model(
     rung of a ladder is always accepted without proof — resolution never comes
     back empty-handed, and a launch is never blocked.
     """
-    profile = ROLE_PROFILES.get(role)
+    profile = ROLE_PROFILES.get(base_role(role))
     level, effort_source = resolve_effort(role, explicit=effort)
     pinned = role_model_override(role)
     if pinned is not None:
@@ -571,7 +617,7 @@ def model_mismatch(role: str, model: str | None) -> str | None:
     """
     if model is None:
         return None
-    profile = ROLE_PROFILES.get(role)
+    profile = ROLE_PROFILES.get(base_role(role))
     if profile is None:
         return None
     families = [MODEL_FAMILIES[alias] for alias in profile.ladder if alias in MODEL_FAMILIES]
@@ -646,7 +692,12 @@ def interfering_env() -> list[str]:
 
 
 def role_cycle(role: str, session_short_id: str) -> list[str]:
-    """The standing work cycle injected for ``role`` (empty for unknown roles)."""
+    """The standing work cycle injected for ``role`` (empty for unknown roles).
+
+    Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
+    the role it is a seat of — the number is an identity, not a new role.
+    """
+    role = base_role(role)
     sid = session_short_id
     if role == "planner":
         return [
@@ -669,9 +720,11 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             f'--note "how to verify + evidence" --as {sid}`,',
             "and pick up the next one.",
         ]
-    if role == "runner":
+    if role in ("runner", "tester"):
+        # `tester` is the fleet's name for `runner` (docs/plans/fleet-tui.md §3.3):
+        # one cycle, two labels, so the two can never drift apart.
         return [
-            "Your standing cycle (runner): `aisquare task next --status review`; if nothing,",
+            f"Your standing cycle ({role}): `aisquare task next --status review`; if nothing,",
             "tell the user and stop. You are the adversarial verifier: run the FULL check the",
             "acceptance criteria name — not a smoke test — and try to make the change fail",
             "(edge inputs, a counterexample) before you trust it. Verdicts cite evidence you",
@@ -690,6 +743,39 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             'Verdict as a note: `aisquare note "GATE: PASS|PASS-WITH-FIXES|FAIL — …"'
             f" --kind result --as {sid}`,",
             "with findings severity-ordered (critical|major|minor|nit) and evidence per finding.",
+        ]
+    if role == "manager":
+        # docs/plans/fleet-tui.md §7.1 — the planner's contract cycle plus the fleet
+        # verbs and the loop protocol. Sub-agents are reached ONLY through the board
+        # and `fleet spawn|tell` (§3.3, §7.6): native agent teams are off in fleet
+        # launches, and a manager that codes is a coder nobody is steering.
+        return [
+            "Your standing cycle (manager): you run this project's fleet; you never do its",
+            "work. Intake: ask until the acceptance criteria are executable. Contracts:",
+            '`aisquare task add "<title>" --role coder --detail "<objective · why · known ·',
+            'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
+            f"`aisquare fleet spawn coder --label coder-<purpose> --task <id> --as {sid}` —",
+            "one per parallelisable task, within the agent cap; `fleet spawn tester` once work",
+            "reaches review, `fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
+            "once every task is done. Board updates reach you every turn: reopen with reasons,",
+            '`aisquare fleet tell <label> "…"` to steer, re-spec or split what bounces. Spawn',
+            "nothing while the `fleet-paused` signal is set. When the validator's gate is PASS:",
+            f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
+            "Never write code. Never merge. Blocked twice on one task? Ask the human:",
+            f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
+            "(coder-auth, not coder-2).",
+        ]
+    if role == "reviewer":
+        # §3.3 — reads the PR as the stranger who will maintain it; findings on the
+        # PR through `gh pr review`; read-only (the fleet launches it --restricted).
+        return [
+            "Your standing cycle (reviewer): `aisquare task next --status review`; if nothing,",
+            "tell the user and stop. Read the PR as the stranger who will maintain it —",
+            "`gh pr diff`, the task's contract, the tests. You are READ-ONLY: never edit, never",
+            "push, never merge. Findings go on the PR (`gh pr review --comment` or",
+            "`--request-changes`), severity-ordered (critical|major|minor|nit), each with",
+            'evidence, then one summary note: `aisquare note "REVIEW <pr>: …" --kind result',
+            f"--as {sid}`. Approve only what you would merge yourself. Repeat.",
         ]
     return []
 

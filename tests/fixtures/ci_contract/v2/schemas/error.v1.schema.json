@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/kernel/error.v1.schema.json",
+  "title": "error.v1",
+  "description": "One explicit failure, rejection or quarantine record. Specified by 02-contracts-and-data.md section 2.3 (stable rejection/quarantine codes), section 4 (the mutation conflict table) and section 10 (error and availability semantics). The code catalog is CLOSED and versioned: free-text detail may supplement but can never replace the code (the same rule 02 section 4 states for exclusion-reason.v1). Failures are explicit in the ledger, fail OPEN with respect to the developer's original workflow by returning noop, and fail CLOSED for knowledge access. Adding a code requires a schema version change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "code",
+    "http_status",
+    "message",
+    "subject_ref",
+    "retryable",
+    "detail",
+    "occurred_at"
+  ],
+  "$defs": {
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "idempotency_conflict",
+        "signal_identity_conflict",
+        "build_definition_conflict",
+        "attachment_conflict",
+        "grant_conflict",
+        "reset_conflict",
+        "trace_batch_span_mismatch",
+        "span_not_completed",
+        "invalid_timestamp_interval",
+        "self_parent_span",
+        "parent_span_cycle",
+        "malformed_scope_clause",
+        "unresolved_scope_hint",
+        "scope_resolution_failed",
+        "provenance_incomplete",
+        "redaction_failed",
+        "contract_version_mismatch",
+        "dependency_unavailable",
+        "deadline_exceeded"
+      ],
+      "description": "Closed kernel catalog. trace_batch_span_mismatch, span_not_completed, invalid_timestamp_interval, self_parent_span, parent_span_cycle and signal_identity_conflict are the adapter quarantine/rejection codes named in 02 section 2.3. Missing external parents and incomplete traces are NOT errors - they are recorded as unresolved coverage, not silently repaired."
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": "error/v1"
+    },
+    "code": {
+      "$ref": "#/$defs/error_code"
+    },
+    "http_status": {
+      "type": "integer",
+      "enum": [
+        400,
+        401,
+        403,
+        404,
+        409,
+        422,
+        503
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "subject_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 500,
+      "description": "What the error is about: a batch ID, source_id, item reference or dependency name. Null when the failure has no single subject."
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "detail": {
+      "type": "object",
+      "description": "Free-form supplementary detail. Deliberately OPEN. It may explain a code but can never replace one."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "description": "Failure time."
+    }
+  }
+}

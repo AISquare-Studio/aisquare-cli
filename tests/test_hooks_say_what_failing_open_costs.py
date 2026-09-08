@@ -89,12 +89,19 @@ def _wedge_the_store(runner: CliRunner) -> None:
     """A store left mid-migration: §0b's race, reproduced by rewinding.
 
     Needs a real migrated store first, so a command creates one.
+
+    Rewound to 0 rather than by one step: the top migration is deliberately
+    idempotent now (schema v13 converges two forks of v11 and so re-applies
+    cleanly), which is a good property and means one step back no longer
+    wedges anything. Version 0 replays v1's ``CREATE TABLE entry`` onto a
+    table that exists, which cannot be made idempotent without changing what
+    the migration means — so the fixture stays true whatever is added on top.
     """
     runner.invoke(app, ["context", "list"], catch_exceptions=False)
     connection = sqlite3.connect(str(paths.db_path()))
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     assert version > 0, "fixture premise: a migrated store to rewind"
-    connection.execute(f"PRAGMA user_version = {version - 1}")
+    connection.execute("PRAGMA user_version = 0")
     connection.commit()
     connection.close()
 

@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/delivery/hook-response.experimental-v2.schema.json",
+  "title": "hook-response.experimental-v2",
+  "description": "The server's answer to one hook invocation. Specified verbatim by 02-contracts-and-data.md section 6 ('Response'), with the cross-field rules taken from section 10 (error and availability semantics) and section 1 (contract principles). WHAT THIS SCHEMA MAKES IMPOSSIBLE, and it is the whole reason it exists: action is a closed enum of exactly inject and noop. allow, block, substitute and tool_result are DELIBERATELY EXCLUDED - 02 section 6 names all four and says they 'are not contract-v2 actions', because 'No response can block, replace, or fabricate the result of a developer tool call' (02 section 1) and 'No delivery mode blocks or substitutes a developer tool call' (01 section 11). A schema that merely omitted them would still accept them under a permissive validator or an open root; this one rejects them at the enum, so an interception-shaped server can never ship a response the contract cannot describe. Tool observations reach the server by the asynchronous source-ingest path instead. The second structural guarantee is that action=noop forces briefing to null, so a response that declined to inject cannot also hand the client something injectable. KNOWN DIVERGENCE, flagged and not fixed here: status carries the four values 02 sections 2.5 and 6 name, but app/retrieval/reader.py::Briefing.status only ever takes served, empty or unavailable - the reader emits 'served' or 'empty' at the end of a successful query and 'unavailable' on failure, and there is no code path that produces 'degraded'. degraded is therefore unreachable from today's reader even though the contract admits it; 02 section 10's 'Redis fails after admission -> manifest-pinned unavailable or cache-bypass degraded' row is the behavior that would produce one. The canon's four are encoded here because the contract is the contract; closing the gap is a reader change, not a schema change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "status",
+    "action",
+    "briefing",
+    "config_fingerprint",
+    "server_ms",
+    "deadline",
+    "errors"
+  ],
+  "properties": {
+    "contract": {
+      "const": 2,
+      "description": "Echoes hook-request.experimental-v2.contract. A mismatch is 'Contract mismatch -> status=unavailable, action=noop' with both versions recorded (02 section 10)."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "served",
+        "empty",
+        "degraded",
+        "unavailable"
+      ],
+      "description": "What happened, and the field analysis groups on. empty and unavailable are NEVER interchangeable: 'An unavailable query must never be counted as a clean CI-off baseline' (02 section 10). empty means the reader looked and found nothing authorized - a real, attributable observation. unavailable means the query failed and the arm produced no observation at all; folding it into the off/noop group would credit a broken dependency as evidence that CI does not help. degraded means a declared partial result. See the root description for the reader-side gap on degraded."
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "inject",
+        "noop"
+      ],
+      "description": "The only two things a v2 hook response may ask the client to do. See the root description: allow, block, substitute and tool_result are excluded on purpose and this enum is where that exclusion is enforced. Failure semantics 'fail open only with respect to the developer's original workflow by returning noop, and fail closed for knowledge access' (02 section 1) - noop is the safe direction in both senses, which is why every non-served status below is pinned to it."
+    },
+    "briefing": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "https://schemas.aisquare.studio/ci/delivery/mcp-tool-output.v1.schema.json"
+        }
+      ],
+      "description": "The composed briefing to inject, or null. IT IS THE DELIVERY-BLIND BRIEFING, mcp-tool-output.v1, and NOT briefing.v1 - that choice is a blinding control and it is load-bearing, so it is spelled out. briefing.v1 (Knowledge/read family) is the server's full internal record: it carries principal_id, workspace_id, retrieval_path, resolution_path, reader diagnostics, and fan_out {targets_queried, fusion_operations}, and its items are whole knowledge-item.v1 records including authorization_decision.matched_attachment_id and matched_grant_ids. fan_out alone unblinds the experiment on the first call - R1 is one physical target and R3 is one per studio (01 section 7, 03 section 4) - and 02 section 3.4 lists fan-out, physical route, local rank, store identity, architecture ID and matched attachment/grant IDs among the fields the topology-neutral projection excludes. A delivery client is blinded by construction (02 section 1, 05 A-13), so handing it a briefing.v1 would defeat the descriptor's blinding through the response instead of through the descriptor. Pointing this field at mcp-tool-output.v1 also makes the two delivery transports carry byte-identical packets, which is what 02 section 7's 'The dummy harness calls the same service function as the future MCP adapter' requires and what makes hook-versus-MCP a delivery-mode contrast rather than a payload contrast. The constraint this schema owns on top of that is WHETHER a briefing may be present at all, in allOf below."
+    },
+    "config_fingerprint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The fingerprint of the server-owned configuration that produced this answer. 'Every build and query names an immutable input checkpoint and configuration fingerprint' (02 section 1) and 02 section 7 requires every call to receive one. Null is nevertheless admitted, and required to be non-null only when action=inject: a request rejected on contract-version mismatch is answered before any run configuration is resolved, so there is no configuration to fingerprint and inventing one would be worse than reporting none. CANON UNDERSPECIFICATION: sections 1 and 7 read as unconditional, and section 10's contract-mismatch row does not say what fingerprint that response carries."
+    },
+    "server_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Server-side wall time for this call, on the SERVER clock. Never differenced against client_observed_at: 02 section 3.7 keeps the two pipelines on separate clocks precisely so one side's transport cost is never charged to the other's architecture."
+    },
+    "deadline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "server_ms",
+        "client_safety_ms",
+        "breached"
+      ],
+      "properties": {
+        "server_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The server's own deadline for this call, from manifest runtime.server_deadline_ms (03 section 4)."
+        },
+        "client_safety_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The ceiling the client declared on the request, echoed back so a breach is attributable to a specific pair of numbers rather than to a policy nobody recorded."
+        },
+        "breached": {
+          "type": "boolean",
+          "description": "Whether a deadline was crossed. NOT EXPRESSIBLE IN JSON SCHEMA, adapter-enforced: the arithmetic relation between breached, server_ms and the two ceilings is a cross-field computation. What IS expressed is its consequence - breached=true forces status=unavailable (allOf below), from 02 section 10's 'Client safety ceiling approached -> status=unavailable, action=noop'."
+        }
+      },
+      "description": "Both deadlines and the breach verdict, together. Reporting them as one object is deliberate: a breach figure without the two ceilings it was measured against cannot be checked by a reader of the ledger, and 02 section 10 requires 'Server and client deadlines plus breach recorded'."
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.aisquare.studio/ci/kernel/error.v1.schema.json"
+      },
+      "description": "Explicit failures, from the closed kernel catalog. 'Failures are explicit in the ledger' (02 section 1), and the closed error.v1 code catalog means free-text detail can supplement a reason but never replace one. The array is pinned empty for served and empty, and required non-empty for degraded and unavailable, in allOf below."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "empty",
+              "unavailable"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "noop"
+          }
+        },
+        "description": "02 section 10, four separate rows: no relevant authorized item, CI dependency unavailable, client safety ceiling approached, and scope cannot be resolved all resolve to status/action pairs whose action is noop. 'no fallback to broader scope' on the scope row is the fail-closed half of the same rule."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "const": "served"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "inject"
+          }
+        },
+        "description": "served means items were injected. TIGHTENING BEYOND CANON: 02 section 10 pins only the noop rows, leaving served and degraded unpinned. served is pinned to inject here because it is otherwise indistinguishable from empty in the ledger - a served/noop row records that the reader found authorized knowledge and then silently discarded it, which is either a bug or an unrecorded policy, and neither should validate. degraded stays free, because 'degraded MAY inject a declared partial briefing only when the run configuration permits partial results' (02 section 6) is genuinely optional."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "inject"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "briefing",
+          "config_fingerprint"
+        ],
+        "properties": {
+          "briefing": {
+            "type": "object"
+          },
+          "config_fingerprint": {
+            "type": "string"
+          }
+        },
+        "description": "You cannot inject nothing. An inject response must carry a briefing object and must name the configuration that produced it, so every injected packet is attributable to a fingerprinted config."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "noop"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "briefing": {
+            "type": "null"
+          }
+        },
+        "description": "The second structural guarantee of this schema. A noop response cannot carry a briefing at all, so a client that ignores action and reads briefing has nothing to inject rather than something. TIGHTENING BEYOND CANON: 02 section 10 records the empty-case candidate counts and filters in the LEDGER, not in the response, so nothing is lost by emptying the client-facing field. Without this rule, 'action=noop' is advice; with it, it is a fact about the payload."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "degraded",
+              "unavailable"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "errors": {
+            "minItems": 1
+          }
+        },
+        "description": "A degradation or failure with no recorded reason is unattributable, and unattributable failures are exactly what makes an unavailable run look like a clean CI-off baseline (02 section 10). TIGHTENING BEYOND CANON: section 6 shows an errors array but does not say when it must be non-empty."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "served",
+              "empty"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "errors": {
+            "maxItems": 0
+          }
+        },
+        "description": "The converse, and it is the half that keeps the first one honest. If a served response could also carry errors, 'errors is non-empty' would stop discriminating degraded and unavailable from success, and the minItems rule above would be decorative."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "deadline"
+        ],
+        "properties": {
+          "deadline": {
+            "required": [
+              "breached"
+            ],
+            "properties": {
+              "breached": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "unavailable"
+          }
+        },
+        "description": "02 section 10: 'Client safety ceiling approached -> status=unavailable, action=noop'. A breached deadline that still reported served would be a latency figure the experiment cannot use and an injection the client had already given up waiting for."
+      }
+    }
+  ]
+}

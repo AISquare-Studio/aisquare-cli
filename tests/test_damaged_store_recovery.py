@@ -296,10 +296,19 @@ def test_a_lock_timeout_is_not_dressed_up_as_damage(monkeypatch: pytest.MonkeyPa
 
 def _wedge_the_store() -> None:
     """A store left mid-migration: the §0b race, reproduced by rewinding the
-    version so a migration re-applies onto its own DDL."""
+    version so a migration re-applies onto its own DDL.
+
+    Rewound to 0 rather than by one step: the top migration is deliberately
+    idempotent now (schema v13 converges two forks of v11 and so re-applies
+    cleanly), which is a good property and means one step back no longer
+    wedges anything. Version 0 replays v1's ``CREATE TABLE entry`` onto a
+    table that exists, which cannot be made idempotent without changing what
+    the migration means — so the fixture stays true whatever is added on top.
+    """
     connection = sqlite3.connect(str(paths.db_path()))
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    connection.execute(f"PRAGMA user_version = {version - 1}")
+    assert version > 0, "fixture premise: a migrated store to rewind"
+    connection.execute("PRAGMA user_version = 0")
     connection.commit()
     connection.close()
 

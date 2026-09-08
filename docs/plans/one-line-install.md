@@ -1,19 +1,26 @@
 # One-line install — `curl … | sh` to a green doctor and the fleet UI
 
-> **Status: planned.** Nothing in this document exists yet. Branch
-> `plan/one-line-install`. Written against `main` @ `f4c3387` (0.6.0).
+> **Status: IMPLEMENTED**, 2026-09-08, on this same branch. `install.sh`,
+> `install.ps1`, `tests/install/`, `.github/workflows/install.yml` and the three
+> doctor fixes of §6 are all in the tree. What the plan got WRONG is recorded in
+> §12 — including one bug in this document's own §3.3 sketch that would have
+> killed the installer on Fedora, RHEL, Arch and macOS.
+>
+> Originally written against `main` @ `f4c3387` (0.6.0) as a plan.
 >
 > Every measurement below was taken on 2026-09-04 on Fedora 44, Python 3.14.7
 > local / 3.13 via uv, tmux 3.7c, Claude Code 2.1.260, uv 0.12.3, Node 26.7.0,
 > gh 2.97.0. Numbers attributed to a run were produced by that run, not
 > estimated.
 >
-> Fences in this file are tagged `text` on purpose.
-> `tests/test_documented_commands.py` sweeps every `.md` in the repo and treats a
-> shell-tagged fence as a script whose every `aisquare …` line must resolve
-> against the live command tree. The commands here are *planned*, so they are
-> shown as references. Keep them `text` until the script exists, then list
-> `install.sh`'s own documentation in `DOCUMENTED` and let the guard have it.
+> Fences in this file stay tagged `text`, and the reason changed once the script
+> landed. `tests/test_documented_commands.py` treats a shell-tagged fence as a
+> script whose every `aisquare …` line must resolve against the live command
+> tree. Most fences here are *measured output* — uv's "Nothing to upgrade", a
+> doctor table, a `pyvenv.cfg` layout — not commands to type, and a guard that
+> read them as instructions would be validating transcripts. The commands a
+> person actually runs are documented in `README.md`, which IS in `DOCUMENTED`
+> and is checked.
 
 ---
 
@@ -965,6 +972,151 @@ not in the code.
 
 ---
 
+## 12. What shipped, and what this plan got wrong
+
+Written after the implementation, from what the work actually turned up. The plan
+held up better than its §11 questions suggested — `uv` as the bootstrap, one
+script rather than one per OS, and `install --force … @latest` over `uv tool
+upgrade` all survived contact — but five things in it were wrong, and one of
+them was the kind of wrong that ships.
+
+### 12.1 §3.3's own `/dev/tty` sketch was a fatal bug
+
+The plan's §3.3 gives this shape, and it is the one detail it says is "most
+likely to be got wrong":
+
+```text
+if [ -r /dev/tty ]; then
+    read -r answer < /dev/tty || answer=n
+```
+
+Both lines are wrong, and the second one is dangerous.
+
+**`[ -r /dev/tty ]` answers the wrong question.** In a container with no
+controlling terminal the device node exists and its mode bits pass `-r`, while
+`open(2)` on it fails with `ENXIO`. So the permissive test says "a human is
+here" on exactly the unattended machines §0.9 is about. The script opens the
+device instead.
+
+**The first implementation of that open was `{ : </dev/tty; } 2>/dev/null`, and
+it killed the installer.** `:` is a POSIX **special built-in**, and "if a
+redirection error occurs with a special built-in, a non-interactive shell shall
+exit" — not *return non-zero*: **exit**, whatever `set -e` says, and even inside
+an `if` condition where `set -e` is suspended. Measured: under `bash` with no
+controlling terminal the run died at that line with exit 1, having printed
+nothing since its previous step. Under `dash` it survived.
+
+That asymmetry is the whole problem. `/bin/sh` is dash on Debian and Ubuntu and
+**bash on Fedora, RHEL, Arch and macOS** — so the bug was invisible on the two
+platforms whose containers are easiest to test and fatal on everything else, in
+the one mode (`curl … | sh` from a script, a Dockerfile, CI) that §0.9 promises
+works.
+
+The fix is `(true </dev/tty) 2>/dev/null`: a subshell cannot take its parent
+down whatever the redirect does, and `true` is a regular built-in rather than a
+special one.
+
+**The container matrix did not catch it, and could not have.** Every cell passes
+`--yes`, and both `confirm` and `handoff` short-circuit on `--yes` before the
+probe is reached — so the matrix proved five distributions install correctly
+while never evaluating the line that breaks an unattended run. It took
+`start_new_session=True` in `tests/test_install_script_functions.py` to reach.
+Three tests there now fail if the probe is reverted.
+
+### 12.2 The §3.9.2 `sed` reads the wrong field on a hostile payload
+
+The plan's extraction is greedy:
+
+```text
+sed -n 's/.*"info":{.*"version":"\([^"]*\)".*/\1/p'
+```
+
+`.*` is greedy, so it takes the **last** `"version":"…"` in a 44 KB blob — and
+that blob embeds the whole README in `info.description`. A README that ever
+shows JSON output containing a version would silently become the answer.
+
+The shipped form splits on commas and anchors: `^"version":"`. Inside the JSON
+string that holds the README every quote is **backslash-escaped**, so a
+`\"version\":\"9.9.9\"` in prose cannot match an anchored `^"` at all.
+Verified against exactly that payload; it is a test in
+`tests/test_install_script_functions.py`.
+
+### 12.3 Node: `fnm` is not a workable primary path, and §5's table is short one row
+
+§3.2 says "prefer the platform package when it is new enough, and `fnm` when it
+is not". Measured, both halves of the fallback fail on the machines that need
+it:
+
+- **fnm's installer needs `unzip`,** and a bare Debian has none: it prints
+  "Checking availability of unzip... Missing! Not installing fnm due to missing
+  dependencies" and **exits 0**.
+- Worse, fnm's Node is only on PATH in shells that have run `fnm env`. So even a
+  successful fnm install leaves a machine where `aisquare doctor` reports no
+  node — after an installer that just promised a green doctor.
+
+So the shipped order is **platform package → NodeSource → fnm**. NodeSource is
+Node's own distribution channel for apt and dnf, installs system-wide, needs no
+shell hook, and is the same shape as the `gh` step that was already in §5: add
+the vendor repository, then install from it. Measured: Debian 12's Node 18 and
+Ubuntu 22.04's Node 12 both become 22.23.2. fnm stays as the last resort, and
+now installs `unzip` first.
+
+**`npm` is a separate package** from `nodejs` on Arch, Alpine and Debian, and
+Repomix is reached through `npx`. A Node 22 with no `npx` leaves the `repomix`
+check amber for a reason that reads like a Node problem and is not one, so the
+script checks for `npx` and installs `npm` beside node when it is missing.
+
+### 12.4 `git` belongs in the System class
+
+Not in §3.2's table, and it should be: the fleet gives every agent its own `git
+worktree` (`services/fleet.py::_git`), so a machine without git can register a
+project and never spawn an agent into one. It is one row of the same `case`
+statement, warn-only like its neighbours. No doctor check measures git, which is
+why the installer's own summary names it.
+
+Related, and an ordering bug the plan could not have seen: **`choose_project`
+cannot use `git`.** It runs before `install_git`, so on the bare machine this
+installer exists for `have git` is false and asking git means never finding the
+repository the user is standing in. It walks up for `.git` instead — a `.git`
+*file* included, which is what a worktree has.
+
+### 12.5 Delivered as one PR, not five
+
+§9 sizes the work as five PRs and §10b recommends shipping the doctor fixes as
+0.6.1 first. The owner asked for it in one, so that is what this is; the phase
+boundaries survive as the commit boundaries. Two smaller departures:
+
+- **No `docs/install.md`.** The README's install section carries the one-liner,
+  the flag table, the read-it-first path and the manual install. A second
+  document would duplicate it and drift.
+- **`AISQUARE_INSTALL_PACKAGE` was added** so the container matrix installs a
+  wheel built from the tree under review. The cell asserts a green doctor and
+  two of this branch's changes are *to doctor checks*, so grading against the
+  last release would have graded the wrong code.
+
+### 12.6 The acceptance criterion, measured
+
+`tests/install/cell.sh` on five bare distributions, each installing a wheel
+built from this tree, each run three times:
+
+```text
+debian:12      17 checks, not-ok = [brain]   PASS
+ubuntu:22.04   17 checks, not-ok = [brain]   PASS
+fedora:41      17 checks, not-ok = [brain]   PASS
+archlinux      17 checks, not-ok = [brain]   PASS
+alpine:3.22    17 checks, not-ok = [brain]   PASS
+debian:12 + Claude Code installed for real   PASS
+```
+
+Alpine earns its cell twice over: musl, BusyBox `ash` as `/bin/sh`, **and no
+curl**, so it is the only cell that takes the `wget` path end to end. Run 3 of
+every cell re-runs the installer with every package manager replaced by a stub
+that records being called, and asserts the run printed "Nothing to do", exited
+0, moved no version, left `~/.claude/settings.json` byte-identical, and **called
+no package manager at all**.
+
+---
+
 ## Decisions log
 
 | Date | Decision |
@@ -976,4 +1128,9 @@ not in the code.
 | 2026-09-04 | Three pre-existing bugs found while measuring and folded in as phase 1 (§6): two `doctor` fixes naming the SDK instead of this CLI, and `repomix` green on Node < 22. |
 | 2026-09-04 | Owner asked for existing-install detection and upgrade; added as §3.9. Measured: `uv tool upgrade` will NOT move a pinned install (exit 0, "Nothing to upgrade"), so the script always upgrades with `uv tool install --force … @latest --with tiktoken`, which moves it and re-states the extra. |
 | 2026-09-04 | Claude Code's version is never managed by us (§3.9.3) — it ships `claude update` and auto-updates by default, and the fleet needs a floor, not an exact version. |
+| 2026-09-08 | Owner answered §11: `uv` confirmed as the bootstrap; the raw GitHub URL now with the vanity redirect later; Homebrew installed only if the user agrees; the fleet UI's first-launch view left alone for a follow-up. |
+| 2026-09-08 | Implemented on this branch. Five things in the plan were wrong — §12. The one that mattered: §3.3's own `/dev/tty` sketch. `[ -r /dev/tty ]` passes where `open(2)` fails, and `{ : </dev/tty; }` **exits** a non-interactive shell on a redirection error because `:` is a special built-in — fatal under bash (Fedora/RHEL/Arch/macOS `/bin/sh`), harmless under dash. Fixed to `(true </dev/tty)`. The container matrix could not see it: every cell passes `--yes`, which short-circuits before the probe. |
+| 2026-09-08 | Node's fallback re-ordered to platform package → NodeSource → fnm (§12.3): fnm needs `unzip` (absent on bare Debian) and its Node is invisible to later processes, so it cannot be the primary path on the machines the floor exists for. `npm` installed beside `nodejs` where it is a separate package, because Repomix is reached through `npx`. |
+| 2026-09-08 | `git` added to the System class (§12.4) — the fleet's per-agent worktrees need it and no doctor check measures it. `choose_project` rewritten to find a repo WITHOUT git, since it runs before `install_git`. |
+| 2026-09-08 | §3.9.2's greedy `sed` replaced with an anchored extraction (§12.2): PyPI embeds the README in `info.description`, and a greedy match takes the last `"version"` in the blob rather than the real one. |
 | 2026-09-04 | Owner asked what `uv` does to a machine; answered in §3.1 from a measured install. Not preinstalled on any OS, but its installer needs no per-OS branch. Installs a per-tool venv plus its own managed interpreter under `~/.local/share/uv/`; the base and system Pythons are untouched. Verified this shape still reports `ok` from the `install` doctor check. |

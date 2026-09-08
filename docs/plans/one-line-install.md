@@ -1171,7 +1171,30 @@ amber set to `expected_amber` for EQUALITY, so the Mac — being *healthier* tha
 expected — was refused the no-op path for it. The condition is "nothing amber
 that we did not expect"; fewer amber lines than expected is good news.
 
-### 12.8 The acceptance criterion, measured
+### 12.8 Every cell ran as root, which is the branch nobody takes
+
+A container gives you root, so the whole matrix ran as root — and root is the
+path where `PKG_SUDO` is EMPTY and `sudo_run` degrades to a plain `run`. §3.7's
+central claim is that "the only step that needs elevation is the System class,
+and there `sudo` is called for that command alone, visibly, never by
+re-executing the whole script"; nothing in the matrix was checking it.
+
+`tests/install/cell-nonroot.sh` runs the same assertions as a normal user with
+sudo. It reaches, for the first time: sudo invoked one command at a time, the
+apt keyring for `gh` written under `/etc` as root while uv, aisquare and Claude
+Code land in that user's own `~/.local/bin`, NodeSource's setup script run
+through sudo from a file, and `preflight`'s root refusal correctly not firing.
+
+It also found a live bug in the summary, and one this document should own: the
+script uses **no `local`**, so every `_name` is a global — and
+`is_expected_amber` used `_expected` as its loop variable, which is the list
+`summary` accumulates while calling it. Each call overwrote the caller's. The
+user-visible output read `expected:brain brain`. The file's header comment had
+claimed it used `local` and justified the choice at length; it never did.
+`tests/test_install_script_is_posix.py` now fails on any `_name` assigned in two
+functions, which turned up two more latent collisions on the way.
+
+### 12.9 The acceptance criterion, measured
 
 `tests/install/cell.sh` on five bare distributions, each installing a wheel
 built from this tree, each run three times:
@@ -1182,8 +1205,21 @@ ubuntu:22.04   17 checks, not-ok = [brain]   PASS
 fedora:41      17 checks, not-ok = [brain]   PASS
 archlinux      17 checks, not-ok = [brain]   PASS
 alpine:3.22    17 checks, not-ok = [brain]   PASS
-debian:12 + Claude Code installed for real   PASS
+ubuntu:22.04 as a normal user with sudo      PASS   (§12.8)
+debian:12 with Claude Code installed for real PASS
+macos-latest   install + tiktoken green, re-run a no-op  PASS
 ```
+
+Each cell runs the installer FOUR times: bare with no project, with a project
+(where the criterion is asserted), again with every package manager stubbed to
+record being called, and finally the upgrade path of §8.4 — `aisquare-cli==0.5.0`
+staged as an exact pin, then the installer, then an assertion that the version
+moved AND that `tiktoken` survived `--force` replacing the tool environment.
+That last run was missing from the first implementation and is the one thing in
+§8.4 that a static guard cannot cover: there was already a check that the string
+`uv tool upgrade` appears nowhere in the script, but only a real upgrade proves
+the replacement command works. Measured: 0.5.0 -> 0.6.0, tiktoken green, on
+every platform.
 
 Alpine earns its cell twice over: musl, BusyBox `ash` as `/bin/sh`, **and no
 curl**, so it is the only cell that takes the `wget` path end to end. Run 3 of
@@ -1206,6 +1242,7 @@ no package manager at all**.
 | 2026-09-04 | Owner asked for existing-install detection and upgrade; added as §3.9. Measured: `uv tool upgrade` will NOT move a pinned install (exit 0, "Nothing to upgrade"), so the script always upgrades with `uv tool install --force … @latest --with tiktoken`, which moves it and re-states the extra. |
 | 2026-09-04 | Claude Code's version is never managed by us (§3.9.3) — it ships `claude update` and auto-updates by default, and the fleet needs a floor, not an exact version. |
 | 2026-09-08 | Owner answered §11: `uv` confirmed as the bootstrap; the raw GitHub URL now with the vanity redirect later; Homebrew installed only if the user agrees; the fleet UI's first-launch view left alone for a follow-up. |
+| 2026-09-08 | Added a non-root cell (§12.8) — every other cell ran as root, which is the branch where `sudo_run` never calls sudo. It found a shell variable collision that doubled a line of the user-facing summary, and that install.sh's own header comment claimed a `local` the file never used. A guard now fails on any `_name` assigned in two functions. |
 | 2026-09-08 | macOS CI found the worst bug in the feature (§12.7): `\|` alternation in a `sed` BRE is a GNU extension that **BSD sed lacks**, so the amber-check filter matched nothing on macOS and the installer reported every Mac as fully healthy. Five Linux cells passed it, BusyBox included. Fixed with two `-e` expressions and a static guard. Same run showed `short_circuit` demanded an EQUAL amber set rather than a subset, so a healthier-than-expected machine was refused the no-op path. |
 | 2026-09-08 | #103 fixed §6's three doctor defects on `main` while this branch was in flight, and per-path rather than against one constant (§12.6). This branch dropped its own phase 1 and took main's. The Node floor now lives in two languages, with a test asserting they are equal. |
 | 2026-09-08 | Implemented on this branch. Five things in the plan were wrong — §12. The one that mattered: §3.3's own `/dev/tty` sketch. `[ -r /dev/tty ]` passes where `open(2)` fails, and `{ : </dev/tty; }` **exits** a non-interactive shell on a redirection error because `:` is a special built-in — fatal under bash (Fedora/RHEL/Arch/macOS `/bin/sh`), harmless under dash. Fixed to `(true </dev/tty)`. The container matrix could not see it: every cell passes `--yes`, which short-circuits before the probe. |

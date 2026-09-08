@@ -172,10 +172,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delegates into it, or prints the one command that installs WSL.
 - **A container matrix for the installer** (`tests/install/`, and its own CI
   workflow). Five bare distributions — Debian 12, Ubuntu 22.04, Fedora 41, Arch,
-  Alpine 3.22 — each installing a wheel built from the tree under review, each
-  run three times, asserting the acceptance criterion (`every check ok except
-  brain`), then that a re-run installs nothing at all, moves no version, leaves
-  `~/.claude/settings.json` byte-identical, and calls no package manager. It runs
+  Alpine 3.22 — each installing a wheel built from the tree under review, plus a
+  cell that runs as a **normal user with sudo** (the primary case, and the only
+  one where the script's `sudo` path is exercised at all), one that installs
+  Claude Code for real, and a macOS job. Each cell runs the installer four
+  times: bare, with a project — where the acceptance criterion is asserted,
+  *every check ok except `brain`* — then again with every package manager
+  replaced by a stub that records being called, asserting the re-run installs
+  nothing, moves no version, leaves `~/.claude/settings.json` byte-identical and
+  calls no package manager; and finally the upgrade path, staging an exact
+  `==0.5.0` pin and asserting the version moves *and* that `tiktoken` survives.
+  The criterion is asserted as a *set* with the total floored rather than pinned,
+  which is why it kept holding when `doctor` gained an eighteenth check. It runs
   on a schedule as well as on pushes, because four of the things the script
   fetches belong to other people.
 

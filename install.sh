@@ -1689,8 +1689,9 @@ is_expected_amber() {
 # GNU sed has it, BusyBox sed has it, and **BSD sed — which is macOS's sed —
 # does not**. There it matches the literal text `warn|fail`, so the amber list
 # came back EMPTY on every Mac. Measured in CI the first time this ran on
-# macos-latest: `doctor: 17 checks, 0 not ok` on a machine whose gbrain is
-# absent. That is the worst failure this function has — an installer that calls
+# macos-latest: `doctor: 17 checks, 0 not ok` (the count was 17 then; it is
+# 18 since #72 added the CI-test-bed line) on a machine whose gbrain is absent.
+# That is the worst failure this function has — an installer that calls
 # every Mac perfectly healthy, never short-circuits, and can never surface an
 # unexpected check, which is exactly what §3.8 exists to prevent. Every
 # container cell in the matrix passed it, because none of them is a Mac.

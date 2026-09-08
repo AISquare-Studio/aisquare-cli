@@ -57,7 +57,8 @@ implicit is how installers become unsafe:
 ## 1. The measured baseline — what `doctor` actually says
 
 This is the part that decides the whole design, so it was measured rather than
-reasoned about. `aisquare doctor` runs **17 checks** (`services/diagnostics.py`
+reasoned about. `aisquare doctor` ran **17 checks** at the time
+(`services/diagnostics.py`
 `doctor()`); `--json` was parsed rather than the rendered table read.
 
 ### 1.1 A fresh machine, nothing set up
@@ -1279,12 +1280,18 @@ making every case an upgrade.
 `tests/install/cell.sh` on five bare distributions, each installing a wheel
 built from this tree, each run three times:
 
+> The count below is **18** as of `main` @ 6536815: #72 added
+> `*_experiment_checks()`, which is one `ok` line while the CI test bed is off —
+> the default, and the state every cell is in. The amber SET is what the
+> criterion is about and it did not move, which is the whole reason `cell.sh`
+> asserts the set and floors the total rather than pinning a number.
+
 ```text
-debian:12      17 checks, not-ok = [brain]   PASS
-ubuntu:22.04   17 checks, not-ok = [brain]   PASS
-fedora:41      17 checks, not-ok = [brain]   PASS
-archlinux      17 checks, not-ok = [brain]   PASS
-alpine:3.22    17 checks, not-ok = [brain]   PASS
+debian:12      18 checks, not-ok = [brain]   PASS
+ubuntu:22.04   18 checks, not-ok = [brain]   PASS
+fedora:41      18 checks, not-ok = [brain]   PASS
+archlinux      18 checks, not-ok = [brain]   PASS
+alpine:3.22    18 checks, not-ok = [brain]   PASS
 ubuntu:22.04 as a normal user with sudo      PASS   (§12.8)
 debian:12 with Claude Code installed for real PASS
 macos-latest   install + tiktoken green, re-run a no-op  PASS
@@ -1314,6 +1321,7 @@ no package manager at all**.
 
 | Date | Decision |
 | --- | --- |
+| 2026-09-08 | `main` moved to 6536815 (#72 Collective Intelligence, #76 serve disclosure). `doctor()` gained `*_experiment_checks()`, so the count is **18**, not 17 — every §1 and §12.7 figure is a dated measurement against 0.6.0 and stays as written. With the CI test bed off (the default, and every container cell's state) that check is a single `ok` line, so the amber SET is unchanged and the acceptance criterion holds; `cell.sh` asserts the set and floors the total rather than pinning it, which is why nothing in the harness needed changing. Re-measured: 18 checks, not-ok = [brain]. |
 | 2026-09-04 | Plan written against `main` @ `f4c3387` (0.6.0). Baselines in §1 measured, not estimated: 17 checks, 4 warnings after `init`, 16/17 green after the §1.3 recipe. |
 | 2026-09-04 | One POSIX `sh` script for macOS/Linux/WSL2 plus a PowerShell shim, not one per OS (§2) — 85% of the steps do not vary by platform. |
 | 2026-09-04 | `uv` chosen as the bootstrap over `pipx` + system Python (§3.1). `UV_PYTHON_DOWNLOADS=automatic` forced, after a measured failure on a distro-packaged uv with `python-downloads = manual`. |

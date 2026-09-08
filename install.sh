@@ -1762,7 +1762,20 @@ run_doctor() {
 # a command substitution — this string is printed, never evaluated.
 _actionable_fix() {
     case "$1" in
-        gh) printf 'gh auth login' ;;
+        gh)
+            # BRANCHED ON WHETHER gh EXISTS. This map used to answer
+            # `gh auth login` unconditionally — which is right for a gh that is
+            # present and logged out, and wrong advice for one whose install
+            # failed (warn-only, §3.2, so that is a reachable state). Telling
+            # someone to log into a binary they do not have is the same class of
+            # mistake as blaming gbrain for a green check: advice that does not
+            # match the state.
+            if [ -n "$GH_VERSION" ]; then
+                printf 'gh auth login'
+            else
+                printf 'install it: %s' "$(pkg_hint gh)"
+            fi
+            ;;
         claude-code) printf 'run `claude` once to authenticate it' ;;
         snapshot) printf 'aisquare project onboard' ;;
         *) printf '' ;;

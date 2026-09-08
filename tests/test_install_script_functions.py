@@ -1545,3 +1545,20 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
         "the reason named gbrain while `brain` was green:\n" + result.stdout
     )
     assert "no project registered" in result.stdout, result.stdout
+
+
+def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:
+    """ "Log in" is wrong advice for a binary that is not installed.
+
+    `_actionable_fix` answered `gh auth login` unconditionally, which is right
+    for a gh that is present and logged out and wrong for one whose install
+    failed — a reachable state, because the System class is warn-only (§3.2).
+    Same class as the two the review caught: advice that does not match the
+    state it is given for.
+    """
+    present = sh("GH_VERSION=2.97.0; _actionable_fix gh; echo", path=base_path(tmp_path))
+    assert present.stdout.strip() == "gh auth login", present.stdout
+
+    absent = sh('GH_VERSION=""; PKG=apt; _actionable_fix gh; echo', path=base_path(tmp_path))
+    assert "install it" in absent.stdout, f"an absent gh was told to log in: {absent.stdout!r}"
+    assert "apt install gh" in absent.stdout, absent.stdout

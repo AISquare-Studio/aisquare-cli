@@ -45,6 +45,14 @@ fi
 
 IMAGES=${*:-"debian:12 ubuntu:22.04 fedora:41 archlinux alpine:3.22"}
 
+#: Whether the caller named images, captured HERE and not asked later. The wheel
+#: check below uses `set -- "$DIST"/*.whl`, which REPLACES "$@" — so a later
+#: `[ "$#" -eq 0 ]` reads the wheel count, not the caller's arguments. Measured:
+#: the non-root cell was silently skipped on every full run because of it, and a
+#: skipped cell looks exactly like a cell that has nothing to say.
+ALL_IMAGES=0
+[ "$#" -eq 0 ] && ALL_IMAGES=1
+
 # One image also runs as a NORMAL USER WITH SUDO (tests/install/cell-nonroot.sh),
 # which is the primary case and the one every root cell cannot reach: `sudo_run`
 # only calls sudo when `PKG_SUDO` is set, and it is empty for root. Ubuntu,
@@ -94,7 +102,7 @@ for image in $IMAGES; do
 done
 
 # The non-root cell, unless the caller named specific images.
-if [ "$#" -eq 0 ]; then
+if [ "$ALL_IMAGES" = 1 ]; then
     printf '\n################ %s (as a non-root user) ################\n' "$NONROOT_IMAGE"
     if "$ENGINE" run --rm \
         -v "$REPO:/mnt:ro,z" \

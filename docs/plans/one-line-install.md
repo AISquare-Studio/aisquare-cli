@@ -1223,7 +1223,58 @@ and Homebrew auto-updates on install. `-Sy` rather than `-Syu` deliberately: a
 full system upgrade is not a thing an installer should do to someone's machine
 unasked, and refreshing the database is the minimum needed to install at all.
 
-### 12.10 The acceptance criterion, measured
+### 12.10 What an independent review found, and the classes it named
+
+A review of the implementation raised **fifteen findings, all fifteen real**.
+Recorded here because three of them are classes rather than instances, and the
+classes are the reusable part.
+
+**Pipeline exit status.** `curl … | sh` yields the SHELL's status, not curl's;
+`fetch … | tee file` yields tee's. Three separate bugs, one cause: a failed
+download reported as a successful install (with `install_uv`'s carefully written
+`die` rendered unreachable, so the user got a false "not on PATH" message
+instead), and a failed `gh` key download leaving a zero-byte keyring that every
+later run then trusted forever. `pipefail` is not POSIX, so all downloads now go
+through one `fetch_to_file` — mktemp, fetch, assert non-empty — which also
+closed a root-executed predictable-temp-file hazard.
+
+**A fix not applied to the function beside it.** Twice. `short_circuit` gated
+its Agent-class check on `WANT_AGENT` and its System-class checks on nothing, so
+`--no-system-deps` could never short-circuit *and* always exited 2 — every
+provisioning run with that flag failed its caller. And §12.8's "explain only what
+is amber" fix went into `summary` and not into `short_circuit`, which kept
+blaming gbrain for a green check.
+
+**A guard that guards nothing.** The `/dev/tty` assertion of §12.1 was satisfied
+*only* by the comment describing the spelling it rejected — so it verified that
+a paragraph of prose still existed, was a false-failure trap for anyone tidying
+that comment, and actively required the dangerous form to be present. The
+workflow's `dash -n "$f" && echo ok` could not fail the step under `bash -e`
+while printing "ok" for both interpreters. `cell-nonroot.sh` was in none of the
+four check lists. And a stray discarded `aisquare doctor` inside RUN 4's command
+substitution could abort the subshell — `doctor` exits 1 on any `fail` check —
+silently skipping the one assertion that proves §3.9.1 is handled, behind a
+message that reads like a network blip.
+
+Two structural findings beyond the individual fixes:
+
+- **Every container cell was grading the same code path.** The stub set put
+  `apt-get` on PATH, and detection tries `apt-get` first — so the fedora, arch
+  and alpine cells all took the apt branch. Four cells' worth of apparent
+  coverage over one branch. Stubs now mirror what the machine really has.
+- **Two claims in this document were overclaims.** §3.9.4's "calls no package
+  manager" was false on every dnf machine (`pkg_manager` read `dnf --version`),
+  and the §11.3 answer "`--yes` declines Homebrew" was false — `confirm`
+  returned 0 unconditionally under `--yes`, so `--yes` on a Mac at a terminal
+  installed a system-wide package manager unasked. Both true now; `--yes` means
+  "never block on a question; take the stated default".
+
+The reviewer also noted where CI *structurally* could not have caught things:
+macos-latest ships Homebrew, so the prompt is unreachable there; and the pin
+downgrade path was untested because the test helper pins `9.9.9` for every case,
+making every case an upgrade.
+
+### 12.11 The acceptance criterion, measured
 
 `tests/install/cell.sh` on five bare distributions, each installing a wheel
 built from this tree, each run three times:
@@ -1271,6 +1322,7 @@ no package manager at all**.
 | 2026-09-04 | Owner asked for existing-install detection and upgrade; added as §3.9. Measured: `uv tool upgrade` will NOT move a pinned install (exit 0, "Nothing to upgrade"), so the script always upgrades with `uv tool install --force … @latest --with tiktoken`, which moves it and re-states the extra. |
 | 2026-09-04 | Claude Code's version is never managed by us (§3.9.3) — it ships `claude update` and auto-updates by default, and the fleet needs a floor, not an exact version. |
 | 2026-09-08 | Owner answered §11: `uv` confirmed as the bootstrap; the raw GitHub URL now with the vanity redirect later; Homebrew installed only if the user agrees; the fleet UI's first-launch view left alone for a follow-up. |
+| 2026-09-08 | An independent review of the implementation raised 15 findings, all real (§12.10). Three classes: pipeline exit status (a failed download read as a successful install, three ways), a fix not applied to the neighbouring function (twice), and a guard that guards nothing (four times, including the `/dev/tty` guard written for §12.1). Two claims in this document were overclaims and are now true. |
 | 2026-09-08 | `pacman -S` without `-Sy` failed to install tmux, gh AND git on Arch's rolling image (§12.9) — and the warn-only System class reported it as three unrelated warnings over a successful run. `pkg_refresh` now syncs the database once per run for apt, pacman and zypper. |
 | 2026-09-08 | Added a non-root cell (§12.8) — every other cell ran as root, which is the branch where `sudo_run` never calls sudo. It found a shell variable collision that doubled a line of the user-facing summary, and that install.sh's own header comment claimed a `local` the file never used. A guard now fails on any `_name` assigned in two functions. |
 | 2026-09-08 | macOS CI found the worst bug in the feature (§12.7): `\|` alternation in a `sed` BRE is a GNU extension that **BSD sed lacks**, so the amber-check filter matched nothing on macOS and the installer reported every Mac as fully healthy. Five Linux cells passed it, BusyBox included. Fixed with two `-e` expressions and a static guard. Same run showed `short_circuit` demanded an EQUAL amber set rather than a subset, so a healthier-than-expected machine was refused the no-op path. |

@@ -142,7 +142,17 @@ jobs:
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          # PINNED. An unpinned linter can turn an untouched file red when a new
+          # rule ships, and this job is the only gate on install.ps1. 1.22.0 also
+          # runs on older pwsh, which is what makes it reproducible locally:
+          #   podman run --rm -v "$PWD:/mnt:ro" mcr.microsoft.com/powershell \
+          #     pwsh -c 'Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 \
+          #       -Force -Scope CurrentUser -SkipPublisherCheck; Import-Module PSScriptAnalyzer;
+          #       Invoke-ScriptAnalyzer -Path /mnt/install.ps1 -Severity Error,Warning \
+          #         -ExcludeRule PSAvoidUsingWriteHost'
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Force `
+            -Scope CurrentUser -SkipPublisherCheck
+          Import-Module PSScriptAnalyzer
           # PSAvoidUsingWriteHost is excluded, and it is the only exclusion.
           # The rule's own reasoning is "it might not work in all hosts, does not
           # work when there is no host, and cannot be captured or redirected" —

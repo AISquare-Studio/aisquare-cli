@@ -51,7 +51,7 @@ if (-not $wsl) {
 # `wsl -l -q` lists installed distributions. It writes UTF-16 to a pipe, which
 # is why the output is filtered rather than tested for emptiness -- a naive
 # `if ($out)` is true even when the only content is a BOM and blank lines.
-function Get-WslLines($WslArgs) {
+function Get-WslOutput($WslArgs) {
     try {
         $raw = & wsl.exe @WslArgs 2>$null
         return @($raw | ForEach-Object { $_ -replace "`0", '' } |
@@ -63,7 +63,7 @@ function Get-WslLines($WslArgs) {
     }
 }
 
-$distros = Get-WslLines @('--list', '--quiet')
+$distros = Get-WslOutput @('--list', '--quiet')
 
 # DOCKER DESKTOP IS WHY THE FIRST ENTRY IS NOT USED.
 #
@@ -80,7 +80,7 @@ $distros = Get-WslLines @('--list', '--quiet')
 # there is.
 $DockerPattern = '^docker-desktop'
 $defaultDistro = $null
-foreach ($line in (Get-WslLines @('--list', '--verbose'))) {
+foreach ($line in (Get-WslOutput @('--list', '--verbose'))) {
     if ($line -match '^\*\s+(\S+)') { $defaultDistro = $Matches[1]; break }
 }
 

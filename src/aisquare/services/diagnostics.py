@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from importlib import metadata
@@ -137,6 +138,24 @@ def _check_python() -> DoctorCheck:
     return _ok("python", f"Python {info.major}.{info.minor}.{info.micro}")
 
 
+#: THE DISTRIBUTION NAME, once, because getting it wrong is not a typo.
+#: `aisquare` on PyPI is a DIFFERENT project — the Explainability SDK — and it
+#: ships its own `aisquare/__init__.py` into the same top-level package
+#: directory this one occupies. pip's RECORD for the two overlaps on exactly
+#: that file and the last writer wins it silently (the long comment on the
+#: `explainability` extra in pyproject.toml is about precisely that shape). So a
+#: fix string saying `pipx install aisquare` does not merely fail to install
+#: this CLI: it lands the reader in the one dependency shape this project
+#: documents at length as a hazard. Both `install` fixes and the tiktoken fix
+#: said it before docs/plans/one-line-install.md §6.1 measured it.
+_INSTALL_GLOBALLY = (
+    "Install as a global tool: uv tool install --with tiktoken aisquare-cli "
+    "(or: pipx install aisquare-cli)"
+)
+"""The uv form first because it is what install.sh uses, and because it fixes
+the `tiktoken` line in the same command. Never `aisquare` — see above."""
+
+
 def _check_install() -> DoctorCheck:
     """Where aisquare runs from — the Claude Code hook needs a stable path."""
     binary = shutil.which("aisquare")
@@ -144,13 +163,13 @@ def _check_install() -> DoctorCheck:
         return _warn(
             "install",
             "aisquare is not on your PATH",
-            "Install as a global tool: pipx install aisquare",
+            _INSTALL_GLOBALLY,
         )
     if {".venv", "venv"} & set(Path(binary).parts):
         return _warn(
             "install",
             f"aisquare runs from a virtualenv ({binary})",
-            "For stable Claude Code hooks, install globally: pipx install aisquare",
+            f"For stable Claude Code hooks, install globally instead. {_INSTALL_GLOBALLY}",
         )
     return _ok("install", f"aisquare at {binary}")
 
@@ -423,16 +442,109 @@ def _read_line(path: Path) -> str:
         return ""
 
 
+MIN_NODE = 22
+"""The Node major Repomix needs, read from its own package.json rather than recalled.
+
+``repomix@1.18.0`` declares ``"engines": {"node": ">=22.0.0"}`` (registry.npmjs.org,
+2026-09-08). This is not a theoretical floor: **Debian 12 ships Node 18 and
+Ubuntu 22.04 ships Node 12**, so on both of them ``npx`` exists, the old form of
+this check reported ``ok``, and the first ``project onboard`` failed at runtime —
+a green line over a feature that cannot run (docs/plans/one-line-install.md §1.4,
+§6.3). A floor, deliberately, not an exact version: anything newer is fine.
+"""
+
+_NODE_MAJOR = re.compile(r"^v?(\d+)\.")
+"""``v26.7.0`` → 26. Anchored, so it reads a version and not the ``18`` out of
+some banner line; the major is all that ``>=22.0.0`` turns on."""
+
+
+def _node_major(binary: str) -> int | None:
+    """Node's major version, or ``None`` when it cannot be read.
+
+    ``None`` is a real answer and not an error: an unreadable version means
+    *untested against the floor*, which the caller reports at ``ok`` rather than
+    guessing — the same rule ``_check_tmux`` follows for a version string that
+    does not parse. Refusing on a guess would lock a fork or a distro build with
+    its own banner out of snapshots.
+    """
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    match = _NODE_MAJOR.match(result.stdout.strip())
+    return int(match.group(1)) if match else None
+
+
+_UPGRADE_NODE = (
+    f"Upgrade Node to {MIN_NODE}+ — a distro package this old will not do it: "
+    "fnm install --install-if-missing 22 (or nvm install 22)"
+)
+"""Named rather than deferred to ``install_hint``: on the two distributions this
+check exists for, ``apt install nodejs`` installs the very version that is too
+old, so the platform hint would be advice that does not work."""
+
+
 def _check_repomix() -> DoctorCheck:
-    if shutil.which("repomix"):
-        return _ok("repomix", "repomix found — codebase snapshots enabled")
-    if shutil.which("npx"):
-        return _ok("repomix", "repomix available on demand via npx")
-    return _warn(
-        "repomix",
-        "repomix not found — codebase snapshots are disabled",
-        "Install Node.js, then: npm install -g repomix",
-    )
+    """Repomix, and whether this machine's Node is new enough to run it.
+
+    The Node version is checked and not merely ``npx``'s presence: see
+    :data:`MIN_NODE`. Warn-only either way — snapshots are one feature, and a
+    machine without them is not unhealthy.
+    """
+    name = "repomix"
+    try:
+        installed = shutil.which("repomix")
+        launcher = installed or shutil.which("npx")
+        if launcher is None:
+            return _warn(
+                name,
+                "repomix not found — codebase snapshots are disabled",
+                f"Install Node {MIN_NODE}+, then: npm install -g repomix",
+            )
+        node = shutil.which("node")
+        major = _node_major(node) if node else None
+        # An installed `repomix` still runs on THIS machine's node, so a too-old
+        # node is a warning even when the binary is right there on PATH.
+        if major is not None and major < MIN_NODE:
+            found = "repomix is installed" if installed else "repomix is available via npx"
+            return _warn(
+                name,
+                f"{found} but Node {major} is too old to run it "
+                f"(Repomix needs {MIN_NODE}+) — codebase snapshots will fail",
+                _UPGRADE_NODE,
+            )
+        if major is None:
+            # No node on PATH at all, or a version string that did not parse.
+            # Reported, never guessed at: `npx` present with no `node` beside it
+            # is unusual enough to say out loud rather than to grade.
+            detail = "Node version not readable" if node else "no node on PATH"
+            if installed:
+                return _ok(
+                    name, f"repomix found — {detail}, so untested against the {MIN_NODE} floor"
+                )
+            return _ok(
+                name,
+                f"repomix available on demand via npx — {detail}, so untested "
+                f"against the {MIN_NODE} floor",
+            )
+        if installed:
+            return _ok(name, f"repomix found (Node {major}) — codebase snapshots enabled")
+        return _ok(name, f"repomix available on demand via npx (Node {major})")
+    except Exception as exc:  # diagnostics must never crash
+        # Same rule as every sibling: failing open costs this line its verdict
+        # and nothing else — `project onboard` reports a Repomix it cannot run
+        # itself, at the moment it needs it.
+        return _ok(name, f"not evaluated ({exc}) — project onboard reports a failing pack itself")
 
 
 def _check_tiktoken() -> DoctorCheck:
@@ -441,7 +553,14 @@ def _check_tiktoken() -> DoctorCheck:
     return _warn(
         "tiktoken",
         "tiktoken not installed — snapshot token counts are estimated",
-        "Install it: pip install tiktoken (or: pipx inject aisquare tiktoken)",
+        # `pipx inject` takes the name of an installed pipx ENVIRONMENT, and
+        # the documented install makes that `aisquare-cli`; `pipx inject
+        # aisquare tiktoken` fails on every machine that followed the docs
+        # (§6.2). The uv form is first because it is one command rather than
+        # two and is what install.sh runs.
+        "Install it into this CLI's own environment: "
+        "uv tool install --with tiktoken aisquare-cli "
+        "(or: pipx inject aisquare-cli tiktoken)",
     )
 
 

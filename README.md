@@ -21,35 +21,96 @@ account, no cloud dependency.
 
 ## Install
 
-```sh
-pipx install aisquare-cli              # or: pip install aisquare-cli
-```
-
-Requires **Python 3.11+**. The package is `aisquare-cli`; the command is
-`aisquare`, with `asq` as the short alias.
-
-The UI runs agents inside a private tmux server, so you also need **tmux 3.2+**
-(3.5+ recommended — that is where shift+enter reaches the agent):
+One line. It works out what your machine already has, installs only what is
+missing, and ends by offering to open the UI:
 
 ```sh
-sudo apt install tmux        # Debian / Ubuntu
-sudo dnf install tmux        # Fedora / RHEL
-brew install tmux            # macOS
-tmux -V                      # 3.2 or newer
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
 ```
 
-Agents run on **[Claude Code](https://claude.com/claude-code)** (`claude`
-2.1.x), so install that too if you haven't. On Windows, run everything inside
-WSL2. `git` is used for the per-agent worktrees; `gh` is optional and only
-needed if you want agents opening and reviewing PRs. Codebase snapshots use
-[Repomix](https://github.com/yamadashy/repomix) via Node/`npx` when available —
-`aisquare doctor` tells you if it's missing, and nothing breaks without it.
+macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
+3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git, Node and
+[Claude Code](https://claude.com/claude-code), then registers the git repo you
+ran it from and wires Claude Code's hooks. Running it again is a no-op: it
+reports what is current and installs nothing.
+
+On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
+tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:
+
+```text
+irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
+```
+
+<details>
+<summary><b>Piping a script into a shell, and how not to</b></summary>
+
+Fair. Read it first, or skip it entirely — nothing here needs it.
+
+```sh
+# See exactly what it would do, and run none of it:
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh -o install.sh
+less install.sh
+sh install.sh --dry-run
+```
+
+Or install by hand, which stays fully supported:
+
+```sh
+uv tool install --python 3.13 --with tiktoken aisquare-cli   # or: pipx install aisquare-cli
+aisquare init --local --yes --agent claude-code
+```
+
+Useful flags — note the `-s --`, since `sh` is reading the script on stdin:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --yes --no-agent
+```
+
+| Flag | Does |
+| --- | --- |
+| `--yes` | Never prompt, and do not open the UI at the end. For CI and Dockerfiles. |
+| `--dry-run` | Print every command, run none. |
+| `--no-agent` | Skip Claude Code. |
+| `--no-system-deps` | Skip tmux, gh, git and Node. |
+| `--project DIR` | Register `DIR` instead of the current directory. |
+| `--no-project` | Set up the machine, register nothing. |
+| `--offline` | Do not ask PyPI what the latest version is. |
+| `--version V` | Pin `aisquare-cli` to `V`. |
+
+It refuses to run as root outside a container, uses `sudo` only for the system
+packages and one command at a time, and never edits your shell profile beyond
+what uv and the Claude Code installer do themselves. Exit codes: `0` installed,
+`1` a fatal step failed, `2` installed but a health check is unexpectedly amber.
+
+</details>
+
+Requires **Python 3.11+** if you install by hand (the one-liner brings its own
+3.13). The package is `aisquare-cli`; the command is `aisquare`, with `asq` as
+the short alias.
+
+Then check the machine at any time:
+
+```sh
+aisquare doctor
+```
+
+It reports every dependency and gives the exact command for anything missing.
+`gbrain` staying amber is expected — long-term memory is optional
+([below](#long-term-memory-optional-via-gbrain)).
 
 ## Start the GUI
 
+The installer offers this at the end; if you skipped it:
+
 ```sh
-aisquare agents connect claude-code    # once — wires the hooks the UI reads state from
 asq                                    # open the UI
+```
+
+Installed by hand? Wire the hooks the UI reads state from, once:
+
+```sh
+aisquare agents connect claude-code
+asq
 ```
 
 That's the whole setup. From inside the UI:
@@ -417,6 +478,13 @@ aisquare serve --show-token      # connection details for the client
 aisquare serve --stdio           # stdio transport (Claude Desktop launches it)
 ```
 
+`--bind` decides more than the interface. The three loopback spellings
+(`127.0.0.1`, `localhost`, `::1`) keep the MCP transport's Host/Origin
+validation; any other bind — `0.0.0.0`, a LAN address — runs with the bearer
+token as the only gate, and that token is a long-lived credential sent in
+clear over plain HTTP on every request. `serve` says so on stderr when you do
+it. Use a trusted network or a TLS-terminating proxy.
+
 Running `serve` in a repo is the explicit opt-in for that project (it
 announces itself); the stdio transport refuses to run from directories that
 aren't a project, so a desktop client can't accidentally adopt your home
@@ -586,7 +654,8 @@ aisquare
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
 │                   attach · reap [--all] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
-└── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
+├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
+└── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
 ```
 
 Everything `aisquare --help` lists is implemented. Roadmap commands are
@@ -609,6 +678,71 @@ so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in
 [issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
+
+## Collective Intelligence test bed (experimental, off by default)
+
+An opt-in experiment: when you submit a prompt, aisquare can ask a Collective
+Intelligence server whether this workspace already knows something relevant and
+put it in front of the agent **before** it starts exploring. The hypothesis is
+that an agent which starts better informed explores less.
+
+**It is off unless you turn it on**, and off costs nothing — no request, no
+connection, no measurable latency. Nothing below runs for a normal install.
+
+```sh
+pip install 'aisquare-cli[experiment]'   # the extra adds no dependencies today
+export AISQUARE_CI=1
+export AISQUARE_CI_URL=https://…          # the server's base URL
+export AISQUARE_CI_KEY=…                  # the experiment token
+export AISQUARE_CI_RUN=run_…              # the run the controller published
+aisquare doctor                           # the switch, the endpoint, and the run's descriptor
+aisquare metrics show                     # what was recorded, per turn, for this project
+```
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `AISQUARE_CI` | off | Master switch; overrides `[experiment].enabled` both ways. **Any unrecognised value is off** |
+| `AISQUARE_CI_URL` | unset | The server's base URL, `http(s)://` only. Or `[experiment].url` |
+| `AISQUARE_CI_KEY` | unset | Bearer token. **Environment only** — never read from `config.toml` |
+| `AISQUARE_CI_RUN` | unset | The `run_…` whose delivery descriptor drives this machine. Or `[experiment].run`. No run ⇒ no calls |
+| `AISQUARE_CI_DELIVERY_OVERRIDE` | unset | **Staging only, dated.** Stands in for the server's delivery list while a run's descriptor still says `direct_api`; ignored otherwise. Every row it produces says `override` and measures nothing. See `docs/ci-live-wiring-handoff.md` |
+
+Each prompt against a dirty working tree also keeps a snapshot of that tree
+alive for replay, as a commit object behind a ref under `refs/aisquare/wip/`
+(outside branches and tags, never pushed by a default refspec). Refs older than
+seven days are dropped the next time a snapshot is taken.
+
+What the CLI does with a run is decided by the server, not by a flag here (the
+one dated exception is the staging override above, which applies only to a
+`direct_api`-only descriptor and marks every row it touches). At
+session start it fetches the run's **delivery descriptor** (cached until it
+expires) and honours only what that lists: which hooks call the server, where,
+under what ceiling, and whether the `collective_intelligence_recall` tool is
+exposed in `aisquare serve`. The descriptor names no architecture or arm, so the
+CLI cannot know which arm it is running — by design.
+
+Four things worth knowing before you enable it:
+
+- **The prompt hook is synchronous.** It waits up to the descriptor's ceiling
+  (60 s today) for a slow server, as wall clock — a server dribbling bytes cannot
+  hold it past that — and every breach is recorded.
+- **Retrieved material is framed as candidate reference, not fact**, inside a
+  delimited region the payload cannot close, capped at 16 384 characters, with the caveat
+  repeated after it, so a bad retrieval is visible in the transcript rather than
+  silently absorbed. `aisquare why` names what was shown.
+- **Every turn is recorded whether or not the server answered**, with *why* it
+  did not kept apart from what the server said. A switched-off machine, a
+  timeout and a server with nothing to add are three different rows.
+- **What leaves the machine:** the prompt (scrubbed at the configured `redaction`
+  level), a `project_ref` selector, and a git object id of the working tree —
+  kept under `refs/aisquare/wip/<trace_id>` so a turn can be replayed later;
+  untracked files are not in it. Nothing about scope, and no credentials.
+
+Token counts are **not** recorded yet — hook payloads do not carry them — so
+`metrics show` says plainly that token savings cannot be read from it. The wire
+contract and the CLI's standing assumptions are in
+[`docs/ci-contract.md`](docs/ci-contract.md); the server-side seam is
+[`docs/ci-integration-handoff.md`](docs/ci-integration-handoff.md).
 
 ## Development
 

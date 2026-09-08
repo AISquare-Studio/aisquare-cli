@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/delivery/mcp-tool-output.v1.schema.json",
+  "title": "mcp-tool-output.v1",
+  "description": "What collective_intelligence_recall returns. Canon says the tool returns a Briefing (02-contracts-and-data.md section 7), so this is the Briefing of 02 section 2.5 - narrowed for a delivery client. Every field 02 section 7 requires every call to receive is present and required: query_id, config_fingerprint (the config fingerprint), resolved_scope_version, timing_ms (timing), and per-item evidence_ids (provenance). Requiring rather than merely listing them is what makes that sentence checkable by a fixture instead of by a reviewer. THE NARROWING IS THE POINT, and it is a blinding control like client-delivery-descriptor.v1. items[] is NOT a $ref to knowledge-item.v1 and is not allowed to be. The full knowledge item carries authorization_decision.matched_attachment_id and matched_grant_ids; 02 section 3.4 defines the topology-neutral renderer input as carrying only 'item/version identity, admitted content, structured facts, evidence references, freshness decision, and frozen render configuration' and says it 'excludes matched attachment/grant IDs, architecture ID, arm code, store identity, fan-out, physical route, local rank, and propagation diagnostics'. This schema is that projection, closed. So a delivery client cannot be handed the ACL reasoning that authorized an item, and cannot be handed anything that names the arm. Closing items[] is what turns 'the server should not send those' into 'the server cannot send those and pass its own contract test'. source_kind is excluded too, and that one is a judgement call worth stating: an item labelled fixture_oracle or fixture_decoy would identify the arm outright (03 section 4's oracle and decoy arms differ from architecture_candidate by their source set), and 02 section 6's blinding sentence names 'source' alongside architecture. Per-item provenance survives as evidence_ids, which is what section 7 actually asks for. CANON TENSION, reported not resolved: section 3.4 says the excluded fields 'remain in response metadata and the ledger', while section 1 says delivery clients know no architecture names beyond an opaque configuration ID. Both cannot hold for the same response. This schema reads 'response metadata' as the experiment API's own response to POST /v1/experiment/queries - a surface holding an experiment token, not a blinded delivery client - and keeps the delivery surface blind. If that reading is wrong, this is the schema to change. KNOWN DIVERGENCES. (1) status carries canon's four values, but app/retrieval/reader.py::Briefing.status only ever takes served, empty or unavailable; degraded is unreachable from today's reader. (2) Canon section 2.5's Briefing has NO errors field, so an unavailable result arrives at the tool surface with no machine-readable reason and the reason lives only in the ledger; app/retrieval/reader.py::Briefing has a failure_reason attribute that canon does not define. No errors array is added here - the contract is kept faithful and the gap is reported rather than papered over.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "briefing_id",
+    "run_id",
+    "query_id",
+    "config_fingerprint",
+    "input_checkpoint",
+    "resolved_scope_version",
+    "items",
+    "rendered_context",
+    "token_count",
+    "cache",
+    "timing_ms",
+    "status"
+  ],
+  "$defs": {
+    "delivery_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "item_version",
+        "text",
+        "structured_facts",
+        "evidence_ids",
+        "freshness"
+      ],
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "pattern": "^ki_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        },
+        "item_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Version identity travels with the item because (item_id, item_version) is the unique key the total order relies on (02 section 3.4) and because a client quoting an item without its version cannot be checked against the ledger afterwards."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Admitted content only. Named text, not content, so this projection is a literal key-subset of knowledge-item.v1 rather than a rename of it - a renamed field is a second vocabulary and a place for the two records to drift apart. An item with nothing to say is excluded upstream rather than rendered empty."
+        },
+        "structured_facts": {
+          "type": "object",
+          "description": "Item-shaped structured facts. Deliberately open, matching knowledge-item.v1's treatment of the same object - its key set is item-kind dependent and closing it would reject valid producers."
+        },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "description": "The normalized-signal.v2 signal_ids this item rests on - the whole of the provenance a delivery client receives, and the reason no source or architecture label is needed to trace an item back. minItems 1 is the hard gate: 'Item lacks provenance -> Item excluded' (02 section 10), and provenance completeness is 100 percent, not a ratio to report. UUIDv5 pattern reused verbatim from normalized-signal.v2."
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "basis",
+            "action"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "current",
+                "stale",
+                "unknown"
+              ]
+            },
+            "basis": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "What the decision was made from, for example git_ancestry or source_snapshot (02 section 2.4, 03 section 4)."
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "include",
+                "rank_penalty"
+              ],
+              "description": "NARROWED FROM knowledge-item.v1 ON PURPOSE. That schema keeps canon's include|rank_penalty|exclude verbatim and records the contradiction in its own description: an item whose action is exclude fails valid_and_fresh and is never returned, so exclude cannot appear on an item that reached a delivery client. contracts/README.md flags this as open point 4 and names the two ways to settle it; this schema takes the narrowing on the DELIVERY surface only, where it is unambiguous, and leaves the kernel record alone."
+            }
+          },
+          "description": "The freshness decision, carried to the client because the client is entitled to know it is reading something the server marked stale. 'Freshness is stale or unknown -> Apply that source's manifest-pinned action' (02 section 10)."
+        }
+      },
+      "description": "One item as a delivery client may see it: the 02 section 3.4 renderer projection, closed. See the root description for what is excluded and why."
+    }
+  },
+  "properties": {
+    "briefing_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^brf_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "Identity of the composed briefing. Null when nothing was composed - an unavailable call produced no briefing to identify, and minting an ID for it would put a row in the ledger that claims a packet exists."
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "query_id": {
+      "type": "string",
+      "pattern": "^qry_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "Server-minted, never caller-supplied: mcp-tool-input.v1 has no query_id field at all. 'All calls receive a query_id' (02 section 7), and it is the join key from this answer to its query_ledger_row."
+    },
+    "config_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "The server-owned configuration that produced this answer. Non-nullable here, unlike hook-response.experimental-v2.config_fingerprint: an MCP call reaches this schema only after the connection resolved a run, so there is always a configuration to name."
+    },
+    "input_checkpoint": {
+      "type": "string",
+      "pattern": "^ckp_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "The immutable corpus checkpoint read. 'Every build and query names an immutable input checkpoint' (02 section 1); two answers citing one checkpoint are comparable, two citing none are not."
+    },
+    "resolved_scope_version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The ResolvedScopeSet.resolution_version this answer was authorized against (02 section 2.2). Revocation increments it and invalidates every older cache key by construction (02 section 11), so an answer that cannot name its version cannot be shown to predate a revocation."
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/delivery_item"
+      },
+      "description": "Ordered, best first. Order is the whole of the ranking a delivery client receives: the ordering score itself stays in response metadata and the ledger (02 section 3.4), so no score field appears on an item here."
+    },
+    "rendered_context": {
+      "type": "string",
+      "description": "The composed context string. Byte-identical for identical renderer inputs, across both architectures (02 section 3.4) - which is why it is a plain string here with no per-arm formatting hook."
+    },
+    "token_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Tokens in rendered_context under the frozen render configuration."
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "key_hash",
+        "age_ms"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "hit",
+            "miss",
+            "bypass"
+          ],
+          "description": "CANON UNDERSPECIFICATION: 02 section 2.5 shows only the value 'miss'. hit is its obvious complement; bypass is drafted from 02 section 10's 'Redis fails after admission -> manifest-pinned unavailable or cache-bypass degraded', which is a third state that is neither a hit nor an ordinary miss and that must be distinguishable in analysis - a bypass counted as a miss makes a degraded run look like a cold one."
+        },
+        "key_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Hash of the briefing cache key, which is built from principal authorization version, resolved scope version, prompt/query hash, reader configuration, source set, token budget and build checkpoint (02 section 11). The hash, not the key: the key's components include scope facts a delivery client must not read."
+        },
+        "age_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "timing_ms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "candidate",
+        "rank",
+        "compose",
+        "total"
+      ],
+      "properties": {
+        "scope": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compose": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "The four phases and their total, closed to exactly canon's five keys. NOT EXPRESSIBLE IN JSON SCHEMA, adapter-enforced: that total is at least the sum of the phases. Server-clock only - never differenced against a client timestamp (02 section 3.7)."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "served",
+        "empty",
+        "degraded",
+        "unavailable"
+      ],
+      "description": "Canon's four (02 sections 2.5 and 6). empty and unavailable are never interchangeable: 'An unavailable query must never be counted as a clean CI-off baseline' (02 section 10). See the root description for the reader-side gap on degraded."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "const": "served"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "minItems": 1
+          },
+          "briefing_id": {
+            "type": "string"
+          }
+        },
+        "description": "served means items were returned. A served answer with zero items is an empty answer mislabelled, and the two are the difference between 'CI had nothing for you' and 'CI helped', which is a distinction the whole experiment turns on."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "const": "empty"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "maxItems": 0
+          }
+        },
+        "description": "empty means the reader looked and found nothing authorized. Candidate counts and filters are recorded in the ledger, not here (02 section 10)."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "const": "unavailable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "items": {
+            "maxItems": 0
+          },
+          "rendered_context": {
+            "maxLength": 0
+          },
+          "token_count": {
+            "const": 0
+          }
+        },
+        "description": "An unavailable call injected nothing, so it carries nothing: no items, no rendered context, no tokens. Same shape as the kernel rule on query-ledger-row.v1, where status=unavailable forces action=noop, resolution_path=unavailable and zero returned items. One rule, three faces - a partial version of it would let an unavailable answer still hand the client text to inject."
+      }
+    }
+  ]
+}

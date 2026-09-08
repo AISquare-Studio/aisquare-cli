@@ -1,0 +1,22 @@
+{
+  "contract_version": 2,
+  "run_id": "run_kernel0001",
+  "opaque_config_id": "cfg_public_7d41ba90c2e5",
+  "delivery": [
+    {
+      "kind": "hook_push",
+      "triggers": [
+        "prompt_submit"
+      ],
+      "endpoint": "/v1/hook"
+    },
+    {
+      "kind": "mcp_pull",
+      "tool": "collective_intelligence_recall"
+    }
+  ],
+  "client_safety_ms": 60000,
+  "retry_policy": "none",
+  "expires_at": "2026-08-22T18:00:00Z",
+  "arm_kind": "architecture_candidate"
+}

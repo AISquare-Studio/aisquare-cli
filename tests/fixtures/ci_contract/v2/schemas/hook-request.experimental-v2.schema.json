@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/delivery/hook-request.experimental-v2.schema.json",
+  "title": "hook-request.experimental-v2",
+  "description": "One push-delivery hook invocation from the caller to the server. Specified verbatim by 02-contracts-and-data.md section 6 (shared hook contract v2, 'Request'). The dummy caller implements this shape so the real CLI can later replace it without changing server behavior, which is why the field set is frozen rather than convenient. AUTHORITY BOUNDARY, and the reason this schema is closed: 'The server resolves principal, workspace, projects, and studios from authentication and mappings. project_ref helps select context but grants nothing' (02 section 6), and 'Authentication determines authorization. Request bodies do not grant scope' (02 section 1). The field list below therefore contains no workspace ID, studio ID, project ID, principal ID, group ID, grant ID, role, auth subject, auth version, token, credential, Cypher, SQL, URL, filesystem path or shell command, and additionalProperties is false at every object level - so a caller that sends one gets a validation failure instead of a field the server silently ignores. Silent ignoring is the dangerous variant: it lets a client ship code that believes it is scoping a request, and lets a reviewer read that code as if it worked. The two free-text fields that remain, project_ref and prompt, are both explicitly non-authoritative; the three ID fields are pattern-constrained to their own prefixes, so a ws_ or std_ value cannot be smuggled through one of them either. CONTRACT VERSION: contract is const 2. A mismatched version is 'Contract mismatch -> status=unavailable, action=noop' with expected and received versions recorded (02 section 10), which is a runtime decision the server makes after reading the number, not something this schema can decide for it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "trigger",
+    "run_id",
+    "session_id",
+    "trace_id",
+    "project_ref",
+    "snapshot_ref",
+    "prompt",
+    "client_safety_ms",
+    "client_observed_at"
+  ],
+  "properties": {
+    "contract": {
+      "const": 2,
+      "description": "Hook contract version. Integer 2, not the string '2': the response echoes the same field and a type-varying version number is a version number two implementations can disagree about while both believing they agree."
+    },
+    "trigger": {
+      "type": "string",
+      "enum": [
+        "session_start",
+        "prompt_submit",
+        "agent_request"
+      ],
+      "description": "Which client event produced this call. Closed catalog from 02 section 6; it is also the value space of client-delivery-descriptor.v1 delivery[].triggers, so a descriptor cannot advertise a trigger no request can carry. Tool observations are NOT a trigger: they 'use the asynchronous source-ingest path rather than a synchronous interception response' (02 section 6), which is the rule that keeps a hook from ever standing between an agent and its tool result."
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "The immutable run this call belongs to. The caller learns it from client-delivery-descriptor.v1 and nothing else; it never learns the sealed manifest behind it (02 section 6, 05 A-13)."
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^ses_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "Caller session identity. A SELECTOR for the trusted server-side session mapping, never a claim: the mapping is what resolves scope, and an unmapped session resolves EMPTY rather than to every grant (02 section 2.2)."
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^trc_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "Client-side trace correlation for this call. NOTE, and it is a real divergence: this is NOT the upstream span trace_id. completed-span.v1 types trace_id as a free-form 1..128 character string because it is upstream-faithful to Explainability's SpanPayload, which carries W3C-style unprefixed IDs. 02 section 6 writes 'trc_...' here. The two identifier spaces cannot be the same one unless something mints a prefixed ID, so this schema follows the section 6 literal and the kernel prefix convention, and the join between the two spaces is left to the adapter. Flagged rather than reconciled - reconciling it is a canon decision, not a schema decision."
+    },
+    "project_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 500,
+      "description": "Repository / worktree / PR reference. A SELECTOR ONLY, identical in meaning and treatment to query-request.v1.project_ref: 'project_ref helps select context but grants nothing' (02 section 6). The server intersects it with active grants and the trusted session mapping; a selector supplied without a matching grant resolves EMPTY, never to every grant, and an empty result means no authorized knowledge rather than all knowledge (02 section 2.2). Null means the trusted session mapping alone decides, and if neither identifies the dimension it also resolves empty."
+    },
+    "snapshot_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^ckp_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        }
+      ],
+      "description": "'git object or corpus checkpoint' (02 section 6), encoded as exactly those two things: a 40- or 64-hex git object ID (sha1 or sha256 repository), or a ckp_ corpus checkpoint matching the kernel's checkpoint prefix. A branch name, tag or short SHA is deliberately rejected. Every build and query 'names an immutable input checkpoint' (02 section 1), and a movable ref is not one - accepting 'main' here would let two runs claim the same snapshot while reading different corpora, which is unfalsifiable after the fact. Null is admitted because a session_start fires before the client has resolved either."
+    },
+    "prompt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 100000,
+      "description": "The raw prompt, non-authoritative free text. 02 section 6 annotates it 'required for prompt_submit and agent_request', which is a CONDITIONAL requirement and is encoded as one in allOf below rather than flattened to 'optional' - flattening it would let a prompt_submit with no prompt validate, and the server would then have to re-discover the rule at runtime in a place no fixture covers. maxLength matches query-request.v1 so the same text passes both delivery surfaces."
+    },
+    "client_safety_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The caller's own hang ceiling, declared so the server can see it and report a breach against it (02 section 6 'deadline' object). ADVISORY: the server-owned deadline remains authoritative, exactly as query-request.v1.token_budget is advisory against the server-owned packet budget. No maximum is imposed here because the manifest-pinned runtime.server_deadline_ms (03 section 4) is what actually bounds the server, and a second bound in this schema would be a second place to be correct."
+    },
+    "client_observed_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+      "description": "When the client observed the triggering event, on the CLIENT clock. It is never differenced against a server timestamp to produce a latency figure: 02 section 3.7 keeps the source and architecture pipelines on separate clocks and attributes each interval to one of them. The redundant pattern beside format is the enforced half - format is an annotation by default in draft 2020-12."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "trigger"
+        ],
+        "properties": {
+          "trigger": {
+            "enum": [
+              "prompt_submit",
+              "agent_request"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "prompt"
+        ],
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "description": "prompt_submit and agent_request carry a prompt. Both halves are needed: required stops the key being absent, and the narrowed type stops an explicit null satisfying required while still carrying nothing."
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "trigger"
+        ],
+        "properties": {
+          "trigger": {
+            "const": "session_start"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "prompt": {
+            "type": "null"
+          }
+        },
+        "description": "A session_start fires before a prompt exists, so a non-null prompt on one is rejected. TIGHTENING BEYOND CANON: 02 section 6 states only that prompt is required for the other two triggers, not that it is forbidden here. It is forbidden because the alternative is a trigger whose declared meaning is 'no prompt yet' quietly carrying prompt text into the reader's query key. Null rather than absent, so a client that always serializes the full field set still validates."
+      }
+    }
+  ]
+}

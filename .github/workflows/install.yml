@@ -1,0 +1,222 @@
+name: install.sh
+
+# WHY THIS IS ITS OWN WORKFLOW rather than jobs bolted onto ci.yml.
+#
+# `install.sh` is the only artifact in this repo that runs on other people's
+# machines, as root-adjacent, from a pipe, on distributions nobody here uses.
+# Its tests are correspondingly unlike the rest: they need containers rather
+# than a Python matrix, they take minutes rather than seconds, and they must run
+# on a SCHEDULE as well as on pushes — two of the four things the script fetches
+# belong to other people (astral's uv installer, NodeSource, Anthropic's Claude
+# Code installer, fnm), and when one of those changes its interface the failure
+# should land on our clock rather than a new user's (§10).
+#
+# Keeping it separate also means the static half can gate quickly while the
+# container matrix is still running.
+
+on:
+  pull_request:
+    branches: [main, "rc/**"]
+    paths:
+      - install.sh
+      - install.ps1
+      - tests/install/**
+      - tests/test_install_script_*.py
+      - .github/workflows/install.yml
+      # The acceptance criterion is a green `doctor`, so a change to the checks
+      # can break this workflow without touching a single line of the script.
+      - src/aisquare/services/diagnostics.py
+  push:
+    branches: [main, "rc/**"]
+  schedule:
+    # 05:20 UTC daily. The third-party installers above are the reason.
+    - cron: "20 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: install-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: static (shellcheck, shfmt, dash, ash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the shell toolchain
+        run: |
+          sudo apt-get update -qq
+          # dash and busybox are the two /bin/sh implementations this script has
+          # to survive; shellcheck and shfmt are its linter and formatter.
+          sudo apt-get install -y -qq shellcheck dash busybox
+          # shfmt is not in apt on this runner image; the release binary is.
+          SHFMT=v3.10.0
+          curl -fsSL -o /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/download/${SHFMT}/shfmt_${SHFMT}_linux_amd64"
+          chmod +x /tmp/shfmt
+          sudo mv /tmp/shfmt /usr/local/bin/shfmt
+          shellcheck --version | head -2
+          shfmt --version
+
+      - name: shellcheck
+        # --shell=sh so the POSIX dialect is checked, not bash's.
+        run: shellcheck --shell=sh install.sh tests/install/cell.sh tests/install/matrix.sh
+
+      - name: shfmt (format check)
+        run: shfmt -i 4 -ci -d install.sh tests/install/cell.sh tests/install/matrix.sh
+
+      - name: Parse under dash and BusyBox ash
+        # `sh -n` under BOTH, because bash accepts things neither does and
+        # /bin/sh is dash on Debian and Ubuntu and BusyBox ash on Alpine. A
+        # bashism that reaches a user's /bin/sh does not degrade — it fails.
+        run: |
+          for script in install.sh tests/install/cell.sh tests/install/matrix.sh; do
+            dash -n "$script"     && echo "dash  ok: $script"
+            busybox ash -n "$script" && echo "ash   ok: $script"
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: The Python-side guards, under dash as /bin/sh
+        # tests/test_install_script_functions.py shells out to `sh`. Pointing
+        # /bin/sh at dash for this step means the FUNCTIONS are exercised under
+        # the interpreter most users' machines will use, not just under bash.
+        # (`dpkg-reconfigure dash` is the supported way to switch it.)
+        run: |
+          python -m pip install --upgrade pip >/dev/null
+          pip install -e ".[dev]" >/dev/null
+          echo "dash" | sudo debconf-set-selections
+          sudo dpkg-reconfigure -f noninteractive dash
+          readlink -f /bin/sh
+          pytest -ra tests/test_install_script_is_posix.py tests/test_install_script_functions.py
+
+  powershell:
+    name: install.ps1 (parse + analyse)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Parse
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host $_.Message }; exit 1 }
+          Write-Host "parse: clean"
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          $found = Invoke-ScriptAnalyzer -Path ./install.ps1 -Severity Error,Warning
+          if ($found) { $found | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }
+          Write-Host "analyzer: clean"
+
+      # The WSL DELEGATION ITSELF IS NOT TESTED HERE, said out loud rather than
+      # left as a gap a reader has to notice: GitHub's windows-latest runners do
+      # not have WSL2, so the one path that matters cannot be exercised. What is
+      # checked is that the script parses, analyses clean, and takes its
+      # "no WSL installed" branch — which is what a runner can honestly prove.
+      # The fleet's own key matrix is manual on Windows for the same reason
+      # (docs/plans/fleet-tui.md).
+      - name: The no-WSL branch
+        shell: pwsh
+        run: |
+          # The runner has wsl.exe but no distribution, so this is the
+          # "present but empty" branch. Exit 1 is the CORRECT outcome.
+          ./install.ps1
+          if ($LASTEXITCODE -ne 1) {
+            Write-Host "expected exit 1 with no WSL distribution, got $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "no-WSL branch: exits 1 with the wsl --install advice"
+
+  matrix:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    needs: static
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each image earns its place by a property no other has — the reasons
+        # are in tests/install/matrix.sh's header, beside the code that uses
+        # them, rather than duplicated here.
+        image:
+          - debian:12
+          - ubuntu:22.04
+          - fedora:41
+          - archlinux
+          - alpine:3.22
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build a wheel from THIS tree
+        # Not PyPI. The cell's acceptance criterion is a green `doctor`, and
+        # doctor's checks are part of what this branch changes — so grading
+        # against the last release would grade the wrong code.
+        run: |
+          python -m pip install --upgrade pip build >/dev/null
+          python -m build --wheel --outdir dist .
+          ls -l dist
+
+      - name: Run the cell
+        run: |
+          # A glob into "$@", not `ls`: exactly one wheel is the assertion, and
+          # `$(ls dist/*.whl)` collapses two paths into ONE argument if dist/
+          # ever holds a second — the same trap ci.yml's package job calls out.
+          set -- dist/*.whl
+          test "$#" -eq 1 || { echo "expected one wheel, found $#: $*"; exit 1; }
+          wheel=$1
+          docker run --rm \
+            -v "$PWD:/mnt:ro" \
+            -e "AISQUARE_INSTALL_PACKAGE=/mnt/$wheel" \
+            -e CELL_SKIP_AGENT=1 \
+            -e HOME=/root \
+            "${{ matrix.image }}" sh /mnt/tests/install/cell.sh
+
+  with-claude-code:
+    name: one cell with Claude Code installed for real
+    runs-on: ubuntu-latest
+    needs: static
+    # ALLOWED TO BE FLAKY, on purpose (§8.3). Every cell in `matrix` stubs the
+    # agent out so the suite does not depend on a third party's CDN being up;
+    # this one installs it for real, because "the fleet has an agent to spawn"
+    # is part of what the installer promises and something has to check it.
+    # continue-on-error so a CDN blip is a visible amber rather than a red PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build a wheel from THIS tree
+        run: |
+          python -m pip install --upgrade pip build >/dev/null
+          python -m build --wheel --outdir dist .
+
+      - name: Run the cell with the agent installed
+        run: |
+          set -- dist/*.whl
+          test "$#" -eq 1 || { echo "expected one wheel, found $#: $*"; exit 1; }
+          wheel=$1
+          docker run --rm \
+            -v "$PWD:/mnt:ro" \
+            -e "AISQUARE_INSTALL_PACKAGE=/mnt/$wheel" \
+            -e CELL_SKIP_AGENT=0 \
+            -e HOME=/root \
+            debian:12 sh /mnt/tests/install/cell.sh

@@ -85,16 +85,28 @@ jobs:
           python-version: "3.13"
 
       - name: The Python-side guards, under dash as /bin/sh
-        # tests/test_install_script_functions.py shells out to `sh`. Pointing
-        # /bin/sh at dash for this step means the FUNCTIONS are exercised under
-        # the interpreter most users' machines will use, not just under bash.
-        # (`dpkg-reconfigure dash` is the supported way to switch it.)
+        # tests/test_install_script_functions.py shells out to `sh`, so on this
+        # runner the FUNCTIONS are exercised under dash rather than bash — which
+        # is the interpreter most users' machines will use.
+        #
+        # ASSERTED, NOT ARRANGED. Ubuntu already points /bin/sh at dash, so the
+        # first version of this step reconfigured it anyway and got the debconf
+        # incantation wrong ("parse error on line 1: 'dash'", a red job for a
+        # setting that was already correct). Checking the premise instead means a
+        # runner image that ever switches to bash fails HERE, naming the reason,
+        # rather than silently downgrading these tests to a second bash run.
         run: |
           python -m pip install --upgrade pip >/dev/null
           pip install -e ".[dev]" >/dev/null
-          echo "dash" | sudo debconf-set-selections
-          sudo dpkg-reconfigure -f noninteractive dash
-          readlink -f /bin/sh
+          sh_is=$(readlink -f /bin/sh)
+          echo "/bin/sh -> $sh_is"
+          case "$sh_is" in
+            */dash) ;;
+            *)
+              echo "::error::/bin/sh on this runner is $sh_is, not dash — these tests would run under bash, which is not what they are here to check. Install dash and repoint /bin/sh, or drop this job's claim."
+              exit 1
+              ;;
+          esac
           pytest -ra tests/test_install_script_is_posix.py tests/test_install_script_functions.py
 
   powershell:
@@ -116,9 +128,21 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
-          $found = Invoke-ScriptAnalyzer -Path ./install.ps1 -Severity Error,Warning
+          # PSAvoidUsingWriteHost is excluded, and it is the only exclusion.
+          # The rule's own reasoning is "it might not work in all hosts, does not
+          # work when there is no host, and cannot be captured or redirected" —
+          # which is a description of what this script WANTS. It is an
+          # interactive bootstrap whose entire output is coloured console text
+          # for a person watching; Write-Output would put those lines in the
+          # pipeline, where `irm ... | iex` would return them as values.
+          #
+          # PSUseBOMForUnicodeEncodedFile is NOT excluded, and it found a real
+          # bug: the file had em dashes with no BOM, which Windows PowerShell
+          # 5.1 reads as ANSI. install.ps1 is pure ASCII now.
+          $found = Invoke-ScriptAnalyzer -Path ./install.ps1 `
+            -Severity Error,Warning -ExcludeRule PSAvoidUsingWriteHost
           if ($found) { $found | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }
-          Write-Host "analyzer: clean"
+          Write-Host "analyzer: clean (PSAvoidUsingWriteHost excluded, see comment)"
 
       # The WSL DELEGATION ITSELF IS NOT TESTED HERE, said out loud rather than
       # left as a gap a reader has to notice: GitHub's windows-latest runners do

@@ -7,6 +7,7 @@ from pathlib import Path
 from aisquare.core.config import (
     AppConfig,
     CaptureSettings,
+    ExperimentSettings,
     RedactionSettings,
     load_config,
     save_config,
@@ -61,3 +62,52 @@ def test_ensure_home_creates_layout(isolated_home: Path) -> None:
     assert home == aisquare_home()
     assert cache_dir().is_dir()
     assert log_dir().is_dir()
+
+
+def test_experiment_is_off_by_default() -> None:
+    """The state every existing user is in. ``prompt_submit`` runs
+    synchronously in front of a developer who has just hit enter, so off has to
+    be the default rather than something a release turns on for everyone."""
+    config = AppConfig()
+    assert config.experiment.enabled is False
+    assert config.experiment.url == ""
+
+
+def test_the_experiment_has_no_delivery_flags_of_its_own() -> None:
+    """Which hooks call the server and whether the recall tool is exposed are
+    decided by the server's delivery descriptor. A client-side flag would be a
+    second place the experiment's shape lives, and the two would disagree."""
+    for flag in ("push", "pull", "arm", "architecture"):
+        assert flag not in ExperimentSettings.model_fields
+
+
+def test_experiment_settings_round_trip(tmp_path: Path) -> None:
+    config = AppConfig(
+        experiment=ExperimentSettings(enabled=True, url="http://ci.internal", run="run_kernel0001")
+    )
+    target = save_config(config, tmp_path / "config.toml")
+    assert load_config(target) == config
+    assert load_config(target).experiment.run == "run_kernel0001"
+
+
+def test_a_config_from_the_v1_branch_still_loads(tmp_path: Path) -> None:
+    """``push``/``pull`` were fields once; a file that still carries them loads,
+    because unknown keys are ignored — and they change nothing."""
+    target = tmp_path / "config.toml"
+    target.write_text("[experiment]\nenabled = true\npush = false\npull = true\n", encoding="utf-8")
+    loaded = load_config(target)
+    assert loaded.experiment.enabled is True
+    assert loaded.experiment.run == ""
+
+
+def test_experiment_has_nowhere_to_put_a_key() -> None:
+    """config.toml is a file people diff, paste into issues and copy between
+    machines; the bearer token is read from the environment only."""
+    assert "key" not in ExperimentSettings.model_fields
+
+
+def test_a_config_without_an_experiment_section_still_loads(tmp_path: Path) -> None:
+    """Every config written before this release."""
+    target = tmp_path / "config.toml"
+    target.write_text('profile = "default"\n', encoding="utf-8")
+    assert load_config(target).experiment.enabled is False

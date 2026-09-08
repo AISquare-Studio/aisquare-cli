@@ -87,6 +87,29 @@ def test_pruning_fails_open_and_reports_what_it_dropped(tmp_path: Path) -> None:
     assert ci_snapshot._prune(root, ci_snapshot._Budget(2.0)) == 0, "nothing old is left"
 
 
+def test_pruning_a_backlog_stops_at_the_budget_and_finishes_on_later_turns(
+    tmp_path: Path,
+) -> None:
+    """The first prune after an unbounded stretch has thousands of refs to drop,
+    one ``update-ref`` spawn each. It used to run them all: 6.6 s of a 2 s
+    budget, on the synchronous prompt path. Now it stops at the budget and the
+    next turn takes the rest — the work is idempotent, so nothing is lost."""
+    root = repo(tmp_path / "r")
+    old = _dated_commit(root, "2026-01-01T00:00:00+0000")
+    for n in range(40):
+        git(root, "update-ref", f"{ci_snapshot.WIP_REF_PREFIX}stale{n}", old)
+
+    spent = ci_snapshot._Budget(0.0)  # already gone before the first deletion
+    assert spent.spent(), "a zero budget must read as spent even though remaining() floors"
+    assert ci_snapshot._prune(root, spent) == 0, "no ref is dropped once the budget is gone"
+
+    remaining = len(
+        git(root, "for-each-ref", "--format=%(refname)", ci_snapshot.WIP_REF_PREFIX).split()
+    )
+    assert remaining == 40, "and the backlog is still there to drop next turn"
+    assert ci_snapshot._prune(root, ci_snapshot._Budget(30.0)) == 40, "a real budget drains it"
+
+
 def test_a_dirty_tree_becomes_a_stash_object_kept_alive_by_a_ref(tmp_path: Path) -> None:
     root = repo(tmp_path / "r")
     (root / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")

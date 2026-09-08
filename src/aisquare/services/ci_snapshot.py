@@ -163,6 +163,11 @@ def _prune(root: Path, budget: _Budget, *, now: float | None = None) -> int:
         ref, _, stamp = line.partition("\t")
         if not (ref.startswith(WIP_REF_PREFIX) and stamp.isdigit() and int(stamp) < cutoff):
             continue
+        if budget.spent():
+            # The first prune after an unbounded stretch has thousands to drop,
+            # one spawn each. Stop at the budget and take the rest next turn:
+            # the work is idempotent, and no turn owes the backlog its latency.
+            break
         if _git(root, "update-ref", "-d", ref, timeout=budget.remaining()) is not None:
             dropped += 1
     return dropped
@@ -174,6 +179,17 @@ class _Budget:
 
     def remaining(self) -> float:
         return max(0.05, self._deadline - time.monotonic())
+
+    def spent(self) -> bool:
+        """Whether the budget is gone.
+
+        :meth:`remaining` floors at 50 ms so a call always gets a usable
+        timeout, which means it can never say "stop" — a loop that asks it
+        instead of this runs as long as it has work. Pruning a backlog of
+        thousands of refs took 6.6 s of a 2 s budget that way, in front of a
+        developer who had just hit enter.
+        """
+        return time.monotonic() >= self._deadline
 
 
 def _git(root: Path, *args: str, timeout: float) -> str | None:

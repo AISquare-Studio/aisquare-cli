@@ -37,13 +37,27 @@ from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
-ROLES = ("planner", "coder", "runner")
-"""Roles with a standing work cycle the orchestrator injects on every prompt."""
+ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager")
+"""Roles with a standing work cycle the orchestrator injects on every prompt.
+
+``tester``, ``reviewer`` and ``manager`` are the fleet's roles
+(docs/plans/fleet-tui.md §3.3); ``tester`` shares ``runner``'s cycle.
+"""
 
 #: A numbered SEAT of a first-class role — ``coder1``, ``coder2``. Crews run
 #: several agents in the same role and need to tell them apart on the board;
 #: the work cycle is the role's, so the number is an identity, not a new role.
-_SEAT = re.compile(rf"^({'|'.join(ROLES)}|validator)\d+$")
+#:
+#: The seat is exported VERBATIM as ``AISQUARE_ROLE`` below, because that is what
+#: makes it an identity: the board row says ``coder1``, and ``team bind coder1``
+#: binds that seat's own binary and env. What turns the seat back into a role is
+#: ``services.team.base_role``, which every harness lookup keyed on a board role
+#: goes through — that is where the "the work cycle is the role's" half of this
+#: comment is actually kept, and it was NOT kept until it existed: measured,
+#: ``harness.role_cycle('coder1', …)`` returned ``[]`` and
+#: ``harness.model_mismatch('coder1', …)`` returned ``None``, so a seat launched
+#: with no standing cycle and off every ladder.
+_SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
 

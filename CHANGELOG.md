@@ -7,6 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
 - **Collective Intelligence test bed — retrieval in front of the agent, off by
   default (experimental).** When a prompt is submitted, aisquare can ask a CI
   server whether the workspace already knows something relevant and hand that to
@@ -91,14 +92,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     on its own line whenever it is set — active, ignored, or malformed. Rows it
     produces measure nothing; it goes when the server publishes real delivery
     modes.
-  - The column arrives as **schema v12**, a healing migration, because v11 has
-    reached developer machines in three shapes: the v2 table, no table at all
-    (following the earlier advice to delete the v1-shaped table — every row
-    silently lost), and the v1-shaped table itself. A v1-shaped `metric` (and
-    its `run` sibling) is renamed to `*_v1_orphaned`, never dropped; `CREATE
-    TABLE IF NOT EXISTS metric` then `ALTER TABLE` bring the other two to v12.
-    Deleting the `metric` table by hand is no longer needed and, at version 12,
-    no longer safe.
+  - The column arrives as **schema v13**, a converging migration, because
+    `user_version 11` means two incompatible things in the wild: 0.6.0 from PyPI
+    stamped it for the fleet tables, and this branch stamped it for the `metric`
+    table. Renumbering cannot serve both — whichever meaning keeps the number,
+    the other cohort's next step hits a table that already exists and the store
+    stops opening, which takes every command and every hook with it. So v11 is
+    left exactly as released (it only ever runs below 11, where neither table
+    can exist), v12 creates `metric` only if it is absent, and v13 gives the
+    fleet tables to anyone who reached 11 or 12 down this branch. On top of
+    that, v11 reached developer machines in three further shapes — the v2 table,
+    no table at all (following the earlier advice to delete the v1-shaped one),
+    and the v1-shaped table itself, which is renamed to `*_v1_orphaned` onto a
+    free name and never dropped. Every shape is a case in
+    `test_every_shape_of_user_version_11_converges_on_one_schema`, which asserts
+    the end state by writing to both tables rather than by reading the version.
+    Deleting the `metric` table by hand is no longer needed and no longer safe.
 - **The review of the CI branch at `ee422b5`, acted on.** Every item sits where
   server-controlled bytes cross into the client, and each has a test that failed
   before its fix:
@@ -122,6 +131,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Also: the compare-and-set in `close_turn` and five CHECK vocabularies are now
   actually tested, the vendored-contract drift guard is pinned to the deployed
   server commit, and the cap is stated in characters, which is what it is.
+
+## [0.6.0] - 2026-09-03
+
+**The fleet UI: bare `asq` opens one view over every project, agent and
+session.** This is the first release where the CLI has a front door — a
+two-pane, mouse-driven terminal UI over your projects, the manager agent in
+each, and the agents that manager spawns, every one of them a real Claude Code
+session you can type into. Everything it does is still a plain command with
+`--json`, and both halves below it — memory and orchestration — work exactly as
+they did without ever opening it.
+
+Shipping ahead of feature-complete on purpose, to make internal testing easier;
+known gaps are listed in `docs/plans/fleet-tui.md` and land as 0.6.x.
+
+### Added
+- **The fleet: `asq` with no arguments opens one view over every project,
+  agent and session.** A two-pane, mouse-driven UI — a navigator of projects,
+  the agents running in each and a Doctor summary on the left; onboarding, a
+  project's **manager** (an agent you task in prose, which plans, spawns and
+  steers the others), any agent's *real* Claude Code session, the board and
+  doctor findings with their fixes on the right. Never a chat relayed through
+  us: agents run as windows of a per-project session on a private tmux server
+  (`tmux -L asq`, bundled config, tmux ≥ 3.2), so they outlive the UI and
+  `aisquare fleet attach` shows the same session from any terminal. New `fleet`
+  group — `spawn · ls · status · tell · stop · attach · reap · rename · pause ·
+  resume`, `--json` everywhere — and an explicit `ui` command. Fleet roles
+  `manager` (the planner with fleet authority), `tester` (the fleet's name for
+  `runner`) and `reviewer` (read-only PR review), which `launch` accepts too.
+  Store schema v11: `fleet_agent`, and a per-project `codename`
+  (`adjective-animal`, deterministic from the project id; `fleet rename`
+  changes it) that names the tmux session and the `fleet/<codename>/…`
+  branches. A `[fleet]` config section in which every value is a default —
+  permission mode `auto` for every role, a worktree per coder and reviewer,
+  four agents per project, `F12` as the escape key, Claude's native agent
+  teams off in fleet launches — overridable per spawn or
+  in config. Scripts, pipes and `--json` callers of bare `aisquare` still get
+  usage and exit 2. User guide: `docs/fleet.md`; the plan and its decisions
+  log: `docs/plans/fleet-tui.md`. Delivered in phases (plan §9); the plan's
+  Decisions log records what has landed.
 - **CI runs the suite against a machine that looks like a developer's.** The
   `check` job installs `.[dev]` into a pristine runner — no `~/.aisquare`,
   nothing listening on any port, no optional extra — while anyone who followed
@@ -1004,7 +1052,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0
 [0.4.0rc2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc1...v0.4.0rc2
 [0.4.0rc1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.2.0...v0.4.0rc1

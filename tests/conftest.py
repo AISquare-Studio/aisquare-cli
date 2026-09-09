@@ -200,12 +200,21 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_CI_KEY",
         "AISQUARE_CI_RUN",
         "AISQUARE_CI_DELIVERY_OVERRIDE",
+        # A sign-in token in the operator's shell would make every test run as them.
+        "AISQUARE_TOKEN",
+        "BROWSER",
     ):
         monkeypatch.delenv(knob, raising=False)
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
     # test's HOME would outlive the home it came from.
     ci_client.reset_cache()
+    # The command sweeps invoke `login` with no arguments. Without this it would
+    # resolve config.toml's default and contact the REAL API from inside the test
+    # suite. A loopback port nothing listens on refuses instantly, so the command
+    # exits through its `unreachable` message and never leaves the machine. Tests
+    # that exercise sign-in point --api-url at their own stub server.
+    monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
     return home
 
 

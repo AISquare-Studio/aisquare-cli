@@ -361,6 +361,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scripts and neither can run without one; a Node that is present but will not
   report a version stays untested. The advice points at nodejs.org or a version
   manager rather than the package manager whose `nodejs` *is* the old one.
+- **`aisquare login`, `logout`, `whoami` and `aisquare auth status|token` do
+  something real.** Sign-in is the OAuth 2.0 device flow (RFC 8628) against the
+  AISquare identity provider: the terminal shows a one-time code and a link,
+  you approve in a browser, and the CLI polls the standard token endpoint until
+  the server hands over a 90-day session token, stored 0600 in
+  `~/.aisquare/credentials`. Discovery-driven (`/o/.well-known/openid-configuration`),
+  standard-library HTTP only, no new dependencies. Headless machines print the
+  link instead of opening a browser; `--no-browser` forces that; `BROWSER=echo`
+  is honoured. Esc or Ctrl-C cancels (exit 130). `AISQUARE_TOKEN` supplies a
+  token read-only for CI, `--with-token` stores one from stdin, `--api-url`
+  targets another server and a session is refused against a different host
+  (`api_url_mismatch`). No refresh: an expired or revoked session says
+  "run aisquare login". `logout` revokes on the server (RFC 7009) and forgets
+  locally. `--json` puts exactly one object on stdout. Redaction learns the
+  `aisq_` token shape. Contract: `docs/plans/aisquare-login.md`; guide:
+  `docs/signing-in.md`. The `auth rotate` stub is gone (sessions do not rotate).
 
 ## [0.6.0] - 2026-09-03
 

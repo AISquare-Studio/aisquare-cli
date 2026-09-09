@@ -708,18 +708,26 @@ def test_the_row_starts_when_the_turn_did_not_when_the_call_returned(
 
     wired.respond(status=200, body=json.dumps(_response()), delay_s=0.25)
 
-    before = datetime.now(tz=UTC)
     hooks_service.prompt_submitted(
         "why does the brain lock use msvcrt", tmp_path, session_id=SESSION
     )
+    after = datetime.now(tz=UTC)
 
     turn = _turn()
     assert turn.round_trip_ms is not None and turn.round_trip_ms >= 200, (
         "precondition: the stub really did hold the call"
     )
-    assert turn.started_at <= before + timedelta(milliseconds=100), (
-        "started_at must precede the round trip, not follow it"
-    )
+    # The row's clock started before the exchange did, so the whole exchange
+    # fits between the stamp and the return: started_at + round trip <= after,
+    # with only millisecond rounding as slack. A stamp taken once the call had
+    # returned — the bug — lands a full round trip late and misses by the stub's
+    # 250 ms. This is NOT `started_at <= before + 100 ms`, which the test used to
+    # assert: the work in front of the exchange (spool, config, descriptor) took
+    # 158 ms on one loaded CI runner, and a correct stamp failed on the runner's
+    # speed rather than on the property under test.
+    assert turn.started_at + timedelta(milliseconds=turn.round_trip_ms) <= after + timedelta(
+        milliseconds=50
+    ), "started_at must precede the round trip, not follow it"
 
 
 def test_a_ci_failure_does_not_cost_the_prompt_its_spool(

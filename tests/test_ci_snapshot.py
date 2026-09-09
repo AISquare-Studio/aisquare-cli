@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,18 @@ def test_a_clean_tree_snapshots_as_head(tmp_path: Path) -> None:
     assert snapshot.object_id == git(root, "rev-parse", "HEAD")
     assert snapshot.dirty is False
     assert snapshot.ref is None
+
+
+def _days_ago(days: int) -> str:
+    """A git date ``days`` before now, in the raw ``<unix> <offset>`` form.
+
+    Relative on purpose. The "recent" commit in the retention test was once the
+    literal ``2026-09-02``: seven days after that date it aged past
+    :data:`ci_snapshot.WIP_REF_TTL_DAYS`, the prune dropped the ref the test
+    expected to survive, and every job went red on a ``main`` nobody had
+    touched. A date measured from the clock the prune itself reads cannot age.
+    """
+    return f"{int(time.time()) - days * 86_400} +0000"
 
 
 def _dated_commit(root: Path, when: str) -> str:
@@ -60,7 +73,7 @@ def test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_tak
     developer did not know existed."""
     root = repo(tmp_path / "r")
     old = _dated_commit(root, "2026-01-01T00:00:00+0000")
-    recent = _dated_commit(root, "2026-09-02T00:00:00+0000")
+    recent = _dated_commit(root, _days_ago(1))  # inside the 7-day retention, whenever this runs
     git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "old", old)
     git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "recent", recent)
     (root / "tracked.txt").write_text("edited\n", encoding="utf-8")

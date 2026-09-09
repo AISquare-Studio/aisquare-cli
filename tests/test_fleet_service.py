@@ -501,7 +501,10 @@ def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     # The two variables this process lacks are unset for the child…
     assert command[0].endswith("env")
     assert command[1:5] == ["-u", "CLAUDE_CONFIG_DIR", "-u", "CLAUDE_CODE_TMPDIR"]
-    assert command[5:9] == [sys.executable, "-m", "aisquare", "launch"]
+    # …then the launcher exactly as it is built without a flag (interpreter switches and all).
+    module = command.index("-m")
+    assert command[5] == sys.executable
+    assert command[module : module + 3] == ["-m", "aisquare", "launch"]
     assert _flag(command, "--account") == "1"
     # …and the aisquare home this process has is set, as an absolute path.
     assert env["AISQUARE_HOME"] == str(Path(os.environ["AISQUARE_HOME"]).absolute())
@@ -511,7 +514,8 @@ def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     fleet_service.spawn(project, "tester")
     plain_command, plain_env = tmux.spawned[-1]["command"], tmux.spawned[-1]["env"]
     assert isinstance(plain_command, list) and isinstance(plain_env, dict)
-    assert plain_command[:4] == [sys.executable, "-m", "aisquare", "launch"]
+    assert plain_command[0] == sys.executable  # no env prefix: the launcher comes first…
+    assert plain_command.index("-m") == module - 5  # …shaped exactly as the prefixed one after it
     assert "AISQUARE_HOME" not in plain_env
 
 

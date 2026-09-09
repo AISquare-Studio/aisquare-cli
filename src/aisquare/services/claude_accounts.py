@@ -398,6 +398,10 @@ def session_env(account: ClaudeAccount, base: Mapping[str, str] | None = None) -
     return core.apply_launch_env(env, account, shell=base)
 
 
+def _leave_it_to_the_child(signum: int, frame: Any) -> None:
+    """The parent's SIGINT handler while Claude Code runs: the keypress was for the child."""
+
+
 def run_session(
     account: ClaudeAccount,
     args: Sequence[str] = (),
@@ -413,9 +417,12 @@ def run_session(
     Ctrl-C belongs to Claude Code while it runs: the terminal delivers SIGINT
     to the whole foreground group, and a first Ctrl-C only interrupts Claude
     Code's current turn, so a parent that died on it would leave the session
-    orphaned and the slot half-made. SIGINT is ignored here for the child's
-    lifetime (main thread only — a signal handler cannot be set elsewhere) and
-    the previous disposition is restored afterwards.
+    orphaned and the slot half-made. For the child's lifetime this process
+    answers SIGINT with a handler that does nothing — a Python-level handler,
+    NOT ``SIG_IGN``: an ignored disposition is inherited across ``exec`` and
+    would have made Claude Code itself deaf to the signal, where a handler is
+    reset to the default in the child. Main thread only (a signal handler
+    cannot be set elsewhere), and the previous disposition is restored after.
     """
     found = install()
     if not found.installed or found.binary is None:
@@ -425,7 +432,7 @@ def run_session(
     previous: Any = None
     on_main_thread = threading.current_thread() is threading.main_thread()
     if on_main_thread:
-        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        previous = signal.signal(signal.SIGINT, _leave_it_to_the_child)
     try:
         completed = subprocess.run(  # argv, never a shell
             [found.binary, *args], env=session_env(account, env), check=False

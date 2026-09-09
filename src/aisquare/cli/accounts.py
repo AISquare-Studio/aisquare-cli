@@ -236,8 +236,9 @@ def add() -> None:
     landed = accounts_service.sign_in_landed(account)
     if landed is None:
         accounts_service.abandon_sign_in(account)
+        how = f"status {status}" if status >= 0 else f"signal {-status}"
         fail(
-            f"no sign-in landed in slot {account.slot} (Claude Code exited with status {status}) "
+            f"no sign-in landed in slot {account.slot} (Claude Code exited with {how}) "
             "— nothing was added",
             error="not_signed_in",
         )

@@ -781,6 +781,9 @@ def test_accounts_add_records_a_landed_sign_in_and_discards_one_that_did_not(
     gave_up = runner.invoke(app, ["accounts", "add"])
     assert gave_up.exit_code == 1
     assert "no sign-in landed in slot 3" in gave_up.stderr and "status 130" in gave_up.stderr
+    monkeypatch.setattr(service, "run_session", lambda account, *a, **k: -2)
+    killed = runner.invoke(app, ["accounts", "add"])
+    assert "exited with signal 2" in killed.stderr  # a signal death is named as one
     assert [a.slot for a in core.managed_accounts()] == [2]  # slot 3 was discarded
 
     def interrupted(account: ClaudeAccount, *args: Any, **kwargs: Any) -> int:
@@ -812,8 +815,12 @@ def test_run_session_leaves_ctrl_c_to_the_child_and_restores_the_handler(
     assert service.run_session(account, ["--model", "opus"]) == 7
 
     assert seen["argv"] == ["/opt/bin/claude", "--model", "opus"]
-    assert seen["handler"] is signal.SIG_IGN  # Ctrl-C reaches Claude Code alone while it runs
-    assert signal.getsignal(signal.SIGINT) is before  # and is ours again afterwards
+    # A handler, never SIG_IGN: an ignored disposition is inherited across exec and
+    # would make Claude Code itself deaf to Ctrl-C; a handler resets to default there.
+    handler = seen["handler"]
+    assert callable(handler) and handler not in (signal.SIG_IGN, signal.SIG_DFL)
+    handler(signal.SIGINT, None)  # and it swallows the keypress in this process
+    assert signal.getsignal(signal.SIGINT) is before  # ours again afterwards
     assert seen["env"][core.CONFIG_DIR_VAR] == str(account.config_dir)
 
 

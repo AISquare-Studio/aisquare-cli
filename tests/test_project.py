@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.models import Snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -114,3 +117,98 @@ def test_workspace_alias_works(runner: CliRunner, work_dir: Path) -> None:
     result = runner.invoke(app, ["--json", "workspace", "info"])
     assert result.exit_code == 0, result.output
     assert _json(result.stdout)["root"] == str(work_dir.resolve())
+
+
+_TWO_FILE_SKELETON = (
+    '<files>\n<file path="a.py">\nx ⋮\n</file>\n<file path="b.py">\ny ⋮\n</file>\n</files>\n'
+)
+
+
+def test_onboard_over_budget_keeps_a_skeleton_and_the_knob_is_what_it_measures_against(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#82: over budget even compressed, the line says what was kept and skipped, with numbers.
+
+    Then the loop closes: raise the knob it names, re-pack with the flag it
+    names, and the compressed pack is kept whole. Rendered output, not the
+    string passed in — bracketed text that Rich would eat with markup on.
+    """
+    from aisquare.core import snapshot
+
+    seen: dict[str, list[str]] = {}
+
+    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
+        seen["ignore"] = list(ignore)
+        if compress:
+            return _TWO_FILE_SKELETON, "Total Tokens: 203,991"
+        return "<files>\n</files>\n", "Total Tokens: 412,318"
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
+    # Read repomix's own count, whether or not this machine has tiktoken.
+    monkeypatch.setattr(snapshot, "_tiktoken_count", lambda _text: None)
+
+    result = runner.invoke(app, ["project", "onboard"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "snapshot: skeleton only: 203991 tokens, 2 files indexed; "
+        "full pack skipped over budget 150000 (412318 tokens)"
+    ) in result.stdout
+
+    assert runner.invoke(app, ["config", "set", "snapshot.max_tokens", "250000"]).exit_code == 0
+    assert (
+        runner.invoke(
+            app, ["config", "set", "snapshot.ignore", "docs/generated/**,**/fixtures/**"]
+        ).exit_code
+        == 0
+    )
+    again = runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
+    # The operator's patterns reach repomix AFTER the built-ins, never instead of them.
+    assert seen["ignore"][: len(snapshot.DEFAULT_IGNORE)] == list(snapshot.DEFAULT_IGNORE)
+    assert seen["ignore"][-2:] == ["docs/generated/**", "**/fixtures/**"]
+    assert again.exit_code == 0, again.output
+    snap = _json(again.stdout)["snapshot"]
+    assert (snap["status"], snap["compressed"]) == ("ready", True)
+    assert (snap["full_token_count"], snap["token_count"], snap["max_tokens"]) == (
+        412318,
+        203991,
+        250000,
+    )
+
+
+def test_onboard_reports_a_legacy_too_large_verdict_with_its_numbers(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """A snapshot.json written before ``skeleton_only`` existed: a plain `onboard` reloads it.
+
+    The line names all three numbers and both knobs — ``[snapshot]`` is bracketed
+    text Rich would eat with markup on, so this reads the RENDERED output — and
+    ends with the ``--refresh`` that turns the verdict into a skeleton.
+    """
+    from aisquare.core import snapshot
+    from aisquare.core.workspace import project_id_for
+
+    project_id = project_id_for(work_dir.resolve())
+    snapshot.snapshot_dir(project_id).mkdir(parents=True, exist_ok=True)
+    verdict = Snapshot(
+        project_id=project_id,
+        generated_at=datetime.now(tz=UTC),
+        pack_path=snapshot.pack_path(project_id),
+        skeleton_path=snapshot.skeleton_path(project_id),
+        index_path=snapshot.index_path(project_id),
+        token_count=203_991,
+        compressed=True,
+        status="too_large",
+        full_token_count=412_318,
+        max_tokens=150_000,
+    )
+    snapshot.meta_path(project_id).write_text(verdict.model_dump_json(), encoding="utf-8")
+
+    result = runner.invoke(app, ["project", "onboard"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "snapshot: codebase too large: full 412318 tokens, compressed 203991 tokens, "
+        "budget 150000. Raise [snapshot] max_tokens (aisquare config set "
+        "snapshot.max_tokens <n>), or exclude generated or vendored trees with [snapshot] "
+        "ignore (aisquare config set snapshot.ignore '<glob>,<glob>') or a .repomixignore at "
+        "the repo root. Re-pack: aisquare project onboard --refresh"
+    ) in result.stdout

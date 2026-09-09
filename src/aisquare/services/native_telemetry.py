@@ -12,14 +12,12 @@ import hashlib
 import hmac
 import json
 import os
-import secrets
 import subprocess
 import tempfile
 import time
 import tomllib
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +163,9 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
 
 
 def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
+    import secrets
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
     token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):

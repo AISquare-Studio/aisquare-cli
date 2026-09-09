@@ -253,11 +253,12 @@ class SnapshotSettings(BaseModel):
 
     ``max_tokens`` is the budget a pack must fit. The full pack is tried first,
     then the compressed one (signatures only); a repo whose compressed pack is
-    STILL over it gets no pack, a ``too_large`` snapshot, and a message naming
-    all three numbers. 150 000 mirrors the server's ``REPO_PACK_MAX_TOKENS`` so
-    artifacts stay consistent for a future sync — raise it for a repo you know
-    is big, or add a ``.repomixignore`` at the repo root to keep generated and
-    vendored trees out of the pack (#82).
+    STILL over it keeps that pack as the skeleton with its per-file index —
+    status ``skeleton_only``, every count recorded, ``onboard`` and ``doctor``
+    naming the numbers — rather than getting nothing. 150 000 mirrors the
+    server's ``REPO_PACK_MAX_TOKENS`` so artifacts stay consistent for a future
+    sync — raise it for a repo you know is big, or leave more out, with
+    ``ignore`` below or a ``.repomixignore`` at the repo root (#82).
 
     ``ignore`` is the operator's own list of what to leave out of the pack, in
     the glob syntax repomix's ``--ignore`` takes (``**/fixtures/**``,

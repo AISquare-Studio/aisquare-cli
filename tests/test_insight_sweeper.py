@@ -88,6 +88,39 @@ class FakeSDK:
         self.runs.append(run)
         return run
 
+    def get_tracer(self, name: str) -> Any:
+        """A launched session's drain opens a SEGMENT inside the launcher's trace
+        (``_ClientLaneSegment``) instead of a root of its own. It lands in
+        ``runs`` too, under the attributes the segment carries, so every
+        assertion about WHICH Run a record joined reads the same either way."""
+        sdk = self
+
+        class _Tracer:
+            def start_span(self, name: str, *, context: Any, attributes: dict[str, Any]) -> Any:
+                if sdk.fail_on_run:
+                    raise ConnectionError("gateway unreachable")
+                run = FakeRun(
+                    agent_name=attributes["agent.name"], run_id=attributes["agent.run_id"]
+                )
+                sdk.runs.append(run)
+
+                class _Segment:
+                    def set_attribute(self, key: str, value: Any) -> None:
+                        if key == "input.value":
+                            run.set_input(str(value))
+                        elif key == "agent.run.status":
+                            run.set_status(str(value))
+
+                    def set_status(self, *args: Any) -> None:
+                        return None
+
+                    def end(self) -> None:
+                        return None
+
+                return _Segment()
+
+        return _Tracer()
+
     def HumanInterventionTracer(self, *, human_id: str, action: str, reason: str) -> FakeSpan:
         return FakeSpan(f"human:{action}", f"{human_id}|{reason}", self.spans)
 
@@ -104,7 +137,42 @@ def sdk(monkeypatch: pytest.MonkeyPatch) -> FakeSDK:
     fake = FakeSDK()
     monkeypatch.setattr(service, "sdk_available", lambda: True)
     monkeypatch.setattr(service, "_init_sdk", lambda settings, api_key: fake)
+    monkeypatch.setattr(service, "_otel", lambda: (_FakeOtelTrace, _FakeOtelContext()))
     return fake
+
+
+class _FakeOtelTrace:
+    """Just enough of ``opentelemetry.trace`` for a remote parent context."""
+
+    class TraceFlags:
+        SAMPLED = 1
+
+        def __init__(self, flags: int) -> None:
+            self.flags = flags
+
+    class SpanContext:
+        def __init__(self, **fields: Any) -> None:
+            self.__dict__.update(fields)
+
+    class NonRecordingSpan:
+        def __init__(self, ctx: Any) -> None:
+            self.ctx = ctx
+
+    class StatusCode:
+        OK = "OK"
+        ERROR = "ERROR"
+
+    @staticmethod
+    def set_span_in_context(span: Any) -> dict[str, Any]:
+        return {"span": span}
+
+
+class _FakeOtelContext:
+    def attach(self, ctx: Any) -> object:
+        return object()
+
+    def detach(self, token: Any) -> None:
+        return None
 
 
 @pytest.fixture(autouse=True)

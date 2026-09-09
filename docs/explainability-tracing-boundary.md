@@ -38,7 +38,10 @@ A session joins the trace by carrying two variables in its process environment:
 
 - `ANTHROPIC_BASE_URL` — routes the session's model traffic through the proxy
 - `ANTHROPIC_CUSTOM_HEADERS` — carries `X-Agent-Name` (the studio identity) and
-  `X-Pipeline-Id` (the Run key)
+  the Run's correlation: `traceparent` when the launcher owns the Run (the
+  default — it posted the Run's root span first and names it here), or
+  `X-Pipeline-Id` when it could not (no gateway, no key, root refused), in
+  which case the proxy keys the Run itself
 
 Those two names are **reserved**. If a launch finds either already set it
 stands down and runs the session untraced rather than seize routing you own,
@@ -88,10 +91,21 @@ no proxy can see them; they travel separately. Both key the Run on the same
 board activity in one place. See the correlation spine in
 `aisquare/services/explainability.py`.
 
-**[unverified]** That the gateway merges spans arriving by both paths into a
-single Run is designed for and not yet demonstrated end-to-end against staging.
-Until someone has seen one Run rather than two for a session that used both,
-treat it as an assumption.
+**[verified-prod]** (workspace 881, 2026-09-09.) This was **false** as built:
+a session that used both lanes produced TWO Runs — `5efb96de…` with the model
+traffic and `6fb49942…` with the client lane, same agent name, same
+`X-Pipeline-Id`. The gateway keys a Run by OTel `trace_id`, and the two lanes
+never agreed on one: the proxy minted a random trace per pipeline session, and
+the shipper's `AgentRunTracer` opened another. `X-Pipeline-Id` was an attribute
+on each root, not the key.
+
+Fixed by making the pipeline id the SOURCE of the trace id
+(`trace_identity`: SHA-256, first 16 bytes trace id, next 8 root span id). The
+launcher posts the Run's root span with those ids before the agent starts and
+hands the proxy a `traceparent` naming it; the shipper attaches its spans under
+that same root. Re-measured after the fix: one Run per session, both lanes in
+it. `joins.jsonl` now records that `trace_id`, and it is the id
+`GET /v1/workspaces/{ws}/runs/{run_id}` reads back with the workspace key.
 
 ## Two mechanisms people will suggest, and their status
 

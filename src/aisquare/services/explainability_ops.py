@@ -63,6 +63,7 @@ from aisquare.services.explainability import (
     probe_proxy,
     running_editable,
     stored_api_key,
+    trace_identity,
 )
 from aisquare.services.explainability import (
     INSTALL_HINT as _EXTRA_INSTALL_HINT,
@@ -104,6 +105,9 @@ GATEWAY_ENV_VAR = "EXPLAINABILITY_GATEWAY_URL"
 #: Gateway-side checks are opt-in, so they may take a beat — but never hang a
 #: terminal. Chosen over the proxy probe's 1.5s because this is a real WAN hop.
 _HTTP_TIMEOUT = 6.0
+#: Posting a Run's root sits on the LAUNCH path, where a human is waiting. The
+#: proxy probe beside it allows 1.5 s; this is a write and gets twice that.
+_ROOT_TIMEOUT = 3.0
 _SDK_DOCTOR_TIMEOUT = 30.0
 
 #: SDK doctor lines that are expected noise for this lane rather than findings:
@@ -565,6 +569,74 @@ def probe_ingest(
                 f"HTTP {verdict.status} — the gateway answered but did not ACCEPT "
                 "the span (ingest acknowledges with 202); check the URL reaches "
                 "the gateway itself rather than a proxy in front of it"
+            ),
+            code=verdict.code,
+            payload=verdict.payload,
+        )
+    return verdict
+
+
+def open_run_root(
+    gateway_url: str,
+    api_key: str,
+    agent_name: str,
+    pipeline_id: str,
+    *,
+    timeout: float = _ROOT_TIMEOUT,
+) -> HttpVerdict:
+    """Post the root span of the Run a launch is about to produce.
+
+    The gateway keys a Run by OTel trace id, so the launcher derives that id
+    from the pipeline id (``trace_identity``) and sends the root FIRST: the
+    proxy's model spans arrive as children of ``span_id`` (the ``traceparent``
+    the launcher hands it names exactly this span), and the client lane's
+    spans join the same trace later. Sent before the agent starts so the trace
+    is routed — ``agent.name`` on this span is what routes it — by the time
+    the first child batch lands; a child-only batch with no route is held as
+    ``awaiting_trace_route`` and only clears once a root exists.
+
+    Shaped like ``AgentRunTracer``'s root, with ``agent.run_id`` = the pipeline
+    id so ``by-agent-run-id`` lookups keep working. Same 202 rule as
+    ``probe_ingest``: a 200 is an answer from something in front of the gateway.
+    """
+    identity = trace_identity(pipeline_id)
+    now_ns = time.time_ns()
+    batch = {
+        "trace_id": identity.trace_id,
+        "spans": [
+            {
+                "trace_id": identity.trace_id,
+                "span_id": identity.span_id,
+                "parent_span_id": None,
+                "name": f"AgentRun:{agent_name}",
+                "kind": "INTERNAL",
+                "start_time": now_ns,
+                "end_time": now_ns,
+                "duration_ms": 0.0,
+                "attributes": {
+                    "openinference.span.kind": "AGENT",
+                    "agent.name": agent_name,
+                    "agent.run_id": pipeline_id,
+                    "agent.source": "aisquare-cli:launch",
+                    "service.name": "aisquare-cli",
+                    "input.value": f"aisquare-cli session {pipeline_id}",
+                },
+            }
+        ],
+    }
+    verdict = _request(
+        f"{gateway_url.rstrip('/')}/v1/traces/ingest",
+        api_key=api_key,
+        body=batch,
+        timeout=timeout,
+    )
+    if verdict.ok and verdict.status != 202:
+        return HttpVerdict(
+            ok=False,
+            status=verdict.status,
+            detail=(
+                f"HTTP {verdict.status} — the gateway answered but did not ACCEPT "
+                "the root span (ingest acknowledges with 202)"
             ),
             code=verdict.code,
             payload=verdict.payload,

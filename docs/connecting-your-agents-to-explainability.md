@@ -21,7 +21,11 @@ which turns most confusion into a one-line answer.
 | **Client** | Your prompts, board notes, task claims, session events | CLI → local spool → `explainability ship` → gateway |
 
 Both key on the same session id, so a board row, a live process and a dashboard
-Run share one identifier.
+Run share one identifier. The dashboard's Run id is derived from it (SHA-256 of
+the session id); `aisquare launch` prints it — `traced as … (pipeline <session>,
+run <trace_id>)` — and `~/.aisquare/explainability/joins.jsonl` records it as
+`trace_id`, so a Run can be found from its board row without reading anything
+back.
 
 **Why a proxy at all?** Claude Code emits no telemetry of its own — the only
 interception point is `ANTHROPIC_BASE_URL`. So something has to sit in the

@@ -265,6 +265,7 @@ def test_the_strip_covers_everything_a_traced_launch_exports() -> None:
     assert tuple(MARKER_ENV_VARS) == (
         explainability.PIPELINE_ID_ENV_VAR,
         explainability.TRACE_AGENT_NAME_ENV_VAR,
+        explainability.RUN_TRACE_ID_ENV_VAR,
     )
     assert tuple(IDENTITY_ENV_VARS) == (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 

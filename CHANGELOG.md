@@ -276,6 +276,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **One session is ONE Run again — the launcher owns the Run's trace id.**
+  Measured against production on 2026-09-09 (workspace 881, studio 748): one
+  `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the
+  model traffic (157,756 tokens, $3.16) under `aisquare-coder`; `6fb49942…` held
+  the same session's client lane — the prompt, the board events — with zero
+  tokens, same agent name, twenty seconds later. `docs/explainability-tracing-boundary.md`
+  had this exact merge down as **[unverified]**; this is the measurement, and it
+  came out false.
+  - **Why.** The gateway materialises a Run per OTel `trace_id`
+    (`trace_states.trace_id` *is* the dashboard's `run_id`). `X-Pipeline-Id`,
+    the value both lanes shared, is `agent.run_id` — an attribute on a span,
+    searchable, not the key. The proxy mints a random trace per pipeline
+    session (`_open_pipeline_session`); `ship_once` opened `AgentRunTracer`,
+    which starts a new trace unconditionally (`INVALID_SPAN` context). Two
+    writers, two trace ids, two Runs — every time, by construction.
+  - **The fix.** The pipeline id is now the SOURCE of the trace id:
+    `trace_identity(pipeline_id)` is SHA-256 of it, first 16 bytes the trace
+    id, next 8 the root span id. `wire_session` posts the Run's root span with
+    those ids to `/v1/traces/ingest` **before** the agent starts
+    (`explainability_ops.open_run_root`, 3 s budget, fail-open), and hands the
+    proxy a `traceparent: 00-<trace>-<root>-01` — the proxy's tier-2 path,
+    which parents every model span under that root. `ship_once` attaches a
+    client-lane segment under the same remote root
+    (`_ClientLaneSegment`). One trace, one Run, both lanes.
+  - **`traceparent` REPLACES `X-Pipeline-Id` on the wire.** The proxy resolves a
+    request in tiers and `X-Pipeline-Id` is tier 1: present, it opens its own
+    session and never reads the `traceparent` beside it, so sending both would
+    change nothing. The pipeline id still travels as `agent.run_id` on the root
+    and as the `AISQUARE_PIPELINE_ID` marker, so `by-agent-run-id` lookups and
+    the board join are unchanged.
+  - **Fail-open, in one direction.** No gateway URL, no key, or a root that was
+    not accepted with 202 → the pre-fix wiring, byte for byte: `X-Pipeline-Id`,
+    the proxy keys the Run, and the launch line says so (`the proxy keys the
+    run — root not posted: …`). Tracing still never costs a launch. A plain
+    session with no proxy lane still ships through `AgentRunTracer` as before —
+    it has nothing to join.
+  - **The Run is now findable from the board row.** `joins.jsonl` grows a
+    `trace_id` field (the marker `AISQUARE_RUN_TRACE_ID`, copied by the hook;
+    `null` when the proxy keyed the Run rather than a derived id that was never
+    used), and it is exactly the id `GET /v1/workspaces/{ws}/runs/{run_id}`
+    reads back with the workspace key — measured live: the workspace routes
+    accept `X-API-KEY`, only the studio-scoped ones answer 403. The
+    findings-loop page's field table gains the row. The launch line prints it:
+    `traced as aisquare-coder (pipeline <session>, run <trace_id>)`.
+  - **The SDK's inbox stays in `~/.aisquare`.** Its delivery inbox is a SQLite
+    file at a RELATIVE default path, so every drain left
+    `explainability_inbox.db` (+ `-shm`, `-wal`) in whatever directory it ran
+    from — a repo root by hand, `$HOME` from the cron timer step 10 of the guide
+    installs. `_init_sdk` now pins `EXPLAINABILITY_INBOX_PATH` to
+    `~/.aisquare/explainability/inbox.db` unless the operator set it.
+  - `tests/test_one_run_per_session.py` pins each piece: the derivation, both
+    wiring outcomes and the three no-post cases, the root span's shape and the
+    202 rule, the marker and join record, the shipper's segment (remote parent
+    = the derived root; `AgentRunTracer` never opened for a launched session;
+    the plain-session path untouched; the segment closed and the context
+    detached on failure), the inbox path, and one launch through the CLI.
+    Verified live against production after the change: one Run per session,
+    the model spans and the prompt span under one trace id.
 - **A retention test went red on `main` on a calendar date, with no code
   change.** `test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_taken`
   dated the ref it expects to SURVIVE pruning at a literal `2026-09-02`, five

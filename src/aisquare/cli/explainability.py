@@ -483,12 +483,14 @@ def env(
     the header is omitted entirely there.
     """
     settings = load_config().explainability
+    target = ops.resolve_target(settings, target_name)
     wiring = wire_session(
         ops.effective_settings(settings, target_name),
         role,
         session_id=session_id,
         base_env=dict(os.environ),
-        api_key=ops.resolve_target(settings, target_name).api_key,
+        api_key=target.api_key,
+        gateway_url=target.gateway_url,
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")

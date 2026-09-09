@@ -253,9 +253,10 @@ def launch(
         # never the launch.
         try:
             effective = explainability_ops.effective_settings(tracing)
-            api_key = explainability_ops.resolve_target(tracing).api_key
+            target = explainability_ops.resolve_target(tracing)
+            api_key, gateway_url = target.api_key, target.gateway_url
         except Exception as exc:
-            effective, api_key = tracing, None
+            effective, api_key, gateway_url = tracing, None, None
             stderr_console().print(
                 f"explainability: target unreadable ({exc}) — using the top-level "
                 "settings, untraced if that proxy needs a key",
@@ -267,6 +268,7 @@ def launch(
             session_id=identity.session_id,
             base_env=env,
             api_key=api_key,
+            gateway_url=gateway_url,
         )
         env.update(wiring.env)
         stderr_console().print(f"explainability: {wiring.reason}", style="dim")

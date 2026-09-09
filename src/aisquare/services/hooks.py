@@ -61,6 +61,7 @@ def record_trace_join(session_id: str | None) -> str | None:
             pipeline_id=pipeline_id,
             agent_name=agent_name,
             role=os.environ.get("AISQUARE_ROLE") or None,
+            trace_id=explainability_service.run_trace_id(),
         )
     except Exception as exc:  # an observer may never disrupt a session start
         return f"join record not written ({exc})"

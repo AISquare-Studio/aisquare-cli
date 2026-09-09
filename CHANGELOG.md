@@ -238,6 +238,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **A retention test went red on `main` on a calendar date, with no code
+  change.** `test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_taken`
+  dated the ref it expects to SURVIVE pruning at a literal `2026-09-02`, five
+  days inside the seven-day `WIP_REF_TTL_DAYS` window on the day it landed. On
+  2026-09-09 that ref turned exactly seven days old, `_prune` dropped it as
+  designed, and the assertion failed — five of the six CI jobs red on an
+  unmodified tree, and the first branch to run afterwards wearing the blame.
+  The date is now computed as one day before the run. Its sibling `old`
+  fixtures stay literal deliberately: they only ever need to be OUTSIDE the
+  window, and `2026-01-01` always will be. Checked in the other direction too —
+  moving the fixture to eight days ago still fails the test, so the assertion
+  is still the one doing the work.
+
 - **The ceiling holds on mcp 2.2.0.** Released after 0.6.0 measured its floor,
   and admitted by the same `>=2.1,<3` pin, so a fresh install already resolves
   to it — CI's `check` jobs install it and are green, which is what proves it

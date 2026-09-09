@@ -181,3 +181,87 @@ def test_a_cancel_that_lands_while_the_poll_is_in_flight_still_cancels() -> None
     # The control: the same poll with no cancel hands the token back.
     token, _, _ = _wait([iam.PollOutcome("token", TOKEN)])
     assert token == TOKEN
+
+
+# --- the commit boundary ------------------------------------------------------------------
+
+
+class _Iam:
+    """Scripted identity provider for ``commit_sign_in``: records what would have been written."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, previous: iam.Session | None) -> None:
+        self.stored: list[dict[str, Any]] = []
+        self.revoked: list[str] = []
+        self.cancel = {"set": False}
+        self.userinfo_calls = 0
+
+        def fetch_userinfo(endpoints: iam.Endpoints, token: str) -> dict[str, Any]:
+            self.userinfo_calls += 1
+            self.cancel["set"] = self.cancel_during_userinfo
+            return {"sub": "usr_1", "email": "new@example.com", "name": "New"}
+
+        def store_session(**values: Any) -> iam.Session:
+            self.stored.append(values)
+            return iam.Session(
+                api_url=values["api_url"], token=values["token"], source="file",
+                email=values["claims"]["email"],
+            )  # fmt: skip
+
+        monkeypatch.setattr(iam, "fetch_userinfo", fetch_userinfo)
+        monkeypatch.setattr(iam, "stored_session", lambda: previous)
+        monkeypatch.setattr(iam, "store_session", store_session)
+
+        def revoke(endpoints: iam.Endpoints, token: str) -> bool:
+            self.revoked.append(token)
+            return True
+
+        monkeypatch.setattr(iam, "revoke", revoke)
+        self.cancel_during_userinfo = False
+
+
+def _previous(api_url: str = "https://api.example", token: str = "aisq_old") -> iam.Session:
+    return iam.Session(api_url=api_url, token=token, source="file", email="old@example.com")
+
+
+def test_commit_stores_the_session_and_retires_the_previous_token_on_the_same_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _Iam(monkeypatch, previous=_previous())
+
+    session = device_flow.commit_sign_in(
+        "https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: fake.cancel["set"]
+    )
+
+    assert session.email == "new@example.com" and session.token == "aisq_new"
+    [written] = fake.stored
+    assert written["token"] == "aisq_new" and written["expires_in"] == 7776000
+    assert written["scope"] == iam.SCOPE  # the response named none: the client's default
+    assert fake.revoked == ["aisq_old"]
+
+
+def test_commit_never_sends_a_token_to_another_hosts_revocation_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _Iam(monkeypatch, previous=_previous(api_url="https://other.example"))
+    device_flow.commit_sign_in("https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: False)
+    assert fake.stored and fake.revoked == []  # stored, but the other host's token is left alone
+    same = _Iam(monkeypatch, previous=_previous(token="aisq_new"))
+    device_flow.commit_sign_in("https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: False)
+    assert same.revoked == []  # the same token is not "previous"
+
+
+def test_a_cancel_during_the_userinfo_request_stores_nothing_and_revokes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last request before the write: the server answered, the user had already said no."""
+    fake = _Iam(monkeypatch, previous=_previous())
+    fake.cancel_during_userinfo = True
+
+    with pytest.raises(iam.IamError) as caught:
+        device_flow.commit_sign_in(
+            "https://api.example", ENDPOINTS, TOKEN, cancelled=lambda: fake.cancel["set"]
+        )
+
+    assert caught.value.code == "cancelled"
+    assert fake.userinfo_calls == 1  # the request did complete…
+    assert fake.stored == [] and fake.revoked == []  # …and changed nothing

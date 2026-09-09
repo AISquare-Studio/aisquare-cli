@@ -9,6 +9,8 @@ clock, the sleep and the cancel check as parameters. It reaches the provider
 only through ``services.iam``, exactly as the terminal does, and it raises the
 same ``IamError`` codes the terminal maps to exit statuses (``cancelled``,
 ``expired``, ``access_denied``, ``paused``, ``unsupported_server``).
+:func:`commit_sign_in` is the terminal's completion with the same cancel check
+at the last moment before anything is written.
 """
 
 from __future__ import annotations
@@ -90,6 +92,50 @@ def wait_for_token(
         raise iam.IamError(
             "unsupported_server", f"Unexpected answer from {endpoints.issuer} while waiting."
         )
+
+
+def commit_sign_in(
+    api_url: str,
+    endpoints: iam.Endpoints,
+    token_response: dict[str, Any],
+    *,
+    cancelled: Callable[[], bool],
+) -> iam.Session:
+    """``services.auth.complete_sign_in`` with the cancel check at the commit boundary.
+
+    The userinfo request is the last thing before the session is written and
+    the previous token retired, and a Cancel — or the page unmounting — that
+    lands while it is in flight must still store nothing. Step for step the
+    terminal's completion: identify the user, store the session, retire the
+    token this one replaces but only against its own host (a stored token
+    belongs to ``previous.api_url``; sent to another server's revocation
+    endpoint it would hand that server a live bearer for the first). Kept
+    interchangeable with the terminal's so that, when the dependency grows a
+    cancel hook of its own, this collapses back into it.
+    """
+    access_token = str(token_response["access_token"])
+    expires_in = token_response.get("expires_in")
+    scope = str(token_response.get("scope") or iam.SCOPE)
+    claims = iam.fetch_userinfo(endpoints, access_token)
+    if cancelled():
+        raise iam.IamError("cancelled", "Sign-in cancelled. Nothing was stored.")
+    previous = iam.stored_session()
+    session = iam.store_session(
+        api_url=api_url,
+        token=access_token,
+        expires_in=int(expires_in) if expires_in else None,
+        scope=scope,
+        claims=claims,
+    )
+    if (
+        previous is not None
+        and previous.token != access_token
+        and previous.api_url.rstrip("/") == api_url.rstrip("/")
+    ):
+        iam.revoke(
+            endpoints, previous.token
+        )  # best effort: a failed revoke is not a failed sign-in
+    return session
 
 
 def _pause(

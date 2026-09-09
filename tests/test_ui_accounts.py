@@ -503,13 +503,15 @@ def _script_device_flow(
 
     monkeypatch.setattr(device_flow, "wait_for_token", wait)
 
-    def complete(api_url: str, e: iam.Endpoints, token: dict[str, Any]) -> iam.Session:
+    def commit(
+        api_url: str, e: iam.Endpoints, token: dict[str, Any], *, cancelled: Any
+    ) -> iam.Session:
         seen.append(f"complete:{token['access_token']}")
         session = _session("new@aisquare.studio")
         script["session"] = session
         return session
 
-    monkeypatch.setattr(auth_service, "complete_sign_in", complete)
+    monkeypatch.setattr(device_flow, "commit_sign_in", commit)
     return seen
 
 

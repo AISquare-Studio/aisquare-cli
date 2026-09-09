@@ -541,10 +541,9 @@ class AccountsView(Vertical):
         opened = browser.open_url(grant.verification_uri_complete)
         self.app.call_from_thread(self._show_grant, grant, opened)
         token = device_flow.wait_for_token(endpoints, grant, cancelled=cancel.is_set)
-        if cancel.is_set():
-            # Belt to the wait's braces: nothing is stored past a Cancel.
-            raise iam.IamError("cancelled", "Sign-in cancelled. Nothing was stored.")
-        return auth_service.complete_sign_in(api_url, endpoints, token)
+        # The commit checks the flag once more after the userinfo request, the
+        # last thing before the session is written: nothing is stored past a Cancel.
+        return device_flow.commit_sign_in(api_url, endpoints, token, cancelled=cancel.is_set)
 
     def _show_grant(self, grant: iam.DeviceAuthorization, opened: bool | None) -> None:
         self.query_one("#aisquare-code", Static).update(grant_text(grant, opened=opened))

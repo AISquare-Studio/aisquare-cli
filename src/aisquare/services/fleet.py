@@ -55,6 +55,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
@@ -982,6 +983,14 @@ def spawn(
     env = {"AISQUARE_FLEET_AGENT": agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
+    if account is not None:
+        # `launch --account 1` restores "this shell's" login, and inside the
+        # window that shell would be whoever started the private server — so
+        # the CALLER's aisquare home and account variables travel with the
+        # window (set as absolute paths, or unset through `env -u`), exactly as
+        # the Accounts page's sign-in window carries them.
+        command, carried = claude_accounts_service.carry_environment(command)
+        env.update(carried)
     tmux_session = session_name(codename)
     try:
         window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)

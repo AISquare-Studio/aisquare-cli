@@ -485,6 +485,36 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         assert store.fleet_agent_by_label(project.id, "manager") == agent
 
 
+def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`launch --account 1` restores "this shell's" login — inside the window that shell is
+    whoever started the server, so the CALLER's view travels with the window."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
+
+    fleet_service.spawn(project, "coder", account="1")
+
+    spawned = tmux.spawned[-1]
+    command, env = spawned["command"], spawned["env"]
+    assert isinstance(command, list) and isinstance(env, dict)
+    # The two variables this process lacks are unset for the child…
+    assert command[0].endswith("env")
+    assert command[1:5] == ["-u", "CLAUDE_CONFIG_DIR", "-u", "CLAUDE_CODE_TMPDIR"]
+    assert command[5:9] == [sys.executable, "-m", "aisquare", "launch"]
+    assert _flag(command, "--account") == "1"
+    # …and the aisquare home this process has is set, as an absolute path.
+    assert env["AISQUARE_HOME"] == str(Path(os.environ["AISQUARE_HOME"]).absolute())
+    assert env["AISQUARE_FLEET_AGENT"]  # the fleet's own variables are still there
+
+    # The control: no --account, no carried environment, the command starts with python.
+    fleet_service.spawn(project, "tester")
+    plain_command, plain_env = tmux.spawned[-1]["command"], tmux.spawned[-1]["env"]
+    assert isinstance(plain_command, list) and isinstance(plain_env, dict)
+    assert plain_command[:4] == [sys.executable, "-m", "aisquare", "launch"]
+    assert "AISQUARE_HOME" not in plain_env
+
+
 def test_spawn_refuses_a_second_manager(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

@@ -572,6 +572,39 @@ def test_the_window_command_carries_set_variables_and_unsets_the_others() -> Non
     assert env[core.TMPDIR_VAR] == "/t"
 
 
+def test_carried_directories_are_resolved_against_the_callers_cwd_not_the_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_home: Path
+) -> None:
+    """``CLAUDE_CONFIG_DIR=./profile asq`` names <cwd>/profile on the page; the window must agree.
+
+    The window starts in another directory (the home, an agent's worktree), so a
+    relative value copied verbatim would name a sibling of THAT directory.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    environ = {
+        core.CONFIG_DIR_VAR: "./profile",
+        "AISQUARE_HOME": "rel/home",
+        core.TMPDIR_VAR: str(tmp_path / "abs-tmp"),
+    }
+
+    _, env = service.carry_environment(["x"], environ)
+
+    assert env[core.CONFIG_DIR_VAR] == str(project / "profile")
+    assert env["AISQUARE_HOME"] == str(project / "rel" / "home")
+    assert env[core.TMPDIR_VAR] == str(tmp_path / "abs-tmp")  # absolute stays as it was
+    # The page and the child now read the same directory for the default slot.
+    monkeypatch.setenv(core.CONFIG_DIR_VAR, "./profile")
+    assert core.default_config_dir().absolute() == Path(env[core.CONFIG_DIR_VAR])
+    # An explicit cwd wins over the process's, and ~ expands as the page expands it.
+    _, from_elsewhere = service.carry_environment(
+        ["x"], {core.CONFIG_DIR_VAR: "~/c2", "AISQUARE_HOME": "h"}, cwd=tmp_path / "other"
+    )
+    assert from_elsewhere[core.CONFIG_DIR_VAR] == str(Path.home() / "c2")
+    assert from_elsewhere["AISQUARE_HOME"] == str(tmp_path / "other" / "h")
+
+
 def test_session_env_strips_the_tracing_identity_and_adds_the_accounts_variables(
     fake_home: Path,
 ) -> None:

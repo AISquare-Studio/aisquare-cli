@@ -267,32 +267,58 @@ def sign_in_command(account: ClaudeAccount) -> list[str]:
     return [sys.executable, "-m", "aisquare", "accounts", "run", str(account.slot)]
 
 
-SIGN_IN_WINDOW_VARS = (paths.HOME_ENV_VAR, core.CONFIG_DIR_VAR, core.TMPDIR_VAR)
+CARRIED_VARS = (paths.HOME_ENV_VAR, core.CONFIG_DIR_VAR, core.TMPDIR_VAR)
 """What decides which directory a slot IS: the aisquare home, and the default's two variables."""
 
 
-def sign_in_window_command(
-    account: ClaudeAccount, environ: Mapping[str, str] | None = None
+def carry_environment(
+    command: Sequence[str],
+    environ: Mapping[str, str] | None = None,
+    *,
+    cwd: Path | None = None,
 ) -> tuple[list[str], dict[str, str]]:
-    """The window's command and the variables to set on it — THIS process's, not the server's.
+    """``command`` and the variables to set so a tmux window sees THIS process's slots.
 
     A tmux window inherits the environment of whoever started the private
     server, which may be another shell entirely: a different ``CLAUDE_CONFIG_DIR``
-    would make ``accounts run 1`` open a login other than the one the page is
-    watching, and a different ``AISQUARE_HOME`` would resolve a managed slot
-    under the wrong home. So the three variables travel with the window as the
-    Accounts page sees them. ``tmux -e`` can only SET a variable, so one this
-    process does not have is unset for the child through ``env -u`` — the
-    server's retained value must not leak in as ours.
+    would make ``accounts run 1`` (or ``launch --account 1``) open a login other
+    than the one this process calls the default, and a different
+    ``AISQUARE_HOME`` would resolve a managed slot under the wrong home. So the
+    three variables travel with the window as this process sees them:
+
+    - a variable this process HAS is set on the window (``tmux -e``), as an
+      absolute path resolved against this process's working directory — the
+      window starts somewhere else (the home directory, an agent's worktree),
+      and ``CLAUDE_CONFIG_DIR=./profile`` must keep naming the directory the
+      page is reading rather than a sibling of the new cwd;
+    - a variable this process does NOT have is unset for the child through
+      ``env -u``, because ``-e`` can only set and the server's retained value
+      must not leak in as ours. A blank value counts as unset, as it does for
+      ``core.claude_accounts.default_config_dir``.
     """
     source = os.environ if environ is None else environ
-    to_set = {var: source[var] for var in SIGN_IN_WINDOW_VARS if source.get(var, "").strip()}
-    to_unset = [var for var in SIGN_IN_WINDOW_VARS if var not in to_set]
-    command = sign_in_command(account)
+    base = Path.cwd() if cwd is None else cwd
+    to_set: dict[str, str] = {}
+    for var in CARRIED_VARS:
+        value = source.get(var, "").strip()
+        if value:
+            to_set[var] = str((base / Path(value).expanduser()).absolute())
+    to_unset = [var for var in CARRIED_VARS if var not in to_set]
+    argv = list(command)
     if to_unset:
         env_binary = shutil.which("env") or "/usr/bin/env"
-        command = [env_binary, *(flag for var in to_unset for flag in ("-u", var)), *command]
-    return command, to_set
+        argv = [env_binary, *(flag for var in to_unset for flag in ("-u", var)), *argv]
+    return argv, to_set
+
+
+def sign_in_window_command(
+    account: ClaudeAccount,
+    environ: Mapping[str, str] | None = None,
+    *,
+    cwd: Path | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """The sign-in window's command and variables: ``accounts run <slot>``, this process's view."""
+    return carry_environment(sign_in_command(account), environ, cwd=cwd)
 
 
 def open_sign_in_window(
@@ -307,7 +333,8 @@ def open_sign_in_window(
     The UI renders the window in a pane and polls :func:`sign_in_landed`; the
     working directory is the home directory, exactly what a fresh terminal
     would give ``claude``; the environment is this process's view of what the
-    slot means (:func:`sign_in_window_command`).
+    slot means (:func:`carry_environment`), resolved against THIS process's
+    working directory, not the window's.
     """
     command, env = sign_in_window_command(account, environ)
     return server.spawn_window(

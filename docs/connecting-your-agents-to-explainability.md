@@ -148,7 +148,10 @@ aisquare explainability register
 **Spans whose agent name the workspace does not know are rejected**, so a fresh
 workspace records nothing until this runs. Idempotent. It registers the identity
 template applied to each configured role — by default `aisquare-planner`,
-`aisquare-coder`, `aisquare-runner`.
+`aisquare-coder`, `aisquare-runner` and the rest of the first-class roles
+(`-manager`, `-tester`, `-reviewer`, `-validator`, `-ui-tester`). A machine whose
+`config.toml` predates a role is told which ones its roster lacks when it runs
+`register`.
 
 ---
 

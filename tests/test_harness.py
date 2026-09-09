@@ -258,7 +258,7 @@ def test_the_planner_lane_routes_a_fix_to_tasks_and_names_the_hand_off() -> None
 
 
 def test_the_verifier_lanes_route_a_fix_back_to_the_coder() -> None:
-    for role in ("runner", "tester", "reviewer", "validator"):
+    for role in ("runner", "tester", "reviewer", "validator", "ui-tester"):
         text = " ".join(harness.role_cycle(role, "abcd1234"))
         assert "the coder fixes, not you" in text, role
 

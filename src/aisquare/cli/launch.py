@@ -37,7 +37,7 @@ from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
-ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager")
+ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager", "ui-tester")
 """Roles with a standing work cycle the orchestrator injects on every prompt.
 
 ``tester``, ``reviewer`` and ``manager`` are the fleet's roles
@@ -287,7 +287,12 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
+    # The role's own flags (`RoleProfile.default_args`), after the binding and
+    # before the operator's line, so an explicit flag or opt-out on either wins.
+    role_args = harness.role_default_args(
+        role, binary=resolution.binary, args=[*profile.args, *ctx.args]
+    )
+    argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

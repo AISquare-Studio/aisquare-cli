@@ -405,8 +405,9 @@ def spawn(
     # than printing nothing.
     for key, value in launch_profile.env.items():
         env_assignments.append(f"{key}={shlex.quote(value)}")
+    role_args = harness.role_default_args(role_name, binary=binary.binary, args=launch_profile.args)
     if resolution is None:
-        argv = [binary.binary, *launch_profile.args]
+        argv = [binary.binary, *role_args, *launch_profile.args]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
         argv = [
@@ -415,6 +416,7 @@ def spawn(
             resolution.model,
             "--effort",
             resolution.effort,
+            *role_args,
             *launch_profile.args,
         ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""

@@ -107,6 +107,13 @@ class RoleProfile(BaseModel):
     ordering survives whatever base the user picks."""
     mission: str
     """One line of intent for the spawn banner — why this role exists."""
+    default_args: list[str] = []
+    """Flags the role needs on the agent binary wherever it starts — ``launch``,
+    ``team spawn``, a fleet window — applied only to the default agent (``claude``)
+    and only when the operator has not already said otherwise (see
+    :func:`role_default_args`). A role's tooling is the role's business: the
+    ui-tester needs Claude in Chrome, and asking every operator to remember
+    ``--chrome`` is how the role silently degrades on the second machine."""
 
 
 #: The role -> model x effort matrix. Order within a ladder is the fallback order;
@@ -151,7 +158,41 @@ ROLE_PROFILES: dict[str, RoleProfile] = {
         ladder=["sonnet", "opus"],
         mission="reads the PR as the stranger who will maintain it — read-only findings",
     ),
+    "ui-tester": RoleProfile(
+        role="ui-tester",
+        ladder=["sonnet", "opus"],
+        mission="verifies user-facing work in a real browser — evidence, not eyeballing",
+        default_args=["--chrome"],
+    ),
 }
+
+#: Pairs where the second flag is the operator saying NO to the first: a default
+#: is never added over an explicit opt-out.
+_OPT_OUT_OF: dict[str, str] = {"--chrome": "--no-chrome"}
+
+
+def role_default_args(role: str, *, binary: str, args: Sequence[str]) -> list[str]:
+    """The role's :attr:`RoleProfile.default_args` that this launch still needs.
+
+    Applied only when the agent is the default binary (``claude``) — a wrapper or
+    another agent has its own flags and would reject Claude Code's; skipped for
+    any flag already present in ``args`` (a binding, a fleet ``extra_args``, the
+    operator's own line) and for any flag whose opt-out is present. So the fleet's
+    ``aisquare launch ui-tester`` inside a tmux window and an operator's
+    ``ais-cli-ais ui-tester --chrome`` both end with exactly one ``--chrome``, and
+    ``--no-chrome`` anywhere wins.
+    """
+    profile = ROLE_PROFILES.get(base_role(role))
+    if profile is None or not profile.default_args:
+        return []
+    if os.path.basename(binary) != DEFAULT_AGENT_BINARY:
+        return []
+    present = set(args)
+    return [
+        flag
+        for flag in profile.default_args
+        if flag not in present and _OPT_OUT_OF.get(flag) not in present
+    ]
 
 
 #: A numbered SEAT: a first-class role with a crew index glued on (``coder1``).
@@ -728,6 +769,11 @@ _LANE: dict[str, tuple[str, str]] = {
         "asked to write code or fix something yourself",
         "spawn a coder for it (`aisquare fleet spawn coder --task <id> --as {sid}`)",
     ),
+    "ui-tester": (
+        "asked to edit or fix the code",
+        '`aisquare task reopen <id> --reason "<what failed + screenshot path>" --as {sid}` — '
+        "the coder fixes, not you",
+    ),
 }
 _LANE["tester"] = _LANE["runner"]
 
@@ -796,7 +842,9 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "already known or ruled out · acceptance criteria the runner can execute ·",
             "boundaries (what NOT to touch). Re-emitting is safe. Record choices:",
             f'`aisquare note "…" --kind decision --as {sid}`. A task reopened twice is',
-            "yours again: re-spec or split it instead of letting it bounce.",
+            "yours again: re-spec or split it instead of letting it bounce. Anything a user",
+            'SEES is a task titled "UI: …" whose acceptance criteria are browser steps — URL,',
+            "login, action, expected text/pixels/request — so the ui-tester can run them.",
         ]
     if role == "coder":
         return [
@@ -820,7 +868,10 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "produced this session: `aisquare task done <id> "
             f'--note "verified: <evidence>" --as {sid}`,',
             f'or `aisquare task reopen <id> --reason "<what failed + repro>" --as {sid}`.',
-            "Criteria missing? Reopen as underspecified — never rubber-stamp. Repeat.",
+            "Criteria missing? Reopen as underspecified — never rubber-stamp. A task titled",
+            '"UI: …" belongs to the ui-tester when one is on the board (`aisquare board`);',
+            "otherwise run its non-browser checks and say the UI part is not browser-verified.",
+            "Repeat.",
         ]
     if role == "validator":
         return [
@@ -845,7 +896,8 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
             f"`aisquare fleet spawn coder --label coder-<purpose> --task <id> --as {sid}` —",
             "one per parallelisable task, within the agent cap; `fleet spawn tester` once work",
-            "reaches review, `fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
+            'reaches review — `fleet spawn ui-tester` for tasks titled "UI: …", it verifies in a',
+            "real browser — `fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
             "once every task is done. Board updates reach you every turn: reopen with reasons,",
             '`aisquare fleet tell <label> "…"` to steer, re-spec or split what bounces. Spawn',
             "nothing while the `fleet-paused` signal is set. When the validator's gate is PASS:",
@@ -853,6 +905,22 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
             "(coder-auth, not coder-2).",
+        ]
+    if role == "ui-tester":
+        return [
+            f"Your standing cycle (ui-tester): `aisquare task next --status review --as {sid}`;",
+            'take tasks titled "UI: …" (leave the rest to the runner; if nothing, tell the user',
+            "and stop). Verify in a REAL browser with whatever this window has, in this order:",
+            "Claude in Chrome (present when the window was started with `--chrome` and the",
+            "extension is connected), the Chrome DevTools MCP, Playwright MCP. Check which of",
+            "them answer BEFORE you start. Do the acceptance steps as written — URL, login,",
+            "action — and MEASURE: screenshots, computed sizes, console errors, network",
+            "responses; never pass a visual requirement by reading code. Verdict with evidence:",
+            f'`aisquare task done <id> --note "verified in <tool>: <evidence>" --as {sid}`, or',
+            f'`aisquare task reopen <id> --reason "<what failed> + <screenshot path>" --as {sid}`.',
+            "No browser tool answers? Run the task's non-browser checks, then reopen it with",
+            '"UI not browser-verified in this window" — never done. Read-only: never edit,',
+            "never push. Repeat.",
         ]
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
@@ -864,7 +932,9 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "push, never merge. Findings go on the PR (`gh pr review --comment` or",
             "`--request-changes`), severity-ordered (critical|major|minor|nit), each with",
             'evidence, then one summary note: `aisquare note "REVIEW <pr>: …" --kind result',
-            f"--as {sid}`. Approve only what you would merge yourself. Repeat.",
+            f"--as {sid}`. A PR that touches the frontend with no ui-tester evidence on its",
+            "task (`aisquare task show <id>`) gets request-changes, not approval. Approve only",
+            "what you would merge yourself. Repeat.",
         ]
     return []
 

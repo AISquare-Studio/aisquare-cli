@@ -114,6 +114,7 @@ def doctor(
         _check_tiktoken(),
         _check_claude_code(),
         _check_tmux(),
+        _check_browser_tools(cwd),
         _check_gh(),
         _check_snapshot(cwd),
         _check_brain(cwd),
@@ -814,6 +815,76 @@ def _gh_login_note() -> str:
     except (OSError, UnicodeDecodeError):
         return ""
     return " (no login found: gh auth login)"
+
+
+#: MCP server / plugin names that mean "this window can drive a browser".
+_BROWSER_TOOL_PATTERN = re.compile(r"playwright|chrome|devtools|browser|puppeteer", re.IGNORECASE)
+
+
+def _read_json(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _browser_tools_in(config_dir: Path, cwd: Path | None) -> list[str]:
+    """Browser tooling one Claude Code config directory declares, as short labels."""
+    found: list[str] = []
+    settings = _read_json(config_dir / "settings.json")
+    plugins = settings.get("enabledPlugins")
+    if isinstance(plugins, dict):
+        for name, enabled in plugins.items():
+            if enabled and _BROWSER_TOOL_PATTERN.search(str(name)):
+                found.append(f"plugin {str(name).split('@')[0]}")
+    sources: list[dict[str, object]] = [settings, _read_json(config_dir / ".claude.json")]
+    projects = sources[1].get("projects")
+    if isinstance(projects, dict):
+        sources.extend(v for v in projects.values() if isinstance(v, dict))
+    if cwd is not None:
+        sources.append(_read_json(cwd / ".mcp.json"))
+    for source in sources:
+        servers = source.get("mcpServers")
+        if isinstance(servers, dict):
+            found.extend(
+                f"mcp {name}" for name in servers if _BROWSER_TOOL_PATTERN.search(str(name))
+            )
+    # de-duplicated, order kept
+    return list(dict.fromkeys(found))
+
+
+def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
+    """browser tools: what the ui-tester role will find when it looks (§ui-tester).
+
+    Reads, never runs: the plugins and MCP servers each connected Claude Code
+    directory declares, plus the project's ``.mcp.json``. Claude in Chrome is
+    the one it cannot see — the extension lives in the browser, not on disk —
+    so the row says so rather than guessing; the ui-tester is launched with
+    ``--chrome`` and finds out at its first tool call. Amber, never red, when
+    nothing is declared: the role still runs and reports "UI not
+    browser-verified" instead of passing on code alone.
+    """
+    name = "browser tools"
+    sites = agent_core.hook_sites("claude-code")
+    dirs = [site.config_dir for site in sites] or [agent_core._claude_home()]
+    per_dir = {d: _browser_tools_in(d, cwd) for d in dirs}
+    declared = sorted({tool for tools in per_dir.values() for tool in tools})
+    chrome_note = (
+        "Claude in Chrome cannot be detected from here (a browser extension); "
+        "the ui-tester role passes --chrome and learns at its first tool call"
+    )
+    if declared:
+        return _ok(
+            name, f"{', '.join(declared)} declared — the ui-tester can measure; {chrome_note}"
+        )
+    return _warn(
+        name,
+        f"no browser MCP/plugin declared in {len(dirs)} config dir(s); {chrome_note}. Without "
+        "one, the ui-tester reopens UI tasks as 'not browser-verified' instead of passing them",
+        "Install the Chrome DevTools MCP plugin or the Claude in Chrome extension "
+        "(claude.ai/chrome), or add a playwright MCP server to settings.json",
+    )
 
 
 def _check_gh() -> DoctorCheck:

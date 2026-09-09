@@ -355,6 +355,21 @@ def register(
             )
     else:
         names = target.agent_names
+        # A role this CLI can launch but this machine's roster does not list —
+        # an upgrade that added a role to the DEFAULTS does not edit an existing
+        # config.toml. Launching it then ships under an identity the workspace
+        # has never heard of: 409 agent_not_registered, a backlog until someone
+        # registers it. Named here, where registering is one flag away.
+        from aisquare.core.harness import ROLE_PROFILES
+
+        unlisted = [r for r in ROLE_PROFILES if r not in settings.roles]
+        if unlisted and not get_state().json_output:
+            typer.echo(
+                f"note: launchable but not in explainability.roles: {', '.join(unlisted)} — "
+                f"add them to config.toml or run: aisquare explainability register "
+                + " ".join(f"--role {r}" for r in unlisted),
+                err=True,
+            )
     if not names:
         fail("no agent identities to register — check explainability.roles", error="no-agents")
 

@@ -7,6 +7,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A `ui-tester` role: user-facing work is verified in a real browser, with
+  evidence — and the role brings its own browser flag.** Eight first-class roles
+  now. It takes tasks titled `UI: …` from the review pool and runs their
+  acceptance steps in whatever browser tooling the window has, in order: Claude
+  in Chrome (the window is launched with `--chrome`), the Chrome DevTools MCP,
+  a Playwright MCP; it checks which of them answer before starting; it
+  measures — screenshots, computed sizes, console errors, network responses —
+  and never passes a visual requirement by reading code. `task done` carries
+  the evidence; `task reopen` carries a screenshot. With no browser tool it runs
+  the non-browser checks and reopens the task as "UI not browser-verified in
+  this window", never done. Read-only. Ladder `sonnet → opus`, like the other
+  verifiers.
+  - **The flag is the role's, not the operator's.** The operator who set this
+    up passed `--chrome` in a personal alias; the next operator will not.
+    `RoleProfile.default_args` now exists and `harness.role_default_args`
+    applies it wherever the role starts — `aisquare launch`, `team spawn`'s
+    printed and exec'd command, and therefore every fleet window, which runs
+    `launch` inside tmux — only for the default `claude` binary (another agent
+    would reject Claude Code's flag), never twice, and never over an explicit
+    `--no-chrome` on a binding, a fleet `extra_args`, or the command line.
+    The fleet's `[fleet.roles.ui-tester]` therefore carries no `extra_args`.
+  - **What the machine can and cannot know.** A new `doctor` row, `browser
+    tools`, reads what every connected Claude Code directory declares —
+    `enabledPlugins` and `mcpServers` in `settings.json` and `.claude.json`
+    (per-project blocks included) plus the project's `.mcp.json` — and lists
+    the browser-shaped ones. It says plainly that the Claude in Chrome
+    extension cannot be detected from a terminal: the role learns at its first
+    tool call. Amber, never red, when nothing is declared, because the role
+    still runs and degrades honestly.
+  - **The other roles know it exists.** The planner titles user-facing tasks
+    `UI: …` and writes their acceptance criteria as browser steps (URL, login,
+    action, expected text/pixels/request). The runner leaves `UI:` tasks to a
+    ui-tester on the board, and otherwise says the UI part is not
+    browser-verified. The manager spawns one for `UI:` tasks in review. The
+    reviewer request-changes a frontend PR whose task carries no ui-tester
+    evidence. The lane rule names the ui-tester among the roles that never edit.
+  - **Upgrading machines are told.** The default roster gains
+    `aisquare-ui-tester`, but a default does not edit an existing
+    `config.toml`; `explainability register` now names any first-class role the
+    configured roster lacks and prints the `--role` flags that register it.
+  - `tests/test_ui_tester_role.py` (17 tests): wired into every list that
+    enumerates roles; the briefing's tools, order, measuring and honest
+    degrade; the other roles' mentions; `role_default_args` on binary, dedupe
+    and opt-out; `launch` argv for ui-tester, coder, `--no-chrome`, `--chrome
+    --resume`, another binary; `team spawn`'s printed command; the doctor row
+    across two config dirs, a project `.mcp.json`, nothing declared, malformed
+    files, and its presence in `--json doctor`; the register hint.
 - **`project forget <id|name|codename|path>` and `project prune`** (#83), so a
   store with hundreds of dead registrations can be cleaned. Measured on the
   owner's box: 305 registered projects, most of them throwaway git worktrees,

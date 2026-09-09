@@ -122,7 +122,7 @@ That's the whole setup. From inside the UI:
    session fills the pane. **Type your goal in prose**, exactly as you would to
    any Claude session.
 3. **Watch the agents appear** under the project, each with a role icon
-   (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a live
+   (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a live
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU**, **💤 exited**.
    Click one to see and drive its session.
 4. **Press `F12`** to hand focus back to the sidebar — it's the one key a pane
@@ -312,6 +312,11 @@ automatically — no standing prompts to paste:
   back to whichever coder picks the task up next
 - **validator** — gates the assembled deliverable once, before handoff
   (final accountability review, severity-ordered findings)
+- **ui-tester** — verifies anything a user sees in a real browser (Claude in
+  Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever the window
+  has) and measures instead of eyeballing; reopens rather than passes a UI
+  task it could not open in a browser. Launched with `--chrome` by the role
+  itself, so the tool is not one operator's alias
 
 ### The model harness: each role on the right model
 
@@ -661,7 +666,7 @@ aisquare
 ├── board [-w] [-i SECONDS] · recall <query>
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
-│                   tester, reviewer), a numbered seat (coder1), or any role you
+│                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)

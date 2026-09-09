@@ -56,7 +56,7 @@ from aisquare.models import (
 )
 from aisquare.services import explainability as explainability_service
 
-FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
+FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"

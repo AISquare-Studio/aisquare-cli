@@ -91,12 +91,13 @@ tmux can see and its row says so (`no hooks`).
 3. **Click the project.** The Project view opens on its **Manager** tab. Press
    *Start manager* and the manager's live Claude Code session fills the pane.
    Type your goal to it in prose, exactly as you would to any Claude session. It
-   writes contract-carrying tasks, spawns coders, a tester and a reviewer as the
+   writes contract-carrying tasks, spawns coders, a tester, a ui-tester for
+   anything a user sees, and a reviewer as the
    work needs them, reopens what fails, calls a validator once everything is
    done, and posts `READY: <PRs + evidence>` when its gate passes. It never
    writes code and never merges — a human does (Phase 5).
 4. **Watch the agents appear**, indented under the project, each with a role
-   icon (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a
+   icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
    bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. `＋ spawn
@@ -125,7 +126,7 @@ aisquare --json fleet ls                  # what the UI and any automation read
 Five roles, each a briefing the harness injects at launch and a place in the
 manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
-ladder (`fable → opus → sonnet`); coder, tester and reviewer start on `sonnet`
+ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
 tier above the work it gates.
 
@@ -136,6 +137,7 @@ tier above the work it gates.
 | **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`; read-only by construction | its own worktree, `--restricted` |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
+| **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` with that evidence or `task reopen` with a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. Read-only. Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root |
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the
@@ -177,7 +179,7 @@ follows as a `⚠` line.
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `<role>` | `manager`, `coder`, `tester`, `reviewer`, `validator`, or any role you have bound with `team bind` | — |
+| `<role>` | `manager`, `coder`, `tester`, `ui-tester`, `reviewer`, `validator`, or any role you have bound with `team bind` | — |
 | `--label L` / `-l L` | the agent's label (see [Naming](#naming)) | `<role>-<task short id>` with `--task`, else `<role>-<n>` |
 | `--task ID` | the board task this agent is for (id or prefix) | none |
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
@@ -309,6 +311,7 @@ answer.
 | manager | `auto` | its tool use is board and fleet CLI calls |
 | coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
 | reviewer | `auto` + `--restricted` | read-only by construction |
+| ui-tester | `auto` + `--chrome` | `--chrome` comes from the role, not this table: `aisquare launch ui-tester` adds it for the default `claude` binary wherever the role starts, and `--no-chrome` in `extra_args` or on the command turns it off |
 
 The mode is passed straight through to `claude` and nothing here reads its
 answer, so where `auto` is unavailable to the account the refusal appears in
@@ -369,6 +372,11 @@ extra_args = []
 permission_mode = "auto"
 worktree = true
 extra_args = ["--restricted"]             # read-only by construction
+
+[fleet.roles.ui-tester]
+permission_mode = "auto"
+worktree = false                          # tests the running app, not a tree of its own
+extra_args = []                           # --chrome is the role's own default; put "--no-chrome" here to drop it
 
 [fleet.roles.validator]
 permission_mode = "auto"

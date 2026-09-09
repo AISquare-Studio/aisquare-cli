@@ -442,6 +442,40 @@ def test_login_with_token_retires_the_previous_session_on_the_same_host(
     assert _stored()["iam_token"] == "aisq_" + "v" * 43
 
 
+@pytest.mark.parametrize("claims", [{"sub": "uid-456"}, {}])
+def test_login_with_token_clears_the_previous_sessions_optional_fields(
+    runner: CliRunner, idp: IdentityProviderStub, claims: dict[str, str]
+) -> None:
+    credentials.store(api_key="keep-me", serve_token="keep-this-too")
+    assert _login(runner, idp.url).exit_code == 0
+    previous = iam.stored_session()
+    assert previous is not None
+    assert previous.expires_at is not None
+    assert all((previous.scope, previous.sub, previous.email, previous.name))
+
+    token = "aisq_" + "v" * 43
+    idp.issued.append(token)
+    idp.claims = dict(claims)
+    result = runner.invoke(
+        app, ["--json", "login", "--with-token", "--api-url", idp.url], input=token + "\n"
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["expires_at"] is None
+    assert payload["user"] == {"sub": claims.get("sub", ""), "email": "", "name": ""}
+
+    reloaded = iam.stored_session()
+    assert reloaded is not None
+    assert reloaded.as_json() == payload
+    assert reloaded.token == token
+    assert reloaded.scope == ""
+    whoami = runner.invoke(app, ["--json", "whoami"])
+    assert whoami.exit_code == 0, whoami.output
+    assert json.loads(whoami.stdout) == payload
+    assert _stored()["api_key"] == "keep-me"
+    assert _stored()["serve_token"] == "keep-this-too"
+
+
 def test_discovered_endpoints_must_share_the_servers_origin(runner: CliRunner) -> None:
     idp = IdentityProviderStub(
         discovery_overrides={"token_endpoint": "https://elsewhere.example/o/token/"}

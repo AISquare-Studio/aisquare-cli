@@ -391,6 +391,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     detached on failure), the inbox path, and one launch through the CLI.
     Verified live against production after the change: one Run per session,
     the model spans and the prompt span under one trace id.
+  - **A turn's `started_at` is the moment the hook was entered.** The prompt is
+    recorded and spooled before CI is consulted, and the stamp was taken after
+    that store work, so `wall_ms` lost however long the store took — and
+    `test_the_row_starts_when_the_turn_did_not_when_the_call_returned` flaked
+    on cold runners (2026-09-09: `main` after #109 on py3.11, then this
+    branch's merge commit on `ambient (proxy-up)`; 112 ms against a 100 ms
+    budget). `capture_prompt` and `session_start_context` now stamp first and
+    pass `began=` into `ci_augment`; a regression test holds the store block
+    for 250 ms and asserts the row still starts at entry.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

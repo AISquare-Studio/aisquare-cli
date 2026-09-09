@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aisquare.core import insights
@@ -77,6 +78,7 @@ def session_start_context(
     effort: str | None = None,
 ) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
+    began = datetime.now(tz=UTC)  # the row's started_at: when the hook was entered
     record_trace_join(session_id)
     with store_session() as store:
         project = active_project(store, cwd)
@@ -94,14 +96,14 @@ def session_start_context(
     # Last, and only when the experiment is on: the standing instruction to
     # consult the recall tool, then any retrieved material — closest to what
     # the agent is about to do, and the part it should weigh least.
-    instruction, retrieved = _session_start_ci(project, session_id, cwd)
+    instruction, retrieved = _session_start_ci(project, session_id, cwd, began=began)
     return "\n\n".join(
         part for part in (directive, block, team_block, instruction, retrieved) if part
     )
 
 
 def _session_start_ci(
-    project: ProjectInfo, session_id: str | None, cwd: Path | None
+    project: ProjectInfo, session_id: str | None, cwd: Path | None, *, began: datetime
 ) -> tuple[str, str]:
     """Consult CI at session start and RECORD the outcome; never raises.
 
@@ -113,7 +115,9 @@ def _session_start_ci(
     the agent whatever the test bed does.
     """
     try:
-        augmentation = ci_augment.for_session_start(project=project, session_id=session_id, cwd=cwd)
+        augmentation = ci_augment.for_session_start(
+            project=project, session_id=session_id, cwd=cwd, began=began
+        )
         if not augmentation.configured:
             return "", ""
         metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=True))
@@ -203,7 +207,12 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     job: a raise anywhere in the CI path (``metric()`` is a bare pydantic
     construction) dropped the prompt from the spool, and even without a raise it
     waited out the descriptor's whole ceiling first.
+
+    ``started_at`` for the turn's row is taken HERE, first, before the store is
+    opened: it is the moment the developer hit enter, and the record-and-spool
+    block below is work the turn already contains, not a delay before it.
     """
+    began = datetime.now(tz=UTC)
     try:
         with store_session() as store:
             project = active_project(store, cwd)
@@ -228,7 +237,7 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     block = ""
     try:
         augmentation = ci_augment.for_prompt(
-            prompt, project=project, session_id=session_id, cwd=cwd
+            prompt, project=project, session_id=session_id, cwd=cwd, began=began
         )
         block = augmentation.block
         metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=False))

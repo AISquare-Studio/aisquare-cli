@@ -722,6 +722,45 @@ def test_the_row_starts_when_the_turn_did_not_when_the_call_returned(
     )
 
 
+def test_the_row_starts_when_the_hook_was_entered_not_after_the_prompt_was_spooled(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt is recorded and spooled BEFORE CI is consulted. With the stamp
+    taken inside the CI call, that store block was billed to the turn as a late
+    start: tens of milliseconds on a warm laptop, over a hundred on a cold CI
+    runner, and ``wall_ms`` lost exactly that — the test above flaked on it
+    (2026-09-09, ``main`` and #107, different jobs each time). The stamp is now
+    taken at the hook's entry; a store block that takes 250 ms moves nothing.
+    """
+    import time
+    from datetime import UTC, datetime, timedelta
+
+    real_record = insights.record_prompt
+
+    def slow_record(*args: object, **kwargs: object) -> None:
+        time.sleep(0.25)
+        real_record(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(insights, "record_prompt", slow_record)
+    wired.respond(status=200, body=json.dumps(_response()))
+
+    before = datetime.now(tz=UTC)
+    hooks_service.prompt_submitted(
+        "why does the brain lock use msvcrt", tmp_path, session_id=SESSION
+    )
+
+    assert _turn().started_at <= before + timedelta(milliseconds=100), (
+        "started_at must be the hook's entry, not the end of the store block"
+    )
+    # wall_ms is derived at close from ended_at - started_at: closing the turn
+    # now must bill the 250 ms store block TO the turn, not hide it before it.
+    metrics_service.close_turn(SESSION)
+    turn = _turn()
+    assert turn.wall_ms is not None and turn.wall_ms >= 250, (
+        "the store block is part of the turn's wall time, not a delay before it"
+    )
+
+
 def test_a_ci_failure_does_not_cost_the_prompt_its_spool(
     wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

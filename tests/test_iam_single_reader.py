@@ -21,15 +21,12 @@ from aisquare.services import iam
 PACKAGE = Path(iam.__file__).resolve().parents[1]
 READER = Path(iam.__file__).resolve()
 
-#: Modules that spoke HTTP before the identity provider existed.
+#: Existing HTTP clients outside the sign-in flow.
 PRE_EXISTING_HTTP = {
+    "services/ci_client.py",
     "services/explainability.py",
     "services/explainability_ops.py",
     "services/mcp_server.py",
-    # The Collective Intelligence client landed on main while the provider client
-    # was on its branch; it speaks HTTP at module scope for the same reasons the
-    # three above do, and is grandfathered the same way.
-    "services/ci_client.py",
 }
 
 

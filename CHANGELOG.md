@@ -7,6 +7,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Client decks in `docs/deck/`, one self-contained HTML file each, with the
+  PDF beside it.** A one-pager, a five-page short deck and a fifteen-slide pitch
+  deck, for showing the fleet to someone who has not seen it. Each HTML embeds
+  its own CSS, its diagrams, its terminal captures and its three typefaces —
+  subset to the glyphs it uses, under the OFL — so it has no external reference
+  of any kind and opens from `file://` unchanged. `docs/deck/README.md` says
+  which capture is real data and which is a worked example, because these are
+  the files someone will reuse in a slide of their own.
+  - **The captures are real renders of the real UI**, not mockups: `cli/ui/` and
+    the board TUI were driven headless through Textual's pilot and exported to
+    SVG, so the layout, the role icons and the state chips are the shipping
+    code's. The board's rows are real data — the CLI was driven through an
+    actual sequence of five contracts, two claims, a review, a tester's reopen
+    with its reason, a routed question and a signal — and the doctor page uses
+    the real check names from `services/diagnostics.py`.
+  - **Each deck carries its own print stylesheet**, so a browser's Print dialog
+    follows a layout authored for paper rather than paginating the scroll
+    layout: printing the short deck or the pitch deck reproduces its committed
+    PDF, one leaf or one slide per page. The one-pager is the stated exception —
+    its web page is ~3,700px tall at full measure, four A-series pages, so its
+    PDF is a separate single-A3 sheet and printing the HTML gives four A4 pages.
+  - **Four checks run against the built files, and each of them found something.**
+    Measuring every page element against its page box turned six overflowing
+    slides into none. Checking every `pre`/`nowrap` block for horizontal
+    overflow — such a block scrolls on screen and crops *silently* on paper —
+    found the one-line installer losing `.sh | sh` off two pages, and a
+    model-harness table losing 35px of its own right edge; spotting these by eye
+    had found two of the four. Checking every hand-drawn figure label against
+    its `viewBox` found two captions past the right edge. Checking every
+    character against the embedded faces found the non-breaking hyphen, used 88
+    times in body copy like `fail-open`, has no glyph in any of the three faces
+    and had been rendering in a fallback font all along.
+  - Two layout defects fell out of the same pass: `margin: 0 auto` on a CSS grid
+    item cancels `justify-self: stretch`, so two diagrams sized to an SVG's
+    300px default instead of their 804px track; and a `display: grid` that was
+    only ever declared on `.duo` left every `.duo-wide` block silently stacking
+    rather than splitting into two columns.
+
 - **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
   0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
   `localhost` and `::1` runs with no Host/Origin validation — described at

@@ -133,7 +133,7 @@ def grant_text(grant: iam.DeviceAuthorization, *, opened: bool | None) -> Text:
     if opened is True:
         text.append("\nOpening your browser… waiting for the approval.", style="dim")
     elif opened is False:
-        text.append("\nCouldn't open a browser here — visit the link on any device.", style="dim")
+        text.append("\nNo browser opened here — visit the link on any device.", style="dim")
     else:
         text.append("\nWaiting for the approval in the browser.", style="dim")
     return text
@@ -371,9 +371,34 @@ class AccountsView(Vertical):
         self._on_screen = False
 
     def on_unmount(self) -> None:
+        """The page is leaving (``q``, usually): nothing transient may outlive it.
+
+        Textual cancelling a thread worker does not stop its callable, so the
+        device flow's own cancel flag is set — the wait returns within half a
+        second and stores nothing. A Claude sign-in window is closed and its
+        slot settled the way a poll would have: recorded if the login landed in
+        the meantime, discarded if it was fresh and did not. No widget is
+        touched here; they are being torn down under us.
+        """
         for timer in (self._login_timer, self._usage_timer):
             if timer is not None:
                 timer.stop()
+        if self._cancel_sign_in is not None:
+            self._cancel_sign_in.set()
+        self._settle_login_quietly()
+
+    def _settle_login_quietly(self) -> None:
+        login = self.login
+        self.login = None
+        if login is None:
+            return
+        with contextlib.suppress(TmuxError):
+            login.server.kill_window(login.pane_id)
+        with contextlib.suppress(Exception):
+            if accounts_service.sign_in_landed(login.account) is not None:
+                accounts_service.complete_sign_in(login.account)
+            elif login.fresh:
+                accounts_service.abandon_sign_in(login.account)
 
     def server(self) -> TmuxServer:
         if self._server is None:
@@ -391,22 +416,28 @@ class AccountsView(Vertical):
         self._paint_aisquare()
         self._paint_claude(overview)
 
+    def _env_token(self) -> bool:
+        """Whether ``AISQUARE_TOKEN`` is what aisquare is using — not a session this page owns."""
+        return self.session is not None and self.session.source == "env"
+
     def _paint_aisquare(self) -> None:
         busy = self._cancel_sign_in is not None
         self.query_one("#aisquare-status", Static).update(aisquare_status_text(self.session))
         signed_in = self.session is not None
-        self.query_one("#aisquare-sign-in", Button).display = not busy
-        self.query_one("#aisquare-sign-in", Button).label = (
-            "Sign in again" if signed_in else "Sign in"
-        )
+        env_token = self._env_token()
+        sign_in = self.query_one("#aisquare-sign-in", Button)
+        sign_in.display = not busy
+        sign_in.label = "Sign in again" if signed_in else "Sign in"
+        # The same refusal `aisquare login` makes (`env_token_set`): a browser
+        # sign-in would store a session the variable keeps overriding, and
+        # retire the one on file for nothing.
+        sign_in.disabled = env_token
         sign_out = self.query_one("#aisquare-sign-out", Button)
         sign_out.display = signed_in and not busy
-        sign_out.disabled = self.session is not None and self.session.source == "env"
-        sign_out.tooltip = (
-            f"the token comes from {iam.TOKEN_ENV_VAR}; unset it to sign out"
-            if sign_out.disabled
-            else None
-        )
+        sign_out.disabled = env_token
+        hint = f"the token comes from {iam.TOKEN_ENV_VAR}; unset it first" if env_token else None
+        sign_in.tooltip = hint
+        sign_out.tooltip = hint
 
     def _paint_claude(self, overview: AccountsOverview) -> None:
         self.query_one("#claude-title", Static).update(claude_title_text(overview))
@@ -441,14 +472,16 @@ class AccountsView(Vertical):
     # --- usage (the one thing here that costs a request) ---------------------------------------
 
     def refresh_usage(self) -> None:
-        """Fetch every signed-in slot's windows off the UI thread, if the page is on screen."""
+        """Ask about every signed-in slot off the UI thread, if the page is on screen.
+
+        Every signed-in slot, not only those with a readable token: the service
+        answers a Keychain-backed (macOS) or expired token with its reason and
+        no request, and that reason is what the row must show instead of a
+        ``usage: …`` that never resolves.
+        """
         if not self._on_screen or self.overview is None:
             return
-        accounts = [
-            status.account
-            for status in self.overview.accounts
-            if status.signed_in and status.token_state != "missing"
-        ]
+        accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
             return
         self.run_worker(
@@ -471,6 +504,13 @@ class AccountsView(Vertical):
     @on(Button.Pressed, "#aisquare-sign-in")
     def _start_sign_in(self) -> None:
         if self._cancel_sign_in is not None:
+            return
+        if self._env_token():
+            self._notice(
+                f"{iam.TOKEN_ENV_VAR} is set, so aisquare is using that token. "
+                "Unset it to sign in with the browser.",
+                "warn",
+            )
             return
         cancel = threading.Event()
         self._cancel_sign_in = cancel
@@ -495,11 +535,15 @@ class AccountsView(Vertical):
         endpoints = iam.discover(api_url)
         grant = iam.start_device_authorization(endpoints)
         self.app.call_from_thread(self._show_grant, grant, None)
-        opened: bool | None = None
-        if not browser.is_headless():
-            opened = browser.open_url(grant.verification_uri_complete)
+        # The helper owns the decision: an explicit BROWSER wins over the
+        # headless heuristics (an SSH session with a bridge browser configured),
+        # exactly as the terminal sign-in lets it.
+        opened = browser.open_url(grant.verification_uri_complete)
         self.app.call_from_thread(self._show_grant, grant, opened)
         token = device_flow.wait_for_token(endpoints, grant, cancelled=cancel.is_set)
+        if cancel.is_set():
+            # Belt to the wait's braces: nothing is stored past a Cancel.
+            raise iam.IamError("cancelled", "Sign-in cancelled. Nothing was stored.")
         return auth_service.complete_sign_in(api_url, endpoints, token)
 
     def _show_grant(self, grant: iam.DeviceAuthorization, opened: bool | None) -> None:

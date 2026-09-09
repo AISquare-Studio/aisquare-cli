@@ -55,6 +55,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -325,8 +326,13 @@ def credentials(account: ClaudeAccount) -> ClaudeCredentials | None:
     raw_expiry = oauth.get("expiresAt")
     expires_at: datetime | None = None
     if isinstance(raw_expiry, int | float) and raw_expiry > 0:
-        # Milliseconds since the epoch, as Claude Code writes it.
-        expires_at = datetime.fromtimestamp(raw_expiry / 1000, tz=UTC)
+        # Milliseconds since the epoch, as Claude Code writes it. A number the
+        # clock cannot represent (``1e300``) is a damaged file, and a damaged
+        # credentials file is not one to lift a token out of.
+        try:
+            expires_at = datetime.fromtimestamp(raw_expiry / 1000, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
     subscription = oauth.get("subscriptionType")
     tier = oauth.get("rateLimitTier")
     return ClaudeCredentials(
@@ -375,16 +381,47 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
 # --- launching ------------------------------------------------------------------------
 
 
+LAUNCH_VARS = (CONFIG_DIR_VAR, TMPDIR_VAR)
+"""The two variables an account IS, for a launch."""
+
+
 def launch_env(account: ClaudeAccount) -> dict[str, str]:
     """The two variables that make a launch run under ``account`` — none for the default.
 
-    The default slot is "whatever this shell's ``claude`` is", so it sets
+    The default slot is "whatever this shell's ``claude`` is", so it ADDS
     nothing: see the module docstring for why ``CLAUDE_CONFIG_DIR=~/.claude``
-    would not be the same thing.
+    would not be the same thing. A launch that may already carry another
+    account's variables (a role binding) wants :func:`apply_launch_env`.
     """
     if not account.managed:
         return {}
     env = {CONFIG_DIR_VAR: str(account.config_dir)}
     if account.tmp_dir is not None:
         env[TMPDIR_VAR] = str(account.tmp_dir)
+    return env
+
+
+def apply_launch_env(
+    env: dict[str, str], account: ClaudeAccount, *, shell: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Make ``env`` launch under ``account``, in place, and return it.
+
+    A managed slot sets both variables. The default slot RESTORES the shell's
+    own: each variable becomes what the launching shell had, and one the shell
+    did not have is removed — so ``--account 1`` means "the plain claude of
+    this shell" even when the role's binding had pointed the launch at another
+    directory. Without the restore a launch announced as the default ran on
+    whatever the binding said, which is the one thing the flag exists to
+    override. ``shell`` defaults to this process's environment.
+    """
+    if account.managed:
+        env.update(launch_env(account))
+        return env
+    source = os.environ if shell is None else shell
+    for var in LAUNCH_VARS:
+        value = source.get(var, "")
+        if value.strip():
+            env[var] = value
+        else:
+            env.pop(var, None)
     return env

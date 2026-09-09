@@ -16,7 +16,10 @@ the slot that must not be discarded.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,11 +29,13 @@ import pytest
 from textual.containers import Vertical
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
+from textual.worker import WorkerError
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import AccountsSection, AccountsTitle
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.accounts import (
+    SIGN_IN_WORKER,
     AccountRow,
     AccountsView,
     account_line_text,
@@ -149,10 +154,16 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         assert isinstance(answer, ClaudeUsage)
         return answer
 
+    script["opened"] = []
+
+    def open_url(url: str, *args: Any, **kwargs: Any) -> bool:
+        script["opened"].append(url)
+        return False
+
     monkeypatch.setattr(accounts_service, "usage", usage)
     monkeypatch.setattr(iam, "current_session", lambda api_url=None: script["session"])
     monkeypatch.setattr(browser, "is_headless", lambda *a, **k: True)
-    monkeypatch.setattr(browser, "open_url", lambda url, *a, **k: False)
+    monkeypatch.setattr(browser, "open_url", open_url)
     return script
 
 
@@ -182,9 +193,19 @@ def shown(widget: Static) -> str:
 
 
 async def settle(app: FleetApp) -> None:
-    ours = [worker for worker in app.workers if worker.group != "_loader"]
-    if ours:
-        await app.workers.wait_for_complete(ours)
+    """Wait for every worker of ours to reach a terminal state, whatever that state is.
+
+    ``wait_for_complete`` raises for a worker that ERRORED — and a scripted
+    ``IamError`` is exactly the outcome several tests here go on to read off
+    the page, so that raise would fail the test before its assertion, and only
+    when the worker was still registered when sampled (a race). Each worker is
+    awaited on its own and its failure swallowed; the page shows the result.
+    """
+    for worker in list(app.workers):
+        if worker.group == "_loader":
+            continue
+        with contextlib.suppress(WorkerError):
+            await worker.wait()
 
 
 def fleet_app(pilot: Pilot[None]) -> FleetApp:
@@ -281,7 +302,7 @@ def test_grant_text_puts_the_code_first_and_says_what_the_browser_did() -> None:
     opened = grant_text(grant, opened=True).plain
     assert opened.index("WDJB-MJHT") < opened.index("https://")
     assert "Opening your browser" in opened
-    assert "visit the link" in grant_text(grant, opened=False).plain
+    assert "No browser opened here" in grant_text(grant, opened=False).plain
     assert "Waiting for the approval" in grant_text(grant, opened=None).plain
 
 
@@ -417,6 +438,28 @@ def test_usage_that_cannot_be_read_says_why_on_the_row(no_network: dict[str, Any
     assert "usage: the stored token has expired" in drive(go)
 
 
+def test_a_keychain_backed_account_is_asked_and_its_row_says_why(
+    no_network: dict[str, Any],
+) -> None:
+    """macOS: signed in, no credentials file — the service's reason must reach the row."""
+    no_network["usage"] = ClaudeUsage(
+        available=False, reason="credentials are in the macOS Keychain, which the CLI does not read"
+    )
+    overview = _overview(_status(1, "me@example.com", token_state="missing"))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[int], str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app)
+        await pilot.pause()
+        return no_network["usage_calls"], line(view, 1)
+
+    calls, first = drive(go, overview=overview)
+    assert calls == [1]  # asked, although its token state is "missing"
+    assert "usage: credentials are in the macOS Keychain" in first
+    assert "usage: …" not in first
+
+
 # --- AISquare: the device flow as a card --------------------------------------------------------
 
 
@@ -494,6 +537,9 @@ def test_sign_in_shows_the_code_then_the_new_session(
 
     status, said, code_shown, title = drive(go)
     assert seen == ["wait:WDJB-MJHT", "complete:aisq_new"]
+    # The browser helper decides (an explicit BROWSER beats the headless heuristics),
+    # so it is asked even where is_headless() says no.
+    assert no_network["opened"] == ["https://home.aisquare.studio/cli?code=WDJB-MJHT"]
     assert "Signed in as new@aisquare.studio" in status
     assert said == "✓ Signed in to AISquare as new@aisquare.studio"
     assert not code_shown  # the card folds away once the session is stored
@@ -578,19 +624,64 @@ def test_sign_out_revokes_and_forgets(
     assert status.startswith("Not signed in") and not sign_out_shown
 
 
-def test_an_environment_token_cannot_be_signed_out_from_the_page(
-    no_network: dict[str, Any],
+def test_an_environment_token_can_neither_sign_out_nor_start_a_browser_sign_in(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
 ) -> None:
     no_network["session"] = _session(source="env")
+    seen = _script_device_flow(monkeypatch, no_network, outcome={"access_token": "aisq_new"})
 
-    async def go(pilot: Pilot[None]) -> tuple[bool, bool, str]:
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str, str, list[str]]:
+        app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        button = view.query_one("#aisquare-sign-out", Button)
-        return button.display, button.disabled, shown(view.query_one("#aisquare-status", Static))
+        sign_out = view.query_one("#aisquare-sign-out", Button)
+        sign_in = view.query_one("#aisquare-sign-in", Button)
+        view._start_sign_in()  # the handler itself, past a disabled button
+        await pilot.pause()
+        await settle(app)
+        return (
+            sign_out.display,
+            sign_out.disabled,
+            sign_in.disabled,
+            shown(view.query_one("#aisquare-status", Static)),
+            notice(view),
+            [worker.name for worker in app.workers if worker.name == SIGN_IN_WORKER],
+        )
 
-    shown_, disabled, status = drive(go)
-    assert shown_ and disabled
+    shown_, out_disabled, in_disabled, status, said, workers = drive(go)
+    assert shown_ and out_disabled and in_disabled
     assert iam.TOKEN_ENV_VAR in status
+    assert said.startswith(f"{iam.TOKEN_ENV_VAR} is set") and "Unset it" in said
+    assert workers == [] and seen == []  # no flow ran, nothing was replaced
+
+
+def test_quitting_mid_sign_in_cancels_the_device_flow(
+    monkeypatch: pytest.MonkeyPatch, no_network: dict[str, Any]
+) -> None:
+    """Textual cancelling a thread worker does not stop its callable; the page's own flag must."""
+    seen = _script_device_flow(monkeypatch, no_network, outcome={"access_token": "aisq_new"})
+    released = threading.Event()
+    observed: dict[str, bool] = {}
+
+    def wait(e: iam.Endpoints, g: iam.DeviceAuthorization, *, cancelled: Any) -> dict[str, Any]:
+        deadline = time.monotonic() + 5
+        while not cancelled() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        observed["cancelled"] = cancelled()
+        released.set()
+        raise iam.IamError("cancelled", "Sign-in cancelled. Nothing was stored.")
+
+    monkeypatch.setattr(device_flow, "wait_for_token", wait)
+
+    async def go(pilot: Pilot[None]) -> None:
+        await open_accounts(pilot)
+        await pilot.click("#aisquare-sign-in")
+        await pilot.pause()
+
+    drive(go)  # the app exits here: the view unmounts while the wait is in flight
+
+    assert released.wait(5), "the wait never noticed the page had gone"
+    assert observed["cancelled"] is True
+    assert seen == []  # complete_sign_in never ran: nothing was stored
 
 
 # --- Claude Code: a sign-in window, watched ----------------------------------------------------
@@ -724,6 +815,47 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     assert begun == 2  # the row's button signs THAT slot in
     assert seen["abandoned"] == []  # an existing slot is kept, login or not
     assert said.startswith("sign-in cancelled — cancelled; nothing changed")
+
+
+def test_quitting_mid_claude_sign_in_closes_the_window_and_discards_the_fresh_slot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_real_tmux: list[tuple[str, ...]]
+) -> None:
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+
+    async def go(pilot: Pilot[None]) -> None:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await pilot.pause()
+        assert view.login is not None
+
+    drive(go)  # the app exits with the sign-in window still open
+
+    killed = [argv for argv in no_real_tmux if "kill-window" in argv]
+    assert killed and killed[0][killed[0].index("-t") + 1] == "%7"
+    assert seen["abandoned"] == [2] and seen["completed"] == []
+
+
+def test_quitting_after_the_login_landed_records_it_instead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _script_claude_sign_in(monkeypatch, tmp_path, lands=False)
+    landed = {"now": False}
+    monkeypatch.setattr(
+        accounts_service,
+        "sign_in_landed",
+        lambda acct: ClaudeIdentity(email="two@example.com") if landed["now"] else None,
+    )
+
+    async def go(pilot: Pilot[None]) -> None:
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await pilot.pause()
+        assert view.login is not None
+        landed["now"] = True  # the login lands, and the user quits before the next poll
+
+    drive(go)
+
+    assert seen["completed"] == [2] and seen["abandoned"] == []
 
 
 def test_remove_runs_the_service_and_reports_where_the_directory_went(

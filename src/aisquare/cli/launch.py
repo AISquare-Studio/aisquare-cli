@@ -203,13 +203,16 @@ def launch(
         )
     env.update(profile.env)
     if account is not None:
-        # The account's two variables win over the binding: the flag names an
-        # account this launch is FOR, and the binding is the role's standing shape.
+        # The account wins over the binding: the flag names an account this
+        # launch is FOR, and the binding is the role's standing shape. For the
+        # default slot that means RESTORING this shell's own two variables (or
+        # their absence) over whatever the binding set — a launch announced as
+        # `[default]` must not run on the binding's other login.
         try:
             chosen = claude_accounts_service.resolve(account)
         except claude_accounts_service.NoSuchAccount as exc:
             fail(str(exc), error="unknown_account", ref=account)
-        env.update(claude_accounts_core.launch_env(chosen))
+        claude_accounts_core.apply_launch_env(env, chosen, shell=os.environ)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
     if account is not None:
         whose += f" [{claude_accounts_core.label(chosen)}]"

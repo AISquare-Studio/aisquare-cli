@@ -227,6 +227,12 @@ def add() -> None:
     except accounts_service.ClaudeNotInstalled as exc:
         accounts_service.abandon_sign_in(account)
         _fail_not_installed(exc)
+    except KeyboardInterrupt:
+        # The session guards itself against Ctrl-C; this is the belt to its
+        # braces (Windows, a signal that arrived between the two calls): a slot
+        # nothing signed into must not outlive the attempt.
+        accounts_service.abandon_sign_in(account)
+        fail("Sign-in cancelled. Nothing was added.", error="cancelled", exit_code=130)
     landed = accounts_service.sign_in_landed(account)
     if landed is None:
         accounts_service.abandon_sign_in(account)

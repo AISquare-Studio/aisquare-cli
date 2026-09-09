@@ -18,7 +18,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
+import subprocess
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -73,6 +75,11 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(core.CONFIG_DIR_VAR, raising=False)
     monkeypatch.delenv(core.TMPDIR_VAR, raising=False)
     monkeypatch.setattr(core, "keychain_platform", lambda: False)
+    # The clock the production code reads is the clock the fixtures write
+    # credentials against: tokens here expire at NOW + 7 h, and a command that
+    # asked the wall clock would find them expired the same evening.
+    monkeypatch.setattr(core, "_now", lambda: NOW)
+    monkeypatch.setattr(service, "_now", lambda: NOW)
     return home
 
 
@@ -187,6 +194,27 @@ def test_create_takes_the_lowest_free_slot_marks_it_and_makes_both_directories(
     }
 
 
+def test_apply_launch_env_sets_a_managed_slot_and_restores_the_shell_for_the_default(
+    fake_home: Path,
+) -> None:
+    second = core.create_account()
+    bound = {"PATH": "/bin", core.CONFIG_DIR_VAR: "/bound", core.TMPDIR_VAR: "/bound-tmp"}
+
+    managed = core.apply_launch_env(dict(bound), second, shell={})
+    assert managed[core.CONFIG_DIR_VAR] == str(second.config_dir)
+    assert managed[core.TMPDIR_VAR] == str(second.tmp_dir)
+
+    # The default with a shell that has neither: the binding's values are REMOVED…
+    bare = core.apply_launch_env(dict(bound), core.default_account(), shell={"PATH": "/bin"})
+    assert core.CONFIG_DIR_VAR not in bare and core.TMPDIR_VAR not in bare
+    assert bare["PATH"] == "/bin"
+    # …and with a shell that has them, they become the shell's, not the binding's.
+    shell = {core.CONFIG_DIR_VAR: str(fake_home / ".claude-c2"), core.TMPDIR_VAR: "  "}
+    own = core.apply_launch_env(dict(bound), core.default_account(), shell=shell)
+    assert own[core.CONFIG_DIR_VAR] == str(fake_home / ".claude-c2")
+    assert core.TMPDIR_VAR not in own  # blank in the shell counts as unset, as the README warns
+
+
 def test_remove_renames_the_directory_beside_itself_and_frees_the_number(
     fake_home: Path,
 ) -> None:
@@ -288,6 +316,14 @@ def test_a_damaged_claude_json_reads_as_not_signed_in_rather_than_raising(
     assert core.identity(account) is None
     assert core.credentials(account) is None
     assert not core.signed_in(account)
+    # Valid JSON with an expiry no clock can represent is a damaged file too.
+    _sign_in(account, "two@example.com")
+    creds = json.loads(core.credentials_path(account).read_text())
+    creds["claudeAiOauth"]["expiresAt"] = 1e300
+    core.credentials_path(account).write_text(json.dumps(creds), encoding="utf-8")
+    assert core.credentials(account) is None
+    assert not core.signed_in(account)
+    assert service.describe(account).token_state == "missing"
 
 
 # ------------------------------------------------------------------ service: describe, usage
@@ -487,7 +523,7 @@ def test_remove_disconnects_the_hooks_and_renames_but_never_the_default(
         service.remove(core.default_account())
 
 
-def test_the_sign_in_window_runs_our_own_run_command_in_the_fleet_server(
+def test_the_sign_in_window_runs_our_own_run_command_with_this_processs_environment(
     fake_home: Path,
 ) -> None:
     account = core.create_account()
@@ -509,9 +545,31 @@ def test_the_sign_in_window_runs_our_own_run_command_in_the_fleet_server(
     new_session = next(argv for argv in ran if "new-session" in argv)
     assert new_session[new_session.index("-s") + 1] == "asq-accounts"
     assert new_session[new_session.index("-c") + 1] == str(fake_home)
+    # This process's AISQUARE_HOME (the isolated one) travels with the window…
+    flags = [new_session[i + 1] for i, flag in enumerate(new_session) if flag == "-e"]
+    assert flags == [f"AISQUARE_HOME={os.environ['AISQUARE_HOME']}"]
+    # …and the two account variables this process does NOT have are unset for the
+    # child, so the server's retained values cannot decide what slot 1 means.
     tail = new_session[new_session.index("--") + 1 :]
-    assert tail == service.sign_in_command(account)
-    assert tail == [sys.executable, "-m", "aisquare", "accounts", "run", "2"]
+    assert tail[1:5] == ["-u", core.CONFIG_DIR_VAR, "-u", core.TMPDIR_VAR]
+    assert tail[0].endswith("env")
+    assert tail[5:] == service.sign_in_command(account)
+    assert tail[5:] == [sys.executable, "-m", "aisquare", "accounts", "run", "2"]
+
+
+def test_the_window_command_carries_set_variables_and_unsets_the_others() -> None:
+    account = core.default_account()
+    command, env = service.sign_in_window_command(
+        account, {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2", core.TMPDIR_VAR: " "}
+    )
+    assert env == {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2"}  # blank is unset
+    assert command[1:3] == ["-u", core.TMPDIR_VAR]
+    assert command[3:] == service.sign_in_command(account)
+    plain, env = service.sign_in_window_command(
+        account, {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2", core.TMPDIR_VAR: "/t"}
+    )
+    assert plain == service.sign_in_command(account)  # nothing to unset: no env wrapper
+    assert env[core.TMPDIR_VAR] == "/t"
 
 
 def test_session_env_strips_the_tracing_identity_and_adds_the_accounts_variables(
@@ -692,6 +750,39 @@ def test_accounts_add_records_a_landed_sign_in_and_discards_one_that_did_not(
     assert "no sign-in landed in slot 3" in gave_up.stderr and "status 130" in gave_up.stderr
     assert [a.slot for a in core.managed_accounts()] == [2]  # slot 3 was discarded
 
+    def interrupted(account: ClaudeAccount, *args: Any, **kwargs: Any) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(service, "run_session", interrupted)
+    cancelled = runner.invoke(app, ["accounts", "add"])
+    assert cancelled.exit_code == 130
+    assert "Sign-in cancelled. Nothing was added." in cancelled.stderr
+    assert [a.slot for a in core.managed_accounts()] == [2]  # slot 3 was discarded again
+
+
+def test_run_session_leaves_ctrl_c_to_the_child_and_restores_the_handler(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _installed(monkeypatch)
+    account = core.create_account()
+    before = signal.getsignal(signal.SIGINT)
+    seen: dict[str, Any] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        seen["argv"] = argv
+        seen["handler"] = signal.getsignal(signal.SIGINT)
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 7)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert service.run_session(account, ["--model", "opus"]) == 7
+
+    assert seen["argv"] == ["/opt/bin/claude", "--model", "opus"]
+    assert seen["handler"] is signal.SIG_IGN  # Ctrl-C reaches Claude Code alone while it runs
+    assert signal.getsignal(signal.SIGINT) is before  # and is ours again afterwards
+    assert seen["env"][core.CONFIG_DIR_VAR] == str(account.config_dir)
+
 
 def test_accounts_run_execs_claude_on_the_slot_with_arguments_forwarded(
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -766,3 +857,23 @@ def test_launch_account_sets_the_slots_variables_over_the_binding(
     plain = runner.invoke(app, ["launch", "coder"])
     assert plain.exit_code == 0, plain.output
     assert core.CONFIG_DIR_VAR not in captured["env"]  # no flag: byte-identical to before
+
+    # Slot 1 over a binding: the binding's directories are REMOVED when this
+    # shell has none of its own…
+    captured.clear()
+    bound = ["--env", f"{core.CONFIG_DIR_VAR}=/elsewhere", "--env", f"{core.TMPDIR_VAR}=/e-tmp"]
+    default = runner.invoke(app, ["launch", "coder", "--account", "1", *bound])
+    assert default.exit_code == 0, default.output
+    assert core.CONFIG_DIR_VAR not in captured["env"] and core.TMPDIR_VAR not in captured["env"]
+    assert "[default]" in default.stderr
+    # …and replaced by the shell's own when it has them.
+    captured.clear()
+    monkeypatch.setenv(core.CONFIG_DIR_VAR, str(fake_home / ".claude-c2"))
+    own = runner.invoke(app, ["launch", "coder", "--account", "1", *bound])
+    assert own.exit_code == 0, own.output
+    assert captured["env"][core.CONFIG_DIR_VAR] == str(fake_home / ".claude-c2")
+    assert core.TMPDIR_VAR not in captured["env"]
+    # The control: the binding alone still applies without the flag.
+    captured.clear()
+    assert runner.invoke(app, ["launch", "coder", *bound]).exit_code == 0
+    assert captured["env"][core.CONFIG_DIR_VAR] == "/elsewhere"

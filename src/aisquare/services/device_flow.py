@@ -38,6 +38,7 @@ def wait_for_token(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     jitter: Callable[[float, float], float] = random.uniform,
+    poll: Callable[[iam.Endpoints, str], iam.PollOutcome] = iam.poll_token,
 ) -> dict[str, Any]:
     """Poll until the browser approves the grant; the token response comes back.
 
@@ -45,7 +46,8 @@ def wait_for_token(
     a 429 waits its ``Retry-After`` (capped), an unreachable endpoint backs off
     exponentially, and a local deadline of ``expires_in`` plus a grace period
     ends it. ``cancelled`` is consulted every half second of every wait, so a
-    Cancel button answers promptly.
+    Cancel button answers promptly — and once more when a token has arrived,
+    so a cancel that lands during the poll is still a cancel.
     """
     deadline = monotonic() + grant.expires_in + GRACE_SECONDS
     interval = float(max(1, grant.interval))
@@ -57,7 +59,7 @@ def wait_for_token(
         if monotonic() > deadline:
             raise iam.IamError("expired", "The code expired before it was approved.")
         try:
-            outcome = iam.poll_token(endpoints, grant.device_code)
+            outcome = poll(endpoints, grant.device_code)
         except iam.IamError as exc:
             if exc.code != "unreachable":
                 raise
@@ -65,6 +67,11 @@ def wait_for_token(
             continue
         backoff = None
         if outcome.kind == "token" and outcome.token is not None:
+            # Cancel pressed while the poll was in flight: the server said yes,
+            # the user said no, and the user wins — a token that is never stored
+            # simply expires on its own.
+            if cancelled():
+                raise iam.IamError("cancelled", "Sign-in cancelled. Nothing was stored.")
             return dict(outcome.token)
         if outcome.kind == "pending":
             continue

@@ -29,15 +29,19 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from aisquare.core import claude_accounts as core
+from aisquare.core import paths
 from aisquare.core.spawn import untraced_env
 from aisquare.core.tmux import TmuxServer, WindowInfo
 from aisquare.core.version import __version__
@@ -263,20 +267,55 @@ def sign_in_command(account: ClaudeAccount) -> list[str]:
     return [sys.executable, "-m", "aisquare", "accounts", "run", str(account.slot)]
 
 
+SIGN_IN_WINDOW_VARS = (paths.HOME_ENV_VAR, core.CONFIG_DIR_VAR, core.TMPDIR_VAR)
+"""What decides which directory a slot IS: the aisquare home, and the default's two variables."""
+
+
+def sign_in_window_command(
+    account: ClaudeAccount, environ: Mapping[str, str] | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """The window's command and the variables to set on it — THIS process's, not the server's.
+
+    A tmux window inherits the environment of whoever started the private
+    server, which may be another shell entirely: a different ``CLAUDE_CONFIG_DIR``
+    would make ``accounts run 1`` open a login other than the one the page is
+    watching, and a different ``AISQUARE_HOME`` would resolve a managed slot
+    under the wrong home. So the three variables travel with the window as the
+    Accounts page sees them. ``tmux -e`` can only SET a variable, so one this
+    process does not have is unset for the child through ``env -u`` — the
+    server's retained value must not leak in as ours.
+    """
+    source = os.environ if environ is None else environ
+    to_set = {var: source[var] for var in SIGN_IN_WINDOW_VARS if source.get(var, "").strip()}
+    to_unset = [var for var in SIGN_IN_WINDOW_VARS if var not in to_set]
+    command = sign_in_command(account)
+    if to_unset:
+        env_binary = shutil.which("env") or "/usr/bin/env"
+        command = [env_binary, *(flag for var in to_unset for flag in ("-u", var)), *command]
+    return command, to_set
+
+
 def open_sign_in_window(
-    account: ClaudeAccount, server: TmuxServer, *, cwd: Path | None = None
+    account: ClaudeAccount,
+    server: TmuxServer,
+    *,
+    cwd: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> WindowInfo:
     """Start a Claude Code session for ``account`` in the fleet's tmux server, detached.
 
     The UI renders the window in a pane and polls :func:`sign_in_landed`; the
     working directory is the home directory, exactly what a fresh terminal
-    would give ``claude``.
+    would give ``claude``; the environment is this process's view of what the
+    slot means (:func:`sign_in_window_command`).
     """
+    command, env = sign_in_window_command(account, environ)
     return server.spawn_window(
         SIGN_IN_SESSION,
         name=f"account-{account.slot}",
         cwd=cwd if cwd is not None else Path.home(),
-        command=sign_in_command(account),
+        command=command,
+        env=env,
     )
 
 
@@ -329,8 +368,7 @@ def session_env(account: ClaudeAccount, base: Mapping[str, str] | None = None) -
     start it.
     """
     env = untraced_env(base)
-    env.update(core.launch_env(account))
-    return env
+    return core.apply_launch_env(env, account, shell=base)
 
 
 def run_session(
@@ -344,13 +382,28 @@ def run_session(
     This is the terminal's sign-in: ``aisquare accounts add`` starts the session
     here, the user signs in inside it and leaves it, and the caller then asks
     :func:`sign_in_landed`. Registered in ``core.spawn.SEAMS`` as excluded.
+
+    Ctrl-C belongs to Claude Code while it runs: the terminal delivers SIGINT
+    to the whole foreground group, and a first Ctrl-C only interrupts Claude
+    Code's current turn, so a parent that died on it would leave the session
+    orphaned and the slot half-made. SIGINT is ignored here for the child's
+    lifetime (main thread only — a signal handler cannot be set elsewhere) and
+    the previous disposition is restored afterwards.
     """
     found = install()
     if not found.installed or found.binary is None:
         raise ClaudeNotInstalled(
             f"Claude Code is not installed — install it first: {core.INSTALL_COMMAND}"
         )
-    completed = subprocess.run(  # argv, never a shell
-        [found.binary, *args], env=session_env(account, env), check=False
-    )
+    previous: Any = None
+    on_main_thread = threading.current_thread() is threading.main_thread()
+    if on_main_thread:
+        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        completed = subprocess.run(  # argv, never a shell
+            [found.binary, *args], env=session_env(account, env), check=False
+        )
+    finally:
+        if on_main_thread:
+            signal.signal(signal.SIGINT, previous)
     return int(completed.returncode)

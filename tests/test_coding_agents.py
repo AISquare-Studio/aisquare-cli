@@ -406,6 +406,13 @@ def test_native_exporter_preserves_operator_configuration(tmp_path: Path) -> Non
     (tmp_path / "config.toml").write_text('[otel]\nexporter="none"\n')
     assert native_telemetry.operator_configured(tmp_path, [])
     assert native_telemetry.operator_configured(tmp_path / "other", ["-c", 'otel.exporter="none"'])
+    assert native_telemetry.operator_configured(
+        tmp_path / "other", ["-c", 'otel={exporter="none"}']
+    )
+    profile_home = tmp_path / "profiles"
+    profile_home.mkdir()
+    (profile_home / "work.config.toml").write_text('[otel]\nexporter="none"\n')
+    assert native_telemetry.operator_configured(profile_home, ["--profile", "work"])
 
 
 def test_new_cli_selection_and_native_model_rendering(runner: CliRunner) -> None:
@@ -421,6 +428,46 @@ def test_new_cli_selection_and_native_model_rendering(runner: CliRunner) -> None
     assert all(
         row["agent"] == "codex" and not row["ladder"] for row in json.loads(status.stdout)["roles"]
     )
+
+
+def test_printed_codex_spawn_preserves_overrides_on_launch(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import importlib
+
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(
+        agent="codex", env={"CODEX_HOME": str(tmp_path / "bound")}, args=["--no-alt-screen"]
+    )
+    save_config(config)
+    override = str(tmp_path / "one-off account")
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "team",
+            "spawn",
+            "coder",
+            "--env",
+            f"CODEX_HOME={override}",
+            "--arg=--sandbox",
+            "--arg=read-only",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    command = shlex.split(json.loads(result.stdout)["command"])
+    assert command[0] == "aisquare"
+    launch_cli = importlib.import_module("aisquare.cli.launch")
+    execution = Mock()
+    monkeypatch.setattr(launch_cli, "_exec", execution)
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "/test/codex")
+    launched = runner.invoke(app, command[1:])
+    assert launched.exit_code == 0, launched.output
+    _, argv, env = execution.call_args.args
+    assert env["CODEX_HOME"] == override
+    assert argv.count("--no-alt-screen") == 1
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert env["AISQUARE_LAUNCH_ID"]
 
 
 def test_native_records_replay_through_the_real_optional_sdk(
@@ -447,6 +494,7 @@ def test_native_records_replay_through_the_real_optional_sdk(
                 "native": {
                     "event.name": "codex.sse_event",
                     "model": "fixture-model",
+                    "provider_name": "fixture-provider",
                     "input_token_count": 19,
                     "output_token_count": 3,
                 },
@@ -467,6 +515,7 @@ def test_native_records_replay_through_the_real_optional_sdk(
     kinds = {span.attributes.get("openinference.span.kind"): span for span in spans}
     assert kinds["LLM"].attributes["llm.token_count.prompt"] == 19
     assert kinds["LLM"].attributes["llm.model_name"] == "fixture-model"
+    assert kinds["LLM"].attributes["llm.provider"] == "fixture-provider"
     assert kinds["TOOL"].attributes["tool.name"] == "exec_command"
     assert len({span.context.trace_id for span in spans}) == 1
     provider.shutdown()

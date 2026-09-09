@@ -1073,7 +1073,9 @@ def _emit_span(sdk: Any, record: dict[str, object]) -> None:
                 tool.set_result(json.dumps(facts, sort_keys=True))
         elif any(key in facts for key in ("input_token_count", "gen_ai.usage.input_tokens")):
             model = str(facts.get("model") or facts.get("gen_ai.request.model") or "unknown")
-            with sdk.LLMCallTracer(model=model, provider="openai") as llm:
+            with sdk.LLMCallTracer(
+                model=model, provider=str(facts.get("provider_name") or "unknown")
+            ) as llm:
                 llm.set_token_counts(
                     prompt=int(
                         facts.get("input_token_count")

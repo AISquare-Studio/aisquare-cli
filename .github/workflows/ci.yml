@@ -295,6 +295,30 @@ jobs:
           # ambient — and a job cannot notice that it tested the wrong thing.
           assert_proxy after
 
+  codex:
+    name: Codex native integration (0.153.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install CLI, MCP and native terminal tools
+        run: |
+          python -m pip install -e ".[dev,serve]"
+          sudo apt-get install -y tmux
+          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@0.153.4
+          echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
+      - name: Exercise hooks, MCP, resume, usage and the interactive fleet
+        env:
+          AISQUARE_TEST_CODEX: "1"
+        run: |
+          codex --version
+          # The fixture owns its temporary hooks and trusts only those. Its
+          # Responses endpoint is loopback; no login, model spend or gateway.
+          pytest -ra tests/test_codex_native.py
+
   package:
     name: package (build + install)
     runs-on: ubuntu-latest

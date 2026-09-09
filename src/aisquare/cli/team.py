@@ -418,28 +418,30 @@ def spawn(
     command = " ".join([*env_assignments, shlex.join(argv)])
     if not selected.adapter.capabilities.model_proxy:
         # A paste must mint its own launch/trace token and native MCP binding.
-        command = " ".join(
+        # Forward overrides as launch flags: an env prefix would lose to the
+        # role's configured env when launch resolves it again. Bound args are
+        # already reapplied there; append only this invocation's extra args.
+        command = shlex.join(
             [
-                *env_assignments,
-                shlex.join(
-                    [
-                        "aisquare",
-                        "launch",
-                        role_name,
-                        "--agent",
-                        selected.adapter.id,
-                        "--command",
-                        binary.binary,
-                        "--",
-                        *(
-                            selected.adapter.model_args(
-                                resolution.model or None, resolution.effort or None
-                            )
-                            if resolution
-                            else []
-                        ),
-                    ]
+                "aisquare",
+                "launch",
+                role_name,
+                "--agent",
+                selected.adapter.id,
+                "--command",
+                binary.binary,
+                *(
+                    part
+                    for key, value in launch_profile.env.items()
+                    for part in ("--env", f"{key}={value}")
                 ),
+                "--",
+                *(
+                    selected.adapter.model_args(resolution.model or None, resolution.effort or None)
+                    if resolution
+                    else []
+                ),
+                *(extra_args or []),
             ]
         )
     if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:

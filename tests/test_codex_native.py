@@ -239,6 +239,11 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             assert any(
                 int(record["native"].get("input_token_count") or 0) == 19 for record in native
             ), [record["native"] for record in native]
+            assert all(
+                record["native"].get("provider_name") == "Local fixture"
+                for record in native
+                if record["native"].get("input_token_count")
+            )
             assert any(
                 record["session_id"] == bound and record["run_key"] == "native-fixture"
                 for record in native

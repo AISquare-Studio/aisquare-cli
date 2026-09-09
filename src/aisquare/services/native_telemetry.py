@@ -31,9 +31,10 @@ MAX_BYTES = 2_000_000
 
 def operator_configured(config_dir: Path, args: list[str]) -> bool:
     """Conservatively preserve native exporter config at any effective layer."""
-    if any("otel." in arg for arg in args):
+    if any("otel." in arg or arg.startswith("otel=") for arg in args):
         return True
-    files = {config_dir / "config.toml"}
+    files = {config_dir / "config.toml", Path("/etc/codex/config.toml")}
+    files.update(config_dir.glob("*.config.toml"))
     for parent in (Path.cwd(), *Path.cwd().parents):
         files.add(parent / ".codex" / "config.toml")
     for path in files:
@@ -52,6 +53,7 @@ _FIELDS = frozenset(
         "event",
         "model",
         "model_name",
+        "provider_name",
         "conversation.id",
         "thread.id",
         "turn.id",
@@ -119,7 +121,14 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
     with store_session() as store:
         session_id = store.get_meta(f"launch-session:{launch_id}")
         session = store.get_session(session_id) if session_id else None
-        for native in events(payload):
+        observations = list(events(payload))
+        for native in observations:
+            if native.get("provider_name") and native.get("conversation.id"):
+                store.set_meta(
+                    f"native-provider:{launch_id}:{native['conversation.id']}",
+                    insights._outbound(str(native["provider_name"])),
+                )
+        for native in observations:
             # Redact before writing anything destined for the gateway. No raw
             # body, prompt, tool parameters, authorization or exporter headers.
             clean = {
@@ -130,6 +139,14 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
             dedup_key = f"native-event:{launch_id}:{digest}"
             if store.get_meta(dedup_key):
                 continue
+            # Provider is reported at conversation start, not on each SSE
+            # usage event. Enrich after hashing so a late startup observation
+            # cannot make a retried usage record count twice.
+            provider = store.get_meta(
+                f"native-provider:{launch_id}:{native.get('conversation.id')}"
+            )
+            if provider:
+                clean.setdefault("provider_name", provider)
             record: dict[str, object] = {
                 "v": insights.RECORD_VERSION,
                 "kind": "native_event",

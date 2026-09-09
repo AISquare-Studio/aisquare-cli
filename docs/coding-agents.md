@@ -132,7 +132,10 @@ exports native OTLP JSON logs to a per-launch, authenticated loopback receiver o
 POSIX/WSL. It spools allowlisted, redacted event metadata. Existing
 `asq explainability ship` delivery replays model, tool and decision spans
 through the SDK under the same run binding. User-configured native OTEL
-exporters are preserved; AISquare reports that it has stood down.
+exporters (including profile files) are preserved; AISquare reports that it
+has stood down. Usage is counted from native logs once, with the observed
+provider name; duplicate exports and the parallel native span stream do not
+add usage again.
 
 This transport does not change model routing, API keys or ChatGPT login. It
 does not capture raw model bodies or tool arguments. Native timestamps remain
@@ -149,6 +152,9 @@ Codex binary, temporary config homes and a loopback Responses server:
 ```sh
 AISQUARE_TEST_CODEX=1 .venv/bin/python -m pytest tests/test_codex_native.py
 ```
+
+The CI Codex job installs the pinned compatible binary and runs this fixture
+on each PR, alongside the existing Claude and shared regression suite.
 
 It covers native hook context, prompt capture, exec/resume identity, tool and
 MCP calls, usage export, interactive fleet startup, tell, resize and stop.

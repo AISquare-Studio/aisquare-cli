@@ -480,6 +480,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     budget). `capture_prompt` and `session_start_context` now stamp first and
     pass `began=` into `ci_augment`; a regression test holds the store block
     for 250 ms and asserts the row still starts at entry.
+- **Every role's briefing now closes with a lane rule: stay in the role, and here is
+  what to do INSTEAD.** Measured 2026-09-10 on a real board: an operator opened
+  `aisquare launch planner`, typed "get it fixed in the same PR, update the body
+  and comment", and the planner edited four files, committed and pushed — while
+  two coder sessions sat on an empty task list. The planner's briefing said its
+  job and "never code"; a standing note loses to a direct instruction for
+  something else unless it names the trigger and the substitute action, and it
+  named none. `role_cycle` now appends `_lane_rule` to every first-class role
+  (a seat is briefed as its role; an unknown role gets none): the trigger ("a
+  planner asked to fix, a coder asked to review or plan its own work, a runner,
+  reviewer or validator asked to edit"), then the role's own substitute from
+  `_LANE_INSTEAD` — planner: add the tasks and tell the human to prompt each
+  coder tab with "check the board"; coder: do the task, verification is the
+  runner's, planning the planner's; runner/tester: `task reopen` with the
+  failure, the coder fixes; reviewer/validator: findings, the coder fixes;
+  manager: `fleet spawn coder`. Reading code to understand a problem stays
+  allowed. The human can still override — say once who owns it and offer the
+  command — so the role is left by decision, never by accident. Pinned by
+  `test_every_first_class_cycle_ends_with_its_own_lane_rule` and two
+  role-specific tests; the manager-cycle test asserts its lane; README and
+  `docs/fleet.md` say it in one line each.
+
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

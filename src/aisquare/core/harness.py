@@ -691,12 +691,65 @@ def interfering_env() -> list[str]:
 # always-injected context, so every line has to earn its tokens.
 
 
+#: What each role does INSTEAD when the human asks for work another role owns.
+#: One entry per first-class role; ``tester`` shares ``runner``'s by construction
+#: (the two cycles must stay byte-identical up to the label — see the manager-loop
+#: test that pins it). The text names a COMMAND, because "don't" without an
+#: alternative is what lost to a direct "fix it" in the incident this fixes.
+_LANE_INSTEAD: dict[str, str] = {
+    "planner": (
+        "add the tasks (`aisquare task add … --role coder`), say how many, and tell the "
+        'human to prompt each coder tab with "check the board"'
+    ),
+    "coder": (
+        "do your task; verification is the runner's (`aisquare task review`), planning is "
+        'the planner\'s (`aisquare note "…" --to planner`)'
+    ),
+    "runner": '`aisquare task reopen <id> --reason "<what failed>"` — the coder fixes, not you',
+    "validator": "findings in your GATE note — the coder fixes, not you",
+    "reviewer": "findings on the PR and one board note — the coder fixes, not you",
+    "manager": "spawn a coder for it (`aisquare fleet spawn coder --task <id>`)",
+}
+_LANE_INSTEAD["tester"] = _LANE_INSTEAD["runner"]
+
+
+def _lane_rule(role: str) -> list[str]:
+    """The closing paragraph of every first-class role's cycle: stay in the role.
+
+    A standing note that only says what a role does loses to a direct
+    instruction that asks for something else — measured 2026-09-10, when a
+    planner told "get it fixed in the same PR" edited four files and pushed
+    while two coders sat on an empty task list. What holds is naming the
+    trigger AND the substitute action: the role does not do the out-of-lane
+    work; it routes it, says so, and if pressed says once who owns it. The
+    human can still override — that is theirs to do — but never by accident.
+    """
+    return [
+        f"Stay in your lane ({role}). When the human asks for work another role owns — a",
+        "planner asked to fix, a coder asked to review or plan its own work, a runner,",
+        f"reviewer or validator asked to edit — do not do it here. Instead: {_LANE_INSTEAD[role]}.",
+        "Reading code and read-only commands to understand a problem are always fine. Say in",
+        "one line what you routed and to whom; if the human insists, say once which role owns",
+        "it and offer them the command. Never merge.",
+    ]
+
+
 def role_cycle(role: str, session_short_id: str) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
-    the role it is a seat of — the number is an identity, not a new role.
+    the role it is a seat of — the number is an identity, not a new role. Every
+    first-class cycle ends with :func:`_lane_rule`; an unknown role has no
+    cycle and therefore no lane either.
     """
+    core = _role_cycle_core(role, session_short_id)
+    if not core:
+        return []
+    return [*core, *_lane_rule(base_role(role))]
+
+
+def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
+    """The role-specific half of the cycle; see :func:`role_cycle`."""
     role = base_role(role)
     sid = session_short_id
     if role == "planner":

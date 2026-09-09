@@ -131,7 +131,7 @@ tier above the work it gates.
 
 | Fleet role | Repo role | Job in the loop | Runs in |
 | --- | --- | --- | --- |
-| **manager** | `planner` + fleet authority | intake → contracts → `fleet spawn` → steer → report. One per project. Never codes, never merges. | the repo root |
+| **manager** | `planner` + fleet authority | intake → contracts → `fleet spawn` → steer → report. One per project. Never codes — a direct "fix this" becomes a coder spawn — never merges. | the repo root |
 | **coder** | `coder` | implements one task to its acceptance criteria; pushes and opens the PR | its own git worktree |
 | **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`; read-only by construction | its own worktree, `--restricted` |

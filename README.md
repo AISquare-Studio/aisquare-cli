@@ -302,7 +302,8 @@ Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:
 
 - **planner** — turns your intent into contract-carrying tasks on the shared
-  board (objective, why, acceptance criteria, boundaries)
+  board (objective, why, acceptance criteria, boundaries); told to "fix"
+  something, it writes the tasks for it rather than editing code itself
 - **coder** — loops `task next --claim` → work → `task review`; blocks
   instead of guessing when a task has no usable contract
 - **runner** — the adversarial verifier: runs the full check the acceptance

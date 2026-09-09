@@ -1026,6 +1026,8 @@ def test_the_manager_cycle_names_fleet_spawn_and_the_two_prohibitions() -> None:
     assert "fleet spawn" in text
     assert "never write code" in text.lower()
     assert "never merge" in text.lower()
+    assert "Stay in your lane (manager)" in text, "the lane rule closes the manager's cycle too"
+    assert "fleet spawn coder" in text, "asked to fix, the manager spawns a coder"
     assert "abcd1234" in text, "the commands are pre-filled with the session id"
 
 

@@ -197,6 +197,36 @@ def test_planner_cycle_demands_a_dispatch_contract() -> None:
     assert "reopened twice" in text
 
 
+def test_every_first_class_cycle_ends_with_its_own_lane_rule() -> None:
+    """Measured 2026-09-10: a planner told "get it fixed in the same PR" edited four
+    files and pushed while two coders sat on an empty task list. A briefing that
+    says what a role does loses to a direct instruction for something else unless
+    it names the trigger and the substitute action. Every role now closes with
+    that paragraph, addressed to itself, naming what to do instead."""
+    for role in harness.ROLE_PROFILES:
+        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        assert f"Stay in your lane ({role})" in text, role
+        assert "asked to fix" in text, role
+        assert "Instead:" in text, role
+        assert "if the human insists" in text, role
+    # a seat is briefed as its role, lane included
+    assert "Stay in your lane (coder)" in " ".join(harness.role_cycle("coder2", "abcd1234"))
+    # an unknown role has no cycle, so no lane is invented for it
+    assert harness.role_cycle("stenographer", "abcd1234") == []
+
+
+def test_the_planner_lane_routes_a_fix_to_tasks_and_names_the_hand_off() -> None:
+    text = " ".join(harness.role_cycle("planner", "abcd1234"))
+    assert "aisquare task add" in text
+    assert "check the board" in text, "the human is told how the hand-off completes"
+
+
+def test_the_verifier_lanes_route_a_fix_back_to_the_coder() -> None:
+    for role in ("runner", "tester", "reviewer", "validator"):
+        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        assert "the coder fixes, not you" in text, role
+
+
 def test_coder_cycle_forbids_guessing() -> None:
     text = " ".join(harness.role_cycle("coder", "abcd1234"))
     assert "don't" in text and "guess" in text

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,24 @@ def test_a_clean_tree_snapshots_as_head(tmp_path: Path) -> None:
     assert snapshot.object_id == git(root, "rev-parse", "HEAD")
     assert snapshot.dirty is False
     assert snapshot.ref is None
+
+
+def _inside_retention() -> str:
+    """A git-parseable date that is inside the retention window, computed now.
+
+    NOT a literal, and that is the whole point. A ref this test expects to
+    SURVIVE pruning has to be younger than :data:`ci_snapshot.WIP_REF_TTL_DAYS`,
+    and a literal that was recent on the day it was written stops being recent:
+    ``2026-09-02`` sat five days inside a seven-day window when this landed,
+    and on 2026-09-09 it was exactly seven days old, so the surviving ref was
+    pruned and the suite went red on ``main`` with no code change at all — the
+    one failure mode a test about a retention window can have and never report
+    honestly.
+
+    The ``old`` fixtures below stay literal on purpose: they only ever need to
+    be OUTSIDE the window, and 2026-01-01 always will be.
+    """
+    return (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def _dated_commit(root: Path, when: str) -> str:
@@ -60,7 +79,7 @@ def test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_tak
     developer did not know existed."""
     root = repo(tmp_path / "r")
     old = _dated_commit(root, "2026-01-01T00:00:00+0000")
-    recent = _dated_commit(root, "2026-09-02T00:00:00+0000")
+    recent = _dated_commit(root, _inside_retention())
     git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "old", old)
     git(root, "update-ref", ci_snapshot.WIP_REF_PREFIX + "recent", recent)
     (root / "tracked.txt").write_text("edited\n", encoding="utf-8")

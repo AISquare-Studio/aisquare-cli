@@ -189,6 +189,9 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_EXPLAINABILITY_TARGET",
         "EXPLAINABILITY_GATEWAY_URL",
         "EXPLAINABILITY_API_KEY",
+        # A sign-in token in the operator's shell would make every test run as them.
+        "AISQUARE_TOKEN",
+        "BROWSER",
         # The CI test bed's switches. An operator who has them exported would
         # otherwise run the suite's hooks against THEIR endpoint, with THEIR
         # token — measured once: four real POSTs to a listener during a green
@@ -202,6 +205,12 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_CI_DELIVERY_OVERRIDE",
     ):
         monkeypatch.delenv(knob, raising=False)
+    # The command sweeps invoke `login` with no arguments. Without this it would
+    # resolve config.toml's default and contact the REAL API from inside the test
+    # suite. A loopback port nothing listens on refuses instantly, so the command
+    # exits through its `unreachable` message and never leaves the machine. Tests
+    # that exercise sign-in point --api-url at their own stub server.
+    monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
     # The experiment settings are read once per process (ci_client._settings is
     # lru_cached, like core.insights._config), so a cached read from the previous
     # test's HOME would outlive the home it came from.

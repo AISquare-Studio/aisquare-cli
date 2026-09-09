@@ -67,8 +67,8 @@ UNINVOKED = {
     "serve": "binds a port and blocks",
     "launch": "spawns a real agent process",
     "team spawn": "spawns a real agent process",
+    "login": "polls the identity provider until a browser approval arrives",
     "fleet attach": "replaces the process with `tmux attach` (os.execvp)",
-    "login": "waits on interactive input",
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",
     "uninstall": "removes the installation running the test",
@@ -77,6 +77,9 @@ UNINVOKED = {
     "project onboard": "packs a codebase snapshot; minutes, not seconds",
     "workspace onboard": "packs a codebase snapshot; minutes, not seconds",
     "team distill": "calls a model",
+    "accounts add": "starts a real Claude Code session and waits for a browser sign-in",
+    "accounts run": "replaces the process with Claude Code (os.execve)",
+    "accounts usage": "sends the developer's own Claude token to the usage endpoint",
 }
 
 CORRUPT = b"this is not a sqlite database, and open_store must say so in words"

@@ -175,6 +175,19 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
         strips_identity=True,
     ),
+    "aisquare/cli/accounts.py::_exec": Seam(
+        EXCLUDED,
+        "`aisquare accounts run` replaces itself with a plain Claude Code session on one "
+        "account — not a board role, so it takes no identity and drops an inherited one",
+        strips_identity=True,
+    ),
+    "aisquare/services/claude_accounts.py::run_session": Seam(
+        EXCLUDED,
+        "the foreground Claude Code session `aisquare accounts add` waits on so the user can "
+        "sign in — the same plain session as `accounts run`, and identity-stripped for the "
+        "same reason",
+        strips_identity=True,
+    ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
     "aisquare/core/agents.py::hook_binary_version": Seam(
         EXCLUDED,

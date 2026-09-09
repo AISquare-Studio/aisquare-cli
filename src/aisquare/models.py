@@ -185,6 +185,81 @@ class PromptRecord(BaseModel):
     created_at: datetime
 
 
+# --- Claude Code accounts (core.claude_accounts, services.claude_accounts) --------
+
+
+class ClaudeAccount(BaseModel):
+    """One Claude Code login the CLI can launch: a numbered slot over a config directory.
+
+    Slot 1 is the machine's default — whatever a plain ``claude`` in this shell
+    uses (``CLAUDE_CONFIG_DIR`` when set, ``~/.claude`` otherwise) — and is never
+    a directory of ours. Every other slot is a directory the CLI created and
+    owns, launched by pointing ``CLAUDE_CONFIG_DIR`` and ``CLAUDE_CODE_TMPDIR``
+    at it.
+    """
+
+    slot: int
+    config_dir: Path
+    tmp_dir: Path | None = None
+    """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
+    managed: bool = False
+    """True when the CLI created ``config_dir`` (every slot but the default)."""
+
+
+class ClaudeIdentity(BaseModel):
+    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``."""
+
+    email: str
+    organization: str | None = None
+    account_uuid: str | None = None
+
+
+class ClaudeUsage(BaseModel):
+    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them."""
+
+    available: bool
+    reason: str | None = None
+    """Why nothing could be read, when ``available`` is False."""
+    session_percent: float | None = None
+    """The rolling five-hour window, 0-100."""
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    """The rolling seven-day window, 0-100."""
+    week_resets_at: datetime | None = None
+    fetched_at: datetime | None = None
+
+
+class ClaudeAccountStatus(BaseModel):
+    """Everything the Accounts page shows about one slot, minus the usage it fetches live."""
+
+    account: ClaudeAccount
+    label: str
+    """``default`` for slot 1, ``account N`` otherwise."""
+    identity: ClaudeIdentity | None = None
+    signed_in: bool = False
+    token_state: str = "missing"
+    """``ok``, ``expired`` or ``missing`` — the state of the stored OAuth token."""
+    subscription: str | None = None
+    """The plan the credentials file names (``max``, ``team``, …), when it does."""
+    hooks_installed: bool = False
+    usage: ClaudeUsage | None = None
+
+
+class ClaudeInstall(BaseModel):
+    """Whether Claude Code is on this machine, and which one."""
+
+    installed: bool
+    binary: str | None = None
+    version: str | None = None
+
+
+class AccountsOverview(BaseModel):
+    """The Claude side of the Accounts page in one read: the install and every slot."""
+
+    claude: ClaudeInstall
+    accounts: list[ClaudeAccountStatus] = Field(default_factory=list)
+
+
 # --- Collective Intelligence: the vocabularies both layers share --------------
 #
 # The wire models in ``services.ci_contract`` and the per-turn ``metric`` row are

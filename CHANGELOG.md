@@ -21,8 +21,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prompt` tables hold foreign keys to the project row, so a project with any
   history cannot be deleted from under them): the project's context entries,
   prompt history and board rows stay in the store, hidden, and come back if the
-  root is registered again. `--purge` deletes them, the ended fleet-agent rows
-  and `~/.aisquare/projects/<id>/`. Forgetting the ACTIVE project moves the pin
+  root is registered again. `--purge` deletes them, the ended fleet-agent rows,
+  the turn metrics and `~/.aisquare/projects/<id>/`. Forgetting the ACTIVE project moves the pin
   to the most recently touched remaining project, or clears it, and says so.
 - **Client decks in `docs/deck/`, one self-contained HTML file each, with the
   PDF beside it.** A one-pager, a five-page short deck and a fifteen-slide pitch

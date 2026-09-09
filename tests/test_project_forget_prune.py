@@ -84,6 +84,24 @@ def _raw(sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         connection.close()
 
 
+def _raw_write(sql: str, params: tuple[Any, ...] = ()) -> None:
+    connection = sqlite3.connect(str(paths.db_path()))
+    try:
+        connection.execute(sql, params)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _record_turn(trace_id: str, project_id: str) -> None:
+    """A metric row the way the hooks leave one even with the CI test bed off."""
+    _raw_write(
+        "INSERT INTO metric (trace_id, project_id, started_at, client_reason) "
+        "VALUES (?, ?, '2026-09-01T00:00:00+00:00', 'disabled')",
+        (trace_id, project_id),
+    )
+
+
 def _agent(project_id: str, label: str = "coder1") -> FleetAgent:
     return FleetAgent(
         id=new_agent_id(),
@@ -271,6 +289,8 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         store.set_meta(f"signal/{alpha}/phase", "{}")
         store.set_meta(f"nudge:{session.id}", now.isoformat())
         store.set_meta(f"distill_seq:{beta}", "7")
+    _record_turn("trc_alpha", alpha)
+    _record_turn("trc_beta", beta)
     data_dir = paths.project_data_dir(alpha)
     (data_dir / "snapshot").mkdir(parents=True)
     (data_dir / "snapshot" / "pack.xml").write_text("<pack/>", encoding="utf-8")
@@ -287,10 +307,19 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "team_task": 1,
         "team_session": 1,
         "fleet_agent": 1,
+        "metric": 1,
         "team_meta": 3,
         "project": 1,
     }
-    for table in ("entry", "prompt", "team_session", "team_task", "team_event", "fleet_agent"):
+    for table in (
+        "entry",
+        "prompt",
+        "team_session",
+        "team_task",
+        "team_event",
+        "fleet_agent",
+        "metric",
+    ):
         assert _raw(f"SELECT COUNT(*) FROM {table} WHERE project_id = ?", (alpha,)) == [(0,)]
     assert _raw("SELECT COUNT(*) FROM project WHERE id = ?", (alpha,)) == [(0,)]
     assert not data_dir.exists()
@@ -298,6 +327,66 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     assert _listed(runner) == {beta}
     assert _raw("SELECT COUNT(*) FROM entry WHERE project_id = ?", (beta,)) == [(1,)]
     assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"distill_seq:{beta}",)) == [("7",)]
+    assert _raw("SELECT COUNT(*) FROM metric WHERE project_id = ?", (beta,)) == [(1,)]
+
+
+def test_purge_copes_with_hundreds_of_recorded_sessions(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """500 sessions once meant 1,002 ``OR`` terms in one DELETE, and SQLite's
+    ``Expression tree is too large`` rolled the purge back with the project
+    intact — even with nothing in ``team_meta`` to delete."""
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        for i in range(501):
+            session = store.upsert_session(
+                TeamSession(id=f"sess-{i:03d}", project_id=alpha, started_at=now, last_seen_at=now)
+            )
+            store.set_meta(f"nudge:{session.id}", now.isoformat())
+        store.set_meta("continuations:sess-000:2026-09-09T12", "1")
+        store.set_meta("nudge:sess-elsewhere", now.isoformat())  # not alpha's
+
+    result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    report = _json(result.stdout)
+    assert report["removed"]["team_session"] == 501
+    assert report["removed"]["team_meta"] == 502
+    assert _raw("SELECT key FROM team_meta") == [("nudge:sess-elsewhere",)]
+    assert _raw("SELECT COUNT(*) FROM project WHERE id = ?", (alpha,)) == [(0,)]
+
+
+def test_a_forgotten_projects_facts_are_hidden_from_context_reads_until_it_registers_again(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cwd still resolves to the project's id after a forget, so without the
+    tombstone on the reads ``project list`` was empty while ``context list`` and
+    ``inject`` went on serving the forgotten project's facts."""
+    alpha = _register(runner, monkeypatch, work_dir / "alpha", "first note")
+    with store_session() as store:
+        store.add_prompt("hello", alpha)
+    assert runner.invoke(app, ["project", "forget", "alpha"]).exit_code == 0
+
+    listed = runner.invoke(app, ["--json", "context", "list"])  # still inside alpha
+
+    assert listed.exit_code == 0, listed.output
+    assert _json(listed.stdout) == []
+    with store_session() as store:
+        assert store.entries(project_id=alpha) == []
+        assert store.entries(pool="project", project_id=alpha) == []
+        assert store.search("first", project_id=alpha) == []
+        assert store.recent_prompts(project_id=alpha) == []
+        assert store.recent_prompts() == [], "the cross-project view hides it too"
+    # The rows are still there, and registering the root brings every one back.
+    assert _raw("SELECT COUNT(*) FROM entry WHERE project_id = ?", (alpha,)) == [(1,)]
+    runner.invoke(app, ["context", "add", "second note", "--project"])
+    with store_session() as store:
+        assert {entry.text for entry in store.entries(project_id=alpha)} == {
+            "first note",
+            "second note",
+        }
+        assert [prompt.text for prompt in store.recent_prompts(project_id=alpha)] == ["hello"]
 
 
 def test_a_project_with_history_cannot_be_deleted_by_hand_which_is_why_forget_tombstones(

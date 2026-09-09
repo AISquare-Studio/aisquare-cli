@@ -15,10 +15,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
-from aisquare.core import brain, orchestrator, spawn
+from aisquare.core import brain, orchestrator, selfcli, spawn
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamEvent
 
@@ -100,7 +99,7 @@ def spawn_drain(cwd: Path | None = None, *, root: Path | None = None) -> None:
         root = orchestrator.team_project(cwd).root
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "aisquare", "--quiet", "team", "distill"],
+            selfcli.argv_for(["--quiet", "team", "distill"]),
             cwd=str(root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

@@ -31,7 +31,6 @@ import contextlib
 import re
 import sqlite3
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -40,7 +39,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
-from aisquare.core import codenames, harness
+from aisquare.core import codenames, harness, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -881,7 +880,10 @@ def spawn(
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
     project, and an unknown role — each with the reason in the message.
 
-    The window runs ``python -m aisquare launch <role> …`` (§3.4): permission
+    The window runs ``python -P -m aisquare launch <role> …`` (§3.4; ``-P`` is
+    :func:`aisquare.core.selfcli.argv_for`'s guard against a project's own
+    ``aisquare/`` package, and travels in the command because a window inherits
+    the tmux SERVER's environment, not the spawner's): permission
     mode as ``--permission-mode`` (flag > role config > ``auto``; the empty
     string passes no flag), the minted ``--session-id`` unless the caller
     already named or resumed a session, ``--name <label>``, then the role's
@@ -1013,7 +1015,7 @@ def spawn(
         env.update(native_env)
     if selected.adapter.id != "claude-code":
         flags.insert(flags.index("--agent") + 2, "--")
-    command = [sys.executable, "-m", "aisquare", "launch", role, *flags, *role_args, *extra]
+    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     if prompt and selected.adapter.capabilities.positional_prompt:
         command += ["--", prompt]
     tmux_session = session_name(codename)

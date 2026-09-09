@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from aisquare.core import harness, orchestrator, paths
+from aisquare.core import harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, config_home
 from aisquare.core.config import AppConfig, load_config, save_config
@@ -124,17 +124,16 @@ def model_for(
 
 
 def mcp_args(selected: ResolvedAgent) -> list[str]:
-    import sys
-
     try:
         enabled = load_config().agents.mcp
     except Exception:
         return []
     if not enabled:
         return []
+    command = selfcli.argv_for(["serve", "--stdio", "--close-after", "0"])
     return selected.adapter.mcp_args(
-        sys.executable,
-        ["-m", "aisquare", "serve", "--stdio", "--close-after", "0"],
+        command[0],
+        command[1:],
         sorted(
             {
                 "AISQUARE_HOME",

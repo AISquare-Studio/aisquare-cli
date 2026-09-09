@@ -10,7 +10,13 @@ from pathlib import Path
 import pytest
 
 from aisquare.core.ids import new_entry_id
-from aisquare.core.store import AmbiguousIdError, ContextStore, open_store, store_session
+from aisquare.core.store import (
+    SCHEMA_VERSION,
+    AmbiguousIdError,
+    ContextStore,
+    open_store,
+    store_session,
+)
 from aisquare.models import ContextEntry, Pool, ProjectInfo
 
 PROJECT = ProjectInfo(id="prj_test", root=Path("/tmp/example-project"), linked_repos=[])
@@ -225,9 +231,35 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert (
-        version == SCHEMA_VERSION == 14
-    )  # v14 adds coding-agent provenance and native session IDs
+    assert version == SCHEMA_VERSION == 15  # v14 forgotten_at, v15 coding-agent identity
+
+
+def test_v14_upgrades_native_identity_without_guessing_legacy_agents() -> None:
+    db = _at_version(14)
+    now = datetime.now(UTC).isoformat()
+    with sqlite3.connect(str(db)) as raw:
+        for sid, account, transcript in (
+            ("claude", "/home/claude", "/home/claude/projects/repo/thread.jsonl"),
+            ("unclassified", None, None),
+            ("wrapper", "/home/other", "/home/other/session.jsonl"),
+        ):
+            raw.execute(
+                "INSERT INTO team_session "
+                "(id, project_id, started_at, last_seen_at, account, transcript_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, "prj_old", now, now, account, transcript),
+            )
+    open_store().close()
+    with sqlite3.connect(str(db)) as raw:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert raw.execute(
+            "SELECT id, agent, native_session_id FROM team_session ORDER BY id"
+        ).fetchall() == [
+            ("claude", "claude-code", "claude"),
+            ("unclassified", None, None),
+            ("wrapper", None, None),
+        ]
+        assert "forgotten_at" in {row[1] for row in raw.execute("PRAGMA table_info(project)")}
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -311,7 +343,7 @@ def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_
 
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert (
             raw.execute("SELECT text FROM entry WHERE id = 'ctx_old'").fetchone()[0] == "survives"
         )
@@ -497,7 +529,7 @@ def test_a_v11_database_whose_metric_table_was_deleted_by_hand_heals() -> None:
     assert row.delivery_source == "override"
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         raw.close()
 
@@ -527,7 +559,7 @@ def test_a_v11_database_with_the_v1_shaped_metric_table_is_moved_aside_and_rebui
     assert {"run_kind", "delivery_source"} <= columns and "arm" not in columns
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         tables = {
             row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
@@ -557,7 +589,7 @@ def test_a_v1_shaped_table_is_moved_aside_even_when_an_orphan_already_exists() -
     open_store().close()
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         tables = {
             row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
@@ -716,7 +748,7 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
 
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14, label
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION, label
         # the fleet half must be there and usable too, whichever way in
         raw.execute(
             "INSERT INTO project (id, name, root, linked_repos, created_at, codename) "

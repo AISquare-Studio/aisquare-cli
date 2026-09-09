@@ -11,7 +11,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from aisquare.core import agents, outbox
+from aisquare.core import agents, outbox, selfcli
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
@@ -126,13 +125,14 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
             encoding="utf-8",
         )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
         monkeypatch.setenv("CODEX_HOME", str(native_home))
         monkeypatch.setenv("AISQUARE_ROLE", "coder")
         monkeypatch.setenv("AISQUARE_TEAM", "1")
         monkeypatch.setenv("AISQUARE_LAUNCH_ID", "native-fixture")
-        monkeypatch.setattr(
-            agents, "_aisquare_command", lambda: shlex.join([sys.executable, "-m", "aisquare"])
-        )
+        monkeypatch.setattr(agents, "_aisquare_command", lambda: shlex.join(selfcli.argv_for([])))
         agents.install_hooks("codex", native_home)
         with store_session() as store:
             store.add(new_entry("LOCAL_CONTEXT_MARKER_4851", "user", None, [], "test"))

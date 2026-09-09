@@ -32,7 +32,11 @@ def presence_lines() -> Text:
         (selected.binary.binary, f"selected coding agent ({selected.adapter.label})"),
         ("gh", "PRs for the coder and reviewer"),
     ):
-        found = shutil.which(tool)
+        found = (
+            agent_launch.executable(selected)
+            if tool == selected.binary.binary
+            else shutil.which(tool)
+        )
         mark = "✓" if found else "✗"
         text.append(f"  {mark} {tool:<7}", style="green" if found else "red")
         text.append(f" {why}\n", style="dim")

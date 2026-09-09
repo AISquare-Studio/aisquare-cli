@@ -40,7 +40,9 @@ a trust-bypass flag.
 Status distinguishes configured hooks from observed execution. `unverified`
 means the file is installed but this definition has not been observed running.
 `observed` means a callback ran; a session's own trust and permission policy
-still applies. Doctor reports missing hooks and the review step. End and
+still applies. Doctor reports missing hooks, stale AISquare executables,
+short context timeouts and the review step, including account homes discovered
+on disk. End and
 interrupt handlers are local and use Codex's three-second timeout.
 
 Selection order is explicit `--agent`, role binding, an exact known binary

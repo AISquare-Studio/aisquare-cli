@@ -513,6 +513,13 @@ class Snapshot(BaseModel):
     file_count: int = 0
     compressed: bool = False
     status: str = "ready"
+    # What a ``too_large`` verdict was made of, so the failure can say what it
+    # measured: the full pack's size and the budget it was held to
+    # (``token_count`` is the pack that was kept — or, when none was, the
+    # compressed pack's size). Both are None on a snapshot.json written before
+    # they were recorded (0.6.0 and earlier); see ``core.snapshot.too_large_detail``.
+    full_token_count: int | None = None
+    max_tokens: int | None = None
 
 
 class OnboardReport(BaseModel):
@@ -520,6 +527,54 @@ class OnboardReport(BaseModel):
 
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
+
+
+class ProjectForgetReport(BaseModel):
+    """Outcome of ``project forget``: what went, and where the active project landed.
+
+    ``removed`` is per-table row counts and is empty unless ``purged`` — a plain
+    forget tombstones the registration and deletes nothing else.
+    """
+
+    project: ProjectInfo
+    purged: bool = False
+    removed: dict[str, int] = Field(default_factory=dict)
+    data_dir_removed: bool = False
+    active: ProjectInfo | None = None
+    """The active project AFTER the forget — ``None`` when nothing is pinned any
+    more and the active project again follows the working directory."""
+    active_changed: bool = False
+    """Whether the forgotten project WAS the active one, so the pin moved."""
+
+
+PruneReason = Literal["missing", "worktree"]
+"""Why ``project prune`` selected a registration: its root is gone from disk, or
+its root is a linked git worktree of another registered project."""
+
+
+class PruneCandidate(BaseModel):
+    """One registration ``project prune`` would drop, and why."""
+
+    project: ProjectInfo
+    reason: PruneReason
+    principal: ProjectInfo | None = None
+    """For a ``worktree`` candidate, the registered project it is a worktree of."""
+    live_agents: int = 0
+    """Live fleet agents on the registration. Non-zero means prune keeps it."""
+
+
+class ProjectPruneReport(BaseModel):
+    """Outcome of ``project prune``: the plan, and what was actually dropped."""
+
+    candidates: list[PruneCandidate] = Field(default_factory=list)
+    dropped: list[str] = Field(default_factory=list)
+    """Ids dropped. Empty on a dry run."""
+    kept: list[PruneCandidate] = Field(default_factory=list)
+    """Candidates NOT dropped because they have live fleet agents."""
+    dry_run: bool = True
+    purged: bool = False
+    active: ProjectInfo | None = None
+    active_changed: bool = False
 
 
 class AgentConnection(BaseModel):

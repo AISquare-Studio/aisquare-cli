@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -73,6 +74,58 @@ def test_wrappers_declare_family_and_conflicts_fail(tmp_path: Path) -> None:
     assert selected.config_dir == tmp_path / "second"
     with pytest.raises(ValueError, match="runs claude-code"):
         agent_launch.resolve(agent="codex", binary="claude")
+
+
+def test_role_path_selects_the_executable_and_probe_account(tmp_path: Path) -> None:
+    directory = tmp_path / "account-bin"
+    directory.mkdir()
+    binary = directory / "claude"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    config = load_config()
+    config.team.profiles["coder"] = RoleLaunchProfile(
+        agent="claude-code", env={"PATH": str(directory), "CLAUDE_CONFIG_DIR": str(tmp_path / "a")}
+    )
+    save_config(config)
+    selected = agent_launch.resolve()
+    assert agent_launch.executable(selected) == str(binary)
+    context = harness.ProbeContext(selected.binary.binary, selected.profile.env)
+    token = harness._PROBE_CONTEXT.set(context)
+    try:
+        first_account = harness.account_scope()
+        context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "b")
+        assert harness.account_scope() != first_account
+        context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "a")
+        binary.write_text("#!/bin/sh\n# upgraded executable\nexit 0\n")
+        assert harness.account_scope() != first_account
+    finally:
+        harness._PROBE_CONTEXT.reset(token)
+
+
+def test_codex_hook_health_finds_all_events_and_module_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import selfcli
+    from aisquare.services import diagnostics
+
+    directory = tmp_path / ".codex-second account"
+    command = shlex.join(selfcli.argv_for([]))
+    monkeypatch.setattr(agents, "_aisquare_command", lambda: command)
+    agents.install_hooks("codex", directory)
+    commands = agents.hook_commands("codex", directory)
+    assert len(commands) == 8
+    binary = agents.hook_binary(commands[0])
+    assert binary is not None and binary.module_form
+    sites = agents.hook_sites("codex")
+    assert any(site.config_dir == directory and site.hooks_installed for site in sites)
+    # Even a previously observed definition needs repair if its executable
+    # disappeared or points at an older AISquare install.
+    agents.observe_hooks("codex", directory)
+    monkeypatch.setattr(
+        agents, "classify_hook_binary", lambda binary: (agents.HOOK_BINARY_STALE, "0.0.1")
+    )
+    checks = diagnostics._check_other_agents(tmp_path)
+    assert any("0.0.1" in check.detail and "connect codex" in (check.fix or "") for check in checks)
 
 
 def test_third_adapter_reuses_selection_models_and_config(
@@ -318,6 +371,35 @@ def test_native_telemetry_is_opt_in_redacted_and_replayable(tmp_path: Path) -> N
     config.explainability.enabled = False
     save_config(config)
     assert native_telemetry.capture(payload, "second") == 0
+
+
+def test_project_purge_removes_native_bindings_and_callback_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "purged-launch")
+    payload = {
+        "session_id": "native-purge",
+        "cwd": str(tmp_path),
+        "hook_event_name": "SessionStart",
+    }
+    directory = tmp_path / ".codex"
+    agent_events.handle_codex(payload, directory)
+    sid = agent_events.session_key("codex", directory, "native-purge")
+    agent_launch.use("codex", project=True)
+    with store_session() as store:
+        project = present(store.get_session(sid)).project_id
+        store.set_meta(f"agent-event:{sid}:Stop:turn:False", '""')
+        store.set_meta(f"continuation-prompt:{sid}", "digest")
+        store.set_meta("launch-session:other-launch", "other-session")
+        store.set_meta("unrelated", sid)
+        store.purge_project(project)
+        assert store.get_meta(f"coding-agent:{project}") is None
+        assert store.get_meta("launch-session:purged-launch") is None
+        assert store.get_meta(f"launch-seen:purged-launch:{sid}") is None
+        assert store.get_meta(f"agent-event:{sid}:Stop:turn:False") is None
+        assert store.get_meta(f"continuation-prompt:{sid}") is None
+        assert store.get_meta("launch-session:other-launch") == "other-session"
+        assert store.get_meta("unrelated") == sid
 
 
 def test_native_exporter_preserves_operator_configuration(tmp_path: Path) -> None:

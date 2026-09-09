@@ -14,7 +14,6 @@ import json
 import os
 import secrets
 import subprocess
-import sys
 import tempfile
 import time
 import tomllib
@@ -24,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from aisquare.core import insights, outbox, spawn
+from aisquare.core import insights, outbox, selfcli, spawn
 from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
@@ -203,17 +202,17 @@ def start(env: dict[str, str]) -> tuple[list[str], str]:
     child: subprocess.Popen[bytes] | None = None
     try:
         child = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "aisquare.services.native_telemetry",
-                "--ready",
-                str(ready),
-                "--owner-pid",
-                str(os.getpid()),
-                "--launch-id",
-                env["AISQUARE_LAUNCH_ID"],
-            ],
+            selfcli.argv_for(
+                [
+                    "--ready",
+                    str(ready),
+                    "--owner-pid",
+                    str(os.getpid()),
+                    "--launch-id",
+                    env["AISQUARE_LAUNCH_ID"],
+                ],
+                module="aisquare.services.native_telemetry",
+            ),
             env=spawn.untraced_env(env),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

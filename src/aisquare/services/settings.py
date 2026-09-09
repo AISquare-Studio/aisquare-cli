@@ -124,10 +124,19 @@ def _assign(data: dict[str, Any], key: str, value: str) -> None:
         node = node[part]
     if not isinstance(node, dict) or parts[-1] not in node:
         raise KeyError(key)
-    node[parts[-1]] = value
+    # A list-valued key takes its items comma-separated — the shape repomix's own
+    # `--ignore` uses, and the one `config get` prints for it — so a list can be
+    # set from a shell at all; pydantic would refuse the bare string.
+    node[parts[-1]] = _split_list(value) if isinstance(node[parts[-1]], list) else value
+
+
+def _split_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _format(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, list):
+        return ",".join(str(item) for item in value)
     return str(value)

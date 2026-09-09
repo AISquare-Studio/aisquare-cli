@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Accounts, in `asq` and on the command line.** A new **Accounts** section in
+  the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
+  Claude Code accounts under it. The AISquare card runs `aisquare login`'s
+  device flow natively — the one-time code and link appear on the page, the
+  browser opens when one can reach you, *Cancel* stops the wait — and *Sign
+  out* revokes as `aisquare logout` does. Below it, every Claude Code account
+  the CLI knows: **slot 1** is the plain `claude` of the machine; **+ Add Claude
+  account** creates a numbered slot (`~/.aisquare/claude-accounts/<n>`, its own
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR`) and opens Claude Code's own
+  login in a pane rendered right there; the page watches the directory and, the
+  moment the login lands, records the account, installs aisquare's hooks into it
+  and closes the pane. Each signed-in row shows the plan and the five-hour and
+  seven-day usage as bars, from the endpoint Claude Code's `/usage` reads (best
+  effort: if it changes, the row says `usage unavailable`). *Remove* renames a
+  slot's directory beside itself as `<n>.removed-<stamp>` rather than deleting
+  it. Slot 1 is never a directory of ours and is never launched with
+  `CLAUDE_CONFIG_DIR=~/.claude` — Claude Code keeps the default install's
+  `.claude.json` beside that directory and would re-onboard into an empty one.
+  - `aisquare accounts` (`list [--usage]`, `add`, `run <slot> [claude args]`,
+    `usage [slot]`, `remove <slot>`), every reporting command with `--json`;
+    `run` is what a `c2` shell alias was, with the environment decided in one
+    place. `aisquare launch <role> --account <slot>` and `aisquare fleet spawn
+    <role> --account <slot>` run a board role on an account; the board labels
+    such sessions `account N`. `doctor` gains a `claude-accounts` line naming
+    any slot that still needs a sign-in. Nothing here writes into Claude Code's
+    own files, and no hook or session path ever reaches the usage endpoint.
+    Plan: `docs/plans/claude-accounts.md`; guide: `docs/fleet.md`.
 - **Client decks in `docs/deck/`, one self-contained HTML file each, with the
   PDF beside it.** A one-pager, a five-page short deck and a fifteen-slide pitch
   deck, for showing the fleet to someone who has not seen it. Each HTML embeds

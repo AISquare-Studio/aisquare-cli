@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
@@ -34,6 +35,7 @@ from aisquare.models import (
     StatusReport,
 )
 from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
@@ -113,6 +115,7 @@ def doctor(
         _check_repomix(),
         _check_tiktoken(),
         _check_claude_code(),
+        *_claude_accounts_checks(),
         _check_tmux(),
         _check_gh(),
         _check_snapshot(cwd),
@@ -627,6 +630,36 @@ def _check_claude_code() -> DoctorCheck:
         f"{product} {_STALE_HOOKS} in: {listed}",
         "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
     )
+
+
+def _claude_accounts_checks() -> list[DoctorCheck]:
+    """One line for the Claude accounts the CLI added, or none when it added none.
+
+    The default account is the ``claude-code`` line's business above. Reads
+    only: ``managed_accounts`` lists directories and ``describe`` reads the
+    files Claude Code left in them, so a machine that never added an account
+    is left exactly as it was (``tests/test_doctor_does_not_create_state.py``).
+    """
+    managed = claude_accounts_core.managed_accounts()
+    if not managed:
+        return []
+    statuses = [claude_accounts_service.describe(account) for account in managed]
+    parts = [
+        f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
+        for status in statuses
+    ]
+    detail = f"{len(statuses)} added beside the default: " + " · ".join(parts)
+    unsigned = [status.account.slot for status in statuses if not status.signed_in]
+    if unsigned:
+        return [
+            _warn(
+                "claude-accounts",
+                detail,
+                "Sign in from asq → Accounts, or: "
+                + "; ".join(f"aisquare accounts run {slot}" for slot in unsigned),
+            )
+        ]
+    return [_ok("claude-accounts", detail)]
 
 
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------

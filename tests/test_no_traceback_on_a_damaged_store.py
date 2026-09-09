@@ -77,6 +77,9 @@ UNINVOKED = {
     "project onboard": "packs a codebase snapshot; minutes, not seconds",
     "workspace onboard": "packs a codebase snapshot; minutes, not seconds",
     "team distill": "calls a model",
+    "accounts add": "starts a real Claude Code session and waits for a browser sign-in",
+    "accounts run": "replaces the process with Claude Code (os.execve)",
+    "accounts usage": "sends the developer's own Claude token to the usage endpoint",
 }
 
 CORRUPT = b"this is not a sqlite database, and open_store must say so in words"

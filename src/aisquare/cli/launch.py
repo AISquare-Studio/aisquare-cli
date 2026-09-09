@@ -29,9 +29,11 @@ import typer
 from rich.text import Text
 
 from aisquare.cli.common import fail
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
@@ -117,6 +119,17 @@ def launch(
             metavar="KEY=VALUE",
         ),
     ] = None,
+    account: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            "-a",
+            help="Claude Code account to run under: a slot number or the email it is signed "
+            "in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and CLAUDE_CODE_TMPDIR "
+            "over the role's binding.",
+            metavar="SLOT",
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -189,7 +202,17 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
+    if account is not None:
+        # The account's two variables win over the binding: the flag names an
+        # account this launch is FOR, and the binding is the role's standing shape.
+        try:
+            chosen = claude_accounts_service.resolve(account)
+        except claude_accounts_service.NoSuchAccount as exc:
+            fail(str(exc), error="unknown_account", ref=account)
+        env.update(claude_accounts_core.launch_env(chosen))
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
+    if account is not None:
+        whose += f" [{claude_accounts_core.label(chosen)}]"
     try:
         tracing = load_config().explainability
     except Exception as exc:  # tracing is an observer: a broken config must

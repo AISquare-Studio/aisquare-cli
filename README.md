@@ -501,36 +501,57 @@ Orchestration has no config files — a handful of env knobs:
 
 ### Several accounts, one team
 
-Running parallel Claude installs for separate rate limits? Connect each
-config dir once, then **bind** each seat to the environment it launches with:
+Running parallel Claude Code logins for separate rate limits? The CLI owns them
+for you. **Slot 1** is the plain `claude` of your machine. Every account you
+**add** is a numbered slot with its own config directory under
+`~/.aisquare/claude-accounts/`, signed in through Claude Code's own login and
+launched by number — the c1/c2/c3 shell aliases, without the aliases:
+
+```sh
+aisquare accounts list             # who is signed in where, plan, hooks
+aisquare accounts add              # a fresh slot: Claude Code opens, you sign in, it is recorded
+aisquare accounts run 2            # a plain session on account 2 (what a c2 alias did)
+aisquare accounts usage            # the 5-hour and weekly windows, per account
+aisquare accounts remove 2         # forget it; the directory is kept as 2.removed-<stamp>
+
+aisquare launch coder --account 2  # a board role on account 2
+aisquare fleet spawn coder --account 2
+```
+
+The same page lives in `asq` under **Accounts**: the AISquare sign-in on top
+(a card that runs the same browser flow as `aisquare login`), then every Claude
+account with its usage bars, **+ Add Claude account** — the login opens in a
+pane right there and closes by itself the moment it lands — and **Remove**.
+`aisquare doctor` gets a `claude-accounts` line naming any slot that still needs
+a sign-in.
+
+An account is two variables, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR`, set
+for the launch and nothing else. Slot 1 sets neither: it is whatever `claude`
+already is in the shell you launch from. The CLI never writes into Claude
+Code's own files — it reads the email and plan Claude Code recorded, and the
+usage numbers come from the endpoint Claude Code's `/usage` reads, best effort:
+if that endpoint changes, a row says `usage unavailable` and nothing else
+breaks.
+
+Accounts laid out some other way — a wrapper script, a proxy, a directory you
+made yourself — still bind to a role as a **launch profile**: a binary, a set
+of env vars and extra args, carried through verbatim.
 
 ```sh
 aisquare agents connect claude-code --config-dir ~/.claude-account1
-aisquare agents connect claude-code --config-dir ~/.claude-account2
-
 aisquare team bind coder1 \
   --env CLAUDE_CONFIG_DIR='$HOME/.claude-account1' \
   --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account1'
-aisquare team bind coder2 \
-  --env CLAUDE_CONFIG_DIR='$HOME/.claude-account2' \
-  --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account2'
-
-aisquare launch planner            # your default account
 aisquare launch coder1             # bound above — nothing to retype
-aisquare launch coder2
 ```
 
-A binding is a **launch profile**: a binary, a set of env vars and extra args,
-carried through verbatim. `~` and `$VAR` expand at launch, so one binding
-follows you across machines with different homes, and an undefined variable is
-left as written rather than blanked — a silently empty `CLAUDE_CONFIG_DIR`
-starts a fresh unauthenticated profile that reads as a login failure hours
-later instead of the typo it is.
-
-Set **both** variables. `CLAUDE_CONFIG_DIR` alone gives a session the right
-credentials and the *default* scratch directory, silently shared with every
-other account; it looks correctly isolated right up until two parallel sessions
-collide in temp.
+`~` and `$VAR` expand at launch, so one binding follows you across machines
+with different homes, and an undefined variable is left as written rather than
+blanked — a silently empty `CLAUDE_CONFIG_DIR` starts a fresh unauthenticated
+profile that reads as a login failure hours later instead of the typo it is.
+Set **both** variables: `CLAUDE_CONFIG_DIR` alone shares the *default* scratch
+directory with every other account, which looks isolated right up until two
+parallel sessions collide in temp. `--account` sets both for you.
 
 For a one-off, `aisquare launch <role> --env KEY=VALUE` merges over the
 binding per key. Shell aliases (`alias claude1='CLAUDE_CONFIG_DIR=… claude'`)
@@ -538,12 +559,13 @@ can **not** be passed to `--command` — an alias is not an executable — but a
 alias is only env vars around a binary, which is exactly what `--env` sets.
 
 Each session records **which config dir it runs under**, and the board labels
-sessions with it once more than one account is in play:
+sessions with it once more than one account is in play — `account 2` for a
+slot the CLI owns, the directory name for anything else:
 
 ```
 sessions:
-  - a1b2c3d4 coder [.claude-account1] — 2m ago
-  - e5f6a7b8 coder [.claude-account2] — 1m ago
+  - a1b2c3d4 coder [account 2] — 2m ago
+  - e5f6a7b8 coder [.claude-account1] — 1m ago
 ```
 
 So when one account hits its limit you can see exactly which terminals to
@@ -608,6 +630,8 @@ aisquare
 ├── project (workspace)  info · list · switch · link · onboard [--refresh]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
+├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
+│                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness
@@ -618,14 +642,15 @@ aisquare
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
-├── launch <role> [--command CMD] [--env KEY=VALUE]… [… agent args]
+├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
-│                             [--permission-mode M] [--bin B] [--prompt TEXT] [-- agent args]
+│                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
+│                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
 │                   attach · reap [--all] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])

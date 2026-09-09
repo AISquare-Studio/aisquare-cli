@@ -14,6 +14,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli import (
+    accounts,
     agents,
     auth,
     capture,
@@ -134,6 +135,7 @@ root.register(app)
 # in --help alongside working commands made a third of the surface look real.
 app.add_typer(auth.app, name="auth")
 app.add_typer(agents.app, name="agents")
+app.add_typer(accounts.app, name="accounts")
 app.add_typer(connectors.app, name="connectors", hidden=True)
 app.add_typer(context.app, name="context")
 app.add_typer(context.app, name="ctx", hidden=True, help="Alias of 'context'.")

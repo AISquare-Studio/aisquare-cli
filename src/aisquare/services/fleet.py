@@ -871,6 +871,7 @@ def spawn(
     prompt: str | None = None,
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
+    account: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -971,6 +972,11 @@ def spawn(
     if mode:
         flags += ["--permission-mode", mode]
     flags += list(identity.inject_args)
+    if account is not None:
+        # Carried to `launch`, which resolves the slot and sets the account's
+        # variables inside the window; a slot that does not exist fails there
+        # with `unknown_account`, exactly as a hand-typed launch would.
+        flags += ["--account", account]
     flags += ["--name", picked]
     command = [sys.executable, "-m", "aisquare", "launch", role, *flags, *role_args, *extra]
     env = {"AISQUARE_FLEET_AGENT": agent_id}

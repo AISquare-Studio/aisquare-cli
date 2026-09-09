@@ -117,6 +117,12 @@ DOCUMENTED = (
     # every `aisquare fleet …` line there is a step the reader types, so a flag
     # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
     "docs/fleet.md",
+    # The CI test bed's smoke: `aisquare doctor` and `aisquare metrics list`
+    # against the stub server, meant to be typed.
+    "docs/ci-contract.md",
+    # The live-wiring handoff: doctor, the hooks by hand, metrics — all meant to
+    # be typed against the staging server.
+    "docs/ci-live-wiring-handoff.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -859,7 +865,9 @@ _NOT_AN_INVOCATION = (
 CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
-    "README.md": (55, 5),
+    # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
+    # fenced example to the memory section.
+    "README.md": (58, 5),
     "docs/connecting-your-agents-to-explainability.md": (11, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
@@ -868,6 +876,12 @@ CENSUS = {
     # fenced commands (the reference plus troubleshooting) and one classified
     # mention (the `aisquare-cli[tui]` pip requirement). Re-measure when it grows.
     "docs/fleet.md": (29, 1),
+    # Two commands in the smoke block; the export line is upper-case and is not a
+    # mention this audit sees.
+    "docs/ci-contract.md": (2, 0),
+    # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
+    # `src/aisquare/...`).
+    "docs/ci-live-wiring-handoff.md": (8, 2),
 }
 
 

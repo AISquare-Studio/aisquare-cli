@@ -52,8 +52,18 @@ otherwise inherit a live identity:
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
+  * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
+    a string: doctor asking another install of this CLI what version it is,
+    so hooks that name a stale binary stop grading as healthy (#84).
+  * ``core/snapshot.py::node_version`` — ``node --version``, a string. Backs the
+    doctor's repomix line, which has to gate on the floor repomix declares
+    (``node >= 22``) rather than on whether ``npx`` exists.
   * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
     ``git rev-parse``.
+  * ``services/ci_snapshot.py::_git`` — the CI test bed's snapshot plumbing
+    (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
+    model; stripped anyway because it runs inside a traced session's hook and
+    a child of a hook is not the agent.
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
@@ -166,9 +176,24 @@ SEAMS: dict[str, Seam] = {
         strips_identity=True,
     ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
+    "aisquare/core/agents.py::hook_binary_version": Seam(
+        EXCLUDED,
+        "`<the aisquare a hook names> --version`, a string — doctor asking another "
+        "install of this CLI its version, so hooks pointing at a stale binary stop "
+        "grading as healthy (#84). An eager callback that exits before any command "
+        "runs; no model process",
+    ),
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
+    "aisquare/core/snapshot.py::node_version": Seam(
+        EXCLUDED, "`node --version`, a string — the floor repomix declares"
+    ),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
     "aisquare/core/workspace.py::git_common_root": Seam(EXCLUDED, "`git rev-parse`"),
+    "aisquare/services/ci_snapshot.py::_git": Seam(
+        EXCLUDED,
+        "git plumbing for the CI turn snapshot — a child of a traced hook is not the agent",
+        strips_identity=True,
+    ),
     "aisquare/core/editor.py::edit_text": Seam(
         EXCLUDED, "the operator's $EDITOR — it is theirs, it gets their environment"
     ),

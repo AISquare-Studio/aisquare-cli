@@ -423,6 +423,12 @@ badge beside the name. `fleet rename` changes it; `aisquare project switch
 amber-otter` and `--project amber-otter` both resolve it, and the "matches
 several projects" error lists codenames, because basenames are what collide.
 
+**Registrations you no longer want** — a deleted checkout, a throwaway worktree —
+go with `aisquare project forget <name|path>`; `aisquare project prune` sweeps
+roots that are gone from disk and worktrees of a repository that is itself
+registered, showing the plan and asking first. The navigator only loads what is
+registered, so this is also how a slow start is cured (#83).
+
 **tmux.** Session `asq-<codename>`, always targeted exactly (`=asq-amber-otter`)
 so `asq-ruby-fox` never prefix-matches an `asq-ruby-foxhound`. Window name =
 agent label; panes are addressed by `%id`, never by name, so renames are

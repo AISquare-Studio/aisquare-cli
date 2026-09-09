@@ -77,6 +77,17 @@ tui = [
   # was the documented way to get the board TUI before textual became core.
   "textual>=8.2,<9",
 ]
+experiment = [
+  # Deliberately empty of runtime dependencies today, and declared anyway.
+  #
+  # The CI test bed's transport is stdlib urllib on purpose: the hot path runs
+  # synchronously in front of a developer who has just hit enter, and it has to
+  # work in a base install, which rules out a hard third-party import there.
+  # So `[experiment]` currently installs nothing and enabling is AISQUARE_CI=1
+  # plus a URL — the extra exists so the documented install line is real and so
+  # the OpenTelemetry work that closes the token-accounting gap has somewhere
+  # to land without changing how anyone installs.
+]
 dev = [
   "pytest>=9.1.1",
   "mypy>=1.10",
@@ -96,6 +107,14 @@ dev = [
   # Same bounds as the core dependency: the dev env must resolve the major the
   # UI code actually targets, not merely "some textual".
   "textual>=8.2,<9",
+  # The CI test bed validates what it EMITS against the server's vendored JSON
+  # Schemas (tests/fixtures/ci_contract/v2/schemas), not against a mirror it
+  # wrote itself — a scorer with its own predicate can only ever agree with
+  # itself. Dev-only: the runtime models are pydantic, and the hot path must
+  # work in a base install. types-jsonschema because jsonschema ships no
+  # py.typed and mypy runs strict over tests.
+  "jsonschema>=4.18",
+  "types-jsonschema>=4.18",
 ]
 
 [project.scripts]

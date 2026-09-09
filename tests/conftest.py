@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 import aisquare
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+from aisquare.services import ci_client
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -191,6 +192,17 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         # A sign-in token in the operator's shell would make every test run as them.
         "AISQUARE_TOKEN",
         "BROWSER",
+        # The CI test bed's switches. An operator who has them exported would
+        # otherwise run the suite's hooks against THEIR endpoint, with THEIR
+        # token — measured once: four real POSTs to a listener during a green
+        # run. Off is the state every test starts from; tests opt in. The
+        # staging override is cleared with them: left set, it would turn every
+        # direct_api descriptor a test serves into one that delivers.
+        "AISQUARE_CI",
+        "AISQUARE_CI_URL",
+        "AISQUARE_CI_KEY",
+        "AISQUARE_CI_RUN",
+        "AISQUARE_CI_DELIVERY_OVERRIDE",
     ):
         monkeypatch.delenv(knob, raising=False)
     # The command sweeps invoke `login` with no arguments. Without this it would
@@ -199,6 +211,10 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # exits through its `unreachable` message and never leaves the machine. Tests
     # that exercise sign-in point --api-url at their own stub server.
     monkeypatch.setenv("AISQUARE_API_URL", "http://127.0.0.1:9")
+    # The experiment settings are read once per process (ci_client._settings is
+    # lru_cached, like core.insights._config), so a cached read from the previous
+    # test's HOME would outlive the home it came from.
+    ci_client.reset_cache()
     return home
 
 
@@ -208,6 +224,43 @@ def fresh_state() -> Iterator[None]:
     reset_state()
     yield
     reset_state()
+
+
+@pytest.fixture(autouse=True)
+def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point agent detection at a temp home so tests never read ``~/.claude*``.
+
+    ``core.agents._home`` is the indirection its own docstring offers for this.
+    Without it the claude-code doctor row read the developer's REAL
+    ``~/.claude/settings.json`` — and since #84 it also globs ``~/.claude*`` for
+    sibling installs and grades the binary each one's hooks name. A doctor row
+    that depends on how the author's own machine is hooked is the ambient leak
+    ``.github/workflows/ci.yml``'s ``ambient`` job exists to catch; green there
+    and red on a hooked laptop, or the reverse. Tests that want Claude Code
+    detected build the tree under their own fixture (``fake_home`` in
+    test_agents.py) and re-point ``_home`` at it, which overrides this.
+    """
+    home = tmp_path / "agent-home"
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    return home
+
+
+@pytest.fixture(autouse=True)
+def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never run a hook's aisquare for its version; answer as this install.
+
+    Hooks written by ``agents connect`` under the suite name whatever
+    ``_aisquare_command`` resolves: the console script beside this interpreter
+    when PATH has it, otherwise the machine's ``aisquare`` — a pyenv shim on the
+    author's box. Which one is ambient state, and running it would grade the
+    developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
+    Tests of the probe itself capture the real function at import and call it
+    against fake scripts they write (test_doctor_stale_hook_binary.py).
+    """
+    from aisquare.core import agents
+    from aisquare.core.version import __version__
+
+    monkeypatch.setattr(agents, "hook_binary_version", lambda argv, **_kwargs: __version__)
 
 
 @pytest.fixture(autouse=True)

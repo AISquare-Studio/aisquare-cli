@@ -12,7 +12,9 @@ On-disk shape (``~/.aisquare/context.db``):
 - ``project``    — projects referenced by ``project``-pool entries.
 
 Deletes are soft: ``delete`` stamps ``deleted_at`` and leaves a tombstone so the
-removal can propagate when sync lands. Every read filters tombstones out.
+removal can propagate when sync lands. Every read filters tombstones out. A
+project is forgotten the same way (``forgotten_at``, see v12); only
+``purge_project`` deletes rows for real.
 """
 
 from __future__ import annotations
@@ -25,9 +27,9 @@ import re
 import sqlite3
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -43,6 +45,7 @@ from aisquare.models import (
     TeamEvent,
     TeamSession,
     TeamTask,
+    TurnMetric,
 )
 
 _SCHEMA_V1 = """
@@ -252,6 +255,239 @@ ALTER TABLE project ADD COLUMN codename TEXT;
 CREATE UNIQUE INDEX project_codename ON project (codename);
 """
 
+# v12: the Collective Intelligence test bed's per-turn metrics. One row per
+# turn, opened by the UserPromptSubmit hook and closed by Stop, so a row exists
+# whether or not CI was consulted — which is what makes the stretch before the
+# endpoint goes live a usable baseline rather than a gap in the record.
+#
+# client_reason is here from creation, not bolted on later, because status and
+# action cannot carry what it encodes: a timed-out call and a server answering
+# `empty` both inject nothing. A table recording only the action makes an
+# endpoint failing every single request look exactly like a clean baseline,
+# and every aggregate over it measures plumbing rather than retrieval.
+#
+# The CHECKs pin the closed vocabularies — the server's (status, action,
+# trigger, cache_status) are fixed by hook contract v2 and change only with a
+# contract revision; client_reason and run_kind are ours, and a new value is a
+# deliberate act that arrives with a migration. tests/test_store.py holds each
+# list equal to the Python vocabulary it mirrors.
+#
+# There is no arm, no architecture, no flags hash and no run table: the client
+# never sees an arm (the descriptor is blinding by construction), and a column
+# for one here would be a place to leak it into. opaque_config_id is the only
+# handle on which configuration served a turn, and it is recorded verbatim.
+#
+# Token and tool columns are nullable and stay unwritten until they come from
+# real evidence (Explainability spans): hook payloads do not carry counts, and
+# a fabricated number here is worse than a null because it survives into a
+# published comparison.
+#
+# IF NOT EXISTS, and delivery_source inline rather than as a later ALTER,
+# because this step is reached by databases that already have the table: this
+# branch numbered the metric table v11 and v12 before `main` released v0.6.0
+# with a *different* v11 (the fleet tables above). See _SCHEMA_V13.
+_SCHEMA_V12 = """
+CREATE TABLE IF NOT EXISTS metric (
+
+    trace_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    session_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    wall_ms INTEGER,
+    run_id TEXT,
+    run_kind TEXT CHECK (run_kind IN ('live', 'replay')),
+    opaque_config_id TEXT,
+    trigger TEXT CHECK (trigger IN ('session_start', 'prompt_submit', 'agent_request')),
+    client_reason TEXT NOT NULL DEFAULT 'disabled' CHECK (client_reason IN (
+        'none', 'disabled', 'not_configured', 'no_run',
+        'trigger_not_in_descriptor', 'no_prompt', 'no_session',
+        'descriptor_unavailable', 'transport_error', 'deadline_exceeded', 'http_error',
+        'malformed_body', 'contract_mismatch', 'schema_mismatch')),
+    status TEXT CHECK (status IN ('served', 'empty', 'degraded', 'unavailable')),
+    action TEXT CHECK (action IN ('inject', 'noop')),
+    query_id TEXT,
+    briefing_id TEXT,
+    config_fingerprint TEXT,
+    input_checkpoint TEXT,
+    resolved_scope_version INTEGER,
+    round_trip_ms INTEGER,
+    server_ms INTEGER,
+    deadline_breached INTEGER,
+    token_count INTEGER,
+    items_count INTEGER,
+    cache_status TEXT CHECK (cache_status IN ('hit', 'miss', 'bypass')),
+    error_codes TEXT NOT NULL DEFAULT '[]',
+    rendered_chars INTEGER,
+    injected_chars INTEGER,
+    frame_version TEXT,
+    instruction_version TEXT,
+    redaction_level TEXT,
+    snapshot_ref TEXT,
+    snapshot_untracked_excluded INTEGER,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    tool_calls INTEGER,
+    delivery_source TEXT CHECK (delivery_source IN ('descriptor', 'override'))
+);
+
+CREATE INDEX IF NOT EXISTS metric_project_started ON metric (project_id, started_at);
+CREATE INDEX IF NOT EXISTS metric_open_session ON metric (session_id, started_at)
+    WHERE ended_at IS NULL;
+"""
+
+# v13: converge the two v11s.
+#
+# `user_version 11` means one of two incompatible things in the wild, because
+# two branches claimed it at once:
+#   - v0.6.0 from PyPI: the fleet tables (_SCHEMA_V11 above) and no metric table;
+#   - this branch, before the merge: the metric table and no fleet tables —
+#     at 11 without delivery_source, or at 12 with it.
+# Renumbering cannot serve both. Whichever meaning keeps the number, the other
+# cohort's next migration hits a table that already exists (`table metric
+# already exists`, `duplicate column name: delivery_source`) or silently never
+# gets the tables it skipped, and a store that cannot open takes every command
+# and every hook with it.
+#
+# So the ladder is made to converge instead of to count: V11 stays exactly as
+# released (it only runs below 11, where neither table can exist), V12 creates
+# the metric table only if it is absent, and this step gives the fleet tables to
+# anyone who reached 11 or 12 down the CI branch and so never ran V11. Every
+# cohort passes through here, so the end state is the same whichever way in.
+# The two columns SQLite cannot add conditionally in SQL are in _PREPARE[12].
+_SCHEMA_V13 = """
+CREATE TABLE IF NOT EXISTS fleet_agent (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    binary        TEXT NOT NULL DEFAULT 'claude',
+    tmux_socket   TEXT NOT NULL DEFAULT 'asq',
+    pane_id       TEXT NOT NULL,
+    session_id    TEXT,
+    cwd           TEXT NOT NULL,
+    worktree      INTEGER NOT NULL DEFAULT 0,
+    task_id       TEXT,
+    spawned_by    TEXT,
+    created_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    exit_status   INTEGER
+);
+CREATE INDEX IF NOT EXISTS fleet_agent_project ON fleet_agent (project_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS fleet_agent_live_label ON fleet_agent (project_id, label)
+    WHERE ended_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS project_codename ON project (codename);
+"""
+
+V1_ORPHAN_SUFFIX = "_v1_orphaned"
+"""Where the v1-contract ``metric`` and ``run`` tables go at v12. Nothing reads
+them; a developer who wants the space back drops them by hand."""
+
+
+def _retire_v1_metric_table(connection: sqlite3.Connection) -> None:
+    """Before the v12 statements: move a v1-contract ``metric`` table aside.
+
+    Detected by shape, not by version — the version is the same 11 for every
+    state above. A ``metric`` table without ``run_kind`` is the v1 one; it is
+    renamed, its indexes dropped (they keep their names through a rename and
+    would make the v12 ``CREATE INDEX IF NOT EXISTS`` a no-op on the new
+    table), and the v1 ``run`` table renamed with it, so the schema that ends
+    up stamped current is the v2 shape and nothing arm-shaped is live. Without
+    this step every v12 statement would succeed on the v1 shape and stamp it 12
+    — a database that can never take a row and can never be migrated by
+    version again.
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(metric)")}
+    if not columns or "run_kind" in columns:
+        return
+    connection.execute("DROP INDEX IF EXISTS metric_project_started")
+    connection.execute("DROP INDEX IF EXISTS metric_open_session")
+    # A free name, never a fixed one: a rename onto an existing name raises,
+    # the transaction rolls back, user_version stays 11 and every later open
+    # fails the same way — a store nobody can use until a table is dropped by
+    # hand. Two orphans are unlikely; a wedged store is certain if they occur.
+    connection.execute(
+        f"ALTER TABLE metric RENAME TO {_free_name(connection, f'metric{V1_ORPHAN_SUFFIX}')}"
+    )
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "run" in tables:
+        connection.execute(
+            f"ALTER TABLE run RENAME TO {_free_name(connection, f'run{V1_ORPHAN_SUFFIX}')}"
+        )
+
+
+def _free_name(connection: sqlite3.Connection, base: str) -> str:
+    """``base``, or ``base_2``, ``base_3`` … — the first name no table or index holds."""
+    taken = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+    name, suffix = base, 2
+    while name in taken:
+        name, suffix = f"{base}_{suffix}", suffix + 1
+    return name
+
+
+def _add_column_if_absent(
+    connection: sqlite3.Connection, table: str, column: str, declaration: str
+) -> None:
+    """``ALTER TABLE … ADD COLUMN`` only when the column is not already there.
+
+    SQLite has no ``ADD COLUMN IF NOT EXISTS``, and a second ALTER raises
+    ``duplicate column name``, which would abort the migration and leave the
+    store unopenable. A missing *table* is not this function's business either:
+    a cohort that has no ``metric`` yet gets the column from the CREATE in
+    _SCHEMA_V12, so there is nothing to add.
+    """
+    query = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+    if connection.execute(query, (table,)).fetchone() is None:
+        return
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column in columns:
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _converge_v11_fork(connection: sqlite3.Connection) -> None:
+    """Before v13's statements: add the columns the other v11 would have added.
+
+    ``project.codename`` is missing for anyone who came down the CI branch (they
+    never ran V11); ``metric.delivery_source`` is missing for anyone who stopped
+    at this branch's old v11. Both are no-ops for a database that already has
+    them, so every cohort can run this and land in the same shape.
+    """
+    _add_column_if_absent(connection, "project", "codename", "TEXT")
+    _add_column_if_absent(
+        connection,
+        "metric",
+        "delivery_source",
+        "TEXT CHECK (delivery_source IN ('descriptor', 'override'))",
+    )
+
+
+# Python that must run before a migration's statements, inside its transaction,
+# keyed by the version being upgraded FROM. Kept apart from _MIGRATIONS so the
+# scripts stay plain SQL that executescript and _statements build identically.
+_PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
+    11: _retire_v1_metric_table,
+    12: _converge_v11_fork,
+}
+
+# v14: ``project forget`` — a tombstone on the registration, in the same spirit as
+# ``entry.deleted_at``. A hard delete is not available to a plain forget:
+# ``entry.project_id`` and ``prompt.project_id`` are FOREIGN KEYS to this row
+# with no cascade and ``PRAGMA foreign_keys = ON``, so a project with any
+# context or prompt history cannot be deleted from under them. Every project
+# read filters ``forgotten_at IS NOT NULL`` out; ``ensure_project`` clears it, so
+# a registration comes back the moment something registers the root again.
+# ``forget --purge`` deletes the dependents first and then the row, for real.
+#
+# v14, not v12 as first authored: main took v12 for the metric table and v13
+# to converge the two v11s while this branch was open — the third time a
+# number was claimed twice. A plain ALTER is safe to run last whatever route
+# a store took to 13; every earlier step leaves the project table in place.
+_SCHEMA_V14 = """
+ALTER TABLE project ADD COLUMN forgotten_at TEXT;
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -265,11 +501,63 @@ _MIGRATIONS = (
     _SCHEMA_V9,
     _SCHEMA_V10,
     _SCHEMA_V11,
+    _SCHEMA_V12,
+    _SCHEMA_V13,
+    _SCHEMA_V14,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
+_PROJECT_COLUMNS = "id, root, linked_repos, codename"
+
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
+_METRIC_FIELDS = (
+    "trace_id",
+    "project_id",
+    "session_id",
+    "started_at",
+    "ended_at",
+    "wall_ms",
+    "run_id",
+    "run_kind",
+    "opaque_config_id",
+    "trigger",
+    "client_reason",
+    "status",
+    "action",
+    "query_id",
+    "briefing_id",
+    "config_fingerprint",
+    "input_checkpoint",
+    "resolved_scope_version",
+    "round_trip_ms",
+    "server_ms",
+    "deadline_breached",
+    "token_count",
+    "items_count",
+    "cache_status",
+    "error_codes",
+    "rendered_chars",
+    "injected_chars",
+    "frame_version",
+    "instruction_version",
+    "redaction_level",
+    "snapshot_ref",
+    "snapshot_untracked_excluded",
+    "tokens_in",
+    "tokens_out",
+    "tool_calls",
+    "delivery_source",
+)
+_METRIC_COLUMNS = ", ".join(_METRIC_FIELDS)
+
+MAX_OPEN_TURN = timedelta(hours=24)
+"""How old an open turn row may be and still be closed by a ``Stop``.
+
+An orphaned row — a killed terminal, an ``open_turn`` that failed — would
+otherwise absorb the whole gap to the next ``Stop`` as a 72-hour turn and land
+in the wall-clock median. Older than this it stays open and is excluded
+instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
     "transcript_path, account, model, effort"
@@ -314,6 +602,9 @@ class ContextStore(Protocol):
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
+    def forget_project(self, project_id: str) -> None: ...
+    def purge_project(self, project_id: str) -> dict[str, int]: ...
+    def project_activity(self) -> dict[str, str]: ...
     def add_prompt(
         self, text: str, project_id: str | None, source: str = "claude-code"
     ) -> PromptRecord: ...
@@ -350,6 +641,11 @@ class ContextStore(Protocol):
     def next_task(
         self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
     ) -> TeamTask | None: ...
+    def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
+    def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
+    def turn_metrics(
+        self, *, project_id: str | None = None, session_id: str | None = None, limit: int = 500
+    ) -> list[TurnMetric]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
@@ -451,6 +747,52 @@ def _maybe_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
+    def flag(name: str) -> bool | None:
+        value = row[name]
+        return None if value is None else bool(value)
+
+    codes = json.loads(row["error_codes"] or "[]")
+    return TurnMetric(
+        trace_id=row["trace_id"],
+        project_id=row["project_id"],
+        session_id=row["session_id"],
+        started_at=datetime.fromisoformat(row["started_at"]),
+        ended_at=_maybe_dt(row["ended_at"]),
+        wall_ms=row["wall_ms"],
+        run_id=row["run_id"],
+        run_kind=row["run_kind"],
+        opaque_config_id=row["opaque_config_id"],
+        trigger=row["trigger"],
+        client_reason=row["client_reason"],
+        status=row["status"],
+        action=row["action"],
+        query_id=row["query_id"],
+        briefing_id=row["briefing_id"],
+        config_fingerprint=row["config_fingerprint"],
+        input_checkpoint=row["input_checkpoint"],
+        resolved_scope_version=row["resolved_scope_version"],
+        round_trip_ms=row["round_trip_ms"],
+        server_ms=row["server_ms"],
+        deadline_breached=flag("deadline_breached"),
+        token_count=row["token_count"],
+        items_count=row["items_count"],
+        cache_status=row["cache_status"],
+        error_codes=codes if isinstance(codes, list) else [],
+        rendered_chars=row["rendered_chars"],
+        injected_chars=row["injected_chars"],
+        frame_version=row["frame_version"],
+        instruction_version=row["instruction_version"],
+        redaction_level=row["redaction_level"],
+        snapshot_ref=row["snapshot_ref"],
+        snapshot_untracked_excluded=flag("snapshot_untracked_excluded"),
+        tokens_in=row["tokens_in"],
+        tokens_out=row["tokens_out"],
+        tool_calls=row["tool_calls"],
+        delivery_source=row["delivery_source"],
+    )
+
+
 def _row_to_session(row: sqlite3.Row) -> TeamSession:
     return TeamSession(
         id=row["id"],
@@ -521,6 +863,19 @@ def _fts_match(query: str) -> str:
     return " OR ".join(f"{token}*" for token in tokens)
 
 
+#: The project rows a read may see. ``project forget`` tombstones a registration
+#: (``forgotten_at``, v14) and promises its rows stay hidden until the root is
+#: registered again; the row is the one place the tombstone lives, so every
+#: project-scoped read of another table qualifies its project id by it.
+_VISIBLE_PROJECTS = "(SELECT id FROM project WHERE forgotten_at IS NULL)"
+
+#: ``team_meta`` rows are matched one ``OR`` term per key, and SQLite parses a
+#: chain of them into a tree as deep as it is long, refusing one past 1000
+#: levels (``Expression tree is too large``): 500 recorded sessions made 1,002
+#: terms and the purge rolled back. Session keys go in statements of this many.
+_META_BATCH = 100
+
+
 def _scope_filter(
     pool: Pool | None, project_id: str | None, *, prefix: str = ""
 ) -> tuple[list[str], list[str]]:
@@ -530,14 +885,22 @@ def _scope_filter(
     unqualified ``entries``/``search`` show: the user pool plus that project's
     pool. ``prefix`` qualifies the column names for joined queries (e.g.
     ``"e."``).
+
+    A forgotten project's rows are out of scope however they are asked for. The
+    cwd still resolves to the project's id after ``project forget``, so without
+    :data:`_VISIBLE_PROJECTS` here the "hidden until registered again" promise
+    held for ``project list`` and not for ``context list`` or ``inject``.
     """
     pool_col, pid_col = f"{prefix}pool", f"{prefix}project_id"
+    visible = f"{pid_col} IN {_VISIBLE_PROJECTS}"
     if pool == "user":
         return [f"{pool_col} = 'user'"], []
     if pool == "project":
-        return [f"{pool_col} = 'project' AND {pid_col} = ?"], [project_id or ""]
+        return [f"{pool_col} = 'project' AND {pid_col} = ? AND {visible}"], [project_id or ""]
     if project_id is not None:
-        in_scope = f"({pool_col} = 'user' OR ({pool_col} = 'project' AND {pid_col} = ?))"
+        in_scope = (
+            f"({pool_col} = 'user' OR ({pool_col} = 'project' AND {pid_col} = ? AND {visible}))"
+        )
         return [in_scope], [project_id]
     return [f"{pool_col} = 'user'"], []
 
@@ -651,9 +1014,17 @@ class SqliteStore:
         return promoted
 
     def ensure_project(self, project: ProjectInfo) -> None:
+        """Register the project, or revive a forgotten registration of the same root.
+
+        Registering IS the revival: ``project forget`` hides a row rather than
+        deleting it (see v12), and the next thing that registers the root —
+        ``init``, a hook recording a prompt, ``context add --project`` — wants the
+        project visible again, with whatever history the row still carries.
+        """
         self._conn.execute(
-            "INSERT OR IGNORE INTO project (id, root, name, linked_repos, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO project (id, root, name, linked_repos, created_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
             (
                 project.id,
                 str(project.root),
@@ -666,23 +1037,132 @@ class SqliteStore:
 
     def list_projects(self) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos, codename FROM project ORDER BY name"
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
     def get_project(self, project_id: str) -> ProjectInfo | None:
         row = self._conn.execute(
-            "SELECT id, root, linked_repos, codename FROM project WHERE id = ?", (project_id,)
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ? AND forgotten_at IS NULL",
+            (project_id,),
         ).fetchone()
         return _row_to_project(row) if row is not None else None
 
     def find_projects(self, term: str) -> list[ProjectInfo]:
         rows = self._conn.execute(
-            "SELECT id, root, linked_repos, codename FROM project "
-            "WHERE id GLOB ? OR name = ? OR codename = ? ORDER BY name",
+            f"SELECT {_PROJECT_COLUMNS} FROM project "
+            "WHERE forgotten_at IS NULL AND (id GLOB ? OR name = ? OR codename = ?) "
+            "ORDER BY name",
             (_glob_prefix(term), term, term),
         ).fetchall()
         return [_row_to_project(row) for row in rows]
+
+    def forget_project(self, project_id: str) -> None:
+        """Hide the registration; everything that references it stays put.
+
+        A tombstone, not a delete — the FOREIGN KEYS from ``entry`` and
+        ``prompt`` forbid deleting a project with history, and a plain forget
+        should not cost history anyway. The context entries, prompt history,
+        board rows, ended fleet-agent rows and turn metrics remain in the store,
+        unreachable through any project read until the root is registered again.
+        """
+        cursor = self._conn.execute(
+            "UPDATE project SET forgotten_at = ? WHERE id = ? AND forgotten_at IS NULL",
+            (_now_iso(), project_id),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(project_id)
+
+    def purge_project(self, project_id: str) -> dict[str, int]:
+        """Delete the registration AND every row that belongs to it, in one transaction.
+
+        Dependents go first, in FK order, so the ``project`` delete is legal
+        under ``PRAGMA foreign_keys = ON``; the counts say what each table gave
+        up. The team tables, ``fleet_agent`` and ``metric`` carry no FK —
+        deleted by ``project_id`` the way every read of them is keyed; the
+        metric rows are written even with the CI test bed off, and left behind
+        they resurfaced in ``metrics list --all`` and in the project's own scope
+        if its root was registered again. ``team_meta`` is a key/value bag whose
+        keys embed either the project id (the distiller's watermark, signals) or
+        a session id (nudge debounce, continuation counters), so its rows are
+        matched on both — in bounded statements, see :meth:`_purge_team_meta`.
+        LIVE fleet agents are the caller's problem to refuse before getting
+        here: this deletes their rows too, and a pane that is still running
+        would then be unaccounted for.
+        """
+        sessions = [
+            str(row["id"])
+            for row in self._conn.execute(
+                "SELECT id FROM team_session WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        ]
+        removed: dict[str, int] = {}
+        with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+            for table in (
+                "entry",
+                "prompt",
+                "team_event",
+                "team_task",
+                "team_session",
+                "fleet_agent",
+                "metric",
+            ):
+                cursor = self._conn.execute(
+                    f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
+                )
+                removed[table] = cursor.rowcount
+            removed["team_meta"] = self._purge_team_meta(project_id, sessions)
+            cursor = self._conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
+            removed["project"] = cursor.rowcount
+        if removed["project"] != 1:
+            raise KeyError(project_id)
+        return removed
+
+    def _purge_team_meta(self, project_id: str, sessions: list[str]) -> int:
+        """Delete the ``team_meta`` rows keyed by the project or by its sessions.
+
+        Inside the caller's transaction, in statements of at most
+        :data:`_META_BATCH` sessions each (two terms per session): one statement
+        per purge was the shape SQLite refused at 500 sessions.
+        """
+        removed = self._conn.execute(
+            "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
+            (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+        ).rowcount
+        for start in range(0, len(sessions), _META_BATCH):
+            batch = sessions[start : start + _META_BATCH]
+            keys = [f"nudge:{sid}" for sid in batch]
+            globs = [f"continuations:{_glob_prefix(sid)[:-1]}:*" for sid in batch]
+            clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
+            removed += self._conn.execute(
+                f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}", (*keys, *globs)
+            ).rowcount
+        return removed
+
+    def project_activity(self) -> dict[str, str]:
+        """When each visible project was last touched, as an ISO-8601 UTC string.
+
+        The project row itself records only ``created_at``; "touched" is the
+        newest of that and every timestamp the project's rows carry — a fact
+        updated, a prompt captured, a session seen, a task moved, an event
+        posted, an agent spawned. Uniform ISO strings compare lexicographically,
+        which is what lets one ``MAX`` span six tables. Used to pick where the
+        active pin lands when the active project is forgotten.
+        """
+        rows = self._conn.execute(
+            "SELECT p.id, MAX(t.at) AS at FROM project p JOIN ("
+            "  SELECT id AS project_id, created_at AS at FROM project"
+            "  UNION ALL SELECT project_id, updated_at FROM entry WHERE project_id IS NOT NULL"
+            "  UNION ALL SELECT project_id, created_at FROM prompt WHERE project_id IS NOT NULL"
+            "  UNION ALL SELECT project_id, last_seen_at FROM team_session"
+            "  UNION ALL SELECT project_id, updated_at FROM team_task"
+            "  UNION ALL SELECT project_id, created_at FROM team_event"
+            "  UNION ALL SELECT project_id, created_at FROM fleet_agent"
+            ") t ON t.project_id = p.id "
+            "WHERE p.forgotten_at IS NULL GROUP BY p.id"
+        ).fetchall()
+        return {str(row["id"]): str(row["at"]) for row in rows}
 
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo:
         project = self.get_project(project_id)
@@ -724,15 +1204,19 @@ class SqliteStore:
     def recent_prompts(
         self, project_id: str | None = None, *, limit: int = 20
     ) -> list[PromptRecord]:
+        # A forgotten project's prompts are hidden with the rest of its history.
         if project_id is None:
             rows = self._conn.execute(
-                f"SELECT {_PROMPT_COLUMNS} FROM prompt ORDER BY created_at DESC, id DESC LIMIT ?",
+                f"SELECT {_PROMPT_COLUMNS} FROM prompt "
+                f"WHERE project_id IS NULL OR project_id IN {_VISIBLE_PROJECTS} "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         else:
             rows = self._conn.execute(
                 f"SELECT {_PROMPT_COLUMNS} FROM prompt "
-                "WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                f"WHERE project_id = ? AND project_id IN {_VISIBLE_PROJECTS} "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (project_id, limit),
             ).fetchall()
         return [_row_to_prompt(row) for row in rows]
@@ -1118,6 +1602,127 @@ class SqliteStore:
             "SELECT id, status FROM team_task WHERE project_id = ?", (project_id,)
         ).fetchall()
         return {row["id"]: row["status"] for row in rows}
+
+    def open_turn(self, metric: TurnMetric) -> TurnMetric:
+        """Record the start of a turn. One INSERT — this is the hot path.
+
+        A plain INSERT, not ``INSERT OR REPLACE``: the trace id is freshly
+        minted, so a collision is a bug, and a bug should raise rather than
+        silently destroy the row it collided with.
+        """
+
+        def flag(value: bool | None) -> int | None:
+            return None if value is None else int(value)
+
+        values = (
+            metric.trace_id,
+            metric.project_id,
+            metric.session_id,
+            metric.started_at.isoformat(),
+            metric.ended_at.isoformat() if metric.ended_at else None,
+            metric.wall_ms,
+            metric.run_id,
+            metric.run_kind,
+            metric.opaque_config_id,
+            metric.trigger,
+            metric.client_reason.value,
+            metric.status,
+            metric.action,
+            metric.query_id,
+            metric.briefing_id,
+            metric.config_fingerprint,
+            metric.input_checkpoint,
+            metric.resolved_scope_version,
+            metric.round_trip_ms,
+            metric.server_ms,
+            flag(metric.deadline_breached),
+            metric.token_count,
+            metric.items_count,
+            metric.cache_status,
+            json.dumps(list(metric.error_codes)),
+            metric.rendered_chars,
+            metric.injected_chars,
+            metric.frame_version,
+            metric.instruction_version,
+            metric.redaction_level.value if metric.redaction_level else None,
+            metric.snapshot_ref,
+            flag(metric.snapshot_untracked_excluded),
+            metric.tokens_in,
+            metric.tokens_out,
+            metric.tool_calls,
+            metric.delivery_source,
+        )
+        placeholders = ", ".join("?" for _ in _METRIC_FIELDS)
+        self._conn.execute(
+            f"INSERT INTO metric ({_METRIC_COLUMNS}) VALUES ({placeholders})", values
+        )
+        self._conn.commit()
+        return metric
+
+    def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None:
+        """Close this session's newest open turn; ``None`` when nothing was closed.
+
+        Matched on the session rather than carried through the agent, because
+        the Stop hook payload has no trace id in it — only the session. The
+        newest open row is the turn that just finished. A turn that never
+        received a Stop (a killed terminal) stays open and is excluded from
+        wall-clock aggregates rather than closed with a fabricated end time;
+        an open row older than :data:`MAX_OPEN_TURN` is left alone for the same
+        reason, so an orphan cannot absorb a three-day gap into the median.
+
+        The UPDATE is a compare-and-set on ``ended_at IS NULL``: two Stops that
+        both saw the row open cannot both write it, and the loser reports
+        ``None`` rather than overwriting the first close. A negative clock
+        delta is stored as ``NULL``, not clamped to a zero that would read as
+        a real instant turn.
+        """
+        row = self._conn.execute(
+            "SELECT trace_id, started_at FROM metric "
+            "WHERE session_id = ? AND ended_at IS NULL "
+            "ORDER BY started_at DESC, trace_id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        started_at = datetime.fromisoformat(row["started_at"])
+        delta = ended_at - started_at
+        if delta > MAX_OPEN_TURN:
+            return None
+        wall_ms = int(delta.total_seconds() * 1000) if delta >= timedelta(0) else None
+        cursor = self._conn.execute(
+            "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ? AND ended_at IS NULL",
+            (ended_at.isoformat(), wall_ms, row["trace_id"]),
+        )
+        self._conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        closed = self._conn.execute(
+            f"SELECT {_METRIC_COLUMNS} FROM metric WHERE trace_id = ?", (row["trace_id"],)
+        ).fetchone()
+        return _row_to_metric(closed) if closed is not None else None
+
+    def turn_metrics(
+        self, *, project_id: str | None = None, session_id: str | None = None, limit: int = 500
+    ) -> list[TurnMetric]:
+        """Recorded turns, newest first. ``limit`` is clamped to at least one:
+        SQLite reads a negative LIMIT as unbounded, and the whole table is not
+        what anyone asked for."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        params.append(max(1, int(limit)))
+        rows = self._conn.execute(
+            f"SELECT {_METRIC_COLUMNS} FROM metric {where}"
+            "ORDER BY started_at DESC, trace_id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [_row_to_metric(row) for row in rows]
 
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM team_meta WHERE key = ?", (key,)).fetchone()
@@ -1613,6 +2218,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
             if version >= len(_MIGRATIONS):
                 connection.execute("COMMIT")
                 return
+            prepare = _PREPARE.get(version)
+            if prepare is not None:
+                prepare(connection)
             for statement in _statements(_MIGRATIONS[version]):
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {version + 1}")

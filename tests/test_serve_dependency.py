@@ -87,6 +87,33 @@ def test_a_parent_that_cannot_be_imported_is_not_an_unhandled_error(
     assert "serve extra is not installed" in result.output
 
 
+def test_an_mcp_that_will_not_import_is_not_told_to_install_mcp(runner: CliRunner) -> None:
+    """mcp present, one of ITS dependencies gone: the third case, with its own advice.
+
+    ``find_spec`` on a dotted name imports the parents, and ``mcp.server``
+    imports ``sse_starlette`` at package-import time, so a venv holding mcp
+    2.1.1 with sse-starlette uninstalled raised inside the probe — which the
+    guard read as "no such module" and answered by telling the user to install
+    the mcp they already had. The exception names the module that was missing;
+    the message must name it too, and send the user to reinstall, not to pin.
+    """
+
+    def _parent_will_not_import(name: str) -> object | None:
+        if name == serve_cli.REQUIRED_MODULE:
+            raise ModuleNotFoundError("No module named 'sse_starlette'", name="sse_starlette")
+        return object()
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(serve_cli, "_find_spec", _parent_will_not_import)
+        result = runner.invoke(app, ["serve", "--stdio"])
+
+    assert result.exit_code == 1
+    assert "cannot be imported" in result.output and "sse_starlette" in result.output
+    assert "not installed" not in result.output, "the extra IS installed"
+    assert "Move it into range" not in result.output, "the mcp they have is in range"
+    assert "Traceback" not in result.output
+
+
 def test_the_guard_probes_the_symbol_the_server_imports() -> None:
     """The two must not drift: a rename in mcp_server has to move this too."""
     from pathlib import Path

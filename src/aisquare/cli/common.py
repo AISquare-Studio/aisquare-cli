@@ -15,6 +15,7 @@ import typer
 from rich.table import Table
 
 from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -25,12 +26,16 @@ from aisquare.models import (
     ContextEntry,
     DoctorCheck,
     InjectionRecord,
+    MetricsSummary,
     OnboardReport,
     Pool,
+    ProjectForgetReport,
     ProjectInfo,
+    ProjectPruneReport,
     PromptRecord,
     SetupReport,
     StatusReport,
+    TurnMetric,
 )
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
@@ -152,6 +157,13 @@ def emit_injection_record(record: InjectionRecord | None) -> None:
         f"  {total} entries — {record.user_count} from your user pool, "
         f"{record.project_count} from this project"
     )
+    if record.retrieved_chars:
+        console.print(
+            f"  {record.retrieved_chars} chars retrieved by the CI test bed "
+            "(candidate reference, not fetched by the agent)"
+        )
+        if record.retrieved_items:
+            console.print("  items: " + ", ".join(record.retrieved_items))
 
 
 def emit_project_detail(project: ProjectInfo) -> None:
@@ -170,10 +182,26 @@ def emit_project_detail(project: ProjectInfo) -> None:
     stdout_console().print(grid)
 
 
+def _project_name(project: ProjectInfo) -> str:
+    return project.root.name or project.id
+
+
 def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
-    """Render the project list — a JSON array under ``--json``, a table otherwise."""
+    """Render the project list — a JSON array under ``--json``, a table otherwise.
+
+    The JSON carries the same ``name`` the table shows (#83): it is derived from
+    the root rather than stored on the model, and a script picking a project
+    by name had nothing to pick on.
+    """
     if get_state().json_output:
-        typer.echo(json.dumps([project.model_dump(mode="json") for project in projects]))
+        typer.echo(
+            json.dumps(
+                [
+                    {**project.model_dump(mode="json"), "name": _project_name(project)}
+                    for project in projects
+                ]
+            )
+        )
         return
     if not projects:
         stdout_console().print("No projects registered yet. Run: aisquare init")
@@ -195,6 +223,91 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
         typer.echo(project.model_dump_json())
     else:
         stdout_console().print(message)
+
+
+def _active_note(active: ProjectInfo | None, *, changed: bool) -> str | None:
+    """One line saying where the active project went, or None when it did not move."""
+    if not changed:
+        return None
+    if active is None:
+        return "no projects remain — the active project follows your working directory again"
+    return (
+        f"active project is now {_project_name(active)} ({active.id}), "
+        "the most recently touched one left"
+    )
+
+
+def emit_project_forget(report: ProjectForgetReport) -> None:
+    """Render ``project forget`` — the report as JSON under ``--json``, lines otherwise."""
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    project = report.project
+    console.print(f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}")
+    if report.purged:
+        counts = ", ".join(f"{count} {table}" for table, count in report.removed.items() if count)
+        console.print(f"  deleted: {counts or 'no rows'}")
+        if report.data_dir_removed:
+            console.print(f"  deleted: {paths.project_data_dir(project.id)}")
+    else:
+        console.print(
+            "  its context entries, prompt history and board rows stay in the store, hidden "
+            "— --purge deletes them; registering the root again brings them back"
+        )
+    note = _active_note(report.active, changed=report.active_changed)
+    if note is not None:
+        console.print(f"  {note}")
+
+
+def emit_prune(report: ProjectPruneReport) -> None:
+    """Render ``project prune`` — the report as JSON under ``--json``, a table otherwise.
+
+    The same renderer serves the plan and the result: both show every candidate
+    with its reason, the plan stopping there and the result adding what was
+    dropped. A ``--yes`` caller never saw a plan, so the result has to be the
+    plan as well.
+    """
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    if not report.candidates:
+        console.print("nothing to prune")
+        return
+    kept = {candidate.project.id for candidate in report.kept}
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("", no_wrap=True)
+    table.add_column("WHY", no_wrap=True)
+    table.add_column("NAME")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("ROOT")
+    for candidate in report.candidates:
+        project = candidate.project
+        why: str = candidate.reason
+        if candidate.principal is not None:
+            why = f"worktree of {_project_name(candidate.principal)}"
+        if project.id in kept:
+            why += f" (kept: {candidate.live_agents} live agent(s))"
+        marker = "" if report.dry_run else ("·" if project.id in kept else "✓")
+        table.add_row(marker, why, _project_name(project), project.id, str(project.root))
+    console.print(table)
+    if report.dry_run:
+        return
+    count = len(report.dropped)
+    noun = "registration" if count == 1 else "registrations"
+    what = "purged" if report.purged else "forgot"
+    console.print(f"✓ {what} {count} {noun}")
+    if report.kept:
+        console.print(f"  kept {len(report.kept)} with live fleet agents — stop or reap them first")
+    if not report.purged and count:
+        console.print(
+            "  their context entries, prompt history and board rows stay in the store, hidden "
+            "— --purge deletes them"
+        )
+    note = _active_note(report.active, changed=report.active_changed)
+    if note is not None:
+        console.print(f"  {note}")
 
 
 def emit_setup(report: SetupReport) -> None:
@@ -306,8 +419,14 @@ def emit_onboard(report: OnboardReport) -> None:
         if snapshot.skeleton_token_count:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
         console.print(line)
+    elif snapshot is not None and snapshot.status == "skeleton_only":
+        console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
     elif snapshot is not None and snapshot.status == "too_large":
-        console.print("snapshot: codebase too large to pack within the token budget")
+        # The same sentence the doctor prints (one definition, so the two never
+        # disagree on the numbers), plus what to run once a remedy is in place.
+        console.print(
+            f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
+        )
     else:
         console.print("snapshot: skipped (repomix/Node not available)")
     if report.seeded:
@@ -332,6 +451,109 @@ def emit_prompts(prompts: list[PromptRecord]) -> None:
     for prompt in prompts:
         table.add_row(prompt.created_at.strftime("%Y-%m-%d %H:%M"), prompt.text)
     stdout_console().print(table)
+
+
+def emit_metrics_summary(summary: MetricsSummary) -> None:
+    """Render a metrics summary — JSON under ``--json``, a table otherwise.
+
+    The three reason groups are three rows, never one: a baseline run with the
+    experiment off must not read as one where every call failed.
+    """
+    if get_state().json_output:
+        typer.echo(json.dumps(summary.model_dump(mode="json")))
+        return
+    console = stdout_console()
+    if not summary.turns:
+        console.print(
+            "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code"
+        )
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("METRIC", no_wrap=True)
+    table.add_column("VALUE", justify="right")
+    table.add_row("turns", str(summary.turns))
+    if summary.by_trigger:
+        table.add_row("by trigger", _counts(summary.by_trigger))
+    table.add_row("CI consulted", str(summary.consulted))
+    table.add_row("baseline (never asked)", str(summary.baseline))
+    table.add_row("skipped by design", str(summary.skipped))
+    table.add_row("failed", str(summary.failed))
+    table.add_row("turns with injection", str(summary.injected_turns))
+    table.add_row("deadline breaches", str(summary.deadline_breaches))
+    table.add_row("median wall", _ms(summary.median_wall_ms))
+    table.add_row("median round trip", _ms(summary.median_round_trip_ms))
+    table.add_row("p95 round trip", _ms(summary.p95_round_trip_ms))
+    console.print(table)
+
+    if summary.by_reason:
+        console.print(f"reasons: {_counts(summary.by_reason)}")
+    if summary.by_status:
+        console.print(f"server statuses: {_counts(summary.by_status)}")
+    if summary.deadline_breaches:
+        console.print(
+            f"⚠ {summary.deadline_breaches} turn(s) hit the client ceiling — "
+            "that is a server-side latency problem, not a result"
+        )
+    override_turns = summary.by_delivery_source.get("override", 0)
+    if override_turns:
+        console.print(
+            f"⚠ {override_turns} turn(s) ran under the staging delivery override — "
+            "kept out of the round-trip figures; they measure nothing"
+        )
+    if not summary.turns_with_tokens:
+        console.print(
+            "note: no token counts recorded — hook payloads do not carry them (they will "
+            "come from Explainability spans), so token savings cannot be read from this yet"
+        )
+
+
+def _counts(bucket: dict[str, int]) -> str:
+    return ", ".join(f"{key} {count}" for key, count in sorted(bucket.items()))
+
+
+def emit_turn_metrics(turns: list[TurnMetric]) -> None:
+    """Render recent turns — a JSON array under ``--json``, a table otherwise."""
+    if get_state().json_output:
+        typer.echo(json.dumps([turn.model_dump(mode="json") for turn in turns]))
+        return
+    if not turns:
+        stdout_console().print("No turns recorded yet.")
+        return
+    # The trace id is printed WHOLE and never wraps: it is the join key to the
+    # server's ledger and to `refs/aisquare/wip/`, and a truncated id cannot be
+    # looked up anywhere. The vocabulary columns wrap instead when the terminal
+    # is narrow.
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("WHEN", no_wrap=True)
+    table.add_column("TRACE", no_wrap=True, min_width=30)
+    table.add_column("TRIGGER", overflow="fold")
+    table.add_column("REASON", overflow="fold")
+    table.add_column("STATUS", overflow="fold")
+    table.add_column("ACTION", overflow="fold")
+    # Which document ruled delivery. A consulted row under the staging override
+    # must never read as one the descriptor allowed (services/ci_override.py).
+    table.add_column("SOURCE", overflow="fold")
+    table.add_column("WALL", justify="right")
+    table.add_column("TRIP", justify="right")
+    for turn in turns:
+        table.add_row(
+            local_time(turn.started_at).strftime("%m-%d %H:%M:%S"),
+            turn.trace_id,
+            turn.trigger or "—",
+            turn.client_reason.value,
+            turn.status or "—",
+            turn.action or "—",
+            turn.delivery_source or "—",
+            _ms(turn.wall_ms),
+            _ms(turn.round_trip_ms),
+        )
+    stdout_console().print(table)
+
+
+def _ms(value: int | None) -> str:
+    """A millisecond count, or an em dash when the turn never recorded one."""
+    return "—" if value is None else f"{value} ms"
 
 
 def emit_disconnected(name: str) -> None:

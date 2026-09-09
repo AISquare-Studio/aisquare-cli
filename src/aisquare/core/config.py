@@ -118,6 +118,36 @@ class ExplainabilitySettings(BaseModel):
     gateway_url: str = ""
 
 
+class ExperimentSettings(BaseModel):
+    """Settings for the Collective Intelligence test bed.
+
+    ``enabled`` is False, and stays False for everyone who has not deliberately
+    opted in. That is not caution about a half-built feature: the
+    ``prompt_submit`` call runs *synchronously* in front of a developer who has
+    just hit enter, so the off state has to cost exactly nothing — no request,
+    no connection, no measurable latency. Shipping in that state is what makes
+    the client safe to land on ``main`` while the endpoint is still being
+    built, instead of accruing on a branch.
+
+    ``url`` is the server's base URL; ``run`` is the ``run_…`` id whose delivery
+    descriptor drives this machine's sessions. There is deliberately nothing
+    else: which hooks call the server and whether the recall tool is exposed
+    are decided by the descriptor the server publishes, not by a flag here —
+    a client-side switch would be a second place the experiment's shape lives.
+    ``AISQUARE_CI``, ``AISQUARE_CI_URL`` and ``AISQUARE_CI_RUN`` override each
+    field from the environment.
+
+    There is deliberately no key field. The bearer token is read from
+    ``AISQUARE_CI_KEY`` and nowhere else: ``config.toml`` is a file people
+    diff, paste into issues and copy between machines, and a secret that lives
+    there leaks by being ordinary.
+    """
+
+    enabled: bool = False
+    url: str = ""
+    run: str = ""
+
+
 class RoleLaunchProfile(BaseModel):
     """One role's launch spec, carried verbatim and never interpreted.
 
@@ -218,6 +248,38 @@ class FleetSettings(BaseModel):
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 
+class SnapshotSettings(BaseModel):
+    """The codebase snapshot ``aisquare project onboard`` packs with Repomix.
+
+    ``max_tokens`` is the budget a pack must fit. The full pack is tried first,
+    then the compressed one (signatures only); a repo whose compressed pack is
+    STILL over it keeps that pack as the skeleton with its per-file index —
+    status ``skeleton_only``, every count recorded, ``onboard`` and ``doctor``
+    naming the numbers — rather than getting nothing. 150 000 mirrors the
+    server's ``REPO_PACK_MAX_TOKENS`` so artifacts stay consistent for a future
+    sync — raise it for a repo you know is big, or leave more out, with
+    ``ignore`` below or a ``.repomixignore`` at the repo root (#82).
+
+    ``ignore`` is the operator's own list of what to leave out of the pack, in
+    the glob syntax repomix's ``--ignore`` takes (``**/fixtures/**``,
+    ``docs/generated/**``, ``*.snap``). It EXTENDS the built-in list
+    (``core.snapshot.DEFAULT_IGNORE``: dependency trees, build output, caches,
+    this tool's worktrees, and any nested git repository or worktree found
+    below the root) rather than replacing it, and the repo's own ``.gitignore``
+    and ``.repomixignore`` apply on top, read by repomix itself. On the command
+    line the items are comma-separated, as repomix's own flag is::
+
+        aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'
+
+    Read from the config file alone, like ``[fleet]``: there is no
+    ``AISQUARE_SNAPSHOT_*`` variable for either key, because this layer has no
+    per-key environment rung and one section is not the place to grow one.
+    """
+
+    max_tokens: int = 150_000
+    ignore: list[str] = Field(default_factory=list)
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -229,6 +291,8 @@ class AppConfig(BaseModel):
     explainability: ExplainabilitySettings = Field(default_factory=ExplainabilitySettings)
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
+    snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
+    experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
 
 
 def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:

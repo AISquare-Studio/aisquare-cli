@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`project forget <id|name|codename|path>` and `project prune`** (#83), so a
+  store with hundreds of dead registrations can be cleaned. Measured on the
+  owner's box: 305 registered projects, most of them throwaway git worktrees,
+  and the fleet UI loaded state for every one before its first frame. `forget`
+  drops one registration and refuses (exit 2) while the project has live fleet
+  agents; `prune --missing` drops registrations whose root is gone from disk,
+  `prune --worktrees` those whose root is a linked git worktree of a repository
+  that is itself registered (neither flag: both). `prune` prints its plan and
+  asks at a terminal; off one it is a dry run unless `--yes`, and `--json`
+  without `--yes` lists the candidates and changes nothing. A plain forget is a
+  tombstone (store schema v14, `project.forgotten_at` — the `entry` and
+  `prompt` tables hold foreign keys to the project row, so a project with any
+  history cannot be deleted from under them): the project's context entries,
+  prompt history and board rows stay in the store, hidden, and come back if the
+  root is registered again. `--purge` deletes them, the ended fleet-agent rows,
+  the turn metrics and `~/.aisquare/projects/<id>/`. Forgetting the ACTIVE project moves the pin
+  to the most recently touched remaining project, or clears it, and says so.
 - **Client decks in `docs/deck/`, one self-contained HTML file each, with the
   PDF beside it.** A one-pager, a five-page short deck and a fifteen-slide pitch
   deck, for showing the fleet to someone who has not seen it. Each HTML embeds
@@ -316,6 +333,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Self-invocation is no longer shadowed by a project's own `aisquare/`
+  package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
+  `init`, `doctor` and `project onboard` from the fleet UI, for every fleet
+  window, for the detached distiller, and as the last-resort hook command.
+  `-m` puts the current directory first on `sys.path`, so from any repo whose
+  root holds a top-level `aisquare/` package — the explainability SDK's own
+  repo ships one — every one of those died with `No module named
+  aisquare.__main__`, and a fleet window did so even with `PYTHONSAFEPATH`
+  exported by the spawner, because a window inherits the tmux server's
+  environment. All four now build their argv through one helper that passes
+  the interpreter `-P` (the flag form of `PYTHONSAFEPATH`, Python 3.11+): it
+  ends with that process, so a coder's own `python -m pytest` inherits
+  nothing, and it needs no environment to travel. `aisquare doctor` gains a
+  `self-invocation` row that warns when the directory would shadow a
+  hand-typed `python -m aisquare`.
+- **`doctor` now checks WHICH `aisquare` the Claude Code hooks run, not just
+  that hooks are there** (#84). A hook was recognised by its text, so every
+  hook on a box could name `…/aisquare-cli/.venv/bin/aisquare` — a 0.3-era
+  editable checkout — while the live install was 0.6.0, and `doctor` said
+  "all lifecycle hooks installed" for weeks. Per config dir it now resolves the
+  program each hook names and compares it to this install by path, or by
+  running `<path> --version` when the path differs; a stale, missing or
+  unreadable binary turns the row into a warning that names the dir, the
+  hook's path and version, this install's path and version, and the one-line
+  fix (`aisquare agents connect claude-code --config-dir <dir>`).
+- **`doctor` discovers Claude Code config dirs on disk** — `$CLAUDE_CONFIG_DIR`,
+  `~/.claude` and every `~/.claude*` whose `settings.json` carries aisquare
+  hooks — and grades them the same way, labelled "found on disk, not connected
+  in this home". A fresh `AISQUARE_HOME` previously knew no sites, so a
+  `~/.claude3` reached through `CLAUDE_CONFIG_DIR` was invisible until someone
+  ran `agents connect --config-dir` for it. Still read-only: `doctor` never
+  rewrites `settings.json`.
+- `--json project list` objects now carry the `name` the table shows, so a
+  script can pick a project by name (#83).
 - **The selected project row in the fleet sidebar showed its folder glyph and an
   empty highlighted band — no name, no codename.** Any project whose basename is
   wider than the sidebar's title column (25 cells at the default width;

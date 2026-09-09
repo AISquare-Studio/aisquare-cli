@@ -1,10 +1,12 @@
-"""The left pane: Fleet ▸ projects (alternating background) ▸ agents ▸ Doctor.
+"""The left pane: Fleet ▸ projects (alternating background) ▸ agents ▸ Accounts ▸ Doctor.
 
 docs/plans/fleet-tui.md §4.1. One ``ProjectCard`` per registered project, each
 with a disclosure, the basename, the codename as a dim badge, chips (agents
 alive · 🔔 count) and — when two projects share a basename — the path as a dim
 subtitle; under it one ``AgentRow`` per fleet agent (role icon, label, state
-chip, exit status) and a spawn-agent row; a Doctor section at the bottom.
+chip, exit status) and a spawn-agent row; an Accounts section (the AISquare
+sign-in and the Claude Code accounts, docs/plans/claude-accounts.md) and a
+Doctor section at the bottom.
 
 Two rules shape the code more than the layout does:
 
@@ -15,8 +17,9 @@ Two rules shape the code more than the layout does:
   tick, and nothing flickers. Only a project or agent that appeared or vanished
   mounts or unmounts a widget.
 - **Rows post messages; the app decides.** ``AddProject``, ``ProjectSelected``,
-  ``AgentSelected``, ``SpawnAgent`` and ``DoctorSelected`` are the whole
-  contract between this pane and the shell. Nothing here opens a view.
+  ``AgentSelected``, ``SpawnAgent``, ``AccountsSelected`` and ``DoctorSelected``
+  are the whole contract between this pane and the shell. Nothing here opens a
+  view.
 
 Every visible string is a ``rich.text.Text`` built with ``append`` — a project
 called ``[archive]`` must reach the screen as ``[archive]`` (CONTRIBUTING: no
@@ -98,6 +101,10 @@ class DoctorSelected(Message):
         super().__init__()
 
 
+class AccountsSelected(Message):
+    """The Accounts section: the AISquare sign-in and the Claude Code accounts."""
+
+
 # --- pure helpers (unit-testable without a running app) -----------------------------
 
 
@@ -151,6 +158,23 @@ def project_title_text(project: ProjectInfo, statuses: list[FleetAgentStatus]) -
         if alive:
             text.append(" · ", style="dim")
         text.append(f"🔔{bells}", style="bold red")
+    return text
+
+
+def accounts_summary_text(aisquare: bool | None) -> Text:
+    """``Accounts  ✓ AISquare`` — the section's first line.
+
+    ``aisquare`` is signed-in / not / unknown (``None``: the session could not
+    be read). The Claude side goes on the detail line under it (the view's
+    ``summarise``): 28 columns do not hold both beside the title.
+    """
+    text = Text("Accounts  ", style="bold", no_wrap=True, overflow="ellipsis")
+    if aisquare is None:
+        text.append("? AISquare", style="yellow")
+    elif aisquare:
+        text.append("✓ AISquare", style="green")
+    else:
+        text.append("✗ AISquare", style="dim")
     return text
 
 
@@ -422,6 +446,34 @@ class ProjectCard(Vertical):
             return
 
 
+class AccountsTitle(Activatable):
+    """The Accounts section's first line. Click → Accounts view."""
+
+    def __init__(self) -> None:
+        super().__init__(Text("Accounts", style="bold"))
+        self.selection_key = "accounts"
+
+    def message(self) -> Message:
+        return AccountsSelected()
+
+
+class AccountsSection(Vertical):
+    """One line of counts and one line of detail: who is signed in, or what is missing."""
+
+    DEFAULT_CSS = """
+    AccountsSection { height: auto; max-height: 3; border-top: solid $primary; padding: 0 1; }
+    AccountsSection .accounts-line { height: 1; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield AccountsTitle()
+        yield Static("", classes="accounts-line")
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.query_one(AccountsTitle).activate()
+
+
 class DoctorTitle(Activatable):
     """The Doctor section's first line: the counts. Click → Doctor view."""
 
@@ -462,7 +514,7 @@ class DoctorSection(Vertical):
 
 
 class Sidebar(Vertical):
-    """Header, the scrolling project list, and the Doctor section at the bottom.
+    """Header, the scrolling project list, then the Accounts and Doctor sections at the bottom.
 
     Focusable, because §4.3 puts focus either here or in a terminal pane:
     ↑/↓ move a cursor over the rows, Enter activates the row under it, and the
@@ -490,7 +542,7 @@ class Sidebar(Vertical):
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.selected_key: str | None = None
-        """What is highlighted: ``project:<id>``, ``agent:<id>``, ``doctor`` or ``None``."""
+        """What is highlighted: ``project:<id>``, ``agent:<id>``, ``accounts``, ``doctor``."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -511,6 +563,7 @@ class Sidebar(Vertical):
                 Text("No projects yet — press + to onboard one.", style="dim"),
                 id="projects-empty",
             )
+        yield AccountsSection(id="accounts-section")
         yield DoctorSection(id="doctor-section")
 
     # --- data in -----------------------------------------------------------------
@@ -588,6 +641,20 @@ class Sidebar(Vertical):
             slot.update("")
             slot.display = False
 
+    def show_accounts_summary(self, title: Text, line: Text | None) -> None:
+        """The Accounts section: its first line, and the one detail line under it (or none)."""
+        section = self.query_one(AccountsSection)
+        section.query_one(AccountsTitle).update(title)
+        detail = section.query_one(".accounts-line", Static)
+        if line is None:
+            detail.update("")
+            detail.display = False
+        else:
+            line.no_wrap = True
+            line.overflow = "ellipsis"
+            detail.update(line)
+            detail.display = True
+
     def show_doctor_notice(self, text: str | None) -> None:
         """A line in the Doctor section for what doctor itself could not do."""
         notice = self.query_one(DoctorSection).query_one(".doctor-notice", Static)
@@ -601,7 +668,7 @@ class Sidebar(Vertical):
     # --- selection ------------------------------------------------------------------
 
     def select(self, key: str | None) -> None:
-        """Highlight the row for ``key`` (``project:<id>``, ``agent:<id>``, ``doctor``)."""
+        """Highlight the row for ``key`` (a project, an agent, ``accounts`` or ``doctor``)."""
         self.selected_key = key
         self._apply_selection()
 

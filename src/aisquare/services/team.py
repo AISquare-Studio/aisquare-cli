@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import brain, harness, insights, orchestrator, workspace
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import ContextStore, store_session, unmet_needs
@@ -401,8 +402,19 @@ def session_account(transcript_path: str | None) -> str | None:
 
 
 def account_label(account: str | None) -> str | None:
-    """The short display form of an account: its directory name."""
-    return Path(account).name if account else None
+    """The short display form of an account.
+
+    ``account N`` for a slot the CLI owns, the directory name otherwise. A
+    managed slot's directory is named by its number alone
+    (``…/claude-accounts/2``), and a bare ``[2]`` beside a session row would
+    read as a count.
+    """
+    if not account:
+        return None
+    slot = claude_accounts_core.managed_slot(account)
+    if slot is not None:
+        return f"account {slot}"
+    return Path(account).name
 
 
 def task_key(title: str) -> str:

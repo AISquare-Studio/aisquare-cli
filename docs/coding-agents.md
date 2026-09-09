@@ -51,6 +51,11 @@ user default, then Claude Code. An arbitrary wrapper declares its family with
 `team bind ROLE --agent NAME --bin PATH`. Conflicting known binaries and
 families are rejected. Changing a default affects future launches.
 
+Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
+Doctor warns about a missing executable when an agent or launch profile has
+been configured explicitly. Managed `--account` slots belong to Claude Code;
+choose a Codex account through the role's `CODEX_HOME` binding instead.
+
 The Settings tab has user and role agent choices; the spawn dialog supports a
 per-launch choice. Model/account profiles continue to use `team bind`.
 

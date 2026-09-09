@@ -171,6 +171,15 @@ def spawn(
     prompt: Annotated[
         str | None, typer.Option("--prompt", help="First message to type once the agent is up.")
     ] = None,
+    account: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Claude Code account to run under: a slot number or email (see "
+            "`aisquare accounts`).",
+            metavar="SLOT",
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -196,6 +205,7 @@ def spawn(
             prompt=prompt,
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",
+            account=account,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)

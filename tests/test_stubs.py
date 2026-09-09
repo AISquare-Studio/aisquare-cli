@@ -29,6 +29,11 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("recall",),
     ("launch",),
     ("serve",),
+    ("login",),
+    ("logout",),
+    ("whoami",),
+    ("auth", "status"),
+    ("auth", "token"),
     ("ui",),
     *(
         ("fleet", command)
@@ -117,6 +122,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
         ("agents", command)
         for command in ("list", "scan", "status", "connect", "disconnect", "use")
     ),
+    *(("accounts", command) for command in ("list", "usage", "add", "remove", "run")),
     *(("metrics", command) for command in ("show", "list")),
 }
 
@@ -152,6 +158,6 @@ def test_stub_message_goes_to_stderr(runner: CliRunner) -> None:
 
 def test_a_stubbed_group_command_still_reports_canonically(runner: CliRunner) -> None:
     # Group subcommands report their full canonical path in the stub message.
-    result = runner.invoke(app, ["auth", "status"])
+    result = runner.invoke(app, ["connectors", "status"])
     assert result.exit_code == EXIT_NOT_IMPLEMENTED
-    assert "aisquare auth status is not implemented yet" in result.output
+    assert "aisquare connectors status is not implemented yet" in result.output

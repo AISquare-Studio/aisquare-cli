@@ -54,6 +54,7 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import agent_launch
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
@@ -873,6 +874,7 @@ def spawn(
     prompt: str | None = None,
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
+    account: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -903,6 +905,11 @@ def spawn(
         selected = agent_launch.resolve(role, agent=agent, binary=binary, cwd=project.root)
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
+    if account is not None and selected.adapter.id != "claude-code":
+        raise FleetError(
+            "--account selects a Claude Code account; for Codex bind CODEX_HOME "
+            "with aisquare team bind ROLE --agent codex --env CODEX_HOME=PATH"
+        )
     resolution = selected.binary
     if agent_launch.executable(selected) is None:
         raise FleetError(
@@ -1001,6 +1008,11 @@ def spawn(
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     flags += list(identity.inject_args)
+    if account is not None:
+        # Carried to `launch`, which resolves the slot and sets the account's
+        # variables inside the window; a slot that does not exist fails there
+        # with `unknown_account`, exactly as a hand-typed launch would.
+        flags += ["--account", account]
     env = {
         **selected.profile.env,
         "AISQUARE_FLEET_AGENT": agent_id,
@@ -1018,6 +1030,14 @@ def spawn(
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     if prompt and selected.adapter.capabilities.positional_prompt:
         command += ["--", prompt]
+    if account is not None:
+        # `launch --account 1` restores "this shell's" login, and inside the
+        # window that shell would be whoever started the private server — so
+        # the CALLER's aisquare home and account variables travel with the
+        # window (set as absolute paths, or unset through `env -u`), exactly as
+        # the Accounts page's sign-in window carries them.
+        command, carried = claude_accounts_service.carry_environment(command)
+        env.update(carried)
     tmux_session = session_name(codename)
     try:
         window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)

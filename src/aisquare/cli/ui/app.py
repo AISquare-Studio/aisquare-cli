@@ -2,10 +2,11 @@
 
 docs/plans/fleet-tui.md §4, §4.2, §4.3, §3.8. Left: the ``Sidebar``. Right: a
 ``ContentSwitcher`` over the views — Welcome and Doctor from the start, Onboard on
-the first ``+``,
-one ``ProjectView`` / ``AgentView`` per selection, created the first time it is
-asked for and kept (a view hosts a live terminal pane; re-creating it on every
-click would restart that pane's render loop).
+the first ``+``, Accounts on the first click of its section
+(docs/plans/claude-accounts.md), one ``ProjectView`` / ``AgentView`` per
+selection, created the first time it is asked for and kept (a view hosts a live
+terminal pane; re-creating it on every click would restart that pane's render
+loop).
 
 **The TUI holds no state that matters** (§2). Projects come from the store,
 agents from the fleet service, both re-read every two seconds exactly as
@@ -44,27 +45,40 @@ from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import (
+    AccountsSelected,
     AddProject,
     AgentSelected,
     DoctorSelected,
     ProjectSelected,
     Sidebar,
     SpawnAgent,
+    accounts_summary_text,
 )
 from aisquare.cli.ui.terminal import EscapeToSidebar
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
+from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.store import store_session
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgentStatus, ProjectInfo
+from aisquare.models import (
+    AccountsOverview,
+    CheckStatus,
+    DoctorCheck,
+    FleetAgentStatus,
+    ProjectInfo,
+)
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor section runs: ``diagnostics.doctor`` in production, a stub in tests."""
+
+AccountsReader = Callable[[], AccountsOverview]
+"""What the Accounts section reads: ``claude_accounts.overview`` in production, a stub in tests."""
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
@@ -129,7 +143,7 @@ class HelpScreen(ModalScreen[None]):
         text = Text()
         text.append("aisquare fleet — keys\n\n", style="bold")
         for key, what in (
-            ("click", "select a project, an agent, the Doctor section; + onboards a project"),
+            ("click", "select a project, an agent, Accounts, Doctor; + onboards a project"),
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("t", "themes (applied live, autosaved)"),
@@ -174,10 +188,14 @@ class FleetApp(App[None], inherit_bindings=False):
         refresh_seconds: float = 2.0,
         doctor: DoctorRunner | None = diagnostics.doctor,
         escape_key: str | None = None,
+        accounts: AccountsReader | None = accounts_service.overview,
     ) -> None:
         super().__init__()
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
+        self._accounts = accounts
+        self.accounts_overview: AccountsOverview | None = None
+        """The last Accounts frame that was read; ``None`` before the first or when disabled."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -309,6 +327,33 @@ class FleetApp(App[None], inherit_bindings=False):
         sidebar.show_notice(None)
         sidebar.show_projects(projects, agents, notices=notices)
         self._feed_open_views(self.snapshot)
+        self.refresh_accounts()
+
+    def refresh_accounts(self) -> None:
+        """Re-read the Claude accounts and the AISquare session; the section and the page follow.
+
+        Files only — a few small JSON reads — which is why it rides the same
+        two-second tick as the store. The usage numbers are the view's own,
+        slower business (``AccountsView.refresh_usage``).
+        """
+        if self._accounts is None:
+            return
+        sidebar = self.sidebar
+        try:
+            overview: AccountsOverview | None = self._accounts()
+        except Exception:  # a directory we cannot read costs the line, never the frame
+            overview = None
+        self.accounts_overview = overview
+        session_known = True
+        try:
+            session = read_session()
+        except Exception:  # read_session never raises; belt to its braces
+            session, session_known = None, False
+        summary = summarise(overview, session, session_known=session_known)
+        sidebar.show_accounts_summary(accounts_summary_text(summary.aisquare), summary.line)
+        if overview is not None:
+            for view in self.query(AccountsView):
+                view.show(overview)
 
     def _feed_open_views(self, snapshot: FleetSnapshot) -> None:
         """Hand every open Project/Agent view its row from the new frame.
@@ -520,6 +565,18 @@ class FleetApp(App[None], inherit_bindings=False):
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         if project is not None:
             self.push_screen(SpawnScreen(project))
+
+    async def on_accounts_selected(self, event: AccountsSelected) -> None:
+        await self._show(
+            "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
+        )
+        self.sidebar.select("accounts")
+        if self.accounts_overview is not None:
+            self.query_one("#accounts", AccountsView).show(self.accounts_overview)
+
+    def on_accounts_changed(self, event: AccountsChanged) -> None:
+        """The page added, removed or signed in something: the section follows at once."""
+        self.refresh_accounts()
 
     async def on_doctor_selected(self, event: DoctorSelected) -> None:
         await self._show("doctor")

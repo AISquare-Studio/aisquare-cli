@@ -62,6 +62,56 @@ def test_selection_precedence_and_mixed_roles(
     assert agent_launch.resolve("coder").adapter.id == "codex"
 
 
+@pytest.mark.parametrize("selection", ["implicit", "user", "project", "role", "binary", "profile"])
+def test_doctor_requires_only_configured_agent_executables(
+    selection: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.models import CheckStatus
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: None)
+    if selection in {"user", "project"}:
+        agent_launch.use("codex", project=selection == "project")
+    elif selection in {"role", "profile"}:
+        config = load_config()
+        config.team.profiles["coder"] = (
+            RoleLaunchProfile(agent="codex")
+            if selection == "role"
+            else RoleLaunchProfile(env={"CLAUDE_CONFIG_DIR": str(tmp_path / "account")})
+        )
+        save_config(config)
+    elif selection == "binary":
+        monkeypatch.setenv("AISQUARE_AGENT_BIN", "missing-wrapper")
+    checks = [
+        check for check in diagnostics._check_other_agents(tmp_path) if check.name == "coding-agent"
+    ]
+    if selection == "implicit":
+        assert not checks, "--no-agent is a supported CLI-only installation"
+    else:
+        assert len(checks) == 1 and checks[0].status == CheckStatus.warn
+        assert "not on PATH" in checks[0].detail
+
+
+def test_codex_cannot_silently_use_a_managed_claude_account(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from importlib import import_module
+
+    from aisquare.services import fleet
+
+    execute = Mock()
+    server = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    monkeypatch.setattr(fleet, "server", lambda config: server)
+    monkeypatch.setattr(fleet, "_require_tmux", lambda server: None)
+    launched = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--account", "2"])
+    assert launched.exit_code == 1 and "Claude Code account" in launched.output
+    execute.assert_not_called()
+    with pytest.raises(fleet.FleetError, match="Claude Code account"):
+        fleet.spawn(team_project(tmp_path), "coder", agent="codex", account="2", worktree=False)
+    server.spawn_window.assert_not_called()
+
+
 def test_wrappers_declare_family_and_conflicts_fail(tmp_path: Path) -> None:
     assert agent_launch.resolve(binary="/opt/bin/codex").adapter.id == "codex"
     config = load_config()

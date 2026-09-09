@@ -6,7 +6,8 @@ Layout:
     ├── credentials     # API keys / tokens
     ├── context.db      # SQLite store: context entries and projects (see core.store)
     ├── agents.json     # registry of detected and connected agents
-    ├── cache/          # disposable cached data
+    ├── claude-accounts/# one CLAUDE_CONFIG_DIR per managed account (core.claude_accounts)
+    ├── cache/          # disposable cached data (incl. each managed account's TMPDIR)
     ├── explainability/ # session→Run join records (see services.explainability)
     └── log/            # capture and diagnostic logs
 
@@ -126,6 +127,16 @@ def project_data_dir(project_id: str) -> Path:
 def credentials_path() -> Path:
     """Path of the credentials file (API keys, tokens)."""
     return aisquare_home() / "credentials"
+
+
+def claude_accounts_dir() -> Path:
+    """Where the CLI keeps the Claude Code config directories it owns, one per slot."""
+    return aisquare_home() / "claude-accounts"
+
+
+def claude_accounts_tmp_dir() -> Path:
+    """Where each managed account's ``CLAUDE_CODE_TMPDIR`` lives — disposable, under cache."""
+    return cache_dir() / "claude-accounts"
 
 
 def agents_registry_path() -> Path:

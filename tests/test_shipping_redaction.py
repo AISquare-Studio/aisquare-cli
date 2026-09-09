@@ -50,6 +50,7 @@ SECRETS = {
     "gitlab pat": _shaped("glpat", "-AbCdEfGhIjKlMnOpQrSt"),
     "slack bot token": _shaped("xox", "b-1234567890-ABCDEFGHIJKLMNOP"),
     "aws access key id": _shaped("AKIA", "IOSFODNN7EXAMPLE"),
+    "aisquare session token": _shaped("aisq_", "3kF9xQ2mVb8ZrT1cLw6nYp4sHd0eJu7gAi5oKf9qRc2"),
     "google api key": _shaped("AIza", "SyA1234567890abcdefghijklmnopqrstuvw"),
     "jwt": _shaped(
         "eyJ",

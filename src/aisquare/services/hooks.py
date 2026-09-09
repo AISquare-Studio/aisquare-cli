@@ -74,9 +74,21 @@ def session_start_context(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
     record_trace_join(session_id)
+    if session_id:
+        with store_session() as store:
+            for env_key, prefix in (
+                ("AISQUARE_LAUNCH_ID", "launch"),
+                ("AISQUARE_FLEET_AGENT", "fleet"),
+            ):
+                token = os.environ.get(env_key)
+                if token and store.set_meta_once(f"{prefix}-seen:{token}:{session_id}", "1"):
+                    store.set_meta(f"{prefix}-session:{token}", session_id)
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
@@ -85,7 +97,15 @@ def session_start_context(
     block = build_block(entries, project) if entries else ""
     team_block = (
         team_service.hook_session_start(
-            session_id, cwd, source, transcript_path=transcript_path, model=model, effort=effort
+            session_id,
+            cwd,
+            source,
+            transcript_path=transcript_path,
+            model=model,
+            effort=effort,
+            agent=agent,
+            native_session_id=native_session_id,
+            account=account,
         )
         if session_id
         else ""
@@ -136,13 +156,24 @@ def prompt_submitted(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
+    source: str = "claude-code",
 ) -> str:
     """Record a submitted prompt; return the team delta to add to context."""
-    retrieved = capture_prompt(prompt, cwd, session_id=session_id)
+    retrieved = capture_prompt(prompt, cwd, session_id=session_id, source=source)
     if session_id is None:
         return retrieved
     delta = team_service.hook_prompt_heartbeat(
-        session_id, cwd, transcript_path=transcript_path, model=model, effort=effort
+        session_id,
+        cwd,
+        transcript_path=transcript_path,
+        model=model,
+        effort=effort,
+        agent=agent,
+        native_session_id=native_session_id,
+        account=account,
     )
     return "\n\n".join(part for part in (delta, retrieved) if part)
 
@@ -180,7 +211,13 @@ def needs_attention(
         team_service.hook_notification(session_id, cwd, message)
 
 
-def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:
+def capture_prompt(
+    prompt: str | None,
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    source: str = "claude-code",
+) -> str:
     """Record the prompt, consult CI, open this turn's row.
 
     Three steps, deliberately separated. The store is opened for the prompt
@@ -212,7 +249,7 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             # resolves names through that table.
             store.ensure_project(project)
             if prompt is not None and prompt.strip():
-                store.add_prompt(prompt, project.id, source="claude-code")
+                store.add_prompt(prompt, project.id, source=source)
         if prompt is not None and prompt.strip():
             insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
     except Exception as exc:  # never disrupt the session to record it — but say what it cost

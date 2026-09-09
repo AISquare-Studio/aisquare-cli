@@ -84,6 +84,8 @@ class AgentInfo(BaseModel):
     detected: bool = False
     config_paths: list[Path] = Field(default_factory=list)
     connected: bool = False
+    readiness: str = "not_connected"
+    detail: str = ""
     sites: list[AgentHookSite] = Field(default_factory=list)
     """Every config dir this agent was connected in, with that dir's hook health."""
 
@@ -396,6 +398,8 @@ class TeamSession(BaseModel):
     """One live agent session on the orchestrator (id = the agent's session id)."""
 
     id: str
+    agent: str | None = None
+    native_session_id: str | None = None
     project_id: str
     role: str = "unassigned"
     label: str | None = None
@@ -524,6 +528,8 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    readiness: str = "configured"
+    detail: str = ""
 
 
 FleetAgentState = Literal["working", "waiting", "attention", "exited", "lost", "unknown"]
@@ -549,6 +555,7 @@ class FleetAgent(BaseModel):
     """Unique among the project's LIVE agents; an ended agent frees its label."""
     role: str
     binary: str = "claude"
+    agent: str | None = None
     tmux_socket: str = "asq"
     pane_id: str
     session_id: str | None = None

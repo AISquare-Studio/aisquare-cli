@@ -149,6 +149,9 @@ class Seam:
 #: not part of the key: they move on every edit, and a guard that fails on
 #: reformatting is a guard people learn to silence.
 SEAMS: dict[str, Seam] = {
+    "aisquare/services/native_telemetry.py::start": Seam(
+        EXCLUDED, "local OTLP receiver; not a model process", strips_identity=True
+    ),
     "aisquare/cli/launch.py::_exec": Seam(
         TRACED, "the launch seam — this process BECOMES the agent"
     ),
@@ -241,4 +244,8 @@ def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     to is not a failure worth reporting.
     """
     source = os.environ if base is None else base
-    return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}
+    return {
+        key: value
+        for key, value in source.items()
+        if key not in (*IDENTITY_ENV_VARS, "AISQUARE_LAUNCH_ID", "AISQUARE_FLEET_AGENT")
+    }

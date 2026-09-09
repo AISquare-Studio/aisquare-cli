@@ -469,6 +469,15 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _retire_v1_metric_table,
     12: _converge_v11_fork,
 }
+_SCHEMA_V14 = """
+ALTER TABLE team_session ADD COLUMN agent TEXT;
+ALTER TABLE team_session ADD COLUMN native_session_id TEXT;
+ALTER TABLE fleet_agent ADD COLUMN agent TEXT;
+UPDATE team_session SET agent = 'claude-code', native_session_id = id
+ WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl';
+UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -484,6 +493,7 @@ _MIGRATIONS = (
     _SCHEMA_V11,
     _SCHEMA_V12,
     _SCHEMA_V13,
+    _SCHEMA_V14,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -538,7 +548,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort"
+    "transcript_path, account, model, effort, agent, native_session_id"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -547,7 +557,7 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status"
+    "task_id, spawned_by, created_at, ended_at, exit_status, agent"
 )
 
 
@@ -623,6 +633,8 @@ class ContextStore(Protocol):
     ) -> list[TurnMetric]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
+    def set_meta_once(self, key: str, value: str) -> bool: ...
+    def compare_meta(self, key: str, expected: str, value: str) -> bool: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
     def add_signal_event(
         self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
@@ -695,6 +707,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         label=row["label"],
         role=row["role"],
         binary=row["binary"],
+        agent=row["agent"],
         tmux_socket=row["tmux_socket"],
         pane_id=row["pane_id"],
         session_id=row["session_id"],
@@ -784,6 +797,8 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         account=row["account"],
         model=row["model"],
         effort=row["effort"],
+        agent=row["agent"],
+        native_session_id=row["native_session_id"],
     )
 
 
@@ -1069,14 +1084,16 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
-            "effort = COALESCE(excluded.effort, effort)",
+            "effort = COALESCE(excluded.effort, effort), "
+            "agent = COALESCE(excluded.agent, agent), "
+            "native_session_id = COALESCE(excluded.native_session_id, native_session_id)",
             (
                 session.id,
                 session.project_id,
@@ -1092,6 +1109,8 @@ class SqliteStore:
                 session.account,
                 session.model,
                 session.effort,
+                session.agent,
+                session.native_session_id,
             ),
         )
         self._conn.commit()
@@ -1577,6 +1596,22 @@ class SqliteStore:
         ).fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
+    def set_meta_once(self, key: str, value: str) -> bool:
+        """Atomically record the first observation, including before a fleet row exists."""
+        cursor = self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+            (key, value),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def compare_meta(self, key: str, expected: str, value: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE team_meta SET value = ? WHERE key = ? AND value = ?", (value, key, expected)
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def add_signal_event(
         self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
     ) -> TeamEvent:
@@ -1750,6 +1785,11 @@ class SqliteStore:
         ).fetchall()
         return {str(row["codename"]) for row in rows}
 
+    def _bound_fleet_agent(self, row: sqlite3.Row) -> FleetAgent:
+        agent = _row_to_fleet_agent(row)
+        bound = self.get_meta(f"fleet-session:{agent.id}")
+        return agent.model_copy(update={"session_id": bound}) if bound else agent
+
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent:
         """Insert a fleet agent, or update the mutable facts of one already known.
 
@@ -1759,7 +1799,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -1780,6 +1820,7 @@ class SqliteStore:
                 agent.created_at.isoformat(),
                 agent.ended_at.isoformat() if agent.ended_at else None,
                 agent.exit_status,
+                agent.agent,
             ),
         )
         self._conn.commit()
@@ -1795,7 +1836,7 @@ class SqliteStore:
         ).fetchall()
         if len(rows) > 1:
             raise AmbiguousIdError(ref)
-        return _row_to_fleet_agent(rows[0]) if rows else None
+        return self._bound_fleet_agent(rows[0]) if rows else None
 
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
         clause = " AND ended_at IS NULL" if live_only else ""
@@ -1804,7 +1845,7 @@ class SqliteStore:
             f"WHERE project_id = ?{clause} ORDER BY created_at, id",
             (project_id,),
         ).fetchall()
-        return [_row_to_fleet_agent(row) for row in rows]
+        return [self._bound_fleet_agent(row) for row in rows]
 
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
@@ -1815,7 +1856,7 @@ class SqliteStore:
             f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
             (project_id, label),
         ).fetchone()
-        return _row_to_fleet_agent(row) if row is not None else None
+        return self._bound_fleet_agent(row) if row is not None else None
 
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
         """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""

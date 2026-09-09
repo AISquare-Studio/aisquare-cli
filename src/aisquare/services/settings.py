@@ -63,6 +63,7 @@ def bind_role(
     role: str,
     *,
     agent_bin: str | None = None,
+    agent: str | None = None,
     env: dict[str, str] | None = None,
     unset: Sequence[str] = (),
     args: Sequence[str] = (),
@@ -77,6 +78,11 @@ def bind_role(
     """
     config = load_config()
     profile = config.team.profiles.setdefault(role, RoleLaunchProfile())
+    if agent is not None:
+        from aisquare.core.agent_adapters import get_adapter
+
+        get_adapter(agent)
+        profile.agent = agent
     if agent_bin is not None:
         profile.bin = agent_bin
     profile.env.update(env or {})

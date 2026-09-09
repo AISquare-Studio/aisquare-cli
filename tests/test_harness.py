@@ -675,7 +675,7 @@ def test_tui_session_line_renders_model_and_mismatch() -> None:
 def test_spawn_exec_requires_claude_on_path(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: None)
+    monkeypatch.setattr("aisquare.services.agent_launch.shutil.which", lambda _name: None)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "planner", "--exec"])  # type: ignore[arg-type]
     assert result.exit_code != 0
@@ -692,7 +692,9 @@ def test_spawn_exec_replaces_the_process(
         calls["argv"] = argv
         calls["role"] = env.get("AISQUARE_ROLE")
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
+    )
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1068,7 +1070,9 @@ def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
         calls["argv"] = argv
         calls["env"] = env
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
+    )
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     with healthy_proxy() as proxy_url:
@@ -1112,7 +1116,9 @@ def test_spawn_exec_untraced_argv_is_never_pinned(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["argv"] = argv
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
+    )
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1148,7 +1154,9 @@ def test_spawn_exec_enabled_wires_the_traced_env(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["env"] = env
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
+    )
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1173,7 +1181,9 @@ def test_spawn_exec_dead_proxy_fails_open(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["env"] = env
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
+    )
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]

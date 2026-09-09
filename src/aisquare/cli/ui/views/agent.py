@@ -34,6 +34,8 @@ def header_text(status: FleetAgentStatus) -> Text:
     text.append(f"{ROLE_ICON.get(agent.role, '🤖')} ")
     text.append(agent.label, style="bold")
     text.append(SEPARATOR + agent.role, style="cyan")
+    if agent.agent:
+        text.append(SEPARATOR + agent.agent, style="dim")
     text.append(SEPARATOR)
     text.append(f"{chip} {status.state}", style=chip_style)
     if status.detail:

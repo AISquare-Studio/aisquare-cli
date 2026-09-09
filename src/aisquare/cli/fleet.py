@@ -154,6 +154,17 @@ def spawn(
             help="Claude Code permission mode (auto, acceptEdits, …); default per role.",
         ),
     ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    sandbox: Annotated[
+        str | None,
+        typer.Option(
+            "--sandbox", help="Codex write scope: read-only, workspace-write, danger-full-access."
+        ),
+    ] = None,
+    approval: Annotated[
+        str | None,
+        typer.Option("--approval", help="Codex approval policy: on-request, untrusted, never."),
+    ] = None,
     binary: Annotated[
         str | None, typer.Option("--bin", help="Agent executable (default: the role's binding).")
     ] = None,
@@ -178,7 +189,10 @@ def spawn(
             task_id=task,
             worktree=worktree,
             permission_mode=permission_mode,
+            sandbox=sandbox,
+            approval_policy=approval,
             binary=binary,
+            agent=agent,
             prompt=prompt,
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",

@@ -225,7 +225,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 13  # v11 fleet, v12 metric, v13 converges the two
+    assert (
+        version == SCHEMA_VERSION == 14
+    )  # v14 adds coding-agent provenance and native session IDs
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -309,7 +311,7 @@ def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_
 
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
         assert (
             raw.execute("SELECT text FROM entry WHERE id = 'ctx_old'").fetchone()[0] == "survives"
         )
@@ -495,7 +497,7 @@ def test_a_v11_database_whose_metric_table_was_deleted_by_hand_heals() -> None:
     assert row.delivery_source == "override"
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
     finally:
         raw.close()
 
@@ -525,7 +527,7 @@ def test_a_v11_database_with_the_v1_shaped_metric_table_is_moved_aside_and_rebui
     assert {"run_kind", "delivery_source"} <= columns and "arm" not in columns
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
         tables = {
             row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
@@ -555,7 +557,7 @@ def test_a_v1_shaped_table_is_moved_aside_even_when_an_orphan_already_exists() -
     open_store().close()
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14
         tables = {
             row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
@@ -714,7 +716,7 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
 
     raw = sqlite3.connect(str(db))
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 13, label
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 14, label
         # the fleet half must be there and usable too, whichever way in
         raw.execute(
             "INSERT INTO project (id, name, root, linked_repos, created_at, codename) "

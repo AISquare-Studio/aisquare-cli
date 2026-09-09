@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import contextlib
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -55,6 +54,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import agent_launch
 from aisquare.services import explainability as explainability_service
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
@@ -867,7 +867,10 @@ def spawn(
     task_id: str | None = None,
     worktree: bool | None = None,
     permission_mode: str | None = None,
+    sandbox: str | None = None,
+    approval_policy: str | None = None,
     binary: str | None = None,
+    agent: str | None = None,
     prompt: str | None = None,
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
@@ -894,8 +897,12 @@ def spawn(
         )
     srv = server(config)
     _require_tmux(srv)
-    resolution = harness.resolve_binary(role, override=binary)
-    if shutil.which(resolution.binary) is None:
+    try:
+        selected = agent_launch.resolve(role, agent=agent, binary=binary, cwd=project.root)
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
+    resolution = selected.binary
+    if agent_launch.executable(selected) is None:
         raise FleetError(
             f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
             "install it, pass --bin, or change the role's binding"
@@ -957,8 +964,16 @@ def spawn(
     mode = role_config.permission_mode if permission_mode is None else permission_mode
     role_args = list(role_config.extra_args)
     extra = list(agent_args)
-    identity = explainability_service.plan_session_identity(resolution.binary, [*role_args, *extra])
-    if identity.session_id is None:
+    if selected.adapter.id != "claude-code" and role_args == ["--restricted"]:
+        role_args = []  # legacy reviewer default belongs to the Claude adapter
+    identity = (
+        explainability_service.plan_session_identity(
+            resolution.binary, [*selected.profile.args, *role_args, *extra]
+        )
+        if selected.adapter.capabilities.assigns_session_id
+        else explainability_service.SessionIdentity(None, note="native ID binds at session start")
+    )
+    if identity.session_id is None and selected.adapter.capabilities.assigns_session_id:
         notes.append(
             f"no board join for this agent ({identity.note}) — its state comes from tmux alone"
         )
@@ -968,26 +983,52 @@ def spawn(
         # `launch` re-resolves the binary inside the window; an explicit --bin
         # must reach it, or the row would name one agent and the pane run another.
         flags += ["--command", resolution.binary]
-    if mode:
-        flags += ["--permission-mode", mode]
+    if agent is not None or selected.adapter.id != "claude-code":
+        flags += ["--agent", selected.adapter.id]
+    native_mode = mode if selected.adapter.id == "claude-code" else permission_mode
+    try:
+        flags += selected.adapter.fleet_args(
+            role,
+            picked,
+            native_mode,
+            sandbox=sandbox if sandbox is not None else role_config.sandbox,
+            approval=approval_policy
+            if approval_policy is not None
+            else role_config.approval_policy,
+        )
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
     flags += list(identity.inject_args)
-    flags += ["--name", picked]
-    command = [sys.executable, "-m", "aisquare", "launch", role, *flags, *role_args, *extra]
-    env = {"AISQUARE_FLEET_AGENT": agent_id}
+    env = {
+        **selected.profile.env,
+        "AISQUARE_FLEET_AGENT": agent_id,
+        "AISQUARE_LAUNCH_ID": "",
+        agent_launch.ACTIVE_AGENT_ENV: selected.adapter.id,
+    }
+    with store_session() as store:
+        store.set_meta(f"fleet-pending:{agent_id}", selected.adapter.id)
     if config.disable_native_agent_teams:
-        env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
+        native_args, native_env = selected.adapter.disable_native_teams()
+        flags += native_args
+        env.update(native_env)
+    if selected.adapter.id != "claude-code":
+        flags.insert(flags.index("--agent") + 2, "--")
+    command = [sys.executable, "-m", "aisquare", "launch", role, *flags, *role_args, *extra]
+    if prompt and selected.adapter.capabilities.positional_prompt:
+        command += ["--", prompt]
     tmux_session = session_name(codename)
     try:
         window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
 
-    agent = FleetAgent(
+    fleet_agent = FleetAgent(
         id=agent_id,
         project_id=project.id,
         label=picked,
         role=role,
         binary=resolution.binary,
+        agent=selected.adapter.id,
         tmux_socket=config.tmux_socket,
         pane_id=window.pane_id,
         session_id=identity.session_id,
@@ -998,9 +1039,9 @@ def spawn(
         created_at=_now(),
     )
     stored = _record(
-        agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
+        fleet_agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
-    if prompt:
+    if prompt and not selected.adapter.capabilities.positional_prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
 
@@ -1222,6 +1263,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
 def status_of(agent: FleetAgent) -> FleetAgentStatus:
     """One agent's derived state: board session first, tmux facts second."""
     with store_session() as store:
+        agent = store.get_fleet_agent(agent.id) or agent
         project = store.get_project(agent.project_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
     tmux_session = session_name(project.codename) if project and project.codename else None
@@ -1257,6 +1299,13 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
+    if agent.agent not in (None, "claude-code") and (
+        status.session is None
+        or status.session.state != "waiting"
+        or _now() - status.session.last_seen_at > _team()._STALE_AFTER
+    ):
+        how = _file_note(project, label, text, sender)
+        return TellResult(False, f"no confirmed waiting native session — {how}")
     if status.state == "waiting":
         srv = server_for(agent.tmux_socket)
         if not _pane_is_the_agent(srv, agent.pane_id):

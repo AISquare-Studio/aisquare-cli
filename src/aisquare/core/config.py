@@ -171,6 +171,7 @@ class RoleLaunchProfile(BaseModel):
     spec; we carry it.
     """
 
+    agent: str | None = None
     bin: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     args: list[str] = Field(default_factory=list)
@@ -212,6 +213,8 @@ class FleetRoleSettings(BaseModel):
     """
 
     permission_mode: str = "auto"
+    sandbox: str | None = None
+    approval_policy: str | None = None
     worktree: bool = False
     extra_args: list[str] = Field(default_factory=list)
 
@@ -248,10 +251,26 @@ class FleetSettings(BaseModel):
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 
+class AgentModelDefault(BaseModel):
+    model: str | None = None
+    effort: str | None = None
+
+
+class AgentModelSettings(AgentModelDefault):
+    roles: dict[str, AgentModelDefault] = Field(default_factory=dict)
+
+
+class AgentSettings(BaseModel):
+    mcp: bool = False
+    default: str | None = None
+    models: dict[str, AgentModelSettings] = Field(default_factory=dict)
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
     profile: str = "default"
+    agents: AgentSettings = Field(default_factory=AgentSettings)
     api_url: str = "https://api.aisquare.studio"
     default_pool: Pool = "project"
     capture: CaptureSettings = Field(default_factory=CaptureSettings)

@@ -9,7 +9,7 @@
 Type `asq` and you get a full-screen, mouse-driven view: your projects on the
 left, and on the right a **manager** agent you task in prose — it plans, spawns
 coders, testers and reviewers, and loops until the goal is met. Click any of
-them and you are inside its *real* Claude Code session, typing at it directly.
+them and you are inside its *real* Claude Code or Codex session, typing at it directly.
 Nothing is relayed or re-rendered as a chat.
 
 Underneath, agents get a **memory** that persists across sessions — your
@@ -20,6 +20,11 @@ It's a single CLI, local-first, backed by one SQLite file. No daemon, no
 account, no cloud dependency.
 
 ## Install
+
+Claude Code is the compatibility default. For Codex, use the installer's
+`--agent codex`, or run `asq agents connect codex` and `asq agents use codex`
+on an existing installation. Review the installed hooks in Codex's `/hooks`
+menu. [Coding-agent setup, mixed teams and compatibility](docs/coding-agents.md).
 
 One line. It works out what your machine already has, installs only what is
 missing, and ends by offering to open the UI:
@@ -70,7 +75,8 @@ curl -fsSL .../install.sh | sh -s -- --yes --no-agent
 | --- | --- |
 | `--yes` | Never prompt, and do not open the UI at the end. For CI and Dockerfiles. |
 | `--dry-run` | Print every command, run none. |
-| `--no-agent` | Skip Claude Code. |
+| `--agent NAME` | Select `claude-code` (default) or `codex`. |
+| `--no-agent` | Skip coding agent installation and hooks. |
 | `--no-system-deps` | Skip tmux, gh, git and Node. |
 | `--project DIR` | Register `DIR` instead of the current directory. |
 | `--no-project` | Set up the machine, register nothing. |
@@ -118,9 +124,9 @@ That's the whole setup. From inside the UI:
 1. **Click `+` beside Fleet** and point it at a directory. It registers the
    project and runs a health check in the background, streaming the log — you
    never leave the UI. The project appears in the navigator on the left.
-2. **Click the project**, then press *Start manager*. Its live Claude Code
+2. **Click the project**, then press *Start manager*. Its live coding-agent
    session fills the pane. **Type your goal in prose**, exactly as you would to
-   any Claude session.
+   any supported terminal agent session.
 3. **Watch the agents appear** under the project, each with a role icon
    (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a live
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU**, **💤 exited**.

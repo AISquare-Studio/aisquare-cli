@@ -7,7 +7,13 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
+from aisquare.cli.common import (
+    emit_agents,
+    emit_connected,
+    emit_disconnected,
+    expected_config_write_errors,
+    fail,
+)
 from aisquare.core.console import stderr_console
 from aisquare.services import agents as agents_service
 
@@ -44,8 +50,7 @@ ConfigDir = Annotated[
     Path | None,
     typer.Option(
         "--config-dir",
-        help="Claude Code config directory to target (for CLAUDE_CONFIG_DIR "
-        "installs, e.g. ~/.claude4). Default: $CLAUDE_CONFIG_DIR or ~/.claude.",
+        help="Agent config directory. Default: its native environment override or home.",
     ),
 ]
 
@@ -75,3 +80,25 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
             "with --config-dir, disconnect with the same one"
         )
     emit_disconnected(name)
+
+
+@app.command("use")
+def use(
+    name: AgentName,
+    project: Annotated[bool, typer.Option("--project", help="Set this project's default.")] = False,
+) -> None:
+    """Choose the coding agent for future launches (role bindings take precedence)."""
+    import json
+
+    from aisquare.core.state import get_state
+    from aisquare.services import agent_launch
+
+    try:
+        with expected_config_write_errors():
+            scope = agent_launch.use(name, project=project)
+    except ValueError as exc:
+        fail(str(exc), error="unknown_agent")
+    if get_state().json_output:
+        typer.echo(json.dumps({"agent": name, "scope": scope}))
+    else:
+        typer.echo(f"Default coding agent: {name} ({scope})")

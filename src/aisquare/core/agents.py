@@ -18,6 +18,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from aisquare.core import paths
+from aisquare.core.agent_adapters import adapters, get_adapter
+from aisquare.core.agent_adapters.types import HookSpec, config_home
 from aisquare.models import AgentHookSite, AgentInfo
 
 CONTEXT_HOOK_TIMEOUT_SECONDS = 120
@@ -56,6 +58,7 @@ class AgentSpec:
     home: Path
     context_files: tuple[Path, ...]
     settings_path: Path | None = None  # where aisquare installs hooks, if supported
+    hooks: tuple[HookSpec, ...] = ()
 
 
 def _home() -> Path:
@@ -80,19 +83,22 @@ def _claude_home(config_dir: Path | None = None) -> Path:
 
 
 def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
-    home = _home()
-    claude = _claude_home(config_dir)
-    return [
-        AgentSpec(
-            "claude-code",
-            "Claude Code",
-            claude,
-            (claude / "CLAUDE.md",),
-            settings_path=claude / "settings.json",
-        ),
-        AgentSpec("cursor", "Cursor", home / ".cursor", ()),
-        AgentSpec("codex", "Codex", home / ".codex", ()),
-    ]
+    specs = []
+    for adapter in adapters():
+        directory = config_home(adapter, _home(), os.environ, config_dir)
+        specs.append(
+            AgentSpec(
+                adapter.id,
+                adapter.label,
+                directory,
+                adapter.context_files(directory),
+                directory / adapter.settings_name,
+                adapter.capabilities.hooks,
+            )
+        )
+    # Detection of this legacy IDE entry is preserved; it has no terminal adapter.
+    specs.insert(1, AgentSpec("cursor", "Cursor", _home() / ".cursor", ()))
+    return specs
 
 
 _PROGRAM_NAMES = frozenset({"aisquare", "asq"})
@@ -187,9 +193,11 @@ def _is_aisquare_hook_command(command: str) -> bool:
         tokens = _split_command(command)
     except ValueError:
         return False
+    if len(tokens) >= 2 and tokens[-2] == "--config-dir":
+        tokens = tokens[:-2]
     if len(tokens) < 3 or tokens[-2] != "hook":
         return False
-    if tokens[-1] not in {subcommand for _, subcommand in _HOOKS}:
+    if tokens[-1] not in {"codex", *(subcommand for _, subcommand in _HOOKS)}:
         return False
     return _is_aisquare_program(tokens[0]) or tokens[-4:-2] == ["-m", "aisquare"]
 
@@ -208,58 +216,111 @@ def _is_aisquare_group(group: Any) -> bool:
     )
 
 
+def _without_owned(groups: Any) -> list[Any]:
+    """Remove our handlers, retaining unrelated handlers even in the same group."""
+    if not isinstance(groups, list):
+        return []
+    kept: list[Any] = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            kept.append(group)
+            continue
+        handlers = [
+            item
+            for item in group["hooks"]
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("command"), str)
+                and _is_aisquare_hook_command(item["command"])
+            )
+        ]
+        if handlers:
+            kept.append({**group, "hooks": handlers})
+    return kept
+
+
+def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+    import tempfile
+
+    payload = json.dumps(settings, indent=2) + "\n"
+    # No change means no rewrite: Codex trust refers to the installed definition.
+    if path.exists() and path.read_text(encoding="utf-8") == payload:
+        return
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, filename = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    temp = Path(filename)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _settings_for_write(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object; existing settings preserved")
+    return value
+
+
 def install_hooks(name: str, config_dir: Path | None = None) -> bool:
-    """Install aisquare's lifecycle hooks. False if the agent is unsupported."""
+    """Merge native hooks; preserve other handlers and avoid partial settings writes."""
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return False
-    settings = _read_settings(spec.settings_path)
-    hooks = settings.get("hooks")
+    settings = _settings_for_write(spec.settings_path)
+    hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
-        hooks = {}
-    command = _aisquare_command()  # already shell-quoted where needed
-    for event, subcommand in _HOOKS:
-        groups = hooks.get(event)
-        kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
-        entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {subcommand}"}
-        if event in _CONTEXT_HOOKS:
-            # Never below the ceiling the CI hook may wait for; never *reducing*
-            # a longer one the operator chose deliberately.
-            existing = _installed_timeout(groups, event)
-            entry["timeout"] = max(CONTEXT_HOOK_TIMEOUT_SECONDS, existing or 0)
-        kept.append({"hooks": [entry]})
-        hooks[event] = kept
+        raise ValueError(f"{spec.settings_path}: hooks must be an object")
+    command = _aisquare_command()
+    for hook in spec.hooks:
+        groups = hooks.get(hook.event)
+        kept = _without_owned(groups)
+        suffix = f" --config-dir {_quote(str(spec.home))}" if hook.command == "codex" else ""
+        entry: dict[str, Any] = {
+            "type": "command",
+            "command": f"{command} hook {hook.command}{suffix}",
+        }
+        if hook.timeout is not None:
+            entry["timeout"] = max(hook.timeout, _installed_timeout(groups, hook.event) or 0)
+        group: dict[str, Any] = {"hooks": [entry]}
+        if hook.matcher is not None:
+            group["matcher"] = hook.matcher
+        kept.append(group)
+        hooks[hook.event] = kept
     settings["hooks"] = hooks
-    spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
-    spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(spec.settings_path, settings)
     return True
 
 
 def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
-    """Remove aisquare's hooks from the agent's settings. True if any were removed."""
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
         return False
-    settings = _read_settings(spec.settings_path)
+    settings = _settings_for_write(spec.settings_path)
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
     removed = False
-    for event, _ in _HOOKS:
-        groups = hooks.get(event)
-        if not isinstance(groups, list):
-            continue
-        kept = [g for g in groups if not _is_aisquare_group(g)]
-        if len(kept) != len(groups):
+    for hook in spec.hooks:
+        groups = hooks.get(hook.event)
+        kept = _without_owned(groups)
+        if isinstance(groups, list) and kept != groups:
             removed = True
-        if kept:
-            hooks[event] = kept
-        else:
-            hooks.pop(event, None)
+            if kept:
+                hooks[hook.event] = kept
+            else:
+                hooks.pop(hook.event, None)
     if not hooks:
         settings.pop("hooks", None)
     if removed:
-        spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        _write_settings(spec.settings_path, settings)
     return removed
 
 
@@ -289,7 +350,8 @@ def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
     operator hand-edited). :func:`hook_timeout_shortfall` reports that, on its
     own line, with the same fix.
     """
-    return not _missing_events(name, config_dir, reconciled=False)
+    spec = _spec(name, config_dir)
+    return bool(spec and spec.hooks) and not _missing_events(name, config_dir, reconciled=False)
 
 
 def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[str]:
@@ -308,14 +370,14 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
     whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`."""
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None or not spec.settings_path.exists():
-        return [event for event, _ in _HOOKS]
+        return [hook.event for hook in spec.hooks] if spec else [event for event, _ in _HOOKS]
     hooks = _read_settings(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
-        return [event for event, _ in _HOOKS]
+        return [hook.event for hook in spec.hooks] if spec else [event for event, _ in _HOOKS]
     accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
     return [
         event
-        for event, _ in _HOOKS
+        for event in (hook.event for hook in spec.hooks)
         if not any(accepts(group, event) for group in (hooks.get(event) or []))
     ]
 
@@ -465,7 +527,10 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
         )
         for directory in connected_dirs(spec.name, registry)
     ]
+    readiness, detail = integration_readiness(spec.name, _hook_dir(spec))
     return AgentInfo(
+        readiness=readiness,
+        detail=detail,
         name=spec.name,
         detected=spec.home.exists() or bool(existing),
         config_paths=existing,
@@ -490,3 +555,51 @@ def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
     """Existing context files for an agent (its content, for ingestion)."""
     spec = _spec(name, config_dir)
     return [path for path in spec.context_files if path.exists()] if spec else []
+
+
+def hook_fingerprint(name: str, config_dir: Path) -> str:
+    import hashlib
+
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return ""
+    settings = _read_settings(spec.settings_path)
+    return hashlib.sha256(
+        json.dumps(settings.get("hooks", {}), sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _observation_path(name: str, config_dir: Path) -> Path:
+    import hashlib
+
+    key = hashlib.sha256(f"{name}:{config_dir.resolve()}".encode()).hexdigest()[:24]
+    return paths.aisquare_home() / "cache" / f"agent-hooks-{key}.json"
+
+
+def observe_hooks(name: str, config_dir: Path) -> None:
+    """Evidence that the current native hook definition actually executed."""
+    _write_settings(
+        _observation_path(name, config_dir),
+        {
+            "fingerprint": hook_fingerprint(name, config_dir),
+        },
+    )
+
+
+def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
+    if not hooks_installed(name, config_dir):
+        return "not_configured", ""
+    try:
+        adapter = get_adapter(name)
+    except ValueError:
+        return "unsupported", "No terminal integration is available"
+    if not adapter.capabilities.requires_hook_trust:
+        return "configured", ""
+    observed = _read_settings(_observation_path(name, config_dir))
+    if observed.get("fingerprint") == hook_fingerprint(name, config_dir):
+        return "observed", "Native hooks observed working; current session policy still applies"
+    return (
+        "unverified",
+        "Hooks configured; open /hooks in Codex to review and trust them. "
+        "AISquare has not yet observed this definition run.",
+    )

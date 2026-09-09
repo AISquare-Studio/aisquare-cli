@@ -211,3 +211,19 @@ def notification() -> None:
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("notification", exc)
         return
+
+
+@app.command("codex")
+def codex(config_dir: str | None = typer.Option(None, "--config-dir")) -> None:
+    """Decode Codex native hooks and run the shared lifecycle services."""
+    import os
+
+    from aisquare.services.agent_events import handle_codex
+
+    try:
+        directory = Path(config_dir or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        output = handle_codex(_payload(), directory)
+        if output:
+            typer.echo(output)
+    except Exception as exc:
+        _cost_of_failing_open("codex", exc, cost="this native event was not recorded")

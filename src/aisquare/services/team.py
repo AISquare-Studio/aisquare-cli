@@ -1235,6 +1235,9 @@ def hook_session_start(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Register this session with the orchestrator and return the board injection.
 
@@ -1260,13 +1263,15 @@ def hook_session_start(
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
+                agent=agent,
+                native_session_id=native_session_id or session_id,
                 project_id=project.id,
                 role=role or (known.role if known else "unassigned"),
                 started_at=now,
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
                 transcript_path=transcript_path,
-                account=session_account(transcript_path),
+                account=account or session_account(transcript_path),
                 model=model,
                 effort=effort,
             )
@@ -1291,6 +1296,9 @@ def hook_prompt_heartbeat(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Heartbeat on prompt submit; returns the teammate delta to inject (or '').
 
@@ -1311,13 +1319,15 @@ def hook_prompt_heartbeat(
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
+                    agent=agent,
+                    native_session_id=native_session_id or session_id,
                     project_id=project.id,
                     role=role or "unassigned",
                     started_at=now,
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
-                    account=session_account(transcript_path),
+                    account=account or session_account(transcript_path),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
                 )
@@ -1748,7 +1758,11 @@ def _render_board(
                 parts.append(f"[{session.model}]")
                 # base_role: a seat rides its role's ladder, so `coder1` on a
                 # model outside the coder ladder is flagged like `coder` is.
-                mismatch = harness.model_mismatch(base_role(session.role), session.model)
+                mismatch = (
+                    harness.model_mismatch(base_role(session.role), session.model)
+                    if session.agent in (None, "claude-code")
+                    else None
+                )
                 if mismatch:
                     parts.append("⚠ off-ladder")
             if session.focus:

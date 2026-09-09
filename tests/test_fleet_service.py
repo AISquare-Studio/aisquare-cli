@@ -477,6 +477,8 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     assert "--command" not in command, "no --bin given: launch resolves the binary itself"
     assert spawned["env"] == {
         "AISQUARE_FLEET_AGENT": agent.id,
+        "AISQUARE_LAUNCH_ID": "",
+        "AISQUARE_CODING_AGENT": "claude-code",
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
@@ -1088,7 +1090,11 @@ def test_spawn_can_keep_native_agent_teams_on(
     _settings(monkeypatch, disable_native_agent_teams=False)
     agent = _coder(project)
     env = tmux.spawned[0]["env"]
-    assert env == {"AISQUARE_FLEET_AGENT": agent.id}
+    assert env == {
+        "AISQUARE_FLEET_AGENT": agent.id,
+        "AISQUARE_LAUNCH_ID": "",
+        "AISQUARE_CODING_AGENT": "claude-code",
+    }
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(

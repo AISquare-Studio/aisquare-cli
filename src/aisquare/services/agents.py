@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
@@ -41,7 +42,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     info = agent_core.detect(name, config_dir)
     if info is None:
         raise KeyError(name)
-    if not info.detected:
+    if not info.detected and not (name == "codex" and shutil.which("codex")):
         raise ValueError(f"{name} is not installed on this machine")
 
     sections: list[str] = []
@@ -60,7 +61,20 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
 
     hooks_installed = agent_core.install_hooks(name, config_dir)
     agent_core.set_connected(name, True, config_dir)
-    return AgentConnection(name=name, hooks_installed=hooks_installed, imported=added)
+    readiness, detail = (
+        agent_core.integration_readiness(
+            name, config_dir or agent_core.ambient_hook_dir(name) or Path.home()
+        )
+        if hooks_installed
+        else ("unsupported", "No terminal integration is available")
+    )
+    return AgentConnection(
+        name=name,
+        hooks_installed=hooks_installed,
+        imported=added,
+        readiness=readiness,
+        detail=detail,
+    )
 
 
 def disconnect(name: str, config_dir: Path | None = None) -> bool:

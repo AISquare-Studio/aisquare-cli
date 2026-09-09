@@ -40,7 +40,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import credentials as credentials_store
-from aisquare.core.store import is_locked_error
+from aisquare.core.store import is_locked_error, store_session
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
@@ -87,6 +87,20 @@ def client_session_id(project_id: str) -> str:
     every other project's board would render the remote unattributed while
     the first kept a phantom live session forever.
     """
+    with store_session() as store:
+        for env_key, prefix in (
+            ("AISQUARE_LAUNCH_ID", "launch"),
+            ("AISQUARE_FLEET_AGENT", "fleet"),
+        ):
+            token = os.environ.get(env_key)
+            if token:
+                bound = store.get_meta(f"{prefix}-session:{token}")
+                session = store.get_session(bound) if bound else None
+                if session is not None and session.project_id == project_id:
+                    return session.id
+                raise ValueError(
+                    "Local agent session has not joined this board yet; retry after SessionStart"
+                )
     client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
     return f"mcp:{client}:{project_id.removeprefix('prj_')[:6]}"
 
@@ -112,6 +126,10 @@ def _ensure_virtual_session() -> str:
         raise TeamDisabledError()
     with store_session() as store:
         project = team_project(None)
+        bound_id = client_session_id(project.id)
+        bound_session = store.get_session(bound_id)
+        if bound_session is not None and not bound_id.startswith("mcp:"):
+            return bound_id
         if not store.team_active(project.id):
             raise ValueError(
                 f"the agent orchestrator is not active for {project.root} — start `aisquare serve` "

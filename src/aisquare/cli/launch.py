@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 from typing import Annotated
 
 import typer
@@ -32,8 +31,8 @@ from aisquare.cli.common import fail
 from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
+from aisquare.services import agent_launch, explainability_ops
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -107,6 +106,7 @@ def launch(
             metavar="CMD",
         ),
     ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
     env_pairs: Annotated[
         list[str] | None,
         typer.Option(
@@ -143,8 +143,17 @@ def launch(
     # alone and ignore the binding entirely, which is worse than not supporting
     # it: the docstring promised the profile supplied the binary, so `launch`
     # silently started the DEFAULT agent under the right role name and exited 0.
-    resolution = harness.resolve_binary(role, override=command)
-    binary = shutil.which(resolution.binary)
+    try:
+        selected = agent_launch.resolve(
+            role,
+            agent=agent,
+            binary=command,
+            env_overrides=harness.parse_env_pairs(env_pairs or []),
+        )
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
+    resolution = selected.binary
+    binary = agent_launch.executable(selected)
     if binary is None:
         # Name the candidate AND who chose it — a bare "not on your PATH" sends
         # the reader hunting through flag, env and config to learn which won.
@@ -176,11 +185,7 @@ def launch(
     # The role's bound spec plus this launch's overrides, carried verbatim.
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.
-    try:
-        overrides = harness.parse_env_pairs(env_pairs or [])
-    except ValueError as exc:
-        fail(str(exc), error="bad_env_pair")
-    profile = harness.resolve_profile(role, env_overrides=overrides)
+    profile = selected.profile
     if profile.notice is not None:
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
@@ -189,6 +194,16 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
+    import uuid
+
+    env[agent_launch.ACTIVE_AGENT_ENV] = selected.adapter.id
+    if os.environ.get("AISQUARE_LAUNCH_ID"):
+        env.pop("AISQUARE_FLEET_AGENT", None)
+    env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
+    if project is not None:
+        env.setdefault("AISQUARE_TEAM_HUB", str(project.root))
+    if selected.adapter.id != "claude-code":
+        env[selected.adapter.home_env] = str(selected.config_dir)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
     try:
         tracing = load_config().explainability
@@ -202,7 +217,7 @@ def launch(
         )
     #: Appended to the agent's argv, and empty unless a trace actually happened.
     pinned_id: list[str] = []
-    if tracing is not None and tracing.enabled:
+    if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
         # Fail-open by contract: wire_session returns an empty env delta (plus
         # the reason) rather than raising, so a dead or wrong proxy can only
         # ever cost the trace, never the launch. Disabled config skips even
@@ -285,7 +300,24 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    argv = [resolution.binary, *profile.args, *ctx.args, *pinned_id]
+    native_trace_args, native_trace_note = agent_launch.telemetry_args(
+        selected, env, [*profile.args, *ctx.args]
+    )
+    if native_trace_note:
+        stderr_console().print(native_trace_note, markup=False)
+    try:
+        model_args = agent_launch.native_model_args(selected, role, [*profile.args, *ctx.args])
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
+    argv = [
+        resolution.binary,
+        *model_args,
+        *native_trace_args,
+        *agent_launch.mcp_args(selected),
+        *profile.args,
+        *ctx.args,
+        *pinned_id,
+    ]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

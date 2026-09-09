@@ -435,6 +435,12 @@ class _KnownFix:
 #: surface for "what can one click run".
 KNOWN_FIXES: tuple[_KnownFix, ...] = (
     _KnownFix(
+        "agents connect codex",
+        ("agents", "connect", "codex"),
+        "machine",
+        valued=frozenset({"--config-dir"}),
+    ),
+    _KnownFix(
         "agents connect claude-code",
         ("agents", "connect", "claude-code"),
         "machine",

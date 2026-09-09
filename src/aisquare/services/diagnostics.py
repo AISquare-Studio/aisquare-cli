@@ -113,6 +113,7 @@ def doctor(
         _check_repomix(),
         _check_tiktoken(),
         _check_claude_code(),
+        *_check_other_agents(cwd),
         _check_tmux(),
         _check_gh(),
         _check_snapshot(cwd),
@@ -1140,6 +1141,8 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
         interference = harness.interfering_env()
         mismatches: list[str] = []
         for session in live:
+            if session.agent not in (None, "claude-code"):
+                continue
             # `base_role`: a numbered seat (`coder1`, the shape README documents
             # for a parallel crew) rides its role's ladder, so it is judged
             # against it. Keyed on the raw role, `ROLE_PROFILES.get` missed and
@@ -1293,3 +1296,45 @@ def _check_fleet(
             f"not evaluated ({exc}) — stale fleet rows, if any, go unreported until "
             "the store opens",
         )
+
+
+def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
+    from aisquare.core.agent_adapters import adapters
+    from aisquare.services import agent_launch
+
+    checks = []
+    for adapter in adapters():
+        if adapter.id == "claude-code":
+            continue  # legacy diagnostic includes detailed timeout/version checks
+        info = agent_core.detect(adapter.id)
+        if info is None or not info.detected:
+            checks.append(_ok(adapter.id, f"{adapter.label} not detected on this machine"))
+            continue
+        directories = set(agent_core.connected_dirs(adapter.id))
+        ambient = agent_core.ambient_hook_dir(adapter.id)
+        if ambient:
+            directories.add(ambient)
+        for directory in sorted(directories):
+            state, detail = agent_core.integration_readiness(adapter.id, directory)
+            if state in {"configured", "observed"}:
+                checks.append(_ok(adapter.id, f"{adapter.label}: {state} in {directory}"))
+            else:
+                fix = f"aisquare agents connect {adapter.id} --config-dir {directory}"
+                if state == "unverified":
+                    fix = "Open /hooks in Codex to review hooks; then start a session"
+                checks.append(
+                    _warn(adapter.id, f"{adapter.label}: {state} in {directory}. {detail}", fix)
+                )
+    try:
+        selected = agent_launch.resolve(cwd=cwd)
+        if shutil.which(selected.binary.binary) is None:
+            checks.append(
+                _warn(
+                    "coding-agent",
+                    f"Selected agent executable {selected.binary.binary!r} is not on PATH",
+                    selected.adapter.install_hint,
+                )
+            )
+    except ValueError as exc:
+        checks.append(_warn("coding-agent", str(exc), "aisquare agents use claude-code"))
+    return checks

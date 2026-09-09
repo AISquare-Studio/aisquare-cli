@@ -328,7 +328,15 @@ def fake() -> FakeTmux:
 # --- rendering ----------------------------------------------------------------------------
 
 
-def test_renders_text_and_sgr_colour(fake: FakeTmux, tmp_path: Path) -> None:
+def test_renders_text_and_sgr_colour(
+    fake: FakeTmux,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This test asserts colour; an automation shell's NO_COLOR would deliberately
+    # make Textual map the same ANSI cells to greyscale.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
     async def drive() -> tuple[list[str], Style, Style, Style]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:

@@ -479,9 +479,20 @@ def test_the_key_never_lands_in_config_toml(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_the_sdk_probe_does_not_import_the_sdk() -> None:
     """Importing it costs opentelemetry + httpx; status must stay cheap."""
-    service.sdk_available()
+    import subprocess
 
-    assert service.SDK_MODULE not in sys.modules
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from aisquare.services import explainability as s; "
+            "s.sdk_available(); assert s.SDK_MODULE not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_fake_sdk_module_shape_matches_what_the_service_calls() -> None:

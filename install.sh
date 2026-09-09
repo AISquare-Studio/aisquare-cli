@@ -115,6 +115,8 @@ HAVE_WGET=0
 UV_VERSION=""
 CLI_VERSION=""
 CLAUDE_VERSION=""
+CODEX_VERSION=""
+SELECTED_AGENT="claude-code"
 TMUX_VERSION=""
 GH_VERSION=""
 GIT_VERSION=""
@@ -580,6 +582,7 @@ survey() {
     have uv && UV_VERSION=$(version_of_uv || true)
     have aisquare && CLI_VERSION=$(version_of_aisquare || true)
     have claude && CLAUDE_VERSION=$(version_of_claude || true)
+    have codex && CODEX_VERSION=$(codex --version 2>/dev/null | first_line | cut -d' ' -f2 || true)
     have tmux && TMUX_VERSION=$(version_of_tmux || true)
     have gh && GH_VERSION=$(version_of_gh || true)
     have git && GIT_VERSION=$(version_of_git || true)
@@ -588,6 +591,7 @@ survey() {
     _report uv "$UV_VERSION"
     _report aisquare "$CLI_VERSION"
     _report "Claude Code" "$CLAUDE_VERSION"
+    [ "$SELECTED_AGENT" != codex ] || _report "Codex" "$CODEX_VERSION"
     _report tmux "$TMUX_VERSION"
     _report gh "$GH_VERSION"
     _report git "$GIT_VERSION"
@@ -775,7 +779,14 @@ short_circuit() {
     # Code IS the requested state, and demanding it here meant a second run
     # never short-circuited — measured in the container matrix, where every
     # cell passes --no-agent.
-    [ "$WANT_AGENT" = 0 ] || [ -n "$CLAUDE_VERSION" ] || return 1
+    if [ "$WANT_AGENT" = 1 ]; then
+        if [ "$SELECTED_AGENT" = codex ]; then
+            [ -n "$CODEX_VERSION" ] || return 1
+            return 1 # init must also persist the explicitly selected agent
+        else
+            [ -n "$CLAUDE_VERSION" ] || return 1
+        fi
+    fi
     have aisquare || return 1
 
     # A SUBSET, not an equal set. Measured on macOS, where the amber list came
@@ -866,7 +877,9 @@ banner() {
         _plan="$_plan\n  skip     tmux/gh/Node (--no-system-deps)"
     fi
 
-    if [ "$WANT_AGENT" = 1 ]; then
+    if [ "$WANT_AGENT" = 1 ] && [ "$SELECTED_AGENT" = codex ]; then
+        _plan="$_plan\n  install  Codex CLI (npm; keep current installation unless --upgrade-all)"
+    elif [ "$WANT_AGENT" = 1 ]; then
         [ "$CLAUDE_ACTION" = install ] && _plan="$_plan\n  install  Claude Code"
         [ "$CLAUDE_ACTION" = update ] && _plan="$_plan\n  update   Claude Code $CLAUDE_VERSION (via its own updater)"
     else
@@ -874,7 +887,7 @@ banner() {
     fi
 
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
-        _plan="$_plan\n  register $PROJECT_DIR as a project, and connect claude-code's hooks"
+        _plan="$_plan\n  register $PROJECT_DIR as a project, and connect $SELECTED_AGENT's hooks"
     else
         _plan="$_plan\n  set up   ~/.aisquare (no project registered)"
     fi
@@ -887,7 +900,11 @@ banner() {
     note "~/.local/bin/                     uv, aisquare, asq, claude"
     note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment"
     note "~/.aisquare/                      config.toml, context.db, projects/"
-    note "~/.claude/settings.json           MERGED — aisquare's hook groups only"
+    if [ "$SELECTED_AGENT" = codex ]; then
+        note "\$CODEX_HOME/hooks.json             MERGED — AISquare hooks; review with /hooks in Codex"
+    else
+        note "~/.claude/settings.json           MERGED — aisquare's hook groups only"
+    fi
     say ""
 
     if [ "$DRY_RUN" = 1 ]; then
@@ -1531,6 +1548,32 @@ _install_node_via_fnm() {
 # 14  install_claude — the Agent class. WARN-ONLY (§3.2).
 # ---------------------------------------------------------------------------
 
+install_agent() {
+    case "$SELECTED_AGENT" in
+        claude-code) install_claude ;;
+        codex)
+            [ "$WANT_AGENT" = 1 ] || return 0
+            if [ -n "$CODEX_VERSION" ] && [ "$UPGRADE_ALL" = 0 ]; then
+                good "Codex $CODEX_VERSION"
+                return 0
+            fi
+            if [ "$DRY_RUN" = 1 ]; then
+                note "would run: npm install --global --prefix ~/.local @openai/codex"
+                return 0
+            fi
+            if [ "$OFFLINE" = 1 ] || ! have npm; then
+                warn "Codex needs npm and network access to install. Run npm install --global --prefix ~/.local @openai/codex when available."
+                return 0
+            fi
+            if run npm install --global --prefix "$HOME/.local" @openai/codex; then
+                INSTALLED_LIST="$INSTALLED_LIST codex"
+            else
+                warn "Codex installation failed; install it with npm install --global --prefix ~/.local @openai/codex."
+            fi
+            ;;
+    esac
+}
+
 install_claude() {
     [ "$WANT_AGENT" = 1 ] || {
         note "skipping Claude Code (--no-agent)"
@@ -1601,7 +1644,7 @@ init_home() {
     # bindings made with `team bind` — silently destroying user configuration on
     # every re-run.
     set -- init --local --yes
-    [ "$WANT_AGENT" = 1 ] && set -- "$@" --agent claude-code
+    [ "$WANT_AGENT" = 1 ] && set -- "$@" --agent "$SELECTED_AGENT"
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         set -- "$@" "$PROJECT_DIR"
     else
@@ -1614,6 +1657,10 @@ init_home() {
     fi
     if ! run aisquare "$@"; then
         die "\`aisquare $*\` failed. Rerun with --verbose to see its output."
+    fi
+    if [ "$WANT_AGENT" = 1 ] && [ "$SELECTED_AGENT" != claude-code ]; then
+        run aisquare agents use "$SELECTED_AGENT" || die "could not save coding agent preference"
+        note "Run codex to sign in; open /hooks to review the installed AISquare hooks."
     fi
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         good "~/.aisquare set up, $PROJECT_DIR registered"
@@ -1936,7 +1983,8 @@ have to be handed to sh explicitly):
 
 Options
   -y, --yes            Never prompt, and do not launch the UI at the end.
-      --no-agent       Skip Claude Code.
+      --agent NAME     Terminal coding agent: claude-code (default) or codex.
+      --no-agent       Skip coding agent installation and hooks.
       --no-system-deps Skip tmux, gh and Node.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
       --no-project     Machine setup only; register nothing.
@@ -1974,6 +2022,12 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -y | --yes) ASSUME_YES=1 ;;
+            --agent)
+                [ $# -ge 2 ] || die "--agent needs claude-code or codex"
+                SELECTED_AGENT=$2
+                shift
+                ;;
+            --agent=*) SELECTED_AGENT=${1#--agent=} ;;
             --no-agent) WANT_AGENT=0 ;;
             --no-system-deps) WANT_SYSTEM_DEPS=0 ;;
             --no-project) WANT_PROJECT=0 ;;
@@ -2018,6 +2072,10 @@ parse_args() {
         esac
         shift
     done
+    case "$SELECTED_AGENT" in
+        claude-code | codex) ;;
+        *) die "unknown coding agent: $SELECTED_AGENT (use claude-code or codex)" ;;
+    esac
 }
 
 # Which project to register (§4): $PWD when it is a git repo, and nothing
@@ -2075,7 +2133,7 @@ main() {
     install_gh
     install_git
     install_node
-    install_claude
+    install_agent
     init_home
     run_doctor
     summary

@@ -26,10 +26,12 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 from aisquare.core import codenames, paths
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.config import (
     AppConfig,
     FleetRoleSettings,
     FleetSettings,
+    RoleLaunchProfile,
     load_config,
     save_config,
 )
@@ -101,6 +103,16 @@ class SettingsView(VerticalScroll):
     def compose(self) -> ComposeResult:
         name = self.project.root.name or self.project.id
         yield Static(Text(f"fleet settings — {name}", style="bold"), id="settings-title")
+        config = load_config()
+        agent_options = [("Use default", ""), *((a.label, a.id) for a in adapters())]
+        with Horizontal(classes="row"):
+            yield Label("user coding agent")
+            yield Select(
+                agent_options,
+                value=config.agents.default or "",
+                allow_blank=False,
+                id="default-agent",
+            )
         with Horizontal(classes="row"):
             yield Label("codename")
             yield Input(
@@ -115,6 +127,13 @@ class SettingsView(VerticalScroll):
             suffix = widget_suffix(role)
             with Horizontal(classes="row"):
                 yield Label(role)
+                binding = config.team.profiles.get(role, RoleLaunchProfile())
+                yield Select(
+                    agent_options,
+                    value=binding.agent or "",
+                    allow_blank=False,
+                    id=f"family-{suffix}",
+                )
                 yield Select(
                     permission_options(settings.permission_mode),
                     value=settings.permission_mode,
@@ -123,6 +142,26 @@ class SettingsView(VerticalScroll):
                 )
                 yield Label("worktree", classes="worktree-label")
                 yield Switch(settings.worktree, id=f"worktree-{suffix}")
+            with Horizontal(classes="row"):
+                yield Label("Codex scope / approval")
+                yield Select(
+                    [
+                        ("Role default", ""),
+                        *[(s, s) for s in ("read-only", "workspace-write", "danger-full-access")],
+                    ],
+                    value=settings.sandbox or "",
+                    allow_blank=False,
+                    id=f"sandbox-{suffix}",
+                )
+                yield Select(
+                    [
+                        ("Native default", ""),
+                        *[(s, s) for s in ("on-request", "untrusted", "never")],
+                    ],
+                    value=settings.approval_policy or "",
+                    allow_blank=False,
+                    id=f"approval-{suffix}",
+                )
         yield Static("fleet", classes="section")
         with Horizontal(classes="row"):
             yield Label("escape key")
@@ -161,6 +200,8 @@ class SettingsView(VerticalScroll):
     def reload_form(self) -> None:
         """Discard edits: show what the file holds (the roles list can change with it)."""
         self.fleet = fleet_service.settings()
+        config = load_config()
+        self.query_one("#default-agent", Select).value = config.agents.default or ""
         self._roles = role_order(self.fleet)
         self.query_one("#codename", Input).value = self.project.codename or ""
         self.query_one("#escape-key", Input).value = self.fleet.escape_key
@@ -178,6 +219,11 @@ class SettingsView(VerticalScroll):
             select.set_options(permission_options(settings.permission_mode))
             select.value = settings.permission_mode
             switch.value = settings.worktree
+            self.query_one(f"#family-{suffix}", Select).value = (
+                config.team.profiles.get(role, RoleLaunchProfile()).agent or ""
+            )
+            self.query_one(f"#sandbox-{suffix}", Select).value = settings.sandbox or ""
+            self.query_one(f"#approval-{suffix}", Select).value = settings.approval_policy or ""
 
     # --- writing -----------------------------------------------------------------------
 
@@ -236,6 +282,19 @@ class SettingsView(VerticalScroll):
             self.notify(result, severity="error", timeout=6, markup=False)
             return
         config.fleet = result
+        config.agents.default = str(self.query_one("#default-agent", Select).value) or None
+        for role in self._roles:
+            suffix = widget_suffix(role)
+            family = str(self.query_one(f"#family-{suffix}", Select).value) or None
+            profile = config.team.profiles.get(role, RoleLaunchProfile())
+            if family or role in config.team.profiles:
+                config.team.profiles[role] = profile.model_copy(update={"agent": family})
+            config.fleet.roles[role].sandbox = (
+                str(self.query_one(f"#sandbox-{suffix}", Select).value) or None
+            )
+            config.fleet.roles[role].approval_policy = (
+                str(self.query_one(f"#approval-{suffix}", Select).value) or None
+            )
         try:
             written = save_config(config)
         except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure

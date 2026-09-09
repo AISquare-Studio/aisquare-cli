@@ -1062,6 +1062,36 @@ def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> Shi
 def _emit_span(sdk: Any, record: dict[str, object]) -> None:
     """Replay one spooled record as a span inside the open Run."""
     text = str(record.get("text") or "")
+    if record.get("kind") == "native_event":
+        facts = record.get("native")
+        facts = facts if isinstance(facts, dict) else {}
+        name = str(facts.get("event.name", "codex.event"))
+        if name == "codex.tool_result":
+            with sdk.ToolCallTracer(
+                tool_name=str(facts.get("tool_name") or facts.get("tool.name") or name)
+            ) as tool:
+                tool.set_result(json.dumps(facts, sort_keys=True))
+        elif any(key in facts for key in ("input_token_count", "gen_ai.usage.input_tokens")):
+            model = str(facts.get("model") or facts.get("gen_ai.request.model") or "unknown")
+            with sdk.LLMCallTracer(model=model, provider="openai") as llm:
+                llm.set_token_counts(
+                    prompt=int(
+                        facts.get("input_token_count")
+                        or facts.get("gen_ai.usage.input_tokens")
+                        or 0
+                    ),
+                    completion=int(
+                        facts.get("output_token_count")
+                        or facts.get("gen_ai.usage.output_tokens")
+                        or 0
+                    ),
+                )
+        else:
+            with sdk.DecisionTracer(decision_type=name) as decision:
+                decision.set_selected(
+                    json.dumps(facts, sort_keys=True), reason="Codex native telemetry"
+                )
+        return
     if record.get("kind") == "ci_turn":
         # The CI test bed's ledger-join record: ids and timings, no prose. It
         # is a fact about the turn rather than a decision anyone took, but a

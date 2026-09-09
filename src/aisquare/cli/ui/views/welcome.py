@@ -16,16 +16,20 @@ from textual.widgets import Static
 INSTALL_HINT: dict[str, str] = {
     "tmux": "apt install tmux · dnf install tmux · brew install tmux",
     "claude": "npm install -g @anthropic-ai/claude-code",
+    "codex": "npm install -g @openai/codex",
     "gh": "https://cli.github.com",
 }
 
 
 def presence_lines() -> Text:
     """Which of the tools the fleet leans on are on this machine, with a hint per gap."""
+    from aisquare.services import agent_launch
+
+    selected = agent_launch.resolve()
     text = Text()
     for tool, why in (
         ("tmux", "the fleet's session substrate — agents run inside it"),
-        ("claude", "the agent every fleet role runs on"),
+        (selected.binary.binary, f"selected coding agent ({selected.adapter.label})"),
         ("gh", "PRs for the coder and reviewer"),
     ):
         found = shutil.which(tool)
@@ -33,7 +37,10 @@ def presence_lines() -> Text:
         text.append(f"  {mark} {tool:<7}", style="green" if found else "red")
         text.append(f" {why}\n", style="dim")
         if not found:
-            text.append(f"            install: {INSTALL_HINT[tool]}\n", style="dim italic")
+            text.append(
+                f"            install: {INSTALL_HINT.get(tool, selected.adapter.install_hint)}\n",
+                style="dim italic",
+            )
     return text
 
 

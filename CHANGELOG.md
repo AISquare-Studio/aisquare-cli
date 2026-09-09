@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Terminal Codex integration through a shared coding-agent adapter registry:
+  native hooks, memory, board identity, fleet launches, permissions, optional
+  MCP and native telemetry. User/project defaults and role bindings support
+  mixed Claude Code/Codex teams; setup, status and the UI expose agent choice.
+  See [coding-agent support](docs/coding-agents.md) for native trust and the
+  tested compatibility boundary.
 - **Client decks in `docs/deck/`, one self-contained HTML file each, with the
   PDF beside it.** A one-pager, a five-page short deck and a fifteen-slide pitch
   deck, for showing the fleet to someone who has not seen it. Each HTML embeds

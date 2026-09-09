@@ -10,10 +10,9 @@ import json
 import os
 import re
 import shlex
-import shutil
 import sqlite3
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 
@@ -31,8 +30,8 @@ from aisquare.core.store import (
     is_corrupt_error,
     is_locked_error,
 )
+from aisquare.services import agent_launch, explainability_ops
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
@@ -264,6 +263,7 @@ def spawn(
     role_name: Annotated[
         str, typer.Argument(help="Role to launch (planner/coder/runner/validator/…).")
     ],
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
     agent_bin: Annotated[
         str | None,
         typer.Option(
@@ -334,40 +334,43 @@ def spawn(
     """
     if not orchestrator.team_enabled():
         _fail_team(TeamDisabledError())
-    if effort is not None and harness.normalize_effort(effort) is None:
-        fail(
-            f"unknown --effort '{effort}' — use one of: "
-            f"{', '.join([*harness.EFFORT_SCALE, harness.ULTRACODE])}",
-            error="bad_effort",
+    try:
+        selected = agent_launch.resolve(
+            role_name,
+            agent=agent,
+            binary=agent_bin,
+            env_overrides=_parse_env(env_pairs or []),
+            extra_args=extra_args or [],
         )
-    if refresh:
-        # Forget EVERY cached verdict, not just the rungs this walk touches:
-        # --refresh promises "re-check after an entitlement change", and an
-        # entitlement change is account-wide, not per-role.
-        harness.clear_probe_cache()
-    if (probe is None and harness.probing_enabled()) or probe:
-        # Probes spawn short agent subprocesses; without this line a spawn can
-        # sit silent for seconds and read as hung.
-        typer.echo("probing model availability (cached 24h; --no-probe skips)…", err=True)
-    resolution = harness.resolve_model(role_name, probe=probe, refresh=refresh, effort=effort)
+        if selected.adapter.capabilities.model_ladders and (
+            (probe is None and harness.probing_enabled()) or probe
+        ):
+            typer.echo("probing model availability (cached 24h; --no-probe skips)…", err=True)
+        resolution = agent_launch.model_for(
+            selected, role_name, probe=probe, refresh=refresh, effort=effort
+        )
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
     try:
         tracing: ExplainabilitySettings | None = load_config().explainability
     except Exception as exc:  # fail-open: a broken config costs the trace, never the spawn
         tracing = None
         typer.echo(f"explainability: config unreadable ({exc}) — sessions untraced", err=True)
     env_assignments = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
+    if selected.adapter.id != "claude-code":
+        env_assignments.append(
+            f"{agent_launch.ACTIVE_AGENT_ENV}={shlex.quote(selected.adapter.id)}"
+        )
     # WHICH executable, resolved separately from WHICH model — flag > env >
     # config > default (#52). Reported in the banner because a role silently
     # launching on a different install than the operator expects is the same
     # class of surprise as a silent model swap.
-    binary = harness.resolve_binary(role_name, override=agent_bin)
+    binary = selected.binary
     # WHOSE install, resolved on the same ladder as the binary. Kept separate
     # because they answer different questions and most setups only need this
     # one: parallel accounts are reached through aliases that set
     # CLAUDE_CONFIG_DIR, and an alias is not something --bin could resolve.
-    launch_profile = harness.resolve_profile(
-        role_name, env_overrides=_parse_env(env_pairs or []), extra_args=extra_args or []
-    )
+    launch_profile = selected.profile
     if launch_profile.notice is not None:
         # No silent fail-soft: an unreadable config means this role launches
         # UNBOUND, i.e. possibly on a different install than the operator
@@ -388,17 +391,15 @@ def spawn(
     else:
         argv = [
             binary.binary,
-            "--model",
-            resolution.model,
-            "--effort",
-            resolution.effort,
+            *selected.adapter.model_args(resolution.model or None, resolution.effort or None),
             *launch_profile.args,
         ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
         profile = harness.ROLE_PROFILES.get(role_name)
         mission = profile.mission if profile else "pinned by AISQUARE_MODEL override"
         banner = (
-            f"{role_name}: {resolution.model} @ {resolution.effort} "
+            f"{role_name}: {resolution.model or 'native default'} @ "
+            f"{resolution.effort or 'native effort'} "
             f"[model {resolution.source} · effort {resolution.effort_source}]{skipped} — {mission}"
         )
     if binary.source != "default":
@@ -413,8 +414,35 @@ def spawn(
             for key in sorted(launch_profile.env)
         )
         banner = f"{banner}  ·  env {shown}"
+    argv = [argv[0], *agent_launch.mcp_args(selected), *argv[1:]]
     command = " ".join([*env_assignments, shlex.join(argv)])
-    if tracing is not None and tracing.enabled:
+    if not selected.adapter.capabilities.model_proxy:
+        # A paste must mint its own launch/trace token and native MCP binding.
+        command = " ".join(
+            [
+                *env_assignments,
+                shlex.join(
+                    [
+                        "aisquare",
+                        "launch",
+                        role_name,
+                        "--agent",
+                        selected.adapter.id,
+                        "--command",
+                        binary.binary,
+                        "--",
+                        *(
+                            selected.adapter.model_args(
+                                resolution.model or None, resolution.effort or None
+                            )
+                            if resolution
+                            else []
+                        ),
+                    ]
+                ),
+            ]
+        )
+    if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
         # Never burn a pipeline id into a printable command: every paste would
         # reuse the same id and those sessions would merge into one Run. The
         # eval mints a fresh id per run instead; if tracing is down at run
@@ -442,6 +470,8 @@ def spawn(
                     "effort_source": resolution.effort_source if resolution else None,
                     "skipped": resolution.skipped if resolution else [],
                     "binary": binary.binary,
+                    "agent": selected.adapter.id,
+                    "agent_source": selected.source,
                     "binary_source": binary.source,
                     "env": launch_profile.env,
                     "env_sources": launch_profile.env_sources,
@@ -459,7 +489,7 @@ def spawn(
             if caution:
                 stdout_console().print(f"  ⚠ {caution}", markup=False)
     if execute:
-        if shutil.which(binary.binary) is None:
+        if agent_launch.executable(selected) is None:
             # Names the candidate AND where it came from: a bare "not found"
             # sends the reader hunting through flag, env and config to learn
             # which of them chose it. Never falls back to the default — that
@@ -482,7 +512,13 @@ def spawn(
         # ones name a directory that ought to exist is exactly the coupling
         # this design removes.
         env.update(launch_profile.env)
-        if tracing is not None and tracing.enabled:
+        import uuid
+
+        env[agent_launch.ACTIVE_AGENT_ENV] = selected.adapter.id
+        env.pop("AISQUARE_FLEET_AGENT", None)
+        env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
+        env.setdefault("AISQUARE_TEAM_HUB", str(orchestrator.team_project().root))
+        if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
             # dead or wrong proxy costs the trace, never the spawn. The id is
             # planned from the args this spawn will really run with — a role
@@ -534,6 +570,10 @@ def spawn(
                 # is what the hook inside the agent reads to record the join.
                 env.update(explainability_service.trace_marker(wiring))
 
+        native_trace_args, native_trace_note = agent_launch.telemetry_args(selected, env, argv[1:])
+        if native_trace_note:
+            typer.echo(native_trace_note, err=True)
+        argv = [argv[0], *native_trace_args, *argv[1:]]
         os.execvpe(argv[0], argv, env)
     if not get_state().json_output:
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)
@@ -544,26 +584,32 @@ def harness_status() -> None:
     """Show the role→model matrix and how each ladder resolves right now."""
     if not orchestrator.team_enabled():
         _fail_team(TeamDisabledError())
-    rows = []
+    rows: list[dict[str, Any]] = []
     base, base_source = harness.base_effort()
     for name, profile in harness.ROLE_PROFILES.items():
-        resolution = harness.resolve_model(name, probe=False)
-        assert resolution is not None  # every profiled role resolves
-        pinned = harness.role_model_override(name)
+        try:
+            selected = agent_launch.resolve(name)
+            resolution = agent_launch.model_for(selected, name, probe=False)
+        except ValueError as exc:
+            fail(str(exc), error="agent_configuration")
         rows.append(
             {
                 "role": name,
-                "ladder": profile.ladder,
-                "effort_offset": profile.effort_offset,
-                "effort": resolution.effort,
-                "effort_source": resolution.effort_source,
-                "resolves_to": pinned or resolution.model,
-                "source": "pinned" if pinned else resolution.source,
+                "agent": selected.adapter.id,
+                "agent_source": selected.source,
+                "ladder": profile.ladder if selected.adapter.capabilities.model_ladders else [],
+                "effort_offset": profile.effort_offset
+                if selected.adapter.capabilities.model_ladders
+                else 0,
+                "effort": resolution.effort if resolution else "",
+                "effort_source": resolution.effort_source if resolution else "native-default",
+                "resolves_to": resolution.model if resolution else "",
+                "source": resolution.source if resolution else "native-default",
                 "mission": profile.mission,
-                "binary": harness.resolve_binary(name).binary,
-                "binary_source": harness.resolve_binary(name).source,
-                "env": harness.resolve_profile(name).env,
-                "extra_args": harness.resolve_profile(name).args,
+                "binary": selected.binary.binary,
+                "binary_source": selected.binary.source,
+                "env": selected.profile.env,
+                "extra_args": selected.profile.args,
             }
         )
     interference = harness.interfering_env()
@@ -581,34 +627,21 @@ def harness_status() -> None:
         return
     console = stdout_console()
     console.print(f"base effort: {base} ({base_source})", markup=False)
-    for name, profile in harness.ROLE_PROFILES.items():
-        resolution = harness.resolve_model(name, probe=False)
-        assert resolution is not None  # every profiled role resolves
-        pinned = harness.role_model_override(name)
-        ladder = "→".join(profile.ladder)
-        offset = f"+{profile.effort_offset}" if profile.effort_offset else " 0"
-        source = "pinned" if pinned else resolution.source
-        binary = harness.resolve_binary(name)
-        # The matrix showed WHAT each role runs on and hid WHICH executable
-        # runs it — half the launch decision, invisible.
-        bin_note = "" if binary.source == "default" else f"  bin={binary.binary} [{binary.source}]"
-        launch_profile = harness.resolve_profile(name)
-        # ...and hid the env the role carries, which is the axis a
-        # parallel-install operator actually steers by. Keys only: the values
-        # are paths and tokens and this is a terminal.
-        if not launch_profile.is_empty:
-            carried = ",".join(sorted(launch_profile.env))
-            extra = f"+{len(launch_profile.args)}args" if launch_profile.args else ""
-            bin_note = f"{bin_note}  env={carried}{extra}"
+    for row in rows:
+        ladder = "→".join(row["ladder"]) or "native default"
+        env_keys = ",".join(sorted(row["env"]))
+        env_note = f" env={env_keys}" if env_keys else ""
         console.print(
-            f"{name:<10} {ladder:<20} effort={resolution.effort:<10}({offset}) "
-            f"→ {pinned or resolution.model} [{source}]{bin_note}",
+            f"{row['role']:<10} {row['agent']} [{row['agent_source']}] "
+            f"{ladder} effort={row['effort'] or 'native'} "
+            f"→ {row['resolves_to'] or 'native default'} [{row['source']}] "
+            f"bin={row['binary']} [{row['binary_source']}]{env_note}",
             markup=False,
         )
     if interference:
         console.print(f"⚠ env overrides model selection: {', '.join(interference)}", markup=False)
     console.print(
-        "Resolution shown without probing — `aisquare team spawn <role>` verifies live.",
+        "Resolution shown without probing; native defaults stay with the selected agent.",
         markup=False,
     )
 
@@ -619,6 +652,7 @@ def bind(
         str | None,
         typer.Argument(help="Role to pin. Omit to show the current bindings."),
     ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
     agent_bin: Annotated[
         str | None,
         typer.Option("--bin", help="Executable this role launches, e.g. a wrapper script."),
@@ -677,7 +711,7 @@ def bind(
             settings_service.clear_role_binding(role_name)
         bound = None
     else:
-        if not any((agent_bin, env_pairs, extra_args, unset)):
+        if not any((agent, agent_bin, env_pairs, extra_args, unset)):
             fail(
                 "nothing to bind — pass --bin, --env, --arg, --unset or --clear",
                 error="nothing_to_bind",
@@ -686,6 +720,7 @@ def bind(
             bound = settings_service.bind_role(
                 role_name,
                 agent_bin=agent_bin,
+                agent=agent,
                 env=_parse_env(env_pairs or []),
                 unset=unset or [],
                 args=extra_args or [],
@@ -714,6 +749,7 @@ def _describe(profile: RoleLaunchProfile) -> str:
     view is for editing, and resolving `$HOME` here would hide the very thing
     that makes a binding portable. `team harness` shows what it resolves to."""
     parts = [
+        f"agent={profile.agent}" if profile.agent else "",
         f"bin={profile.bin}" if profile.bin else "",
         "  ".join(f"{key}={value}" for key, value in sorted(profile.env.items())),
         f"args={shlex.join(profile.args)}" if profile.args else "",

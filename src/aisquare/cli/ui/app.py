@@ -515,11 +515,11 @@ class FleetApp(App[None], inherit_bindings=False):
         self._set_doctor_scope(event.project_id)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
-        self.notify(
-            "the spawn dialog is not built yet — from a terminal: aisquare fleet spawn <role>",
-            timeout=6,
-        )
+        from aisquare.cli.ui.views.spawn import SpawnScreen
+
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is not None:
+            self.push_screen(SpawnScreen(project))
 
     async def on_doctor_selected(self, event: DoctorSelected) -> None:
         await self._show("doctor")

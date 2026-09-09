@@ -52,8 +52,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -69,6 +72,21 @@ if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
 _OFF_VALUES = {"0", "false", "no", "off"}
 PROBE_TIMEOUT_SECONDS = 150
 CACHE_TTL = timedelta(hours=24)
+
+
+@dataclass(frozen=True)
+class ProbeContext:
+    """The exact executable and effective account used by a launch.
+
+    The executable's resolved path and stat fingerprint invalidate availability
+    on upgrades without executing wrappers during read-only status queries.
+    """
+
+    binary: str
+    env: dict[str, str]
+
+
+_PROBE_CONTEXT: ContextVar[ProbeContext | None] = ContextVar("agent_probe", default=None)
 
 #: alias → the family token that proves the alias actually resolved to it. Matched
 #: as a substring so full ids (``claude-sonnet-5``), dated legacy ids
@@ -307,6 +325,31 @@ def account_scope() -> str:
     ``CLAUDE_CONFIG_DIR`` is the only account selector Claude Code exposes to
     us; unset means the default ``~/.claude``.
     """
+    context = _PROBE_CONTEXT.get()
+    if context is not None:
+        executable = Path(
+            (
+                shutil.which(context.binary)
+                if context.env.get("PATH") == os.environ.get("PATH")
+                else shutil.which(context.binary, path=context.env.get("PATH"))
+            )
+            or context.binary
+        )
+        identity: list[object] = ["claude-code", str(executable.resolve())]
+        with contextlib.suppress(OSError):
+            stat = executable.stat()
+            identity += [stat.st_mtime_ns, stat.st_size]
+        # Hash account/provider inputs, never expose them in a cache name.
+        identity += sorted(
+            (k, v)
+            for k, v in context.env.items()
+            if k.startswith(("CLAUDE_", "ANTHROPIC_", "AWS_", "GOOGLE_"))
+        )
+        home = Path(context.env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        for name in ("settings.json", ".credentials.json"):
+            with contextlib.suppress(OSError):
+                identity += [(name, (home / name).stat().st_mtime_ns)]
+        return hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:20]
     raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if not raw:
         return "default"
@@ -377,7 +420,8 @@ def _probe_env() -> dict[str, str]:
     junk-run suppression: the traffic is ours not to send in the first place.
     """
     keep = {"AISQUARE_HOME"}  # a relocated tree must stay relocated in the child
-    ambient = spawn.untraced_env()
+    context = _PROBE_CONTEXT.get()
+    ambient = spawn.untraced_env(context.env if context else None)
     env = {k: v for k, v in ambient.items() if k in keep or not k.startswith("AISQUARE_")}
     for name in (
         "ANTHROPIC_MODEL",
@@ -413,8 +457,9 @@ def probe_model(alias: str) -> ProbeResult:
     home = aisquare_home()
     with contextlib.suppress(OSError):
         home.mkdir(parents=True, exist_ok=True)
+    context = _PROBE_CONTEXT.get()
     argv = [
-        "claude",
+        context.binary if context is not None else "claude",
         "-p",
         "reply with exactly: ok",
         "--model",
@@ -518,6 +563,7 @@ def resolve_model(
     probe: bool | None = None,
     refresh: bool = False,
     effort: str | None = None,
+    context: ProbeContext | None = None,
 ) -> ModelResolution | None:
     """Resolve the model for ``role`` down its ladder; ``None`` for untiered roles.
 
@@ -527,6 +573,16 @@ def resolve_model(
     rung of a ladder is always accepted without proof — resolution never comes
     back empty-handed, and a launch is never blocked.
     """
+    if context is not None:
+        if refresh:
+            clear_probe_cache()  # retire the legacy ambient cache as well
+        token = _PROBE_CONTEXT.set(context)
+        try:
+            if refresh:
+                clear_probe_cache()
+            return resolve_model(role, probe=probe, refresh=refresh, effort=effort)
+        finally:
+            _PROBE_CONTEXT.reset(token)
     profile = ROLE_PROFILES.get(base_role(role))
     level, effort_source = resolve_effort(role, explicit=effort)
     pinned = role_model_override(role)

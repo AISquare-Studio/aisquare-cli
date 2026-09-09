@@ -260,6 +260,7 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     table.add_column("AGENT")
     table.add_column("DETECTED")
     table.add_column("CONNECTED")
+    table.add_column("INTEGRATION")
     table.add_column("HOOKS IN")
     table.add_column("CONTEXT")
     for agent in agents:
@@ -268,10 +269,14 @@ def emit_agents(agents: list[AgentInfo]) -> None:
             agent.name,
             "yes" if agent.detected else "no",
             "yes" if agent.connected else "no",
+            agent.readiness.replace("_", " "),
             _hook_sites(agent),
             context,
         )
     stdout_console().print(table)
+    for agent in agents:
+        if agent.detected and agent.detail:
+            stdout_console().print(f"{agent.name}: {agent.detail}", markup=False)
 
 
 def _hook_sites(agent: AgentInfo) -> str:
@@ -301,6 +306,8 @@ def emit_connected(connection: AgentConnection) -> None:
     stdout_console().print(
         f"✓ connected {connection.name} — {hooks}; imported {connection.imported} {noun}"
     )
+    if connection.detail:
+        stdout_console().print(connection.detail, markup=False)
 
 
 def emit_onboard(report: OnboardReport) -> None:

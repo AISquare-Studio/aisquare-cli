@@ -1562,3 +1562,29 @@ def test_the_gh_advice_matches_whether_gh_exists(tmp_path: Path) -> None:
     absent = sh('GH_VERSION=""; PKG=apt; _actionable_fix gh; echo', path=base_path(tmp_path))
     assert "install it" in absent.stdout, f"an absent gh was told to log in: {absent.stdout!r}"
     assert "apt install gh" in absent.stdout, absent.stdout
+
+
+def test_codex_selection_installs_into_user_prefix_and_connects() -> None:
+    result = sh("""
+parse_args --agent codex --yes --no-project
+DRY_RUN=0
+OFFLINE=0
+have() { return 0; }
+run() { printf 'RUN'; printf ' <%s>' "$@"; printf '\\n'; }
+install_agent
+init_home
+""")
+    assert result.returncode == 0, result.stderr
+    assert "<npm> <install> <--global> <--prefix>" in result.stdout
+    assert "<@openai/codex>" in result.stdout
+    assert "<aisquare> <init> <--local> <--yes> <--agent> <codex>" in result.stdout
+    assert "<aisquare> <agents> <use> <codex>" in result.stdout
+    assert "/hooks" in result.stdout
+    assert "<claude>" not in result.stdout
+
+
+def test_unknown_agent_is_refused_before_installation() -> None:
+    result = sh("parse_args --agent unsupported; printf SHOULD_NOT_RUN")
+    assert result.returncode != 0
+    assert "unknown coding agent" in result.stdout + result.stderr
+    assert "SHOULD_NOT_RUN" not in result.stdout

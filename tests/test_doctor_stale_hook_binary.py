@@ -25,6 +25,7 @@ runs, against scripts they write.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import stat
 import sys
@@ -509,3 +510,72 @@ def test_the_probe_reads_this_very_install() -> None:
 def test_the_suite_stub_answers_as_this_install() -> None:
     """conftest's premise, asserted: under the suite every probe reports this version."""
     assert agents.hook_binary_version(["/nowhere/aisquare", "--version"]) == __version__
+
+
+# --- review of ac7d7ec: identity, not neighbourhood; one unreadable sibling ---------------
+
+
+def test_two_interpreters_in_one_directory_are_two_installs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """``/usr/bin/python3.11 -m aisquare`` is not current because doctor runs on
+    ``/usr/bin/python3.12``: the two share a directory and nothing else — each has
+    its own site-packages. Sharing the directory used to skip the probe and report
+    this process's version for a sibling whose own answer is 0.3.0rc1."""
+    bin_dir = tmp_path / "usr" / "bin"
+    ours = _fake_aisquare(bin_dir / "python3.12", prints=f"aisquare {__version__}")
+    other = _fake_aisquare(bin_dir / "python3.11", prints=f"aisquare {OLD}")
+    monkeypatch.setattr(sys, "executable", str(ours))
+    _real_probe(monkeypatch)
+
+    state, version = agents.classify_hook_binary(agents.HookBinary(other, module_form=True))
+
+    assert (state, version) == (agents.HOOK_BINARY_STALE, OLD)
+
+    # The same interpreter under another name in that directory IS this install,
+    # still without a process: `python3 -> python3.12`, as every venv spells it.
+    alias = bin_dir / "python3"
+    alias.symlink_to(ours.name)
+    _never_probe(monkeypatch)
+    state, version = agents.classify_hook_binary(agents.HookBinary(alias, module_form=True))
+    assert (state, version) == (agents.HOOK_BINARY_CURRENT, __version__)
+
+    # And the doctor row names the interpreter the hooks actually run.
+    _real_probe(monkeypatch)
+    config = isolated_agent_home / ".claude"
+    _connect(config)
+    _write_hooks(config, f"{other} -P -m aisquare")
+    check = diagnostics._check_claude_code()
+    assert check.status is CheckStatus.warn
+    assert f"{other} ({OLD})" in check.detail
+
+
+def test_an_unreadable_sibling_does_not_take_doctor_down_with_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_agent_home: Path
+) -> None:
+    """``~/.claude-archived/settings.json`` at mode 000 — another account's, a
+    backup — raised PermissionError out of the discovery scan and aborted the
+    whole doctor command. It is skipped: a file this user cannot read cannot be
+    shown to carry our hooks, and the connected directory is still graded."""
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("mode 000 does not stop this user from reading")
+    current = _this_install(monkeypatch, tmp_path)
+    _never_probe(monkeypatch)
+    config = isolated_agent_home / ".claude"
+    _write_hooks(config, str(current))
+    _connect(config)
+    archived = isolated_agent_home / ".claude-archived"
+    archived.mkdir()
+    settings = archived / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    settings.chmod(0)
+
+    try:
+        sites = agents.hook_sites("claude-code")
+        check = diagnostics._check_claude_code()
+    finally:
+        settings.chmod(0o600)
+
+    assert [site.config_dir for site in sites] == [config]
+    assert check.status is CheckStatus.ok
+    assert "all lifecycle hooks installed" in check.detail

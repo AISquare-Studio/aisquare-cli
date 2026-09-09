@@ -636,23 +636,31 @@ def current_install() -> Path:
 
 
 def _same_install(binary: HookBinary) -> bool:
-    """Whether ``binary`` is this install, decided from paths alone — no process.
+    """Whether ``binary`` is THIS program, decided from paths alone — no process.
 
-    Directories are compared UNRESOLVED on purpose. Every venv's ``python`` is a
-    symlink to the same base interpreter, so resolving ``~/a/.venv/bin/python``
-    and ``~/b/.venv/bin/python`` gives one path for two different installs — and
-    ``-m aisquare`` picks its package from the venv beside the symlink, not the
-    target. A different spelling of the same directory (a shim, a symlinked
-    parent) merely falls through to the version probe, which answers correctly.
+    Identity, not neighbourhood. Two interpreters can share a directory and
+    nothing else: ``/usr/bin/python3.11`` and ``/usr/bin/python3.12`` each have
+    their own site-packages, so a hook on one is not "current" because doctor
+    happens to run on the other — and two console scripts in one ``bin`` are no
+    more alike. Sharing the directory used to skip the probe and report this
+    process's version for a sibling that answers 0.3.0rc1.
+
+    So the shortcut needs the same directory AND the same file. The directory is
+    compared UNRESOLVED: every venv's ``python`` is a symlink to one base
+    interpreter, so a resolved path alone would make ``~/a/.venv`` and
+    ``~/b/.venv`` one install, and ``-m aisquare`` picks its package from the
+    venv beside the symlink, not the target. The file is compared RESOLVED, so
+    ``python`` and ``python3`` in one venv — links to the same interpreter — are
+    one install. Anything else is asked its version, once per doctor run.
     """
     program = binary.program
-    if binary.module_form:
-        return program.parent == Path(sys.executable).parent
-    current = current_install()
-    if program.parent == current.parent and _is_aisquare_program(program.name):
+    this = Path(sys.executable) if binary.module_form else current_install()
+    if program == this:
         return True
+    if program.parent != this.parent:
+        return False
     try:
-        return program.resolve() == current.resolve()
+        return program.resolve() == this.resolve()
     except OSError:
         return False
 
@@ -747,6 +755,11 @@ def _claude_dirs_on_disk() -> list[Path]:
     ``settings.json`` holds at least one aisquare hook are returned: a hook that
     is on disk runs whether or not this home ever heard of the directory, and
     that is the only thing that makes a directory doctor's business.
+
+    A candidate whose ``settings.json`` this user cannot read — another
+    account's ``~/.claude-archived``, a backup left at mode 000 — is skipped, not
+    raised: it cannot be shown to carry our hooks, and one unreadable sibling
+    must not cost doctor every other row.
     """
     candidates: list[Path] = []
     env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
@@ -763,7 +776,11 @@ def _claude_dirs_on_disk() -> list[Path]:
         if key in seen or not candidate.is_dir():
             continue
         seen.add(key)
-        if hook_commands("claude-code", candidate):
+        try:
+            ours = bool(hook_commands("claude-code", candidate))
+        except OSError:
+            continue  # unreadable settings.json — see the docstring
+        if ours:
             found.append(candidate)
     return found
 

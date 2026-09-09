@@ -226,6 +226,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fetches belong to other people.
 
 ### Changed
+- **The snapshot token budget is a config knob, and the failure names its
+  numbers (#82).** `aisquare project onboard` on a large repo printed only
+  "codebase too large to pack within the token budget" against a hardcoded
+  150 000, and the `snapshot` doctor line stayed a warning whose fix — a plain
+  `onboard` — only reloaded the same verdict. The budget is now `[snapshot]
+  max_tokens` in `config.toml` (`aisquare config set snapshot.max_tokens <n>`;
+  the default is unchanged), the snapshot records the full-pack and
+  compressed-pack sizes it measured alongside the budget, and `onboard` and
+  `doctor` print the same sentence with all three numbers and both remedies —
+  raise the budget, or add a `.repomixignore` — followed by the `--refresh`
+  re-pack that actually re-measures. A `snapshot.json` written by 0.6.0 has no
+  numbers to name and says so rather than printing zeros. Read from the config
+  file alone, like `[fleet]`: no environment variable, because the config layer
+  has no per-key env rung and one knob is not the place to grow one.
+- **`[snapshot] ignore`: what a pack leaves out, and a built-in list it
+  extends.** Repomix glob patterns, passed to `--ignore`; `aisquare config set
+  snapshot.ignore '**/fixtures/**,docs/generated/**'` (a list key now takes
+  comma-separated items, and `config get` prints them the same way). The
+  built-ins go first whatever the operator sets — `node_modules`, `.venv`,
+  `venv`, `.git`, `__pycache__`, `dist`, `build`, `coverage`,
+  `.aisquare-worktrees`, `*.worktrees` — plus any nested git repository or
+  worktree found below the root, detected by its `.git` entry, so another
+  project's checkout is never packed into this one. The repo's `.gitignore` and
+  `.repomixignore` still apply, read by Repomix itself; the too-large message
+  names both knobs.
+- **Over budget even compressed, the snapshot keeps the skeleton instead of
+  nothing.** The 150 000 cap mirrors a server cap on a pack that is read into a
+  model context. The CLI never does that — `hook session-start` hands the agent
+  the skeleton, pack and index *paths* — so the cap bounded no prompt, only
+  whether a snapshot existed; and the skeleton (`repomix --compress`) was built
+  only when the FULL pack fit, so the repos that most needed one were the only
+  ones without it (measured: 10.99M tokens full, 2.03M compressed). Now the
+  compressed pack is written as `skeleton.repomix.xml` with its per-file index,
+  status `skeleton_only`, every count recorded, any stale full pack removed;
+  the session-start directive lists the skeleton and index and omits the full
+  pack; `doctor` reports it green as `skeleton only: N tokens, F files indexed;
+  full pack skipped over budget B (M tokens)` with no fix, because a fix here
+  was the button pressed forever with a green tick. `max_tokens` now gates
+  only the full pack. `too_large` survives only as a status loaded from a
+  0.6.0 `snapshot.json`.
 - **`serverInfo.version` reports this CLI's version.** mcp 1.x filled an
   omitted server version with the SDK's own package version, so clients saw
   `1.29.1` — a number that named nothing of ours — and 2.x sends the empty
@@ -293,6 +333,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.claude3` reached through `CLAUDE_CONFIG_DIR` was invisible until someone
   ran `agents connect --config-dir` for it. Still read-only: `doctor` never
   rewrites `settings.json`.
+- **The selected project row in the fleet sidebar showed its folder glyph and an
+  empty highlighted band — no name, no codename.** Any project whose basename is
+  wider than the sidebar's title column (25 cells at the default width;
+  `AISquare-Explainability-SDK` is 27) was affected, in every theme. The row's
+  Rich `Text` asks for `no_wrap` and an ellipsis, but Textual keeps only the
+  text and its spans and lets the widget's CSS `text-wrap` decide; its default
+  wraps, so the name landed on a second line that the one-line row clipped. The
+  sidebar's one-line rows — project title, agent rows, the path subtitle, the
+  Doctor lines — now declare `text-wrap: nowrap; text-overflow: ellipsis`, so a
+  long name is cut with `…` where it stands. (#86)
 - **A retention test went red on `main` on a calendar date, with no code
   change.** `test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_taken`
   dated the ref it expects to SURVIVE pruning at a literal `2026-09-02`, five

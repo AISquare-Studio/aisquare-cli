@@ -316,6 +316,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **The selected project row in the fleet sidebar showed its folder glyph and an
+  empty highlighted band — no name, no codename.** Any project whose basename is
+  wider than the sidebar's title column (25 cells at the default width;
+  `AISquare-Explainability-SDK` is 27) was affected, in every theme. The row's
+  Rich `Text` asks for `no_wrap` and an ellipsis, but Textual keeps only the
+  text and its spans and lets the widget's CSS `text-wrap` decide; its default
+  wraps, so the name landed on a second line that the one-line row clipped. The
+  sidebar's one-line rows — project title, agent rows, the path subtitle, the
+  Doctor lines — now declare `text-wrap: nowrap; text-overflow: ellipsis`, so a
+  long name is cut with `…` where it stands. (#86)
 - **A retention test went red on `main` on a calendar date, with no code
   change.** `test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_taken`
   dated the ref it expects to SURVIVE pruning at a literal `2026-09-02`, five

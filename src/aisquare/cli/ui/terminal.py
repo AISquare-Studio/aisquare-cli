@@ -127,6 +127,8 @@ class TerminalPane(Widget, can_focus=True):
     """Where the resize backoff stops, so an unreachable pane costs ~1 process / 8 s."""
     WHEEL_LINES: int = 3
     """History lines one wheel notch moves."""
+    WHEEL_COALESCE: float = 0.02
+    """Seconds notches are gathered before one tmux call carries them all."""
     CACHE_LIMIT: int = 4096
     """Distinct row strings kept as Strips before the cache is emptied."""
 
@@ -167,6 +169,9 @@ class TerminalPane(Widget, can_focus=True):
         self._synced: tuple[str, int, int] | None = None
         self._warned: set[str] = set()
         self._reported_gone = False
+        self._wheel_queue: list[tuple[bool, int, int]] = []
+        """Notches (up?, pane column, pane row) awaiting one forwarding call."""
+        self._wheel_timer: Timer | None = None
 
     # --- what is shown -----------------------------------------------------------------
 
@@ -202,6 +207,10 @@ class TerminalPane(Widget, can_focus=True):
         self._synced = None
         self._resize_retry = self.RESIZE_RETRY
         self._reported_gone = False
+        self._wheel_queue = []
+        if self._wheel_timer is not None:
+            self._wheel_timer.stop()
+            self._wheel_timer = None
         # A new attach may be a new server — ``ManagerTab`` assigns ``server``
         # then calls this — and a cached "extended chords are fine" from a 3.7
         # server would TYPE ``S-Enter`` into an agent on a 3.4 one. Re-read
@@ -223,6 +232,8 @@ class TerminalPane(Widget, can_focus=True):
     def on_unmount(self) -> None:
         if self._timer is not None:
             self._timer.stop()
+        if self._wheel_timer is not None:
+            self._wheel_timer.stop()
         if self._resize_timer is not None:
             self._resize_timer.stop()
 
@@ -466,47 +477,71 @@ class TerminalPane(Widget, can_focus=True):
     def _wheel(self, event: events.MouseEvent, *, up: bool) -> None:
         """Route a wheel notch to whoever can act on it.
 
-        Three panes look identical from outside and want three different things:
+        Panes look alike from outside and want different things:
 
+        * a view this widget has already scrolled into history is the widget's
+          own — the wheel always brings it back, whatever the program wants;
+        * a pane in tmux copy mode belongs to tmux for the moment — forwarding a
+          mouse event there cancels the mode and delivers nothing (measured on
+          3.7c), so the history offset is used instead;
         * a program that tracks the mouse (Claude Code's fullscreen TUI turns on
           ``?1000`` + ``?1006`` and scrolls its own transcript on the wheel) gets
           the notch as the mouse event it asked for — reported 2026-09-08 as
-          "scroll not working": this widget was scrolling tmux's history instead,
-          and the alternate screen has none;
-        * a program on the alternate screen that does NOT track the mouse gets
-          what a terminal's alternate-scroll mode (``?1007``) would have sent —
-          arrow keys, one per line;
+          "scroll not working": this widget was scrolling tmux's history, which
+          the alternate screen does not have;
+        * a program on the alternate screen that does NOT track the mouse is
+          told, once, that its own keys are the way: arrow keys would land in a
+          prompt (Claude Code's ``Up`` recalls a previous prompt) and there is no
+          history behind it to scroll;
         * anything else scrolls tmux's history, as before.
         """
         facts = self.facts
-        if facts is not None and facts.mouse_on:
-            self._send_wheel(event, up=up, sgr=facts.mouse_sgr)
+        if self.scrollback or facts is None or facts.in_mode or not facts.mouse_on:
+            if (
+                facts is not None
+                and facts.alternate_on
+                and not facts.mouse_on
+                and not self.scrollback
+            ):
+                self._warn_once(
+                    "wheel:alternate-screen",
+                    "this program is fullscreen and does not take the mouse — scroll it with "
+                    "its own keys",
+                )
+                return
+            self.scroll_history(self.WHEEL_LINES if up else -self.WHEEL_LINES)
             return
-        if facts is not None and facts.alternate_on:
-            if self.pane_id is not None and self.server is not None:
-                self.server.send_keys(self.pane_id, *(["Up" if up else "Down"] * self.WHEEL_LINES))
-                self._schedule(self.FAST_INTERVAL)
-            return
-        self.scroll_history(self.WHEEL_LINES if up else -self.WHEEL_LINES)
+        # The pane may be taller than the widget between a Resize and its
+        # debounced resize-window: the widget shows the pane's LAST rows, so a
+        # widget row maps to a pane row that many lines further down.
+        offset = max(0, facts.height - self.content_size.height)
+        self._wheel_queue.append((up, event.x + 1, event.y + 1 + offset))
+        if self._wheel_timer is None:
+            # One tmux client per FLUSH, not per notch: a trackpad flick is 20-50
+            # notches a second, each of which was its own fork+exec.
+            self._wheel_timer = self.set_timer(self.WHEEL_COALESCE, self._flush_wheel, name="wheel")
 
-    def _send_wheel(self, event: events.MouseEvent, *, up: bool, sgr: bool) -> None:
-        """The wheel as the program would have read it from its own terminal.
-
-        Buttons 64/65 are wheel up/down in both encodings; coordinates are
-        1-based cells within the pane. Sent as literal bytes (``send-keys -l``,
-        measured to deliver ``ESC [ < 64 ; 5 ; 3 M`` intact); never through the
-        paste buffer, which a program with bracketed paste on would wrap.
-        """
-        if self.pane_id is None or self.server is None:
+    def _flush_wheel(self) -> None:
+        """Send every notch queued since the last flush as one tmux call."""
+        self._wheel_timer = None
+        queue, self._wheel_queue = self._wheel_queue, []
+        facts = self.facts
+        if not queue or self.pane_id is None or self.server is None or facts is None:
             return
-        button = 64 if up else 65
-        x, y = event.x + 1, event.y + 1
-        if sgr:
-            sequence = f"\x1b[<{button};{x};{y}M"
-        else:
-            sequence = "\x1b[M" + chr(32 + button) + chr(32 + min(x, 223)) + chr(32 + min(y, 223))
         try:
-            self.server.send_literal(self.pane_id, sequence)
+            if facts.mouse_sgr:
+                self.server.send_literal(
+                    self.pane_id,
+                    "".join(f"\x1b[<{64 if up else 65};{x};{y}M" for up, x, y in queue),
+                )
+            else:
+                # X10: three bytes after ESC [ M, each 32 + value, one byte each —
+                # so a cell past 223 cannot be expressed and is clamped.
+                payload = b"".join(
+                    b"\x1b[M" + bytes([32 + (64 if up else 65), 32 + min(x, 223), 32 + min(y, 223)])
+                    for up, x, y in queue
+                )
+                self.server.send_bytes(self.pane_id, payload)
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
             return

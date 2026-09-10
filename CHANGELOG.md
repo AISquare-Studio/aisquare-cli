@@ -384,12 +384,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transcript on the wheel; the agent pane spent every notch on tmux's history
   — which the alternate screen does not have — so nothing moved and the program
   never saw the wheel. The pane now reads tmux's `mouse_any_flag` /
-  `mouse_sgr_flag` / `alternate_on` with every frame and routes each notch: a
-  program tracking the mouse gets the notch as the SGR (or X10) event it asked
-  for, at the pointer's cell, through `send-keys -l`; a fullscreen program that
-  does not track the mouse gets arrow keys, one per line, as its terminal's
-  alternate-scroll mode (`?1007`) would send; everything else scrolls tmux
-  history as before.
+  `mouse_sgr_flag` / `alternate_on` / `pane_in_mode` with every frame and
+  routes each notch: a program tracking the mouse gets the notches as the SGR
+  (or, as raw bytes via `send-keys -H`, X10) events it asked for, at the
+  pointer's pane cell, coalesced into one tmux call per frame; a fullscreen
+  program that does not track the mouse is left alone and the user told once
+  (arrow keys would land in its prompt); a view already scrolled into history
+  always comes back with the wheel; a pane in tmux copy mode stays tmux's;
+  everything else scrolls tmux history as before. A pane that dies under the
+  wheel reports `(pane gone)` like every other path.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

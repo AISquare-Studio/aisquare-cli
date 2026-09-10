@@ -805,6 +805,17 @@ class TmuxServer:
         if text:
             self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
 
+    def send_bytes(self, pane_id: str, data: bytes) -> None:
+        """Raw bytes, one hex pair per argument (``-H``).
+
+        The one way to put a byte above 0x7f in front of a program: ``-l`` takes
+        a string and tmux re-emits it as UTF-8, so ``chr(0x98)`` arrives as
+        ``C2 98`` — measured on 3.7c, the X10 mouse encoding's column byte for
+        any cell past 95 split in two, with the row byte then read as text.
+        """
+        if data:
+            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in data))
+
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line.
 

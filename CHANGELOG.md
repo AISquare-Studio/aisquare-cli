@@ -390,7 +390,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   supplies `get_selection` from its captured lines and paints the span itself);
   the text is copied on release through OSC 52, and ctrl+c copies again while a
   selection stands — without one it is still the agent's interrupt. None of the
-  new keys reach the agent; Claude Code binds none of them.
+  new keys reach the agent; Claude Code binds none of them. And the wheel
+  itself was going to the wrong place: Claude Code's fullscreen TUI turns on
+  mouse reporting (`?1000` + `?1006`) and scrolls its own transcript on the
+  wheel, while the pane scrolled tmux's history — empty on the alternate
+  screen — so nothing moved. The pane now reads tmux's `mouse_any_flag` /
+  `mouse_sgr_flag` / `alternate_on` per frame and routes each notch: a mouse
+  event to a program that tracks the mouse, arrow keys (alternate-scroll) to
+  a fullscreen program that does not, tmux history for everything else.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

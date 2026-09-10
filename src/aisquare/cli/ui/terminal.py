@@ -546,13 +546,65 @@ class TerminalPane(Widget, can_focus=True):
         if self.attached:
             event.stop()
             event.prevent_default()
-            self.scroll_history(self.WHEEL_LINES)
+            self._wheel(event, up=True)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self.attached:
             event.stop()
             event.prevent_default()
-            self.scroll_history(-self.WHEEL_LINES)
+            self._wheel(event, up=False)
+
+    def _wheel(self, event: events.MouseEvent, *, up: bool) -> None:
+        """Route a wheel notch to whoever can act on it.
+
+        Three panes look identical from outside and want three different things:
+
+        * a program that tracks the mouse (Claude Code's fullscreen TUI turns on
+          ``?1000`` + ``?1006`` and scrolls its own transcript on the wheel) gets
+          the notch as the mouse event it asked for — reported 2026-09-08 as
+          "scroll not working": this widget was scrolling tmux's history instead,
+          and the alternate screen has none;
+        * a program on the alternate screen that does NOT track the mouse gets
+          what a terminal's alternate-scroll mode (``?1007``) would have sent —
+          arrow keys, one per line;
+        * anything else scrolls tmux's history, as before.
+        """
+        facts = self.facts
+        if facts is not None and facts.mouse_on:
+            self._send_wheel(event, up=up, sgr=facts.mouse_sgr)
+            return
+        if facts is not None and facts.alternate_on:
+            if self.pane_id is not None and self.server is not None:
+                self.server.send_keys(self.pane_id, *(["Up" if up else "Down"] * self.WHEEL_LINES))
+                self._schedule(self.FAST_INTERVAL)
+            return
+        self.scroll_history(self.WHEEL_LINES if up else -self.WHEEL_LINES)
+
+    def _send_wheel(self, event: events.MouseEvent, *, up: bool, sgr: bool) -> None:
+        """The wheel as the program would have read it from its own terminal.
+
+        Buttons 64/65 are wheel up/down in both encodings; coordinates are
+        1-based cells within the pane. Sent as literal bytes (``send-keys -l``,
+        measured to deliver ``ESC [ < 64 ; 5 ; 3 M`` intact); never through the
+        paste buffer, which a program with bracketed paste on would wrap.
+        """
+        if self.pane_id is None or self.server is None:
+            return
+        button = 64 if up else 65
+        x, y = event.x + 1, event.y + 1
+        if sgr:
+            sequence = f"\x1b[<{button};{x};{y}M"
+        else:
+            sequence = "\x1b[M" + chr(32 + button) + chr(32 + min(x, 223)) + chr(32 + min(y, 223))
+        try:
+            self.server.send_literal(self.pane_id, sequence)
+        except TmuxUnavailable:
+            self._fail(TMUX_UNAVAILABLE)
+            return
+        except TmuxError:
+            self._fail(PANE_GONE)
+            return
+        self._schedule(self.FAST_INTERVAL)
 
     def scroll_history(self, delta: int) -> None:
         """Move the view ``delta`` lines up (positive) into history, clamped; 0 is live."""

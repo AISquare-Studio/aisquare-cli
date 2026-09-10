@@ -159,6 +159,8 @@ _FACTS_FIELDS = (
     "pane_dead_status",
     "pane_in_mode",
     "pane_current_command",
+    "mouse_any_flag",
+    "mouse_sgr_flag",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -267,6 +269,11 @@ class PaneFacts:
     in_mode: bool
     current_command: str
     title: str
+    mouse_on: bool = False
+    """The program in the pane has turned mouse reporting on (``?1000``/``?1002``/
+    ``?1003``) — it wants the wheel itself. Claude Code's fullscreen TUI does."""
+    mouse_sgr: bool = False
+    """…and asked for SGR encoding (``?1006``), the form every modern program uses."""
 
 
 @dataclass(frozen=True)
@@ -336,6 +343,8 @@ def _facts(line: str) -> PaneFacts:
         in_mode=values["pane_in_mode"] == "1",
         current_command=values["pane_current_command"],
         title=values["pane_title"],
+        mouse_on=values["mouse_any_flag"] == "1",
+        mouse_sgr=values["mouse_sgr_flag"] == "1",
     )
 
 

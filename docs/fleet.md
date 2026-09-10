@@ -585,7 +585,11 @@ tmux -L asq list-sessions
 hatch (`F12`). Printable characters travel as typed; special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
 `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
-per line. The wheel scrolls a pane's history, and so do shift+PgUp / shift+PgDn
+per line. The wheel goes to whoever can use it: a program that tracks the mouse
+(Claude Code's fullscreen TUI does) receives it as its own mouse event and
+scrolls its transcript; a fullscreen program that does not gets arrow keys, as
+its terminal's alternate-scroll mode would send; anything else scrolls the
+pane's tmux history, and so do shift+PgUp / shift+PgDn
 (a screen at a time), shift+Home (the top) and shift+End (live) — the keys every
 terminal already uses for its scrollback, which Claude Code does not bind. A
 scrolled pane shows `[↑k/history]` in its top-right corner; any other key

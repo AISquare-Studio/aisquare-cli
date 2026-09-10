@@ -334,10 +334,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
-  Measured against production on 2026-09-09 (workspace 881, studio 748): one
+  Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the
-  model traffic (157,756 tokens, $3.16) under `aisquare-coder`; `6fb49942…` held
-  the same session's client lane — the prompt, the board events — with zero
+  model traffic (157,756 tokens) under `aisquare-coder`; `6fb49942…` held the
+  same session's client lane — the prompt, the board events — with zero
   tokens, same agent name, twenty seconds later. `docs/explainability-tracing-boundary.md`
   had this exact merge down as **[unverified]**; this is the measurement, and it
   came out false.
@@ -354,9 +354,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     those ids to `/v1/traces/ingest` **before** the agent starts
     (`explainability_ops.open_run_root`, 3 s budget, fail-open), and hands the
     proxy a `traceparent: 00-<trace>-<root>-01` — the proxy's tier-2 path,
-    which parents every model span under that root. `ship_once` attaches a
-    client-lane segment under the same remote root
-    (`_ClientLaneSegment`). One trace, one Run, both lanes.
+    which parents every model span under that root. A launch whose root was
+    accepted OWNS its Run, and `ship_once` attaches that session's client
+    lane as a segment under the same remote root (`_ClientLaneSegment`). One
+    trace, one Run, both lanes.
+  - **Ownership, not the run key, decides the client lane.** The shipper takes
+    the segment path only for records that carry the OWNED trace id, which
+    `insights` now spools as `run_trace_id` beside `run_key` (marker
+    `AISQUARE_RUN_TRACE_ID`, exported only when the root was posted; no
+    session-id fallback, unlike the run key). The run key is no evidence of a
+    root: it falls back to the board session id, so every plain session has
+    one, and an earlier cut of this fix read that as "launched" and parented a
+    whole drain under a root nobody had posted — the gateway then elected the
+    orphaned segment as a pseudo-root, and the plain session that had always
+    produced a well-formed Run produced a rootless one. Now a plain session
+    and every fail-open launch open `AgentRunTracer` exactly as before: a Run
+    of their own, with a root. Two Runs for a fail-open session is the old,
+    known cost; one Run with no root is worse than the bug it was fixing.
   - **`traceparent` REPLACES `X-Pipeline-Id` on the wire.** The proxy resolves a
     request in tiers and `X-Pipeline-Id` is tier 1: present, it opens its own
     session and never reads the `traceparent` beside it, so sending both would
@@ -365,10 +379,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the board join are unchanged.
   - **Fail-open, in one direction.** No gateway URL, no key, or a root that was
     not accepted with 202 → the pre-fix wiring, byte for byte: `X-Pipeline-Id`,
-    the proxy keys the Run, and the launch line says so (`the proxy keys the
-    run — root not posted: …`). Tracing still never costs a launch. A plain
-    session with no proxy lane still ships through `AgentRunTracer` as before —
-    it has nothing to join.
+    the proxy keys the Run, no `AISQUARE_RUN_TRACE_ID` is exported, and the
+    launch line says so (`the proxy keys the run — root not posted: …`).
+    Tracing still never costs a launch. A plain session with no proxy lane
+    still ships through `AgentRunTracer` as before — it has nothing to join.
+  - **`aisquare explainability env` writes nothing to the gateway.** It is a
+    print-only command, and it used to post a Run root like a launch does —
+    with a gateway URL configured, every invocation minted a dashboard Run of
+    one 0 ms span and zero tokens, named after the role, for a session that
+    might never start (a fresh pipeline id per call without `--session-id`:
+    a second terminal, a shell rc, a `--json` reader), after up to 3 s of WAN
+    I/O behind a print. `wire_session` gains `post_root=False` and `env`
+    passes it: the probe, the guards and the header pair still run, the root
+    is not posted, and the delta is the proxy-keyed form — `X-Pipeline-Id`,
+    no `traceparent`, no `AISQUARE_RUN_TRACE_ID`; the other exports are
+    unchanged. So a session started from that output — including the
+    `team spawn` command as PRINTED, which evals `env` — runs on the fallback,
+    two Runs per session; `aisquare launch` and `team spawn --exec` still post
+    the root and own theirs.
+  - **The `team spawn` prelude clears every trace marker.** The printed
+    command's `unset` list was hand-written and missed `AISQUARE_RUN_TRACE_ID`,
+    so two pastes in one shell could share a Run: paste 1 exported it, paste 2
+    cleared the other four, and if paste 2's own root post was refused the
+    stale id survived and session 2's hook joined session 1's Run. The list is
+    now `core.spawn.IDENTITY_ENV_VARS` — the tuple every stripping seam
+    already removes — so a new marker cannot be missed again.
   - **The Run is now findable from the board row.** `joins.jsonl` grows a
     `trace_id` field (the marker `AISQUARE_RUN_TRACE_ID`, copied by the hook;
     `null` when the proxy keyed the Run rather than a derived id that was never
@@ -383,14 +418,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     from — a repo root by hand, `$HOME` from the cron timer step 10 of the guide
     installs. `_init_sdk` now pins `EXPLAINABILITY_INBOX_PATH` to
     `~/.aisquare/explainability/inbox.db` unless the operator set it.
+  - **What the live check did and did not verify.** Re-measured against
+    production after the change, for an owned launch: one Run per session, the
+    model spans and the prompt span under one trace id. It read tokens and
+    node presence, not the Run's `status` or `end_time` — the root is posted
+    already ended, and what the gateway makes of that is an open question,
+    written down as a known limitation in
+    `docs/explainability-tracing-boundary.md`; the fix, if one is needed, is
+    gateway-side and not in this release.
   - `tests/test_one_run_per_session.py` pins each piece: the derivation, both
-    wiring outcomes and the three no-post cases, the root span's shape and the
-    202 rule, the marker and join record, the shipper's segment (remote parent
-    = the derived root; `AgentRunTracer` never opened for a launched session;
-    the plain-session path untouched; the segment closed and the context
-    detached on failure), the inbox path, and one launch through the CLI.
-    Verified live against production after the change: one Run per session,
-    the model spans and the prompt span under one trace id.
+    wiring outcomes and the no-post cases, the root span's shape and the 202
+    rule, the marker and join record, the shipper's lane choice (a launched
+    session with an owned root: a segment under the derived remote parent,
+    `AgentRunTracer` never opened; a plain session and each fail-open cause,
+    driven through the real `insights` spool rather than a hand-built record:
+    `AgentRunTracer`, never a segment; the segment closed and the context
+    detached on failure), the inbox path, one launch through the CLI, and the
+    print-only mode (`env` with a gateway and key configured makes zero
+    network calls; `team spawn --exec` still posts the root).
+    `tests/test_harness.py` runs the printed spawn prelude through `/bin/sh`
+    with a stale `AISQUARE_RUN_TRACE_ID` set and asserts every marker is gone.
   - **A turn's `started_at` is the moment the hook was entered.** The prompt is
     recorded and spooled before CI is consulted, and the stamp was taken after
     that store work, so `wall_ms` lost however long the store took — and

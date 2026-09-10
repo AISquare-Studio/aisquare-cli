@@ -481,16 +481,36 @@ def env(
     is a write-scoped ingest key — it sends spans and reads nothing — which is
     what makes printing it acceptable at all. A loopback proxy needs no key and
     the header is omitted entirely there.
+
+    THIS COMMAND WRITES NOTHING TO THE GATEWAY. The delta is the proxy-keyed
+    form — ``X-Pipeline-Id``, never ``traceparent``, and no
+    ``AISQUARE_RUN_TRACE_ID`` — because the Run's root is not posted. Posting
+    it is how a launch OWNS its Run, and it mints a dashboard Run on the spot:
+    one parentless, already-ended span that the gateway files as a
+    ``completed`` Run of 0 ms and zero tokens, named after the role. A command
+    whose whole job is to print exports cannot know whether an agent will ever
+    start on the id it printed, and without ``--session-id`` every invocation
+    mints a fresh one — so a second terminal, a shell rc that evals this, a
+    script reading ``--json``, or an operator inspecting the delta each left an
+    empty Run behind, after up to three seconds of WAN I/O behind a print.
+    The price is the documented fallback: the proxy keys the Run for a session
+    started from this output and the client lane opens its own. That is the
+    pre-ownership shape, and it is exactly what a print with no side effects
+    can promise. ``aisquare launch`` and ``team spawn --exec`` still post the
+    root, because they are about to start the agent that fills it.
     """
     settings = load_config().explainability
     target = ops.resolve_target(settings, target_name)
+    # Print-only: this command posts NO Run root, so it has no use for the
+    # target's gateway at all — the key is still resolved, because a hosted
+    # proxy authenticates on it. See the docstring for what a post would cost.
     wiring = wire_session(
         ops.effective_settings(settings, target_name),
         role,
         session_id=session_id,
         base_env=dict(os.environ),
         api_key=target.api_key,
-        gateway_url=target.gateway_url,
+        post_root=False,
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")

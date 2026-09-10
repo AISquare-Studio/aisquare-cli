@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1003,6 +1004,11 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     The clear-out in front is part of that promise, not decoration: the eval
     EXPORTS what it minted, so it outlives one paste, and a later spawn in the
     same terminal would otherwise inherit the previous session's identity.
+
+    The unset list is the WHOLE identity — ``core.spawn.IDENTITY_ENV_VARS``,
+    the same tuple every stripping seam removes — so pinning it here is pinning
+    what a reader sees, not a second copy of the list. A name added to the tuple
+    lands in the printed command by construction.
     """
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
@@ -1010,11 +1016,64 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["command"].startswith(
-        'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset AISQUARE_PIPELINE_ID '
-        "AISQUARE_TRACE_AGENT_NAME ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS; fi; "
+        'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset ANTHROPIC_BASE_URL '
+        "ANTHROPIC_CUSTOM_HEADERS AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME "
+        "AISQUARE_RUN_TRACE_ID; fi; "
         'eval "$(aisquare explainability env coder)"; AISQUARE_ROLE=coder '
     )
     assert "X-Pipeline-Id" not in payload["command"]
+
+
+def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
+    isolated_home: Path,
+) -> None:
+    """Two pastes, one Run — the half a hand-written unset list kept missing.
+
+    Paste 1 posts a root and exports ``AISQUARE_RUN_TRACE_ID=T1``; the agent
+    exits, the shell keeps it. Paste 2 clears and re-wires, but its own root
+    post is refused or times out, so ``trace_marker`` emits no run trace id of
+    its own and nothing overwrites T1. Session 2's SessionStart hook then calls
+    ``run_trace_id()`` and writes its join row against session 1's Run — and
+    ``disown_inherited_trace`` cannot save it, because the clear-out already
+    removed the run key it keys off, so it returns early.
+
+    So the prelude must leave NO marker behind, whether or not the second wiring
+    owns a trace of its own. Run through real ``sh``, which also proves the
+    snippet is valid POSIX shell — reading the string cannot.
+    """
+    import subprocess
+    import sys
+
+    from aisquare.core import spawn
+
+    _tracing_enabled("http://127.0.0.1:9")
+    runner, app = _cli()
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    assert result.exit_code == 0, result.output
+    prelude = json.loads(result.output)["command"].split("; eval ")[0]
+    assert prelude.startswith('if [ -n "'), prelude
+
+    # Paste 1's exports, still in the shell. The second wiring owns no trace,
+    # so nothing after the prelude re-exports any of them.
+    stale = dict.fromkeys(spawn.IDENTITY_ENV_VARS, "from-paste-1") | {
+        "AISQUARE_RUN_TRACE_ID": "T1",
+        "PATH": os.environ["PATH"],
+    }
+    probe = "import os,sys; print(' '.join(os.environ.get(n, '<unset>') for n in sys.argv[1:]))"
+    argv = [sys.executable, "-c", probe, *spawn.IDENTITY_ENV_VARS]
+    cleared = subprocess.run(
+        ["sh", "-c", f'{prelude}; exec "$@"', "sh", *argv],
+        env=stale,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert cleared.stdout.split() == ["<unset>"] * len(spawn.IDENTITY_ENV_VARS), cleared.stdout
+
+    # Negative control: without the prelude the probe reports every value, so a
+    # row of "<unset>" is the clear-out's work and not a blind reader.
+    kept = subprocess.run(argv, env=stale, capture_output=True, text=True, check=True)
+    assert "T1" in kept.stdout.split()
 
 
 def test_spawn_printed_command_takes_its_session_id_from_the_shell(

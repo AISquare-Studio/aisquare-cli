@@ -482,24 +482,62 @@ def ship_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[_ShipSdk, _FakeOtelContex
     return fake, otel_context
 
 
-def _spool(session_id: str, **extra: object) -> None:
-    outbox.enqueue(
-        {
-            "v": insights.RECORD_VERSION,
-            "kind": "prompt",
-            "session_id": session_id,
-            "text": "t",
-            **extra,
-        }
+def _capture(
+    monkeypatch: pytest.MonkeyPatch,
+    wiring: SessionWiring | None,
+    session_id: str,
+    text: str = "t",
+) -> None:
+    """Spool one prompt the way a process inside ``wiring``'s session would.
+
+    Through the REAL ``insights.record_prompt``, under exactly the env
+    ``trace_marker`` exports — ``None`` for a plain session, which carries no
+    marker at all. The record's SHAPE is the whole question the sweeper
+    branches on, and a hand-built dict is free to have a shape production
+    never produces: this helper replaced one that enqueued a record with NO
+    run key, which ``_spool`` cannot emit for a session that has an id (see
+    ``insights.run_key``'s fallback). That test passed while the code under
+    test was wrong.
+    """
+    for name in (
+        service.PIPELINE_ID_ENV_VAR,
+        service.TRACE_AGENT_NAME_ENV_VAR,
+        service.RUN_TRACE_ID_ENV_VAR,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in (trace_marker(wiring) if wiring else {}).items():
+        monkeypatch.setenv(name, value)
+    insights.record_prompt(text, session_id=session_id)
+
+
+def _launch(session_id: str, **overrides: Any) -> SessionWiring:
+    """A wiring as ``aisquare launch`` builds it — owning its Run by default."""
+    return wire_session(
+        _settings(),
+        "cli",
+        session_id=session_id,
+        api_key=overrides.pop("api_key", "k"),
+        gateway_url=overrides.pop("gateway_url", "https://gateway.example"),
+        prober=_healthy,
+        root_opener=overrides.pop("root_opener", _posted),
+        **overrides,
     )
 
 
 def test_a_launched_sessions_insights_join_the_run_the_launcher_keyed(
-    isolated_home: Path, ship_sdk: tuple[_ShipSdk, _FakeOtelContext]
+    isolated_home: Path,
+    ship_sdk: tuple[_ShipSdk, _FakeOtelContext],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sdk, otel_context = ship_sdk
-    _spool("board-1", run_key="pipe-1")
-    _spool("board-1", run_key="pipe-1")
+    owned = _launch("pipe-1")
+    assert owned.owns_trace, "this launch posted the root — that is what earns the segment"
+    _capture(monkeypatch, owned, "board-1")
+    _capture(monkeypatch, owned, "board-1")
+    record = json.loads(outbox.pending()[0].read_text(encoding="utf-8"))
+    assert record["run_trace_id"] == trace_identity("pipe-1").trace_id, (
+        "the owned key travels in the record — it is the sweeper's only evidence of a root"
+    )
     report = service.ship_once()
     assert report.sent == 2, report.reason
     assert sdk.roots == [], "AgentRunTracer opens a NEW trace — that is the bug"
@@ -522,13 +560,62 @@ def test_a_launched_sessions_insights_join_the_run_the_launcher_keyed(
 
 
 def test_a_plain_sessions_insights_still_open_their_own_run(
-    isolated_home: Path, ship_sdk: tuple[_ShipSdk, _FakeOtelContext]
+    isolated_home: Path,
+    ship_sdk: tuple[_ShipSdk, _FakeOtelContext],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No launcher, no proxy lane, nothing to join: the pre-fix path, untouched."""
+    """No launcher, no proxy lane, nothing to join: the pre-fix path, untouched.
+
+    The record here DOES carry a run key — ``insights.run_key`` falls back to
+    the board session id, so every plain session's does. That is exactly the
+    trap: read as "launched", it hung this drain on a root nobody posted, and
+    the gateway made a rootless Run of a session that had a well-formed one.
+    """
     sdk, _ = ship_sdk
-    _spool("board-2")
+    _capture(monkeypatch, None, "board-2")
+    record = json.loads(outbox.pending()[0].read_text(encoding="utf-8"))
+    assert record["run_key"] == "board-2", "the fallback fires — a run key proves nothing"
+    assert record["run_trace_id"] is None, "and nobody posted a root for it"
+
     service.ship_once()
+
     assert sdk.roots == [("aisquare-cli", "board-2")]
+    assert sdk.segments == [], "a segment here would attach to a root that does not exist"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "why"),
+    [
+        ({"root_opener": _refused}, "the root post was refused"),
+        ({"gateway_url": None}, "no gateway URL to post a root to"),
+        ({"api_key": None}, "no workspace key to post a root with"),
+    ],
+)
+def test_a_fail_open_launchs_insights_still_open_their_own_run(
+    overrides: dict[str, Any],
+    why: str,
+    isolated_home: Path,
+    ship_sdk: tuple[_ShipSdk, _FakeOtelContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Traced, but nobody owns the Run: the proxy keyed one we cannot name.
+
+    ``trace_marker`` still exports the pipeline id here — that is what makes
+    fail-open fail OPEN — so the record carries a run key and looks launched.
+    It is not joinable: two Runs for one session is the old, known cost of
+    this path, and it stays that rather than becoming one headless Run.
+    """
+    sdk, _ = ship_sdk
+    wiring = _launch("pipe-open", **overrides)
+    assert wiring.traced and not wiring.owns_trace, why
+    _capture(monkeypatch, wiring, "board-open")
+    record = json.loads(outbox.pending()[0].read_text(encoding="utf-8"))
+    assert record["run_key"] == "pipe-open", "the marker is exported — this LOOKS launched"
+    assert record["run_trace_id"] is None, "but no root was posted, so nothing owns the Run"
+
+    service.ship_once()
+
+    assert sdk.roots == [("aisquare-cli", "pipe-open")]
     assert sdk.segments == []
 
 
@@ -543,7 +630,7 @@ def test_a_segment_that_fails_is_closed_and_the_records_stay_queued(
         raise ConnectionError("gateway unreachable")
 
     monkeypatch.setattr(sdk, "HumanInterventionTracer", boom)
-    _spool("board-3", run_key="pipe-3")
+    _capture(monkeypatch, _launch("pipe-3"), "board-3")
     report = service.ship_once()
     assert report.sent == 0 and report.deferred == 1
     (segment,) = sdk.segments
@@ -640,3 +727,184 @@ def test_launch_hands_the_proxy_the_run_the_launcher_owns(
     assert spy["env"][service.RUN_TRACE_ID_ENV_VAR] == identity.trace_id
     assert spy["env"][service.PIPELINE_ID_ENV_VAR] == pipeline_id
     assert f"run {identity.trace_id}" in result.output
+
+
+# ── print-only: `explainability env` claims no Run ───────────────────────────
+#
+# PR #107 review, blocker 2. With a gateway configured, every invocation of a
+# command whose entire job is to PRINT exports posted a root — a parentless,
+# already-ended span the worker reads as a terminal batch and MERGE_RUN files
+# as a `completed` Run of one 0 ms span and zero tokens, named after the role,
+# for a session that may never start. Without `--session-id` the pipeline id is
+# a fresh uuid4, so each invocation minted a NEW empty Run rather than
+# re-touching one: a second terminal, a shell rc, a `--json` reader, an operator
+# inspecting the delta. Plus up to three seconds of WAN I/O behind a print.
+
+
+class _RootPosted(AssertionError):
+    """Raised by the print-only fakes, distinct from any assertion below."""
+
+
+def _must_not_post(
+    gateway_url: str, api_key: str, agent_name: str, pipeline_id: str
+) -> RootReceipt:
+    """The fake that fails LOUDLY if the print-only path ever reaches the seam."""
+    raise _RootPosted(
+        f"a print minted a dashboard Run: root for {agent_name} (pipeline {pipeline_id}) "
+        f"posted to {gateway_url}"
+    )
+
+
+def test_the_print_only_mode_never_dials_the_gateway() -> None:
+    """Gateway AND key in hand — the one state where the default would post."""
+    wiring = wire_session(
+        _settings(),
+        "coder",
+        session_id="sess-env",
+        api_key="k",
+        gateway_url="https://gateway.example",
+        prober=_healthy,
+        root_opener=_must_not_post,
+        post_root=False,
+    )
+    headers = wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+    assert wiring.traced is True, "print-only costs the OWNERSHIP, never the trace"
+    assert "X-Pipeline-Id: sess-env" in headers, "the proxy keys the Run, as before ownership"
+    assert "traceparent" not in headers, "a traceparent names a root nobody posted"
+    assert wiring.owns_trace is False
+    assert wiring.trace_id is None, "an unposted derived id must not be reported as the key"
+    assert "root not posted" in wiring.reason and "print-only" in wiring.reason, wiring.reason
+    assert service.RUN_TRACE_ID_ENV_VAR not in trace_marker(wiring), (
+        "the hook would record a join against a Run that does not exist"
+    )
+
+
+@pytest.fixture
+def gateway_target(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A machine where a launch WOULD own its Run: target gateway, key, https proxy.
+
+    Exactly the launch CLI test's configuration, so the two commands are judged
+    on the same footing. The markers are cleared too: this suite runs inside
+    traced sessions, and an inherited ``AISQUARE_PIPELINE_ID`` would make the
+    spawn path disown a parent that is not part of the test.
+    """
+    from aisquare.core.config import ExplainabilitySettings, ExplainabilityTarget
+
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True,
+                proxy_url="https://proxy.example:9443",
+                target="prod",
+                targets={
+                    "prod": ExplainabilityTarget(
+                        gateway_url="https://gateway.example",
+                        proxy_url="https://proxy.example:9443",
+                    )
+                },
+            )
+        )
+    )
+    service.store_api_key("wk-test")
+    for name in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        service.PIPELINE_ID_ENV_VAR,
+        service.TRACE_AGENT_NAME_ENV_VAR,
+        service.RUN_TRACE_ID_ENV_VAR,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(service, "probe_proxy", _healthy)
+
+
+@pytest.mark.parametrize("form", ["shell", "json"])
+def test_explainability_env_prints_the_delta_without_minting_a_run(
+    form: str, runner: CliRunner, gateway_target: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ZERO network calls to the gateway from a print — asserted two ways.
+
+    The seam fake raises if ``wire_session`` reaches the root post at all, and
+    a socket tripwire catches any other route to the network once the probe is
+    faked: the exports must come out with the machine's network unplugged.
+    ``catch_exceptions=False`` so a trip surfaces as ITS message, not as a
+    bare exit 1 that reads like a refused proxy.
+    """
+    import socket
+
+    monkeypatch.setattr(service, "_post_run_root", _must_not_post)
+    attempts: list[str] = []
+
+    class Tripwire(socket.socket):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            attempts.append("socket")
+            raise _RootPosted("explainability env opened a socket — the print must stay local")
+
+    monkeypatch.setattr(socket, "socket", Tripwire)
+
+    args = ["explainability", "env", "coder", "--session-id", "sess-env"]
+    result = runner.invoke(
+        app, (["--json", *args] if form == "json" else args), catch_exceptions=False
+    )
+
+    assert result.exit_code == 0, result.output
+    assert attempts == [], "the print-only path reached the network"
+    if form == "json":
+        exports = json.loads(result.stdout)["env"]
+    else:
+        exports = {
+            line.split("=", 1)[0].removeprefix("export "): line
+            for line in result.output.split("\nexport ")
+            if line
+        }
+    headers = exports["ANTHROPIC_CUSTOM_HEADERS"]
+    # The delta a session started from this output carries: the proxy-keyed
+    # header pair plus the key, and the two markers that do not depend on
+    # ownership. Nothing else moved — a launch's extra marker names a root, and
+    # this command posted none.
+    assert "X-Pipeline-Id: sess-env" in headers
+    assert "X-Agent-Name: aisquare-coder" in headers
+    assert "X-AISquare-Key: wk-test" in headers, "the hosted proxy still authenticates"
+    assert "traceparent" not in headers
+    assert exports.keys() == {
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        service.PIPELINE_ID_ENV_VAR,
+        service.TRACE_AGENT_NAME_ENV_VAR,
+    }, sorted(exports)
+    assert service.RUN_TRACE_ID_ENV_VAR not in result.output
+
+
+def test_spawn_exec_still_posts_the_root_it_is_about_to_fill(
+    runner: CliRunner, gateway_target: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other launch path keeps the default: ``team spawn --exec`` is
+    committed to starting the agent, so it owns the Run exactly as ``launch``
+    does (pinned above) — traceparent on the wire, the run key in the env."""
+    posted: list[tuple[str, str, str, str]] = []
+
+    def fake_post(gateway_url: str, api_key: str, agent_name: str, pipeline_id: str) -> RootReceipt:
+        posted.append((gateway_url, api_key, agent_name, pipeline_id))
+        return RootReceipt(True, "HTTP 202")
+
+    monkeypatch.setattr(service, "_post_run_root", fake_post)
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.cli.team.os.execvpe", lambda file, argv, env: seen.update(argv=argv, env=env)
+    )
+
+    result = runner.invoke(app, ["team", "spawn", "coder", "--exec", "--no-probe"])
+
+    assert result.exit_code == 0, result.output
+    ((gateway_url, api_key, agent_name, pipeline_id),) = posted
+    assert (gateway_url, api_key, agent_name) == (
+        "https://gateway.example",
+        "wk-test",
+        "aisquare-coder",
+    )
+    identity = trace_identity(pipeline_id)
+    headers = seen["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+    assert f"traceparent: {identity.traceparent}" in headers
+    assert "X-Pipeline-Id" not in headers
+    assert seen["env"][service.RUN_TRACE_ID_ENV_VAR] == identity.trace_id
+    assert seen["env"][service.PIPELINE_ID_ENV_VAR] == pipeline_id

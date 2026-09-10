@@ -21,6 +21,7 @@ from aisquare.cli.common import expected_config_write_errors, fail, local_time
 from aisquare.core import harness, orchestrator
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
+from aisquare.core.spawn import IDENTITY_ENV_VARS
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     AmbiguousIdError,
@@ -64,12 +65,23 @@ _SESSION_ID_SUBSTITUTION = (
 #: ``AISQUARE_PIPELINE_ID`` is the discriminator, because nothing but our own
 #: wiring sets it. Present ⇒ the ANTHROPIC_* beside it are ours to clear.
 #: Absent ⇒ they are the operator's real gateway and stay untouched, so the
-#: "not overriding your routing" guard keeps working exactly as before.
+#: "not overriding your routing" guard keeps working exactly as before. It is
+#: also a sound discriminator for the whole set: ``trace_marker`` emits the run
+#: key unconditionally and the other markers only beside it, so there is no
+#: exported marker this guard can fail to see.
+#:
+#: What it clears is :data:`core.spawn.IDENTITY_ENV_VARS` — the same tuple every
+#: stripping seam removes — and NOT a hand-written list. Hand-writing the names
+#: is how ``AISQUARE_RUN_TRACE_ID`` came to be missed: paste 1 exported it,
+#: paste 2's clear-out took the other four, and if paste 2's own root post was
+#: then refused or timed out its ``trace_marker`` emitted no run trace id of its
+#: own — so paste 1's survived, and session 2's SessionStart hook wrote its join
+#: row against session 1's Run. ``disown_inherited_trace`` could not catch that
+#: either: the clear-out had already removed the run key it keys off, so it
+#: returned early. One tuple, one place to add a name.
 _CLEAR_PREVIOUS_TRACE = (
     f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
-    f"unset {explainability_service.PIPELINE_ID_ENV_VAR} "
-    f"{explainability_service.TRACE_AGENT_NAME_ENV_VAR} "
-    f"{' '.join(explainability_service.RESERVED_ENV_VARS)}; fi"
+    f"unset {' '.join(IDENTITY_ENV_VARS)}; fi"
 )
 
 SessionRef = Annotated[

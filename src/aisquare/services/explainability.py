@@ -598,6 +598,7 @@ def wire_session(
     prober: Callable[[str], ProxyProbe] | None = None,
     gateway_url: str | None = None,
     root_opener: RootOpener | None = None,
+    post_root: bool = True,
 ) -> SessionWiring:
     """Build the env delta that traces one session, or explain why not.
 
@@ -610,6 +611,22 @@ def wire_session(
     proxy keys the Run itself; the model traffic is still recorded, in a Run
     the client lane cannot find (two Runs per session, the pre-fix behaviour).
     Never a third outcome: a failed post costs the join, not the launch.
+
+    ``post_root=False`` is the PRINT-ONLY mode: every check above still runs —
+    the probe, the guards, the header pair — but the root is not posted, and
+    the wiring comes back on the ``X-Pipeline-Id`` path even with a gateway
+    and a key in hand. Posting the root is a WRITE: it mints a dashboard Run on
+    the spot — a parentless, already-ended span the gateway files as a
+    ``completed`` Run of one 0 ms span and zero tokens, named after the role.
+    Launch and spawn keep the default because they are about to start the
+    agent that fills it. ``explainability env`` passes ``False`` because its
+    whole job is to print exports: it cannot know whether an agent will ever
+    start on the id it printed, and without a session id every invocation
+    mints a fresh one — a second terminal, a shell rc, a ``--json`` reader, an
+    operator inspecting the delta — each of which used to leave an empty Run
+    behind, after up to three seconds of WAN I/O behind a print. The cost of
+    the mode is the documented fallback (the proxy keys the Run; the client
+    lane opens its own), never a network call.
 
     ``session_id`` becomes the run's ``X-Pipeline-Id`` when given — pass the
     agent session id so board rows and dashboard Runs share a key; otherwise a
@@ -736,7 +753,12 @@ def wire_session(
     pipeline_id = session_id or str(uuid.uuid4())
     identity = trace_identity(pipeline_id)
     owns_trace = False
-    if not gateway_url:
+    if not post_root:
+        # Checked FIRST, ahead of the gateway and key: print-only means no
+        # write, and the reason must say that rather than blame a URL or a
+        # key the caller may well have handed over.
+        not_owned = "print-only — no agent is starting here, so no Run is claimed"
+    elif not gateway_url:
         not_owned = "no gateway URL to post the run's root to"
     elif not api_key:
         not_owned = "no workspace key to post the run's root with"
@@ -1185,14 +1207,19 @@ def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> Shi
         # pipeline id would miss and file a planner's Run under the generic
         # identity. The board id travels in the record for exactly this.
         agent_name = _agent_name_for(settings, _board_session_of(claimed))
-        # A record carrying `run_key` was captured INSIDE a traced launch, whose
-        # launcher derived the Run's trace id from that key — so these spans go
-        # into that trace, not a fresh one. Records keyed by board session id
-        # alone came from a plain session with no proxy lane: their Run is
-        # their own, and the SDK's root tracer opens it as before.
-        launched = any(record.get("run_key") for _, record in claimed)
+        # OWNERSHIP picks the lane — not the presence of a run key. A segment
+        # hangs under a root at `trace_identity(run_key)`, and that root exists
+        # only where the launcher POSTED it, which is exactly when it exported
+        # the owned key that `insights` spooled into these records. The run key
+        # itself is no evidence of one: `insights.run_key` falls back to the
+        # board session id, so EVERY plain session carries one, and reading
+        # that as "launched" parented a whole drain on a root nobody wrote.
+        # The gateway then elects the orphaned segment as a pseudo-root and its
+        # LINK_SPAN_CONTAINS_SPAN matches nothing: a ROOTLESS Run, where the
+        # SDK's root tracer had been opening a well-formed one.
+        owns_root = any(record.get("run_trace_id") for _, record in claimed)
         try:
-            with _open_run(sdk, agent_name, run_key, launched=launched) as run:
+            with _open_run(sdk, agent_name, run_key, owns_root=owns_root) as run:
                 run.set_input(f"aisquare-cli session {run_key}")
                 for _, record in claimed:
                     _emit_span(sdk, record)
@@ -1223,14 +1250,21 @@ def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> Shi
     )
 
 
-def _open_run(sdk: Any, agent_name: str, run_key: str, *, launched: bool) -> Any:
+def _open_run(sdk: Any, agent_name: str, run_key: str, *, owns_root: bool) -> Any:
     """The span every record of one drain nests under.
 
-    Launched session → a segment INSIDE the trace the launcher keyed (one Run
-    with the model traffic). Anything else → the SDK's own root tracer, which
-    opens a new trace, exactly as before this existed.
+    A launch that OWNS its Run — one whose launcher posted the root span — → a
+    segment INSIDE that trace (one Run with the model traffic). Everything else
+    → the SDK's own root tracer, which opens a new trace, exactly as before
+    this existed.
+
+    A fail-open launch (no gateway URL, no key, or a root post that did not
+    land) is deliberately in the second group even though it IS traced: its
+    proxy lane keyed a Run of its own that we cannot name, so a segment here
+    would attach to nothing. Two Runs for one session is the old, known cost;
+    one Run with no root is a worse thing than the bug it would be fixing.
     """
-    if launched:
+    if owns_root:
         return _ClientLaneSegment(sdk, agent_name, run_key)
     return sdk.AgentRunTracer(agent_name=agent_name, run_id=run_key)
 

@@ -88,39 +88,6 @@ class FakeSDK:
         self.runs.append(run)
         return run
 
-    def get_tracer(self, name: str) -> Any:
-        """A launched session's drain opens a SEGMENT inside the launcher's trace
-        (``_ClientLaneSegment``) instead of a root of its own. It lands in
-        ``runs`` too, under the attributes the segment carries, so every
-        assertion about WHICH Run a record joined reads the same either way."""
-        sdk = self
-
-        class _Tracer:
-            def start_span(self, name: str, *, context: Any, attributes: dict[str, Any]) -> Any:
-                if sdk.fail_on_run:
-                    raise ConnectionError("gateway unreachable")
-                run = FakeRun(
-                    agent_name=attributes["agent.name"], run_id=attributes["agent.run_id"]
-                )
-                sdk.runs.append(run)
-
-                class _Segment:
-                    def set_attribute(self, key: str, value: Any) -> None:
-                        if key == "input.value":
-                            run.set_input(str(value))
-                        elif key == "agent.run.status":
-                            run.set_status(str(value))
-
-                    def set_status(self, *args: Any) -> None:
-                        return None
-
-                    def end(self) -> None:
-                        return None
-
-                return _Segment()
-
-        return _Tracer()
-
     def HumanInterventionTracer(self, *, human_id: str, action: str, reason: str) -> FakeSpan:
         return FakeSpan(f"human:{action}", f"{human_id}|{reason}", self.spans)
 
@@ -137,42 +104,7 @@ def sdk(monkeypatch: pytest.MonkeyPatch) -> FakeSDK:
     fake = FakeSDK()
     monkeypatch.setattr(service, "sdk_available", lambda: True)
     monkeypatch.setattr(service, "_init_sdk", lambda settings, api_key: fake)
-    monkeypatch.setattr(service, "_otel", lambda: (_FakeOtelTrace, _FakeOtelContext()))
     return fake
-
-
-class _FakeOtelTrace:
-    """Just enough of ``opentelemetry.trace`` for a remote parent context."""
-
-    class TraceFlags:
-        SAMPLED = 1
-
-        def __init__(self, flags: int) -> None:
-            self.flags = flags
-
-    class SpanContext:
-        def __init__(self, **fields: Any) -> None:
-            self.__dict__.update(fields)
-
-    class NonRecordingSpan:
-        def __init__(self, ctx: Any) -> None:
-            self.ctx = ctx
-
-    class StatusCode:
-        OK = "OK"
-        ERROR = "ERROR"
-
-    @staticmethod
-    def set_span_in_context(span: Any) -> dict[str, Any]:
-        return {"span": span}
-
-
-class _FakeOtelContext:
-    def attach(self, ctx: Any) -> object:
-        return object()
-
-    def detach(self, token: Any) -> None:
-        return None
 
 
 @pytest.fixture(autouse=True)
@@ -180,6 +112,20 @@ def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
     insights.reset_cache()
     monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
     monkeypatch.delenv(service.GATEWAY_ENV_VAR, raising=False)
+    # These tests capture through the REAL `insights` seam, which reads the
+    # ambient environment. A developer running the suite from INSIDE a traced
+    # session would otherwise have every record key on THEIR pipeline id and
+    # claim THEIR owned Run — sending drains down the segment lane in tests
+    # written for the plain one. The answer must not depend on whose terminal
+    # ran it. (Measured: `test_outside_a_traced_session_the_board_id_is_still_
+    # the_run_key` fails on such a machine without this.) Each test that wants
+    # a marker still sets it, as they do below.
+    for marker in (
+        service.PIPELINE_ID_ENV_VAR,
+        service.TRACE_AGENT_NAME_ENV_VAR,
+        service.RUN_TRACE_ID_ENV_VAR,
+    ):
+        monkeypatch.delenv(marker, raising=False)
 
 
 def _configure(*, ship: bool = True, key: str | None = "wk-test") -> None:
@@ -575,6 +521,12 @@ def test_the_run_key_env_var_matches_the_launcher() -> None:
     assert insights.RUN_KEY_ENV_VAR == service.PIPELINE_ID_ENV_VAR
 
 
+def test_the_owned_run_env_var_matches_the_launcher() -> None:
+    """Same duplication, and it decides which lane a drain opens — so it is
+    worth more than the run key's name is."""
+    assert insights.RUN_TRACE_ID_ENV_VAR == service.RUN_TRACE_ID_ENV_VAR
+
+
 def test_insights_captured_inside_a_traced_session_key_on_its_pipeline_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -599,6 +551,9 @@ def test_insights_captured_inside_a_traced_session_key_on_its_pipeline_id(
 def test_an_unjoined_session_ships_into_the_proxys_run(
     sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Keyed on the pipeline id the launcher chose, in a root of our own: no
+    marker said the launcher OWNED that Run, so there is no root to hang under
+    (``test_a_fail_open_launchs_insights_still_open_their_own_run``)."""
     _configure()
     monkeypatch.setenv(insights.RUN_KEY_ENV_VAR, "minted-pipeline-id")
     insights.record_prompt("p", session_id="board-session-id")

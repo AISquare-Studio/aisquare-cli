@@ -107,6 +107,53 @@ that same root. Re-measured after the fix: one Run per session, both lanes in
 it. `joins.jsonl` now records that `trace_id`, and it is the id
 `GET /v1/workspaces/{ws}/runs/{run_id}` reads back with the workspace key.
 
+## Known limitation: a Run's status and its end time **[unverified]**
+
+The launcher posts the Run's root span **already ended** — `start_time ==
+end_time`, `duration_ms` 0.0, no status object (`explainability_ops.open_run_root`).
+What the gateway then makes of that root is written down here so the next reader
+does not have to re-derive it across two repositories.
+
+In the gateway (`AISquare-Explainability-SDK`):
+
+- `worker/structural.py` derives `is_terminal_batch` from "this batch holds a
+  parentless span with an end time". The launcher's root-only batch satisfies
+  it, so that batch's `run_status` is `completed`.
+- Every later batch of the same trace — the proxy's model spans, the client
+  lane's segment — is child-only, therefore not terminal, therefore `running`.
+- `graph/queries.py`'s `MERGE_RUN` sets `r.status = $status` outright on
+  `ON MATCH`, where its neighbours coalesce. The LAST batch wins.
+
+So an owned Run reads `completed` while it is only a root, flips to `running` on
+the first proxy batch, and stays there. `end_time` is
+`coalesce($end_time, r.end_time)` and a child-only batch carries no root to take
+one from, so it stays frozen at the launch instant.
+`gateway/otlp/routes.py:307-311` documents this exact outcome — "stuck at
+running FOREVER. Measured." — as the reason that route stopped sending its root
+first. Nothing on the CLI side corrects it: `set_status("completed")` at the end
+of a drain lands on the client-lane segment, not on the root. Duration survives,
+because `run_metrics["duration_ms"]` is computed from the min/max span range
+rather than from the root's own zero.
+
+This is parity with a proxy-keyed Run, which has always looked this way, so it is
+not a regression for the model lane. It IS a regression against the pre-fix
+client-lane Run, whose `AgentRunTracer` root closed last with OK.
+
+**The fix belongs on the gateway side, and none of it is implemented here.**
+Either the gateway derives the verdict from the last child rather than from the
+presence of an ended root, or the root is closed at session end — and the second
+is only half a CLI change, since the launcher has `execve`'d away by then, so it
+would fall to the `SessionEnd` hook re-posting the root with a real end time as
+the trace's last batch. Which one is right is a gateway decision, and it was
+deliberately deferred rather than guessed at.
+
+The **[unverified]** tag is load-bearing. The live check after the one-Run fix
+read **tokens and node presence** — one Run per session, model spans and the
+prompt span under one trace id. Nobody has read `status` or `end_time` back off
+a Run and compared them to the session that produced it, so the question above
+is open in both directions: read duration and tokens, and treat a Run's status
+and end time as unverified until someone does.
+
 ## Two mechanisms people will suggest, and their status
 
 Both are **[unverified]**. Neither is an option today; do not plan around them.

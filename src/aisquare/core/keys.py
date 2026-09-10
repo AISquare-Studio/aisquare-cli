@@ -237,11 +237,19 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
 
     ``key`` is Textual's ``Key.key`` (``"ctrl+c"``, ``"shift+tab"``, ``"f5"``,
     ``"a"``), ``character`` its ``Key.character`` and ``printable`` its
-    ``Key.is_printable``. Printable input is always literal, so a pasted ``é``
-    or a typed ``[`` never goes through the name table at all — and neither does
-    a shifted symbol, whose meaning only the keyboard layout knows.
+    ``Key.is_printable``. Printable input is literal, so a pasted ``é`` or a
+    typed ``[`` never goes through the name table at all — and neither does a
+    shifted symbol, whose meaning only the keyboard layout knows.
+
+    EXCEPT under alt/meta. Textual's parser reads ``ESC p`` as
+    ``Key("alt+p", character="p")`` — the character is always set for an
+    alt+letter chord, and it is printable — so "the text wins" here typed a
+    bare ``p`` into the agent and Claude Code's alt+p (switch model) never
+    fired. Reported 2026-09-02 and 2026-09-10 from the fleet UI. With alt held
+    the chord is the meaning; the character is only how the terminal spelt it.
     """
-    if printable and character:
+    alt_held = any(part in ("alt", "meta") for part in key.split("+")[:-1])
+    if printable and character and not alt_held:
         return Translation("literal", character)
     if key in CHORDS:
         return Translation("key", CHORDS[key])

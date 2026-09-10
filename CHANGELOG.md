@@ -377,6 +377,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
+  model) did nothing from a fleet pane — reported 2026-09-02 and again
+  2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",
+  character="p")` and the key table's "printable input is literal" rule sent the
+  bare letter. With alt or meta held the chord is the meaning; the character is
+  only how the terminal spelt it, and `translate` now says `M-p`. Shift and ctrl
+  keep the existing rule.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

@@ -167,8 +167,19 @@ def test_alt_chords_keep_their_modifier_even_when_the_character_is_reported() ->
     assert translate("meta+p", "p", printable=True) == key("M-p")
     assert translate("alt+shift+p", "P", printable=True) == key("M-P")
     assert translate("ctrl+alt+p", "p", printable=True) == key("C-M-p")
+    assert translate("alt+1", "1", printable=True) == key("M-1")
     # Without the character it always worked; it must keep working.
     assert translate("alt+p", None, printable=False) == key("M-p")
+
+
+def test_alt_on_punctuation_stays_the_character_it_always_was() -> None:
+    """Through the name table alt+punctuation was dropped (``;``) or turned into
+    a control-sequence introducer (``M-[`` is ``ESC [``) — where before the
+    program simply received the character. Found in review; the letter fix
+    must not widen to this."""
+    assert translate("alt+semicolon", ";", printable=True) == literal(";")
+    assert translate("alt+left_square_bracket", "[", printable=True) == literal("[")
+    assert translate("alt+shift+minus", "_", printable=True, extended_keys=False) == literal("_")
     # Semicolon is text like any other here; escaping is the transport's job.
     assert translate("semicolon", ";", printable=True) == literal(";")
 

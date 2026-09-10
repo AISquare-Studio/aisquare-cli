@@ -582,7 +582,9 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`). Printable characters travel as typed; special keys are
+hatch (`F12`). Printable characters travel as typed — except a letter or digit
+with alt held, which travels as the chord (`M-p`), so Claude Code's alt+p
+switches the model; special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
 `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel scrolls a pane's history; any key returns to live. Modifier

@@ -382,8 +382,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",
   character="p")` and the key table's "printable input is literal" rule sent the
   bare letter. With alt or meta held the chord is the meaning; the character is
-  only how the terminal spelt it, and `translate` now says `M-p`. Shift and ctrl
-  keep the existing rule.
+  only how the terminal spelt it, and `translate` now says `M-p`. Letters and
+  digits only: alt on punctuation stays the character, since through the name
+  table it was dropped (`;`) or became `ESC [`, the control-sequence
+  introducer. Shift and ctrl keep the existing rule. Two limits are the
+  parser's and are documented: a kitty-protocol terminal reports the text and
+  Textual then drops the `alt` token, and Escape typed within ~100 ms before a
+  letter reads as that chord.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

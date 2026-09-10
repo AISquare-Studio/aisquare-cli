@@ -241,18 +241,24 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
     typed ``[`` never goes through the name table at all — and neither does a
     shifted symbol, whose meaning only the keyboard layout knows.
 
-    EXCEPT under alt/meta. Textual's parser reads ``ESC p`` as
+    EXCEPT alt/meta on a letter or digit. Textual's parser reads ``ESC p`` as
     ``Key("alt+p", character="p")`` — the character is always set for an
     alt+letter chord, and it is printable — so "the text wins" here typed a
     bare ``p`` into the agent and Claude Code's alt+p (switch model) never
     fired. Reported 2026-09-02 and 2026-09-10 from the fleet UI. With alt held
     the chord is the meaning; the character is only how the terminal spelt it.
+    Alt on PUNCTUATION stays text: through the name table it would be dropped
+    (``;`` is tmux's separator) or worse — ``M-[`` is ``ESC [``, the CSI
+    introducer, and a program reading raw bytes would mis-parse everything
+    typed after it — where before it simply received the character.
+
+    Known limits, recorded rather than hidden: a terminal speaking the kitty
+    protocol reports the text alongside the chord and Textual then drops the
+    ``alt`` token from the key name (``_xterm_parser._parse_extended_key``), so
+    the event arrives as a bare letter and this table cannot see the chord;
+    and Escape typed within ~100 ms before a letter is read by Textual's parser
+    as that alt chord — both are the parser's, not this table's.
     """
-    alt_held = any(part in ("alt", "meta") for part in key.split("+")[:-1])
-    if printable and character and not alt_held:
-        return Translation("literal", character)
-    if key in CHORDS:
-        return Translation("key", CHORDS[key])
     if not key or key.endswith("+"):
         return None
     *modifiers, base = key.split("+")
@@ -260,6 +266,10 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
         return None
     ctrl = "ctrl" in modifiers
     alt = "alt" in modifiers or "meta" in modifiers
+    if printable and character and not (alt and character.isalnum()):
+        return Translation("literal", character)
+    if key in CHORDS:
+        return Translation("key", CHORDS[key])
     shift = "shift" in modifiers
     prefix = ("C-" if ctrl else "") + ("M-" if alt else "") + ("S-" if shift else "")
 

@@ -14,8 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from click.testing import Result
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from aisquare.cli.app import app
 from aisquare.core import paths

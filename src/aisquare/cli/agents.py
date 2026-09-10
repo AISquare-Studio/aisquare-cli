@@ -14,6 +14,7 @@ from aisquare.cli.common import (
     expected_config_write_errors,
     fail,
 )
+from aisquare.core.agents import AgentSettingsError
 from aisquare.core.console import stderr_console
 from aisquare.services import agents as agents_service
 
@@ -62,6 +63,8 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
         connection = agents_service.connect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    except AgentSettingsError as exc:
+        fail(str(exc), error="agent_configuration", ref=name, detail=str(exc))
     except ValueError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
@@ -74,6 +77,8 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         removed = agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    except AgentSettingsError as exc:
+        fail(str(exc), error="agent_configuration", ref=name, detail=str(exc))
     if not removed:
         stderr_console().print(
             "note: no aisquare hooks found in that config dir — if you connected "

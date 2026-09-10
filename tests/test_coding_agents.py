@@ -40,8 +40,6 @@ def isolated_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AISQUARE_TEAM", "1")
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")
-    for key in (agent_launch.ACTIVE_AGENT_ENV, "AISQUARE_LAUNCH_ID", "AISQUARE_FLEET_AGENT"):
-        monkeypatch.delenv(key, raising=False)
 
 
 def test_selection_precedence_and_mixed_roles(
@@ -82,6 +80,9 @@ def test_doctor_requires_only_configured_agent_executables(
         save_config(config)
     elif selection == "binary":
         monkeypatch.setenv("AISQUARE_AGENT_BIN", "missing-wrapper")
+        config = load_config()
+        config.team.profiles["coder"] = RoleLaunchProfile(agent="claude-code")
+        save_config(config)
     checks = [
         check for check in diagnostics._check_other_agents(tmp_path) if check.name == "coding-agent"
     ]

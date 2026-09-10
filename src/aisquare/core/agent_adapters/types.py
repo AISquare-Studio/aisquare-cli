@@ -27,6 +27,7 @@ class AgentCapabilities:
     model_proxy: bool = False
     model_ladders: bool = False
     positional_prompt: bool = False
+    first_context_file_only: bool = False
 
 
 class AgentAdapter(Protocol):
@@ -78,7 +79,7 @@ def config_home(
     explicit: Path | None = None,
 ) -> Path:
     """Resolve against the environment the selected executable will actually use."""
-    raw = explicit or env.get(adapter.home_env) or home / adapter.home_name
+    raw = explicit or env.get(adapter.home_env, "").strip() or home / adapter.home_name
     return Path(raw).expanduser().absolute()
 
 

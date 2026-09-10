@@ -262,7 +262,12 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 def identity(account: ClaudeAccount) -> ClaudeIdentity | None:
     """The signed-in account, or ``None`` when the directory has no login recorded."""
-    data = _read_json(claude_json_path(account))
+    return read_identity(claude_json_path(account))
+
+
+def read_identity(path: Path) -> ClaudeIdentity | None:
+    """Read stable account identity without using or fingerprinting rotating tokens."""
+    data = _read_json(path)
     if data is None:
         return None
     oauth = data.get("oauthAccount")

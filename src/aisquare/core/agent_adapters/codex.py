@@ -28,6 +28,7 @@ class CodexAdapter:
         requires_hook_trust=True,
         structured_exec=True,
         positional_prompt=True,
+        first_context_file_only=True,
     )
 
     def resolve_model(
@@ -66,11 +67,7 @@ class CodexAdapter:
         ]
 
     def context_files(self, home: Path) -> tuple[Path, ...]:
-        for name in ("AGENTS.override.md", "AGENTS.md"):
-            path = home / name
-            if path.is_file() and path.read_text(encoding="utf-8").strip():
-                return (path,)
-        return ()
+        return (home / "AGENTS.override.md", home / "AGENTS.md")
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         if effort is not None and effort not in {"minimal", "low", "medium", "high", "xhigh"}:
@@ -103,7 +100,7 @@ class CodexAdapter:
                 "danger-full-access; Claude permission modes cannot be reused"
             )
         if sandbox is None:
-            sandbox = "read-only" if role == "reviewer" else "workspace-write"
+            sandbox = "read-only" if harness.base_role(role) == "reviewer" else "workspace-write"
         if approval is not None and approval not in {"on-request", "never", "untrusted"}:
             raise ValueError("Codex approval policy must be on-request, untrusted, or never")
         return (["--sandbox", sandbox] if sandbox else []) + (

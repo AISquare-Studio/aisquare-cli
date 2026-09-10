@@ -13,8 +13,9 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Select
 
 from aisquare.cli.ui.views.project import ProjectView
+from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.cli.ui.views.spawn import SpawnScreen
-from aisquare.core.config import load_config
+from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.models import FleetAgent
 from aisquare.services import fleet
@@ -41,6 +42,85 @@ def test_ui_settings_persist_mixed_agents_and_native_permissions(tmp_path: Path)
     assert config.team.profiles["reviewer"].agent == "claude-code"
     assert config.fleet.roles["coder"].approval_policy == "on-request"
     assert config.fleet.roles["coder"].sandbox == "workspace-write"
+
+
+def test_settings_preserve_unknown_choices_on_mount_reload_and_save(tmp_path: Path) -> None:
+    config = load_config()
+    config.agents.default = "future-agent"
+    config.team.profiles["coder"] = RoleLaunchProfile(agent="future-role-agent")
+    config.fleet.roles["coder"].sandbox = "future-scope"
+    config.fleet.roles["coder"].approval_policy = "future-approval"
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> None:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        view = host.query_one(SettingsView)
+        assert view.query_one("#default-agent", Select).value == "future-agent"
+        assert view.query_one("#family-coder", Select).value == "future-role-agent"
+        assert view.query_one("#sandbox-coder", Select).value == "future-scope"
+        assert view.query_one("#approval-coder", Select).value == "future-approval"
+        config.agents.default = "newer-agent"
+        config.team.profiles["coder"].agent = "newer-role-agent"
+        config.fleet.roles["coder"].sandbox = "newer-scope"
+        config.fleet.roles["coder"].approval_policy = "newer-approval"
+        save_config(config)
+        view.reload_form()
+        await pilot.pause()
+        view.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        saved = load_config()
+        assert saved.agents.default == "newer-agent"
+        assert saved.team.profiles["coder"].agent == "newer-role-agent"
+        assert saved.fleet.roles["coder"].sandbox == "newer-scope"
+        assert saved.fleet.roles["coder"].approval_policy == "newer-approval"
+
+    drive(team_project(tmp_path), scenario)
+
+
+def test_settings_never_persist_an_uninitialized_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config()
+    config.agents.default = "codex"
+    config.team.profiles["coder"] = RoleLaunchProfile(agent="codex")
+    config.fleet.roles["coder"].sandbox = "read-only"
+    config.fleet.roles["coder"].approval_policy = "on-request"
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> None:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        view = host.query_one(SettingsView)
+        lookup = view.query_one
+        selectors = ("#default-agent", "#family-coder", "#sandbox-coder", "#approval-coder")
+        uninitialized = {
+            key: Select([("valid", "valid")], value="missing", allow_blank=False)
+            for key in selectors
+        }
+        assert all(control.value is Select.NULL for control in uninitialized.values())
+        reload = view.reload_form
+
+        def restore_and_reload() -> None:
+            monkeypatch.setattr(view, "query_one", lookup)
+            reload()
+
+        monkeypatch.setattr(view, "reload_form", restore_and_reload)
+        monkeypatch.setattr(
+            view,
+            "query_one",
+            lambda query, expect_type=None: (
+                uninitialized[query] if query in uninitialized else lookup(query, expect_type)
+            ),
+        )
+        view._save_fleet_settings()
+        saved = load_config()
+        assert saved.agents.default == "codex"
+        assert saved.team.profiles["coder"].agent == "codex"
+        assert saved.fleet.roles["coder"].sandbox == "read-only"
+        assert saved.fleet.roles["coder"].approval_policy == "on-request"
+
+    drive(team_project(tmp_path), scenario)
 
 
 def test_spawn_dialog_uses_selected_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

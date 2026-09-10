@@ -770,7 +770,9 @@ def test_spawn_respects_a_caller_supplied_session_id(
 def test_spawn_records_no_session_for_a_binary_that_takes_no_session_id(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    receipt = fleet_service.spawn(project, "coder", worktree=False, binary=sys.executable)
+    receipt = fleet_service.spawn(
+        project, "coder", worktree=False, agent="claude-code", binary=sys.executable
+    )
     command = _command(tmux)
     assert receipt.agent.session_id is None and "--session-id" not in command
     assert command[6:8] == ["--command", sys.executable], "an explicit --bin reaches launch"
@@ -1256,7 +1258,7 @@ def test_unknown_blames_tmux_first_and_the_missing_hooks_second(
     asked, tmux is why — a hookless binary is a second, smaller fact and must not
     stand in front of the reason and leave the operator thinking the fleet is healthy.
     """
-    hookless = _coder(project, binary=sys.executable)  # takes no --session-id
+    hookless = _coder(project, agent="claude-code", binary=sys.executable)  # takes no --session-id
     with_hooks = _coder(project)
     assert hookless.session_id is None and with_hooks.session_id is not None
     tmux.installed = False
@@ -1303,7 +1305,9 @@ def test_a_stale_board_row_defers_to_the_pane(
 def test_recent_output_is_working_and_old_output_is_waiting_without_hooks(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    agent = _coder(project, binary=sys.executable)  # no --session-id: tmux is the only source
+    agent = _coder(
+        project, agent="claude-code", binary=sys.executable
+    )  # no --session-id: tmux is the only source
     assert fleet_service.status_of(agent).state == "waiting", "no output yet"
     tmux.printed(agent.pane_id, ago=ACTIVITY_WINDOW - timedelta(seconds=1))
     assert fleet_service.status_of(agent).state == "working"

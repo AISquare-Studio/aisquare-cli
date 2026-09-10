@@ -52,6 +52,11 @@ PERMISSION_MODES: tuple[tuple[str, str], ...] = (
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir
 _ID_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+SANDBOX_OPTIONS = [
+    ("Role default", ""),
+    *[(s, s) for s in ("read-only", "workspace-write", "danger-full-access")],
+]
+APPROVAL_OPTIONS = [("Native default", ""), *[(s, s) for s in ("on-request", "untrusted", "never")]]
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -69,10 +74,17 @@ def widget_suffix(role: str) -> str:
 
 def permission_options(current: str) -> list[tuple[str, str]]:
     """The mode list, with a value the list does not know appended so it still shows."""
-    options = list(PERMISSION_MODES)
+    return _options(current, list(PERMISSION_MODES))
+
+
+def _options(current: str, options: list[tuple[str, str]]) -> list[tuple[str, str]]:
     if current not in {value for _, value in options}:
-        options.append((f"{current} (custom)", current))
+        return [*options, (f"{current} (custom)", current)]
     return options
+
+
+def _agent_options(current: str) -> list[tuple[str, str]]:
+    return _options(current, [("Use default", ""), *((a.label, a.id) for a in adapters())])
 
 
 class SettingsView(VerticalScroll):
@@ -104,11 +116,10 @@ class SettingsView(VerticalScroll):
         name = self.project.root.name or self.project.id
         yield Static(Text(f"fleet settings — {name}", style="bold"), id="settings-title")
         config = load_config()
-        agent_options = [("Use default", ""), *((a.label, a.id) for a in adapters())]
         with Horizontal(classes="row"):
             yield Label("user coding agent")
             yield Select(
-                agent_options,
+                _agent_options(config.agents.default or ""),
                 value=config.agents.default or "",
                 allow_blank=False,
                 id="default-agent",
@@ -129,7 +140,7 @@ class SettingsView(VerticalScroll):
                 yield Label(role)
                 binding = config.team.profiles.get(role, RoleLaunchProfile())
                 yield Select(
-                    agent_options,
+                    _agent_options(binding.agent or ""),
                     value=binding.agent or "",
                     allow_blank=False,
                     id=f"family-{suffix}",
@@ -145,19 +156,13 @@ class SettingsView(VerticalScroll):
             with Horizontal(classes="row"):
                 yield Label("Codex scope / approval")
                 yield Select(
-                    [
-                        ("Role default", ""),
-                        *[(s, s) for s in ("read-only", "workspace-write", "danger-full-access")],
-                    ],
+                    _options(settings.sandbox or "", SANDBOX_OPTIONS),
                     value=settings.sandbox or "",
                     allow_blank=False,
                     id=f"sandbox-{suffix}",
                 )
                 yield Select(
-                    [
-                        ("Native default", ""),
-                        *[(s, s) for s in ("on-request", "untrusted", "never")],
-                    ],
+                    _options(settings.approval_policy or "", APPROVAL_OPTIONS),
                     value=settings.approval_policy or "",
                     allow_blank=False,
                     id=f"approval-{suffix}",
@@ -201,6 +206,9 @@ class SettingsView(VerticalScroll):
         """Discard edits: show what the file holds (the roles list can change with it)."""
         self.fleet = fleet_service.settings()
         config = load_config()
+        self.query_one("#default-agent", Select).set_options(
+            _agent_options(config.agents.default or "")
+        )
         self.query_one("#default-agent", Select).value = config.agents.default or ""
         self._roles = role_order(self.fleet)
         self.query_one("#codename", Input).value = self.project.codename or ""
@@ -219,13 +227,21 @@ class SettingsView(VerticalScroll):
             select.set_options(permission_options(settings.permission_mode))
             select.value = settings.permission_mode
             switch.value = settings.worktree
-            self.query_one(f"#family-{suffix}", Select).value = (
-                config.team.profiles.get(role, RoleLaunchProfile()).agent or ""
-            )
-            self.query_one(f"#sandbox-{suffix}", Select).value = settings.sandbox or ""
-            self.query_one(f"#approval-{suffix}", Select).value = settings.approval_policy or ""
+            family = config.team.profiles.get(role, RoleLaunchProfile()).agent or ""
+            for field, value, options in (
+                ("family", family, _agent_options(family)),
+                ("sandbox", settings.sandbox or "", SANDBOX_OPTIONS),
+                ("approval", settings.approval_policy or "", APPROVAL_OPTIONS),
+            ):
+                control = self.query_one(f"#{field}-{suffix}", Select)
+                control.set_options(_options(value, options))
+                control.value = value
 
     # --- writing -----------------------------------------------------------------------
+
+    def _optional_selection(self, selector: str, current: str | None) -> str | None:
+        value = self.query_one(selector, Select).value
+        return (value or None) if isinstance(value, str) else current
 
     def _form_fleet(self, current: FleetSettings) -> FleetSettings | str:
         """``current`` with the form's values applied — or the reason the form is not valid."""
@@ -282,18 +298,18 @@ class SettingsView(VerticalScroll):
             self.notify(result, severity="error", timeout=6, markup=False)
             return
         config.fleet = result
-        config.agents.default = str(self.query_one("#default-agent", Select).value) or None
+        config.agents.default = self._optional_selection("#default-agent", config.agents.default)
         for role in self._roles:
             suffix = widget_suffix(role)
-            family = str(self.query_one(f"#family-{suffix}", Select).value) or None
             profile = config.team.profiles.get(role, RoleLaunchProfile())
+            family = self._optional_selection(f"#family-{suffix}", profile.agent)
             if family or role in config.team.profiles:
                 config.team.profiles[role] = profile.model_copy(update={"agent": family})
-            config.fleet.roles[role].sandbox = (
-                str(self.query_one(f"#sandbox-{suffix}", Select).value) or None
+            config.fleet.roles[role].sandbox = self._optional_selection(
+                f"#sandbox-{suffix}", config.fleet.roles[role].sandbox
             )
-            config.fleet.roles[role].approval_policy = (
-                str(self.query_one(f"#approval-{suffix}", Select).value) or None
+            config.fleet.roles[role].approval_policy = self._optional_selection(
+                f"#approval-{suffix}", config.fleet.roles[role].approval_policy
             )
         try:
             written = save_config(config)

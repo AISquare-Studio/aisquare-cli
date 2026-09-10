@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -63,6 +64,7 @@ class AgentSpec:
     context_files: tuple[Path, ...]
     settings_path: Path | None = None  # where aisquare installs hooks, if supported
     hooks: tuple[HookSpec, ...] = ()
+    first_context_file_only: bool = False
 
 
 def _home() -> Path:
@@ -98,6 +100,7 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
                 adapter.context_files(directory),
                 directory / adapter.settings_name,
                 adapter.capabilities.hooks,
+                adapter.capabilities.first_context_file_only,
             )
         )
     # Detection of this legacy IDE entry is preserved; it has no terminal adapter.
@@ -172,11 +175,9 @@ def _aisquare_command() -> str:
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -269,12 +270,26 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
         temp.unlink(missing_ok=True)
 
 
+class AgentSettingsError(ValueError):
+    """A native settings file cannot be safely changed."""
+
+
 def _settings_for_write(path: Path) -> dict[str, Any]:
-    if not path.exists():
+    try:
+        content = path.read_text(encoding="utf-8")
+        value = json.loads(content) if content.strip() else {}
+    except FileNotFoundError:
         return {}
-    value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AgentSettingsError(
+            f"Cannot update {path}: {exc}. Existing settings preserved; "
+            "repair the file and retry agents connect/disconnect."
+        ) from exc
     if not isinstance(value, dict):
-        raise ValueError(f"{path} must contain a JSON object; existing settings preserved")
+        raise AgentSettingsError(
+            f"{path} must contain a JSON object; existing settings preserved. "
+            "Repair the file and retry agents connect/disconnect."
+        )
     return value
 
 
@@ -286,7 +301,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
     settings = _settings_for_write(spec.settings_path)
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
-        raise ValueError(f"{spec.settings_path}: hooks must be an object")
+        raise AgentSettingsError(f"{spec.settings_path}: hooks must be an object")
     command = _aisquare_command()
     for hook in spec.hooks:
         groups = hooks.get(hook.event)
@@ -296,8 +311,9 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
             "type": "command",
             "command": f"{command} hook {hook.command}{suffix}",
         }
-        if hook.timeout is not None:
-            entry["timeout"] = max(hook.timeout, _installed_timeout(groups, hook.event) or 0)
+        installed_timeout = _installed_timeout(groups, hook.event)
+        if hook.timeout is not None or installed_timeout is not None:
+            entry["timeout"] = max(hook.timeout or 0, installed_timeout or 0)
         group: dict[str, Any] = {"hooks": [entry]}
         if hook.matcher is not None:
             group["matcher"] = hook.matcher
@@ -398,8 +414,9 @@ def _installed_timeout(groups: Any, event: str) -> int | None:
     leaves a longer one alone — an operator who set 180 chose more headroom
     than we need, and reconciling that down would discard their choice.
     """
-    if event not in _CONTEXT_HOOKS or not isinstance(groups, list):
+    if not isinstance(groups, list):
         return None
+    timeouts: list[int] = []
     for group in groups:
         if not _is_aisquare_group(group):
             continue
@@ -410,8 +427,8 @@ def _installed_timeout(groups: Any, event: str) -> int | None:
                 continue
             value = item.get("timeout")
             if isinstance(value, int) and not isinstance(value, bool):
-                return value
-    return None
+                timeouts.append(value)
+    return max(timeouts, default=None)
 
 
 def _is_current_aisquare_group(group: Any, event: str) -> bool:
@@ -563,7 +580,15 @@ def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
     """Existing context files for an agent (its content, for ingestion)."""
     spec = _spec(name, config_dir)
-    return [path for path in spec.context_files if path.exists()] if spec else []
+    if spec is None:
+        return []
+    if spec.first_context_file_only:
+        for path in spec.context_files:
+            with suppress(OSError):
+                if path.read_text(encoding="utf-8", errors="replace").strip():
+                    return [path]
+        return []
+    return [path for path in spec.context_files if path.is_file()]
 
 
 def hook_fingerprint(name: str, config_dir: Path) -> str:
@@ -573,9 +598,23 @@ def hook_fingerprint(name: str, config_dir: Path) -> str:
     if spec is None or spec.settings_path is None:
         return ""
     settings = _read_settings(spec.settings_path)
-    return hashlib.sha256(
-        json.dumps(settings.get("hooks", {}), sort_keys=True).encode()
-    ).hexdigest()
+    owned: dict[str, list[dict[str, Any]]] = {}
+    hooks = settings.get("hooks", {})
+    for event, groups in hooks.items() if isinstance(hooks, dict) else []:
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not _is_aisquare_group(group):
+                continue
+            handlers = [
+                item
+                for item in group["hooks"]
+                if isinstance(item, dict)
+                and isinstance(item.get("command"), str)
+                and _is_aisquare_hook_command(item["command"])
+            ]
+            owned.setdefault(event, []).append({**group, "hooks": handlers})
+    return hashlib.sha256(json.dumps(owned, sort_keys=True).encode()).hexdigest()
 
 
 def _observation_path(name: str, config_dir: Path) -> Path:

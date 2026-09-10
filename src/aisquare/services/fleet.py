@@ -182,7 +182,9 @@ def settings() -> FleetSettings:
 def role_settings(role: str, config: FleetSettings | None = None) -> FleetRoleSettings:
     """The role's launch shape, or the built-in default for a role the config omits."""
     config = config or settings()
-    return config.roles.get(role, FleetRoleSettings())
+    from aisquare.core.harness import base_role
+
+    return config.roles.get(role, config.roles.get(base_role(role), FleetRoleSettings()))
 
 
 def server(config: FleetSettings | None = None) -> TmuxServer:
@@ -995,15 +997,15 @@ def spawn(
     if agent is not None or selected.adapter.id != "claude-code":
         flags += ["--agent", selected.adapter.id]
     native_mode = mode if selected.adapter.id == "claude-code" else permission_mode
+    native_sandbox = role_config.sandbox if selected.adapter.id == "codex" else None
+    native_approval = role_config.approval_policy if selected.adapter.id == "codex" else None
     try:
         flags += selected.adapter.fleet_args(
             role,
             picked,
             native_mode,
-            sandbox=sandbox if sandbox is not None else role_config.sandbox,
-            approval=approval_policy
-            if approval_policy is not None
-            else role_config.approval_policy,
+            sandbox=sandbox if sandbox is not None else native_sandbox,
+            approval=approval_policy if approval_policy is not None else native_approval,
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc

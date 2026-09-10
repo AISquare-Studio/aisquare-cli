@@ -146,6 +146,10 @@ jobs:
             # file branch is what needs a populated home to be real.
             # Set for anyone running the suite from inside a Claude session.
             echo "CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config"
+            echo "CODEX_HOME=$RUNNER_TEMP/codex-config"
+            echo "AISQUARE_CODING_AGENT=codex"
+            echo "AISQUARE_LAUNCH_ID=ci-parent-launch"
+            echo "AISQUARE_FLEET_AGENT=ci-parent-fleet"
           } >> "$GITHUB_ENV"
 
       - name: Configure an aisquare home, the way a developer's machine is
@@ -154,6 +158,8 @@ jobs:
           # that the suite must ignore, and a runner's real ~ stays empty so a
           # leak is unambiguous rather than accidental.
           mkdir -p "$AISQUARE_HOME" "$CLAUDE_CONFIG_DIR"
+          mkdir -p "$CODEX_HOME"
+          printf '[otel]\nexporter="none"\n' > "$CODEX_HOME/config.toml"
           cd "$(mktemp -d)"        # so `init` does not pack the checkout
           aisquare init --yes
           # No --proxy-url: the DEFAULT is 9090, and the default is what the
@@ -311,13 +317,11 @@ jobs:
           npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@0.153.4
           echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
       - name: Exercise hooks, MCP, resume, usage and the interactive fleet
-        env:
-          AISQUARE_TEST_CODEX: "1"
         run: |
-          codex --version
           # The fixture owns its temporary hooks and trusts only those. Its
           # Responses endpoint is loopback; no login, model spend or gateway.
-          pytest -ra tests/test_codex_native.py
+          # The runner asserts the pinned version and a passing, unskipped test.
+          python -m tests.run_codex_native
 
   package:
     name: package (build + install)

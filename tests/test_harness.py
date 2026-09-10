@@ -1044,7 +1044,7 @@ def test_spawn_printed_command_omits_the_flag_an_agent_may_not_speak(
     is never worth that. It still traces, just unjoined."""
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
-    argv = ["--json", "team", "spawn", "coder", "--bin", "aider"]
+    argv = ["--json", "team", "spawn", "coder", "--agent", "claude-code", "--bin", "aider"]
     result = runner.invoke(app, argv)  # type: ignore[arg-type]
     command = json.loads(result.output)["command"]
     assert "--session-id" not in command

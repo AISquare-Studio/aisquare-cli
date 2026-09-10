@@ -98,9 +98,10 @@ def client_session_id(project_id: str) -> str:
                 session = store.get_session(bound) if bound else None
                 if session is not None and session.project_id == project_id:
                     return session.id
-                raise ValueError(
-                    "Local agent session has not joined this board yet; retry after SessionStart"
-                )
+    if os.environ.get("AISQUARE_LAUNCH_ID") or os.environ.get("AISQUARE_FLEET_AGENT"):
+        raise ValueError(
+            "Local agent session has not joined this board yet; retry after SessionStart"
+        )
     client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
     return f"mcp:{client}:{project_id.removeprefix('prj_')[:6]}"
 

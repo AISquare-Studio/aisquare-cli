@@ -145,19 +145,23 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point AISQUARE_HOME at a temp dir so tests never touch ``~/.aisquare``.
 
-    ``CLAUDE_CONFIG_DIR`` is cleared too: agent detection honours it, and a
-    developer running the suite from inside a Claude session must never have
+    ``CLAUDE_CONFIG_DIR`` and ``CODEX_HOME`` are cleared too: detection honours
+    them, and a developer running the suite from inside an agent must never have
     tests write hooks into their real config directory.
     """
     home = tmp_path / "aisquare-home"
     monkeypatch.setenv(HOME_ENV_VAR, str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     # The orchestrator and brain knobs are read from the ambient env; clear them so
     # the suite is hermetic (an embedding user's AISQUARE_BRAIN_EMBED=1 must not
     # change what tests build/assert), each test opting in explicitly instead.
     for knob in (
         "AISQUARE_TEAM",
         "AISQUARE_ROLE",
+        "AISQUARE_CODING_AGENT",
+        "AISQUARE_LAUNCH_ID",
+        "AISQUARE_FLEET_AGENT",
         "AISQUARE_TEAM_HUB",
         "AISQUARE_TEAM_DELTA",
         "AISQUARE_TEAM_LEASE_MIN",
@@ -228,7 +232,7 @@ def fresh_state() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point agent detection at a temp home so tests never read ``~/.claude*``.
+    """Point agent detection and launch at a temp home, never ``~/.claude*`` or ``~/.codex``.
 
     ``core.agents._home`` is the indirection its own docstring offers for this.
     Without it the claude-code doctor row read the developer's REAL

@@ -48,8 +48,10 @@ interrupt handlers are local and use Codex's three-second timeout.
 Selection order is explicit `--agent`, role binding, an exact known binary
 override (legacy shorthand), project preference, inherited session selection,
 user default, then Claude Code. An arbitrary wrapper declares its family with
-`team bind ROLE --agent NAME --bin PATH`. Conflicting known binaries and
-families are rejected. Changing a default affects future launches.
+`team bind ROLE --agent NAME --bin PATH`. Unknown wrappers require that binding
+or an explicit `--agent` at launch; a user, project or inherited default cannot
+identify a wrapper's family. Conflicting known binaries and families are rejected.
+Changing a default affects future launches.
 
 Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
 Doctor warns about a missing executable when an agent or launch profile has
@@ -58,6 +60,8 @@ choose a Codex account through the role's `CODEX_HOME` binding instead.
 
 The Settings tab has user and role agent choices; the spawn dialog supports a
 per-launch choice. Model/account profiles continue to use `team bind`.
+Settings retains custom values written by another version, so they can be
+reviewed or corrected without losing them when saving unrelated changes.
 
 ## Native settings
 
@@ -97,7 +101,9 @@ Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`; Claude effort
 aliases and model ladders are not reused. Native model availability is left to
 Codex, without paid discovery probes. Claude retains its ladder, but probes
 now use the selected executable and effective account. Cache keys include the
-resolved executable's upgrade fingerprint and account/provider inputs.
+resolved executable's upgrade fingerprint and stable login/provider inputs.
+Parent-session variables, OAuth refresh timestamps and hook edits do not
+invalidate the 24-hour cache. `--refresh` clears every probe-cache scope.
 
 ```sh
 asq fleet spawn reviewer --agent codex --sandbox read-only --approval on-request
@@ -107,7 +113,10 @@ asq launch coder --agent codex -- exec --json 'Run the local checks'
 
 Use `--` before native Codex options, especially `-c` (AISquare's own `-c` is
 the executable override). Native sandbox and approval policies stay separate.
-Reviewers default to read-only; other Codex fleet roles use workspace-write.
+Reviewers, including numbered seats such as `reviewer2`, default to read-only;
+other Codex fleet roles use workspace-write. Numbered seats inherit the base
+role's settings unless configured separately. Saved Codex sandbox/approval
+settings apply only to Codex; Claude Code keeps its own permission mode.
 No automatic approval bypass is added. Native subagents are disabled in fleet
 sessions when `fleet.disable_native_agent_teams` is enabled.
 
@@ -137,10 +146,13 @@ exports native OTLP JSON logs to a per-launch, authenticated loopback receiver o
 POSIX/WSL. It spools allowlisted, redacted event metadata. Existing
 `asq explainability ship` delivery replays model, tool and decision spans
 through the SDK under the same run binding. User-configured native OTEL
-exporters (including profile files) are preserved; AISquare reports that it
-has stood down. Usage is counted from native logs once, with the observed
-provider name; duplicate exports and the parallel native span stream do not
-add usage again.
+exporters in the effective account home, selected profile, system config or
+explicit `-c`/`--config` overrides are preserved; AISquare reports that it
+has stood down. Prompts and unselected profiles do not disable tracing.
+Codex [ignores `otel` in project-local config](https://learn.chatgpt.com/docs/config-file/config-advanced),
+so AISquare does not search ancestor projects or other account homes for
+exporters. Usage is counted from native logs once, with the observed provider
+name; duplicate exports and the parallel native span stream do not add usage again.
 
 This transport does not change model routing, API keys or ChatGPT login. It
 does not capture raw model bodies or tool arguments. Native timestamps remain
@@ -158,8 +170,12 @@ Codex binary, temporary config homes and a loopback Responses server:
 AISQUARE_TEST_CODEX=1 .venv/bin/python -m pytest tests/test_codex_native.py
 ```
 
-The CI Codex job installs the pinned compatible binary and runs this fixture
-on each PR, alongside the existing Claude and shared regression suite.
+The CI Codex job installs the pinned compatible binary and runs
+`python -m tests.run_codex_native` on each PR, alongside the existing Claude
+and shared regression suite. This runner checks the exact binary version and
+requires the native fixture to execute and pass; an all-skipped run fails.
+The ambient CI jobs also export parent-agent identity and a populated
+`CODEX_HOME`, which the shared test fixtures must isolate.
 
 It covers native hook context, prompt capture, exec/resume identity, tool and
 MCP calls, usage export, interactive fleet startup, tell, resize and stop.

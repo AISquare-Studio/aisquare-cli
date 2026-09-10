@@ -25,24 +25,32 @@ def presence_lines() -> Text:
     """Which of the tools the fleet leans on are on this machine, with a hint per gap."""
     from aisquare.services import agent_launch
 
-    selected = agent_launch.resolve()
     text = Text()
-    for tool, why in (
-        ("tmux", "the fleet's session substrate — agents run inside it"),
-        (selected.binary.binary, f"selected coding agent ({selected.adapter.label})"),
-        ("gh", "PRs for the coder and reviewer"),
-    ):
+    tools = [("tmux", "the fleet's session substrate — agents run inside it")]
+    try:
+        selected = agent_launch.resolve()
+    except ValueError as exc:
+        selected = None
+        text.append(f"  ✗ coding agent: {exc}\n", style="red")
+        text.append(
+            "    Fix the agent selection in Settings or aisquare agents use.\n", style="dim"
+        )
+    if selected is not None:
+        tools.append((selected.binary.binary, f"selected coding agent ({selected.adapter.label})"))
+    tools.append(("gh", "PRs for the coder and reviewer"))
+    for tool, why in tools:
         found = (
             agent_launch.executable(selected)
-            if tool == selected.binary.binary
+            if selected is not None and tool == selected.binary.binary
             else shutil.which(tool)
         )
         mark = "✓" if found else "✗"
         text.append(f"  {mark} {tool:<7}", style="green" if found else "red")
         text.append(f" {why}\n", style="dim")
         if not found:
+            hint = INSTALL_HINT.get(tool, selected.adapter.install_hint if selected else "")
             text.append(
-                f"            install: {INSTALL_HINT.get(tool, selected.adapter.install_hint)}\n",
+                f"            install: {hint}\n",
                 style="dim italic",
             )
     return text

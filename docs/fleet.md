@@ -164,7 +164,7 @@ aisquare fleet spawn manager
 aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
-aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
+aisquare fleet spawn coder --agent claude-code --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
 Starts an agent in the project's tmux session — a window running
@@ -398,7 +398,7 @@ which is the harness's rule, not this one.
 
 Three places to change one:
 
-- **per spawn** — `fleet spawn … --permission-mode acceptEdits --no-worktree --bin claude2`;
+- **per spawn** — `fleet spawn … --agent claude-code --permission-mode acceptEdits --no-worktree --bin claude2`;
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
@@ -448,7 +448,7 @@ never the fleet: the defaults apply and nothing refuses.
 
 **Model, effort and binary per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),
-`aisquare team bind <role> --bin … --env … --arg …` (launch profiles),
+`aisquare team bind <role> --agent claude-code --bin … --env … --arg …` (launch profiles),
 `AISQUARE_MODEL_<ROLE>`, `AISQUARE_EFFORT_<ROLE>` and `AISQUARE_BIN_<ROLE>` in
 the environment. A fleet launch is an `aisquare launch <role>` inside a tmux
 window, so all of it applies unchanged, as does the Explainability wiring.

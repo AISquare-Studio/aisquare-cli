@@ -25,23 +25,71 @@ from aisquare.core import insights, outbox, selfcli, spawn
 from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
+SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+
+
+def _option_values(args: list[str], short: str, long: str) -> Iterator[str]:
+    tokens = iter(args)
+    for arg in tokens:
+        if arg == "--":
+            break
+        if arg in {short, long}:
+            value = next(tokens, None)
+            if value is not None:
+                yield value
+        elif arg.startswith(long + "="):
+            yield arg.partition("=")[2]
+        elif arg.startswith(short) and len(arg) > len(short):
+            yield arg[len(short) :].removeprefix("=")
+
+
+def _read_config(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except FileNotFoundError:
+        return {}
 
 
 def operator_configured(config_dir: Path, args: list[str]) -> bool:
-    """Conservatively preserve native exporter config at any effective layer."""
-    if any("otel." in arg or arg.startswith("otel=") for arg in args):
-        return True
-    files = {config_dir / "config.toml", Path("/etc/codex/config.toml")}
-    files.update(config_dir.glob("*.config.toml"))
-    for parent in (Path.cwd(), *Path.cwd().parents):
-        files.add(parent / ".codex" / "config.toml")
-    for path in files:
-        if not path.is_file():
+    """Preserve exporters in native user/system config and the selected profile.
+
+    Codex ignores `otel` in project-local config. Other account homes and
+    unselected profile files are not layers of this launch either.
+    """
+    overrides: dict[str, Any] = {}
+    for value in _option_values(args, "-c", "--config"):
+        key, separator, raw = value.partition("=")
+        if not separator:
             continue
-        with path.open("rb") as handle:
-            config = tomllib.load(handle)
-        if config.get("otel") or any(p.get("otel") for p in config.get("profiles", {}).values()):
+        try:
+            parsed = tomllib.loads(value)
+        except tomllib.TOMLDecodeError:
+            # Codex accepts an unquoted string as a config override value.
+            parsed = tomllib.loads(f"{key}={json.dumps(raw)}")
+        if "otel" in parsed:
             return True
+        overrides.update(parsed)
+    configs = [_read_config(SYSTEM_CONFIG), _read_config(config_dir / "config.toml")]
+    profile = overrides.get("profile")
+    if profile is None:
+        profile = next(
+            (config["profile"] for config in reversed(configs) if "profile" in config), None
+        )
+    for value in _option_values(args, "-p", "--profile"):
+        profile = value
+    if profile:
+        if not isinstance(profile, str) or Path(profile).name != profile or profile in {".", ".."}:
+            raise ValueError("Invalid Codex config profile name")
+        configs.append(_read_config(config_dir / f"{profile}.config.toml"))
+    for config in configs:
+        if "otel" in config:
+            return True
+        legacy_profiles = config.get("profiles", {})
+        if profile and isinstance(legacy_profiles, dict):
+            selected = legacy_profiles.get(profile, {})
+            if isinstance(selected, dict) and "otel" in selected:
+                return True
     return False
 
 

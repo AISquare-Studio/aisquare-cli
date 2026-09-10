@@ -98,7 +98,9 @@ def test_launch_reports_a_missing_agent_binary(
 def test_launch_honours_a_custom_agent_command(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
-    result = runner.invoke(app, ["launch", "coder", "--command", "claude-next"])
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", "claude-code", "--command", "claude-next"]
+    )
 
     assert result.exit_code == 0, result.output
     assert spy["argv"] == ["claude-next"]
@@ -425,7 +427,9 @@ def test_a_role_bound_to_a_wrapper_traces_and_still_joins(
         save_config(
             AppConfig(
                 explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url),
-                team=TeamSettings(profiles={"coder": RoleLaunchProfile(bin="my-wrapper")}),
+                team=TeamSettings(
+                    profiles={"coder": RoleLaunchProfile(agent="claude-code", bin="my-wrapper")}
+                ),
             )
         )
         result = runner.invoke(app, ["launch", "coder"])
@@ -520,7 +524,9 @@ def test_launch_does_not_pin_an_id_it_cannot_own(
         (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "the-resumed-session")
         assert record["pipeline_id"] == spy["env"]["AISQUARE_PIPELINE_ID"]
 
-        result = runner.invoke(app, ["launch", "coder", "--command", "aider"])
+        result = runner.invoke(
+            app, ["launch", "coder", "--agent", "claude-code", "--command", "aider"]
+        )
         assert result.exit_code == 0, result.output
         assert spy["argv"] == ["aider"], "no flag reaches a binary we did not resolve"
         assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"

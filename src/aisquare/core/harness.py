@@ -327,6 +327,10 @@ def account_scope() -> str:
     """
     context = _PROBE_CONTEXT.get()
     if context is not None:
+        from aisquare.core import agents, claude_accounts
+        from aisquare.core.agent_adapters import get_adapter
+        from aisquare.core.agent_adapters.types import config_home
+
         executable = Path(
             (
                 shutil.which(context.binary)
@@ -339,22 +343,58 @@ def account_scope() -> str:
         with contextlib.suppress(OSError):
             stat = executable.stat()
             identity += [stat.st_mtime_ns, stat.st_size]
-        # Hash account/provider inputs, never expose them in a cache name.
-        identity += sorted(
-            (k, v)
-            for k, v in context.env.items()
-            if k.startswith(("CLAUDE_", "ANTHROPIC_", "AWS_", "GOOGLE_"))
+        home = config_home(get_adapter("claude-code"), agents._home(), context.env)
+        identity.append(str(home.resolve()))
+        account_path = (
+            home / ".claude.json"
+            if context.env.get("CLAUDE_CONFIG_DIR", "").strip()
+            else agents._home() / ".claude.json"
         )
-        home = Path(context.env.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-        for name in ("settings.json", ".credentials.json"):
-            with contextlib.suppress(OSError):
-                identity += [(name, (home / name).stat().st_mtime_ns)]
+        account = claude_accounts.read_identity(account_path)
+        identity.append(account.model_dump() if account else None)
+        # Login identity, provider routing and explicit credentials affect
+        # entitlement. Hook edits, OAuth refreshes and parent-session IDs do not.
+        settings = agents._read_settings(home / "settings.json")
+        configured_env = settings.get("env", {})
+        identity += [
+            _provider_identity(configured_env if isinstance(configured_env, dict) else {}),
+            settings.get("apiKeyHelper"),
+            _provider_identity(context.env),
+        ]
         return hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:20]
     raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if not raw:
         return "default"
     resolved = str(Path(raw).expanduser())
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
+
+
+def _provider_identity(env: dict[str, object] | dict[str, str]) -> list[tuple[str, object]]:
+    """Account/provider selectors, excluding per-process and tracing variables."""
+    keys = {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_ROLE_ARN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "ANTHROPIC_FOUNDRY_RESOURCE",
+        "ANTHROPIC_FOUNDRY_BASE_URL",
+        "ANTHROPIC_FOUNDRY_API_KEY",
+    }
+    return sorted((key, env[key]) for key in keys if key in env)
 
 
 def _cache_path() -> Path:
@@ -554,7 +594,10 @@ def _probe_and_cache(alias: str) -> ProbeResult:
 def clear_probe_cache() -> None:
     """Forget every cached availability verdict (``spawn --refresh``)."""
     with contextlib.suppress(OSError):
-        _cache_path().unlink(missing_ok=True)
+        directory = aisquare_home() / "cache"
+        for path in (*directory.glob("harness_models.*.json"), directory / "harness_models.json"):
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
 
 
 def resolve_model(
@@ -574,15 +617,13 @@ def resolve_model(
     back empty-handed, and a launch is never blocked.
     """
     if context is not None:
-        if refresh:
-            clear_probe_cache()  # retire the legacy ambient cache as well
         token = _PROBE_CONTEXT.set(context)
         try:
-            if refresh:
-                clear_probe_cache()
             return resolve_model(role, probe=probe, refresh=refresh, effort=effort)
         finally:
             _PROBE_CONTEXT.reset(token)
+    if refresh:
+        clear_probe_cache()
     profile = ROLE_PROFILES.get(base_role(role))
     level, effort_source = resolve_effort(role, explicit=effort)
     pinned = role_model_override(role)

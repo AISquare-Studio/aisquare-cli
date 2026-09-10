@@ -4,7 +4,7 @@ Native defaults stay native. Discovery and status never invoke a paid model.
 """
 
 from aisquare.core import harness
-from aisquare.core.config import load_config
+from aisquare.core.config import AppConfig, load_config
 
 
 def resolve_model(
@@ -14,7 +14,13 @@ def resolve_model(
     env: dict[str, str],
     effort: str | None,
 ) -> harness.ModelResolution:
-    settings = load_config().agents.models.get(agent)
+    try:
+        config = load_config()
+    except Exception:
+        # The launch profile reports the damaged config; native defaults and
+        # explicit environment pins must still let the agent start.
+        config = AppConfig()
+    settings = config.agents.models.get(agent)
     role_settings = settings.roles.get(harness.base_role(role)) if settings else None
     suffix = "".join(c if c.isalnum() else "_" for c in role.upper())
     model = env.get(f"AISQUARE_MODEL_{suffix}")

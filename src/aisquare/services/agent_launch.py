@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from aisquare.core import harness, orchestrator, paths, selfcli
+from aisquare.core import agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, config_home
 from aisquare.core.config import AppConfig, load_config, save_config
@@ -81,13 +81,19 @@ def resolve(
         raise ValueError(
             f"{chosen_binary.binary!r} runs {inferred.id}, but {adapter.id} was selected"
         )
+    elif inferred is None and source not in {"flag", "role"}:
+        raise ValueError(
+            f"The agent family of {chosen_binary.binary!r} is unknown; pass --agent "
+            f"or bind it with aisquare team bind {role} --agent {adapter.id} "
+            "--bin PATH before launching this wrapper"
+        )
     effective_env = {**os.environ, **profile.env}
     return ResolvedAgent(
         adapter,
         chosen_binary,
         source,
         profile,
-        config_home(adapter, Path.home(), effective_env),
+        config_home(adapter, agents._home(), effective_env),
     )
 
 
@@ -171,16 +177,18 @@ def telemetry_args(
     env: dict[str, str],
     raw_args: list[str] | None = None,
 ) -> tuple[list[str], str]:
-    from aisquare.services import explainability, native_telemetry
+    from aisquare.services import explainability
+
+    # A child must never keep a Claude parent's model/run identity, even when
+    # its own telemetry is disabled or its config cannot be read.
+    if not selected.adapter.capabilities.model_proxy:
+        explainability.disown_inherited_trace(env)
+    if selected.adapter.id != "codex":
+        return [], ""
+    from aisquare.services import native_telemetry
 
     try:
         settings = load_config().explainability
-        if not selected.adapter.capabilities.model_proxy:
-            explainability.disown_inherited_trace(env)
-        if selected.adapter.id != "codex":
-            return [], ""
-        # A child must never keep a Claude parent's model/run identity, even
-        # when the child's own telemetry is disabled.
         if not settings.enabled:
             return [], ""
         if not settings.ship:

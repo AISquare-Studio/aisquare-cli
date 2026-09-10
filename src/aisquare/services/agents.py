@@ -47,7 +47,10 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
 
     sections: list[str] = []
     for path in agent_core.context_files(name, config_dir):
-        sections.extend(_split_sections(path.read_text(encoding="utf-8")))
+        try:
+            sections.extend(_split_sections(path.read_text(encoding="utf-8", errors="replace")))
+        except OSError as exc:
+            raise agent_core.AgentSettingsError(f"Cannot read context file {path}: {exc}") from exc
 
     added = 0
     with store_session() as store:

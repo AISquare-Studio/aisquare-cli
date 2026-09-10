@@ -355,21 +355,14 @@ def register(
             )
     else:
         names = target.agent_names
-        # A role this CLI can launch but this machine's roster does not list —
-        # an upgrade that added a role to the DEFAULTS does not edit an existing
-        # config.toml. Launching it then ships under an identity the workspace
-        # has never heard of: 409 agent_not_registered, a backlog until someone
-        # registers it. Named here, where registering is one flag away.
-        from aisquare.core.harness import ROLE_PROFILES
-
-        unlisted = [r for r in ROLE_PROFILES if r not in settings.roles]
+        # A role this CLI can launch but this TARGET's roster does not list —
+        # off `target.roles`, the resolved one, because a per-target `roles`
+        # override is exactly the configuration this hint is for. Named here,
+        # where registering is one flag away, and carried into the --json
+        # payload below so automation sees the same gap.
+        unlisted = ops.unregistered_roles(target)
         if unlisted and not get_state().json_output:
-            typer.echo(
-                f"note: launchable but not in explainability.roles: {', '.join(unlisted)} — "
-                f"add them to config.toml or run: aisquare explainability register "
-                + " ".join(f"--role {r}" for r in unlisted),
-                err=True,
-            )
+            typer.echo(f"note: {ops.unregistered_roles_note(unlisted)}", err=True)
     if not names:
         fail("no agent identities to register — check explainability.roles", error="no-agents")
 
@@ -398,6 +391,13 @@ def register(
                 {
                     "target": target.name,
                     "publications": {name: published.get(name) for name in names},
+                    # The roster gap, for the caller that cannot read stderr
+                    # prose — the note above is suppressed under --json, and a
+                    # payload without this field made the gap invisible to
+                    # automation in the very function whose comment records
+                    # honouring --json on the failing branches but not the
+                    # succeeding one as an already-fixed bug.
+                    "unregistered_roles": list(ops.unregistered_roles(target)),
                 }
             )
         )

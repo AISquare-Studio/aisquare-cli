@@ -743,6 +743,39 @@ def test_spawn_records_no_session_for_a_binary_that_takes_no_session_id(
     assert fleet_service.status_of(receipt.agent).detail == "no hooks"
 
 
+def test_spawn_forwards_a_bound_binary_the_tmux_server_cannot_see(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fleet window re-resolves its binary in the tmux SERVER's environment.
+
+    That environment is not this shell's: `core/tmux.py` spawns with
+    `untraced_env()` and passes two per-window keys, so `AISQUARE_BIN_<ROLE>`
+    and `AISQUARE_AGENT_BIN` never arrive. Forwarding only an explicit `--bin`
+    left the row naming `claude2` while the pane silently ran `claude` — and
+    decided the role's binary-keyed flags against the wrong executable.
+    `docs/fleet.md` promises the variable works for a fleet launch.
+    """
+    other = claude_on_path.with_name("claude2")
+    other.write_text(claude_on_path.read_text(encoding="utf-8"), encoding="utf-8")
+    other.chmod(0o755)
+    monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    command = _command(tmux)
+    assert _flag(command, "--command") == "claude2", "the binding reaches the window"
+    assert receipt.agent.binary == "claude2", "and the row and the pane agree"
+
+
+def test_spawn_leaves_the_default_binary_to_the_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Only a CHOSEN binary is forwarded: `resolution.source == "default"` means
+    nothing asked for anything, and `launch` resolving it itself keeps the fleet's
+    command line the shortest true one."""
+    fleet_service.spawn(project, "coder", worktree=False)
+    assert "--command" not in _command(tmux)
+
+
 def test_spawn_suffixes_a_label_a_live_agent_holds(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

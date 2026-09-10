@@ -201,6 +201,44 @@ class ResolvedTarget:
         return tuple(names)
 
 
+def unregistered_roles(target: ResolvedTarget) -> tuple[str, ...]:
+    """First-class roles this CLI can launch that ``target``'s roster does not list.
+
+    Read off the RESOLVED roster, never off ``settings.roles``: any
+    ``[explainability.targets.<name>]`` may override the list
+    (``ExplainabilityTarget.roles``), and ``resolve_target`` is where that
+    override wins. Comparing against the top level was silent in exactly the
+    per-target configuration this hint was written for — a target listing two
+    roles while the top level lists eight publishes two identities and reports
+    no gap — and it nagged in the mirror case, handing over ``--role`` flags for
+    identities that are already registered.
+
+    Empty when nothing is missing, so every caller can just test it.
+    """
+    from aisquare.core.harness import ROLE_PROFILES
+
+    return tuple(role for role in ROLE_PROFILES if role not in target.roles)
+
+
+def unregistered_roles_note(roles: Sequence[str]) -> str:
+    """The one sentence every register surface shows for :func:`unregistered_roles`.
+
+    ONE renderer, for the reason ``key_origin`` above is one: a role the CLI can
+    launch but the workspace has never heard of ships spans under an unknown
+    identity and is rejected 409 ``agent_not_registered`` — a backlog until
+    someone registers it — and two phrasings of that fact drift, invisibly,
+    until an operator compares them mid-incident. An upgrade that adds a role to
+    the DEFAULTS does not edit an existing ``config.toml``, which is why the
+    gap exists at all.
+    """
+    listed = ", ".join(roles)
+    flags = " ".join(f"--role {role}" for role in roles)
+    return (
+        f"launchable but not in explainability.roles: {listed} — add them to "
+        f"config.toml or run: aisquare explainability register {flags}"
+    )
+
+
 def resolve_target(
     settings: ExplainabilitySettings,
     name: str | None = None,

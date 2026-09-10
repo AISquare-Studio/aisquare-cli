@@ -405,9 +405,22 @@ def spawn(
     # than printing nothing.
     for key, value in launch_profile.env.items():
         env_assignments.append(f"{key}={shlex.quote(value)}")
-    role_args = harness.role_default_args(role_name, binary=binary.binary, args=launch_profile.args)
+    # ONE precedence rule with `cli/launch.py`: the role's own flags
+    # (`RoleProfile.default_args`) sit after the binding's args, and an explicit
+    # flag or its `--no-` opt-out WINS wherever it appears — not because of
+    # where these land in argv, but because `role_defaults` stands down when
+    # either spelling is already in the args it is given. `team spawn` has no
+    # separate operator line to sit before: its `--arg` values are folded into
+    # `launch_profile.args`, so the role's flags come last here and in the
+    # middle in `launch`, under the same rule.
+    defaults = harness.role_defaults(role_name, binary=binary.binary, args=launch_profile.args)
+    role_args = defaults.args
+    for note in defaults.notes:
+        # The banner is meant to be pasted; a flag this role would normally
+        # carry and does not is part of what the paste will do.
+        typer.echo(f"{role_name}: {note}", err=True)
     if resolution is None:
-        argv = [binary.binary, *role_args, *launch_profile.args]
+        argv = [binary.binary, *launch_profile.args, *role_args]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
         argv = [
@@ -416,8 +429,8 @@ def spawn(
             resolution.model,
             "--effort",
             resolution.effort,
-            *role_args,
             *launch_profile.args,
+            *role_args,
         ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
         profile = harness.ROLE_PROFILES.get(role_name)
@@ -604,6 +617,14 @@ def harness_status() -> None:
                 "binary_source": harness.resolve_binary(name).source,
                 "env": harness.resolve_profile(name).env,
                 "extra_args": harness.resolve_profile(name).args,
+                # The role's OWN flags, the third axis of "what will this role
+                # launch with". Without it the matrix reported `extra_args: []`
+                # for a ui-tester that execs `claude --chrome`, and whoever
+                # debugged that concluded the flag came from their alias — the
+                # confusion this feature exists to end. Declared, not resolved:
+                # `binary`/`binary_source` in this same row say whether the
+                # binary gate (`harness.is_default_agent`) will pass them on.
+                "default_args": profile.default_args,
             }
         )
     interference = harness.interfering_env()
@@ -640,6 +661,10 @@ def harness_status() -> None:
             carried = ",".join(sorted(launch_profile.env))
             extra = f"+{len(launch_profile.args)}args" if launch_profile.args else ""
             bin_note = f"{bin_note}  env={carried}{extra}"
+        # ...and hid the role's own flags, the axis this matrix is read for
+        # after a ui-tester did or did not open a browser.
+        if profile.default_args:
+            bin_note = f"{bin_note}  role_args={' '.join(profile.default_args)}"
         console.print(
             f"{name:<10} {ladder:<20} effort={resolution.effort:<10}({offset}) "
             f"→ {pinned or resolution.model} [{source}]{bin_note}",

@@ -314,9 +314,11 @@ automatically — no standing prompts to paste:
   (final accountability review, severity-ordered findings)
 - **ui-tester** — verifies anything a user sees in a real browser (Claude in
   Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever the window
-  has) and measures instead of eyeballing; reopens rather than passes a UI
-  task it could not open in a browser. Launched with `--chrome` by the role
-  itself, so the tool is not one operator's alias
+  has) and measures instead of eyeballing; names the branch and URL it
+  verified, and reopens rather than passes a UI task it could not open in a
+  browser. Launched with `--chrome` by the role itself, so the tool is not one
+  operator's alias. Its briefing ASKS it to be read-only; nothing in this
+  checkout enforces that (no allowed-tools list is passed)
 
 ### The model harness: each role on the right model
 

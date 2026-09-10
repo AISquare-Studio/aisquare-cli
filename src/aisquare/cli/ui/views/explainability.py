@@ -141,6 +141,12 @@ def register_roster() -> Notice:
         )
     if not published:
         lines.append("(the workspace returned no publication ids; re-run after it syncs)")
+    # The TUI is the product's primary path: without this the operator presses
+    # register, reads "✓ registered 7 identities" and is told nothing about the
+    # eighth role their config.toml never gained.
+    unlisted = ops.unregistered_roles(target)
+    if unlisted:
+        lines.append(f"note: {ops.unregistered_roles_note(unlisted)}")
     return Notice("\n".join(lines))
 
 

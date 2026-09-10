@@ -73,7 +73,8 @@ def base_role(role: str) -> str:
 #: The board events worth waking a manager for: a sub-agent's verdict or hand-off
 #: (``task_review``, ``task_done``), a task that needs the manager back
 #: (``task_blocked``, ``task_reopened``), a result or a question on the board, and
-#: an agent that went away (``agent_exited`` is the fleet's, emitted by ``reap``).
+#: an agent that went away (``agent_exited`` is the fleet's, emitted wherever a
+#: fleet row ends: ``fleet.stop`` — and so ``fleet shutdown`` — and ``fleet.reap``).
 #: A plain note, a decision or a claim is news, not a decision the manager has to
 #: make — it arrives with the next prompt's delta like everyone else's.
 MANAGER_WAKE_KINDS: frozenset[str] = frozenset(

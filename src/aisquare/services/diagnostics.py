@@ -1612,11 +1612,21 @@ def _check_fleet(
         by_socket: dict[str, list[FleetAgent]] = {}
         for agent in gone:
             by_socket.setdefault(agent.tmux_socket, []).append(agent)
+        gone_projects: dict[str, list[FleetAgent]] = {}
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
-            if servers[sock].list_sessions():
+            # `answers()` is the question that separates "the pane is gone" from
+            # "there is no server", and this repo says twice that `list_sessions()`
+            # is not it: a server holding NOTHING answers `list-sessions` with exit
+            # 0 and no output, indistinguishable from absence (tmux.py:571-594),
+            # and standing that in "is how a fleet-wide reap came to read a missing
+            # socket as every pane being gone" (fleet.py:680-697). The decision
+            # matters more now that it selects a destructive recommendation.
+            if servers[sock].answers():
                 problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
             else:
+                for agent in agents:
+                    gone_projects.setdefault(names[agent.project_id], []).append(agent)
                 problems.append(
                     f"{len(agents)} recorded live but the private tmux server "
                     f"'{sock}' is not running: {listed}"
@@ -1626,20 +1636,27 @@ def _check_fleet(
                 f"{len(exited)} exited but still recorded live: {_fleet_labels(exited, names)}"
             )
         if problems:
-            server_gone = any("is not running" in p for p in problems)
             fix = (
                 "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap"
             )
-            if server_gone:
-                # `reap` cannot end rows on a server it cannot reach (absence of a
-                # server is not proof a pane died); `shutdown` may, on the
-                # operator's word — which is exactly what a hand-run kill-server was.
+            if gone_projects:
+                # APPENDED, never substituted: `problems` can hold two classes at
+                # once (a gone socket plus reap-fixable rows on a healthy one), and
+                # replacing the fix pointed the operator at a fleet-wide shutdown
+                # that would have stopped the working agents on the healthy socket.
+                # Hence the SCOPED command, one project at a time — and the fact
+                # comes from the branch that measured it, not from matching prose.
+                which = ", ".join(
+                    f"aisquare fleet shutdown --project {codename}"
+                    for codename in sorted(gone_projects)
+                )
                 fix = (
-                    "The server was stopped outside the CLI, so reap will not touch those rows: "
-                    "aisquare fleet shutdown records them as lost (or restart the fleet, then "
-                    "aisquare fleet reap)"
+                    f"{fix}. Their server was stopped outside the CLI, so reap will not touch "
+                    f"the rows on it — {which} records those as lost on your word (or restart "
+                    "the fleet, then reap)"
                 )
             return _warn(name, "; ".join(problems), fix)
+        answering = servers[socket].answers()
         sessions = servers[socket].list_sessions()
         if live:
             return _ok(
@@ -1652,6 +1669,12 @@ def _check_fleet(
                 name,
                 f"private tmux server '{socket}' running with {len(sessions)} session(s); "
                 "no agents recorded live",
+            )
+        if answering:
+            return _ok(
+                name,
+                f"no fleet agents; the private tmux server '{socket}' is running and holds "
+                "no sessions",
             )
         return _ok(name, f"no fleet agents; the private tmux server '{socket}' is not running")
     except Exception as exc:  # diagnostics must never crash

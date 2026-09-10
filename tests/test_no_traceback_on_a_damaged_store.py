@@ -68,6 +68,7 @@ UNINVOKED = {
     "launch": "spawns a real agent process",
     "team spawn": "spawns a real agent process",
     "fleet attach": "replaces the process with `tmux attach` (os.execvp)",
+    "fleet shutdown": "kills the fleet's real tmux sessions on the configured socket",
     "login": "waits on interactive input",
     "logout": "clears credentials on the developer's own machine",
     "open": "launches a browser",

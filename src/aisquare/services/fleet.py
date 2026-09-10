@@ -28,12 +28,13 @@ team service may one day call back into it for nudges.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -167,18 +168,71 @@ class ReapReport:
     worktrees_removed: list[Path] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ShutdownRow:
+    """One row ``shutdown`` did not simply stop, and WHY it reads that way.
+
+    The reason is set where the service KNOWS it, because the CLI cannot know
+    and must not guess. The first draft of this command printed "its server was
+    not running" over every recorded row — including rows that got there because
+    ``stop`` raised on a server that had answered and was reported killed on the
+    line above, and rows whose agent had exited cleanly on its own.
+    """
+
+    agent: FleetAgent
+    reason: str
+
+
 @dataclass
 class ShutdownReport:
-    """What ``shutdown`` did, socket by socket and row by row."""
+    """What ``shutdown`` did, row by row and session by session."""
 
     stopped: list[FleetAgent] = field(default_factory=list)
-    """Agents whose server answered: ``/exit``ed (or killed), exit status recorded."""
-    recorded: list[FleetAgent] = field(default_factory=list)
-    """Rows ended as lost on the operator's word: their server was already gone."""
-    servers_killed: list[str] = field(default_factory=list)
-    """Sockets whose server answered and was then killed."""
+    """Agents ``stop`` ended on an answering server: graceful ``/exit`` unless
+    ``force``, exit status where tmux exposed one, ``agent_exited`` emitted. An
+    agent that had already exited on its OWN between the snapshot and its turn
+    joins them: same end state, and it keeps the exit status it recorded."""
+    recorded: list[ShutdownRow] = field(default_factory=list)
+    """Rows ended with no exit status on the operator's word, each with its reason:
+    their socket did not answer, or they appeared after their session was killed."""
+    failed: list[ShutdownRow] = field(default_factory=list)
+    """Rows LEFT LIVE, each with its reason: ``stop`` refused because the pane was
+    seen alive, the row could not be written, or the agent was no longer there to
+    stop. Nothing in this list was ended — that is the point of the list."""
+    sessions_killed: list[str] = field(default_factory=list)
+    """``<socket>:<session>`` for each of the fleet's OWN sessions this killed."""
+    sessions_absent: list[str] = field(default_factory=list)
+    """Sessions already gone when the kill phase looked — the ordinary shape after a
+    clean stop pass: killing a session's last window takes the session with it."""
+    sessions_failed: list[str] = field(default_factory=list)
+    """Sessions tmux refused to kill. Tried and did NOT happen — never reported as
+    killed, which is what the first draft did with ``servers_killed``."""
+    sessions_left_up: list[str] = field(default_factory=list)
+    """Sessions deliberately spared: they hold a row this left live, and killing the
+    session would kill an agent whose pane tmux had just confirmed alive."""
     servers_absent: list[str] = field(default_factory=list)
-    """Sockets with no server to kill — the rows on them went to ``recorded``."""
+    """Sockets with no server to ask — the rows on them went to ``recorded``."""
+    claims_released: list[str] = field(default_factory=list)
+    """Task ids released from the ended rows' board sessions (``release_claims``)."""
+    paused_cleared: list[str] = field(default_factory=list)
+    """Projects whose ``fleet-paused`` signal this cleared, by display name."""
+
+
+@dataclass(frozen=True)
+class ShutdownPlan:
+    """What ``shutdown`` WOULD end — read-only, so the CLI can ask before doing it.
+
+    ``fleet shutdown`` ends running work, so it prints this and asks first, the
+    way ``project prune`` does for stale registrations. ``absent_sockets`` is
+    what separates the two dispositions: a row on one of them cannot be stopped,
+    only recorded lost.
+    """
+
+    projects: list[ProjectInfo] = field(default_factory=list)
+    agents: list[FleetAgent] = field(default_factory=list)
+    sessions: list[str] = field(default_factory=list)
+    """``<socket>:<session>`` for every fleet session the kill phase would target."""
+    absent_sockets: list[str] = field(default_factory=list)
 
 
 # --- settings ---------------------------------------------------------------------
@@ -1333,7 +1387,15 @@ def stop(
     """``/exit`` the agent, wait ``grace`` seconds, then kill its window.
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
-    cleanly; ``force`` skips the ``/exit`` and goes straight to the kill.
+    cleanly; ``force`` skips the ``/exit`` and goes straight to the kill — and
+    therefore records no exit status, since one is only ever read from a pane
+    that already reads dead.
+
+    Ending the row emits ``agent_exited`` and nudges the manager, exactly as
+    ``reap`` does for a pane it found dead. It belongs HERE rather than in each
+    caller: the §7.3 event the manager's Stop hook wakes on must not depend on
+    which path ended the agent, and while it was reap's alone a stopped agent
+    left the board no record of its exit while a merely crashed one did.
 
     tmux failing to ANSWER is not evidence that the agent died, so it does not
     end the row (see :func:`_verify_gone`): a row ended for a process still
@@ -1415,11 +1477,438 @@ def stop(
     except TmuxError as exc:
         exit_status = _verify_gone(_window, label, exc)
     with store_session() as store:
-        return store.end_fleet_agent(agent.id, exit_status=exit_status)
+        ended = store.end_fleet_agent(agent.id, exit_status=exit_status)
+        _emit_exit(store, ended)
+    # Outside the store session, as ``reap`` does: the nudge types into a pane
+    # and must not hold the write lock the woken manager's own hooks will want.
+    nudge_manager(ended.project_id, reason=f"{ended.label} exited")
+    return ended
 
 
-def shutdown(*, force: bool = False, grace: float = 5.0) -> ShutdownReport:
-    """Stop every live agent in every project, kill the fleet's server, record every row.
+def _manager_first(agents: list[FleetAgent]) -> list[FleetAgent]:
+    """The manager before its team — it is the one agent that spawns others.
+
+    Stops are sequential and each can cost the whole ``grace``, so a six-agent
+    shutdown spends half a minute in the loop; the manager staffing the project
+    through that window is what puts a fresh row on a socket that is coming
+    down. Taking it down first narrows the window (``_record_late_rows`` closes
+    it). ``sorted`` is stable, so the rest keep their spawn order.
+    """
+    return sorted(agents, key=lambda agent: agent.label != MANAGER_LABEL)
+
+
+def _shutdown_targets(
+    project: ProjectInfo | None, config: FleetSettings
+) -> list[tuple[ProjectInfo, list[FleetAgent]]]:
+    """Every project in scope with its live rows — FORGOTTEN registrations included.
+
+    ``list_projects()`` hides a tombstoned registration, and a forgotten project
+    can still hold live rows: ``project forget`` reads liveness and writes the
+    tombstone in separate statements, and a concurrent ``fleet spawn`` revives
+    the row (``ensure_project`` clears ``forgotten_at``) and records its agent.
+    Hidden here, that agent's pane would be taken down with its session while its
+    row stayed live — and nothing could ever reconcile it: ``reap`` correctly
+    refuses a socket it cannot reach, and a second ``shutdown`` would not see the
+    project either. That is precisely the permanently-wrong row this command
+    exists to eliminate, so the scan reads past the tombstone.
+    """
+    with store_session() as store:
+        if project is not None:
+            projects = [store.get_project(project.id) or project]
+        else:
+            projects = store.list_projects(include_forgotten=True)
+        return [(p, _manager_first(store.fleet_agents(p.id, live_only=True))) for p in projects]
+
+
+def _shutdown_sockets(
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]], config: FleetSettings
+) -> list[str]:
+    """Every socket in scope: the ones the rows were spawned on, plus today's.
+
+    Today's is included even with no rows on it, because a session can outlive
+    every row that was recorded in it (``rename`` fails open, and the escape
+    hatch lets anyone rename a session by hand).
+    """
+    sockets = {agent.tmux_socket for _, agents in targets for agent in agents}
+    sockets.add(config.tmux_socket)
+    return sorted(sockets)
+
+
+def _require_usable_tmux(config: FleetSettings) -> None:
+    """Refuse before ANY row is touched unless tmux itself is usable.
+
+    ``answers()`` is False for "no usable tmux" as well as for "no server"
+    (``TmuxServer.answers`` swallows :class:`TmuxUnavailable`), and the first is
+    never evidence a pane died: measured on a live server holding a live
+    session, ``answers()`` reads True with a normal ``PATH`` and False with tmux
+    off it. Without this guard a ``tmux`` that left ``PATH`` — or a
+    ``TMUX_TMPDIR`` set at spawn and unset here — made ``shutdown`` end every
+    live row as lost while every agent kept running, and the next ``reap`` then
+    handed those agents' worktrees to ``git worktree remove``.
+
+    ``_require_tmux`` maps only :class:`TmuxUnavailable`; ``tmux -V`` can also
+    time out (``_COMMAND_TIMEOUT``) and raise a bare :class:`TmuxError`, which
+    is not a :class:`FleetError` and would reach the operator as a traceback
+    with no ``--json`` output at all.
+    """
+    srv = server(config)
+    try:
+        _require_tmux(srv)
+    except TmuxError as exc:  # a timeout or an OSError from `tmux -V`
+        raise FleetUnavailable(
+            f"tmux could not be asked for its version ({exc}) — no row was touched; "
+            "try again once tmux answers"
+        ) from exc
+
+
+def _same_socket(left: Path, right: Path) -> bool:
+    """Whether two socket paths name one socket, symlinks resolved (macOS ``/tmp``)."""
+    if left == right:
+        return True
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def _refuse_from_inside(sockets: Sequence[str], config: FleetSettings) -> None:
+    """Refuse when this very process runs INSIDE a server whose sessions are going.
+
+    ``fleet attach`` is the documented full-fidelity escape hatch and every
+    fleet window runs ``aisquare`` inside that same server, so an operator (or
+    the manager agent itself) typing ``aisquare fleet shutdown`` in a fleet pane
+    is ordinary use, not abuse. Killing that session SIGHUPs the pane running the
+    command: the store writes have already happened, none of the report prints,
+    and no exit code is observable — losing the one thing this command offers
+    over ``tmux kill-server``.
+
+    ``$TMUX`` is tmux's own ``<socket-path>,<pid>,<session-index>``;
+    :meth:`~aisquare.core.tmux.TmuxServer.socket_path` reproduces the path for a
+    server that is not running, and the two are compared with symlinks resolved
+    because ``/tmp`` is one on macOS.
+    """
+    inside = os.environ.get("TMUX", "").split(",")[0]
+    if not inside:
+        return
+    here = Path(inside)
+    for socket in sockets:
+        path: Path | None = None
+        with suppress(TmuxUnavailable, OSError):
+            path = server_for(socket, config).socket_path()
+        if path is not None and _same_socket(path, here):
+            raise FleetError(
+                f"fleet shutdown is running INSIDE the fleet's own tmux server ({socket}) — "
+                "killing its sessions would kill this pane before it could report anything. "
+                "Nothing was touched: detach (your tmux prefix, then `d`) or open a terminal "
+                "outside the fleet and run it there"
+            )
+
+
+def _shutdown_probe(sockets: Sequence[str], config: FleetSettings) -> dict[str, bool]:
+    """Which sockets have a server listening — refusing rather than guessing.
+
+    Routed through :func:`_server_answers`, the module's one documented
+    reachability probe, so this path reads the same answer as every other and
+    inherits the next refinement of it. The probe can also FAIL: ``answers()``
+    catches only :class:`TmuxUnavailable`, while a 30 s command timeout on a
+    wedged server raises a bare :class:`TmuxError` — which is not a
+    :class:`FleetError`, so it escaped as a traceback in exactly the wedged case
+    this command exists for. "The socket did not answer" and "we could not ask"
+    are different facts: the first ends rows on the operator's word, the second
+    refuses.
+    """
+    answering: dict[str, bool] = {}
+    for socket in sockets:
+        try:
+            answering[socket] = _server_answers(server_for(socket, config))
+        except TmuxError as exc:
+            raise FleetError(
+                f"tmux could not be asked whether a server is running on {socket!r} ({exc}) "
+                "— no row was touched, because a socket that cannot be ASKED is not a socket "
+                "with no server; try again once tmux answers"
+            ) from exc
+    return answering
+
+
+def _fleet_sessions(
+    srv: TmuxServer,
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    *,
+    every: bool,
+) -> list[tuple[str, str | None]]:
+    """The fleet's own sessions on this server: ``(session, project id or None)``.
+
+    A scoped shutdown targets exactly the sessions of the projects in scope. An
+    ``--all`` run also sweeps any other ``asq-`` session the socket holds, with
+    no project to attribute it to — that is the shape a ``rename`` which failed
+    open leaves behind (its docstring says so, and ``attach`` and ``reap`` both
+    know it exists), and it is the fleet's session either way.
+    """
+    named = {
+        session_name(project.codename): project.id for project, _ in targets if project.codename
+    }
+    sessions: list[tuple[str, str | None]] = list(named.items())
+    if every:
+        listed = [name for name in srv.list_sessions() if name.startswith(SESSION_PREFIX)]
+        sessions += [(name, None) for name in sorted(listed) if name not in named]
+    return sessions
+
+
+def _kill_fleet_sessions(
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]],
+    sockets: Sequence[str],
+    answering: Mapping[str, bool],
+    report: ShutdownReport,
+    config: FleetSettings,
+    *,
+    every: bool,
+) -> None:
+    """Kill the fleet's OWN sessions — never the server.
+
+    ``tmux kill-server`` is server-scoped, but the fleet's claim is only ever to
+    ``asq-<codename>`` sessions. Reproduced while reviewing the first draft: a
+    socket holding one hand-made session and no fleet rows at all reported
+    ``0 stopped, 0 recorded lost`` and destroyed that session unmentioned — and
+    ``[fleet] tmux_socket`` is a free-form string with no validator, so an
+    operator who points it at ``default`` loses their personal tmux server to a
+    command that reported destroying nothing. Killing sessions still takes the
+    server down when the fleet is all it held: ``BUNDLED_CONF`` does not set
+    ``exit-empty off``, so a server with no session exits on its own.
+
+    A session holding a row this LEFT LIVE is spared. Killing it would end an
+    agent whose pane ``_verify_gone`` had just confirmed alive, and leave its
+    live row on a dead pane — the state this whole command exists to end.
+    """
+    spared = {(row.agent.tmux_socket, row.agent.project_id) for row in report.failed}
+    for socket in sockets:
+        if not answering.get(socket):
+            continue
+        srv = server_for(socket, config)
+        try:
+            here = _fleet_sessions(srv, targets, every=every)
+        except TmuxError:
+            # tmux stopped answering between the probe and here (it can leave
+            # PATH mid-run): nothing on this socket can be reported killed,
+            # and nothing may be CLAIMED killed either.
+            continue
+        for name, project_id in here:
+            qualified = f"{socket}:{name}"
+            if project_id is not None and (socket, project_id) in spared:
+                report.sessions_left_up.append(qualified)
+                continue
+            try:
+                if not srv.has_session(name):
+                    report.sessions_absent.append(qualified)
+                    continue
+                srv.kill_session(name)
+            except TmuxError:
+                # Tried and did not happen: a wedged server times out at 30 s,
+                # and tmux can leave PATH between the probe and the kill.
+                report.sessions_failed.append(qualified)
+            else:
+                report.sessions_killed.append(qualified)
+
+
+def _release_session(agent: FleetAgent, report: ShutdownReport) -> None:
+    """End the ended agent's board session and RELEASE its claims.
+
+    ``services.team`` names exactly this caller: a caller that "genuinely knows
+    the session is dead passes ``release_claims=True``". Without it a task the
+    agent held in ``doing`` stays claimed by a session that no longer exists —
+    ``prune_sessions`` defaults to ``release_claims=False`` and waits
+    ``_CLAIM_ORPHAN_AFTER`` (4 h) — so the next fleet's manager sees its work
+    held by the dead. Under ``--force`` there is no ``/exit`` and therefore no
+    ``SessionEnd`` hook to do it, and a recorded row's pane was never reached at
+    all. A courtesy, never the shutdown: a store that will not answer here costs
+    the release, not the report.
+    """
+    if agent.session_id is None:
+        return
+    with suppress(Exception):
+        with store_session() as store:
+            released = store.end_session(agent.session_id, release_claims=True)
+        report.claims_released.extend(task.id for task in released)
+
+
+def _record_lost(agent: FleetAgent, reason: str, report: ShutdownReport) -> None:
+    """End one row with no exit status, on the operator's word, saying why."""
+    try:
+        with store_session() as store:
+            ended = store.end_fleet_agent(agent.id, exit_status=None)
+    except Exception as exc:  # a vanished row (KeyError), a locked store
+        report.failed.append(ShutdownRow(agent, f"its row could not be ended ({exc})"))
+        return
+    report.recorded.append(ShutdownRow(ended, reason))
+    _release_session(ended, report)
+
+
+def _row_that_went_away(agent: FleetAgent, reason: str, report: ShutdownReport) -> None:
+    """``stop`` raised ``NoSuchAgent``: the row is no longer LIVE, so re-read it.
+
+    The agent exited on its own between the snapshot and its turn and its own
+    ``SessionEnd`` (or a ``reap``) ended the row — with its real exit status.
+    Calling that "left live" would be false in every part: the row IS ended,
+    nothing needs stopping, and one self-exit would make a clean shutdown exit 1.
+    Calling it "recorded lost" would throw away the status the row already has.
+    Only a row that is somehow still live falls through to ``failed``.
+    """
+    try:
+        with store_session() as store:
+            current = store.get_fleet_agent(agent.id)
+    except Exception:  # the store is the only witness; without it, claim nothing new
+        current = None
+    if current is not None and current.ended_at is not None:
+        report.stopped.append(current)
+        _release_session(current, report)
+        return
+    report.failed.append(ShutdownRow(agent, reason))
+
+
+def _shutdown_row(
+    project: ProjectInfo,
+    agent: FleetAgent,
+    answering: Mapping[str, bool],
+    report: ShutdownReport,
+    *,
+    force: bool,
+    grace: float,
+) -> None:
+    """Stop one row where its server answers; record it lost where it does not.
+
+    ``stop``'s refusal is not swallowed. It refuses on exactly one verdict —
+    ``_verify_gone`` looked again and the pane is VERIFIABLY still alive — which
+    is a positive observation, not an absence of evidence, and ending the row on
+    it is what ``stop``'s own docstring exists to prevent: "a row ended for a
+    process still running is an agent no live listing shows and no ``stop`` can
+    address, and the operator was told 'stopped'". Its message becomes the row's
+    reason instead, and the row stays live. ``NoSuchProject`` and
+    ``FleetUnavailable`` are carried the same way rather than vanishing into a
+    bare ``pass``; ``NoSuchAgent`` — the agent exited on its own between the
+    snapshot and its turn — goes through :func:`_row_that_went_away`, which reads
+    what actually became of the row instead of guessing.
+    """
+    if not answering.get(agent.tmux_socket):
+        _record_lost(agent, f"no server answered on socket {agent.tmux_socket!r}", report)
+        return
+    try:
+        stopped = stop(project, agent.label, force=force, grace=grace)
+    except NoSuchAgent as exc:
+        _row_that_went_away(agent, str(exc), report)
+    except FleetError as exc:
+        report.failed.append(ShutdownRow(agent, str(exc)))
+    except Exception as exc:  # a store write, a codename race — the kill phase still runs
+        report.failed.append(ShutdownRow(agent, f"{type(exc).__name__}: {exc}"))
+    else:
+        report.stopped.append(stopped)
+        _release_session(stopped, report)
+
+
+def _record_late_rows(
+    project: ProjectInfo | None,
+    handled: Collection[str],
+    answering: Mapping[str, bool],
+    report: ShutdownReport,
+    config: FleetSettings,
+) -> None:
+    """Rows that appeared DURING the run, re-read on every socket that answered.
+
+    The snapshot is taken before the first stop and each stop can cost the whole
+    grace, so the window is real: the manager (stopped first, to narrow it), a
+    second terminal or the UI can ``fleet spawn`` into it. Such a row is in no
+    snapshot, so without this pass it is neither stopped nor recorded, and its
+    pane goes down with its session — a live row on a dead pane reading
+    ``unknown (tmux unavailable)``, which is the bug this command was written to
+    remove.
+
+    Its pane is asked about before the row is ended: a spawn that landed AFTER
+    the kill phase brought a session of its own back up, and that agent is
+    running. Those stay live and are reported, never recorded.
+    """
+    touched = {socket for socket, reachable in answering.items() if reachable}
+    if not touched:
+        return
+    try:
+        targets = _shutdown_targets(project, config)
+    except Exception:
+        return  # a store that died mid-run: the report is still owed to the caller
+    for _, agents in targets:
+        for agent in agents:
+            if agent.id in handled or agent.tmux_socket not in touched:
+                continue
+            facts = None
+            with suppress(TmuxError):
+                facts = server_for(agent.tmux_socket, config).pane_facts(agent.pane_id)
+            if facts is not None and facts.pane_id == agent.pane_id and not facts.dead:
+                report.failed.append(
+                    ShutdownRow(
+                        agent,
+                        "it was spawned during the shutdown and its pane is still alive — "
+                        "stop it, or run shutdown again",
+                    )
+                )
+                continue
+            _record_lost(
+                agent, "it was spawned during the shutdown; its session was killed under it", report
+            )
+
+
+def _clear_pause(
+    targets: Sequence[tuple[ProjectInfo, list[FleetAgent]]], report: ShutdownReport
+) -> None:
+    """Clear each project's ``fleet-paused`` signal: the fleet it paused is gone.
+
+    Board state survives shutdown by design, which is what makes this signal a
+    trap rather than a nit. ``fleet pause`` then ``fleet shutdown`` used to leave
+    it set, and the next ``fleet spawn manager`` came up staffing nothing — the
+    manager's own instructions tell it to spawn nothing while the signal is set
+    (``core/harness.py``) — with no output from either command pointing at
+    ``fleet resume``. Only a signal that is actually ON is written, so a shutdown
+    does not put a ``fleet-paused`` row on every project's board.
+    """
+    for project, _ in targets:
+        with suppress(Exception):  # a disabled board holds no signals; a missing root neither
+            if is_paused(project):
+                resume(project)
+                report.paused_cleared.append(_name(project))
+
+
+def shutdown_plan(project: ProjectInfo | None = None) -> ShutdownPlan:
+    """What :func:`shutdown` would end — read-only, and it refuses the same way.
+
+    The guards run here too, so the plan an operator is asked to confirm is one
+    that can actually be carried out: no usable tmux, a probe that cannot be
+    asked, or a call from inside the fleet's own server all refuse before
+    anything is printed.
+    """
+    config = settings()
+    _require_usable_tmux(config)
+    targets = _shutdown_targets(project, config)
+    sockets = _shutdown_sockets(targets, config)
+    _refuse_from_inside(sockets, config)
+    answering = _shutdown_probe(sockets, config)
+    sessions: list[str] = []
+    for socket in sockets:
+        if not answering[socket]:
+            continue
+        srv = server_for(socket, config)
+        with suppress(TmuxError):
+            sessions += [
+                f"{socket}:{name}"
+                for name, _ in _fleet_sessions(srv, targets, every=project is None)
+                if srv.has_session(name)
+            ]
+    return ShutdownPlan(
+        projects=[current for current, agents in targets if agents],
+        agents=[agent for _, agents in targets for agent in agents],
+        sessions=sessions,
+        absent_sockets=[socket for socket in sockets if not answering[socket]],
+    )
+
+
+def shutdown(
+    project: ProjectInfo | None = None, *, force: bool = False, grace: float = 5.0
+) -> ShutdownReport:
+    """Stop this project's live agents (every project's with ``project=None``).
 
     The one place a row may be ended without tmux confirming its pane died. Every
     other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
@@ -1432,41 +1921,53 @@ def shutdown(*, force: bool = False, grace: float = 5.0) -> ShutdownReport:
     it could not ask), and the UI showed dead managers for as long as they cared
     to look.
 
+    Scope is ``reap``'s: this project by default, every project when ``project``
+    is ``None``. An operator with two projects running who means "take this
+    project's fleet down" must not lose the other project's agents, and the CLI
+    asks before either.
+
     Order matters and is deliberate: agents on an answering server get the
-    ordinary ``stop`` (graceful ``/exit`` unless ``force``, exit status recorded,
-    ``agent_exited`` emitted) BEFORE the server is killed, so their ``SessionEnd``
-    hooks release their claims. Rows on a socket with no server — killed outside
-    the CLI, or a ``tmux`` that left ``PATH`` — are ended with no exit status
-    (``lost``) and counted apart, so the report never reads "stopped" over a
-    process nobody confirmed stopping. The configured socket is killed even when
-    it holds no rows: a server with nothing recorded on it is still the fleet's,
-    and "shutdown" means down.
+    ordinary ``stop`` (graceful ``/exit`` unless ``force``, ``agent_exited``
+    emitted, claims released) BEFORE their session is killed, so the graceful
+    path's ``SessionEnd`` hook still runs. Rows on a socket with no server —
+    killed outside the CLI, or one the config no longer names — are ended with no
+    exit status and counted apart, each with the reason, so the report never
+    reads "stopped" over a process nobody confirmed stopping.
+
+    **Exit status is recorded where tmux exposes one, which ``force`` usually
+    means it does not**: ``force`` skips the ``/exit`` and kills a live pane, and
+    a status is only ever read from a pane that already reads dead. A forced row
+    lands in ``stopped`` with ``exit_status`` ``None`` unless its agent had
+    already exited on its own.
+
+    What is killed is the fleet's own SESSIONS, never the server (see
+    :func:`_kill_fleet_sessions`). Board tasks and notes are kept, but the ended
+    rows' claims are released — a task held by a session that no longer exists is
+    not "untouched", it is stuck — and a ``fleet-paused`` signal is cleared,
+    because the fleet it paused is gone.
     """
     config = settings()
     report = ShutdownReport()
-    with store_session() as store:
-        projects = store.list_projects()
-        live_by_project = {p.id: (p, store.fleet_agents(p.id, live_only=True)) for p in projects}
-    sockets = {a.tmux_socket for _, agents in live_by_project.values() for a in agents}
-    sockets.add(config.tmux_socket)
-    answering = {socket: server_for(socket, config).answers() for socket in sockets}
-    for project, agents in live_by_project.values():
-        for agent in agents:
-            if answering.get(agent.tmux_socket):
-                try:
-                    report.stopped.append(stop(project, agent.label, force=force, grace=grace))
-                    continue
-                except FleetError:
-                    pass  # its server is coming down regardless; recorded, not stopped
-            with store_session() as store:
-                report.recorded.append(store.end_fleet_agent(agent.id, exit_status=None))
-    for socket in sorted(sockets):
-        if answering[socket]:
-            with suppress(TmuxError):
-                server_for(socket, config).kill_server()
-            report.servers_killed.append(socket)
-        else:
-            report.servers_absent.append(socket)
+    _require_usable_tmux(config)
+    targets = _shutdown_targets(project, config)
+    sockets = _shutdown_sockets(targets, config)
+    _refuse_from_inside(sockets, config)
+    answering = _shutdown_probe(sockets, config)
+    report.servers_absent.extend(socket for socket in sockets if not answering[socket])
+    handled: set[str] = set()
+    try:
+        for current, agents in targets:
+            for agent in agents:
+                handled.add(agent.id)
+                _shutdown_row(current, agent, answering, report, force=force, grace=grace)
+    finally:
+        # The kill phase runs even if a row could not be recorded: "shutdown
+        # means down" must hold when the store refuses, and a caller that got a
+        # traceback instead of a report was left with a half-recorded fleet, a
+        # live server, and nothing saying how far it got.
+        _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
+        _record_late_rows(project, handled, answering, report, config)
+        _clear_pause(targets, report)
     return report
 
 

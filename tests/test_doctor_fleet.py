@@ -82,6 +82,7 @@ class FakeServer(TmuxServer):
         socket: str = "asq",
         version_raises: bool = False,
         facts_raise: bool = False,
+        answers: bool = True,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
@@ -90,6 +91,7 @@ class FakeServer(TmuxServer):
         self._panes = panes or {}
         self._version_raises = version_raises
         self._facts_raise = facts_raise
+        self._answers = answers
         self.asked: list[str] = []
 
     def binary(self) -> str:
@@ -109,6 +111,18 @@ class FakeServer(TmuxServer):
     def list_sessions(self) -> list[str]:
         self.asked.append("list_sessions")
         return list(self._sessions)
+
+    def answers(self) -> bool:
+        """Scripted SEPARATELY from ``sessions`` — the two are different questions.
+
+        Deriving it (``bool(self._sessions)``) would re-introduce the conflation
+        the check is being fixed for: a server that is up but holds no session
+        answers True while ``list-sessions`` answers empty, indistinguishable
+        from absence. Without this override the REAL method runs, which shells
+        out to the developer's own tmux on socket ``asq`` from a unit test.
+        """
+        self.asked.append("answers")
+        return self._answers
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.asked.append(f"pane_facts:{pane_id}")
@@ -518,17 +532,69 @@ def test_fleet_check_warns_when_the_private_server_is_not_running(
 ) -> None:
     project = _seed(tmp_path / "repo")
     _seed(tmp_path / "repo", _agent(project.id, "manager", "%1"))
-    server = FakeServer(sessions=(), panes={})
+    server = FakeServer(sessions=(), panes={}, answers=False)
 
     check = diagnostics._check_fleet(lambda socket: server)
 
     assert check.status is CheckStatus.warn
     assert "private tmux server 'asq' is not running" in check.detail
     assert "manager" in check.detail
-    assert check.fix and "aisquare fleet shutdown" in check.fix, (
-        "reap cannot end rows on a server it cannot reach; the fix must name the command that can"
+    assert check.fix and "aisquare fleet shutdown --project repo" in check.fix, (
+        "reap cannot end rows on a server it cannot reach; the fix must name the command that "
+        "can — SCOPED (by codename, or the name that resolves one), since a fleet-wide "
+        "shutdown would also stop working agents on another socket"
     )
     assert "aisquare fleet reap" in check.fix, "the ordinary reconciliation is still named"
+    assert "answers" in server.asked, "reachability is asked, never inferred from list-sessions"
+
+
+def test_fleet_check_separates_an_empty_server_from_an_absent_one(
+    home: Path, tmp_path: Path
+) -> None:
+    """A server that is UP but session-less answers ``list-sessions`` with nothing —
+    indistinguishable from absence (``tmux.py`` says so twice) — and that empty answer
+    used to select the destructive recommendation. ``answers()`` is the question."""
+    project = _seed(tmp_path / "repo")
+    _seed(tmp_path / "repo", _agent(project.id, "manager", "%1"))
+    empty = FakeServer(sessions=(), panes={}, answers=True)
+
+    check = diagnostics._check_fleet(lambda socket: empty)
+
+    assert check.status is CheckStatus.warn
+    assert "the tmux pane is gone" in check.detail, "the server answered: the PANE is what is gone"
+    assert "is not running" not in check.detail
+    assert check.fix and "aisquare fleet shutdown" not in check.fix, (
+        "reap can reconcile a row on a server that answers; shutdown is not offered"
+    )
+
+
+def test_fleet_check_appends_the_shutdown_advice_for_the_gone_socket_only(
+    home: Path, tmp_path: Path
+) -> None:
+    """The multi-socket shape ``server_for`` exists for: three stale rows on a socket
+    whose server is gone, four agents running on the socket the config now names. One
+    absent socket must not rewrite the fix for the rows on the healthy one — the first
+    draft REPLACED it, sending the operator to a fleet-wide shutdown that would have
+    stopped every working agent on ``asq`` to clean up rows on ``asq-old``."""
+    project = _seed(tmp_path / "repo")
+    _seed(
+        tmp_path / "repo",
+        _agent(project.id, "coder-1", "%5", socket="asq-old"),
+        _agent(project.id, "coder-2", "%6"),
+    )
+    servers = {
+        "asq": FakeServer(socket="asq", sessions=("asq-amber-otter",), panes={"%6": None}),
+        "asq-old": FakeServer(socket="asq-old", answers=False, panes={}),
+    }
+
+    check = diagnostics._check_fleet(lambda socket: servers[socket])
+
+    assert check.status is CheckStatus.warn
+    assert "the tmux pane is gone: coder-2" in check.detail, "the healthy socket's own problem"
+    assert "'asq-old' is not running: coder-1" in check.detail
+    assert check.fix is not None
+    assert check.fix.startswith("Reconcile the rows with tmux"), "the reap advice is KEPT"
+    assert "aisquare fleet shutdown --project repo" in check.fix, "and shutdown APPENDED"
 
 
 def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_path: Path) -> None:

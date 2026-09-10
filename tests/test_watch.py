@@ -82,7 +82,7 @@ def test_tui_smoke_click_task_shows_detail(runner: CliRunner, work_dir: Path) ->
             table.move_cursor(row=1)
             await pilot.press("enter")  # RowSelected shows the detail
             await pilot.pause()
-            return table.row_count, feed.option_count, pilot.app.detail_text
+            return table.row_count, feed.option_count, pilot.app.board.detail_text
 
     rows, options, detail = asyncio.run(drive())
     assert rows == 2
@@ -192,7 +192,7 @@ def test_select_mode_freezes_feed_and_resumes_with_backlog(
             await pilot.press("v")  # freeze into selectable text view
             await pilot.pause()
             runner.invoke(app, ["note", "arrives while frozen"])
-            pilot.app._refresh_data()
+            pilot.app.board.refresh_data()
             await pilot.pause()
             frozen = feed.option_count  # unchanged: select mode is stable
             select_visible = pilot.app.query_one("#feedtext").has_class("active")
@@ -216,10 +216,10 @@ def test_autoscroll_toggle(runner: CliRunner, work_dir: Path) -> None:
         app_cls = watch_mod._build_app_class(interval=60.0)
         async with app_cls().run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            initial = pilot.app._autoscroll
+            initial = pilot.app.board.autoscroll
             await pilot.press("a")
             await pilot.pause()
-            return initial, pilot.app._autoscroll
+            return initial, pilot.app.board.autoscroll
 
     initial, toggled = asyncio.run(drive())
     assert initial is True and toggled is False
@@ -262,7 +262,7 @@ def test_done_archive_view_shows_who_and_when(
             table.focus()
             await pilot.press("enter")  # select the (row 0) archived task
             await pilot.pause()
-            return open_rows, table.row_count, pilot.app.detail_text
+            return open_rows, table.row_count, pilot.app.board.detail_text
 
     open_rows, done_rows, detail = asyncio.run(drive())
     assert open_rows == 0 and done_rows == 1
@@ -318,10 +318,10 @@ def test_feed_selection_survives_a_refresh_tick(
             feed.highlighted = feed.option_count - 1
             await pilot.press("enter")  # select the feed line
             await pilot.pause()
-            chosen = pilot.app._detail_moment
-            pilot.app._refresh_data()  # the async RowHighlighted clobber path
+            chosen = pilot.app.board.detail_moment
+            pilot.app.board.refresh_data()  # the async RowHighlighted clobber path
             await pilot.pause()
-            return chosen, pilot.app._detail_moment
+            return chosen, pilot.app.board.detail_moment
 
     chosen, after_tick = asyncio.run(drive())
     assert chosen is not None
@@ -360,13 +360,13 @@ def test_terminal_cache_flushes_when_a_task_closes(
         app_cls = watch_mod._build_app_class(interval=60.0)
         async with app_cls().run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            pilot.app._terminal_by_task = {"warm": object()}  # a stale cache
+            pilot.app.board._terminal_by_task = {"warm": object()}  # a stale cache
             runner.invoke(app, ["task", "add", "closes soon"])
             tid = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
             runner.invoke(app, ["task", "done", tid])
-            pilot.app._refresh_data()  # the task_done event arrives on the feed
+            pilot.app.board.refresh_data()  # the task_done event arrives on the feed
             await pilot.pause()
-            return bool(pilot.app._terminal_by_task == {})
+            return bool(pilot.app.board._terminal_by_task == {})
 
     assert asyncio.run(drive())  # a close flushes the attribution cache
 
@@ -393,7 +393,7 @@ def test_attribution_negative_cache_avoids_refetch_every_tick(
         async with app_cls().run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             for _ in range(5):  # a task with no terminal event, looked up repeatedly
-                pilot.app._done_event_for("tsk_never_closed")
+                pilot.app.board._done_event_for("tsk_never_closed")
             return calls["n"]
 
     assert asyncio.run(drive()) == 1  # fetched once, negative result cached
@@ -431,8 +431,8 @@ def test_single_click_shows_task_detail(runner: CliRunner, work_dir: Path) -> No
             # click on row 2 must show row 2's detail.
             await pilot.click("#tasks", offset=(6, 4))
             await pilot.pause()
-            clicked_text = pilot.app.detail_text
-            clicked_moment = pilot.app._detail_moment
+            clicked_text = pilot.app.board.detail_text
+            clicked_moment = pilot.app.board.detail_moment
             # (2) select a feed line (keys), then click the table header and
             # the blank area below the rows: the feed detail must survive.
             feed = pilot.app.query_one("#feed", OptionList)
@@ -440,16 +440,16 @@ def test_single_click_shows_task_detail(runner: CliRunner, work_dir: Path) -> No
             feed.highlighted = feed.option_count - 1
             await pilot.press("enter")
             await pilot.pause()
-            feed_text = pilot.app.detail_text
-            feed_moment = pilot.app._detail_moment
+            feed_text = pilot.app.board.detail_text
+            feed_moment = pilot.app.board.detail_moment
             await pilot.click("#tasks", offset=(6, 1))  # header
             await pilot.click("#tasks", offset=(6, 9))  # blank below the rows
             await pilot.pause()
-            after_stray_text = pilot.app.detail_text
-            after_stray_moment = pilot.app._detail_moment
+            after_stray_text = pilot.app.board.detail_text
+            after_stray_moment = pilot.app.board.detail_moment
             # (3) several refresh ticks: still untouched.
             for _ in range(3):
-                pilot.app._refresh_data()
+                pilot.app.board.refresh_data()
                 await pilot.pause()
             return (
                 clicked_text,
@@ -458,8 +458,8 @@ def test_single_click_shows_task_detail(runner: CliRunner, work_dir: Path) -> No
                 feed_moment,
                 after_stray_text,
                 after_stray_moment,
-                pilot.app.detail_text,
-                pilot.app._detail_moment,
+                pilot.app.board.detail_text,
+                pilot.app.board.detail_moment,
             )
 
     (

@@ -44,6 +44,7 @@ DOCS = [
     Path("docs/runbooks/explainability-prod-cutover.md"),
     Path("docs/store-migration-race.md"),
     Path("README.md"),
+    Path("docs/fleet.md"),
 ]
 
 #: References that name a file OUTSIDE this repo, each with the reason it

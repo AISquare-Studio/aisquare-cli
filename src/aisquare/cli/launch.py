@@ -29,21 +29,37 @@ import typer
 from rich.text import Text
 
 from aisquare.cli.common import fail
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
-ROLES = ("planner", "coder", "runner")
-"""Roles with a standing work cycle the orchestrator injects on every prompt."""
+ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager")
+"""Roles with a standing work cycle the orchestrator injects on every prompt.
+
+``tester``, ``reviewer`` and ``manager`` are the fleet's roles
+(docs/plans/fleet-tui.md §3.3); ``tester`` shares ``runner``'s cycle.
+"""
 
 #: A numbered SEAT of a first-class role — ``coder1``, ``coder2``. Crews run
 #: several agents in the same role and need to tell them apart on the board;
 #: the work cycle is the role's, so the number is an identity, not a new role.
-_SEAT = re.compile(rf"^({'|'.join(ROLES)}|validator)\d+$")
+#:
+#: The seat is exported VERBATIM as ``AISQUARE_ROLE`` below, because that is what
+#: makes it an identity: the board row says ``coder1``, and ``team bind coder1``
+#: binds that seat's own binary and env. What turns the seat back into a role is
+#: ``services.team.base_role``, which every harness lookup keyed on a board role
+#: goes through — that is where the "the work cycle is the role's" half of this
+#: comment is actually kept, and it was NOT kept until it existed: measured,
+#: ``harness.role_cycle('coder1', …)`` returned ``[]`` and
+#: ``harness.model_mismatch('coder1', …)`` returned ``None``, so a seat launched
+#: with no standing cycle and off every ladder.
+_SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
 
@@ -101,6 +117,17 @@ def launch(
             help="KEY=VALUE to set for this launch (repeatable). Merges per key over "
             "the role's bound profile.",
             metavar="KEY=VALUE",
+        ),
+    ] = None,
+    account: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            "-a",
+            help="Claude Code account to run under: a slot number or the email it is signed "
+            "in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and CLAUDE_CODE_TMPDIR "
+            "over the role's binding.",
+            metavar="SLOT",
         ),
     ] = None,
 ) -> None:
@@ -175,7 +202,20 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
+    if account is not None:
+        # The account wins over the binding: the flag names an account this
+        # launch is FOR, and the binding is the role's standing shape. For the
+        # default slot that means RESTORING this shell's own two variables (or
+        # their absence) over whatever the binding set — a launch announced as
+        # `[default]` must not run on the binding's other login.
+        try:
+            chosen = claude_accounts_service.resolve(account)
+        except claude_accounts_service.NoSuchAccount as exc:
+            fail(str(exc), error="unknown_account", ref=account)
+        claude_accounts_core.apply_launch_env(env, chosen, shell=os.environ)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
+    if account is not None:
+        whose += f" [{claude_accounts_core.label(chosen)}]"
     try:
         tracing = load_config().explainability
     except Exception as exc:  # tracing is an observer: a broken config must

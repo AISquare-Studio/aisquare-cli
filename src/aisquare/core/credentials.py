@@ -66,3 +66,28 @@ def store(**values: str) -> tuple[dict[str, str], bool]:
     path = paths.credentials_path()
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return data, paths.restrict_to_owner(path)
+
+
+def drop(*keys: str) -> dict[str, str]:
+    """Remove ``keys`` from the file, keeping everything else. Returns what remains.
+
+    Signing out must not take the explainability key (or any future value)
+    with it, and the file must stay valid JSON afterwards, so this is the same
+    read-merge-write as ``store`` with a subtraction instead of an addition.
+    A missing file is already the wanted state.
+    """
+    data = load_all()
+    remaining = {k: v for k, v in data.items() if k not in keys}
+    if remaining == data:
+        return data
+    paths.ensure_home()
+    path = paths.credentials_path()
+    path.write_text(json.dumps(remaining, indent=2) + "\n", encoding="utf-8")
+    # Through the same helper `store` uses, not `chmod`: dropping one key
+    # REWRITES the file that still holds the others, so a sign-out on Windows
+    # would otherwise leave the remaining secrets on a default DACL. The
+    # unrestricted case is not reported here the way `store` reports it —
+    # `drop`'s callers are removing a value, not promising a guard on a new
+    # one — but the file must still end up owner-only.
+    paths.restrict_to_owner(path)
+    return remaining

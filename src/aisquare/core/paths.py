@@ -6,7 +6,8 @@ Layout:
     ├── credentials     # API keys / tokens
     ├── context.db      # SQLite store: context entries and projects (see core.store)
     ├── agents.json     # registry of detected and connected agents
-    ├── cache/          # disposable cached data
+    ├── claude-accounts/# one CLAUDE_CONFIG_DIR per managed account (core.claude_accounts)
+    ├── cache/          # disposable cached data (incl. each managed account's TMPDIR)
     ├── explainability/ # session→Run join records (see services.explainability)
     └── log/            # capture and diagnostic logs
 
@@ -127,6 +128,28 @@ def cache_dir() -> Path:
     return aisquare_home() / "cache"
 
 
+def ci_cache_dir() -> Path:
+    """Directory for the CI test bed's cached delivery descriptors.
+
+    Descriptors only — the client keeps no cache of hook responses. The server
+    caches and reports what it did in ``briefing.cache``; a second cache here
+    would make a cached turn's timing describe a network call it never made.
+    """
+    return cache_dir() / "ci"
+
+
+def ci_descriptor_path(run_id: str) -> Path:
+    """Where the delivery descriptor for ``run_id`` is cached until it expires.
+
+    The run id comes from the environment, so it is treated as a filename
+    the way any outside string is: anything outside the id alphabet becomes
+    ``_`` and the name is bounded, so no value can name a path outside the
+    cache directory.
+    """
+    safe = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in run_id)[:96]
+    return ci_cache_dir() / f"descriptor-{safe or 'unknown'}.json"
+
+
 def log_dir() -> Path:
     """Directory for capture and diagnostic logs."""
     return aisquare_home() / "log"
@@ -160,6 +183,16 @@ def project_data_dir(project_id: str) -> Path:
 def credentials_path() -> Path:
     """Path of the credentials file (API keys, tokens)."""
     return aisquare_home() / "credentials"
+
+
+def claude_accounts_dir() -> Path:
+    """Where the CLI keeps the Claude Code config directories it owns, one per slot."""
+    return aisquare_home() / "claude-accounts"
+
+
+def claude_accounts_tmp_dir() -> Path:
+    """Where each managed account's ``CLAUDE_CODE_TMPDIR`` lives — disposable, under cache."""
+    return cache_dir() / "claude-accounts"
 
 
 def agents_registry_path() -> Path:

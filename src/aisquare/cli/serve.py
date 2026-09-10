@@ -48,11 +48,27 @@ def _dependency_error() -> str | None:
     try:
         if _find_spec(REQUIRED_MODULE) is not None:
             return None
-    except (ImportError, ValueError):
+    except (ImportError, ValueError) as exc:
         # find_spec on a dotted name imports its parents first, so an absent
         # `mcp` raises here rather than returning None. That IS the
         # extra-not-installed case, and it falls through to the check below.
-        pass
+        # A parent that exists but will not import raises too — mcp present,
+        # one of ITS dependencies missing or broken — and that is a third
+        # case: neither "install the extra" nor "move mcp into range" fixes
+        # it, and the second would send someone to install the mcp they have.
+        # The exception names the module that failed; a bare re-raise from a
+        # test stub does not, and takes the absent-mcp path as before.
+        #
+        # Checked ahead of the out-of-range verdict, which an mcp 1.x with a
+        # broken transitive dependency would otherwise get. Deliberate: the
+        # hint below installs the extra, which pins `mcp>=2.1,<3`, so it fixes
+        # the range and the broken import together, while "pin mcp" alone
+        # leaves the import broken.
+        if getattr(exc, "name", None) not in (None, "mcp"):
+            return (
+                f"the installed mcp{_installed_mcp()} cannot be imported — {exc}. "
+                f"Reinstall the serve extra: {_INSTALL_HINT}"
+            )
     if _find_spec("mcp") is None:
         return f"the serve extra is not installed — {_INSTALL_HINT}"
     return (
@@ -63,13 +79,69 @@ def _dependency_error() -> str | None:
 
 
 def _installed_mcp() -> str:
-    """``" (mcp 2.0.0)"`` when the version is knowable, else nothing."""
+    """``" (mcp 1.29.1)"`` when the version is knowable, else nothing.
+
+    Today only a 1.x reaches the out-of-range message — every 2.x release
+    ships the probed module — but a 3.x would, and a 2.x that will not import
+    reaches the reinstall message, which this decorates too.
+    """
     from importlib.metadata import PackageNotFoundError, version
 
     try:
         return f" (mcp {version('mcp')})"
     except PackageNotFoundError:  # importable but not an installed distribution
         return ""
+
+
+_WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
+
+
+def _client_url(bind: str, port: int) -> str:
+    """A URL for ``bind``, since a listen address is not always addressable.
+
+    An IPv6 literal needs brackets: ``http://::1:8747/mcp`` is not a URL at
+    all, and ``::1`` is one of the spellings that keeps the transport's Host
+    validation, so it has to print. That half is unambiguous.
+
+    A wildcard bind names every interface and no destination, so this
+    machine's name stands in for it. Whether that name resolves, and to
+    something a client can reach, is the operator's network to know: it may be
+    absent from DNS, or map straight back to loopback. It is a better starting
+    point than ``0.0.0.0``, which is never dialable, and the caller prints the
+    bind alongside so nothing is hidden.
+    """
+    import socket
+
+    host = socket.gethostname() if bind in _WILDCARD_BINDS else bind
+    if ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}/mcp"
+
+
+def _announce_open_bind(bind: str) -> None:
+    """Say what a non-loopback bind gives up, or say nothing.
+
+    On stderr, so ``--json`` stdout stays machine-readable, and from every
+    path that hands this bind to the transport — serving it, and
+    ``--show-token``, which is the command an operator reads while wiring a
+    client up and is often the only one they read at all.
+
+    Keyed on ``LOOPBACK_BINDS``, which mirrors the literal the SDK matches on;
+    ``tests/test_serve.py`` drives all three of its spellings against the real
+    transport, so a mirror that stopped matching fails there rather than
+    turning this notice into a lie.
+    """
+    from aisquare.services import mcp_server
+
+    if bind in mcp_server.LOOPBACK_BINDS:
+        return
+    shown = bind or '""'
+    stderr_console().print(
+        f"--bind {shown} is not one of {', '.join(mcp_server.LOOPBACK_BINDS)}: the MCP "
+        "transport's Host/Origin validation is off for it, and the bearer token is the "
+        "only gate — a long-lived credential sent in clear over plain HTTP on every "
+        "request. Keep this on a trusted network, or behind a TLS-terminating proxy."
+    )
 
 
 def serve(
@@ -81,7 +153,13 @@ def serve(
         int, typer.Option("--port", help="HTTP port.", envvar="AISQUARE_SERVE_PORT")
     ] = 8747,
     bind: Annotated[
-        str, typer.Option("--bind", help="HTTP bind address (keep it loopback unless you must).")
+        str,
+        typer.Option(
+            "--bind",
+            help="HTTP bind address. 127.0.0.1, localhost or ::1 keep the transport's "
+            "Host/Origin validation; any other bind runs with the bearer token as the only "
+            "gate, sent in clear — trusted networks or a TLS proxy only.",
+        ),
     ] = "127.0.0.1",
     show_token: Annotated[
         bool,
@@ -109,12 +187,16 @@ def serve(
 
     if show_token:
         token = mcp_server.serve_token()
+        url = _client_url(bind, port)
         if get_state().json_output:
-            typer.echo(json.dumps({"url": f"http://{bind}:{port}/mcp", "token": token}))
+            typer.echo(json.dumps({"url": url, "token": token, "bind": bind}))
         else:
             console = stdout_console()
-            console.print(f"URL:    http://{bind}:{port}/mcp")
+            console.print(f"URL:    {url}")
+            if bind in _WILDCARD_BINDS:
+                console.print(f"Bind:   {bind} (every interface — the URL names this machine)")
             console.print(f"Header: Authorization: Bearer {token}")
+        _announce_open_bind(bind)
         return
     # Starting a server here IS the opt-in for this project: activate it
     # explicitly (and visibly — `team on` semantics, with the pipe event),
@@ -158,7 +240,8 @@ def serve(
         _fail_team(exc)
     stderr_console().print(
         f"Serving the orchestrator for {project.root.name or project.id} at "
-        f"http://{bind}:{port}/mcp "
+        f"{_client_url(bind, port)} "
         "(bearer token required — see `aisquare serve --show-token`). Ctrl-C stops."
     )
+    _announce_open_bind(bind)
     mcp_server.run_http(bind=bind, port=port)

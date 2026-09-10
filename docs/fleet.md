@@ -582,8 +582,8 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`) and the scroll keys below. Printable characters travel as typed; special keys are
-translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
+hatch (`F12`), the scroll keys below, and ctrl+c while text is selected (it copies). Printable characters travel as typed; special keys are
+translated into tmux's names (Enter, BSpace, ctrl+c → `C-c` when nothing is selected, shift+tab →
 `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and
@@ -596,7 +596,11 @@ tmux copy mode stays tmux's. The keyboard scrolls too: shift+PgUp / shift+PgDn
 scrollback), shift+Home (the top) and shift+End (live) — through the same
 decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
-Modifier
+Drag to select text in a pane (double-click selects a word): it is copied to
+your clipboard on release (OSC 52 — your terminal has to accept it; Windows
+Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c copies again while the
+selection stands. What is copied is what was highlighted, even if the agent kept
+printing meanwhile. Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter

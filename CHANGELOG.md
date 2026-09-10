@@ -405,6 +405,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   history, tracking history that grows under a frozen view, and leaves with
   the offset. None of the keys reach the agent; any other key still returns
   the view to live.
+- **Select and copy text in an agent pane.** Reported from WSL2 + Windows
+  Terminal (2026-09-03): "not able to select and copy text" — an agent printed a
+  command and there was no way to take it. Drag-select was switched off on the
+  widget: a Line API widget has no `render()` for Textual's default selection to
+  read, and switched on alone every drag resolved to select-all, because the
+  compositor takes the drag's content offset from segment metadata only the
+  `render()` path stamped. The pane now stamps every row it renders, supplies
+  its own extraction (a drag in the blank area below the output used to raise
+  out of the handler), and paints the span itself — as cells, so a row with wide
+  glyphs highlights what is copied, and tinting behind the text rather than over
+  it, since the theme's selection style resolves with foreground equal to
+  background. The text is copied on release from the rows frozen when the drag
+  began; ctrl+c copies again while a selection stands and is the agent's
+  interrupt otherwise; double-click selects a word and a triple click nothing
+  (Textual's defaults would select the whole pane, and the next ctrl+c would
+  copy it instead of interrupting the agent). Switching the pane to another
+  agent drops the selection.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

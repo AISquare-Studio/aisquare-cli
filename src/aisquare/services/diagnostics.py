@@ -1387,28 +1387,46 @@ def _check_fleet(
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
                 problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
-            else:
-                # A plain `reap` refuses to mark rows on a server that does not
-                # answer (it may be alive under another TMUX_TMPDIR), so the fix
-                # it used to prescribe here did nothing — measured: 10 rows
-                # reported, `reap` reconciled 0. The flag is the operator's word.
+            elif servers[sock].server_absent():
+                # tmux itself says there is no server — the one case reap's
+                # --server-down acts on, decided by the SAME predicate reap uses.
+                # A plain `reap` refuses a silent server (it may be alive under
+                # another TMUX_TMPDIR), so the fix prescribed here used to do
+                # nothing — measured: 10 rows reported, 0 reconciled.
                 server_down = True
                 problems.append(
                     f"{len(agents)} recorded live but the private tmux server "
                     f"'{sock}' is not running: {listed}"
+                )
+            else:
+                # Silent but not absent: a protocol mismatch after a tmux upgrade,
+                # a wedged server, a socket under another TMUX_TMPDIR. The agents
+                # may well be alive; nothing here should vouch otherwise.
+                problems.append(
+                    f"{len(agents)} recorded live but the private tmux server '{sock}' "
+                    f"does not answer (not a missing server — a version mismatch or a "
+                    f"different TMUX_TMPDIR?): {listed}"
                 )
         if exited:
             problems.append(
                 f"{len(exited)} exited but still recorded live: {_fleet_labels(exited, names)}"
             )
         if problems:
-            flag = " --server-down" if server_down else ""
-            return _warn(
-                name,
-                "; ".join(problems),
+            # This check is machine-wide; the command it names must be too.
+            fix = (
                 "Reconcile the rows with tmux (ended, lost, merged worktrees): "
-                f"aisquare fleet reap{flag}",
+                "aisquare fleet reap --all"
             )
+            if server_down:
+                # tmux says no server is there — but doctor runs in this shell and
+                # cannot see a fleet alive under another TMUX_TMPDIR, so the flag
+                # is offered with its condition, not prescribed.
+                fix += (
+                    "; if that server is genuinely gone (a reboot, kill-server) and not "
+                    "merely under another TMUX_TMPDIR, mark its rows lost: "
+                    "aisquare fleet reap --all --server-down"
+                )
+            return _warn(name, "; ".join(problems), fix)
         sessions = servers[socket].list_sessions()
         if live:
             return _ok(

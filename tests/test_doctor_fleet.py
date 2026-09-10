@@ -82,9 +82,11 @@ class FakeServer(TmuxServer):
         socket: str = "asq",
         version_raises: bool = False,
         facts_raise: bool = False,
+        absent: bool = False,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
+        self._absent = absent
         self._version = version
         self._sessions = sessions
         self._panes = panes or {}
@@ -109,6 +111,10 @@ class FakeServer(TmuxServer):
     def list_sessions(self) -> list[str]:
         self.asked.append("list_sessions")
         return list(self._sessions)
+
+    def server_absent(self) -> bool:
+        self.asked.append("server_absent")
+        return self._present and self._absent
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.asked.append(f"pane_facts:{pane_id}")
@@ -516,18 +522,45 @@ def test_fleet_check_treats_a_display_message_error_as_a_gone_pane(
 def test_fleet_check_warns_when_the_private_server_is_not_running(
     home: Path, tmp_path: Path
 ) -> None:
+    """tmux itself says there is no server behind the socket — the one case the
+    flag may act on. The check is machine-wide, so the command is ``--all``; and
+    doctor runs in this shell, blind to a fleet under another ``TMUX_TMPDIR``, so
+    the flag comes with its condition rather than as a prescription."""
     project = _seed(tmp_path / "repo")
     _seed(tmp_path / "repo", _agent(project.id, "manager", "%1"))
-    server = FakeServer(sessions=(), panes={})
+    server = FakeServer(sessions=(), panes={}, absent=True)
 
     check = diagnostics._check_fleet(lambda socket: server)
 
     assert check.status is CheckStatus.warn
     assert "private tmux server 'asq' is not running" in check.detail
     assert "manager" in check.detail
-    assert check.fix and "aisquare fleet reap --server-down" in check.fix, (
-        "a plain reap refuses a silent server by design; the advice must be the flag"
+    assert check.fix and "aisquare fleet reap --all;" in check.fix
+    assert "genuinely gone" in check.fix and "TMUX_TMPDIR" in check.fix
+    assert check.fix.endswith("aisquare fleet reap --all --server-down")
+
+
+def test_fleet_check_does_not_vouch_for_a_server_that_is_silent_but_not_absent(
+    home: Path, tmp_path: Path
+) -> None:
+    """A protocol mismatch after an in-place tmux upgrade, a wedged server: every
+    client call fails, the agents are alive. The first version of this check read
+    ``list_sessions() == []`` as "not running" and prescribed ``--server-down`` —
+    advice that would have ended every live row. Now it describes the condition
+    and names only the plain sweep."""
+    project = _seed(tmp_path / "repo")
+    _seed(tmp_path / "repo", _agent(project.id, "coder-1", "%2"))
+    server = FakeServer(sessions=(), panes={}, absent=False)
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "does not answer" in check.detail and "version mismatch" in check.detail
+    assert "is not running" not in check.detail
+    assert check.fix == (
+        "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap --all"
     )
+    assert "server_absent" in server.asked, "decided by the same predicate reap uses"
 
 
 def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_path: Path) -> None:
@@ -540,8 +573,8 @@ def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_pat
 
     assert check.status is CheckStatus.warn
     assert "1 exited but still recorded live" in check.detail and "tester-1" in check.detail
-    assert check.fix and "fleet reap" in check.fix
-    assert "--server-down" not in check.fix, "the server answered; the flag is for silence"
+    assert check.fix and "fleet reap --all" in check.fix
+    assert "--server-down" not in check.fix, "the server answered; the flag is for absence"
 
 
 def test_fleet_check_ignores_ended_rows(home: Path, tmp_path: Path) -> None:

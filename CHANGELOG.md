@@ -377,16 +377,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
-- **`fleet reap --server-down` — the fix `doctor` prescribes now exists.** After
-  a reboot (or `kill-server`) `doctor` reported "N recorded live but the private
-  tmux server 'asq' is not running" and pointed at `aisquare fleet reap`, which
-  reconciled nothing: a server that does not answer is, by design, not evidence
-  that its panes are dead — it may be alive under another `TMUX_TMPDIR`. Measured
-  on one box: 10 rows reported, 0 reaped, the same advice printed again. The flag
-  is the operator's word that the server is genuinely gone; with it every live row
-  on a socket that does not answer is marked lost. A missing tmux *binary* still
-  marks nothing — that is a question that could not be asked, not a silent server
-  — and `doctor` names the flag only in the server-not-running branch.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet
@@ -516,6 +506,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scripts and neither can run without one; a Node that is present but will not
   report a version stays untested. The advice points at nodejs.org or a version
   manager rather than the package manager whose `nodejs` *is* the old one.
+- **`fleet reap --server-down` — the fix `doctor` prescribes now exists.** After
+  a reboot (or `kill-server`) `doctor` reported "N recorded live but the private
+  tmux server 'asq' is not running" and pointed at `aisquare fleet reap`, which
+  reconciled nothing: a server that does not answer is, by design, not evidence
+  that its panes are dead. Measured on one box: 10 rows reported, 0 reaped, the
+  same advice printed again. The flag is the operator's word that the server is
+  genuinely gone — and it acts only where tmux itself says so (`no server running
+  on …` / `error connecting to … (No such file or directory)`), never on a
+  protocol mismatch after an in-place tmux upgrade, a wedged server or a missing
+  binary, all of which hold live agents. One probe per socket per sweep, so a
+  server coming up mid-`reap --all` cannot split the answer. `doctor` decides
+  with the same predicate, names `reap --all` (its scan is machine-wide) and
+  offers the flag only with its condition attached.
 
 ## [0.6.0] - 2026-09-03
 

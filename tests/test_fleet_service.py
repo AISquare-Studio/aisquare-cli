@@ -1188,6 +1188,18 @@ def _unreachable_server() -> TmuxServer:
     return _real_server(refusing)
 
 
+_MISMATCH = "protocol version mismatch (client 8, server 7)"
+"""tmux's answer when the package was upgraded in place under a running server:
+every client call exits 1, and every agent behind that server is alive."""
+
+
+def _mismatched_server() -> TmuxServer:
+    def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        return Completed(1, "", _MISMATCH)
+
+    return _real_server(refusing)
+
+
 def _answering_server(*sessions: str) -> TmuxServer:
     """A server that answers every question and knows none of the panes asked about."""
 
@@ -1284,6 +1296,70 @@ def test_reap_server_down_only_touches_the_socket_that_is_silent(
     assert [a.id for a in report.lost] == [on_old.id]
     with store_session() as store:
         assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [on_new.id]
+
+
+def test_server_absent_needs_tmux_to_say_so() -> None:
+    """Positive evidence only: the two stderr shapes tmux uses for 'no server'
+    (measured on 3.4) — never the bare fact that a client call exited non-zero."""
+    assert _unreachable_server().server_absent() is True
+    absent_file = _real_server(lambda argv, stdin: Completed(1, "", "no server running on /x\n"))
+    assert absent_file.server_absent() is True
+    assert _mismatched_server().server_absent() is False
+    assert _answering_server("asq-a").server_absent() is False
+
+    def raising(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        raise TmuxUnavailable("tmux is not installed")
+
+    assert _real_server(raising).server_absent() is False, "no binary: no evidence"
+
+
+def test_reap_server_down_leaves_a_server_with_a_protocol_mismatch_alone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the first version: the predicate was ``not answers()``, which is
+    also False for a protocol mismatch (tmux upgraded in place, old server still
+    running) and for a wedged server — with the flag, every live row was ended
+    for agents still working. The word may act only where tmux says no server."""
+    agent = _coder(project)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: _mismatched_server())
+
+    report = fleet_service.reap(project, server_down=True)
+
+    assert report.lost == [] and report.ended == []
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [agent.id]
+
+
+def test_reap_server_down_asks_each_socket_once_across_every_project(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One probe per socket per sweep — not one per project — so a server coming
+    up mid-``reap --all`` cannot mark the first projects' rows lost and keep the
+    rest: one command, one answer. (Review of the first version.)"""
+    here = _coder(project)
+    there = fleet_service.spawn(plain_project, "coder", worktree=False).agent
+    probes: list[Sequence[str]] = []
+
+    def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        if "display-message" in argv and "#{version}" in argv:
+            probes.append(argv)
+        return Completed(1, "", _UNREACHABLE)
+
+    dead = _real_server(refusing)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: dead)
+
+    report = fleet_service.reap(None, server_down=True)
+
+    assert {a.id for a in report.lost} == {here.id, there.id}
+    # _observe asks once per project to learn the socket is silent (that is the
+    # refusal the default relies on); the flag's own question is asked ONCE.
+    observe_probes = 2
+    assert len(probes) == observe_probes + 1, probes
 
 
 def test_reap_server_down_still_marks_nothing_without_a_tmux_binary(

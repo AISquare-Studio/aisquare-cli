@@ -236,7 +236,10 @@ graceful exit.
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH` — the row is **left live** and the command fails saying so, rather
 than reporting `✓ stopped` over an agent that is still running. Re-run it once
-tmux answers again, or `fleet reap` after the server comes back.
+tmux answers again, or `fleet reap` after the server comes back. If the server is
+genuinely gone — a reboot, `kill-server` — `fleet reap --all --server-down` marks
+the rows on it lost; it acts only where tmux itself reports no server behind the
+socket, never on a server that is merely not answering.
 
 ### `fleet attach`
 
@@ -254,12 +257,22 @@ instead of running it.
 ```sh
 aisquare fleet reap
 aisquare fleet reap --all
+aisquare fleet reap --all --server-down
 ```
 
 Records agents whose panes have died as ended (with their exit code), marks
 agents whose panes have vanished as lost, and removes the worktrees of ended
 agents **whose branch is merged**. It never deletes unmerged work. `--all`
 walks every project's fleet, not just this one.
+
+A tmux server that does not answer marks **nothing** by default: silence is not
+evidence that its panes are dead — the server may be alive under another
+`TMUX_TMPDIR`, wedged, or running an older binary than the client after an
+upgrade. `--server-down` is the operator's word that the server is genuinely
+gone (a reboot swept `/tmp`; `kill-server`). Even with it, rows are marked lost
+only on a socket where tmux itself reports no server (`no server running on …`
+or `error connecting to … (No such file or directory)`); a protocol mismatch or
+a hung server still marks nothing, and so does a missing `tmux` binary.
 
 ### `fleet rename`
 
@@ -633,6 +646,14 @@ whose branch is merged are removed; unmerged work is never deleted:
 ```sh
 aisquare fleet reap
 aisquare fleet reap --all
+```
+
+If `doctor` says the private server is *not running* and `reap` reconciles
+nothing, the server is silent and `reap` refuses to guess. When it is genuinely
+gone — you rebooted, or ran `kill-server` — say so:
+
+```sh
+aisquare fleet reap --all --server-down
 ```
 
 To stop everything the fleet ever started, on every project, kill the private

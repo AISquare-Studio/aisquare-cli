@@ -24,7 +24,20 @@ pasted, so `test_documented_commands.py` leaves it alone.
 > service client, `sub` on introspection, `aisq_` on both authorize views, the
 > bulk `GET /api/v2/iam/me/access/`) is in too. What remains is deployment
 > (none of the three is deployed yet) and **C5**, which waits on server item
-> S10 exactly as before. The earlier progress note follows for the record.
+> S10 exactly as before.
+>
+> **Verified locally, end to end, over real HTTP.** The provider (BE #3420) and
+> the CI server (#141) running locally in Docker and on the host, this CLI
+> signed in through `AISQUARE_TOKEN` with no `AISQUARE_CI_KEY` and no
+> `AISQUARE_CI_RUN`: `doctor` printed the identity lines (two workspaces, none
+> bound, the fix naming `aisquare ci bind-workspace`); `bind-workspace` with no
+> argument refused and listed both with their runs; bound to the team, `doctor`
+> was five green lines with the run taken from `GET /v1/me` and the descriptor
+> fetched as the developer; the hooks then ran and correctly recorded
+> `trigger_not_in_descriptor`, because the server's descriptor still publishes
+> `direct_api` only — which is S10, and the reason C5 waits. Nothing under
+> `AISQUARE_HOME` contained the token afterwards. The earlier progress note
+> follows for the record.
 >
 > **Progress, 2026-09-08.** The joint contract and the client half of C1–C4 are
 > built and green; the identity-provider adapter is the remaining server work.

@@ -48,6 +48,18 @@ def env_role() -> str | None:
     return role or None
 
 
+def env_fleet_agent() -> str | None:
+    """The ``fleet_agent`` row this session runs as (``AISQUARE_FLEET_AGENT``).
+
+    ``fleet spawn`` sets it on the tmux window it starts, so the session that
+    comes up inside can be joined to the row — and told the task the row was
+    spawned for. Nothing read it before: the task was recorded on the row and
+    named the label and branch, and the agent itself was never told.
+    """
+    agent_id = os.environ.get("AISQUARE_FLEET_AGENT", "").strip()
+    return agent_id or None
+
+
 def delta_enabled() -> bool:
     """Whether per-prompt teammate deltas are injected (``AISQUARE_TEAM_DELTA=0`` mutes)."""
     return _flag_on("AISQUARE_TEAM_DELTA")

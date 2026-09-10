@@ -377,6 +377,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **A spawned agent is told the task it was spawned for.** `fleet spawn --task`
+  recorded the task on the agent's row and named the label and branch after it
+  — and stopped there: the session inside received the generic board and its
+  role's standing cycle, whose `task next` hands out the *oldest* ready task. A
+  coder spawned for task B took task A; two spawned together raced for the same
+  one while their own sat idle; the manager ended up posting "you are coder-x,
+  run task show …" notes by hand (observed 2026-09-10). `fleet spawn` already
+  set `AISQUARE_FLEET_AGENT` on the window; the session-start hook now reads it,
+  joins the session to its row, and puts an **ASSIGNED TO YOU** block at the top
+  of the briefing with the claim command — or, if someone already holds the
+  task, says so and tells the agent to ask the manager rather than take another.
+  `task next` prefers the caller's assigned task before falling back to
+  oldest-first, so parallel spawns stop racing. The coder's standing cycle says
+  assigned-first.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

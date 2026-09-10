@@ -25,7 +25,7 @@ from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
-from aisquare.core.store import ContextStore, store_session, unmet_needs
+from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
 from aisquare.services import distill as distill_service
 
@@ -1096,7 +1096,34 @@ def next_task(
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         event = None
-        while True:
+        # The task this session was spawned for comes first. Oldest-first is
+        # right for a looper picking from a pool; it is wrong for an agent the
+        # manager started FOR a task — that one took whatever was oldest, and two
+        # spawned together raced for the same one while their own sat idle.
+        picked: TeamTask | None = None
+        preferred = _assigned_task_of(store, board.id, session)
+        if (
+            preferred is not None
+            and preferred.status == status
+            and (role is None or preferred.role in (None, role))
+            and (status != "todo" or not unmet_needs(preferred, store.task_statuses(board.id)))
+        ):
+            if not claim:
+                picked = preferred
+            elif store.claim_task(preferred.id, claimant, lease):
+                claimed = store.get_task(preferred.id)
+                assert claimed is not None  # just claimed
+                event = _emit(
+                    store,
+                    claimed.project_id,
+                    "task_claimed",
+                    claimed.title,
+                    session_id=session.id if session else None,
+                    task_id=claimed.id,
+                )
+                picked = claimed
+            # Lost the race for our own task: the pool below is still there.
+        while picked is None:
             task = store.next_task(board.id, role=role, status=status)
             if task is None or not claim:
                 picked = task
@@ -1285,6 +1312,7 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        assigned = _assignment(store, session.id, project.id)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
@@ -1293,6 +1321,7 @@ def hook_session_start(
             store.team_tasks(project.id),
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
+            assigned=assigned,
         )
 
 
@@ -1340,6 +1369,7 @@ def hook_prompt_heartbeat(
                 store.team_tasks(project.id),
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
+                assigned=_assignment(store, session.id, project.id),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -1735,6 +1765,7 @@ def _render_board(
     events: list[TeamEvent],
     *,
     me: TeamSession | None,
+    assigned: TeamTask | None = None,
 ) -> str:
     now = _now()
     lines = ["<aisquare-team>"]
@@ -1743,6 +1774,8 @@ def _render_board(
             f"You are team session {short_id(me.id)} (role: {me.role}) in "
             f"project {project.root.name or project.id}."
         )
+        if assigned is not None:
+            lines += _assignment_lines(assigned, me)
     live = [s for s in sessions if s.ended_at is None]
     accounts = len({s.account for s in live if s.account})
     if live:
@@ -1802,6 +1835,68 @@ def _render_board(
         ]
     lines.append("</aisquare-team>")
     return "\n".join(lines)
+
+
+def _assignment(store: ContextStore, session_id: str, project_id: str) -> TeamTask | None:
+    """The task this session was spawned for, joining the session to its fleet row.
+
+    ``fleet spawn --task`` recorded the task on the ``fleet_agent`` row and named
+    the label and branch after it, and set ``AISQUARE_FLEET_AGENT`` on the window
+    — and that was where it stopped: the session inside received the generic
+    board and its role's standing cycle, whose ``task next`` hands out the
+    OLDEST ready task. A coder spawned for task B took task A; two coders
+    spawned together raced for the same one; the manager ended up posting
+    "you are coder-x, run task show …" notes by hand (observed 2026-09-10).
+
+    Binding the row's ``session_id`` here also closes the "no board join for
+    this agent" gap for a binary whose session id could not be planned at
+    spawn. Fail-open throughout: an unreadable row costs the assignment line,
+    never the board.
+    """
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is None:
+        return None
+    try:
+        agent = store.get_fleet_agent(agent_id)
+    except AmbiguousIdError:
+        return None
+    if agent is None or agent.ended_at is not None or agent.project_id != project_id:
+        return None
+    if agent.session_id != session_id:
+        store.upsert_fleet_agent(agent.model_copy(update={"session_id": session_id}))
+    if agent.task_id is None:
+        return None
+    return store.get_task(agent.task_id)
+
+
+def _assigned_task_of(
+    store: ContextStore, board_id: str, session: TeamSession | None
+) -> TeamTask | None:
+    """The task the calling session's live fleet row was spawned for, if any."""
+    if session is None:
+        return None
+    for agent in store.fleet_agents(board_id, live_only=True):
+        if agent.session_id == session.id and agent.task_id is not None:
+            return store.get_task(agent.task_id)
+    return None
+
+
+def _assignment_lines(task: TeamTask, me: TeamSession) -> list[str]:
+    sid = short_id(me.id)
+    head = f"ASSIGNED TO YOU: {task.id} [{task.status}] {task.title}"
+    if task.status == "todo":
+        return [
+            head,
+            f"Claim it FIRST — `aisquare task claim {task.id} --as {sid}` — then read its",
+            f"contract with `aisquare task show {task.id}` and work it to review/done.",
+            "Only when it is finished does your standing cycle's `task next` apply.",
+        ]
+    holder = f" by {short_id(task.claimed_by)}" if task.claimed_by else ""
+    return [
+        head,
+        f"It is already {task.status}{holder}. Do not take another task on your own:",
+        f'ask the manager — `aisquare note "…" --kind question --to manager --as {sid}`.',
+    ]
 
 
 def _role_cycle(me: TeamSession) -> list[str]:

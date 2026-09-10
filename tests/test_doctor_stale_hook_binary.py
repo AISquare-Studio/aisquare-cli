@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import stat
 import sys
 from collections.abc import Sequence
@@ -40,6 +39,7 @@ from aisquare.core import agents
 from aisquare.core.version import __version__
 from aisquare.models import CheckStatus
 from aisquare.services import diagnostics
+from tests.fsperms import can_symlink
 
 _REAL_PROBE = agents.hook_binary_version
 
@@ -71,7 +71,26 @@ def _hook_entry(command: str | Path, event: str, sub: str) -> dict[str, object]:
 
 
 def _fake_aisquare(path: Path, *, prints: str | None = None, exit_code: int = 0) -> Path:
-    """An executable that answers ``--version`` the way another install would."""
+    """An executable that answers ``--version`` the way another install would.
+
+    The probe RUNS this file, so on Windows it has to be something Windows can
+    run: a `.cmd`, which is the shape pip and npm use. A `#!/bin/sh` file with
+    the execute bits set is a program on POSIX and a text file there, and the
+    probe reported "version could not be read" about a binary sitting right
+    where the hook said it was.
+
+    The suffixed path is RETURNED, and every caller uses the return value, so
+    the hook command a test writes names the file that actually exists.
+    """
+    if sys.platform == "win32":
+        path = path.with_name(path.name + ".cmd")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["@echo off"]
+        if prints is not None:
+            lines.append(f"echo {prints}")
+        lines.append(f"exit /b {exit_code}")
+        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = ["#!/bin/sh"]
     if prints is not None:
@@ -247,7 +266,7 @@ def test_the_python_m_fallback_shape_is_graded_by_its_interpreter(
     _connect(config)
 
     _never_probe(monkeypatch)
-    _write_hooks(config, f"{shlex.quote(sys.executable)} -m aisquare")
+    _write_hooks(config, f"{agents._quote(sys.executable)} -m aisquare")
     assert diagnostics._check_claude_code().status is CheckStatus.ok
 
     _real_probe(monkeypatch)
@@ -390,6 +409,8 @@ def test_two_spellings_of_one_dir_count_once(
     config = isolated_agent_home / ".claude"
     _write_hooks(config, str(current))
     _connect(config)
+    if not can_symlink():  # pragma: no cover - a privilege CI holds and a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     link = tmp_path / "claude-link"
     link.symlink_to(config, target_is_directory=True)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(link))
@@ -450,8 +471,14 @@ def test_hook_binary_parses_the_shapes_connect_writes(tmp_path: Path) -> None:
     spaced = tmp_path / "with space" / "aisquare"
     python = Path(sys.executable)
 
-    assert agents.hook_binary(f"{shlex.quote(str(spaced))} hook stop") == agents.HookBinary(spaced)
-    assert agents.hook_binary(f"{shlex.quote(sys.executable)} -m aisquare hook stop") == (
+    # `agents._quote`, not `shlex.quote`: the latter is POSIX quoting, and its
+    # single quotes are not quoting to cmd.exe. `_quote` is what `connect`
+    # actually writes and the documented inverse of `_split_command`, so this
+    # asserts the real pair rather than one the product never produces.
+    assert agents.hook_binary(f"{agents._quote(str(spaced))} hook stop") == agents.HookBinary(
+        spaced
+    )
+    assert agents.hook_binary(f"{agents._quote(sys.executable)} -m aisquare hook stop") == (
         agents.HookBinary(python, module_form=True)
     )
     assert agents.hook_binary("webhook stop") is None
@@ -534,6 +561,12 @@ def test_two_interpreters_in_one_directory_are_two_installs(
 
     # The same interpreter under another name in that directory IS this install,
     # still without a process: `python3 -> python3.12`, as every venv spells it.
+    # The alias half needs a real symlink. Measured rather than assumed: the
+    # privilege is held by the CI runner and not by an ordinary Windows
+    # account, so this asserts wherever it can mean anything and says so where
+    # it cannot. Everything above this line has already been asserted.
+    if not can_symlink():  # pragma: no cover - a privilege CI holds and a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     alias = bin_dir / "python3"
     alias.symlink_to(ours.name)
     _never_probe(monkeypatch)

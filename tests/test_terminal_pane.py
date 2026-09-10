@@ -890,6 +890,11 @@ def test_drag_select_highlights_the_rows_and_copies_on_release(
     assert selected == "second"
     assert clipboard == "second", "copied on release, without a key"
     assert inside.bgcolor != outside.bgcolor, "the selected span is painted, the rest is not"
+    # Reported 2026-09-10 with a screenshot: a solid block where the word was.
+    # The theme's selection style resolves foreground == background; only its
+    # background may be applied, and the text must stay the colour it was.
+    assert inside.color == outside.color, "selecting must tint behind the text, not recolour it"
+    assert inside.color != inside.bgcolor, "the selected text is still legible"
     assert any(n.startswith("copied 6 characters") for n in notices), notices
 
 

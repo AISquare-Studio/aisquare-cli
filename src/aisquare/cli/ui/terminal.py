@@ -395,9 +395,17 @@ class TerminalPane(Widget, can_focus=True):
         start = min(start, width)
         if start >= end:
             return strip
-        style = self.selection_style
-        if style.bgcolor is None and not style.reverse:
-            style = style + Style(reverse=True)  # a theme with no selection colour
+        # The BACKGROUND only. The theme's ``screen--selection`` component style
+        # resolves with its foreground equal to its background (``#094472 on
+        # #094472`` on the default theme — measured), so applying it whole
+        # paints the text invisible: a solid block where a word was. Textual's
+        # own widgets keep the text's colour and tint behind it; so does this.
+        selection = self.selection_style
+        style = (
+            Style(bgcolor=selection.bgcolor)
+            if selection.bgcolor is not None
+            else Style(reverse=True)  # a theme with no selection colour
+        )
         # Layered LAST on purpose. ``Strip.apply_style`` puts the segment's own
         # style on top, and every segment already carries the widget background
         # from ``apply_style(base)`` — the selection colour would lose to it.

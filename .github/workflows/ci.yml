@@ -44,7 +44,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # Linux only, and the guard is load-bearing now that `check` has a
+      # windows-latest leg: `sudo apt-get` is not a thing on that runner, so an
+      # unconditional step fails the job before a single test runs. tmux has no
+      # Windows build either — the fleet's live tests skip without it, which is
+      # the documented behaviour this step exists to avoid ON LINUX, not a gap
+      # to paper over here.
       - name: Install tmux (the fleet's live tests skip without it)
+        if: runner.os == 'Linux'
         run: sudo apt-get install -y tmux
 
       - name: Lint (ruff)

@@ -51,6 +51,7 @@ from aisquare.core.tmux import (
     _tmux,
     parse_version,
 )
+from tests.fsperms import can_deny_writes
 
 OK = Completed(0, "", "")
 FACTS_FIELDS = 13
@@ -142,11 +143,14 @@ def _completes(call: Callable[[], None]) -> bool:
     return True
 
 
-#: The permission bits below are advice to root, not a refusal, so a suite run
-#: as root would prove the opposite of what the test claims.
-not_root = pytest.mark.skipif(
-    hasattr(os, "getuid") and os.getuid() == 0,
-    reason="root writes an unwritable file anyway — the fail-open branch is unreachable",
+#: The permission bits below are ADVICE on two machines, not a refusal: to root,
+#: and on NTFS, where `chmod(0o444)` returns cleanly and the owner writes anyway.
+#: Either way the rewrite succeeds and the fail-open branch is never reached, so
+#: the test would assert the opposite of what it claims. `can_deny_writes`
+#: measures it by trying, rather than naming the two platforms it knows about.
+can_deny = pytest.mark.skipif(
+    not can_deny_writes(),
+    reason="writes cannot be denied here — the fail-open branch is unreachable",
 )
 
 
@@ -264,7 +268,7 @@ def test_an_explicit_conf_is_used_verbatim_and_never_written(fake_bin: Path, con
     assert server.conf_fallback is None
 
 
-@not_root
+@can_deny
 def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
     fake_bin: Path, isolated_home: Path
 ) -> None:
@@ -296,6 +300,13 @@ def test_a_conf_that_cannot_be_rewritten_fails_open_instead_of_raising(
     # Unreadable AND unwritable: measured on 3.7c, handing tmux an unreadable
     # -f file kills the server at startup ("server exited unexpectedly"), while
     # a missing one is fine — so this branch must NOT hand over the path.
+    #
+    # Only this HALF is skipped where mode 000 is not a refusal — NTFS lets the
+    # owner read its own file whatever the bits say, as root does. Everything
+    # above has already run, including the readable-but-unwritable branch, which
+    # is the one the fail-open was written for.
+    if sys.platform == "win32" or os.geteuid() == 0:
+        pytest.skip("mode 000 does not stop this user from reading")
     path.chmod(0o000)
     blind = TmuxServer("s", binary=str(fake_bin), runner=FakeTmux())
     assert blind.conf_path() == Path(os.devnull)
@@ -468,9 +479,14 @@ def test_spawn_window_escapes_the_separator_in_every_argument_it_carries(
         command=["claude", "--flag", "a;b", ";", "kill-server", "trailing;"],
         env={"K": "v;"},
     )
+    # Built from `directory`, not `f"{tmp_path}/dir"`: the separator between the
+    # two is the platform's, and a hardcoded "/" asserted the POSIX spelling of a
+    # path tmux is handed on both. The `;` escaping is what this test is about
+    # and is applied here exactly as the code applies it.
+    escaped_cwd = str(directory).replace(";", "\\;")
     assert fake.commands()[1] == [
         "new-window", "-d", "-P", "-F", f"#{{window_id}}{_SEP}#{{pane_id}}",
-        "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", f"{tmp_path}/dir\\;",
+        "-t", "=asq-amber-fox:", "-n", "coder\\;", "-c", escaped_cwd,
         "-e", "K=v\\;",
         # "a;b" is data to tmux already: only a LAST ";" separates commands.
         "--", "claude", "--flag", "a;b", "\\;", "kill-server", "trailing\\;",

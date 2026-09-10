@@ -513,7 +513,10 @@ def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     command, env = spawned["command"], spawned["env"]
     assert isinstance(command, list) and isinstance(env, dict)
     # The two variables this process lacks are unset for the child…
-    assert command[0].endswith("env")
+    # The STEM: this is `shutil.which("env")`, which finds Git's `env.EXE` on
+    # Windows, so `endswith("env")` asserted the POSIX spelling of a program the
+    # product looks up on both.
+    assert Path(command[0]).stem.lower() == "env"
     assert command[1:5] == ["-u", "CLAUDE_CONFIG_DIR", "-u", "CLAUDE_CODE_TMPDIR"]
     # …then the launcher exactly as it is built without a flag (interpreter switches and all).
     module = command.index("-m")

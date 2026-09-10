@@ -43,6 +43,7 @@ from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.onboarding import fix_commands
+from tests.fsperms import can_symlink
 
 # --- fakes and seeds -------------------------------------------------------------------
 
@@ -582,7 +583,15 @@ def test_fleet_check_caps_the_labels_it_lists(home: Path, tmp_path: Path) -> Non
     assert check.status is CheckStatus.warn
     assert "9 recorded live" in check.detail
     assert "+3 more" in check.detail
-    assert "coder-9" not in check.detail
+    # HOW MANY are listed, not WHICH. All nine rows are written inside the same
+    # millisecond, and an id is a millisecond stamp plus random bits, so the
+    # order among them is undefined — `coder-9` lands inside the cap about as
+    # often as any other, and Windows shows it most because its clock is
+    # coarsest. Naming one label asserted the tie-break, not the cap; the cap is
+    # what this test is about, and `+3 more` above already pins the remainder.
+    listed = re.findall(r"coder-\d+", check.detail)
+    assert len(listed) == 6, check.detail
+    assert len(set(listed)) == 6, f"a label was listed twice: {check.detail}"
 
 
 def test_fleet_check_fails_open_on_a_damaged_store(home: Path) -> None:
@@ -821,6 +830,8 @@ def test_doctor_without_cwd_means_the_process_cwd(
 
 
 def test_claude_version_from_the_native_installer_layout(tmp_path: Path) -> None:
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     target = tmp_path / "share" / "claude" / "versions" / "2.1.250"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"\x7fELF")
@@ -832,6 +843,8 @@ def test_claude_version_from_the_native_installer_layout(tmp_path: Path) -> None
 
 
 def test_claude_version_from_an_npm_layout(tmp_path: Path) -> None:
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     package = tmp_path / "lib" / "node_modules" / "@anthropic-ai" / "claude-code"
     package.mkdir(parents=True)
     (package / "cli.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
@@ -1030,6 +1043,8 @@ def test_a_symlinked_home_is_a_directory_home(
 ) -> None:
     """The shape the ``is_dir()`` test must NOT accuse: ``ensure_home`` follows a
     link to a directory and everything works, so the check has to agree."""
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     target = tmp_path / "real-home"
     target.mkdir()
     link = tmp_path / "linked-home"

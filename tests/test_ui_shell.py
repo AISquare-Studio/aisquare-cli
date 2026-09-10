@@ -270,7 +270,10 @@ def row_for(app: FleetApp, agent_id: str) -> AgentRow:
 def test_short_path_collapses_the_home_directory_only() -> None:
     home = Path("/home/me")
     assert short_path(home / "work" / "api", home) == "~/work/api"
-    assert short_path(Path("/srv/api"), home) == "/srv/api"  # not under home: untouched
+    # "untouched" means `str(path)`, which is the platform's spelling — the `~/`
+    # branch above is `as_posix()` on purpose and stays a forward-slash literal.
+    outside = Path("/srv/api")
+    assert short_path(outside, home) == str(outside)  # not under home: untouched
 
 
 def test_ordered_agents_puts_the_manager_first_then_by_creation() -> None:
@@ -811,7 +814,14 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
     assert "[archive]" in rendered
     # Control: the same string rendered AS MARKUP loses the bracketed segment —
     # the failure this assertion exists to catch, measured here.
-    assert Content.from_markup(rendered).plain == rendered.replace("[archive]", "")
+    #
+    # Taken on the POSIX spelling on BOTH platforms, because Rich's escape
+    # character is `\` — the Windows path separator. `...\[archive]\repo` reads
+    # as an ESCAPED bracket there, survives markup parsing untouched, and the
+    # control would quietly prove nothing on the one platform where it looks
+    # most alarming. The assertion above is still about the real rendered path.
+    as_markup = f"{path.as_posix()}: init failed: store_unopenable"
+    assert Content.from_markup(as_markup).plain == as_markup.replace("[archive]", "")
 
 
 def test_the_explainability_views_toasts_keep_bracketed_data(
@@ -845,11 +855,23 @@ def test_the_explainability_views_toasts_keep_bracketed_data(
         return app.screen.query_one(Toast).render().plain
 
     rendered = drive(go, notifications=True)
-    assert str(refused) in rendered and "[work]" in rendered
+    # The message carries the OSError, and `OSError.__str__` renders its filename
+    # through `repr()` — which doubles every backslash. So a raw `str(refused)`
+    # is not in the toast on Windows even though the path is: the same escaped-
+    # rendering trap as the `json.dumps` assertions ported earlier. Comparing
+    # against the error's own text asserts the same thing on both platforms.
+    assert str(OSError(30, "Read-only file system", str(refused))) in rendered
+    assert "[work]" in rendered
     assert rendered.startswith("could not write the config:")
     # Control: the same string parsed AS MARKUP loses the bracketed directory —
     # the failure this assertion exists to catch, measured here.
-    assert "[work]" not in Content.from_markup(rendered).plain
+    #
+    # On the POSIX spelling on BOTH platforms, for the reason the sibling test
+    # above records: Rich's escape character is `\`, which is also the Windows
+    # separator, so `\[work]` reads as an escaped bracket, survives parsing
+    # untouched, and the control would pass while proving nothing there.
+    as_markup = f"could not write the config: {refused.as_posix()}"
+    assert "[work]" not in Content.from_markup(as_markup).plain
 
 
 def test_project_onboarded_refreshes_and_selects_the_project(

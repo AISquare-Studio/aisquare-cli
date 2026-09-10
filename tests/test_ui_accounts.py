@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -132,7 +133,15 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
         return Completed(1, "", "no server running (a UI test addresses no real fleet)\n")
 
     monkeypatch.setattr(tmux_core, "_tmux", record)
-    monkeypatch.setattr(fleet_service, "server", lambda config=None: TmuxServer(PRIVATE_SOCKET))
+    # `binary=sys.executable`: the runner above is what answers, but the calls
+    # still go through `TmuxServer.binary()`, which is `shutil.which("tmux")` —
+    # so on a machine with no tmux these tests raised TmuxUnavailable before
+    # reaching the UI they are about. A binary that exists and is never run.
+    monkeypatch.setattr(
+        fleet_service,
+        "server",
+        lambda config=None: TmuxServer(PRIVATE_SOCKET, binary=sys.executable),
+    )
     yield ran
     wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
     assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"

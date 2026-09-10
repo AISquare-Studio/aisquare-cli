@@ -300,8 +300,15 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-_PEER_GONE = (BrokenPipeError, ConnectionResetError)
-"""What a write raises when the client already hung up. Expected, never logged."""
+_PEER_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+"""What a write raises when the client already hung up. Expected, never logged.
+
+``ConnectionAbortedError`` is the Windows spelling of the same event: a client
+that gave up mid-response gets ``[WinError 10053] An established connection was
+aborted by the software in your host machine`` rather than a reset, so without
+it here the "no traceback behind a client that gave up" test watched this stub
+print one from a handler thread.
+"""
 
 
 class _QuietServer(ThreadingHTTPServer):

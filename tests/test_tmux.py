@@ -104,11 +104,22 @@ def _facts_line(**overrides: str) -> str:
 
 @pytest.fixture
 def fake_bin(tmp_path: Path) -> Path:
-    """An executable that exists, so ``binary()`` resolves without real tmux."""
-    path = tmp_path / "bin" / "tmux"
+    """An executable that exists, so ``binary()`` resolves without real tmux.
+
+    `TmuxServer.binary` is `shutil.which(...)`, which on Windows resolves
+    through PATHEXT — an extensionless file is not a program there, so every
+    test taking this fixture failed with "tmux is not installed" against a file
+    that was sitting right there. `.cmd` is the shape pip and npm use and the
+    same fix the gbrain fake in test_brain.py already carries.
+    """
+    suffix = ".cmd" if sys.platform == "win32" else ""
+    path = tmp_path / "bin" / f"tmux{suffix}"
     path.parent.mkdir()
-    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    path.chmod(0o755)
+    if sys.platform == "win32":
+        path.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    else:
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
     return path
 
 

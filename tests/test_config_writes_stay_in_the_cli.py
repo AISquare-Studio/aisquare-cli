@@ -99,6 +99,50 @@ def _rebinding_aliases(tree: ast.AST, imported: dict[str, str]) -> dict[str, str
     return resolved
 
 
+def _locally_bound(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Names this function assigns to, so a method call on one can be told from
+    a call to a project function that happens to share its bare name."""
+    bound: set[str] = set()
+    for stmt in ast.walk(node):
+        if isinstance(stmt, ast.Assign):
+            bound |= {t.id for t in stmt.targets if isinstance(t, ast.Name)}
+        elif isinstance(stmt, ast.AnnAssign | ast.AugAssign) and isinstance(stmt.target, ast.Name):
+            bound.add(stmt.target.id)
+        elif isinstance(stmt, ast.With | ast.AsyncWith):
+            bound |= {
+                item.optional_vars.id
+                for item in stmt.items
+                if isinstance(item.optional_vars, ast.Name)
+            }
+        elif isinstance(stmt, ast.For | ast.AsyncFor) and isinstance(stmt.target, ast.Name):
+            bound.add(stmt.target.id)
+    return bound
+
+
+def _is_method_on_a_local(func: ast.expr, bound: set[str], aliases: dict[str, str]) -> bool:
+    """``worker.start()`` is ``threading.Thread.start``, not this project's ``start``.
+
+    The graph is keyed by bare name, so a method on a local object borrows the
+    identity of any project function spelled the same — and a stdlib name like
+    ``start``, ``run``, ``get`` or ``add`` almost always collides. That invents
+    edges, and an invented edge is harmless in one direction and not in the
+    other: the closure test below asserts a writer DOES reach ``save_config``,
+    where a spare edge only widens the set, but the surface test asserts a hook
+    does NOT, where it is a false alarm with no fix available to whoever hits
+    it. Measured: ``ci_client.exchange``'s ``worker.start()`` bound the CI
+    transport to ``capture.start`` and through it to ``doctor`` and
+    ``apply_fixes``, reporting every function in ``hooks.py`` and
+    ``mcp_server.py`` as a config writer.
+
+    An imported module alias is NOT a local, so ``config_mod.save_config()``
+    stays an edge; nor is ``self``, so a method call on it still counts.
+    """
+    if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+        return False
+    receiver = func.value.id
+    return receiver in bound and receiver not in aliases
+
+
 def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[str, set[str]]]:
     defines: dict[str, Path] = {}
     calls: dict[str, set[str]] = defaultdict(set)
@@ -110,11 +154,15 @@ def _call_graph(roots: list[Path] | None = None) -> tuple[dict[str, Path], dict[
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
             defines[node.name] = module
+            bound = _locally_bound(node)
             for inner in ast.walk(node):
-                if isinstance(inner, ast.Call):
-                    name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None)
-                    if name:
-                        calls[node.name].add(aliases.get(name, name))
+                if not isinstance(inner, ast.Call):
+                    continue
+                if _is_method_on_a_local(inner.func, bound, aliases):
+                    continue
+                name = getattr(inner.func, "id", None) or getattr(inner.func, "attr", None)
+                if name:
+                    calls[node.name].add(aliases.get(name, name))
     return defines, calls
 
 
@@ -210,6 +258,48 @@ def test_no_hook_or_daemon_surface_can_reach_a_config_write() -> None:
         "The CLI write guard cannot cover them — either route the write through "
         "a command that wraps it, or make that surface handle the failure itself."
     )
+
+
+def test_a_method_on_a_local_is_not_a_call_to_a_function_of_the_same_name(
+    tmp_path: Path,
+) -> None:
+    """``worker.start()`` must not be read as this project's ``start``.
+
+    The bare-name key makes every stdlib method a potential impostor. Measured
+    on the merge of this branch with 0.6.0: ``ci_client.exchange`` starts a
+    worker thread, ``capture.py`` defines ``start``, and that one edge chained
+    the CI transport to ``doctor`` -> ``apply_fixes`` -> ``save_config``,
+    reporting all of ``hooks.py`` and ``mcp_server.py`` as config writers. The
+    surface guard asserts an ABSENCE, so an invented edge there is a false
+    alarm nobody can act on.
+    """
+    module = tmp_path / "threaded.py"
+    module.write_text(
+        "import threading\n\n"
+        "from aisquare.core import config as config_mod\n\n"
+        "def start() -> None:\n"
+        "    config_mod.save_config(None)\n\n"
+        "def spawns_a_worker() -> None:\n"
+        "    worker = threading.Thread(target=print)\n"
+        "    worker.start()\n\n"
+        "def writes_through_a_module_alias() -> None:\n"
+        "    config_mod.save_config(None)\n",
+        encoding="utf-8",
+    )
+
+    _, calls = _call_graph(roots=[module])
+
+    assert "start" not in calls["spawns_a_worker"], (
+        "a Thread.start() was read as a call to the module's own start()"
+    )
+    assert "save_config" in calls["writes_through_a_module_alias"], (
+        "narrowing must not lose a write through an imported module alias"
+    )
+    reaching = _reaches_a_config_write(calls)
+    assert {"start", "writes_through_a_module_alias"} <= reaching, (
+        "the closure must still find both writers"
+    )
+    assert "spawns_a_worker" not in reaching, "starting a thread is not a config write"
 
 
 def test_an_aliased_import_of_the_writer_is_still_a_config_write(tmp_path: Path) -> None:

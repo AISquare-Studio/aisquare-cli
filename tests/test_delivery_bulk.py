@@ -38,7 +38,16 @@ from aisquare.core.paths import HOME_ENV_VAR
 WRITERS = 8
 WRITES_PER_WRITER = 25
 READERS = 2
-TIME_BOX_SECONDS = 60.0
+#: The CI budget for the whole storm — NOT the pathology detector. A lock convoy
+#: or a serialisation stall shows up as one call outliving ``_CLI_TIMEOUT`` long
+#: before it shows up as a slow storm, so this box only has to hold what a
+#: healthy run costs on the slowest machine that runs it. Measured: 11.7 s on a
+#: 16-core workstation; 61.6 s and 61.7 s on GitHub's two-core ubuntu-latest
+#: runners (a4975fd on #108, c0946fb on main) against the 60 s this was set to
+#: when the CLI imported less — 200 CLI invocations at ~0.3 s of import each,
+#: eight abreast on two cores, is a minute. Three times that keeps the box a
+#: guard against the catastrophic and stops it grading the runner.
+TIME_BOX_SECONDS = 180.0
 _CLI_TIMEOUT = 30.0  # any single call outliving this is already a failure
 
 

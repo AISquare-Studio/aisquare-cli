@@ -112,13 +112,29 @@ DOCUMENTED = (
     # is the rule, not because this command is likely to drift.
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "docs/runbooks/MORNING-HANDOFF.md",
+    "docs/signing-in.md",
+    # The fleet's user guide. Its command reference is fenced `sh` on purpose:
+    # every `aisquare fleet …` line there is a step the reader types, so a flag
+    # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
+    "docs/fleet.md",
+    # The CI test bed's smoke: `aisquare doctor` and `aisquare metrics list`
+    # against the stub server, meant to be typed.
+    "docs/ci-contract.md",
+    # The live-wiring handoff: doctor, the hooks by hand, metrics — all meant to
+    # be typed against the staging server.
+    "docs/ci-live-wiring-handoff.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
 #: is swept, because "which directories hold documentation" is precisely the
 #: judgement that was wrong before: `.github/ISSUE_TEMPLATE` holds a page that
 #: asks a user to run a command and sat outside a root-plus-docs sweep.
-_SWEEP_EXCLUDES = frozenset({".venv", ".git", "node_modules", "site-packages", "build", "dist"})
+#: `.claude` holds Claude Code's own worktrees (`.claude/worktrees/<name>` — full
+#: checkouts of this repo), so without it every document would be swept once per
+#: live worktree and reported as an unlisted copy of itself.
+_SWEEP_EXCLUDES = frozenset(
+    {".venv", ".git", ".claude", "node_modules", "site-packages", "build", "dist"}
+)
 
 FENCE = re.compile(r"^\s*(?:>\s*)*```+\s*([A-Za-z0-9_-]*)\s*$")
 SHELL_LANGUAGES = {"", "sh", "bash", "shell", "console", "zsh"}
@@ -713,9 +729,13 @@ def test_the_convention_survives_a_widening_in_both_directions() -> None:
     code, append a genuinely stale command in a fenced block, and check the two
     outcomes TOGETHER in ONE document.
 
-    The stale command used is the actual defect this guard was written for —
-    `launch --account`, deleted in ce6bc46 — so the catch being asserted is one
-    that really happened rather than an invented shape.
+    The stale command used is the shape of the actual defect this guard was
+    written for — `launch --account DIR`, deleted in ce6bc46 — so the catch being
+    asserted is one that really happened rather than an invented shape. The
+    FLAG is no longer that one: `--account` came back with the accounts train
+    (docs/plans/claude-accounts.md) as a slot reference rather than a
+    directory, so the sentinel is now `--config-dir`, which `launch` never had.
+    Same shape — a flag the page shows and the CLI lacks — different spelling.
 
     Scope is NOT widened here, per the task's boundary: DOCUMENTED is untouched
     and this test builds its own invocation list.
@@ -723,7 +743,7 @@ def test_the_convention_survives_a_widening_in_both_directions() -> None:
     text = (REPO / "CONTRIBUTING.md").read_text(encoding="utf-8")
     assert "aisquare-cli[explainability]" in text, "the page no longer carries a prohibition"
 
-    widened = f"{text}\n```sh\naisquare launch coder --account ~/.claude-account1\n```\n"
+    widened = f"{text}\n```sh\naisquare launch coder --config-dir ~/.claude-account1\n```\n"
     invocations = _from_text("CONTRIBUTING.md", widened)
 
     # Direction 1: the fenced stale command IS caught.
@@ -737,7 +757,7 @@ def test_the_convention_survives_a_widening_in_both_directions() -> None:
         "a stale command in a fenced block went uncaught — if the convention "
         "reaches this state, widening the guard buys nothing"
     )
-    assert any("--account" in item for item in unknown_or_missing)
+    assert any("--config-dir" in item for item in unknown_or_missing)
 
     # Direction 2: the inline prohibition is still invisible, in the SAME pass.
     assert not any("aisquare-cli[explainability]" in i.text for i in invocations), (
@@ -849,10 +869,23 @@ _NOT_AN_INVOCATION = (
 CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
-    "README.md": (55, 5),
+    # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
+    # fenced example to the memory section.
+    "README.md": (58, 5),
     "docs/connecting-your-agents-to-explainability.md": (11, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
+    "docs/signing-in.md": (8, 0),
+    # Measured 2026-08-28 the same way, on the day the document was written: 29
+    # fenced commands (the reference plus troubleshooting) and one classified
+    # mention (the `aisquare-cli[tui]` pip requirement). Re-measure when it grows.
+    "docs/fleet.md": (29, 1),
+    # Two commands in the smoke block; the export line is upper-case and is not a
+    # mention this audit sees.
+    "docs/ci-contract.md": (2, 0),
+    # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
+    # `src/aisquare/...`).
+    "docs/ci-live-wiring-handoff.md": (8, 2),
 }
 
 

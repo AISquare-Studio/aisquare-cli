@@ -153,9 +153,22 @@ def test_printable_input_is_always_literal_even_with_modifiers() -> None:
     assert translate("left_square_bracket", "[", printable=True) == literal("[")
     assert translate("é", "é", printable=True) == literal("é")
     assert translate("A", "A", printable=True) == literal("A")
-    # A terminal that reports the character alongside the chord: the text wins.
+    # A terminal that reports the character alongside a shift/ctrl chord: the text wins.
     assert translate("shift+a", "A", printable=True) == literal("A")
     assert translate("ctrl+a", "a", printable=True) == literal("a")
+
+
+def test_alt_chords_keep_their_modifier_even_when_the_character_is_reported() -> None:
+    """Textual's parser reads ``ESC p`` as ``Key("alt+p", character="p")`` — the
+    character is always set for alt+letter and it is printable — so the
+    printable-is-literal rule above typed a bare ``p`` into the agent and Claude
+    Code's alt+p (switch model) never fired. Reported 2026-09-02 / 2026-09-10."""
+    assert translate("alt+p", "p", printable=True) == key("M-p")
+    assert translate("meta+p", "p", printable=True) == key("M-p")
+    assert translate("alt+shift+p", "P", printable=True) == key("M-P")
+    assert translate("ctrl+alt+p", "p", printable=True) == key("C-M-p")
+    # Without the character it always worked; it must keep working.
+    assert translate("alt+p", None, printable=False) == key("M-p")
     # Semicolon is text like any other here; escaping is the transport's job.
     assert translate("semicolon", ";", printable=True) == literal(";")
 

@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from click.testing import Result
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -228,15 +229,16 @@ def test_doctor_probes_me_without_caching_it(
 # --- ci bind-workspace ---------------------------------------------------------
 
 
-def _run(runner: CliRunner, *args: str):  # type: ignore[no-untyped-def]
+def _run(runner: CliRunner, *args: str) -> Result:
     return runner.invoke(app, ["ci", "bind-workspace", *args], catch_exceptions=False)
 
 
-def _text(result) -> str:  # type: ignore[no-untyped-def]
+def _text(result: Result) -> str:
+    """stdout and stderr together; ``fail`` prints its message to stderr."""
     try:
-        return result.output + result.stderr
+        return str(result.output) + str(result.stderr)
     except ValueError:
-        return result.output
+        return str(result.output)
 
 
 def test_binding_a_workspace_you_are_in_is_written_to_config(

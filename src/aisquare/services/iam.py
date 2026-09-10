@@ -488,6 +488,9 @@ def store_session(
         # a second stored session, and the reader that handles that is not here.
         KEY_CLIENT_ID: CLIENT_ID,
     }
+    # store() merges only non-empty values. Replace this session's keys first
+    # so an unknown expiry or omitted claim cannot survive from the old token.
+    credentials.drop(*CREDENTIAL_KEYS)
     credentials.store(**values)
     return Session(
         api_url=api_url,

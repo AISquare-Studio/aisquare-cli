@@ -294,6 +294,72 @@ the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
 ---
 
+## Accounts
+
+The **Accounts** section at the bottom of the sidebar opens one page for the two
+logins the fleet leans on.
+
+**AISquare** is on top. The card reads the session `aisquare login` stores and
+shows who you are and when it expires. *Sign in* runs the same browser flow the
+terminal runs — your one-time code and the link appear on the card, the browser
+opens when one can reach you, and *Cancel* stops the wait — and *Sign out*
+revokes the session exactly as `aisquare logout` does. A token supplied through
+`AISQUARE_TOKEN` is shown as such and cannot be signed out from here.
+
+**Claude Code** is below it: one row per account, with who is signed in, the
+plan, and the five-hour and seven-day usage as bars once they have been read.
+Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
+was in the shell you started `asq` from, `~/.claude` otherwise). Every other
+slot is a directory the CLI created under `~/.aisquare/claude-accounts/` and
+launches by pointing `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` at it — the
+c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
+
+- **+ Add Claude account** makes the next free slot and opens Claude Code's own
+  login in a pane on this page. Sign in there as you always do. The page
+  watches the slot's directory; the moment Claude Code has written the login,
+  the account is recorded, aisquare's hooks go into its `settings.json`, and the
+  pane closes by itself. Close the pane without signing in, or press *Cancel
+  sign-in*, and the empty slot is discarded.
+- **Sign in** on a row does the same for a slot that has no login (slot 1
+  included).
+- **Remove** forgets a slot the CLI owns. Its directory is renamed beside
+  itself as `<n>.removed-<stamp>` — the login, the settings and the transcripts
+  kept, never listed again, deletable by hand — and the number is free for the
+  next add. Slot 1 cannot be removed; sign out of it inside Claude Code.
+- Usage comes from the endpoint Claude Code's own `/usage` reads, called with
+  the token in the account's credentials file, once a minute while the page is
+  open. It is not a documented API; when it does not answer, the row says why
+  (`usage unavailable`, `token expired — open a session to refresh it`) and
+  nothing else on the page is affected. On macOS the token lives in the
+  Keychain, which the CLI does not read, so the row says so.
+
+Nothing on this page writes into Claude Code's own files: the email and plan
+are read from what Claude Code recorded, and a token is never refreshed by the
+CLI. Claude Code refreshes it on the account's next session.
+
+Everything the page does is a command, and every reporting one takes `--json`:
+
+```sh
+aisquare accounts list                 # slots, who is signed in, plan, hooks
+aisquare accounts list --usage         # …plus the two windows (one request per account)
+aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
+aisquare accounts run 2                # a plain Claude Code session on account 2
+aisquare accounts run 2 --model opus   # arguments after the slot go to claude
+aisquare accounts usage                # the windows, per signed-in account
+aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
+aisquare launch coder --account 2      # a board role on account 2
+aisquare fleet spawn coder --account 2 # a fleet agent on account 2
+```
+
+`add` and `run` hand the terminal to Claude Code, so they have no `--json`
+form and `add` refuses outside an interactive terminal. `aisquare doctor` gains a
+`claude-accounts` line naming any slot that still needs a sign-in. Accounts laid
+out some other way — a wrapper, a proxy, a directory of your own — still bind
+to a role as a launch profile (`aisquare team bind coder1 --env …`, README
+"Several accounts, one team").
+
+---
+
 ## Permission modes and every default you can change
 
 Autonomy means answering permission prompts. Claude Code offers
@@ -422,6 +488,12 @@ attach hint, branch names, `fleet` command arguments. Elsewhere it is a dim
 badge beside the name. `fleet rename` changes it; `aisquare project switch
 amber-otter` and `--project amber-otter` both resolve it, and the "matches
 several projects" error lists codenames, because basenames are what collide.
+
+**Registrations you no longer want** — a deleted checkout, a throwaway worktree —
+go with `aisquare project forget <name|path>`; `aisquare project prune` sweeps
+roots that are gone from disk and worktrees of a repository that is itself
+registered, showing the plan and asking first. The navigator only loads what is
+registered, so this is also how a slow start is cured (#83).
 
 **tmux.** Session `asq-<codename>`, always targeted exactly (`=asq-amber-otter`)
 so `asq-ruby-fox` never prefix-matches an `asq-ruby-foxhound`. Window name =

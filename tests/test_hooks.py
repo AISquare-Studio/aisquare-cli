@@ -67,7 +67,9 @@ def test_session_start_directive_points_at_the_snapshot(
     from aisquare.core.workspace import current_project
 
     monkeypatch.setattr(
-        snapshot, "_run_repomix", lambda _root, *, compress: (_PACK, "Total Tokens: 9")
+        snapshot,
+        "_run_repomix",
+        lambda _root, *, compress, ignore=(): (_PACK, "Total Tokens: 9"),
     )
     monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 100)
     snapshot.generate(current_project(work_dir).id, work_dir)
@@ -76,3 +78,31 @@ def test_session_start_directive_points_at_the_snapshot(
     assert result.exit_code == 0, result.output
     assert "packed snapshot" in result.stdout
     assert "pack.repomix.xml" in result.stdout
+
+
+def test_session_start_directive_points_at_the_skeleton_when_the_full_pack_was_skipped(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over budget even compressed: the agent gets the skeleton and its index, and no full pack.
+
+    This is the case the cap used to leave with NOTHING — and the directive is
+    the only reader of the snapshot, so it is where "usable" has to be true.
+    """
+    from aisquare.core import snapshot
+    from aisquare.core.workspace import current_project
+
+    monkeypatch.setattr(
+        snapshot,
+        "_run_repomix",
+        lambda _root, *, compress, ignore=(): (_PACK, "Total Tokens: 9"),
+    )
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 100)
+    meta = snapshot.generate(current_project(work_dir).id, work_dir, max_tokens=10)
+    assert meta.status == "skeleton_only"
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert "packed skeleton" in result.stdout
+    assert str(meta.skeleton_path) in result.stdout
+    assert str(meta.index_path) in result.stdout
+    assert "pack.repomix.xml" not in result.stdout

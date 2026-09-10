@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Accounts, in `asq` and on the command line.** A new **Accounts** section in
+  the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
+  Claude Code accounts under it. The AISquare card runs `aisquare login`'s
+  device flow natively — the one-time code and link appear on the page, the
+  browser opens when one can reach you, *Cancel* stops the wait — and *Sign
+  out* revokes as `aisquare logout` does. Below it, every Claude Code account
+  the CLI knows: **slot 1** is the plain `claude` of the machine; **+ Add Claude
+  account** creates a numbered slot (`~/.aisquare/claude-accounts/<n>`, its own
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR`) and opens Claude Code's own
+  login in a pane rendered right there; the page watches the directory and, the
+  moment the login lands, records the account, installs aisquare's hooks into it
+  and closes the pane. Each signed-in row shows the plan and the five-hour and
+  seven-day usage as bars, from the endpoint Claude Code's `/usage` reads (best
+  effort: if it changes, the row says `usage unavailable`). *Remove* renames a
+  slot's directory beside itself as `<n>.removed-<stamp>` rather than deleting
+  it. Slot 1 is never a directory of ours and is never launched with
+  `CLAUDE_CONFIG_DIR=~/.claude` — Claude Code keeps the default install's
+  `.claude.json` beside that directory and would re-onboard into an empty one.
+  - `aisquare accounts` (`list [--usage]`, `add`, `run <slot> [claude args]`,
+    `usage [slot]`, `remove <slot>`), every reporting command with `--json`;
+    `run` is what a `c2` shell alias was, with the environment decided in one
+    place. `aisquare launch <role> --account <slot>` and `aisquare fleet spawn
+    <role> --account <slot>` run a board role on an account; the board labels
+    such sessions `account N`. `doctor` gains a `claude-accounts` line naming
+    any slot that still needs a sign-in. Nothing here writes into Claude Code's
+    own files, and no hook or session path ever reaches the usage endpoint.
+    Plan: `docs/plans/claude-accounts.md`; guide: `docs/fleet.md`.
 - **`aisquare login`, `logout`, `whoami` and `aisquare auth status|token` do
   something real.** Sign-in is the OAuth 2.0 device flow (RFC 8628) against the
   AISquare identity provider: the terminal shows a one-time code and a link,
@@ -23,6 +50,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   locally. `--json` puts exactly one object on stdout. Redaction learns the
   `aisq_` token shape. Contract: `docs/plans/aisquare-login.md`; guide:
   `docs/signing-in.md`. The `auth rotate` stub is gone (sessions do not rotate).
+
+- **`project forget <id|name|codename|path>` and `project prune`** (#83), so a
+  store with hundreds of dead registrations can be cleaned. Measured on the
+  owner's box: 305 registered projects, most of them throwaway git worktrees,
+  and the fleet UI loaded state for every one before its first frame. `forget`
+  drops one registration and refuses (exit 2) while the project has live fleet
+  agents; `prune --missing` drops registrations whose root is gone from disk,
+  `prune --worktrees` those whose root is a linked git worktree of a repository
+  that is itself registered (neither flag: both). `prune` prints its plan and
+  asks at a terminal; off one it is a dry run unless `--yes`, and `--json`
+  without `--yes` lists the candidates and changes nothing. A plain forget is a
+  tombstone (store schema v14, `project.forgotten_at` — the `entry` and
+  `prompt` tables hold foreign keys to the project row, so a project with any
+  history cannot be deleted from under them): the project's context entries,
+  prompt history and board rows stay in the store, hidden, and come back if the
+  root is registered again. `--purge` deletes them, the ended fleet-agent rows,
+  the turn metrics and `~/.aisquare/projects/<id>/`. Forgetting the ACTIVE project moves the pin
+  to the most recently touched remaining project, or clears it, and says so.
+- **Client decks in `docs/deck/`, one self-contained HTML file each, with the
+  PDF beside it.** A one-pager, a five-page short deck and a fifteen-slide pitch
+  deck, for showing the fleet to someone who has not seen it. Each HTML embeds
+  its own CSS, its diagrams, its terminal captures and its three typefaces —
+  subset to the glyphs it uses, under the OFL — so it has no external reference
+  of any kind and opens from `file://` unchanged. `docs/deck/README.md` says
+  which capture is real data and which is a worked example, because these are
+  the files someone will reuse in a slide of their own.
+  - **The captures are real renders of the real UI**, not mockups: `cli/ui/` and
+    the board TUI were driven headless through Textual's pilot and exported to
+    SVG, so the layout, the role icons and the state chips are the shipping
+    code's. The board's rows are real data — the CLI was driven through an
+    actual sequence of five contracts, two claims, a review, a tester's reopen
+    with its reason, a routed question and a signal — and the doctor page uses
+    the real check names from `services/diagnostics.py`.
+  - **Each deck carries its own print stylesheet**, so a browser's Print dialog
+    follows a layout authored for paper rather than paginating the scroll
+    layout: printing the short deck or the pitch deck reproduces its committed
+    PDF, one leaf or one slide per page. The one-pager is the stated exception —
+    its web page is ~3,700px tall at full measure, four A-series pages, so its
+    PDF is a separate single-A3 sheet and printing the HTML gives four A4 pages.
+  - **Four checks run against the built files, and each of them found something.**
+    Measuring every page element against its page box turned six overflowing
+    slides into none. Checking every `pre`/`nowrap` block for horizontal
+    overflow — such a block scrolls on screen and crops *silently* on paper —
+    found the one-line installer losing `.sh | sh` off two pages, and a
+    model-harness table losing 35px of its own right edge; spotting these by eye
+    had found two of the four. Checking every hand-drawn figure label against
+    its `viewBox` found two captions past the right edge. Checking every
+    character against the embedded faces found the non-breaking hyphen, used 88
+    times in body copy like `fail-open`, has no glyph in any of the three faces
+    and had been rendering in a fallback font all along.
+  - Two layout defects fell out of the same pass: `margin: 0 auto` on a CSS grid
+    item cancels `justify-self: stretch`, so two diagrams sized to an SVG's
+    300px default instead of their 804px track; and a `display: grid` that was
+    only ever declared on `.duo` left every `.duo-wide` block silently stacking
+    rather than splitting into two columns.
 
 - **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
   0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
@@ -168,7 +250,83 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   actually tested, the vendored-contract drift guard is pinned to the deployed
   server commit, and the cap is stated in characters, which is what it is.
 
+- **`install.sh` — the one-line installer.** macOS, Linux and WSL2, in POSIX
+  `sh` (it runs as Debian's `dash` and Alpine's BusyBox `ash`).
+  [`uv`](https://docs.astral.sh/uv/) is the bootstrap, so nothing depends on the
+  machine already having a Python — it brings its own 3.13 for the CLI alone,
+  leaving the system Python untouched. It surveys before it writes: a machine
+  that is already current prints its summary and exits 0 having installed
+  nothing, and running it twice is a no-op. Installs `uv`, Python, `aisquare-cli`
+  with `tiktoken`, tmux, `gh`, `git`, Node 22+ and Claude Code; then
+  `aisquare init --agent claude-code`, which wires the hooks and packs the
+  snapshot in the same run. Refuses to run as root outside a container, uses
+  `sudo` for one command at a time, never edits your shell profile beyond what
+  `uv` and the Claude Code installer do themselves, and never `--reinit` (which
+  would discard `team bind` role bindings on every re-run). `--dry-run` prints
+  every command and runs none — that is how you decide whether to trust it.
+  Full flag table in the README; design, measurements and the rejected
+  alternatives in `docs/plans/one-line-install.md`.
+- **`install.ps1` — a WSL2 shim for Windows.** Not an installer: the fleet gives
+  every agent a real tmux pane and Windows has no tmux, so it detects WSL2 and
+  delegates into it, or prints the one command that installs WSL.
+- **A container matrix for the installer** (`tests/install/`, and its own CI
+  workflow). Five bare distributions — Debian 12, Ubuntu 22.04, Fedora 41, Arch,
+  Alpine 3.22 — each installing a wheel built from the tree under review, plus a
+  cell that runs as a **normal user with sudo** (the primary case, and the only
+  one where the script's `sudo` path is exercised at all), one that installs
+  Claude Code for real, and a macOS job. Each cell runs the installer four
+  times: bare, with a project — where the acceptance criterion is asserted,
+  *every check ok except `brain`* — then again with every package manager
+  replaced by a stub that records being called, asserting the re-run installs
+  nothing, moves no version, leaves `~/.claude/settings.json` byte-identical and
+  calls no package manager; and finally the upgrade path, staging an exact
+  `==0.5.0` pin and asserting the version moves *and* that `tiktoken` survives.
+  The criterion is asserted as a *set* with the total floored rather than pinned,
+  which is why it kept holding when `doctor` gained an eighteenth check. It runs
+  on a schedule as well as on pushes, because four of the things the script
+  fetches belong to other people.
+
 ### Changed
+- **The snapshot token budget is a config knob, and the failure names its
+  numbers (#82).** `aisquare project onboard` on a large repo printed only
+  "codebase too large to pack within the token budget" against a hardcoded
+  150 000, and the `snapshot` doctor line stayed a warning whose fix — a plain
+  `onboard` — only reloaded the same verdict. The budget is now `[snapshot]
+  max_tokens` in `config.toml` (`aisquare config set snapshot.max_tokens <n>`;
+  the default is unchanged), the snapshot records the full-pack and
+  compressed-pack sizes it measured alongside the budget, and `onboard` and
+  `doctor` print the same sentence with all three numbers and both remedies —
+  raise the budget, or add a `.repomixignore` — followed by the `--refresh`
+  re-pack that actually re-measures. A `snapshot.json` written by 0.6.0 has no
+  numbers to name and says so rather than printing zeros. Read from the config
+  file alone, like `[fleet]`: no environment variable, because the config layer
+  has no per-key env rung and one knob is not the place to grow one.
+- **`[snapshot] ignore`: what a pack leaves out, and a built-in list it
+  extends.** Repomix glob patterns, passed to `--ignore`; `aisquare config set
+  snapshot.ignore '**/fixtures/**,docs/generated/**'` (a list key now takes
+  comma-separated items, and `config get` prints them the same way). The
+  built-ins go first whatever the operator sets — `node_modules`, `.venv`,
+  `venv`, `.git`, `__pycache__`, `dist`, `build`, `coverage`,
+  `.aisquare-worktrees`, `*.worktrees` — plus any nested git repository or
+  worktree found below the root, detected by its `.git` entry, so another
+  project's checkout is never packed into this one. The repo's `.gitignore` and
+  `.repomixignore` still apply, read by Repomix itself; the too-large message
+  names both knobs.
+- **Over budget even compressed, the snapshot keeps the skeleton instead of
+  nothing.** The 150 000 cap mirrors a server cap on a pack that is read into a
+  model context. The CLI never does that — `hook session-start` hands the agent
+  the skeleton, pack and index *paths* — so the cap bounded no prompt, only
+  whether a snapshot existed; and the skeleton (`repomix --compress`) was built
+  only when the FULL pack fit, so the repos that most needed one were the only
+  ones without it (measured: 10.99M tokens full, 2.03M compressed). Now the
+  compressed pack is written as `skeleton.repomix.xml` with its per-file index,
+  status `skeleton_only`, every count recorded, any stale full pack removed;
+  the session-start directive lists the skeleton and index and omits the full
+  pack; `doctor` reports it green as `skeleton only: N tokens, F files indexed;
+  full pack skipped over budget B (M tokens)` with no fix, because a fix here
+  was the button pressed forever with a green tick. `max_tokens` now gates
+  only the full pack. `too_large` survives only as a status loaded from a
+  0.6.0 `snapshot.json`.
 - **`serverInfo.version` reports this CLI's version.** mcp 1.x filled an
   omitted server version with the SDK's own package version, so clients saw
   `1.29.1` — a number that named nothing of ours — and 2.x sends the empty
@@ -219,6 +377,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Self-invocation is no longer shadowed by a project's own `aisquare/`
+  package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
+  `init`, `doctor` and `project onboard` from the fleet UI, for every fleet
+  window, for the detached distiller, and as the last-resort hook command.
+  `-m` puts the current directory first on `sys.path`, so from any repo whose
+  root holds a top-level `aisquare/` package — the explainability SDK's own
+  repo ships one — every one of those died with `No module named
+  aisquare.__main__`, and a fleet window did so even with `PYTHONSAFEPATH`
+  exported by the spawner, because a window inherits the tmux server's
+  environment. All four now build their argv through one helper that passes
+  the interpreter `-P` (the flag form of `PYTHONSAFEPATH`, Python 3.11+): it
+  ends with that process, so a coder's own `python -m pytest` inherits
+  nothing, and it needs no environment to travel. `aisquare doctor` gains a
+  `self-invocation` row that warns when the directory would shadow a
+  hand-typed `python -m aisquare`.
+- **`doctor` now checks WHICH `aisquare` the Claude Code hooks run, not just
+  that hooks are there** (#84). A hook was recognised by its text, so every
+  hook on a box could name `…/aisquare-cli/.venv/bin/aisquare` — a 0.3-era
+  editable checkout — while the live install was 0.6.0, and `doctor` said
+  "all lifecycle hooks installed" for weeks. Per config dir it now resolves the
+  program each hook names and compares it to this install by path, or by
+  running `<path> --version` when the path differs; a stale, missing or
+  unreadable binary turns the row into a warning that names the dir, the
+  hook's path and version, this install's path and version, and the one-line
+  fix (`aisquare agents connect claude-code --config-dir <dir>`).
+- **`doctor` discovers Claude Code config dirs on disk** — `$CLAUDE_CONFIG_DIR`,
+  `~/.claude` and every `~/.claude*` whose `settings.json` carries aisquare
+  hooks — and grades them the same way, labelled "found on disk, not connected
+  in this home". A fresh `AISQUARE_HOME` previously knew no sites, so a
+  `~/.claude3` reached through `CLAUDE_CONFIG_DIR` was invisible until someone
+  ran `agents connect --config-dir` for it. Still read-only: `doctor` never
+  rewrites `settings.json`.
+- `--json project list` objects now carry the `name` the table shows, so a
+  script can pick a project by name (#83).
+- **The selected project row in the fleet sidebar showed its folder glyph and an
+  empty highlighted band — no name, no codename.** Any project whose basename is
+  wider than the sidebar's title column (25 cells at the default width;
+  `AISquare-Explainability-SDK` is 27) was affected, in every theme. The row's
+  Rich `Text` asks for `no_wrap` and an ellipsis, but Textual keeps only the
+  text and its spans and lets the widget's CSS `text-wrap` decide; its default
+  wraps, so the name landed on a second line that the one-line row clipped. The
+  sidebar's one-line rows — project title, agent rows, the path subtitle, the
+  Doctor lines — now declare `text-wrap: nowrap; text-overflow: ellipsis`, so a
+  long name is cut with `…` where it stands. (#86)
+- **A retention test went red on `main` on a calendar date, with no code
+  change.** `test_snapshot_refs_older_than_the_retention_are_pruned_when_a_new_one_is_taken`
+  dated the ref it expects to SURVIVE pruning at a literal `2026-09-02`, five
+  days inside the seven-day `WIP_REF_TTL_DAYS` window on the day it landed. On
+  2026-09-09 that ref turned exactly seven days old, `_prune` dropped it as
+  designed, and the assertion failed — five of the six CI jobs red on an
+  unmodified tree, and the first branch to run afterwards wearing the blame.
+  The date is now computed as one day before the run. Its sibling `old`
+  fixtures stay literal deliberately: they only ever need to be OUTSIDE the
+  window, and `2026-01-01` always will be. Checked in the other direction too —
+  moving the fixture to eight days ago still fails the test, so the assertion
+  is still the one doing the work.
+
 - **The ceiling holds on mcp 2.2.0.** Released after 0.6.0 measured its floor,
   and admitted by the same `>=2.1,<3` pin, so a fresh install already resolves
   to it — CI's `check` jobs install it and are green, which is what proves it

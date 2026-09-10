@@ -293,6 +293,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "prompt": "run the suite",
         "agent_args": [],
         "spawned_by": "mgr-session",
+        "account": None,
     }
 
 

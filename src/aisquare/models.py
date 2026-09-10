@@ -185,6 +185,81 @@ class PromptRecord(BaseModel):
     created_at: datetime
 
 
+# --- Claude Code accounts (core.claude_accounts, services.claude_accounts) --------
+
+
+class ClaudeAccount(BaseModel):
+    """One Claude Code login the CLI can launch: a numbered slot over a config directory.
+
+    Slot 1 is the machine's default — whatever a plain ``claude`` in this shell
+    uses (``CLAUDE_CONFIG_DIR`` when set, ``~/.claude`` otherwise) — and is never
+    a directory of ours. Every other slot is a directory the CLI created and
+    owns, launched by pointing ``CLAUDE_CONFIG_DIR`` and ``CLAUDE_CODE_TMPDIR``
+    at it.
+    """
+
+    slot: int
+    config_dir: Path
+    tmp_dir: Path | None = None
+    """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
+    managed: bool = False
+    """True when the CLI created ``config_dir`` (every slot but the default)."""
+
+
+class ClaudeIdentity(BaseModel):
+    """Who a Claude Code config directory is signed in as, read from its ``.claude.json``."""
+
+    email: str
+    organization: str | None = None
+    account_uuid: str | None = None
+
+
+class ClaudeUsage(BaseModel):
+    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them."""
+
+    available: bool
+    reason: str | None = None
+    """Why nothing could be read, when ``available`` is False."""
+    session_percent: float | None = None
+    """The rolling five-hour window, 0-100."""
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    """The rolling seven-day window, 0-100."""
+    week_resets_at: datetime | None = None
+    fetched_at: datetime | None = None
+
+
+class ClaudeAccountStatus(BaseModel):
+    """Everything the Accounts page shows about one slot, minus the usage it fetches live."""
+
+    account: ClaudeAccount
+    label: str
+    """``default`` for slot 1, ``account N`` otherwise."""
+    identity: ClaudeIdentity | None = None
+    signed_in: bool = False
+    token_state: str = "missing"
+    """``ok``, ``expired`` or ``missing`` — the state of the stored OAuth token."""
+    subscription: str | None = None
+    """The plan the credentials file names (``max``, ``team``, …), when it does."""
+    hooks_installed: bool = False
+    usage: ClaudeUsage | None = None
+
+
+class ClaudeInstall(BaseModel):
+    """Whether Claude Code is on this machine, and which one."""
+
+    installed: bool
+    binary: str | None = None
+    version: str | None = None
+
+
+class AccountsOverview(BaseModel):
+    """The Claude side of the Accounts page in one read: the install and every slot."""
+
+    claude: ClaudeInstall
+    accounts: list[ClaudeAccountStatus] = Field(default_factory=list)
+
+
 # --- Collective Intelligence: the vocabularies both layers share --------------
 #
 # The wire models in ``services.ci_contract`` and the per-turn ``metric`` row are
@@ -509,6 +584,13 @@ class Snapshot(BaseModel):
     file_count: int = 0
     compressed: bool = False
     status: str = "ready"
+    # What a ``too_large`` verdict was made of, so the failure can say what it
+    # measured: the full pack's size and the budget it was held to
+    # (``token_count`` is the pack that was kept — or, when none was, the
+    # compressed pack's size). Both are None on a snapshot.json written before
+    # they were recorded (0.6.0 and earlier); see ``core.snapshot.too_large_detail``.
+    full_token_count: int | None = None
+    max_tokens: int | None = None
 
 
 class OnboardReport(BaseModel):
@@ -516,6 +598,54 @@ class OnboardReport(BaseModel):
 
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
+
+
+class ProjectForgetReport(BaseModel):
+    """Outcome of ``project forget``: what went, and where the active project landed.
+
+    ``removed`` is per-table row counts and is empty unless ``purged`` — a plain
+    forget tombstones the registration and deletes nothing else.
+    """
+
+    project: ProjectInfo
+    purged: bool = False
+    removed: dict[str, int] = Field(default_factory=dict)
+    data_dir_removed: bool = False
+    active: ProjectInfo | None = None
+    """The active project AFTER the forget — ``None`` when nothing is pinned any
+    more and the active project again follows the working directory."""
+    active_changed: bool = False
+    """Whether the forgotten project WAS the active one, so the pin moved."""
+
+
+PruneReason = Literal["missing", "worktree"]
+"""Why ``project prune`` selected a registration: its root is gone from disk, or
+its root is a linked git worktree of another registered project."""
+
+
+class PruneCandidate(BaseModel):
+    """One registration ``project prune`` would drop, and why."""
+
+    project: ProjectInfo
+    reason: PruneReason
+    principal: ProjectInfo | None = None
+    """For a ``worktree`` candidate, the registered project it is a worktree of."""
+    live_agents: int = 0
+    """Live fleet agents on the registration. Non-zero means prune keeps it."""
+
+
+class ProjectPruneReport(BaseModel):
+    """Outcome of ``project prune``: the plan, and what was actually dropped."""
+
+    candidates: list[PruneCandidate] = Field(default_factory=list)
+    dropped: list[str] = Field(default_factory=list)
+    """Ids dropped. Empty on a dry run."""
+    kept: list[PruneCandidate] = Field(default_factory=list)
+    """Candidates NOT dropped because they have live fleet agents."""
+    dry_run: bool = True
+    purged: bool = False
+    active: ProjectInfo | None = None
+    active_changed: bool = False
 
 
 class AgentConnection(BaseModel):

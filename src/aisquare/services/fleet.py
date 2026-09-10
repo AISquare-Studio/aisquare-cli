@@ -32,7 +32,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -41,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
-from aisquare.core import codenames, harness
+from aisquare.core import codenames, harness, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -55,6 +54,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
@@ -871,6 +871,7 @@ def spawn(
     prompt: str | None = None,
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
+    account: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -878,7 +879,10 @@ def spawn(
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
     project, and an unknown role — each with the reason in the message.
 
-    The window runs ``python -m aisquare launch <role> …`` (§3.4): permission
+    The window runs ``python -P -m aisquare launch <role> …`` (§3.4; ``-P`` is
+    :func:`aisquare.core.selfcli.argv_for`'s guard against a project's own
+    ``aisquare/`` package, and travels in the command because a window inherits
+    the tmux SERVER's environment, not the spawner's): permission
     mode as ``--permission-mode`` (flag > role config > ``auto``; the empty
     string passes no flag), the minted ``--session-id`` unless the caller
     already named or resumed a session, ``--name <label>``, then the role's
@@ -971,11 +975,24 @@ def spawn(
     if mode:
         flags += ["--permission-mode", mode]
     flags += list(identity.inject_args)
+    if account is not None:
+        # Carried to `launch`, which resolves the slot and sets the account's
+        # variables inside the window; a slot that does not exist fails there
+        # with `unknown_account`, exactly as a hand-typed launch would.
+        flags += ["--account", account]
     flags += ["--name", picked]
-    command = [sys.executable, "-m", "aisquare", "launch", role, *flags, *role_args, *extra]
+    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {"AISQUARE_FLEET_AGENT": agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
+    if account is not None:
+        # `launch --account 1` restores "this shell's" login, and inside the
+        # window that shell would be whoever started the private server — so
+        # the CALLER's aisquare home and account variables travel with the
+        # window (set as absolute paths, or unset through `env -u`), exactly as
+        # the Accounts page's sign-in window carries them.
+        command, carried = claude_accounts_service.carry_environment(command)
+        env.update(carried)
     tmux_session = session_name(codename)
     try:
         window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)

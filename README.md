@@ -22,35 +22,96 @@ needs to act as you on AISquare (see [docs/signing-in.md](docs/signing-in.md)).
 
 ## Install
 
-```sh
-pipx install aisquare-cli              # or: pip install aisquare-cli
-```
-
-Requires **Python 3.11+**. The package is `aisquare-cli`; the command is
-`aisquare`, with `asq` as the short alias.
-
-The UI runs agents inside a private tmux server, so you also need **tmux 3.2+**
-(3.5+ recommended — that is where shift+enter reaches the agent):
+One line. It works out what your machine already has, installs only what is
+missing, and ends by offering to open the UI:
 
 ```sh
-sudo apt install tmux        # Debian / Ubuntu
-sudo dnf install tmux        # Fedora / RHEL
-brew install tmux            # macOS
-tmux -V                      # 3.2 or newer
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
 ```
 
-Agents run on **[Claude Code](https://claude.com/claude-code)** (`claude`
-2.1.x), so install that too if you haven't. On Windows, run everything inside
-WSL2. `git` is used for the per-agent worktrees; `gh` is optional and only
-needed if you want agents opening and reviewing PRs. Codebase snapshots use
-[Repomix](https://github.com/yamadashy/repomix) via Node/`npx` when available —
-`aisquare doctor` tells you if it's missing, and nothing breaks without it.
+macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
+3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git, Node and
+[Claude Code](https://claude.com/claude-code), then registers the git repo you
+ran it from and wires Claude Code's hooks. Running it again is a no-op: it
+reports what is current and installs nothing.
+
+On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
+tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:
+
+```text
+irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
+```
+
+<details>
+<summary><b>Piping a script into a shell, and how not to</b></summary>
+
+Fair. Read it first, or skip it entirely — nothing here needs it.
+
+```sh
+# See exactly what it would do, and run none of it:
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh -o install.sh
+less install.sh
+sh install.sh --dry-run
+```
+
+Or install by hand, which stays fully supported:
+
+```sh
+uv tool install --python 3.13 --with tiktoken aisquare-cli   # or: pipx install aisquare-cli
+aisquare init --local --yes --agent claude-code
+```
+
+Useful flags — note the `-s --`, since `sh` is reading the script on stdin:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --yes --no-agent
+```
+
+| Flag | Does |
+| --- | --- |
+| `--yes` | Never prompt, and do not open the UI at the end. For CI and Dockerfiles. |
+| `--dry-run` | Print every command, run none. |
+| `--no-agent` | Skip Claude Code. |
+| `--no-system-deps` | Skip tmux, gh, git and Node. |
+| `--project DIR` | Register `DIR` instead of the current directory. |
+| `--no-project` | Set up the machine, register nothing. |
+| `--offline` | Do not ask PyPI what the latest version is. |
+| `--version V` | Pin `aisquare-cli` to `V`. |
+
+It refuses to run as root outside a container, uses `sudo` only for the system
+packages and one command at a time, and never edits your shell profile beyond
+what uv and the Claude Code installer do themselves. Exit codes: `0` installed,
+`1` a fatal step failed, `2` installed but a health check is unexpectedly amber.
+
+</details>
+
+Requires **Python 3.11+** if you install by hand (the one-liner brings its own
+3.13). The package is `aisquare-cli`; the command is `aisquare`, with `asq` as
+the short alias.
+
+Then check the machine at any time:
+
+```sh
+aisquare doctor
+```
+
+It reports every dependency and gives the exact command for anything missing.
+`gbrain` staying amber is expected — long-term memory is optional
+([below](#long-term-memory-optional-via-gbrain)).
 
 ## Start the GUI
 
+The installer offers this at the end; if you skipped it:
+
 ```sh
-aisquare agents connect claude-code    # once — wires the hooks the UI reads state from
 asq                                    # open the UI
+```
+
+Installed by hand? Wire the hooks the UI reads state from, once:
+
+```sh
+aisquare agents connect claude-code
+asq
 ```
 
 That's the whole setup. From inside the UI:
@@ -162,12 +223,52 @@ one board. Set a repo's conventions up once and every worktree of it starts
 oriented; identity comes from `git rev-parse --git-common-dir`, not from
 walking up to the nearest marker.
 
+Registrations accumulate — every directory a command once ran in is one, and
+the fleet UI loads state for all of them. `aisquare project forget` drops one
+(its context, prompt history and board rows stay in the store, hidden, until
+the root is registered again; `--purge` deletes them and the snapshot too), and
+`aisquare project prune` sweeps the stale ones: roots that no longer exist, and
+worktrees of a repository that is itself registered. It shows the plan and asks
+before dropping anything; off a terminal it is a dry run unless `--yes`. Both
+refuse a project that has live fleet agents.
+
+```sh
+aisquare project forget ../old-checkout       # one registration; --purge deletes its history too
+aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
+```
+
 `aisquare project onboard` (also run by `init`) packs the codebase with
 Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
 **full pack** (every file), a **skeleton** (structure + signatures — the
 cheap thing agents read first), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
+
+A pack has to fit a **token budget**: `[snapshot] max_tokens` in
+`~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
+The full pack is tried first, then a compressed one; when even that is over,
+the compressed pack is kept as the **skeleton** with its per-file index and the
+full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
+skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
+budget 150000 (10990000 tokens)`, and agents are oriented from it as usual.
+The budget gates only the full pack: an agent is handed paths and opens slices
+through the index, never a whole pack in a prompt. To keep the full pack too,
+raise the budget or leave more out, then re-pack:
+
+```sh
+aisquare config set snapshot.max_tokens 300000   # raise the budget for a repo you know is big
+aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'   # leave generated trees out
+aisquare project onboard --refresh               # re-pack; a plain onboard only reuses the verdict
+```
+
+`[snapshot] ignore` takes Repomix glob patterns (comma-separated on the command
+line) and **extends** the built-in list rather than replacing it:
+`node_modules`, `.venv`/`venv`, `.git`, `__pycache__`, `dist`, `build`,
+`coverage`, `.aisquare-worktrees`, `*.worktrees`, and any nested git repository
+or worktree found below the root — another project's checkout is never packed
+into this one. The repo's own `.gitignore` and a `.repomixignore` at the repo
+root apply on top, read by Repomix itself. A smaller pack is also a cheaper one
+for every agent that reads it.
 
 ---
 
@@ -440,36 +541,57 @@ Orchestration has no config files — a handful of env knobs:
 
 ### Several accounts, one team
 
-Running parallel Claude installs for separate rate limits? Connect each
-config dir once, then **bind** each seat to the environment it launches with:
+Running parallel Claude Code logins for separate rate limits? The CLI owns them
+for you. **Slot 1** is the plain `claude` of your machine. Every account you
+**add** is a numbered slot with its own config directory under
+`~/.aisquare/claude-accounts/`, signed in through Claude Code's own login and
+launched by number — the c1/c2/c3 shell aliases, without the aliases:
+
+```sh
+aisquare accounts list             # who is signed in where, plan, hooks
+aisquare accounts add              # a fresh slot: Claude Code opens, you sign in, it is recorded
+aisquare accounts run 2            # a plain session on account 2 (what a c2 alias did)
+aisquare accounts usage            # the 5-hour and weekly windows, per account
+aisquare accounts remove 2         # forget it; the directory is kept as 2.removed-<stamp>
+
+aisquare launch coder --account 2  # a board role on account 2
+aisquare fleet spawn coder --account 2
+```
+
+The same page lives in `asq` under **Accounts**: the AISquare sign-in on top
+(a card that runs the same browser flow as `aisquare login`), then every Claude
+account with its usage bars, **+ Add Claude account** — the login opens in a
+pane right there and closes by itself the moment it lands — and **Remove**.
+`aisquare doctor` gets a `claude-accounts` line naming any slot that still needs
+a sign-in.
+
+An account is two variables, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR`, set
+for the launch and nothing else. Slot 1 sets neither: it is whatever `claude`
+already is in the shell you launch from. The CLI never writes into Claude
+Code's own files — it reads the email and plan Claude Code recorded, and the
+usage numbers come from the endpoint Claude Code's `/usage` reads, best effort:
+if that endpoint changes, a row says `usage unavailable` and nothing else
+breaks.
+
+Accounts laid out some other way — a wrapper script, a proxy, a directory you
+made yourself — still bind to a role as a **launch profile**: a binary, a set
+of env vars and extra args, carried through verbatim.
 
 ```sh
 aisquare agents connect claude-code --config-dir ~/.claude-account1
-aisquare agents connect claude-code --config-dir ~/.claude-account2
-
 aisquare team bind coder1 \
   --env CLAUDE_CONFIG_DIR='$HOME/.claude-account1' \
   --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account1'
-aisquare team bind coder2 \
-  --env CLAUDE_CONFIG_DIR='$HOME/.claude-account2' \
-  --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account2'
-
-aisquare launch planner            # your default account
 aisquare launch coder1             # bound above — nothing to retype
-aisquare launch coder2
 ```
 
-A binding is a **launch profile**: a binary, a set of env vars and extra args,
-carried through verbatim. `~` and `$VAR` expand at launch, so one binding
-follows you across machines with different homes, and an undefined variable is
-left as written rather than blanked — a silently empty `CLAUDE_CONFIG_DIR`
-starts a fresh unauthenticated profile that reads as a login failure hours
-later instead of the typo it is.
-
-Set **both** variables. `CLAUDE_CONFIG_DIR` alone gives a session the right
-credentials and the *default* scratch directory, silently shared with every
-other account; it looks correctly isolated right up until two parallel sessions
-collide in temp.
+`~` and `$VAR` expand at launch, so one binding follows you across machines
+with different homes, and an undefined variable is left as written rather than
+blanked — a silently empty `CLAUDE_CONFIG_DIR` starts a fresh unauthenticated
+profile that reads as a login failure hours later instead of the typo it is.
+Set **both** variables: `CLAUDE_CONFIG_DIR` alone shares the *default* scratch
+directory with every other account, which looks isolated right up until two
+parallel sessions collide in temp. `--account` sets both for you.
 
 For a one-off, `aisquare launch <role> --env KEY=VALUE` merges over the
 binding per key. Shell aliases (`alias claude1='CLAUDE_CONFIG_DIR=… claude'`)
@@ -477,12 +599,13 @@ can **not** be passed to `--command` — an alias is not an executable — but a
 alias is only env vars around a binary, which is exactly what `--env` sets.
 
 Each session records **which config dir it runs under**, and the board labels
-sessions with it once more than one account is in play:
+sessions with it once more than one account is in play — `account 2` for a
+slot the CLI owns, the directory name for anything else:
 
 ```
 sessions:
-  - a1b2c3d4 coder [.claude-account1] — 2m ago
-  - e5f6a7b8 coder [.claude-account2] — 1m ago
+  - a1b2c3d4 coder [account 2] — 2m ago
+  - e5f6a7b8 coder [.claude-account1] — 1m ago
 ```
 
 So when one account hits its limit you can see exactly which terminals to
@@ -544,9 +667,12 @@ aisquare
 ├── context (ctx)   add · list · show · edit · remove · search · preview
 │                   promote · import · export · —  your persistent memory
 ├── inject · why · log · status · doctor
-├── project (workspace)  info · list · switch · link · onboard [--refresh]
+├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
+│                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
+├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
+│                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness
@@ -557,14 +683,15 @@ aisquare
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
-├── launch <role> [--command CMD] [--env KEY=VALUE]… [… agent args]
+├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
-│                             [--permission-mode M] [--bin B] [--prompt TEXT] [-- agent args]
+│                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
+│                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
 │                   attach · reap [--all] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])

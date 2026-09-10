@@ -15,6 +15,7 @@ import typer
 from rich.table import Table
 
 from aisquare.core import paths
+from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import AppConfig
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -28,7 +29,9 @@ from aisquare.models import (
     MetricsSummary,
     OnboardReport,
     Pool,
+    ProjectForgetReport,
     ProjectInfo,
+    ProjectPruneReport,
     PromptRecord,
     SetupReport,
     StatusReport,
@@ -179,10 +182,26 @@ def emit_project_detail(project: ProjectInfo) -> None:
     stdout_console().print(grid)
 
 
+def _project_name(project: ProjectInfo) -> str:
+    return project.root.name or project.id
+
+
 def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
-    """Render the project list — a JSON array under ``--json``, a table otherwise."""
+    """Render the project list — a JSON array under ``--json``, a table otherwise.
+
+    The JSON carries the same ``name`` the table shows (#83): it is derived from
+    the root rather than stored on the model, and a script picking a project
+    by name had nothing to pick on.
+    """
     if get_state().json_output:
-        typer.echo(json.dumps([project.model_dump(mode="json") for project in projects]))
+        typer.echo(
+            json.dumps(
+                [
+                    {**project.model_dump(mode="json"), "name": _project_name(project)}
+                    for project in projects
+                ]
+            )
+        )
         return
     if not projects:
         stdout_console().print("No projects registered yet. Run: aisquare init")
@@ -204,6 +223,91 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
         typer.echo(project.model_dump_json())
     else:
         stdout_console().print(message)
+
+
+def _active_note(active: ProjectInfo | None, *, changed: bool) -> str | None:
+    """One line saying where the active project went, or None when it did not move."""
+    if not changed:
+        return None
+    if active is None:
+        return "no projects remain — the active project follows your working directory again"
+    return (
+        f"active project is now {_project_name(active)} ({active.id}), "
+        "the most recently touched one left"
+    )
+
+
+def emit_project_forget(report: ProjectForgetReport) -> None:
+    """Render ``project forget`` — the report as JSON under ``--json``, lines otherwise."""
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    project = report.project
+    console.print(f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}")
+    if report.purged:
+        counts = ", ".join(f"{count} {table}" for table, count in report.removed.items() if count)
+        console.print(f"  deleted: {counts or 'no rows'}")
+        if report.data_dir_removed:
+            console.print(f"  deleted: {paths.project_data_dir(project.id)}")
+    else:
+        console.print(
+            "  its context entries, prompt history and board rows stay in the store, hidden "
+            "— --purge deletes them; registering the root again brings them back"
+        )
+    note = _active_note(report.active, changed=report.active_changed)
+    if note is not None:
+        console.print(f"  {note}")
+
+
+def emit_prune(report: ProjectPruneReport) -> None:
+    """Render ``project prune`` — the report as JSON under ``--json``, a table otherwise.
+
+    The same renderer serves the plan and the result: both show every candidate
+    with its reason, the plan stopping there and the result adding what was
+    dropped. A ``--yes`` caller never saw a plan, so the result has to be the
+    plan as well.
+    """
+    if get_state().json_output:
+        typer.echo(report.model_dump_json())
+        return
+    console = stdout_console()
+    if not report.candidates:
+        console.print("nothing to prune")
+        return
+    kept = {candidate.project.id for candidate in report.kept}
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("", no_wrap=True)
+    table.add_column("WHY", no_wrap=True)
+    table.add_column("NAME")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("ROOT")
+    for candidate in report.candidates:
+        project = candidate.project
+        why: str = candidate.reason
+        if candidate.principal is not None:
+            why = f"worktree of {_project_name(candidate.principal)}"
+        if project.id in kept:
+            why += f" (kept: {candidate.live_agents} live agent(s))"
+        marker = "" if report.dry_run else ("·" if project.id in kept else "✓")
+        table.add_row(marker, why, _project_name(project), project.id, str(project.root))
+    console.print(table)
+    if report.dry_run:
+        return
+    count = len(report.dropped)
+    noun = "registration" if count == 1 else "registrations"
+    what = "purged" if report.purged else "forgot"
+    console.print(f"✓ {what} {count} {noun}")
+    if report.kept:
+        console.print(f"  kept {len(report.kept)} with live fleet agents — stop or reap them first")
+    if not report.purged and count:
+        console.print(
+            "  their context entries, prompt history and board rows stay in the store, hidden "
+            "— --purge deletes them"
+        )
+    note = _active_note(report.active, changed=report.active_changed)
+    if note is not None:
+        console.print(f"  {note}")
 
 
 def emit_setup(report: SetupReport) -> None:
@@ -315,8 +419,14 @@ def emit_onboard(report: OnboardReport) -> None:
         if snapshot.skeleton_token_count:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
         console.print(line)
+    elif snapshot is not None and snapshot.status == "skeleton_only":
+        console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
     elif snapshot is not None and snapshot.status == "too_large":
-        console.print("snapshot: codebase too large to pack within the token budget")
+        # The same sentence the doctor prints (one definition, so the two never
+        # disagree on the numbers), plus what to run once a remedy is in place.
+        console.print(
+            f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
+        )
     else:
         console.print("snapshot: skipped (repomix/Node not available)")
     if report.seeded:

@@ -377,6 +377,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Agent panes: scroll from the keyboard, see that you are scrolled, and
+  select and copy text.** Reported from WSL2 + Windows Terminal (2026-09-03,
+  2026-09-08): "scroll not working", "not able to select and copy text" — an
+  agent printed a command and there was no way to take it. The wheel was the
+  only way into a pane's history, a scrolled pane looked identical to a live
+  one, and drag-select was switched off on the widget (a Line API widget has no
+  `render()` for Textual's default selection to read). Now: shift+PgUp /
+  shift+PgDn scroll a screen at a time, shift+Home and shift+End go to the top
+  and back to live, and a `[↑k/history]` marker sits in the top-right corner
+  while the view is in history. Drag selects the rendered rows (the widget
+  supplies `get_selection` from its captured lines and paints the span itself);
+  the text is copied on release through OSC 52, and ctrl+c copies again while a
+  selection stands — without one it is still the agent's interrupt. None of the
+  new keys reach the agent; Claude Code binds none of them.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

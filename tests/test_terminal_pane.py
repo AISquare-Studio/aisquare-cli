@@ -278,8 +278,16 @@ def rows(pane: TerminalPane) -> list[Strip]:
     return pane.render_lines(Region(0, 0, width, height))
 
 
+_MARKER = re.compile(r"\s*\[\u2191\d+/\d+\]$")
+
+
 def screen_text(pane: TerminalPane) -> list[str]:
-    return [strip.text.rstrip() for strip in rows(pane)]
+    """The pane's rows as text, minus the ``[↑k/history]`` corner marker.
+
+    Tests that use this ask WHICH rows are shown; the marker's presence and
+    absence have their own test, which reads the raw strip instead.
+    """
+    return [_MARKER.sub("", strip.text.rstrip()) for strip in rows(pane)]
 
 
 def style_at(strip: Strip, x: int) -> Style:
@@ -787,6 +795,139 @@ def test_a_stale_height_hint_still_shows_a_full_screen(fake: FakeTmux, tmp_path:
     rows_per_capture, text = run(drive())
     assert rows_per_capture[:2] == [4, 16]  # the short answer, then the refetch
     assert text == ["old 40", "old 41", "old 42", "old 43", "old 44", "old 45"]
+
+
+def test_shift_page_keys_scroll_history_and_never_reach_the_agent(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The wheel is not a given (reported from WSL2 + Windows Terminal: "scroll
+    not working"), and the keys every terminal uses for its scrollback must
+    work here too — without one of them being typed into the agent."""
+    fake.panes["%1"].history = [f"old {n}" for n in range(20)]
+
+    async def drive() -> tuple[int, int, int, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: synced(pane))
+            await pilot.press("shift+pageup")
+            up = pane.scrollback
+            await pilot.press("shift+home")
+            top = pane.scrollback
+            await pilot.press("shift+pagedown")
+            down = pane.scrollback
+            await pilot.press("shift+end")
+            live = pane.scrollback
+            return up, top, down, live
+
+    up, top, down, live = run(drive())
+    assert up == 5, "one screen (height 6 - 1) into history"
+    assert top == 20 and down == 15 and live == 0
+    assert fake.sent() == [], "none of the scroll keys was forwarded"
+
+
+def test_a_scrolled_pane_shows_its_position_in_the_corner(fake: FakeTmux, tmp_path: Path) -> None:
+    """A scrolled pane looked identical to a quiet live one — the first report of
+    "scroll not working" may have been exactly that. tmux's own marker, in
+    tmux's own corner, gone the moment the view is live again."""
+    fake.panes["%1"].history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[str, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: synced(pane))
+            pane.post_message(scroll_event(pane, up=True))
+            await pilot.pause()
+            scrolled = rows(pane)[0].text
+            await pilot.press("a")
+            await pilot.pause()
+            return scrolled, rows(pane)[0].text
+
+    scrolled, live = run(drive())
+    assert scrolled.endswith("[↑3/5]"), scrolled
+    assert "[↑" not in live
+
+
+def test_drag_select_highlights_the_rows_and_copies_on_release(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Reported: "not able to select and copy text" — an agent printed a command
+    and there was no way to take it. The drag is the request to copy."""
+
+    async def drive() -> tuple[str | None, str, Style, Style, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            # The cell under the pointer at release is included, as in every
+            # terminal: a drag from column 0 to column 5 takes six characters.
+            await pilot.mouse_down(pane, offset=(0, 1))
+            await pilot.hover(pane, offset=(3, 1))
+            await pilot.hover(pane, offset=(5, 1))
+            await pilot.mouse_up(pane, offset=(5, 1))
+            await pilot.pause()
+            row = rows(pane)[1]
+            return (
+                pane.selected_text(),
+                host.clipboard,
+                style_at(row, 2),
+                style_at(row, 8),
+                list(host.notices),
+            )
+
+    selected, clipboard, inside, outside, notices = run(drive())
+    assert selected == "second"
+    assert clipboard == "second", "copied on release, without a key"
+    assert inside.bgcolor != outside.bgcolor, "the selected span is painted, the rest is not"
+    assert any(n.startswith("copied 6 characters") for n in notices), notices
+
+
+def test_ctrl_c_copies_a_selection_and_interrupts_the_agent_otherwise(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    async def drive() -> tuple[str, list[tuple[str, ...]], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await pilot.mouse_down(pane, offset=(0, 2))
+            await pilot.hover(pane, offset=(4, 2))
+            await pilot.mouse_up(pane, offset=(4, 2))
+            await pilot.pause()
+            pane.focus()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            with_selection = list(fake.sent())
+            copied = host.clipboard
+            assert pane.text_selection is None, "ctrl+c copied and cleared the selection"
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return copied, with_selection, list(fake.sent())
+
+    copied, with_selection, after = run(drive())
+    assert copied == "third"
+    assert with_selection == [], "with text selected, ctrl+c is copy, not the agent's interrupt"
+    assert after == [("C-c",)], "without a selection it reaches the agent as before"
+
+
+def test_get_selection_is_the_plain_text_of_the_rendered_rows(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """SGR is stripped and rows end where their text does — what the eye selected."""
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    async def drive() -> tuple[str, str] | None:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            return pane.get_selection(Selection.from_offsets(Offset(0, 0), Offset(4, 1)))
+
+    assert run(drive()) == ("red plain\nseco", "\n")
 
 
 def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) -> None:

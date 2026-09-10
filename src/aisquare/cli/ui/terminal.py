@@ -76,6 +76,7 @@ from rich.text import Text
 from textual import events
 from textual.geometry import Region
 from textual.message import Message
+from textual.selection import Selection
 from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
@@ -92,6 +93,8 @@ from aisquare.services import fleet as fleet_service
 CURSOR = Style(reverse=True)
 UNFOCUSED_CURSOR = Style(underline=True)
 PLACEHOLDER = Style(dim=True)
+SCROLL_MARKER = Style(reverse=True, bold=True)
+"""The ``[↑k/history]`` corner marker while the view is in history."""
 NOTICE = Style(dim=True, italic=True)
 
 NO_PANE = "(no agent selected)"
@@ -110,10 +113,12 @@ class TerminalPane(Widget, can_focus=True):
     TerminalPane { height: 1fr; width: 1fr; }
     """
 
-    #: Textual's built-in text selection works over ``render()`` output, which a
-    #: Line API widget does not have; drag-select lands with its own
-    #: ``get_selection`` (§4.3) rather than half-working now.
-    ALLOW_SELECT: ClassVar[bool] = False
+    #: Drag-select over the rendered rows (§4.3). Textual's default
+    #: ``get_selection`` reads ``render()`` output, which a Line API widget does
+    #: not have, so this widget supplies its own from the captured rows and
+    #: paints the span itself in :meth:`render_line`. Copy is on release and on
+    #: ctrl+c while a selection exists; without one ctrl+c reaches the agent.
+    ALLOW_SELECT: ClassVar[bool] = True
 
     FAST_INTERVAL: float = 0.05
     """Seconds between frames while the screen is changing (~20 fps)."""
@@ -127,6 +132,14 @@ class TerminalPane(Widget, can_focus=True):
     """Where the resize backoff stops, so an unreachable pane costs ~1 process / 8 s."""
     WHEEL_LINES: int = 3
     """History lines one wheel notch moves."""
+    SCROLL_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {"shift+pageup", "shift+pagedown", "shift+home", "shift+end"}
+    )
+    """Keys that move the history view instead of reaching the agent — the
+    convention every terminal emulator already teaches (shift+PgUp scrolls the
+    scrollback). Claude Code binds none of them, so nothing is taken from it.
+    The wheel is not a given: reported 2026-09-08 from WSL2 + Windows Terminal
+    as "scroll not working", with no other way into the history."""
     CACHE_LIMIT: int = 4096
     """Distinct row strings kept as Strips before the cache is emptied."""
 
@@ -167,6 +180,9 @@ class TerminalPane(Widget, can_focus=True):
         self._synced: tuple[str, int, int] | None = None
         self._warned: set[str] = set()
         self._reported_gone = False
+        self._copied: Selection | None = None
+        """The selection last copied on release, so a plain click that leaves a
+        stale selection in place does not copy it again."""
 
     # --- what is shown -----------------------------------------------------------------
 
@@ -360,7 +376,73 @@ class TerminalPane(Widget, can_focus=True):
         strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
         if self._cursor is not None and self._cursor[1] == y and self._cursor[0] < width:
             strip = self._with_cursor(strip, self._cursor[0])
-        return strip
+        selection = self.text_selection
+        if selection is not None:
+            span = selection.get_span(y)
+            if span is not None:
+                strip = self._with_selection(strip, span, width)
+        if y == 0 and self.scrollback:
+            strip = self._with_scroll_marker(strip, width)
+        # The compositor reads a drag's content offset from segment metadata
+        # that Textual's ``render()`` path stamps and a Line API widget must
+        # stamp itself; without it every drag resolved to "select all".
+        return strip.apply_offsets(0, y)
+
+    def _with_selection(self, strip: Strip, span: tuple[int, int], width: int) -> Strip:
+        """Paint ``span`` (``end == -1`` means to the row's end) in the selection style."""
+        start, end = span
+        end = width if end == -1 else min(end, width)
+        start = min(start, width)
+        if start >= end:
+            return strip
+        style = self.selection_style
+        if style.bgcolor is None and not style.reverse:
+            style = style + Style(reverse=True)  # a theme with no selection colour
+        # Layered LAST on purpose. ``Strip.apply_style`` puts the segment's own
+        # style on top, and every segment already carries the widget background
+        # from ``apply_style(base)`` — the selection colour would lose to it.
+        selected = strip.crop(start, end)
+        painted = Strip(
+            [
+                Segment(text, (segment_style or Style()) + style, control)
+                for text, segment_style, control in selected
+            ],
+            selected.cell_length,
+        )
+        return Strip.join([strip.crop(0, start), painted, strip.crop(end)])
+
+    def _with_scroll_marker(self, strip: Strip, width: int) -> Strip:
+        """``[↑k/history]`` in the top-right corner while the view is in history.
+
+        tmux's own copy-mode indicator, in the same place: without it a scrolled
+        pane is indistinguishable from a live one that happens to be quiet, and
+        the first report of "scroll not working" may have been exactly that.
+        """
+        history = self.facts.history_size if self.facts is not None else self.scrollback
+        marker = f"[↑{self.scrollback}/{history}]"
+        if len(marker) >= width:
+            return strip
+        return Strip.join(
+            [
+                strip.crop(0, width - len(marker)),
+                Strip([Segment(marker, self.rich_style + SCROLL_MARKER)]),
+            ]
+        )
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """The plain text under ``selection``, from the rows this widget shows."""
+        if self.pane_id is None:
+            return None
+        text = "\n".join(self._strip_for(line).text.rstrip() for line in self._lines)
+        return selection.extract(text), "\n"
+
+    def selected_text(self) -> str | None:
+        """What a drag has selected in this pane, or ``None`` when nothing is."""
+        selection = self.text_selection
+        if selection is None:
+            return None
+        extracted = self.get_selection(selection)
+        return extracted[0] if extracted and extracted[0] else None
 
     def _strip_for(self, line: str) -> Strip:
         strip = self._strip_cache.get(line)
@@ -395,6 +477,14 @@ class TerminalPane(Widget, can_focus=True):
             return  # nothing to type into; the app's own bindings stay live
         event.stop()
         event.prevent_default()
+        if event.key in self.SCROLL_KEYS:
+            self._scroll_by_key(event.key)
+            return
+        if event.key in ("ctrl+c", "super+c") and self._copy_selection():
+            # Every terminal emulator does this: ctrl+c copies while text is
+            # selected. Without a selection it is the agent's interrupt.
+            self.screen.clear_selection()
+            return
         translation = translate(
             event.key,
             event.character,
@@ -408,6 +498,7 @@ class TerminalPane(Widget, can_focus=True):
         if self.scrollback:
             self.scrollback = 0
             self.refresh_frame()
+            self._repaint_rows({0})  # the scroll marker leaves with the offset
         # A key is activity: the echo must not wait for the idle tick.
         self._schedule(self.FAST_INTERVAL)
 
@@ -471,7 +562,49 @@ class TerminalPane(Widget, can_focus=True):
             return
         self.scrollback = target
         self.refresh_frame()
+        self._repaint_rows({0})  # the marker: k changed even if row 0's text did not
         self._schedule(self.FAST_INTERVAL)
+
+    def _scroll_by_key(self, key: str) -> None:
+        """shift+PgUp/PgDn: a screen at a time; shift+Home: the top; shift+End: live."""
+        page = max(1, self.content_size.height - 1)
+        history = self.facts.history_size if self.facts is not None else 0
+        if key == "shift+pageup":
+            self.scroll_history(page)
+        elif key == "shift+pagedown":
+            self.scroll_history(-page)
+        elif key == "shift+home":
+            self.scroll_history(history - self.scrollback)
+        else:
+            self.scroll_history(-self.scrollback)
+
+    # --- selection and copy ------------------------------------------------------------
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        """Copy on release — the drag itself is the request to copy.
+
+        Guarded by the selection object, not by "is there text": a click that
+        leaves an earlier selection standing must not copy it a second time.
+        """
+        selection = self.text_selection
+        if selection is None or selection == self._copied:
+            return
+        if self._copy_selection():
+            self._copied = selection
+
+    def _copy_selection(self) -> bool:
+        """Copy the selected text to the clipboard (OSC 52); False when nothing is selected."""
+        text = self.selected_text()
+        if text is None:
+            return False
+        self.app.copy_to_clipboard(text)
+        count = len(text)
+        self.notify(
+            f"copied {count} character{'s' if count != 1 else ''} — ctrl+c copies again "
+            "while the selection stands",
+            markup=False,
+        )
+        return True
 
     # --- size ----------------------------------------------------------------------------
 

@@ -585,7 +585,14 @@ tmux -L asq list-sessions
 hatch (`F12`). Printable characters travel as typed; special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
 `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
-per line. The wheel scrolls a pane's history; any key returns to live. Modifier
+per line. The wheel scrolls a pane's history, and so do shift+PgUp / shift+PgDn
+(a screen at a time), shift+Home (the top) and shift+End (live) — the keys every
+terminal already uses for its scrollback, which Claude Code does not bind. A
+scrolled pane shows `[↑k/history]` in its top-right corner; any other key
+returns to live. Drag to select text in a pane: it is copied to your clipboard
+on release (OSC 52 — your terminal has to accept it; Windows Terminal, kitty,
+wezterm, iTerm2 and foot do), and ctrl+c copies again while the selection
+stands. Without a selection ctrl+c is the agent's interrupt, as before. Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter

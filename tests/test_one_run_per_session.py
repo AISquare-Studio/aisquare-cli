@@ -642,6 +642,83 @@ def test_a_segment_that_fails_is_closed_and_the_records_stay_queued(
     assert len(outbox.pending()) == 1
 
 
+def test_the_inbox_directory_exists_before_the_sdk_opens_it(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #107, round 2: the SDK's ``InboxWriter.ensure_schema()`` calls
+    ``sqlite3.connect()`` without creating parents, and on a fresh install
+    ``~/.aisquare/explainability/`` does not exist until a traced join makes it —
+    so the pin alone raised ``unable to open database file`` on every drain."""
+    import os
+    import sqlite3
+    import sys
+    import types
+
+    from aisquare.core import paths
+
+    monkeypatch.delenv(service.SDK_INBOX_ENV_VAR, raising=False)
+    assert not paths.explainability_dir().exists(), "a fresh home: only the SDK init runs"
+    seen: dict[str, object] = {}
+
+    def _init_from_env(**_: object) -> None:
+        # What the real writer does at init: open the SQLite file where the env says.
+        path = Path(os.environ[service.SDK_INBOX_ENV_VAR])
+        seen["parent_exists"] = path.parent.is_dir()
+        sqlite3.connect(path).close()
+
+    fake = types.ModuleType(service.SDK_MODULE)
+    fake.init_from_env = _init_from_env  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, service.SDK_MODULE, fake)
+    service._init_sdk("https://g.example", "k")
+    assert seen["parent_exists"] is True
+    assert (paths.explainability_dir() / "inbox.db").exists()
+
+
+def test_an_operator_supplied_inbox_path_is_neither_replaced_nor_created(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+    import sys
+    import types
+
+    from aisquare.core import paths
+
+    theirs = tmp_path / "elsewhere" / "their-inbox.db"
+    monkeypatch.setenv(service.SDK_INBOX_ENV_VAR, str(theirs))
+    fake = types.ModuleType(service.SDK_MODULE)
+    fake.init_from_env = lambda **kw: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, service.SDK_MODULE, fake)
+    service._init_sdk("https://g.example", "k")
+    assert os.environ[service.SDK_INBOX_ENV_VAR] == str(theirs)
+    assert not theirs.parent.exists(), "their location is theirs to create"
+    assert not paths.explainability_dir().exists(), "and ours is not created for nothing"
+
+
+def test_a_malformed_gateway_url_keeps_the_launch_fail_open() -> None:
+    """Review of #107, round 2: ``gateway.example`` (no scheme) made
+    ``urllib.request.Request`` raise ``ValueError`` before the request's own
+    exception handler, so tracing stopped the agent from starting instead of
+    falling back to the proxy-keyed Run."""
+    from aisquare.services import explainability_ops as ops
+
+    verdict = ops.open_run_root("gateway.example", "k", "aisquare-coder", "sess-1")
+    assert verdict.ok is False
+    assert "not a usable URL" in verdict.detail and "gateway.example" in verdict.detail
+
+    wiring = wire_session(
+        _settings(),
+        "coder",
+        session_id="sess-1",
+        api_key="k",
+        gateway_url="gateway.example",
+        prober=_healthy,
+    )
+    assert wiring.traced is True, "the proxy lane still traces"
+    assert wiring.owns_trace is False and wiring.trace_id is None
+    assert "X-Pipeline-Id: sess-1" in wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+    assert "not a usable URL" in wiring.reason
+
+
 def test_the_sdk_inbox_lives_in_our_home_not_the_cwd(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

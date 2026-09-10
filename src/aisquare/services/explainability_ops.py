@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from aisquare.core.config import (
@@ -442,8 +443,20 @@ def _request(
         headers["Content-Type"] = "application/json"
     if api_key:
         headers["X-API-KEY"] = api_key
-    request = Request(url, data=data, headers=headers)
+    # `Request(url)` itself raises `ValueError("unknown url type")` for a URL
+    # with no scheme (`gateway.example`), and it used to be built OUTSIDE this
+    # try — so a mistyped gateway escaped the fail-open promise and stopped the
+    # agent from starting. Review of #107, round 2. Named as what it is
+    # rather than "unreachable": the operator's next step is the config, not
+    # the network.
+    if urlsplit(url).scheme not in ("http", "https"):
+        return HttpVerdict(
+            ok=False,
+            status=None,
+            detail=f"not a usable URL: {url!r} (it needs an http:// or https:// scheme)",
+        )
     try:
+        request = Request(url, data=data, headers=headers)
         with urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8", "replace")
             return HttpVerdict(

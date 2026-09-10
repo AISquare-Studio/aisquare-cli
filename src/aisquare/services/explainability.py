@@ -1193,8 +1193,19 @@ def _init_sdk(gateway_url: str, api_key: str) -> Any:
     # The SDK's delivery inbox is a SQLite file at a RELATIVE default path, so
     # every drain left `explainability_inbox.db` (+ -shm/-wal) in whatever
     # directory it ran from — a repo root by hand, $HOME from cron. Pinned into
-    # our own home unless the operator chose a location themselves.
-    os.environ.setdefault(SDK_INBOX_ENV_VAR, str(paths.explainability_dir() / "inbox.db"))
+    # our own home unless the operator chose a location themselves — and the
+    # directory is CREATED here, because the SDK's `InboxWriter.ensure_schema()`
+    # calls `sqlite3.connect()` without making parents: on a fresh install, or
+    # an upgrade that has only ever run plain sessions, `~/.aisquare/
+    # explainability/` does not exist yet (configuration writes the home and
+    # the key file; only a traced join used to create this subdirectory), and
+    # the pin alone turned every drain into `unable to open database file`,
+    # deferred forever. Review of #107, round 2. An operator-supplied path is
+    # theirs: neither replaced nor created.
+    if not os.environ.get(SDK_INBOX_ENV_VAR):
+        inbox = paths.explainability_dir() / "inbox.db"
+        inbox.parent.mkdir(parents=True, exist_ok=True)
+        os.environ[SDK_INBOX_ENV_VAR] = str(inbox)
     sdk = importlib.import_module(SDK_MODULE)
     sdk.init_from_env(auto_instrument=False)
     return sdk

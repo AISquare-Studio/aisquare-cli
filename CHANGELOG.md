@@ -433,7 +433,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `explainability_inbox.db` (+ `-shm`, `-wal`) in whatever directory it ran
     from — a repo root by hand, `$HOME` from the cron timer step 10 of the guide
     installs. `_init_sdk` now pins `EXPLAINABILITY_INBOX_PATH` to
-    `~/.aisquare/explainability/inbox.db` unless the operator set it.
+    `~/.aisquare/explainability/inbox.db` unless the operator set it — and
+    creates that directory first (review round 2): the SDK's inbox writer opens
+    SQLite without making parents, so on a fresh home the pin alone left every
+    drain deferred with `unable to open database file`. An operator-supplied
+    path is neither replaced nor created.
+  - **A mistyped gateway URL stays fail-open** (review round 2). A URL with no
+    `http(s)://` scheme made `urllib`'s `Request` constructor raise before the
+    request's own error handling, so tracing stopped the agent from starting;
+    it is now a failed root receipt (`not a usable URL: …`) and the launch falls
+    back to the proxy-keyed Run with the reason on the launch line.
   - **What the live check did and did not verify.** Re-measured against
     production after the change, for an owned launch: one Run per session, the
     model spans and the prompt span under one trace id. It read tokens and

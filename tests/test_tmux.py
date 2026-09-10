@@ -603,6 +603,13 @@ def test_numeric_fields_never_raise_on_junk() -> None:
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="no uid, no tmux socket (see the next test)")
 def test_socket_path_follows_tmux_tmpdir_then_tmp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The decorator is the runtime guard; this is the one MYPY reads, which now
+    # matters because the suite is type-checked under Windows too. `os.getuid`
+    # is POSIX-only and typeshed says so, a decorator narrows nothing, and an
+    # `assert` does not prune the branch either — mypy's platform reachability
+    # keys on `if`. `pytest.skip` is `NoReturn`, so this narrows and never runs.
+    if sys.platform == "win32":  # pragma: no cover - the skipif above got here first
+        pytest.skip("no uid on Windows")
     uid = os.getuid()
     monkeypatch.delenv("TMUX_TMPDIR", raising=False)
     assert TmuxServer("asq").socket_path() == Path("/tmp") / f"tmux-{uid}" / "asq"

@@ -15,7 +15,6 @@ import ast
 import inspect
 import json
 import os
-import pty
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -406,7 +405,12 @@ def test_validate_path_fails_open_when_the_store_will_not_answer(tmp_path: Path)
 def test_validate_path_expands_tilde_and_variables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Both, because `expanduser` reads a different variable per platform: HOME
+    # on POSIX, USERPROFILE on Windows (where HOME is ignored outright). Setting
+    # only HOME asserts the POSIX half of a call the product makes on both — the
+    # same shape as #56, and the same fix as `test_role_profile.py::test_tilde_expands`.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("ASQ_TEST_ROOT", str(tmp_path))
     (tmp_path / "proj").mkdir()
     for typed in ("~/proj", "$ASQ_TEST_ROOT/proj", f"  {tmp_path}/proj  "):
@@ -731,6 +735,16 @@ def test_the_child_that_runs_init_never_has_a_terminal_on_stdin() -> None:
     Putting a real terminal on fd 0 for the duration is what makes the two answers
     different, and the control below proves the terminal is actually there.
     """
+    # `pty` is POSIX-only and used to be imported at MODULE scope, which on
+    # Windows aborted collection of this whole file — 30-odd tests that have
+    # nothing to do with terminals never ran, and the error arrived as a
+    # collection failure rather than as a skip. Skipping HERE keeps the rest of
+    # the module running, and `pytest.skip` is typed `NoReturn`, so it also
+    # narrows the platform for mypy and the import below type-checks on Windows.
+    if sys.platform == "win32":
+        pytest.skip("no pty on Windows; this asserts a POSIX terminal on fd 0")
+
+    import pty
     import subprocess
 
     probe = [sys.executable, "-c", _TTY_PROBE]

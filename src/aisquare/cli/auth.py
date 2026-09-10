@@ -309,21 +309,27 @@ class _EscapeWatcher:
                 time.sleep(0.05)
 
     def _run_posix(self) -> None:
-        import select
-        import termios
-        import tty
+        # The mirror of `_run_windows` above, and guarded the same way for the
+        # same reason: `termios` and `tty` do not exist on Windows, and mypy now
+        # checks this file under Windows too — `check` has a windows-latest leg.
+        # `_run` never routes a Windows process here; the guard is what makes
+        # that fact checkable rather than merely true.
+        if sys.platform != "win32":
+            import select
+            import termios
+            import tty
 
-        fd = sys.stdin.fileno()
-        saved = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            while not self._stop.is_set():
-                ready, _, _ = select.select([fd], [], [], 0.1)
-                if ready and os.read(fd, 1) == b"\x1b":
-                    self._cancel.set()
-                    return
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                while not self._stop.is_set():
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                    if ready and os.read(fd, 1) == b"\x1b":
+                        self._cancel.set()
+                        return
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
 def _emit_signed_in(session: iam.Session) -> None:

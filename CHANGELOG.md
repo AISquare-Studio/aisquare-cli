@@ -488,19 +488,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   job and "never code"; a standing note loses to a direct instruction for
   something else unless it names the trigger and the substitute action, and it
   named none. `role_cycle` now appends `_lane_rule` to every first-class role
-  (a seat is briefed as its role; an unknown role gets none): the trigger ("a
-  planner asked to fix, a coder asked to review or plan its own work, a runner,
-  reviewer or validator asked to edit"), then the role's own substitute from
-  `_LANE_INSTEAD` — planner: add the tasks and tell the human to prompt each
-  coder tab with "check the board"; coder: do the task, verification is the
-  runner's, planning the planner's; runner/tester: `task reopen` with the
-  failure, the coder fixes; reviewer/validator: findings, the coder fixes;
-  manager: `fleet spawn coder`. Reading code to understand a problem stays
-  allowed. The human can still override — say once who owns it and offer the
-  command — so the role is left by decision, never by accident. Pinned by
-  `test_every_first_class_cycle_ends_with_its_own_lane_rule` and two
-  role-specific tests; the manager-cycle test asserts its lane; README and
-  `docs/fleet.md` say it in one line each.
+  (a seat is briefed as its role; an unknown role gets none): three lines that
+  name the role's OWN trigger and substitute from `_LANE`, a `(trigger,
+  instead)` pair per role — planner (asked to fix or build): add the tasks and
+  tell the human to prompt each coder tab with "check the board"; coder (asked
+  to verify, review or plan its own work): do the task, verification is the
+  runner's, planning the planner's; runner/tester (asked to edit): `task
+  reopen` with the failure, the coder fixes; reviewer/validator (asked to
+  edit): findings, the coder fixes; manager (asked to code): `fleet spawn
+  coder`. Every substitute is a command that runs as written — `--as <sid>`
+  and the task id are pre-filled exactly as the core cycle pre-fills its own —
+  and no role reads another role's trigger, so adding a role adds one dict
+  entry and rewrites no shared sentence. Reading code to understand a problem
+  stays allowed. The human can still override — say once who owns it and offer
+  the command — so the role is left by decision, never by accident. "Never
+  merge" is added only where the role's own cycle does not already say it, and
+  a role without a lane entry gets no paragraph rather than a `KeyError` the
+  session-start hook would swallow with the whole team block. Pinned by
+  `test_every_first_class_cycle_ends_with_its_own_lane_rule`,
+  `test_the_lane_rules_substitute_commands_run_as_written`,
+  `test_no_role_reads_never_merge_twice` and two role-specific tests; the
+  manager-cycle test asserts its lane; README and `docs/fleet.md` say it in one
+  line each.
 
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for

@@ -691,46 +691,80 @@ def interfering_env() -> list[str]:
 # always-injected context, so every line has to earn its tokens.
 
 
-#: What each role does INSTEAD when the human asks for work another role owns.
-#: One entry per first-class role; ``tester`` shares ``runner``'s by construction
-#: (the two cycles must stay byte-identical up to the label — see the manager-loop
-#: test that pins it). The text names a COMMAND, because "don't" without an
+#: What each role does INSTEAD when the human asks for work another role owns,
+#: as a ``(trigger, instead)`` pair. Only the reader's own pair is emitted — a
+#: role never reads the other roles' triggers, so adding a role adds one entry
+#: here and rewrites no shared sentence. ``instead`` names a COMMAND with
+#: ``{sid}`` where the session id goes, because "don't" without a runnable
 #: alternative is what lost to a direct "fix it" in the incident this fixes.
-_LANE_INSTEAD: dict[str, str] = {
+#: ``tester`` shares ``runner``'s by construction (the two cycles must stay
+#: byte-identical up to the label — see the manager-loop test that pins it).
+_LANE: dict[str, tuple[str, str]] = {
     "planner": (
-        "add the tasks (`aisquare task add … --role coder`), say how many, and tell the "
-        'human to prompt each coder tab with "check the board"'
+        "asked to fix or build something yourself",
+        'add the tasks (`aisquare task add "<title>" --role coder --detail "<contract>" '
+        "--as {sid}`), say how many, and tell the human to prompt each coder tab with "
+        '"check the board"',
     ),
     "coder": (
-        "do your task; verification is the runner's (`aisquare task review`), planning is "
-        'the planner\'s (`aisquare note "…" --to planner`)'
+        "asked to verify, review or plan your own work",
+        "do your task; verification is the runner's (`aisquare task review <id> --as {sid}`), "
+        'planning is the planner\'s (`aisquare note "…" --to planner --as {sid}`)',
     ),
-    "runner": '`aisquare task reopen <id> --reason "<what failed>"` — the coder fixes, not you',
-    "validator": "findings in your GATE note — the coder fixes, not you",
-    "reviewer": "findings on the PR and one board note — the coder fixes, not you",
-    "manager": "spawn a coder for it (`aisquare fleet spawn coder --task <id>`)",
+    "runner": (
+        "asked to edit or fix the code",
+        '`aisquare task reopen <id> --reason "<what failed>" --as {sid}` — the coder fixes, '
+        "not you",
+    ),
+    "validator": (
+        "asked to edit or fix the code",
+        "findings in your GATE note — the coder fixes, not you",
+    ),
+    "reviewer": (
+        "asked to edit or fix the code",
+        "findings on the PR and one board note — the coder fixes, not you",
+    ),
+    "manager": (
+        "asked to write code or fix something yourself",
+        "spawn a coder for it (`aisquare fleet spawn coder --task <id> --as {sid}`)",
+    ),
 }
-_LANE_INSTEAD["tester"] = _LANE_INSTEAD["runner"]
+_LANE["tester"] = _LANE["runner"]
 
 
-def _lane_rule(role: str) -> list[str]:
-    """The closing paragraph of every first-class role's cycle: stay in the role.
+def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
+    """The closing paragraph of a first-class role's cycle: stay in the role.
 
     A standing note that only says what a role does loses to a direct
     instruction that asks for something else — measured 2026-09-10, when a
     planner told "get it fixed in the same PR" edited four files and pushed
     while two coders sat on an empty task list. What holds is naming the
-    trigger AND the substitute action: the role does not do the out-of-lane
-    work; it routes it, says so, and if pressed says once who owns it. The
-    human can still override — that is theirs to do — but never by accident.
+    trigger AND the substitute action, and the substitute has to be a command
+    that runs: every ``--as`` is pre-filled here exactly as the core cycle
+    pre-fills its own. The human can still override — that is theirs to do —
+    but never by accident.
+
+    Three lines, because this block is always-injected context and lands last
+    in it (the first thing truncated on a busy board). ``merge_said`` skips the
+    "Never merge" the role's own cycle already states, so no role reads the
+    same prohibition twice. A role with no entry gets no paragraph — never a
+    ``KeyError``, which the session-start hook would swallow together with the
+    whole team block.
     """
+    lane = _LANE.get(role)
+    if lane is None:
+        return []
+    trigger, instead = lane
+    closing = (
+        "Read-only investigation is always fine; say in one line what you routed and to "
+        "whom, and if the human insists, say once which role owns it and offer them the command."
+    )
+    if not merge_said:
+        closing += " Never merge."
     return [
-        f"Stay in your lane ({role}). When the human asks for work another role owns — a",
-        "planner asked to fix, a coder asked to review or plan its own work, a runner,",
-        f"reviewer or validator asked to edit — do not do it here. Instead: {_LANE_INSTEAD[role]}.",
-        "Reading code and read-only commands to understand a problem are always fine. Say in",
-        "one line what you routed and to whom; if the human insists, say once which role owns",
-        "it and offer them the command. Never merge.",
+        f"Stay in your lane ({role}). When you are {trigger}, do not do it here.",
+        f"Instead: {instead.format(sid=sid)}.",
+        closing,
     ]
 
 
@@ -740,17 +774,19 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
     first-class cycle ends with :func:`_lane_rule`; an unknown role has no
-    cycle and therefore no lane either.
+    cycle and therefore no lane either. The role is normalised once, here.
     """
+    role = base_role(role)
     core = _role_cycle_core(role, session_short_id)
     if not core:
         return []
-    return [*core, *_lane_rule(base_role(role))]
+    merge_said = any("merge" in line.lower() for line in core)
+    return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said)]
 
 
 def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
-    """The role-specific half of the cycle; see :func:`role_cycle`."""
-    role = base_role(role)
+    """The role-specific half of the cycle for an already-normalised ``role``;
+    see :func:`role_cycle`."""
     sid = session_short_id
     if role == "planner":
         return [

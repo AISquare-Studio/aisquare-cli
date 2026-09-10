@@ -204,15 +204,51 @@ def test_every_first_class_cycle_ends_with_its_own_lane_rule() -> None:
     it names the trigger and the substitute action. Every role now closes with
     that paragraph, addressed to itself, naming what to do instead."""
     for role in harness.ROLE_PROFILES:
-        text = " ".join(harness.role_cycle(role, "abcd1234"))
-        assert f"Stay in your lane ({role})" in text, role
-        assert "asked to fix" in text, role
+        lines = harness.role_cycle(role, "abcd1234")
+        text = " ".join(lines)
+        trigger, _instead = harness._LANE[role]
+        assert f"Stay in your lane ({role}). When you are {trigger}" in text, role
         assert "Instead:" in text, role
         assert "if the human insists" in text, role
+        # the paragraph is three lines and reads only the reader's own trigger
+        assert len(lines) - len(harness._role_cycle_core(role, "abcd1234")) == 3, role
+        for other, (other_trigger, _) in harness._LANE.items():
+            if other_trigger != trigger:
+                assert other_trigger not in text, (role, other)
     # a seat is briefed as its role, lane included
     assert "Stay in your lane (coder)" in " ".join(harness.role_cycle("coder2", "abcd1234"))
     # an unknown role has no cycle, so no lane is invented for it
     assert harness.role_cycle("stenographer", "abcd1234") == []
+    # and a role with a cycle but no lane entry gets no paragraph — never a KeyError,
+    # which the session-start hook would swallow together with the whole team block
+    assert harness._lane_rule("stenographer", "abcd1234", merge_said=False) == []
+
+
+def test_the_lane_rules_substitute_commands_run_as_written() -> None:
+    """Review of #111: the lane paragraph was the only board-writing text in a
+    briefing without `--as <sid>` — the coder's `aisquare task review` even lacked
+    its required task id. Every substitute is now a command that runs and is
+    attributed, pre-filled the way the core cycle pre-fills its own."""
+    for role in harness.ROLE_PROFILES:
+        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        assert "{sid}" not in text, role
+        assert "`aisquare " not in text or "--as abcd1234" in text, role
+    coder = " ".join(harness.role_cycle("coder", "abcd1234"))
+    assert "aisquare task review <id> --as abcd1234" in coder
+    assert 'aisquare note "…" --to planner --as abcd1234' in coder
+    planner = " ".join(harness.role_cycle("planner", "abcd1234"))
+    assert '--detail "<contract>" --as abcd1234' in planner
+    manager = " ".join(harness.role_cycle("manager", "abcd1234"))
+    assert "aisquare fleet spawn coder --task <id> --as abcd1234" in manager
+
+
+def test_no_role_reads_never_merge_twice() -> None:
+    """The manager's and reviewer's cycles already forbid merging; the lane rule
+    adds the prohibition only where the core does not say it, so no briefing
+    repeats the same rule two paragraphs apart."""
+    for role in harness.ROLE_PROFILES:
+        text = " ".join(harness.role_cycle(role, "abcd1234")).lower()
+        assert text.count("never merge") == 1, (role, text.count("never merge"))
 
 
 def test_the_planner_lane_routes_a_fix_to_tasks_and_names_the_hand_off() -> None:

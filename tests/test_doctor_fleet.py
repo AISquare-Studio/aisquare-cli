@@ -525,7 +525,10 @@ def test_fleet_check_warns_when_the_private_server_is_not_running(
     assert check.status is CheckStatus.warn
     assert "private tmux server 'asq' is not running" in check.detail
     assert "manager" in check.detail
-    assert check.fix and "aisquare fleet reap" in check.fix
+    assert check.fix and "aisquare fleet shutdown" in check.fix, (
+        "reap cannot end rows on a server it cannot reach; the fix must name the command that can"
+    )
+    assert "aisquare fleet reap" in check.fix, "the ordinary reconciliation is still named"
 
 
 def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_path: Path) -> None:

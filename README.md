@@ -675,7 +675,7 @@ aisquare
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
-│                   attach · reap [--all] · rename <codename> · pause · resume
+│                   shutdown [--force] · attach · reap [--all] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
 ├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 └── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)

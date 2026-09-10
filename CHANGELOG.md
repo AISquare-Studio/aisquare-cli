@@ -425,6 +425,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **`aisquare fleet shutdown`: the fleet's off switch, and the end of rows stuck at
+  "unknown (tmux unavailable)".** Measured 2026-09-10: the only way to stop a
+  whole fleet was `tmux -L asq kill-server` by hand. After it, every manager row
+  kept reading `unknown (tmux unavailable)`, the UI showed dead managers with
+  `(pane gone)`, and `fleet reap` reaped 0 — correctly: reap and stop refuse to
+  end a row on a server they cannot reach, because an unreachable server is not
+  proof a pane died (an earlier release lost live agents' worktrees to exactly
+  that inference). Nothing in the CLI could say "yes, I stopped it". Now
+  `shutdown` can, because the operator is saying it: every agent on an answering
+  server is stopped as `fleet stop` would (graceful `/exit` unless `--force`,
+  exit status recorded, `agent_exited` emitted) BEFORE the server is killed, so
+  `SessionEnd` hooks release claims; rows on a socket with no server are ended
+  as lost and counted apart (`recorded`, never "stopped"); the configured socket
+  is killed even with no rows on it. Board tasks and notes are untouched. Doctor's
+  fleet row, when the server is gone, now names `fleet shutdown` as the fix
+  instead of a `reap` that cannot act. Four service tests (answering server;
+  hand-killed server, with the reap-reaps-0 control; no agents; every project),
+  two CLI tests, the stubs registry, and the doctor pin.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
   Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the

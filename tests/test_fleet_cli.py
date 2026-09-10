@@ -42,6 +42,7 @@ from aisquare.services.fleet import (
     NoSuchAgent,
     NoSuchProject,
     ReapReport,
+    ShutdownReport,
     SpawnReceipt,
     TellResult,
 )
@@ -645,6 +646,47 @@ def test_stop_json_returns_the_agent_row(
     assert payload["agent"]["label"] == "coder-auth"
     assert payload["agent"]["ended_at"] is not None
     assert payload["agent"]["exit_status"] == 0
+
+
+# ── shutdown ─────────────────────────────────────────────────────────────────
+
+
+def test_shutdown_reports_each_group_and_passes_force_through(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = ShutdownReport(
+        stopped=[_agent("coder-auth", ended=True, exit_status=0)],
+        recorded=[_agent("manager", ended=True, exit_status=None)],
+        servers_killed=["asq"],
+        servers_absent=["asq-old"],
+    )
+    shutdown = _install(monkeypatch, "shutdown", report)
+    result = runner.invoke(app, ["fleet", "shutdown"])
+    assert result.exit_code == 0, result.output
+    out = _plain(result.stdout)
+    assert "1 stopped, 1 recorded lost" in out and "servers killed: asq" in out
+    assert "💤 coder-auth (exit 0)" in out
+    assert "✗ manager" in out and "recorded lost — its server 'asq' was not running" in out
+    assert "board tasks and notes kept" in out
+    assert shutdown.calls[-1] == ((), {"force": False})
+    forced = runner.invoke(app, ["fleet", "shutdown", "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert shutdown.calls[-1] == ((), {"force": True})
+
+
+def test_shutdown_json_carries_the_four_groups(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = ShutdownReport(
+        stopped=[_agent("coder-auth", ended=True, exit_status=0)], servers_killed=["asq"]
+    )
+    _install(monkeypatch, "shutdown", report)
+    result = runner.invoke(app, ["--json", "fleet", "shutdown"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"stopped", "recorded", "servers_killed", "servers_absent"}
+    assert payload["stopped"][0]["label"] == "coder-auth" and payload["servers_killed"] == ["asq"]
+    assert payload["recorded"] == [] and payload["servers_absent"] == []
 
 
 # ── attach ───────────────────────────────────────────────────────────────────

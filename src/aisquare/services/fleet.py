@@ -167,6 +167,20 @@ class ReapReport:
     worktrees_removed: list[Path] = field(default_factory=list)
 
 
+@dataclass
+class ShutdownReport:
+    """What ``shutdown`` did, socket by socket and row by row."""
+
+    stopped: list[FleetAgent] = field(default_factory=list)
+    """Agents whose server answered: ``/exit``ed (or killed), exit status recorded."""
+    recorded: list[FleetAgent] = field(default_factory=list)
+    """Rows ended as lost on the operator's word: their server was already gone."""
+    servers_killed: list[str] = field(default_factory=list)
+    """Sockets whose server answered and was then killed."""
+    servers_absent: list[str] = field(default_factory=list)
+    """Sockets with no server to kill — the rows on them went to ``recorded``."""
+
+
 # --- settings ---------------------------------------------------------------------
 
 
@@ -1402,6 +1416,58 @@ def stop(
         exit_status = _verify_gone(_window, label, exc)
     with store_session() as store:
         return store.end_fleet_agent(agent.id, exit_status=exit_status)
+
+
+def shutdown(*, force: bool = False, grace: float = 5.0) -> ShutdownReport:
+    """Stop every live agent in every project, kill the fleet's server, record every row.
+
+    The one place a row may be ended without tmux confirming its pane died. Every
+    other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
+    is not evidence of a dead pane, and ending a live agent's row hides it from
+    every listing and hands its worktree to ``_remove_merged_worktrees``. Here the
+    ambiguity is resolved by the operator, not by inference: they have ordered the
+    fleet DOWN. Measured 2026-09-10 without this command — the operator ran ``tmux
+    -L asq kill-server`` by hand (the only off switch they had), every manager
+    row kept saying ``unknown (tmux unavailable)``, ``reap`` reaped 0 (correctly:
+    it could not ask), and the UI showed dead managers for as long as they cared
+    to look.
+
+    Order matters and is deliberate: agents on an answering server get the
+    ordinary ``stop`` (graceful ``/exit`` unless ``force``, exit status recorded,
+    ``agent_exited`` emitted) BEFORE the server is killed, so their ``SessionEnd``
+    hooks release their claims. Rows on a socket with no server — killed outside
+    the CLI, or a ``tmux`` that left ``PATH`` — are ended with no exit status
+    (``lost``) and counted apart, so the report never reads "stopped" over a
+    process nobody confirmed stopping. The configured socket is killed even when
+    it holds no rows: a server with nothing recorded on it is still the fleet's,
+    and "shutdown" means down.
+    """
+    config = settings()
+    report = ShutdownReport()
+    with store_session() as store:
+        projects = store.list_projects()
+        live_by_project = {p.id: (p, store.fleet_agents(p.id, live_only=True)) for p in projects}
+    sockets = {a.tmux_socket for _, agents in live_by_project.values() for a in agents}
+    sockets.add(config.tmux_socket)
+    answering = {socket: server_for(socket, config).answers() for socket in sockets}
+    for project, agents in live_by_project.values():
+        for agent in agents:
+            if answering.get(agent.tmux_socket):
+                try:
+                    report.stopped.append(stop(project, agent.label, force=force, grace=grace))
+                    continue
+                except FleetError:
+                    pass  # its server is coming down regardless; recorded, not stopped
+            with store_session() as store:
+                report.recorded.append(store.end_fleet_agent(agent.id, exit_status=None))
+    for socket in sorted(sockets):
+        if answering[socket]:
+            with suppress(TmuxError):
+                server_for(socket, config).kill_server()
+            report.servers_killed.append(socket)
+        else:
+            report.servers_absent.append(socket)
+    return report
 
 
 def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxError) -> int | None:

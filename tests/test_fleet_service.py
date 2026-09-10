@@ -92,6 +92,10 @@ class FakeTmux(TmuxServer):
         tmux 3.4 (its own -vv server log): one poll can see ``dead=1`` while
         ``pane_dead_status`` expands to ``''``; the status lands a beat later."""
         self.fail_input = False
+        self.running = True
+        """Whether a server is listening on the socket. False = the shape a hand-run
+        `tmux kill-server` leaves: binary present, every question answered empty."""
+        self.server_killed = False
         self.sessions: dict[str, list[WindowInfo]] = {}
         self.facts: dict[str, PaneFacts] = {}
         self.output_at: dict[str, datetime] = {}
@@ -125,6 +129,8 @@ class FakeTmux(TmuxServer):
         self.binary()
         if list(args) != ["list-panes", "-a", "-F", fleet_service._ACTIVITY_FORMAT]:
             raise AssertionError(f"the fake tmux was asked to really run: {list(args)}")
+        if not self.running:
+            return ""
         return "".join(
             f"{pane_id}{fleet_service._SEP}{int(when.timestamp())}\n"
             for pane_id, when in self.output_at.items()
@@ -145,15 +151,22 @@ class FakeTmux(TmuxServer):
             self.binary()
         except TmuxUnavailable:
             return False
-        return True
+        return self.running
+
+    def kill_server(self) -> None:
+        self.binary()
+        self.server_killed = True
+        self.running = False
+        self.sessions.clear()
+        self.facts.clear()
 
     def list_sessions(self) -> list[str]:
         self.binary()
-        return list(self.sessions)
+        return list(self.sessions) if self.running else []
 
     def has_session(self, name: str) -> bool:
         self.binary()
-        return name in self.sessions
+        return self.running and name in self.sessions
 
     def spawn_window(
         self,
@@ -194,6 +207,8 @@ class FakeTmux(TmuxServer):
 
     def list_windows(self, session: str) -> list[WindowInfo]:
         self.binary()
+        if not self.running:
+            return []
         return [self._current(window) for window in self.sessions.get(session, [])]
 
     def _current(self, window: WindowInfo) -> WindowInfo:
@@ -214,7 +229,7 @@ class FakeTmux(TmuxServer):
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.binary()
-        return self.facts.get(pane_id)
+        return self.facts.get(pane_id) if self.running else None
 
     def kill_window(self, pane_id: str) -> None:
         self.binary()
@@ -1726,6 +1741,67 @@ def test_stop_leaves_the_row_live_when_tmux_cannot_confirm_the_agent_stopped(
 
 
 # --- reap ----------------------------------------------------------------------------
+
+
+# --- shutdown: the operator's off switch, and the one path that may end unconfirmed rows ---
+
+
+def test_shutdown_stops_every_agent_kills_the_server_and_records_each_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+    report = fleet_service.shutdown(force=True)
+    assert sorted(a.id for a in report.stopped) == sorted([manager.id, coder.id])
+    assert report.recorded == [], "the server answered, so nothing was merely recorded"
+    assert report.servers_killed == [coder.tmux_socket] and report.servers_absent == []
+    assert tmux.server_killed, "the server itself is down"
+    assert sorted(tmux.killed) == sorted([manager.pane_id, coder.pane_id]), (
+        "each window killed first"
+    )
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+    assert fleet_service.list_agents(project) == [], "no live agent is left to list"
+
+
+def test_shutdown_records_rows_lost_when_the_server_was_killed_by_hand(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Measured 2026-09-10: after a hand-run `tmux -L asq kill-server` the rows read
+    `unknown (tmux unavailable)` and `reap` reaped 0 — correctly, it could not ask.
+    The operator's `shutdown` is the word that resolves it."""
+    coder = _coder(project)
+    tmux.running = False  # the shape kill-server leaves: binary present, server gone
+    assert fleet_service.status_of(coder).state == "unknown", "the control: reap may not guess"
+    before = fleet_service.reap(project)
+    assert before.lost == [] and before.ended == []
+    report = fleet_service.shutdown()
+    assert [a.id for a in report.recorded] == [coder.id]
+    assert report.stopped == [], "nothing answered, so nothing was 'stopped'"
+    assert report.servers_absent == [coder.tmux_socket] and report.servers_killed == []
+    assert report.recorded[0].ended_at is not None and report.recorded[0].exit_status is None
+    assert _events(project, "agent_exited") == [], "lost is recorded, not announced as an exit"
+    assert fleet_service.status_of(report.recorded[0]).state == "exited", "the row now says so"
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+
+
+def test_shutdown_with_no_agents_still_takes_the_server_down(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    report = fleet_service.shutdown()
+    assert report.stopped == [] and report.recorded == []
+    assert report.servers_killed == [fleet_service.settings().tmux_socket]
+    assert tmux.server_killed, "the configured server goes down even with nothing recorded on it"
+
+
+def test_shutdown_reaches_every_project(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, plain_project: ProjectInfo
+) -> None:
+    first = _coder(project)
+    second = fleet_service.spawn(plain_project, "coder", worktree=False).agent
+    report = fleet_service.shutdown(force=True)
+    assert sorted(a.id for a in report.stopped) == sorted([first.id, second.id])
 
 
 def test_reap_ends_dead_panes_and_tells_the_board(

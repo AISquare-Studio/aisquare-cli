@@ -283,6 +283,54 @@ def _exec_attach(argv: list[str]) -> None:
     os.execvp(argv[0], argv)
 
 
+@app.command("shutdown")
+def shutdown(
+    force: Annotated[
+        bool, typer.Option("--force", help="Kill every agent without a graceful /exit.")
+    ] = False,
+) -> None:
+    """Stop every agent in every project, kill the fleet's server, record every row.
+
+    The fleet's off switch. Unlike ``tmux -L asq kill-server`` by hand, the rows
+    are recorded: agents on the running server are stopped and their exit
+    recorded; rows whose server is already gone are ended as lost, on your word.
+    Board tasks and notes are untouched. The next ``asq`` or ``fleet spawn``
+    starts a fresh server on whichever account that shell carries.
+    """
+    try:
+        report = fleet_service.shutdown(force=force)
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "stopped": [a.model_dump(mode="json") for a in report.stopped],
+                    "recorded": [a.model_dump(mode="json") for a in report.recorded],
+                    "servers_killed": report.servers_killed,
+                    "servers_absent": report.servers_absent,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    console.print(
+        f"✓ fleet shut down: {len(report.stopped)} stopped, "
+        f"{len(report.recorded)} recorded lost (server already gone); "
+        f"servers killed: {', '.join(report.servers_killed) or 'none'}"
+    )
+    for agent in report.stopped:
+        code = f" (exit {agent.exit_status})" if agent.exit_status is not None else ""
+        console.print(f"  💤 {agent.label}{code}")
+    for agent in report.recorded:
+        console.print(
+            f"  ✗ {agent.label}  recorded lost — its server '{agent.tmux_socket}' was not running"
+        )
+    if report.servers_absent and not report.servers_killed:
+        console.print("  (nothing was running; the rows above were the leftovers)")
+    console.print("  board tasks and notes kept; the next asq / fleet spawn starts a fresh server")
+
+
 @app.command("attach")
 def attach(project: ProjectRef = None) -> None:
     """Attach this terminal to the project's fleet session (full-fidelity tmux)."""

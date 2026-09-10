@@ -1626,11 +1626,20 @@ def _check_fleet(
                 f"{len(exited)} exited but still recorded live: {_fleet_labels(exited, names)}"
             )
         if problems:
-            return _warn(
-                name,
-                "; ".join(problems),
-                "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap",
+            server_gone = any("is not running" in p for p in problems)
+            fix = (
+                "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap"
             )
+            if server_gone:
+                # `reap` cannot end rows on a server it cannot reach (absence of a
+                # server is not proof a pane died); `shutdown` may, on the
+                # operator's word — which is exactly what a hand-run kill-server was.
+                fix = (
+                    "The server was stopped outside the CLI, so reap will not touch those rows: "
+                    "aisquare fleet shutdown records them as lost (or restart the fleet, then "
+                    "aisquare fleet reap)"
+                )
+            return _warn(name, "; ".join(problems), fix)
         sessions = servers[socket].list_sessions()
         if live:
             return _ok(

@@ -238,7 +238,28 @@ graceful exit.
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH` — the row is **left live** and the command fails saying so, rather
 than reporting `✓ stopped` over an agent that is still running. Re-run it once
-tmux answers again, or `fleet reap` after the server comes back.
+tmux answers again, or `fleet reap` after the server comes back. To take the
+whole fleet down and record every row in one go, use `fleet shutdown`.
+
+### `fleet shutdown`
+
+```sh
+aisquare fleet shutdown
+aisquare fleet shutdown --force
+```
+
+The fleet's off switch. Every agent in every project is stopped the way `fleet
+stop` stops one (`/exit`, grace, kill; `--force` skips the `/exit`), then the
+fleet's tmux server is killed, and **every row is recorded**: stopped agents
+with their exit status, and rows whose server was already gone as *lost*. Board
+tasks and notes are untouched; the next `asq` or `fleet spawn` starts a fresh
+server on whichever account that shell carries.
+
+Why this exists rather than `tmux -L asq kill-server` by hand: `stop` and
+`reap` refuse to end a row on a server they cannot reach, because an unreachable
+server is not proof a pane died. A hand-run kill leaves every row saying
+`unknown (tmux unavailable)` and `reap` reaping nothing — correctly. `shutdown`
+is the operator saying so, which is the one thing that resolves it.
 
 ### `fleet attach`
 

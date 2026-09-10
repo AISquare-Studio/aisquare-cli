@@ -816,6 +816,8 @@ def test_shutdown_json_carries_every_group_and_the_reasons(
         "servers_absent",
         "claims_released",
         "paused_cleared",
+        "paused_kept",
+        "incomplete_projects",
     }
     assert payload["stopped"][0]["label"] == "coder-auth"
     assert payload["recorded"] == [

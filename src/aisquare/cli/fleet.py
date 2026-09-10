@@ -356,6 +356,8 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
                     "servers_absent": report.servers_absent,
                     "claims_released": report.claims_released,
                     "paused_cleared": report.paused_cleared,
+                    "paused_kept": report.paused_kept,
+                    "incomplete_projects": report.incomplete_projects,
                 }
             )
         )
@@ -389,6 +391,8 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
         )
     for name in report.paused_cleared:
         console.print(f"  ▶ the fleet-paused signal on {name} was cleared")
+    for name in report.paused_kept:
+        console.print(f"  ⏸ {name} stays fleet-paused: it was not confirmed down")
     if partial:
         console.print(
             "  rows above marked LEFT LIVE were NOT ended: `aisquare fleet ls --all`, then "

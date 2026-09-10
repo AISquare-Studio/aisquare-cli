@@ -35,8 +35,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   would take down a hand-made session, one a failed `rename` left under an old
   name, or the operator's personal server if `[fleet] tmux_socket` names it, and
   a server with nothing left on it exits by itself. A `fleet-paused` signal is
-  cleared for each project shut down (and said in the output), so the next
-  manager does not come up staffing nothing. **Exit status is recorded only where
+  cleared for each project the run CONFIRMED down (and said in the output), so
+  the next manager does not come up staffing nothing — and KEPT, named as
+  `paused_kept`, for a project with a row left live, a session left up or a
+  listing that failed (review round 2). Round 2 also closed three safety holes:
+  a row spawned mid-run whose pane cannot be QUERIED is left live and said so
+  (a timeout is not a dead pane); the spare-this-session rule follows the pane
+  to the session it actually lives in, so an `asq-*` session left under an old
+  name is no longer prefix-swept over a row marked LEFT LIVE; and a socket
+  whose `list-sessions` fails after a good probe is reported as a failed kill
+  (`<socket>:*`), so the command exits 1 instead of printing a clean shutdown
+  over a surviving session. `incomplete_projects` in the `--json` report is the
+  set every one of those rules reads. **Exit status is recorded only where
   tmux exposes one**: `--force` kills a live pane and records none. It refuses
   rather than guess — no usable tmux, a socket that cannot be *asked* whether a
   server is there (a wedged server's 30 s timeout used to escape as a traceback

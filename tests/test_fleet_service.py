@@ -2119,6 +2119,106 @@ def test_shutdown_leaves_a_row_live_when_the_late_spawn_is_still_running(
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [spawned[0].id]
 
 
+def test_shutdown_leaves_a_late_row_live_when_its_pane_cannot_be_asked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 2 (P1): a `pane_facts()` timeout on a row spawned during
+    the run left `facts=None`, which fell through to `_record_lost` — a running
+    agent's row ended, its claims released, and the report saying its session was
+    killed. "Could not ask" is not "dead"."""
+    coder = _coder(project)
+    spawned: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+    real_facts = tmux.pane_facts
+
+    def kill_then_spawn(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        spawned.append(_coder(project))
+
+    def facts_or_timeout(pane_id: str) -> PaneFacts | None:
+        if spawned and pane_id == spawned[0].pane_id:
+            raise TmuxError("timed out after 30 s (fake)")
+        return real_facts(pane_id)
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_spawn)
+    monkeypatch.setattr(tmux, "pane_facts", facts_or_timeout)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.recorded == [], "an unqueryable pane is never recorded lost"
+    assert [row.agent.id for row in report.failed] == [spawned[0].id]
+    assert "could not be asked" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [spawned[0].id], "live"
+
+
+def test_shutdown_spares_the_old_name_session_that_hosts_a_left_live_pane(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #121, round 2: under `--all` the prefix sweep killed an `asq-*`
+    session left under an OLD name even though the row inside it had just been
+    marked LEFT LIVE — the spare rule only knew the project's CURRENT session name.
+    It now follows the pane."""
+    coder = _coder(project)
+    current = _session_of(project).split(":", 1)[1]
+    tmux.sessions["asq-old-name"] = tmux.sessions.pop(current)  # a failed rename
+    tmux.fail_input = True  # the server answers, but /exit does not go through
+
+    report = fleet_service.shutdown()  # every project: the prefix sweep runs
+
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    socket = fleet_service.settings().tmux_socket
+    assert f"{socket}:asq-old-name" in report.sessions_left_up
+    assert "asq-old-name" not in tmux.killed_sessions
+    assert coder.pane_id in tmux.facts, "the pane is untouched"
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+    assert report.incomplete_projects == [project.id]
+
+
+def test_shutdown_reports_a_failed_session_listing_as_a_partial_shutdown(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 2: a socket that answered the probe but whose
+    `list-sessions` then raised was skipped in silence — an EMPTY report over a
+    surviving session, which the CLI printed as `✓ fleet shut down`, exit 0."""
+    tmux.spawn_window("asq-stale-otter", name="manager", cwd=project.root, command=["cat"])
+
+    def listing_times_out() -> list[str]:
+        raise TmuxError("timed out after 30 s (fake)")
+
+    monkeypatch.setattr(tmux, "list_sessions", listing_times_out)
+
+    report = fleet_service.shutdown()
+
+    assert report.sessions_killed == [] and "asq-stale-otter" in tmux.sessions
+    socket = fleet_service.settings().tmux_socket
+    assert any(
+        s.startswith(f"{socket}:*") and "could not list sessions" in s
+        for s in report.sessions_failed
+    ), report.sessions_failed
+    # `sessions_failed` is what the CLI reads as PARTIAL (⚠ + exit 1), so the
+    # surviving session can no longer hide behind a clean report.
+
+
+def test_shutdown_keeps_a_surviving_project_paused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #121, round 2: when the paused manager could not be stopped, the
+    row stayed live and its session was spared — but the cleanup still called
+    `resume()`, removing "spawn nothing while fleet-paused" precisely while the
+    operator was trying to shut it down."""
+    _coder(project)
+    fleet_service.pause(project)
+    tmux.fail_input = True  # the server answers, but /exit does not go through
+
+    report = fleet_service.shutdown(project)
+
+    assert report.failed and report.sessions_left_up
+    assert fleet_service.is_paused(project), "a surviving fleet keeps its standing order"
+    assert report.paused_cleared == [] and report.paused_kept == [project.root.name]
+
+
 def test_shutdown_kills_only_the_fleets_own_sessions(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

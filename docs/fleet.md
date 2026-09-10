@@ -274,8 +274,11 @@ account that shell carries.
 
 Board notes and tasks are kept, but the ended rows' **claims are released**: a
 task left `doing` by a session that no longer exists is not untouched, it is
-stuck for four hours. A `fleet-paused` signal is cleared for each project shut
-down, and the output says so — the fleet it paused is gone.
+stuck for four hours. A `fleet-paused` signal is cleared for each project this
+run CONFIRMED down, and the output says so — the fleet it paused is gone. A
+project with a row left live, a session left up or a listing that failed keeps
+its signal (`paused_kept` in the report): the manager's "spawn nothing while
+paused" is exactly the standing order wanted while you are trying to stop it.
 
 It refuses rather than guess. With no usable tmux (`fleet_unavailable`), on a
 socket that cannot be ASKED whether a server is there (a wedged server's 30 s

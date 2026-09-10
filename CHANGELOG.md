@@ -383,20 +383,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     launch line says so (`the proxy keys the run — root not posted: …`).
     Tracing still never costs a launch. A plain session with no proxy lane
     still ships through `AgentRunTracer` as before — it has nothing to join.
-  - **`aisquare explainability env` writes nothing to the gateway.** It is a
+  - **`aisquare explainability env` writes nothing to the gateway by default;
+    the printed `team spawn` command opts in with `--post-root`.** `env` is a
     print-only command, and it used to post a Run root like a launch does —
     with a gateway URL configured, every invocation minted a dashboard Run of
     one 0 ms span and zero tokens, named after the role, for a session that
     might never start (a fresh pipeline id per call without `--session-id`:
     a second terminal, a shell rc, a `--json` reader), after up to 3 s of WAN
     I/O behind a print. `wire_session` gains `post_root=False` and `env`
-    passes it: the probe, the guards and the header pair still run, the root
-    is not posted, and the delta is the proxy-keyed form — `X-Pipeline-Id`,
-    no `traceparent`, no `AISQUARE_RUN_TRACE_ID`; the other exports are
-    unchanged. So a session started from that output — including the
-    `team spawn` command as PRINTED, which evals `env` — runs on the fallback,
-    two Runs per session; `aisquare launch` and `team spawn --exec` still post
-    the root and own theirs.
+    passes it by default: the probe, the guards and the header pair still
+    run, the root is not posted, and the delta is the proxy-keyed form —
+    `X-Pipeline-Id`, no `traceparent`, no `AISQUARE_RUN_TRACE_ID`; the other
+    exports are unchanged. That justification — no agent may ever start on
+    the id a print minted — is true of a bare `env` and false of the line
+    `team spawn` prints, where the agent starts on the very next command in
+    the same shell; an earlier cut of this fix collapsed the two and put the
+    default paste path, the one the CLI tells the operator to run, back on
+    the two-Runs fallback. So `env` gains `--post-root` and the printed
+    command evals `aisquare explainability env <role> --post-root`: the root
+    is posted first exactly as `launch` and `team spawn --exec` do, the
+    pasted session owns its Run — `traceparent` on the wire,
+    `AISQUARE_RUN_TRACE_ID` exported — and the launch line goes to stderr,
+    where an eval leaves it for the human. Same fail-open in the same
+    direction: a refused root falls back to `X-Pipeline-Id` with no run key
+    exported, a dead proxy to untraced, and neither costs the paste. A bare
+    `aisquare explainability env <role>` still makes zero gateway calls. The
+    flag is visible in `--help` rather than hidden, because the line that
+    carries it is printed for a human to read and a flag the CLI disowns is
+    a trap; its help text says when adding it by hand is wrong. Not the
+    SessionStart hook: that path may never open a socket, and
+    `tests/test_no_network_on_the_primary_path.py` pins it.
   - **The `team spawn` prelude clears every trace marker.** The printed
     command's `unset` list was hand-written and missed `AISQUARE_RUN_TRACE_ID`,
     so two pastes in one shell could share a Run: paste 1 exported it, paste 2
@@ -433,11 +449,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `AgentRunTracer` never opened; a plain session and each fail-open cause,
     driven through the real `insights` spool rather than a hand-built record:
     `AgentRunTracer`, never a segment; the segment closed and the context
-    detached on failure), the inbox path, one launch through the CLI, and the
+    detached on failure), the inbox path, one launch through the CLI, the
     print-only mode (`env` with a gateway and key configured makes zero
-    network calls; `team spawn --exec` still posts the root).
-    `tests/test_harness.py` runs the printed spawn prelude through `/bin/sh`
-    with a stale `AISQUARE_RUN_TRACE_ID` set and asserts every marker is gone.
+    network calls; `team spawn --exec` still posts the root), the opt-in
+    (`env --post-root` posts the root and exports the run key, and exports
+    none when the root is refused), and the paste path for real: the printed
+    `team spawn` command run through `/bin/sh` against a loopback proxy and
+    gateway posts ONE root and starts a stub agent with `traceparent`, the
+    run key and `--session-id` all naming the same id — and still starts it
+    when the gateway refuses. `tests/test_harness.py` runs the printed spawn
+    prelude through `/bin/sh` with a stale `AISQUARE_RUN_TRACE_ID` set and
+    asserts every marker is gone.
   - **A turn's `started_at` is the moment the hook was entered.** The prompt is
     recorded and spooled before CI is consulted, and the stamp was taken after
     that store work, so `wall_ms` lost however long the store took — and

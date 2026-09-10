@@ -78,7 +78,18 @@ _SESSION_ID_SUBSTITUTION = (
 #: own — so paste 1's survived, and session 2's SessionStart hook wrote its join
 #: row against session 1's Run. ``disown_inherited_trace`` could not catch that
 #: either: the clear-out had already removed the run key it keys off, so it
-#: returned early. One tuple, one place to add a name.
+#: returned early.
+#:
+#: One tuple, one place to add a name — and that is now true of every reader of
+#: the identity, not just this one. :data:`core.spawn.MARKER_ENV_VARS` is where
+#: a marker is declared; this prelude, every stripping seam and
+#: ``services.explainability.disown_inherited_trace`` all read the tuple rather
+#: than naming its members. The one place that still names them one by one is
+#: ``trace_marker``, which EMITS rather than removes: each marker is emitted
+#: under its own condition (the run key always, the role when there is one, the
+#: run trace id only when this launch owns the Run), so there is nothing there
+#: to iterate. That asymmetry is the point — a name missing from an emitter
+#: costs a record, a name missing from a remover corrupts the next session's.
 _CLEAR_PREVIOUS_TRACE = (
     f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
     f"unset {' '.join(IDENTITY_ENV_VARS)}; fi"
@@ -437,11 +448,24 @@ def spawn(
         # STARTED on it and its board row joins the Run (the correlation
         # spine). The clear-out leads because what a previous paste exported
         # outlives it — see _CLEAR_PREVIOUS_TRACE for the merge it prevents.
+        #
+        # `--post-root` is what makes the pasted line OWN its Run. A bare
+        # `explainability env` is print-only: it cannot know whether an agent
+        # will ever start on the id it printed, so it posts nothing and a
+        # session seeded from it runs on the fallback — the proxy keys the
+        # Run, the client lane opens its own, two Runs. Here that unknown is
+        # settled by construction: the agent starts on the very next command
+        # in the same shell. So this line, and only this line, opts in, and
+        # the eval posts the root exactly as `--exec` below and `launch` do —
+        # traceparent on the wire, AISQUARE_RUN_TRACE_ID exported. Same
+        # fail-open: a refused root falls back to X-Pipeline-Id, a dead proxy
+        # to untraced, and neither costs the paste.
         if explainability_service.accepts_session_id(binary.binary):
             command = f"{command} {_SESSION_ID_SUBSTITUTION}"
         command = (
             f"{_CLEAR_PREVIOUS_TRACE}; "
-            f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
+            f'eval "$(aisquare explainability env {shlex.quote(role_name)} --post-root)"; '
+            f"{command}"
         )
     if get_state().json_output:
         typer.echo(

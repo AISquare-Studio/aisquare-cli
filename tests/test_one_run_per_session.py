@@ -21,7 +21,9 @@ the launch path once through the CLI.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -872,6 +874,234 @@ def test_explainability_env_prints_the_delta_without_minting_a_run(
         service.TRACE_AGENT_NAME_ENV_VAR,
     }, sorted(exports)
     assert service.RUN_TRACE_ID_ENV_VAR not in result.output
+
+
+def _exports_of(form: str, stdout: str) -> dict[str, str]:
+    """The variables ``env`` printed, from STDOUT only.
+
+    Not ``result.output``: the opt-in path writes its launch line to stderr,
+    and the runner's mixed stream would hand that line to the parser as a
+    variable named after the whole sentence.
+    """
+    if form == "json":
+        env: dict[str, str] = json.loads(stdout)["env"]
+        return env
+    exports: dict[str, str] = {}
+    # Split on the keyword, not on newlines: the header pair is ONE value with
+    # a real newline inside its quotes, which is the whole point of `env`.
+    for chunk in stdout.split("\nexport "):
+        name, _, quoted = chunk.strip().removeprefix("export ").partition("=")
+        if name:
+            (exports[name],) = shlex.split(quoted)
+    return exports
+
+
+@pytest.mark.parametrize("form", ["shell", "json"])
+def test_explainability_env_post_root_owns_the_run_the_next_command_starts(
+    form: str, runner: CliRunner, gateway_target: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The opt-in, for the one caller on a launch's footing.
+
+    The print-only justification — "no agent may ever start on this id" — is
+    true of a bare ``env`` and false of the line ``team spawn`` prints, where
+    the agent starts on the very next command in the same shell. So that line
+    passes ``--post-root`` (pinned by the real-shell tests below), and with it
+    the eval IS a launch in two commands: the root posted to the target's
+    gateway with the target's key, ``traceparent`` on the wire instead of
+    ``X-Pipeline-Id``, the run key exported for the hook, and the launch line
+    on stderr — never stdout, which an eval would execute.
+    """
+    posted: list[tuple[str, str, str, str]] = []
+
+    def fake_post(gateway_url: str, api_key: str, agent_name: str, pipeline_id: str) -> RootReceipt:
+        posted.append((gateway_url, api_key, agent_name, pipeline_id))
+        return RootReceipt(True, "HTTP 202")
+
+    monkeypatch.setattr(service, "_post_run_root", fake_post)
+
+    args = ["explainability", "env", "coder", "--post-root", "--session-id", "sess-env"]
+    result = runner.invoke(
+        app, (["--json", *args] if form == "json" else args), catch_exceptions=False
+    )
+
+    assert result.exit_code == 0, result.output
+    assert posted == [("https://gateway.example", "wk-test", "aisquare-coder", "sess-env")]
+    identity = trace_identity("sess-env")
+    exports = _exports_of(form, result.stdout)
+    headers = exports["ANTHROPIC_CUSTOM_HEADERS"]
+    assert f"traceparent: {identity.traceparent}" in headers
+    assert "X-Pipeline-Id" not in headers, "tier 1 would make the proxy ignore the traceparent"
+    assert "X-AISquare-Key: wk-test" in headers
+    assert exports[service.RUN_TRACE_ID_ENV_VAR] == identity.trace_id
+    assert exports[service.PIPELINE_ID_ENV_VAR] == "sess-env"
+    assert exports.keys() == {
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        service.PIPELINE_ID_ENV_VAR,
+        service.TRACE_AGENT_NAME_ENV_VAR,
+        service.RUN_TRACE_ID_ENV_VAR,
+    }, sorted(exports)
+    assert f"run {identity.trace_id}" in result.stderr, result.stderr
+    assert "explainability:" not in result.stdout, "an eval would execute that line"
+
+
+def test_explainability_env_post_root_falls_back_when_the_root_is_refused(
+    runner: CliRunner, gateway_target: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-open in the launch's direction: a refused root costs the join, not
+    the paste. The pre-ownership form comes out byte for byte — ``X-Pipeline-Id``,
+    no ``traceparent`` — and NO run key is exported, because a key nobody posted
+    would send the hook's join row to a Run that does not exist. This is the
+    state ``test_harness``'s two-pastes scenario starts its paste 2 from."""
+    monkeypatch.setattr(
+        service, "_post_run_root", lambda *_a: RootReceipt(False, "HTTP 409: agent_not_registered")
+    )
+
+    result = runner.invoke(
+        app,
+        ["explainability", "env", "coder", "--post-root", "--session-id", "sess-env"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    exports = _exports_of("shell", result.stdout)
+    assert "X-Pipeline-Id: sess-env" in exports["ANTHROPIC_CUSTOM_HEADERS"]
+    assert "traceparent" not in exports["ANTHROPIC_CUSTOM_HEADERS"]
+    assert service.RUN_TRACE_ID_ENV_VAR not in exports, sorted(exports)
+    assert "root not posted" in result.stderr and "agent_not_registered" in result.stderr
+
+
+# ── the printed `team spawn` command owns its Run ────────────────────────────
+#
+# The default path — the one the CLI itself tells the operator to paste. It is
+# executed for real: the composed line through /bin/sh, `aisquare` from the
+# venv on PATH, a loopback proxy answering /health and a loopback gateway
+# answering /v1/traces/ingest, and a stub `claude` that prints the env and
+# argv it was started with. Nothing in the middle is faked, because the claim
+# is a property of the whole chain (prelude → eval → export → agent), and the
+# earlier cut that put this path on two Runs passed every unit test it had.
+
+
+def _owning_machine(*, proxy_url: str, gateway_url: str) -> None:
+    """A machine where a launch owns its Run: target gateway, key, local proxy."""
+    from aisquare.core.config import ExplainabilitySettings, ExplainabilityTarget
+
+    save_config(
+        AppConfig(
+            explainability=ExplainabilitySettings(
+                enabled=True,
+                proxy_url=proxy_url,
+                target="prod",
+                targets={
+                    "prod": ExplainabilityTarget(gateway_url=gateway_url, proxy_url=proxy_url)
+                },
+            )
+        )
+    )
+    service.store_api_key("wk-test")
+
+
+def _paste(command: str, tmp_path: Path) -> tuple[int, str, dict[str, str]]:
+    """Run the printed command through ``/bin/sh`` against a stub ``claude``.
+
+    Returns ``(returncode, stderr, seen)`` where ``seen`` is what the stub
+    agent was started with: its custom headers, the two markers, and its argv.
+    The child env carries none of the identity — this suite runs inside traced
+    sessions, and the point is what the paste exports, not what it inherited.
+    """
+    import subprocess
+    import sys
+
+    from aisquare.core import spawn
+
+    stub = tmp_path / "claude"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "printf 'headers=[%s]\\nrun=[%s]\\npipeline=[%s]\\nargv=[%s]\\n' "
+        '"$ANTHROPIC_CUSTOM_HEADERS" "$AISQUARE_RUN_TRACE_ID" "$AISQUARE_PIPELINE_ID" "$*"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    venv_bin = Path(sys.executable).parent
+    child_env = {k: v for k, v in os.environ.items() if k not in spawn.IDENTITY_ENV_VARS}
+    child_env["PATH"] = f"{tmp_path}:{venv_bin}:/usr/bin:/bin"
+    proc = subprocess.run(
+        ["/bin/sh", "-c", command], capture_output=True, text=True, timeout=120, env=child_env
+    )
+    seen = {
+        key: match.group(1)
+        for key in ("headers", "run", "pipeline", "argv")
+        if (match := re.search(rf"{key}=\[(.*?)\]", proc.stdout, re.S))
+    }
+    return proc.returncode, proc.stderr, seen
+
+
+def _printed_spawn(runner: CliRunner) -> str:
+    printed = runner.invoke(app, ["--json", "team", "spawn", "coder", "--no-probe"])
+    assert printed.exit_code == 0, printed.output
+    command: str = json.loads(printed.stdout)["command"]
+    assert 'eval "$(aisquare explainability env coder --post-root)"; ' in command, command
+    return command
+
+
+def test_the_printed_spawn_command_owns_its_run_through_a_real_shell(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """ONE Run for a pasted spawn: the eval posts the root, the agent starts
+    with ``traceparent`` naming it and the run key beside it, on the id the
+    root carries as ``agent.run_id`` — and that id is the one the agent's own
+    ``--session-id`` is pinned to, so the board row joins the same Run."""
+    from tests.proxy_stub import healthy_proxy
+    from tests.test_explainability_ops import _gateway
+
+    server, gateway_url, posted = _gateway({"/v1/traces/ingest": (202, {"status": "accepted"})})
+    try:
+        with healthy_proxy() as proxy_url:
+            _owning_machine(proxy_url=proxy_url, gateway_url=gateway_url)
+            code, stderr, seen = _paste(_printed_spawn(runner), tmp_path)
+    finally:
+        server.shutdown()
+
+    assert code == 0, stderr
+    pipeline_id = seen["pipeline"]
+    assert re.fullmatch(r"[0-9a-f-]{36}", pipeline_id), seen
+    identity = trace_identity(pipeline_id)
+    assert seen["run"] == identity.trace_id
+    assert f"traceparent: {identity.traceparent}" in seen["headers"]
+    assert "X-Pipeline-Id" not in seen["headers"]
+    assert "X-AISquare-Key: wk-test" in seen["headers"]
+    assert f"--session-id {pipeline_id}" in seen["argv"], "the correlation spine"
+    assert f"run {identity.trace_id}" in stderr, stderr
+    (root,) = [hit for hit in posted if hit["path"] == "/v1/traces/ingest"]
+    assert root["body"]["trace_id"] == identity.trace_id
+    (span,) = root["body"]["spans"]
+    assert span["parent_span_id"] is None and span["span_id"] == identity.span_id
+    assert span["attributes"]["agent.name"] == "aisquare-coder"
+    assert span["attributes"]["agent.run_id"] == pipeline_id
+
+
+def test_the_printed_spawn_command_still_launches_when_the_gateway_refuses(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """The paste path's fail-open, for real: the gateway says no, the agent
+    still starts — traced on the pre-ownership form, no run key exported."""
+    from tests.proxy_stub import healthy_proxy
+    from tests.test_explainability_ops import _gateway
+
+    server, gateway_url, _ = _gateway({"/v1/traces/ingest": (409, {"detail": "not registered"})})
+    try:
+        with healthy_proxy() as proxy_url:
+            _owning_machine(proxy_url=proxy_url, gateway_url=gateway_url)
+            code, stderr, seen = _paste(_printed_spawn(runner), tmp_path)
+    finally:
+        server.shutdown()
+
+    assert code == 0, stderr
+    assert f"X-Pipeline-Id: {seen['pipeline']}" in seen["headers"]
+    assert "traceparent" not in seen["headers"]
+    assert seen["run"] == "", "a key nobody posted would misfile the hook's join"
+    assert f"--session-id {seen['pipeline']}" in seen["argv"]
+    assert "root not posted" in stderr, stderr
 
 
 def test_spawn_exec_still_posts_the_root_it_is_about_to_fill(

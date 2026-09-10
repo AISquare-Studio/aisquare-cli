@@ -1019,7 +1019,7 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
         'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset ANTHROPIC_BASE_URL '
         "ANTHROPIC_CUSTOM_HEADERS AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME "
         "AISQUARE_RUN_TRACE_ID; fi; "
-        'eval "$(aisquare explainability env coder)"; AISQUARE_ROLE=coder '
+        'eval "$(aisquare explainability env coder --post-root)"; AISQUARE_ROLE=coder '
     )
     assert "X-Pipeline-Id" not in payload["command"]
 
@@ -1029,17 +1029,24 @@ def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
 ) -> None:
     """Two pastes, one Run — the half a hand-written unset list kept missing.
 
-    Paste 1 posts a root and exports ``AISQUARE_RUN_TRACE_ID=T1``; the agent
-    exits, the shell keeps it. Paste 2 clears and re-wires, but its own root
-    post is refused or times out, so ``trace_marker`` emits no run trace id of
-    its own and nothing overwrites T1. Session 2's SessionStart hook then calls
-    ``run_trace_id()`` and writes its join row against session 1's Run — and
-    ``disown_inherited_trace`` cannot save it, because the clear-out already
-    removed the run key it keys off, so it returns early.
+    Paste 1 is the printed command, whose eval is ``explainability env coder
+    --post-root`` (pinned below — a bare ``env`` is print-only and could never
+    export the key this scenario turns on): it posts a root and exports
+    ``AISQUARE_RUN_TRACE_ID=T1``; the agent exits, the shell keeps it. Paste 2
+    clears and re-wires, but its own root post is refused or times out, so
+    ``trace_marker`` emits no run trace id of its own and nothing overwrites T1
+    (``test_one_run_per_session`` pins that refused-root fallback for the
+    opt-in: exit 0, ``X-Pipeline-Id``, no run key). Session 2's SessionStart
+    hook then calls ``run_trace_id()`` and writes its join row against session
+    1's Run — and ``disown_inherited_trace`` cannot save it, because the
+    clear-out already removed the run key it keys off, so it returns early.
 
     So the prelude must leave NO marker behind, whether or not the second wiring
-    owns a trace of its own. Run through real ``sh``, which also proves the
-    snippet is valid POSIX shell — reading the string cannot.
+    owns a trace of its own. The stale env is synthesised rather than produced
+    by a real paste 1: the prelude is the unit under test, and it must clear
+    what ANY earlier paste left, not what one particular run of it left. Run
+    through real ``sh``, which also proves the snippet is valid POSIX shell —
+    reading the string cannot.
     """
     import subprocess
     import sys
@@ -1050,8 +1057,10 @@ def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
     runner, app = _cli()
     result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
-    prelude = json.loads(result.output)["command"].split("; eval ")[0]
+    prelude, _, evaluated = json.loads(result.output)["command"].partition("; eval ")
     assert prelude.startswith('if [ -n "'), prelude
+    # Paste 1 can only have exported T1 because the composed line opts in.
+    assert evaluated.startswith('"$(aisquare explainability env coder --post-root)"'), evaluated
 
     # Paste 1's exports, still in the shell. The second wiring owns no trace,
     # so nothing after the prelude re-exports any of them.
@@ -1105,7 +1114,7 @@ def test_spawn_printed_command_omits_the_flag_an_agent_may_not_speak(
     result = runner.invoke(app, argv)  # type: ignore[arg-type]
     command = json.loads(result.output)["command"]
     assert "--session-id" not in command
-    assert 'eval "$(aisquare explainability env coder)"' in command, "it still traces"
+    assert 'eval "$(aisquare explainability env coder --post-root)"' in command, "it still traces"
 
 
 def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
@@ -1263,14 +1272,14 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     runner, app = _cli()
     printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     command = json.loads(printed.output)["command"]
-    assert 'eval "$(aisquare explainability env coder)"; ' in command
+    assert 'eval "$(aisquare explainability env coder --post-root)"; ' in command
 
     venv_bin = Path(sys.executable).parent
     child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
 
     # Premise: refusal → stderr only, stdout EMPTY, nonzero exit.
     refusal = subprocess.run(
-        [str(venv_bin / "aisquare"), "explainability", "env", "coder"],
+        [str(venv_bin / "aisquare"), "explainability", "env", "coder", "--post-root"],
         capture_output=True,
         text=True,
         timeout=60,

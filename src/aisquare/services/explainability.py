@@ -72,7 +72,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from aisquare.core import insights, outbox, paths
+from aisquare.core import insights, outbox, paths, spawn
 from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.store import store_session
 
@@ -303,16 +303,30 @@ def disown_inherited_trace(env: MutableMapping[str, str]) -> str | None:
 
     ``None`` when there was nothing of ours to disown, which is every ordinary
     launch.
+
+    WHAT IT REMOVES IS :data:`core.spawn.IDENTITY_ENV_VARS`, the same tuple
+    every stripping seam removes and the same one the printed ``team spawn``
+    prelude unsets — not a list of names written out here. The two questions
+    this function asks are different and only one of them is an inventory:
+    "are these ``ANTHROPIC_*`` ours?" is answered by :data:`RESERVED_ENV_VARS`
+    plus the run key above, and stays spelled out because it is a
+    discriminator with a reason per name; "what is the identity?" is answered
+    by the tuple, because that answer grows. It grew once already:
+    ``AISQUARE_RUN_TRACE_ID`` was added to the wiring and every hand-written
+    copy of the identity had to be found and widened by hand, and the one in
+    the spawn prelude was missed — a session that inherited a stale run trace
+    id wrote its session→Run join against the previous session's Run. This
+    loop was widened correctly on that pass; it is derived now so the next
+    name needs no pass at all.
     """
     parent_run = (env.get(PIPELINE_ID_ENV_VAR) or "").strip()
     if not parent_run or not any(env.get(name) for name in RESERVED_ENV_VARS):
         return None
-    for name in (
-        *RESERVED_ENV_VARS,
-        PIPELINE_ID_ENV_VAR,
-        TRACE_AGENT_NAME_ENV_VAR,
-        RUN_TRACE_ID_ENV_VAR,
-    ):
+    # Read off the module, not bound at import, so the derivation is testable:
+    # `tests/test_spawn_seams.py` adds a name to the tuple and asserts this
+    # pops it. A `from … import` here would coincidentally match the tuple
+    # today and silently stop following it tomorrow.
+    for name in spawn.IDENTITY_ENV_VARS:
         env.pop(name, None)
     return parent_run
 
@@ -619,14 +633,17 @@ def wire_session(
     the spot — a parentless, already-ended span the gateway files as a
     ``completed`` Run of one 0 ms span and zero tokens, named after the role.
     Launch and spawn keep the default because they are about to start the
-    agent that fills it. ``explainability env`` passes ``False`` because its
-    whole job is to print exports: it cannot know whether an agent will ever
-    start on the id it printed, and without a session id every invocation
-    mints a fresh one — a second terminal, a shell rc, a ``--json`` reader, an
-    operator inspecting the delta — each of which used to leave an empty Run
-    behind, after up to three seconds of WAN I/O behind a print. The cost of
-    the mode is the documented fallback (the proxy keys the Run; the client
-    lane opens its own), never a network call.
+    agent that fills it. ``explainability env`` passes ``False`` by default
+    because its whole job is to print exports: it cannot know whether an agent
+    will ever start on the id it printed, and without a session id every
+    invocation mints a fresh one — a second terminal, a shell rc, a ``--json``
+    reader, an operator inspecting the delta — each of which used to leave an
+    empty Run behind, after up to three seconds of WAN I/O behind a print. The
+    cost of the mode is the documented fallback (the proxy keys the Run; the
+    client lane opens its own), never a network call. Its ``--post-root``
+    opt-in — what the printed ``team spawn`` command evals — takes the default
+    again, because on that line the agent starts on the very next command in
+    the same shell, so the unknown that justifies print-only is settled.
 
     ``session_id`` becomes the run's ``X-Pipeline-Id`` when given — pass the
     agent session id so board rows and dashboard Runs share a key; otherwise a

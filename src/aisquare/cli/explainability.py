@@ -461,6 +461,18 @@ def env(
         typer.Option("--session-id", help="Key the Run to this session id."),
     ] = None,
     target_name: Annotated[str | None, _TARGET_OPTION] = None,
+    post_root: Annotated[
+        bool,
+        typer.Option(
+            "--post-root",
+            help=(
+                "Post the Run's root first, so the agent the NEXT command in this shell "
+                "starts owns its Run (one Run per session). Only for a line that starts "
+                "the agent right after, which is what the printed `team spawn` command "
+                "is; a bare eval with this flag leaves an empty Run on the dashboard."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Print shell exports that trace the next agent run from this terminal.
 
@@ -482,8 +494,8 @@ def env(
     what makes printing it acceptable at all. A loopback proxy needs no key and
     the header is omitted entirely there.
 
-    THIS COMMAND WRITES NOTHING TO THE GATEWAY. The delta is the proxy-keyed
-    form — ``X-Pipeline-Id``, never ``traceparent``, and no
+    BY DEFAULT THIS COMMAND WRITES NOTHING TO THE GATEWAY. The delta is the
+    proxy-keyed form — ``X-Pipeline-Id``, never ``traceparent``, and no
     ``AISQUARE_RUN_TRACE_ID`` — because the Run's root is not posted. Posting
     it is how a launch OWNS its Run, and it mints a dashboard Run on the spot:
     one parentless, already-ended span that the gateway files as a
@@ -498,22 +510,46 @@ def env(
     pre-ownership shape, and it is exactly what a print with no side effects
     can promise. ``aisquare launch`` and ``team spawn --exec`` still post the
     root, because they are about to start the agent that fills it.
+
+    ``--post-root`` IS THE OPT-IN, for the one caller on a launch's footing:
+    the command ``team spawn`` prints, ``eval "$(aisquare
+    explainability env <role> --post-root)"; claude …``. There "will an agent
+    ever start on this id" is not unknowable — the agent starts on the very
+    next command in the same shell — so the eval posts the root exactly as a
+    launch does, the pasted session owns its Run (``traceparent`` on the wire,
+    ``AISQUARE_RUN_TRACE_ID`` exported) and the launch line goes to stderr,
+    where an eval leaves it for the human. Same fail-open, same direction: a
+    refused root falls back to ``X-Pipeline-Id`` with no run key exported, a
+    dead proxy to untraced, and neither costs the paste. The flag is visible
+    rather than hidden because the line that carries it is printed for a
+    human to read, and a flag the CLI's own ``--help`` disowns is a trap; the
+    help text says when it is wrong to add by hand.
     """
     settings = load_config().explainability
     target = ops.resolve_target(settings, target_name)
-    # Print-only: this command posts NO Run root, so it has no use for the
-    # target's gateway at all — the key is still resolved, because a hosted
-    # proxy authenticates on it. See the docstring for what a post would cost.
+    # Print-only by default: no Run root is posted, so the target's gateway is
+    # not even handed over — the key still is, because a hosted proxy
+    # authenticates on it. `--post-root` takes the path `launch` takes: gateway,
+    # key, root, fail-open. See the docstring for what a post costs and why
+    # only a line that starts the agent next may pay it.
     wiring = wire_session(
         ops.effective_settings(settings, target_name),
         role,
         session_id=session_id,
         base_env=dict(os.environ),
         api_key=target.api_key,
-        post_root=False,
+        gateway_url=target.gateway_url if post_root else None,
+        post_root=post_root,
     )
     if not wiring.traced:
         fail(wiring.reason, error="untraced")
+    if post_root:
+        # A write happened, or was refused: say what `launch` says, on stderr.
+        # Stdout is the exports and nothing else may land there — an eval would
+        # execute it — and stderr is exactly where the substitution leaves a
+        # line for the human, so the pasted command reports its Run the way
+        # `--exec` does. The default stays silent: it changed nothing.
+        typer.echo(f"explainability: {wiring.reason}", err=True)
     exports = dict(wiring.env)
     if wiring.pipeline_id:
         # Marks the ANTHROPIC_* beside it as OURS, so a second paste in the

@@ -1379,6 +1379,7 @@ def _check_fleet(
             elif facts.dead:
                 exited.append(agent)
         problems: list[str] = []
+        server_down = False
         by_socket: dict[str, list[FleetAgent]] = {}
         for agent in gone:
             by_socket.setdefault(agent.tmux_socket, []).append(agent)
@@ -1387,6 +1388,11 @@ def _check_fleet(
             if servers[sock].list_sessions():
                 problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
             else:
+                # A plain `reap` refuses to mark rows on a server that does not
+                # answer (it may be alive under another TMUX_TMPDIR), so the fix
+                # it used to prescribe here did nothing — measured: 10 rows
+                # reported, `reap` reconciled 0. The flag is the operator's word.
+                server_down = True
                 problems.append(
                     f"{len(agents)} recorded live but the private tmux server "
                     f"'{sock}' is not running: {listed}"
@@ -1396,10 +1402,12 @@ def _check_fleet(
                 f"{len(exited)} exited but still recorded live: {_fleet_labels(exited, names)}"
             )
         if problems:
+            flag = " --server-down" if server_down else ""
             return _warn(
                 name,
                 "; ".join(problems),
-                "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap",
+                "Reconcile the rows with tmux (ended, lost, merged worktrees): "
+                f"aisquare fleet reap{flag}",
             )
         sessions = servers[socket].list_sessions()
         if live:

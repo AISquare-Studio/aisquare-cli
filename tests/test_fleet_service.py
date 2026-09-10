@@ -1243,6 +1243,61 @@ def test_an_unreachable_tmux_server_is_not_read_as_every_pane_gone(
     assert [a.id for a in fleet_service.reap(project).lost] == [agent.id]
 
 
+def test_reap_server_down_marks_rows_on_a_silent_server_lost(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix doctor prescribes after a reboot has to exist.
+
+    Measured on the reporting box: doctor said "10 recorded live but the private
+    tmux server 'asq' is not running" and pointed at ``fleet reap``, which
+    reconciled 0 — the refusal above is correct by default and left the
+    operator with no command that acted. ``--server-down`` is their word that
+    the server is gone; the rows on it are then lost, and nothing else changes.
+    """
+    agent = fleet_service.spawn(project, "coder").agent
+    dead = _unreachable_server()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+    assert fleet_service.reap(project).lost == [], "the default still refuses"
+    report = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in report.lost] == [agent.id]
+    assert report.ended == [], "lost, never ended: no exit status was ever observed"
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+
+
+def test_reap_server_down_only_touches_the_socket_that_is_silent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows span sockets; the flag vouches for the silent one, not for all of them."""
+    _settings(monkeypatch, tmux_socket="asq-old")
+    on_old = _coder(project)
+    _settings(monkeypatch, tmux_socket="asq-new")
+    on_new = _coder(project)
+    dead = _unreachable_server()
+
+    def per_socket(config: FleetSettings | None = None) -> TmuxServer:
+        return dead if config is not None and config.tmux_socket == "asq-old" else tmux
+
+    monkeypatch.setattr(fleet_service, "server", per_socket)
+    report = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in report.lost] == [on_old.id]
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [on_new.id]
+
+
+def test_reap_server_down_still_marks_nothing_without_a_tmux_binary(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """No tmux at all is a question that could not be asked, not a silent server."""
+    coder = _coder(project)
+    tmux.installed = False
+    report = fleet_service.reap(project, server_down=True)
+    assert report.lost == [] and report.ended == []
+    tmux.installed = True
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+
+
 def test_unknown_blames_tmux_first_and_the_missing_hooks_second(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

@@ -377,6 +377,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **`fleet reap --server-down` — the fix `doctor` prescribes now exists.** After
+  a reboot (or `kill-server`) `doctor` reported "N recorded live but the private
+  tmux server 'asq' is not running" and pointed at `aisquare fleet reap`, which
+  reconciled nothing: a server that does not answer is, by design, not evidence
+  that its panes are dead — it may be alive under another `TMUX_TMPDIR`. Measured
+  on one box: 10 rows reported, 0 reaped, the same advice printed again. The flag
+  is the operator's word that the server is genuinely gone; with it every live row
+  on a socket that does not answer is marked lost. A missing tmux *binary* still
+  marks nothing — that is a question that could not be asked, not a silent server
+  — and `doctor` names the flag only in the server-not-running branch.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

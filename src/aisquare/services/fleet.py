@@ -1435,7 +1435,7 @@ def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxE
     return window.dead_status if window is not None else None
 
 
-def reap(project: ProjectInfo | None = None) -> ReapReport:
+def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
     """Record dead panes as ended, mark vanished panes lost, remove merged worktrees.
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
@@ -1443,6 +1443,15 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
     still be running. That is decided per SOCKET — each row is asked of the
     server it was started on — so an operator who changed ``[fleet]
     tmux_socket`` does not thereby lose every agent still running on the old one.
+
+    ``server_down`` is the operator's word that a server which does not answer
+    is genuinely gone (a reboot swept ``/tmp``; ``kill-server``), not merely
+    unreachable from this shell (a different ``TMUX_TMPDIR`` between the
+    spawning shell and this one is the case that made the default refuse).
+    With it, every live row on a socket whose server does not answer is marked
+    lost — the panes of a server that is not running cannot be running either.
+    A tmux BINARY that is missing still marks nothing: that is not a server
+    that was asked and stayed silent, it is a question that could not be put.
     """
     config = settings()
     report = ReapReport()
@@ -1456,9 +1465,16 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
             if live:
                 tmux_session = session_name(current.codename) if current.codename else None
                 views = _observe_sockets(live, tmux_session, config)
+                down = {
+                    socket
+                    for socket, view in views.items()
+                    if view is None and server_down and _server_is_down(server_for(socket, config))
+                }
                 for agent in live:
                     observed = views.get(agent.tmux_socket)
                     if observed is None:
+                        if agent.tmux_socket in down:
+                            report.lost.append(store.end_fleet_agent(agent.id, exit_status=None))
                         continue  # that socket could not be asked: nothing is marked
                     pane = observed.get(agent.pane_id)
                     if pane is None:
@@ -1471,6 +1487,20 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
     for ended in report.ended:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited")
     return report
+
+
+def _server_is_down(srv: TmuxServer) -> bool:
+    """A tmux that is installed but has no server answering on this socket.
+
+    The one state ``--server-down`` may act on. A missing binary is excluded on
+    purpose: with no tmux to ask, "down" and "unknown" cannot be told apart, and
+    the flag is the operator vouching for the former.
+    """
+    try:
+        srv.binary()
+    except TmuxUnavailable:
+        return False
+    return not srv.answers()
 
 
 def _emit_exit(store: ContextStore, agent: FleetAgent) -> None:

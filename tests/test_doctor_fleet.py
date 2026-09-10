@@ -525,7 +525,9 @@ def test_fleet_check_warns_when_the_private_server_is_not_running(
     assert check.status is CheckStatus.warn
     assert "private tmux server 'asq' is not running" in check.detail
     assert "manager" in check.detail
-    assert check.fix and "aisquare fleet reap" in check.fix
+    assert check.fix and "aisquare fleet reap --server-down" in check.fix, (
+        "a plain reap refuses a silent server by design; the advice must be the flag"
+    )
 
 
 def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_path: Path) -> None:
@@ -539,6 +541,7 @@ def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_pat
     assert check.status is CheckStatus.warn
     assert "1 exited but still recorded live" in check.detail and "tester-1" in check.detail
     assert check.fix and "fleet reap" in check.fix
+    assert "--server-down" not in check.fix, "the server answered; the flag is for silence"
 
 
 def test_fleet_check_ignores_ended_rows(home: Path, tmp_path: Path) -> None:

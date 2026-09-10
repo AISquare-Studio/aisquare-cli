@@ -393,6 +393,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   always comes back with the wheel; a pane in tmux copy mode stays tmux's;
   everything else scrolls tmux history as before. A pane that dies under the
   wheel reports `(pane gone)` like every other path.
+- **Agent panes scroll from the keyboard, and show that they are scrolled.**
+  Reported from WSL2 + Windows Terminal (2026-09-08): "scroll not working". The
+  wheel was the only way into a pane's history, and a scrolled pane looked
+  identical to a quiet live one. Now shift+PgUp / shift+PgDn — or alt+PgUp /
+  alt+PgDn, since many terminals keep shift's for their own scrollback — scroll
+  a screen at a time, shift+Home and shift+End go to the top and back to live,
+  through the same owner decision as the wheel: on a Claude Code pane they
+  scroll Claude's transcript rather than pulling stale shell lines over it. A
+  `[↑k/history]` marker sits in the top-right corner while the view is in tmux
+  history, tracking history that grows under a frozen view, and leaves with
+  the offset. None of the keys reach the agent; any other key still returns
+  the view to live.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

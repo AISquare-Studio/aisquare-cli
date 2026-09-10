@@ -126,8 +126,8 @@ That's the whole setup. From inside the UI:
    (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a live
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU**, **💤 exited**.
    Click one to see and drive its session.
-4. **Press `F12`** to hand focus back to the sidebar — it's the one key a pane
-   never swallows. There, `t` picks a theme and `q` quits. **The agents keep
+4. **Press `F12`** to hand focus back to the sidebar — the pane swallows only it
+   and the scroll keys (shift/alt+PgUp/PgDn, shift+Home/End). There, `t` picks a theme and `q` quits. **The agents keep
    running**; reopen `asq` and it re-attaches to what it finds.
 
 The manager never writes code and never merges — a human does that.

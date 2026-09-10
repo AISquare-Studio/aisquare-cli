@@ -104,7 +104,9 @@ def current(*, base: str, key: str, now: datetime | None = None) -> MeResult:
     return result
 
 
-def fetch(*, base: str, key: str, cache: bool = True) -> MeResult:
+def fetch(
+    *, base: str, key: str, cache: bool = True, deadline_ms: int = DESCRIPTOR_DEADLINE_MS
+) -> MeResult:
     """One GET, one attempt, every failure its own detail. Never raises.
 
     ``cache=False`` answers without leaving a file behind — ``doctor`` uses it,
@@ -112,11 +114,13 @@ def fetch(*, base: str, key: str, cache: bool = True) -> MeResult:
     CLEARS a cached refusal either way: the refusal is a claim about the server
     that this answer has just disproved, and leaving it would make ``doctor``
     print a healthy identity while every hook kept reading the stale negative.
+    ``deadline_ms`` exists for ``doctor`` too, which bounds its probes tighter
+    than the session-start path does.
     """
     result = ci_client.exchange(
         f"{base}{ME_PATH}",
         method="GET",
-        deadline_ms=DESCRIPTOR_DEADLINE_MS,
+        deadline_ms=deadline_ms,
         headers=ci_client.headers_for(key, json_body=False),
         max_body=MAX_ME_BYTES,
     )

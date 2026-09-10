@@ -13,6 +13,19 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Progress, 2026-09-10.** Everything in this document is built. The client
+> half (C1–C4) landed first; C3's two identity lines and C2a's hidden
+> `aisquare ci bind-workspace` are in as of this revision, and the server half
+> (the identity-provider adapter, the `aisq_` branch, memberships as the trusted
+> session mapping, the run-scoped workspace check, `CITEST_IDP_*`) shipped in
+> `aisquare-ci` #141 together with `CITEST_WORKSPACE_ID`, the variable that lets
+> a controller publish a run in a workspace a real developer is a member of.
+> The identity provider's share (`AISquare-Studio-BE` #3420: the `aisquare-ci`
+> service client, `sub` on introspection, `aisq_` on both authorize views, the
+> bulk `GET /api/v2/iam/me/access/`) is in too. What remains is deployment
+> (none of the three is deployed yet) and **C5**, which waits on server item
+> S10 exactly as before. The earlier progress note follows for the record.
+>
 > **Progress, 2026-09-08.** The joint contract and the client half of C1–C4 are
 > built and green; the identity-provider adapter is the remaining server work.
 >
@@ -42,10 +55,13 @@ pasted, so `test_documented_commands.py` leaves it alone.
 > different source was winning, and a scrubber that tracked the winner would
 > leak the loser.
 >
-> **C3 (doctor) is partly done.** The `ci test bed` line now names which
-> credential is in use — "experiment token from `AISQUARE_CI_KEY`" or "signed in
-> as <email> (aisquare login)" — never its value. The two dedicated `ci
-> identity` / `ci workspace` lines are still owed.
+> **C3 (doctor) is done.** The `ci test bed` line names which credential is in
+> use — "experiment token from `AISQUARE_CI_KEY`" or "signed in as <email>
+> (aisquare login)" — never its value. Signed in with nothing exported, the run
+> comes from `GET /v1/me` and two lines follow: `ci identity` (the principal the
+> server resolved, the workspace count) and `ci workspace` (bound workspace,
+> role, run), each warning with the command that fixes it. Both probes are
+> bounded to three seconds and cache nothing.
 >
 > **C2 (`GET /v1/me` at session start) is done, with the bound the plan did not
 > ask for.** `services/ci_me.py` fetches once per bearer, caches for five
@@ -56,11 +72,14 @@ pasted, so `test_documented_commands.py` leaves it alone.
 > something it planned. The cache is keyed by a hash of the bearer, so signing
 > in as somebody else cannot serve the previous identity's routing.
 >
-> **C2a (workspace binding) is a config field, not yet a command.**
-> `[experiment].workspace` binds a project to one workspace; a developer in a
-> single workspace needs nothing. Several workspaces and none bound **refuses to
-> guess** and says to set the field. The hidden `aisquare ci bind-workspace`
-> convenience is still owed.
+> **C2a (workspace binding) is done.** `[experiment].workspace` binds a
+> project to one workspace; a developer in a single workspace needs nothing.
+> Several workspaces and none bound **refuses to guess** and names the choice.
+> The hidden `aisquare ci bind-workspace [ws_…]` sets it from the list
+> `GET /v1/me` returns (uncached), refuses a workspace the user is not in, binds
+> the only one without being told, and `--clear` forgets it. It is the one
+> config write on the CI surface, and it lives in `cli/ci.py` where the
+> call-graph guard can see it.
 >
 > **C5 (retire the override) is unchanged and still waiting on server item S10.**
 >

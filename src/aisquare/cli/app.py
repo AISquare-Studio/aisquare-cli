@@ -18,6 +18,7 @@ from aisquare.cli import (
     agents,
     auth,
     capture,
+    ci,
     connectors,
     context,
     enforce,
@@ -156,6 +157,7 @@ app.command("serve")(serve.serve)
 app.add_typer(fleet.app, name="fleet")
 app.command("ui")(fleet.ui)
 app.add_typer(hook.app, name="hook", hidden=True)
+app.add_typer(ci.app, name="ci", hidden=True)
 # Visible: unlike the roadmap groups above, every leaf here does something on a
 # stock machine — `enable` is the one command that turns tracing on, and the
 # rest report or wire it. A surface an operator has to be told exists is not an

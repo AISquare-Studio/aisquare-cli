@@ -23,7 +23,6 @@ READER = Path(iam.__file__).resolve()
 
 #: Existing HTTP clients outside the sign-in flow.
 PRE_EXISTING_HTTP = {
-    "services/ci_client.py",
     "services/explainability.py",
     "services/explainability_ops.py",
     "services/mcp_server.py",

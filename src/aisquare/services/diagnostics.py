@@ -34,7 +34,7 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import ci_client, ci_descriptor, ci_me, ci_override, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
@@ -1009,7 +1009,9 @@ def _experiment_checks() -> list[DoctorCheck]:
     key, key_source = ci_client.api_key_and_source()
     raw_run = ci_client.raw_run_id()
     run = ci_client.run_id()
+    signed_in = bool(key) and key_source == ci_client.SIGNED_IN_SOURCE
     checks: list[DoctorCheck] = []
+    identity: list[DoctorCheck] = []
     if not key:
         problem = ci_client.api_key_problem()
         checks.append(
@@ -1029,15 +1031,7 @@ def _experiment_checks() -> list[DoctorCheck]:
                 "token: export AISQUARE_CI_KEY=…",
             )
         )
-    elif not raw_run:
-        checks.append(
-            _warn(
-                name,
-                f"enabled for {shown}, but no run id — every prompt records no_run",
-                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
-            )
-        )
-    elif not run:
+    elif raw_run and not run:
         checks.append(
             _warn(
                 name,
@@ -1046,12 +1040,48 @@ def _experiment_checks() -> list[DoctorCheck]:
                 "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
             )
         )
+    elif not raw_run and not signed_in:
+        checks.append(
+            _warn(
+                name,
+                f"enabled for {shown}, but no run id — every prompt records no_run",
+                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
+            )
+        )
+    elif not raw_run:
+        # Signed in and nothing exported: the run is whatever GET /v1/me says
+        # is published in the bound workspace, which is the path a real
+        # developer takes. The identity lines below carry the reasons.
+        identity, resolved = _identity_checks(base, key)
+        run = resolved or ""
+        if run:
+            checks.append(
+                _ok(
+                    name,
+                    f"enabled for {shown}, run {run} from GET /v1/me, {_bearer_note(key_source)}",
+                )
+            )
+        else:
+            checks.append(
+                _warn(
+                    name,
+                    f"enabled for {shown}, but no run resolved for the signed-in user — "
+                    "every prompt records no_run",
+                    "See the ci identity and ci workspace lines",
+                )
+            )
     else:
         # Which credential is in play, never its value. An authentication
         # failure is the commonest thing to debug here and "whose token is this"
         # was unanswerable from the output: an operator with both an experiment
         # token exported and a signed-in session had no way to see which one won.
         checks.append(_ok(name, f"enabled for {shown}, run {run}, {_bearer_note(key_source)}"))
+        if signed_in:
+            # An exported run wins over the server's routing; the identity is
+            # still worth a line, because "who does CI think I am" is the
+            # question this path exists to answer.
+            identity, _resolved = _identity_checks(base, key)
+    checks.extend(identity)
     checks.append(_check_ci_endpoint(base, shown))
     descriptor: DeliveryDescriptor | None = None
     if key and run:
@@ -1093,6 +1123,78 @@ def _bearer_note(source: str) -> str:
 _CI_PROBE_MS = 3_000
 """Doctor must stay fast; an unreachable endpoint is the common case here, and
 the transport's wall-clock deadline is what bounds each probe."""
+
+
+def _identity_checks(base: str, key: str) -> tuple[list[DoctorCheck], str | None]:
+    """The two signed-in lines: who CI resolves the bearer to, and where it asks.
+
+    ``ci identity`` answers "who does CI think I am" from ``GET /v1/me``, fetched
+    without caching (a diagnostic must not create state) and bounded like every
+    other probe here. ``ci workspace`` applies the same routing the hooks apply
+    — ``ci_me.run_for`` over the bound ``experiment.workspace`` — so the run it
+    prints is the run a session would use, and the fix for each way that can
+    fail names the command that fixes it. Returns the lines and the run.
+    """
+    answer = ci_me.fetch(base=base, key=key, cache=False, deadline_ms=_CI_PROBE_MS)
+    if answer.me is None:
+        if answer.status == 401:
+            return [
+                _warn(
+                    "ci identity",
+                    "token rejected (401) — the signed-in session has expired or was revoked",
+                    "Sign in again: aisquare login",
+                )
+            ], None
+        return [
+            _warn(
+                "ci identity",
+                f"GET /v1/me did not answer: {answer.detail}",
+                "Check the ci endpoint line; if the server is down, AISQUARE_CI=0 turns the "
+                "hooks off meanwhile",
+            )
+        ], None
+    me = answer.me
+    count = len(me.workspaces)
+    plural = "" if count == 1 else "s"
+    lines = [
+        _ok(
+            "ci identity",
+            f"{_signed_in_as(me.auth_subject)} — CI resolves {me.principal_id} in "
+            f"{count} workspace{plural}",
+        )
+    ]
+    bound = ci_client.workspace_id() or None
+    run, detail = ci_me.run_for(me, bound)
+    member = me.membership(bound)
+    if run and member is not None:
+        lines.append(_ok("ci workspace", f"{member.workspace_id} ({member.role}), run {run}"))
+        return lines, run
+    if "none is bound" in detail:
+        fix = "Bind this project to one: aisquare ci bind-workspace <ws_…>"
+    elif "not a member" in detail:
+        fix = "Bind this project to a workspace you are in: aisquare ci bind-workspace"
+    elif "no run published" in detail:
+        fix = "Ask the controller to publish a run there; until then every prompt records no_run"
+    else:
+        fix = "Join a workspace in AISquare Studio; until then every prompt records no_run"
+    lines.append(_warn("ci workspace", detail, fix))
+    return lines, None
+
+
+def _signed_in_as(auth_subject: str) -> str:
+    """ "signed in as <email>" when the session knows one, else the server's own
+    issuer-qualified subject — never the token, in either branch."""
+    try:
+        from aisquare.services import iam
+
+        session = iam.current_session()
+    except Exception:
+        session = None
+    if session is not None and session.email:
+        return f"signed in as {session.email}"
+    if session is not None and session.source == "env":
+        return f"signed in via AISQUARE_TOKEN ({auth_subject})"
+    return f"signed in ({auth_subject})"
 
 
 def _check_ci_endpoint(base: str, shown: str) -> DoctorCheck:

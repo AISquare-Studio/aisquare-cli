@@ -114,6 +114,32 @@ def _can_fail(function: ast.FunctionDef) -> bool:
     return False
 
 
+def _skips_itself_at_module_level(path: Path) -> bool:
+    """Whether ``path`` calls ``pytest.skip(..., allow_module_level=True)``.
+
+    Such a file contributes NO node ids on a platform it opts out of — pytest
+    skips the module before collecting anything — so every test in it would read
+    as "audited and never executed". That is a wrong reading: the module is not
+    part of this platform's suite at all.
+
+    Detected from the AST rather than by importing, and by this EXACT call
+    rather than by "collected nothing": a file that collects nothing for any
+    other reason — a broken walk, a lost decorator — still has to fail the
+    phantom check, which is the whole point of it.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        named_skip = (isinstance(target, ast.Attribute) and target.attr == "skip") or (
+            isinstance(target, ast.Name) and target.id == "skip"
+        )
+        if named_skip and any(kw.arg == "allow_module_level" for kw in node.keywords):
+            return True
+    return False
+
+
 def _test_functions() -> list[tuple[str, ast.FunctionDef]]:
     """Every test in the suite, named the way PYTEST names it.
 
@@ -299,7 +325,14 @@ def test_the_sweep_sees_exactly_what_pytest_runs() -> None:
         "Every assertion in this file is therefore about a smaller suite than "
         "the one that runs."
     )
-    phantom = sorted(swept - collected)
+    # A module that opts itself out of this platform contributes no node ids,
+    # so its tests are not "audited and never executed" — they are not part of
+    # this platform's suite. Windows reaches this:
+    # `test_install_script_functions.py` drives a POSIX shell script.
+    opted_out = {
+        path.name for path in sorted(TESTS.glob("test_*.py")) if _skips_itself_at_module_level(path)
+    }
+    phantom = sorted(n for n in swept - collected if n.split("::", 1)[0] not in opted_out)
     assert not phantom, (
         f"this sweep checks {len(phantom)} tests pytest never runs, e.g. "
         f"{phantom[:5]} — they are being audited and never executed."

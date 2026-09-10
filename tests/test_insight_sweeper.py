@@ -29,6 +29,7 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import TeamSession
 from aisquare.services import explainability as service
+from tests import winacl
 
 
 @dataclass
@@ -474,7 +475,17 @@ def test_the_key_never_lands_in_config_toml(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert "wk-secret" not in paths.config_path().read_text(encoding="utf-8")
     assert service.key_path().read_text(encoding="utf-8") == "wk-secret"
-    assert service.key_path().stat().st_mode & 0o777 == 0o600
+    # Per platform: `st_mode` reports 0o666 on NTFS however the file is really
+    # protected, so an unconditional 0o600 would fail on Windows while saying
+    # nothing about who can actually read the key.
+    if sys.platform == "win32":
+        granted = winacl.dacl_trustees(service.key_path())
+        assert granted, "no ACEs read back from the workspace key"
+        mine = winacl.user_trustees(granted, winacl.current_user_sid())
+        assert mine, granted
+        assert not (granted - winacl.PRIVILEGED_TRUSTEES - mine), granted
+    else:
+        assert service.key_path().stat().st_mode & 0o777 == 0o600
 
 
 def test_the_sdk_probe_does_not_import_the_sdk() -> None:

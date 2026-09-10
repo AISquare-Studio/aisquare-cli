@@ -50,6 +50,11 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=UTC)
 PROJECT = ProjectInfo(id="prj_01abc", root=Path("/home/me/work/api"), codename="amber-otter")
+#: Built once and compared through `str()`/`.name`, never against a hardcoded
+#: "/a/b" literal: `str(Path(...))` renders with the platform's separator, so a
+#: forward-slash expectation asserts the POSIX half of a contract the CLI keeps
+#: on both. Same class as the escaped-path assertions ported earlier.
+WORKTREE = Path("/home/me/work/api/.aisquare-worktrees/coder-auth")
 UNNAMED = ProjectInfo(id="prj_02def", root=Path("/home/me/oss/tool"), codename=None)
 SESSION = "asq-amber-otter"
 
@@ -758,7 +763,7 @@ def test_reap_names_what_it_found(
     report = ReapReport(
         ended=[_agent("coder-auth", ended=True, exit_status=0)],
         lost=[_agent("tester-py311", "tester", pane="%9", ended=True)],
-        worktrees_removed=[Path("/home/me/work/api/.aisquare-worktrees/coder-auth")],
+        worktrees_removed=[WORKTREE],
     )
     reap = _install(monkeypatch, "reap", report)
 
@@ -769,7 +774,7 @@ def test_reap_names_what_it_found(
     assert "✓ reaped: 1 ended, 1 lost, 1 worktrees removed" in out
     assert "💤 coder-auth (exit 0)" in out
     assert "✗ tester-py311 pane %9 gone" in out
-    assert ".aisquare-worktrees/coder-auth" in out
+    assert str(WORKTREE) in out
     assert reap.args == (PROJECT,)
 
 
@@ -790,7 +795,7 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     report = ReapReport(
         ended=[_agent("coder-auth", ended=True, exit_status=0)],
         lost=[],
-        worktrees_removed=[Path("/home/me/work/api/.aisquare-worktrees/coder-auth")],
+        worktrees_removed=[WORKTREE],
     )
     _install(monkeypatch, "reap", report)
 
@@ -801,7 +806,7 @@ def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.Monkey
     assert set(payload) == {"ended", "lost", "worktrees_removed"}
     assert [a["label"] for a in payload["ended"]] == ["coder-auth"]
     assert payload["lost"] == []
-    assert payload["worktrees_removed"] == ["/home/me/work/api/.aisquare-worktrees/coder-auth"]
+    assert payload["worktrees_removed"] == [str(WORKTREE)]
 
 
 # ── rename ───────────────────────────────────────────────────────────────────

@@ -426,7 +426,7 @@ def test_worktrees_share_one_team_project(tmp_path: Path) -> None:
         "PATH": "/usr/bin:/bin",
     }
     subprocess.run(["git", "init", "-q"], cwd=main, check=True, env=env)
-    (main / "f").write_text("x")
+    (main / "f").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "f"], cwd=main, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=main, check=True, env=env)
     worktree = tmp_path / "wt"

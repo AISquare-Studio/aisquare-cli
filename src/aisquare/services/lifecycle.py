@@ -105,9 +105,17 @@ def initialize(
     if api_key:
         # Merged rather than replaced: `serve` keeps its bearer token in the same
         # file, and a whole-file write erased it (and, in the other order, this
-        # key). One helper owns the format so the two cannot diverge again.
-        credentials_store.store(**{credentials_store.API_KEY: api_key})
-        notes.append("Stored API key in ~/.aisquare/credentials.")
+        # key). One helper owns the format so the two cannot diverge again --
+        # and reports whether the file could really be locked to this account,
+        # because on NTFS the 0600 that guarded it is a no-op.
+        _, restricted = credentials_store.store(**{credentials_store.API_KEY: api_key})
+        if restricted:
+            notes.append("Stored API key in ~/.aisquare/credentials.")
+        else:
+            notes.append(
+                "Stored API key in ~/.aisquare/credentials — but could NOT restrict it to "
+                "your account; other users on this machine may be able to read it."
+            )
     elif not local:
         notes.append(
             "No API key given — running local-only; re-run with --api-key to connect later."

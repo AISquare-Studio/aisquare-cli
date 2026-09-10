@@ -170,7 +170,8 @@ def test_doctor_warns_when_the_directory_would_shadow_a_hand_typed_module_run(
     warned = diagnostics._check_self_invocation(tmp_path)
 
     assert warned.status is CheckStatus.warn
-    assert "aisquare/__init__.py" in warned.detail and "python -m aisquare" in warned.detail
+    assert str(Path("aisquare/__init__.py")) in warned.detail
+    assert "python -m aisquare" in warned.detail
     assert warned.fix is not None and "python -P -m aisquare" in warned.fix
 
 
@@ -184,4 +185,7 @@ def test_the_row_reaches_doctor_for_the_project_it_was_asked_about(
     rows = {check.name: check for check in diagnostics.doctor(cwd=project)}
 
     assert rows["self-invocation"].status is CheckStatus.warn
-    assert shape in rows["self-invocation"].detail
+    # `str(Path(shape))`, not `shape`: the detail names the file the way the
+    # platform spells it, so a forward-slash literal asserts the POSIX half of
+    # a message the product produces on both.
+    assert str(Path(shape)) in rows["self-invocation"].detail

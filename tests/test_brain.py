@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -18,39 +19,104 @@ from aisquare.core.orchestrator import team_project
 from aisquare.services import distill
 from aisquare.services import team as team_service
 
-_FAKE_GBRAIN = """#!/bin/sh
-# Schema-aware fake: `init` records the embedding choice into config.json
-# exactly like real gbrain, and `query` (hybrid) REJECTS a vectorless brain —
+_FAKE_GBRAIN = r"""# Schema-aware fake: `init` records the embedding choice into config.json
+# exactly like real gbrain, and `query` (hybrid) REJECTS a vectorless brain --
 # so the suite exercises the real create-time constraint instead of passing
 # on a path that hard-fails for users.
-case "$1" in
-  --version) echo "gbrain 0.42.1.0";;
-  init)
-    mkdir -p "$GBRAIN_HOME/.gbrain/brain.pglite"
-    echo 16 > "$GBRAIN_HOME/.gbrain/brain.pglite/PG_VERSION"
-    echo "$@" >> "$GBRAIN_HOME/init.log"
-    CFG="$GBRAIN_HOME/.gbrain/config.json"
-    if echo "$@" | grep -q -- --no-embedding; then
-      echo '{"embedding_disabled": true}' > "$CFG"
-    else
-      echo '{"embedding_model": "openai:text-embedding-3-large"}' > "$CFG"
-    fi
-    ;;
-  put)
-    [ "$FAKE_GBRAIN_FAIL" = "1" ] && exit 1
-    mkdir -p "$GBRAIN_HOME/pages"
-    cat > "$GBRAIN_HOME/pages/$(echo "$2" | tr '/' '_')"
-    echo "$2" >> "$GBRAIN_HOME/puts.log"
-    ;;
-  search) echo "results for: $2";;
-  query)
-    if grep -q embedding_disabled "$GBRAIN_HOME/.gbrain/config.json" 2>/dev/null; then
-      echo "hybrid query needs a vectorized brain" >&2; exit 1
-    fi
-    echo "hybrid results for: $2";;
-  *) exit 0;;
-esac
+#
+# Python rather than /bin/sh: the product finds this through
+# shutil.which("gbrain"), and Windows resolves that through PATHEXT, so the
+# thing on PATH has to be something CreateProcess can start. See fake_gbrain
+# for the per-platform launcher that fronts this file.
+import os
+import sys
+from pathlib import Path
+
+
+def home() -> Path:
+    return Path(os.environ["GBRAIN_HOME"])
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        return 0
+    command = argv[0]
+    if command == "--version":
+        # Asked without GBRAIN_HOME in the environment -- never resolve it here.
+        print("gbrain 0.42.1.0")
+        return 0
+    if command == "init":
+        pglite = home() / ".gbrain" / "brain.pglite"
+        pglite.mkdir(parents=True, exist_ok=True)
+        (pglite / "PG_VERSION").write_text("16\n", encoding="utf-8")
+        with (home() / "init.log").open("a", encoding="utf-8") as log:
+            log.write(" ".join(argv) + "\n")
+        config = home() / ".gbrain" / "config.json"
+        if "--no-embedding" in argv:
+            config.write_text('{"embedding_disabled": true}', encoding="utf-8")
+        else:
+            config.write_text(
+                '{"embedding_model": "openai:text-embedding-3-large"}', encoding="utf-8"
+            )
+        return 0
+    if command == "put":
+        if os.environ.get("FAKE_GBRAIN_FAIL") == "1":
+            return 1
+        slug = argv[1]
+        pages = home() / "pages"
+        pages.mkdir(parents=True, exist_ok=True)
+        # Bytes, not text: the page body carries whatever the distiller wrote,
+        # and a locale codec must never get a vote (see the UTF-8 sweep).
+        (pages / slug.replace("/", "_")).write_bytes(sys.stdin.buffer.read())
+        with (home() / "puts.log").open("a", encoding="utf-8") as log:
+            log.write(slug + "\n")
+        return 0
+    if command == "search":
+        print(f"results for: {argv[1]}")
+        return 0
+    if command == "query":
+        config = home() / ".gbrain" / "config.json"
+        body = config.read_text(encoding="utf-8") if config.exists() else ""
+        if "embedding_disabled" in body:
+            print("hybrid query needs a vectorized brain", file=sys.stderr)
+            return 1
+        print(f"hybrid results for: {argv[1]}")
+        return 0
+    return 0
+
+
+sys.exit(main(sys.argv[1:]))
 """
+
+
+@pytest.fixture
+def fake_gbrain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put a scripted gbrain on PATH (keeping the inherited dirs for git etc.).
+
+    The fake is Python, fronted by a launcher named so ``shutil.which`` finds
+    it on either platform: a shebanged script on POSIX, a ``.cmd`` on Windows
+    (which is how pip and npm put interpreted scripts on PATH -- PATHEXT makes
+    ``which("gbrain")`` resolve it, and CreateProcess runs it through cmd.exe).
+    """
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    impl = bin_dir / "fake_gbrain.py"
+    impl.write_text(_FAKE_GBRAIN, encoding="utf-8")
+    if sys.platform == "win32":
+        launcher = bin_dir / "gbrain.cmd"
+        launcher.write_text(
+            "@echo off\r\n" + f'"{sys.executable}" "{impl}" %*' + "\r\n", encoding="utf-8"
+        )
+    else:
+        launcher = bin_dir / "gbrain"
+        launcher.write_text(
+            "#!/bin/sh\n" + f'exec "{sys.executable}" "{impl}" "$@"' + "\n", encoding="utf-8"
+        )
+        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Prepend rather than replace: the fake must win, but git and friends have
+    # to stay reachable, and a hardcoded "/usr/bin:/bin" is not portable.
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return bin_dir
 
 
 @pytest.fixture(autouse=True)
@@ -59,18 +125,6 @@ def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work.mkdir()
     monkeypatch.chdir(work)
     return work
-
-
-@pytest.fixture
-def fake_gbrain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Put a scripted gbrain on PATH (keeping system dirs for git etc.)."""
-    bin_dir = tmp_path / "fakebin"
-    bin_dir.mkdir()
-    script = bin_dir / "gbrain"
-    script.write_text(_FAKE_GBRAIN)
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin")
-    return bin_dir
 
 
 def _seed_events(runner: CliRunner) -> None:
@@ -88,7 +142,7 @@ def test_drain_distills_communication_not_churn(
     _seed_events(runner)
     assert distill.drain(work_dir) == 3  # decision + note + task_done; task_added/activate skipped
     project = team_project(work_dir)
-    puts = (brain.brain_home(project.id) / "puts.log").read_text().splitlines()
+    puts = (brain.brain_home(project.id) / "puts.log").read_text(encoding="utf-8").splitlines()
     assert any(slug.startswith("team/decision/") for slug in puts)
     assert any(slug.startswith("team/note/") for slug in puts)
     assert any(slug.startswith("team/task-done/") for slug in puts)
@@ -97,7 +151,7 @@ def test_drain_distills_communication_not_churn(
         path
         for path in (brain.brain_home(project.id) / "pages").iterdir()
         if "decision" in path.name
-    ).read_text()
+    ).read_text(encoding="utf-8")
     assert "we will use JWT" in page and "aisquare-team" in page
     assert distill.drain(work_dir) == 0  # watermark: nothing new on re-drain
 
@@ -113,9 +167,14 @@ def test_drain_holds_watermark_on_put_failure(
 
 
 def test_drain_without_gbrain_is_a_quiet_noop(
-    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")  # no gbrain anywhere
+    # An empty directory, not "/usr/bin:/bin": the point is a PATH with no
+    # gbrain on it, and hardcoded POSIX dirs assert that only by accident on a
+    # platform where they do not exist at all.
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
     _seed_events(runner)
     assert distill.drain(work_dir) == 0
 
@@ -140,11 +199,11 @@ def test_distill_all_backfills_past_the_watermark(
     # Simulate the pre-broadening era: watermark advanced, pages missing.
     project = team_project(work_dir)
     puts_log = brain.brain_home(project.id) / "puts.log"
-    puts_log.write_text("")
+    puts_log.write_text("", encoding="utf-8")
     assert distill.drain(work_dir) == 0  # normal drain sees nothing new
     result = runner.invoke(app, ["--json", "team", "distill", "--all"])
     assert json.loads(result.stdout) == {"distilled": 3}  # rescan rebuilt them
-    assert len(puts_log.read_text().splitlines()) == 3
+    assert len(puts_log.read_text(encoding="utf-8").splitlines()) == 3
 
 
 def test_distill_cli_reports_count(runner: CliRunner, fake_gbrain: Path, work_dir: Path) -> None:
@@ -181,7 +240,9 @@ def test_recall_uses_hybrid_on_an_embedding_brain(
     assert "hybrid results for: auth" in result.stdout
     project = team_project(work_dir)
     assert brain.brain_embeds(project.id)  # schema really embeds
-    assert "--embedding-model" in (brain.brain_home(project.id) / "init.log").read_text()
+    assert "--embedding-model" in (brain.brain_home(project.id) / "init.log").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_recall_falls_back_to_keyword_on_a_vectorless_brain(

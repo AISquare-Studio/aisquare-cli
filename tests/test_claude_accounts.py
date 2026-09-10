@@ -537,7 +537,11 @@ def test_the_sign_in_window_runs_our_own_run_command_with_this_processs_environm
             return Completed(0, f"@3{tmux_core._SEP}%9\n", "")
         return Completed(0, "", "")
 
-    server = TmuxServer("asq-test-accounts", runner=runner)
+    # A binary that EXISTS, because `spawn_window` goes through `binary()` and
+    # that is `shutil.which(...)`: with no tmux on the machine this raised
+    # TmuxUnavailable before reaching the thing under test. The runner is fake,
+    # so nothing is ever executed — this test is about the command that would be.
+    server = TmuxServer("asq-test-accounts", binary=sys.executable, runner=runner)
     window = service.open_sign_in_window(account, server, cwd=fake_home)
 
     assert window.pane_id == "%9" and window.session == service.SIGN_IN_SESSION
@@ -552,24 +556,43 @@ def test_the_sign_in_window_runs_our_own_run_command_with_this_processs_environm
     # child, so the server's retained values cannot decide what slot 1 means.
     tail = new_session[new_session.index("--") + 1 :]
     assert tail[1:5] == ["-u", core.CONFIG_DIR_VAR, "-u", core.TMPDIR_VAR]
-    assert tail[0].endswith("env")
+    # The STEM, not the spelling: `carry_environment` resolves this through
+    # `shutil.which("env")`, which on Windows finds Git's `env.EXE` — an
+    # `endswith("env")` asserts the POSIX spelling of a program the product
+    # looks up on both.
+    assert Path(tail[0]).stem.lower() == "env"
     assert tail[5:] == service.sign_in_command(account)
     assert tail[5:] == [sys.executable, "-m", "aisquare", "accounts", "run", "2"]
 
 
-def test_the_window_command_carries_set_variables_and_unsets_the_others() -> None:
+def test_the_window_command_carries_set_variables_and_unsets_the_others(tmp_path: Path) -> None:
+    # Values that are ALREADY absolute on both platforms, so what comes back is
+    # what went in. `"/h"` is rooted but driveless on Windows, which is not
+    # absolute there: `carry_environment` anchors it to the current drive and
+    # returns `N:\h`, so the literal asserted the POSIX half of a path the
+    # product resolves on both. tmp_path is absolute wherever the suite runs.
+    home, config, tmpdir = tmp_path / "h", tmp_path / "c2", tmp_path / "t"
     account = core.default_account()
     command, env = service.sign_in_window_command(
-        account, {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2", core.TMPDIR_VAR: " "}
+        account,
+        {"AISQUARE_HOME": str(home), core.CONFIG_DIR_VAR: str(config), core.TMPDIR_VAR: " "},
     )
-    assert env == {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2"}  # blank is unset
+    assert env == {  # blank is unset
+        "AISQUARE_HOME": str(home),
+        core.CONFIG_DIR_VAR: str(config),
+    }
     assert command[1:3] == ["-u", core.TMPDIR_VAR]
     assert command[3:] == service.sign_in_command(account)
     plain, env = service.sign_in_window_command(
-        account, {"AISQUARE_HOME": "/h", core.CONFIG_DIR_VAR: "/c2", core.TMPDIR_VAR: "/t"}
+        account,
+        {
+            "AISQUARE_HOME": str(home),
+            core.CONFIG_DIR_VAR: str(config),
+            core.TMPDIR_VAR: str(tmpdir),
+        },
     )
     assert plain == service.sign_in_command(account)  # nothing to unset: no env wrapper
-    assert env[core.TMPDIR_VAR] == "/t"
+    assert env[core.TMPDIR_VAR] == str(tmpdir)
 
 
 def test_carried_directories_are_resolved_against_the_callers_cwd_not_the_windows(

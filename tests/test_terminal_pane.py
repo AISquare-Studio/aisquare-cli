@@ -1106,6 +1106,10 @@ def test_no_usable_tmux_is_a_notice_not_a_traceback(fake: FakeTmux, tmp_path: Pa
 # --- AgentView --------------------------------------------------------------------------------
 
 
+#: Brackets in a real path, which is what this file is about.
+_CWD = Path("/home/me/[archive]/repo")
+
+
 def _status(
     *,
     label: str = "coder-1",
@@ -1120,7 +1124,7 @@ def _status(
         label=label,
         role="coder",
         pane_id=pane_id,
-        cwd=Path("/home/me/[archive]/repo"),
+        cwd=_CWD,
         task_id=task_id,
         created_at=datetime.now(UTC),
         exit_status=exit_status,
@@ -1133,7 +1137,10 @@ def test_header_text_carries_every_field_as_data() -> None:
     assert "[coder-1]" in text  # brackets survive: appended as text, never markup
     assert "coder" in text and "exited" in text
     assert "task 89abcdef" in text
-    assert "/home/me/[archive]/repo" in text
+    # `str(Path(...))`, not the literal: the header renders the path the
+    # platform's way, and the point of this assertion is the BRACKETS
+    # surviving as text rather than becoming markup — not the separator.
+    assert str(_CWD) in text
     assert "exited 1" in text
     # The negative: absent facts leave no trace.
     bare = str(header_text(_status(task_id=None, exit_status=None)))

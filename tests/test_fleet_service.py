@@ -307,12 +307,26 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
 
 @pytest.fixture
 def claude_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A ``claude`` the binary check finds — a shell script, never Claude Code."""
+    """A ``claude`` the binary check finds — a script, never Claude Code.
+
+    Named so ``shutil.which("claude")`` resolves it on either platform: a
+    shebanged script on POSIX, a ``.cmd`` on Windows, which is the shape pip and
+    npm use and what makes PATHEXT match. `fleet.spawn` gates on exactly that
+    call, so an extensionless file left every test using this fixture failing
+    with "'claude' is not on your PATH" — the same PATHEXT bug as the gbrain
+    fake in test_brain.py, in code written after that one was fixed.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    script = bin_dir / "claude"
-    script.write_text('#!/bin/sh\necho "fake claude: $*"\nread line\nexit 0\n', encoding="utf-8")
-    script.chmod(0o755)
+    if sys.platform == "win32":
+        script = bin_dir / "claude.cmd"
+        script.write_text("@echo off\r\necho fake claude: %*\r\nset /p line=\r\n", encoding="utf-8")
+    else:
+        script = bin_dir / "claude"
+        script.write_text(
+            '#!/bin/sh\necho "fake claude: $*"\nread line\nexit 0\n', encoding="utf-8"
+        )
+        script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     return script
 
@@ -499,7 +513,10 @@ def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     command, env = spawned["command"], spawned["env"]
     assert isinstance(command, list) and isinstance(env, dict)
     # The two variables this process lacks are unset for the child…
-    assert command[0].endswith("env")
+    # The STEM: this is `shutil.which("env")`, which finds Git's `env.EXE` on
+    # Windows, so `endswith("env")` asserted the POSIX spelling of a program the
+    # product looks up on both.
+    assert Path(command[0]).stem.lower() == "env"
     assert command[1:5] == ["-u", "CLAUDE_CONFIG_DIR", "-u", "CLAUDE_CODE_TMPDIR"]
     # …then the launcher exactly as it is built without a flag (interpreter switches and all).
     module = command.index("-m")

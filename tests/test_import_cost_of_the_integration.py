@@ -107,8 +107,20 @@ UNIQUELY_IMPORTED = {
 #: assertion that catches the failure this file exists for, and it is exact.
 DRIFTS_BY_INTERPRETER = {"_socket", "array", "socket", "tempfile"}
 
-#: Everything the diff is permitted to contain, on any interpreter.
-ALLOWED = UNIQUELY_IMPORTED | DRIFTS_BY_INTERPRETER
+#: Stdlib names that drift by PLATFORM rather than by interpreter, recorded the
+#: same way and for the same reason.
+#:
+#: ``nturl2path`` is Windows-only: ``urllib.request`` imports it there to turn a
+#: ``file://`` URL into a path, and it does not exist in the closure anywhere
+#: else. It is stdlib, it is pure Python, and it arrives through an import this
+#: package already makes deliberately — so it is an allowance, not a finding.
+#: Kept as its own set rather than folded into the one above because the two
+#: answer different questions when this next goes red: "which interpreter" and
+#: "which OS" are separate investigations.
+DRIFTS_BY_PLATFORM = {"nturl2path"}
+
+#: Everything the diff is permitted to contain, on any interpreter or platform.
+ALLOWED = UNIQUELY_IMPORTED | DRIFTS_BY_INTERPRETER | DRIFTS_BY_PLATFORM
 
 #: The members tied to behaviour rather than to a version: TLS for the gateway
 #: probes, the spool's store, HTTP, quoting for the printed proxy command, and

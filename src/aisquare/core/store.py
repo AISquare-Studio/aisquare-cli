@@ -639,9 +639,14 @@ class ContextStore(Protocol):
     def release_task(self, task_id: str) -> TeamTask: ...
     def reopen_task(self, task_id: str) -> TeamTask: ...
     def next_task(
-        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+        self,
+        project_id: str,
+        *,
+        role: str | None = None,
+        status: TaskStatus = "todo",
+        prefer: str | None = None,
     ) -> TeamTask | None: ...
-    def task_statuses(self, project_id: str) -> dict[str, str]: ...
+    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool: ...
     def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
     def turn_metrics(
@@ -1570,7 +1575,12 @@ class SqliteStore:
         return updated
 
     def next_task(
-        self, project_id: str, *, role: str | None = None, status: TaskStatus = "todo"
+        self,
+        project_id: str,
+        *,
+        role: str | None = None,
+        status: TaskStatus = "todo",
+        prefer: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
 
@@ -1578,14 +1588,22 @@ class SqliteStore:
         only match sessions of that role (or an unfiltered query). A ``todo``
         task is ready only when every task it needs is resolved — so loopers
         never receive work whose prerequisites are still in flight.
+
+        ``prefer`` puts one task first in the order — the one a fleet agent was
+        spawned for — under exactly the same status, role and readiness rules
+        as every other candidate: one predicate, one query, not a copy of it.
         """
         clauses = ["project_id = ?", "status = ?"]
         params: list[str] = [project_id, status]
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        order = "ORDER BY id"
+        if prefer is not None:
+            order = "ORDER BY (id = ?) DESC, id"
+            params.append(prefer)
         rows = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} ORDER BY id",
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE {' AND '.join(clauses)} {order}",
             params,
         ).fetchall()
         if not rows:
@@ -1954,6 +1972,21 @@ class SqliteStore:
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool:
+        """Join a LIVE fleet row to the session running in its pane; False if none did.
+
+        A targeted UPDATE, like ``end_fleet_agent``, rather than a read-modify-
+        write of the whole row: the hook that calls this runs in another process
+        from ``fleet stop`` / ``reap``, and writing a stale snapshot back
+        resurrected a stopped agent (review of the first version).
+        """
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET session_id = ? WHERE id = ? AND ended_at IS NULL",
+            (session_id, agent_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""

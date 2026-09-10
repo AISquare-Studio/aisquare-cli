@@ -387,10 +387,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set `AISQUARE_FLEET_AGENT` on the window; the session-start hook now reads it,
   joins the session to its row, and puts an **ASSIGNED TO YOU** block at the top
   of the briefing with the claim command — or, if someone already holds the
-  task, says so and tells the agent to ask the manager rather than take another.
-  `task next` prefers the caller's assigned task before falling back to
-  oldest-first, so parallel spawns stop racing. The coder's standing cycle says
-  assigned-first.
+  task, says so and tells the agent to ask the manager rather than take another;
+  an agent meeting its OWN claimed task after a `/clear` or resume is told to
+  carry on; a tester spawned for a `[review]` task is told to verify it. `task
+  next` puts the caller's assigned task first through the same query as every
+  other candidate, so parallel spawns stop racing. A nested `claude -p` inside
+  the agent inherits the variable and reaches the same hook: while the row's
+  recorded session is alive it is neither bound nor briefed, so it cannot steal
+  the row. `fleet spawn --task` refuses a task that is already `done` or
+  `dropped`.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

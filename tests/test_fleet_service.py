@@ -1809,6 +1809,111 @@ def test_an_assigned_task_someone_else_already_holds_is_reported_not_retaken(
     assert "ask the manager" in board, "never silently take another task"
 
 
+def test_after_a_clear_or_resume_the_agent_is_told_it_holds_its_own_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the first version: the agent claimed its task, ``/clear``ed, and
+    was told the task was 'already doing by <itself>' — ordered to stop its own
+    work. The branch that runs most often in practice."""
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(project, "coder", task_id=mine.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-c1", project.root, "startup")
+    team_service.claim_task(mine.id, session_ref="sess-c1")
+
+    resumed = team_service.hook_session_start("sess-c1", project.root, "resume")
+    assert "You hold it" in resumed and "Do not take another" not in resumed
+    # A /clear gives Claude Code a NEW session id; the row follows it.
+    cleared = team_service.hook_session_start("sess-c2", project.root, "clear")
+    with store_session() as store:
+        row = store.get_fleet_agent(receipt.agent.id)
+        assert row is not None and row.session_id == "sess-c2"
+    assert f"ASSIGNED TO YOU: {mine.id} [doing]" in cleared
+    assert "already doing by sess-c1" in cleared, "held by the id that is gone; ask, do not steal"
+
+
+def test_a_child_process_of_the_agent_neither_takes_the_row_nor_the_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window's env is inherited by every descendant: a nested ``claude -p``
+    reaches the same hook. While the row's recorded session is alive, that
+    caller is a child — it is not bound and not briefed, or it would steal the
+    row and later ``task next`` would fall back to oldest-first for the real
+    agent (review of the first version)."""
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(project, "coder", task_id=mine.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-parent", project.root, "startup")
+
+    child = team_service.hook_session_start("sess-child", project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in child
+    with store_session() as store:
+        row = store.get_fleet_agent(receipt.agent.id)
+        assert row is not None and row.session_id == "sess-parent", "the row stays the parent's"
+    picked = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-parent", cwd=project.root
+    )
+    assert picked is not None and picked.id == mine.id, "the parent still gets its own task first"
+
+
+def test_a_tester_spawned_for_a_review_task_is_told_to_verify_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manager spawns a tester once work reaches review; the assignment must
+    read as 'verify this', not as a coder's 'claim it' or a stop order."""
+    task = _task(project, "verify the auth flow")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-coder", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-coder")
+    team_service.review_task(task.id, session_ref="sess-coder")
+    receipt = fleet_service.spawn(project, "tester", task_id=task.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "tester")
+
+    board = team_service.hook_session_start("sess-tester", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [review]" in board
+    assert "awaits your verification" in board and "Do not take another" not in board
+    picked = team_service.next_task(status="review", session_ref="sess-tester", cwd=project.root)
+    assert picked is not None and picked.id == task.id
+
+
+def test_spawning_for_a_finished_task_is_refused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Harmless when the id only named a label; now it would brief an agent on
+    work that is over and hold a slot for nothing."""
+    task = _task(project, "already shipped")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-x", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-x")
+    team_service.finish_task(task.id, session_ref="sess-x")
+    with pytest.raises(fleet_service.FleetError, match="is done"):
+        fleet_service.spawn(project, "coder", task_id=task.id, worktree=False)
+
+
+def test_a_stopped_agents_row_is_not_resurrected_by_a_late_hook(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook runs in another process from ``fleet stop``; a whole-row write
+    from a stale snapshot brought a stopped agent back to life (review)."""
+    mine = _task(project, "some task")
+    receipt = fleet_service.spawn(project, "coder", task_id=mine.id, worktree=False)
+    fleet_service.stop(project, receipt.agent.label)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+
+    board = team_service.hook_session_start("sess-late", project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in board, "an ended row assigns nothing"
+    with store_session() as store:
+        row = store.get_fleet_agent(receipt.agent.id)
+        assert row is not None and row.ended_at is not None, "still ended"
+
+
 def test_no_assignment_line_without_the_fleet_env(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1817,9 +1922,7 @@ def test_no_assignment_line_without_the_fleet_env(
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     monkeypatch.delenv("AISQUARE_FLEET_AGENT", raising=False)
     board = team_service.hook_session_start("sess-plain-6", project.root, "startup")
-    assert "ASSIGNED TO YOU:" not in board, (
-        "no assignment line — the cycle text may mention the phrase"
-    )
+    assert "ASSIGNED TO YOU" not in board
     assert "Your standing cycle (coder)" in board
 
 

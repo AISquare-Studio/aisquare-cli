@@ -26,7 +26,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
-from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
+from aisquare.models import FleetAgent, ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
 from aisquare.services import distill as distill_service
 
 _SHORT_ID = 8
@@ -1100,31 +1100,16 @@ def next_task(
         # right for a looper picking from a pool; it is wrong for an agent the
         # manager started FOR a task — that one took whatever was oldest, and two
         # spawned together raced for the same one while their own sat idle.
+        # The task this session was spawned for comes first — through the same
+        # query and predicate as every other candidate. Oldest-first is right for
+        # a looper picking from a pool; it was wrong for an agent the manager
+        # started FOR a task: that one took whatever was oldest, and two spawned
+        # together raced for the same one while their own sat idle.
+        row = _fleet_row_for(store, session.id, board.id) if session is not None else None
+        prefer = row.task_id if row is not None else None
         picked: TeamTask | None = None
-        preferred = _assigned_task_of(store, board.id, session)
-        if (
-            preferred is not None
-            and preferred.status == status
-            and (role is None or preferred.role in (None, role))
-            and (status != "todo" or not unmet_needs(preferred, store.task_statuses(board.id)))
-        ):
-            if not claim:
-                picked = preferred
-            elif store.claim_task(preferred.id, claimant, lease):
-                claimed = store.get_task(preferred.id)
-                assert claimed is not None  # just claimed
-                event = _emit(
-                    store,
-                    claimed.project_id,
-                    "task_claimed",
-                    claimed.title,
-                    session_id=session.id if session else None,
-                    task_id=claimed.id,
-                )
-                picked = claimed
-            # Lost the race for our own task: the pool below is still there.
         while picked is None:
-            task = store.next_task(board.id, role=role, status=status)
+            task = store.next_task(board.id, role=role, status=status, prefer=prefer)
             if task is None or not claim:
                 picked = task
                 break
@@ -1312,7 +1297,7 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
-        assigned = _assignment(store, session.id, project.id)
+        assigned = _assignment(store, session.id, project.id, source)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
@@ -1369,7 +1354,7 @@ def hook_prompt_heartbeat(
                 store.team_tasks(project.id),
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
-                assigned=_assignment(store, session.id, project.id),
+                assigned=_assignment(store, session.id, project.id, None),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -1837,7 +1822,31 @@ def _render_board(
     return "\n".join(lines)
 
 
-def _assignment(store: ContextStore, session_id: str, project_id: str) -> TeamTask | None:
+def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> FleetAgent | None:
+    """The live fleet row a session runs in: by ``AISQUARE_FLEET_AGENT`` when the
+    process carries it, else by the ``session_id`` already recorded on a row.
+
+    One lookup for both readers (the briefing and ``task next``), so a session
+    that never went through the hook — ``task next --as coder-1`` from the
+    manager's shell, say — still resolves the same row as the pane itself.
+    """
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is not None:
+        try:
+            agent = store.get_fleet_agent(agent_id)
+        except AmbiguousIdError:
+            agent = None
+        if agent is not None and agent.ended_at is None and agent.project_id == project_id:
+            return agent
+    for agent in store.fleet_agents(project_id, live_only=True):
+        if agent.session_id == session_id:
+            return agent
+    return None
+
+
+def _assignment(
+    store: ContextStore, session_id: str, project_id: str, source: str | None
+) -> TeamTask | None:
     """The task this session was spawned for, joining the session to its fleet row.
 
     ``fleet spawn --task`` recorded the task on the ``fleet_agent`` row and named
@@ -1848,48 +1857,66 @@ def _assignment(store: ContextStore, session_id: str, project_id: str) -> TeamTa
     spawned together raced for the same one; the manager ended up posting
     "you are coder-x, run task show …" notes by hand (observed 2026-09-10).
 
-    Binding the row's ``session_id`` here also closes the "no board join for
-    this agent" gap for a binary whose session id could not be planned at
-    spawn. Fail-open throughout: an unreadable row costs the assignment line,
-    never the board.
+    The variable is inherited by every process the agent starts, so a nested
+    ``claude -p`` reaches this hook too: while the row's recorded session is
+    still alive and this is not that session's own ``clear``/``resume``, the
+    caller is such a child — it is neither bound to the row nor briefed on the
+    task, or it would steal both (review of the first version). Fail-open
+    throughout: an unreadable row costs the assignment line, never the board.
     """
-    agent_id = orchestrator.env_fleet_agent()
-    if agent_id is None:
+    agent = _fleet_row_for(store, session_id, project_id)
+    if agent is None:
         return None
-    try:
-        agent = store.get_fleet_agent(agent_id)
-    except AmbiguousIdError:
-        return None
-    if agent is None or agent.ended_at is not None or agent.project_id != project_id:
-        return None
+    if agent.session_id not in (None, session_id):
+        holder = store.get_session(agent.session_id)
+        if holder is not None and holder.ended_at is None and source not in ("clear", "resume"):
+            return None
     if agent.session_id != session_id:
-        store.upsert_fleet_agent(agent.model_copy(update={"session_id": session_id}))
+        store.bind_fleet_agent_session(agent.id, session_id)
     if agent.task_id is None:
         return None
     return store.get_task(agent.task_id)
 
 
-def _assigned_task_of(
-    store: ContextStore, board_id: str, session: TeamSession | None
-) -> TeamTask | None:
-    """The task the calling session's live fleet row was spawned for, if any."""
-    if session is None:
-        return None
-    for agent in store.fleet_agents(board_id, live_only=True):
-        if agent.session_id == session.id and agent.task_id is not None:
-            return store.get_task(agent.task_id)
-    return None
+_VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "validator"})
 
 
 def _assignment_lines(task: TeamTask, me: TeamSession) -> list[str]:
+    """What the agent is told about the task it was spawned for — by state.
+
+    Written per state, not per the coder's cycle: the manager spawns a tester
+    once a task reaches review, and that tester's assignment is a ``[review]``
+    task it must verify, not a ``[todo]`` one to claim. And a session that
+    ``/clear``s or resumes meets its OWN in-flight task here; it must be told to
+    carry on, not that someone else holds it (review of the first version).
+    """
     sid = short_id(me.id)
     head = f"ASSIGNED TO YOU: {task.id} [{task.status}] {task.title}"
+    if task.claimed_by == me.id:
+        return [
+            head,
+            "You hold it (claimed before a clear or resume). Carry on:",
+            f"`aisquare task show {task.id}`, then `task review` / `task done --as {sid}`.",
+        ]
     if task.status == "todo":
         return [
             head,
             f"Claim it FIRST — `aisquare task claim {task.id} --as {sid}` — then read its",
             f"contract with `aisquare task show {task.id}` and work it to review/done.",
             "Only when it is finished does your standing cycle's `task next` apply.",
+        ]
+    if task.status == "review" and base_role(me.role) in _VERIFYING_ROLES:
+        return [
+            head,
+            "It awaits your verification — start there: your standing cycle's",
+            f"`aisquare task next --status review --as {sid}` hands you this task first.",
+        ]
+    if task.status in ("done", "dropped"):
+        return [
+            head,
+            f"It is already {task.status}; nothing here needs you. Take pool work with your",
+            f'standing cycle, and tell the manager: `aisquare note "spawned for {task.id}, '
+            f'already {task.status}" --kind question --to manager --as {sid}`.',
         ]
     holder = f" by {short_id(task.claimed_by)}" if task.claimed_by else ""
     return [

@@ -711,8 +711,7 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
         ]
     if role == "coder":
         return [
-            "Your standing cycle (coder): a task marked ASSIGNED TO YOU above comes first —",
-            f"claim it. Otherwise `aisquare task next --role coder --claim --as {sid}`;",
+            f"Your standing cycle (coder): `aisquare task next --role coder --claim --as {sid}`;",
             "if nothing is available, tell the user and stop. Read the task's contract and",
             "any reopen feedback first — if the contract is missing or ambiguous, don't",
             f'guess: `aisquare task block <id> --reason "needs spec: …" --as {sid}` and note',

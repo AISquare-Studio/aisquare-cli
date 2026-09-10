@@ -304,7 +304,8 @@ automatically — no standing prompts to paste:
 
 - **planner** — turns your intent into contract-carrying tasks on the shared
   board (objective, why, acceptance criteria, boundaries)
-- **coder** — loops `task next --claim` → work → `task review`; blocks
+- **coder** — starts on the task it was spawned for (the board says
+  **ASSIGNED TO YOU**), then loops `task next --claim` → work → `task review`; blocks
   instead of guessing when a task has no usable contract
 - **runner** — the adversarial verifier: runs the full check the acceptance
   criteria name, tries to make the change fail, then `task done` with
@@ -388,7 +389,8 @@ that never opt in see nothing.
 ```sh
 aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit
 aisquare task add "ship it" --needs tsk_01k…      # held until its dependency is done
-aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner
+aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
+                                                  # fleet agent's own assigned task comes first
 aisquare task review tsk_01k… --note "how to verify" --as <id>
 aisquare task reopen tsk_01k… --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>

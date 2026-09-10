@@ -390,9 +390,11 @@ precedence rule:
 
 > per-spawn flag  >  `[fleet]` config  >  built-in default
 
-**No `[fleet]` setting is read from the environment**: there is no
-`AISQUARE_FLEET_*` variable, and the fleet reads this section from the config
-file alone. The environment layer is real one level down — the model, effort
+**No `[fleet]` setting is read from the environment**: the fleet reads this
+section from the config file alone. (`AISQUARE_FLEET_AGENT` exists, but it is
+not a setting — `fleet spawn` sets it on each window as the agent's identity,
+and the session-start hook reads it to brief the agent on the task it was
+spawned for.) The environment layer is real one level down — the model, effort
 and binary a launch resolves (`AISQUARE_MODEL_<ROLE>` and friends, below) —
 which is the harness's rule, not this one.
 

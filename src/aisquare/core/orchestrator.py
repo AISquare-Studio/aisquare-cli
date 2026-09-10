@@ -17,6 +17,11 @@ branch is the gate:
 - ``AISQUARE_TEAM_DELTA=0``— mute the per-prompt teammate delta injection.
 - ``AISQUARE_TEAM_LEASE_MIN`` — claim lease in minutes (default 120; long
                              agentic turns only renew on prompt submit).
+- ``AISQUARE_FLEET_AGENT``  — the fleet_agent row this session runs in; set by
+                             ``fleet spawn`` on the window, read at session start
+                             to join the session to its row and brief it on the
+                             task it was spawned for. Inherited by the agent's
+                             own child processes — see ``team._assignment``.
 """
 
 from __future__ import annotations

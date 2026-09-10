@@ -62,8 +62,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **The other roles know it exists.** The planner titles user-facing tasks
     `UI: …` and writes their acceptance criteria as browser steps (URL, login,
     action, expected text/pixels/request). The runner leaves `UI:` tasks to a
-    ui-tester on the board, and otherwise says the UI part is not
-    browser-verified. The manager spawns one for `UI:` tasks in review. The
+    ui-tester that is on the board and NOT marked `(stale)` — presence is not
+    availability, a crashed tester's row lingers (review round 2) — and
+    otherwise runs the non-browser checks and reopens the task as "UI not
+    browser-verified", never done. The manager spawns one for `UI:` tasks in
+    review. The
     reviewer request-changes a frontend PR whose task carries no ui-tester
     evidence. The lane rule names the ui-tester among the roles that never edit.
   - **Upgrading machines are told.** The default roster gains
@@ -71,10 +74,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `config.toml`; `explainability register` now names any first-class role the
     RESOLVED roster lacks — `target.roles`, so a per-target `roles` override is
     read the way registration reads it — and prints the `--role` flags that
-    register it. On all three surfaces: the CLI's note, an
+    register it — on the target the gap was measured on (`--target <name>`,
+    review round 2: without it, `register --target prod` on a staging-active
+    machine suggested a command that registered them in staging). On all three
+    surfaces: the CLI's note, an
     `unregistered_roles` field in its `--json` payload, and the fleet UI's
     register button.
-  - `tests/test_ui_tester_role.py` (47 tests): wired into every list that
+  - `tests/test_ui_tester_role.py` (49 tests): wired into every list that
     enumerates roles; the briefing's tools, order, measuring, honest degrade,
     which-build rule, reach past the head of the review pool, and unenforced
     read-only; the other roles' mentions, the runner's named verdict and the

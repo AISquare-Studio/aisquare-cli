@@ -156,6 +156,19 @@ def test_the_runner_names_a_verdict_for_a_ui_task_it_cannot_verify() -> None:
     )
 
 
+def test_the_runner_does_not_defer_ui_tasks_to_a_stale_ui_tester() -> None:
+    """Review of #112, round 2: `_render_board` keeps listing a ui-tester that
+    crashed without SessionEnd (marked `(stale)`), so "when one is on the board"
+    routed `UI:` work to a verifier that no longer exists. Presence is not
+    availability: a stale row means the runner reopens the task itself."""
+    for role in ("runner", "tester"):
+        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        assert "NOT marked (stale)" in text, role
+        assert "not an available one" in text, role
+        # the board is where staleness is visible — the briefing names the marker it prints
+        assert "(stale)" in text
+
+
 def test_the_manager_names_the_build_when_it_spawns_a_ui_tester() -> None:
     """The tester's documented workaround, which the ui-tester needs more: it
     measures a page instead of running a suite, so it fails SILENTLY against the
@@ -781,6 +794,31 @@ def test_register_reads_the_targets_roster_and_not_the_top_level(
     assert "not in explainability.roles" in result.output
     for role in (ROLE, "tester", "reviewer", "validator", "manager"):
         assert role in result.output, role
+    assert "register --target prod --role" in result.output, "the hint names its target"
+
+
+def test_the_register_hint_keeps_the_selected_target(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, registered_ok: None
+) -> None:
+    """Review of #112, round 2: with staging active, `register --target prod`
+    printed a follow-up that dropped `--target prod` — following it registered the
+    missing roles in staging and left prod's roster gap unchanged."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.target = "stg"
+    config.explainability.roles = list(ExplainabilitySettings().roles)
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+        "prod": ExplainabilityTarget(
+            gateway_url="https://gateway.example", roles=["planner", "coder"]
+        ),
+    }
+    save_config(config)
+    explainability_service.store_api_key("wk-test")
+    result = runner.invoke(app, ["explainability", "register", "--target", "prod"])
+    assert result.exit_code == 0, result.output
+    assert "aisquare explainability register --target prod --role" in result.output
+    assert "--target stg" not in result.output
 
 
 def test_register_stays_quiet_when_the_target_registers_everything(

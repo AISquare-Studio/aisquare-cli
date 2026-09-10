@@ -220,8 +220,13 @@ def unregistered_roles(target: ResolvedTarget) -> tuple[str, ...]:
     return tuple(role for role in ROLE_PROFILES if role not in target.roles)
 
 
-def unregistered_roles_note(roles: Sequence[str]) -> str:
+def unregistered_roles_note(roles: Sequence[str], target: ResolvedTarget) -> str:
     """The one sentence every register surface shows for :func:`unregistered_roles`.
+
+    The suggested command names the TARGET the gap was measured on. Without it,
+    `register --target prod` on a machine whose active target is staging printed
+    a follow-up that registered the missing roles in staging and left prod's
+    roster gap exactly as it was (review of #112, round 2).
 
     ONE renderer, for the reason ``key_origin`` above is one: a role the CLI can
     launch but the workspace has never heard of ships spans under an unknown
@@ -235,7 +240,7 @@ def unregistered_roles_note(roles: Sequence[str]) -> str:
     flags = " ".join(f"--role {role}" for role in roles)
     return (
         f"launchable but not in explainability.roles: {listed} — add them to "
-        f"config.toml or run: aisquare explainability register {flags}"
+        f"config.toml or run: aisquare explainability register --target {target.name} {flags}"
     )
 
 

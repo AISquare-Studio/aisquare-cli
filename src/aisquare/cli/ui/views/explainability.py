@@ -146,7 +146,7 @@ def register_roster() -> Notice:
     # eighth role their config.toml never gained.
     unlisted = ops.unregistered_roles(target)
     if unlisted:
-        lines.append(f"note: {ops.unregistered_roles_note(unlisted)}")
+        lines.append(f"note: {ops.unregistered_roles_note(unlisted, target)}")
     return Notice("\n".join(lines))
 
 

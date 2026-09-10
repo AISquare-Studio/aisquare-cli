@@ -362,7 +362,7 @@ def register(
         # payload below so automation sees the same gap.
         unlisted = ops.unregistered_roles(target)
         if unlisted and not get_state().json_output:
-            typer.echo(f"note: {ops.unregistered_roles_note(unlisted)}", err=True)
+            typer.echo(f"note: {ops.unregistered_roles_note(unlisted, target)}", err=True)
     if not names:
         fail("no agent identities to register — check explainability.roles", error="no-agents")
 

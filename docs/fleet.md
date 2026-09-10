@@ -585,7 +585,11 @@ tmux -L asq list-sessions
 hatch (`F12`). Printable characters travel as typed; special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
 `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
-per line. The wheel scrolls a pane's history; any key returns to live. Modifier
+per line. The wheel goes to whoever can use it: a program that tracks the mouse
+(Claude Code's fullscreen TUI does) receives it as its own mouse event and
+scrolls its transcript; a fullscreen program that does not gets arrow keys, as
+its terminal's alternate-scroll mode would send; anything else scrolls the
+pane's tmux history, and any key returns to live. Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter

@@ -72,6 +72,12 @@ class FakePane:
     dead_status: int | None = None
     gone: bool = False
     """``True`` makes every command targeting the pane fail like a killed window."""
+    alternate_on: bool = False
+    """The program switched to the alternate screen (a fullscreen TUI)."""
+    mouse_on: bool = False
+    """The program turned mouse reporting on — it wants the wheel itself."""
+    mouse_sgr: bool = True
+    """…in SGR encoding (``?1006``), as every modern program asks."""
 
     def facts(self, pane_id: str, fmt: str) -> str:
         """``display-message`` output for ``fmt`` — any field order the caller asks for."""
@@ -82,7 +88,9 @@ class FakePane:
             "cursor_x": str(self.cursor[0]),
             "cursor_y": str(self.cursor[1]),
             "cursor_flag": "1" if self.cursor_visible else "0",
-            "alternate_on": "0",
+            "alternate_on": "1" if self.alternate_on else "0",
+            "mouse_any_flag": "1" if self.mouse_on else "0",
+            "mouse_sgr_flag": "1" if self.mouse_sgr else "0",
             "history_size": str(len(self.history)),
             "pane_dead": "1" if self.dead else "0",
             "pane_dead_status": "" if self.dead_status is None else str(self.dead_status),
@@ -787,6 +795,59 @@ def test_a_stale_height_hint_still_shows_a_full_screen(fake: FakeTmux, tmp_path:
     rows_per_capture, text = run(drive())
     assert rows_per_capture[:2] == [4, 16]  # the short answer, then the refetch
     assert text == ["old 40", "old 41", "old 42", "old 43", "old 44", "old 45"]
+
+
+def test_the_wheel_reaches_a_program_that_tracks_the_mouse_as_its_own_event(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Claude Code's fullscreen TUI (``?1000`` + ``?1006`` + ``?1049``) scrolls its
+    own transcript on the wheel. Reported 2026-09-08 as "scroll not working":
+    this widget scrolled tmux's history — empty on the alternate screen — and
+    the program never saw a notch. Now it gets the SGR event it asked for, at
+    the pointer's cell, and the history offset does not move."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = True
+    pane.history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[int, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            widget.post_message(events.MouseScrollUp(widget, 4, 2, 0, -1, 0, False, False, False))
+            widget.post_message(events.MouseScrollDown(widget, 4, 2, 0, 1, 0, False, False, False))
+            await pilot.pause()
+            return widget.scrollback, [call for call in fake.input if call[0] == "send-keys"]
+
+    scrollback, sent = run(drive())
+    assert scrollback == 0, "the history offset is not what a mouse-tracking program wants"
+    assert sent == [
+        ("send-keys", "%1", "-l", "--", "\x1b[<64;5;3M"),
+        ("send-keys", "%1", "-l", "--", "\x1b[<65;5;3M"),
+    ], sent
+
+
+def test_the_wheel_on_a_plain_alternate_screen_becomes_arrow_keys(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """A fullscreen program that does not track the mouse gets what its own
+    terminal's alternate-scroll mode would have sent: one arrow per line."""
+    pane = fake.panes["%1"]
+    pane.alternate_on, pane.mouse_on = True, False
+
+    async def drive() -> tuple[int, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            widget.post_message(scroll_event(widget, up=True))
+            widget.post_message(scroll_event(widget, up=False))
+            await pilot.pause()
+            return widget.scrollback, fake.sent()
+
+    scrollback, sent = run(drive())
+    assert scrollback == 0
+    assert sent == [("Up", "Up", "Up"), ("Down", "Down", "Down")]
 
 
 def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) -> None:

@@ -53,7 +53,7 @@ from aisquare.core.tmux import (
 )
 
 OK = Completed(0, "", "")
-FACTS_FIELDS = 13
+FACTS_FIELDS = len(tmux_module._FACTS_FIELDS)  # what display-message is asked for
 WINDOW_FIELDS = 7
 
 
@@ -96,6 +96,8 @@ def _facts_line(**overrides: str) -> str:
         "pane_dead_status": "",
         "pane_in_mode": "0",
         "pane_current_command": "claude",
+        "mouse_any_flag": "0",
+        "mouse_sgr_flag": "0",
         "pane_title": "fedora",
     }
     values.update(overrides)

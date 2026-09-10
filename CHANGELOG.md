@@ -377,6 +377,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **The wheel goes to the program that can use it — Claude Code's fullscreen
+  TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
+  + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate
+  screen (`?1049`) and mouse reporting (`?1000` + `?1006`) and scrolls its own
+  transcript on the wheel; the agent pane spent every notch on tmux's history
+  — which the alternate screen does not have — so nothing moved and the program
+  never saw the wheel. The pane now reads tmux's `mouse_any_flag` /
+  `mouse_sgr_flag` / `alternate_on` with every frame and routes each notch: a
+  program tracking the mouse gets the notch as the SGR (or X10) event it asked
+  for, at the pointer's cell, through `send-keys -l`; a fullscreen program that
+  does not track the mouse gets arrow keys, one per line, as its terminal's
+  alternate-scroll mode (`?1007`) would send; everything else scrolls tmux
+  history as before.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

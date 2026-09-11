@@ -241,7 +241,9 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
     typed ``[`` never goes through the name table at all — and neither does a
     shifted symbol, whose meaning only the keyboard layout knows.
 
-    EXCEPT alt/meta on an ASCII letter or digit. Textual's parser reads ``ESC p``
+    EXCEPT alt/meta on an ASCII letter or digit, or on a key ``SPECIAL`` names
+    (in practice Space, the only one a terminal reports a character for).
+    Textual's parser reads ``ESC p``
     as ``Key("alt+p", character="p")`` — the character is always set for an
     alt+letter chord, and it is printable — so "the text wins" here typed a
     bare ``p`` into the agent and Claude Code's alt+p (switch model) never
@@ -270,18 +272,29 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
     as that alt chord — both are the parser's, not this table's.
     """
     *modifiers, base = key.split("+")
-    if any(modifier not in MODIFIERS for modifier in modifiers):
+    if any(modifier and modifier not in MODIFIERS for modifier in modifiers):
         # A modifier tmux cannot spell: super/hyper, reported by kitty-protocol
         # terminals and by macOS Cmd. This ONE test goes ahead of the printable
         # rule — sending the bare character would type a ``v`` for Cmd+V. The
         # malformed-name guard below stays behind it, where it has always been:
         # a name ending in ``+`` still types its reported character rather than
-        # being dropped (review of the third version).
+        # being dropped (review of the third version). An EMPTY token is such a
+        # name, not an unknown modifier — ``"ctrl++"`` splits to
+        # ``['ctrl', '', '']`` — so it is skipped here and dropped below, which
+        # is what the printable rule did before it moved (review of the fourth).
         return None
     ctrl = "ctrl" in modifiers
     alt = "alt" in modifiers or "meta" in modifiers
-    if printable and character and not (alt and character.isascii() and character.isalnum()):
-        return Translation("literal", character)
+    if printable and character:
+        # With alt held, a chord the table can spell SAFELY wins over the
+        # character: an ASCII letter or digit, or a key ``SPECIAL`` names. Space
+        # is the only ``SPECIAL`` key a terminal reports a printable character
+        # for, and without it ``M-Space`` was unreachable — the
+        # ``not (ctrl or alt)`` guard below exists to emit it and never fired
+        # (review of the fourth version).
+        spellable = base in SPECIAL or (character.isascii() and character.isalnum())
+        if not (alt and spellable):
+            return Translation("literal", character)
     if not key or key.endswith("+"):
         return None
     if key in CHORDS:

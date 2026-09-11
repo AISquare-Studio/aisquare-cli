@@ -214,11 +214,40 @@ def test_a_digit_chord_tmux_cannot_take_still_types_its_character() -> None:
 def test_a_malformed_key_name_still_types_the_character_it_reported() -> None:
     """Only the unspellable modifier jumps the printable rule. The
     malformed-name guard sits behind it, where it always did: a name ending in
-    ``+`` types its character rather than warning "dropped" (review)."""
+    ``+`` types its character rather than warning "dropped" (review).
+
+    ``"ctrl++"`` and ``"+"`` are the cases that matter, and the first version of
+    this test missed them: they split to an EMPTY modifier token, which the
+    unknown-modifier gate read as an unspellable modifier and dropped, while
+    ``"ctrl+"`` and ``""`` split to a well-formed modifier list plus an empty
+    base and reached the printable rule anyway (review of the fourth version).
+    """
+    assert translate("ctrl++", "+", printable=True) == literal("+")
+    assert translate("+", "+", printable=True) == literal("+")
     assert translate("ctrl+", "c", printable=True) == literal("c")
     assert translate("", "x", printable=True) == literal("x")
+    # Without a character there is no text to fall back to, and no name either.
+    assert translate("ctrl++", None, printable=False) is None
+    assert translate("+", None, printable=False) is None
     assert translate("ctrl+", None, printable=False) is None
     assert translate("", None, printable=False) is None
+    # And a real unspellable modifier is still dropped, character or not.
+    assert translate("super+a", "a", printable=True) is None
+
+
+def test_alt_space_travels_as_the_chord_the_table_already_had_a_name_for() -> None:
+    """``SPECIAL``'s ``not (ctrl or alt)`` guard exists to emit ``M-Space`` when
+    alt is held, and could never fire: Textual reports ``Key("alt+space", " ")``,
+    a space is printable and is not alnum, so the printable rule returned it as
+    text. The same dead-branch shape this PR was written to fix for alt+letter,
+    on the one non-alnum key the table has a safe tmux name for (review)."""
+    assert translate("alt+space", " ", printable=True) == key("M-Space")
+    assert translate("meta+space", " ", printable=True) == key("M-Space")
+    # Without the character it always worked; it must keep working.
+    assert translate("alt+space", None, printable=False) == key("M-Space")
+    # Alt is what makes it a chord: plain and ctrl+space stay the space they were.
+    assert translate("space", " ", printable=True) == literal(" ")
+    assert translate("ctrl+space", " ", printable=True) == literal(" ")
 
 
 def test_alt_on_punctuation_stays_the_character_it_always_was() -> None:

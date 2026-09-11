@@ -475,7 +475,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   character="p")` and the key table's "printable input is literal" rule sent the
   bare letter. With alt or meta held the chord is the meaning; the character is
   only how the terminal spelt it, and `translate` now says `M-p`. ASCII letters
-  and digits only: alt on punctuation stays the character, since through the
+  and digits, plus the keys the special-key table already names — alt+space
+  reaches the agent as `M-Space`, which the table could spell all along and
+  never got the chance to. Alt on punctuation stays the character, since through the
   name table it was dropped (`;`) or became `ESC [`, the control-sequence
   introducer, and every name this module emits was measured against a real tmux
   — `M-é` never was. Shift and ctrl keep the existing rule. A modifier tmux

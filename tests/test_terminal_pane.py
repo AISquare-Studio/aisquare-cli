@@ -1366,24 +1366,25 @@ def test_the_cursor_is_one_cell_even_past_the_end_of_the_row(
     between the trimmed text and the cursor: `capture-pane -e` trims trailing
     spaces, so every quiet shell pane whose cursor is not flush against the text
     showed a black bar instead of a cell (review)."""
-    fake.panes["%1"] = FakePane(screen=["hello", "", ""], cursor=(20, 0))
 
-    async def drive() -> tuple[list[int], list[int]]:
-        host = Host(fake.server(tmp_path), "%1")
-        async with host.run_test(size=(40, 6)) as pilot:
-            pane = host.pane
-            await wait_until(pilot, lambda: synced(pane))
-            pane.focus()
-            await pilot.pause()
-            past = [x for x in range(40) if style_at(rows(pane)[0], x).reverse]
-            pane._cursor = (2, 0)
-            pane._lines[0] = "日本語ab"
-            pane.refresh()
-            await pilot.pause()
-            wide = [x for x in range(40) if style_at(rows(pane)[0], x).reverse]
-            return past, wide
+    def reverse_cells(screen: list[str], cursor: tuple[int, int]) -> list[int]:
+        # Through the fake pane, not by poking `_cursor`/`_lines`: the render
+        # loop rewrites both every 50 ms, and setting them by hand raced it.
+        fake.panes["%1"] = FakePane(screen=screen, cursor=cursor)
 
-    past, wide = run(drive())
+        async def drive() -> list[int]:
+            host = Host(fake.server(tmp_path), "%1")
+            async with host.run_test(size=(40, 6)) as pilot:
+                pane = host.pane
+                await wait_until(pilot, lambda: synced(pane))
+                pane.focus()
+                await pilot.pause()
+                return [x for x in range(40) if style_at(rows(pane)[0], x).reverse]
+
+        return run(drive())
+
+    past = reverse_cells(["hello", "", ""], (20, 0))
+    wide = reverse_cells(["日本語ab", "", ""], (2, 0))
     assert past == [20], "one cell, at the cursor — not a bar back to the text"
     assert wide == [2, 3], "and still both cells of a wide glyph it sits on"
 

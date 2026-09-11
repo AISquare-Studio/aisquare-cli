@@ -1617,20 +1617,26 @@ def _refuse_from_inside(sockets: Sequence[str], config: FleetSettings) -> None:
 def _shutdown_probe(sockets: Sequence[str], config: FleetSettings) -> dict[str, bool]:
     """Which sockets have a server listening — refusing rather than guessing.
 
-    Routed through :func:`_server_answers`, the module's one documented
-    reachability probe, so this path reads the same answer as every other and
-    inherits the next refinement of it. The probe can also FAIL: ``answers()``
-    catches only :class:`TmuxUnavailable`, while a 30 s command timeout on a
-    wedged server raises a bare :class:`TmuxError` — which is not a
-    :class:`FleetError`, so it escaped as a traceback in exactly the wedged case
-    this command exists for. "The socket did not answer" and "we could not ask"
-    are different facts: the first ends rows on the operator's word, the second
-    refuses.
+    Asked with :meth:`TmuxServer.reachable`, the probe that RAISES on a client
+    that cannot be run, rather than :func:`_server_answers` / ``answers()``,
+    which swallow that into the same ``False`` as "no server". Both kinds of
+    failure — a 30 s command timeout on a wedged server (a bare
+    :class:`TmuxError`) and an unavailable client (:class:`TmuxUnavailable`) —
+    become a :class:`FleetError` refusal with nothing touched. "The socket did
+    not answer" and "we could not ask" are different facts: the first ends rows
+    on the operator's word, the second refuses.
     """
     answering: dict[str, bool] = {}
     for socket in sockets:
         try:
-            answering[socket] = _server_answers(server_for(socket, config))
+            # The STRICT probe (review of #121, round 6): `answers()` swallows an
+            # unavailable client into False, and a client that disappears or
+            # fails at execution between `_require_usable_tmux` and this call
+            # would have read as "no server" — every row on that socket ended
+            # as lost before a single stop was attempted, panes alive.
+            # `reachable()` raises `TmuxUnavailable` (a `TmuxError`) instead,
+            # which the handler below turns into a refusal with nothing touched.
+            answering[socket] = server_for(socket, config).reachable()
         except TmuxError as exc:
             raise FleetError(
                 f"tmux could not be asked whether a server is running on {socket!r} ({exc}) "

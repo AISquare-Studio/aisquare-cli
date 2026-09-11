@@ -2347,6 +2347,42 @@ def test_shutdown_keeps_a_late_row_live_when_the_client_fails_at_execution(
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 
 
+@pytest.mark.parametrize("how", ["missing", "not_runnable"])
+def test_shutdown_refuses_when_the_client_goes_away_between_the_guard_and_the_probe(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    how: str,
+) -> None:
+    """Review of #121, round 6 (P1): the initial socket map came from `answers()`,
+    which swallows an unavailable client into False — so a client that vanished or
+    failed at execution AFTER `_require_usable_tmux` read as "no server", and every
+    row on that socket was recorded lost before a single stop was attempted, panes
+    alive, claims released, pause cleared. The strict probe refuses instead."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    real_targets = fleet_service._shutdown_targets
+
+    def targets_then_lose_the_client(*args: object, **kwargs: object) -> object:
+        result = real_targets(*args, **kwargs)  # type: ignore[arg-type]
+        if how == "missing":
+            tmux.installed = False
+        else:
+            tmux.exec_unavailable = True
+        return result
+
+    monkeypatch.setattr(fleet_service, "_shutdown_targets", targets_then_lose_the_client)
+
+    with pytest.raises(fleet_service.FleetError, match="could not be asked"):
+        fleet_service.shutdown(project, force=True)
+
+    tmux.installed, tmux.exec_unavailable = True, False
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id], "untouched"
+    assert coder.pane_id in tmux.facts, "the pane was never touched either"
+    assert fleet_service.is_paused(project), "and the standing order stands"
+
+
 def test_shutdown_kills_only_the_fleets_own_sessions(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

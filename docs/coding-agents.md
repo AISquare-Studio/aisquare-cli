@@ -31,7 +31,8 @@ asq team bind reviewer --agent claude-code
 ```
 
 Connect merges AISquare's handlers into `CODEX_HOME/hooks.json`, preserving
-other hooks and instruction files. Codex requires native trust: open `/hooks`
+other hooks and instruction files. Unreadable context files are skipped with a
+note; hooks still install. Codex requires native trust: open `/hooks`
 in Codex, review the definitions and trust them. Reconnect is idempotent and
 does not rewrite an identical file. Changing definitions requires native
 review again. AISquare never writes Codex trust records or automatically adds
@@ -42,15 +43,18 @@ means the file is installed but this definition has not been observed running.
 `observed` means a callback ran; a session's own trust and permission policy
 still applies. Doctor reports missing hooks, stale AISquare executables,
 short context timeouts and the review step, including account homes discovered
-on disk. End and
-interrupt handlers are local and use Codex's three-second timeout.
+on disk. End and interrupt handlers are local and use Codex's three-second
+timeout. Reconnect preserves extra headroom for the two context hooks and
+restores the bounded timeouts for the other lifecycle hooks.
 
 Selection order is explicit `--agent`, role binding, an exact known binary
 override (legacy shorthand), project preference, inherited session selection,
 user default, then Claude Code. An arbitrary wrapper declares its family with
-`team bind ROLE --agent NAME --bin PATH`. Unknown wrappers require that binding
-or an explicit `--agent` at launch; a user, project or inherited default cannot
-identify a wrapper's family. Conflicting known binaries and families are rejected.
+`team bind ROLE --agent NAME --bin PATH`, `--agent` at launch, or an explicit
+user/project default (`agents use NAME`, optionally `--project`). An inherited
+`AISQUARE_CODING_AGENT` choice also identifies a wrapper's family. Without an
+explicit choice, an unknown wrapper asks for one. Conflicting known binaries
+and families are rejected.
 Changing a default affects future launches.
 
 Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
@@ -101,9 +105,10 @@ Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`; Claude effort
 aliases and model ladders are not reused. Native model availability is left to
 Codex, without paid discovery probes. Claude retains its ladder, but probes
 now use the selected executable and effective account. Cache keys include the
-resolved executable's upgrade fingerprint and stable login/provider inputs.
+resolved executable's upgrade fingerprint, login entitlements and provider inputs.
 Parent-session variables, OAuth refresh timestamps and hook edits do not
-invalidate the 24-hour cache. `--refresh` clears every probe-cache scope.
+invalidate the 24-hour cache. `--refresh` clears the selected account's scope
+and prunes expired scopes, retaining other accounts' valid cached verdicts.
 
 ```sh
 asq fleet spawn reviewer --agent codex --sandbox read-only --approval on-request
@@ -115,7 +120,9 @@ Use `--` before native Codex options, especially `-c` (AISquare's own `-c` is
 the executable override). Native sandbox and approval policies stay separate.
 Reviewers, including numbered seats such as `reviewer2`, default to read-only;
 other Codex fleet roles use workspace-write. Numbered seats inherit the base
-role's settings unless configured separately. Saved Codex sandbox/approval
+role's sandbox and approval policy per field unless configured separately.
+Their worktree, Claude permission mode and extra arguments keep their own
+defaults. Saved Codex sandbox/approval
 settings apply only to Codex; Claude Code keeps its own permission mode.
 No automatic approval bypass is added. Native subagents are disabled in fleet
 sessions when `fleet.disable_native_agent_teams` is enabled.
@@ -138,8 +145,10 @@ reap and worktree operations remain shared. Restart a stopped role with
 Set `agents.mcp = true` to add AISquare's stdio server to launched sessions.
 Install the `serve` extra first. This is ephemeral launch configuration;
 unrelated servers are retained. The launch identity and AISquare configuration
-environment are forwarded explicitly to Codex's MCP child. Local MCP tools
-reuse the hook-bound session, while external clients keep virtual identities.
+environment are forwarded explicitly to Codex's MCP child. MCP tools reuse a
+hook-bound session for the requested project when available. Until hooks join
+(including while awaiting native trust), or on another board, they use a
+project-scoped virtual identity, as external clients do.
 
 With both `explainability.enabled` and `explainability.ship` enabled, Codex
 exports native OTLP JSON logs to a per-launch, authenticated loopback receiver on

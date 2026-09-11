@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 CODEX_VERSION = "codex-cli 0.153.4"
-NATIVE_TEST = "test_real_codex_hooks_resume_and_usage"
+NATIVE_MODULE = Path(__file__).with_name("test_codex_native.py")
 
 
 def run() -> int:
@@ -26,18 +26,24 @@ def run() -> int:
                 "-m",
                 "pytest",
                 "-ra",
-                str(Path(__file__).with_name("test_codex_native.py")),
+                str(NATIVE_MODULE),
                 f"--junitxml={report}",
             ],
             env={**os.environ, "AISQUARE_TEST_CODEX": "1"},
         )
         if result.returncode:
             return result.returncode
-        cases = ET.parse(report).findall(".//testcase")
-        if not any(case.get("name") == NATIVE_TEST for case in cases) or any(
-            case.find(tag) is not None for case in cases for tag in ("skipped", "failure", "error")
-        ):
-            raise RuntimeError("Native Codex fixture must execute and pass without skips")
+        cases = [
+            case
+            for case in ET.parse(report).findall(".//testcase")
+            if case.get("classname") == f"tests.{NATIVE_MODULE.stem}"
+        ]
+        if not cases:
+            raise RuntimeError(f"No test cases reported for {NATIVE_MODULE.name}")
+        if any(case.find(tag) is not None for case in cases for tag in ("failure", "error")):
+            raise RuntimeError(f"Native Codex tests failed in {NATIVE_MODULE.name}")
+        if not any(case.find("skipped") is None for case in cases):
+            raise RuntimeError(f"Native Codex tests all skipped in {NATIVE_MODULE.name}")
     return 0
 
 

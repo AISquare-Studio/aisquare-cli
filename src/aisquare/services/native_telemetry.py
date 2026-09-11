@@ -39,15 +39,13 @@ def _option_values(args: list[str], short: str, long: str) -> Iterator[str]:
                 yield value
         elif arg.startswith(long + "="):
             yield arg.partition("=")[2]
-        elif arg.startswith(short) and len(arg) > len(short):
-            yield arg[len(short) :].removeprefix("=")
 
 
 def _read_config(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
             return tomllib.load(handle)
-    except FileNotFoundError:
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         return {}
 
 
@@ -57,30 +55,31 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
     Codex ignores `otel` in project-local config. Other account homes and
     unselected profile files are not layers of this launch either.
     """
-    overrides: dict[str, Any] = {}
+    overrides: list[dict[str, Any]] = []
     for value in _option_values(args, "-c", "--config"):
         key, separator, raw = value.partition("=")
         if not separator:
             continue
         try:
-            parsed = tomllib.loads(value)
+            try:
+                parsed = tomllib.loads(value)
+            except tomllib.TOMLDecodeError:
+                # Codex accepts an unquoted string as a config override value.
+                parsed = tomllib.loads(f"{key}={json.dumps(raw)}")
         except tomllib.TOMLDecodeError:
-            # Codex accepts an unquoted string as a config override value.
-            parsed = tomllib.loads(f"{key}={json.dumps(raw)}")
+            continue  # Native argument validation belongs to Codex.
         if "otel" in parsed:
             return True
-        overrides.update(parsed)
-    configs = [_read_config(SYSTEM_CONFIG), _read_config(config_dir / "config.toml")]
-    profile = overrides.get("profile")
-    if profile is None:
-        profile = next(
-            (config["profile"] for config in reversed(configs) if "profile" in config), None
-        )
+        # Keep each dotted override: a shallow update would erase sibling keys
+        # under profiles when a later -c configures something else there.
+        overrides.append(parsed)
+    configs = [_read_config(SYSTEM_CONFIG), _read_config(config_dir / "config.toml"), *overrides]
+    profile = next((config["profile"] for config in reversed(configs) if "profile" in config), None)
     for value in _option_values(args, "-p", "--profile"):
         profile = value
+    if not isinstance(profile, str) or Path(profile).name != profile or profile in {".", ".."}:
+        profile = None
     if profile:
-        if not isinstance(profile, str) or Path(profile).name != profile or profile in {".", ".."}:
-            raise ValueError("Invalid Codex config profile name")
         configs.append(_read_config(config_dir / f"{profile}.config.toml"))
     for config in configs:
         if "otel" in config:

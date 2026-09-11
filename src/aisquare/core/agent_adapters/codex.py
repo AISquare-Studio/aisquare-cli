@@ -29,6 +29,7 @@ class CodexAdapter:
         structured_exec=True,
         positional_prompt=True,
         first_context_file_only=True,
+        sandbox_permissions=True,
     )
 
     def resolve_model(

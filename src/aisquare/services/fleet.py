@@ -182,9 +182,20 @@ def settings() -> FleetSettings:
 def role_settings(role: str, config: FleetSettings | None = None) -> FleetRoleSettings:
     """The role's launch shape, or the built-in default for a role the config omits."""
     config = config or settings()
-    from aisquare.core.harness import base_role
-
-    return config.roles.get(role, config.roles.get(base_role(role), FleetRoleSettings()))
+    selected = config.roles.get(role, FleetRoleSettings())
+    base = config.roles.get(harness.base_role(role), FleetRoleSettings())
+    # Numbered seats historically use their own worktree/Claude permission/argv
+    # settings. Only native sandbox and approval defaults inherit per field.
+    return selected.model_copy(
+        update={
+            "sandbox": selected.sandbox if selected.sandbox is not None else base.sandbox,
+            "approval_policy": (
+                selected.approval_policy
+                if selected.approval_policy is not None
+                else base.approval_policy
+            ),
+        }
+    )
 
 
 def server(config: FleetSettings | None = None) -> TmuxServer:
@@ -997,8 +1008,12 @@ def spawn(
     if agent is not None or selected.adapter.id != "claude-code":
         flags += ["--agent", selected.adapter.id]
     native_mode = mode if selected.adapter.id == "claude-code" else permission_mode
-    native_sandbox = role_config.sandbox if selected.adapter.id == "codex" else None
-    native_approval = role_config.approval_policy if selected.adapter.id == "codex" else None
+    native_sandbox = (
+        role_config.sandbox if selected.adapter.capabilities.sandbox_permissions else None
+    )
+    native_approval = (
+        role_config.approval_policy if selected.adapter.capabilities.sandbox_permissions else None
+    )
     try:
         flags += selected.adapter.fleet_args(
             role,

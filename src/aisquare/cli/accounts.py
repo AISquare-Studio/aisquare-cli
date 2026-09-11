@@ -26,6 +26,7 @@ from rich.text import Text
 
 from aisquare.cli.common import fail, local_time
 from aisquare.cli.fleet import not_interactive_reason
+from aisquare.core import agents
 from aisquare.core import claude_accounts as core
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -91,7 +92,7 @@ def _usage_cells(usage: ClaudeUsage | None) -> tuple[str, str]:
 
 def _short(path: object) -> str:
     text = str(path)
-    home = str(core._home())
+    home = str(agents._home())
     return "~" + text[len(home) :] if home and text.startswith(home) else text
 
 

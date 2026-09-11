@@ -218,10 +218,18 @@ def codex(config_dir: str | None = typer.Option(None, "--config-dir")) -> None:
     """Decode Codex native hooks and run the shared lifecycle services."""
     import os
 
+    from aisquare.core import agents
+    from aisquare.core.agent_adapters import get_adapter
+    from aisquare.core.agent_adapters.types import config_home
     from aisquare.services.agent_events import handle_codex
 
     try:
-        directory = Path(config_dir or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        directory = config_home(
+            get_adapter("codex"),
+            agents._home(),
+            os.environ,
+            Path(config_dir) if config_dir is not None else None,
+        )
         output = handle_codex(_payload(), directory)
         if output:
             typer.echo(output)

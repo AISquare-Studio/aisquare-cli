@@ -28,6 +28,7 @@ class AgentCapabilities:
     model_ladders: bool = False
     positional_prompt: bool = False
     first_context_file_only: bool = False
+    sandbox_permissions: bool = False
 
 
 class AgentAdapter(Protocol):

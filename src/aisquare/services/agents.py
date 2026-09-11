@@ -45,12 +45,8 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     if not info.detected and not (name == "codex" and shutil.which("codex")):
         raise ValueError(f"{name} is not installed on this machine")
 
-    sections: list[str] = []
-    for path in agent_core.context_files(name, config_dir):
-        try:
-            sections.extend(_split_sections(path.read_text(encoding="utf-8", errors="replace")))
-        except OSError as exc:
-            raise agent_core.AgentSettingsError(f"Cannot read context file {path}: {exc}") from exc
+    documents, notes = agent_core.read_context(name, config_dir)
+    sections = [section for content in documents.values() for section in _split_sections(content)]
 
     added = 0
     with store_session() as store:
@@ -66,7 +62,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     agent_core.set_connected(name, True, config_dir)
     readiness, detail = (
         agent_core.integration_readiness(
-            name, config_dir or agent_core.ambient_hook_dir(name) or Path.home()
+            name, config_dir or agent_core.ambient_hook_dir(name) or agent_core._home()
         )
         if hooks_installed
         else ("unsupported", "No terminal integration is available")
@@ -76,7 +72,7 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
         hooks_installed=hooks_installed,
         imported=added,
         readiness=readiness,
-        detail=detail,
+        detail=" ".join(filter(None, [detail, *notes])),
     )
 
 

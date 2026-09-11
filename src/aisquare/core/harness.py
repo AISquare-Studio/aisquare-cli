@@ -328,8 +328,6 @@ def account_scope() -> str:
     context = _PROBE_CONTEXT.get()
     if context is not None:
         from aisquare.core import agents, claude_accounts
-        from aisquare.core.agent_adapters import get_adapter
-        from aisquare.core.agent_adapters.types import config_home
 
         executable = Path(
             (
@@ -343,15 +341,16 @@ def account_scope() -> str:
         with contextlib.suppress(OSError):
             stat = executable.stat()
             identity += [stat.st_mtime_ns, stat.st_size]
-        home = config_home(get_adapter("claude-code"), agents._home(), context.env)
+        selected_account = claude_accounts.default_account(context.env)
+        home = selected_account.config_dir
         identity.append(str(home.resolve()))
-        account_path = (
-            home / ".claude.json"
-            if context.env.get("CLAUDE_CONFIG_DIR", "").strip()
-            else agents._home() / ".claude.json"
-        )
-        account = claude_accounts.read_identity(account_path)
+        account = claude_accounts.identity(selected_account, env=context.env)
         identity.append(account.model_dump() if account else None)
+        credentials = claude_accounts.credentials(selected_account)
+        identity += [
+            credentials.subscription_type if credentials else None,
+            credentials.rate_limit_tier if credentials else None,
+        ]
         # Login identity, provider routing and explicit credentials affect
         # entitlement. Hook edits, OAuth refreshes and parent-session IDs do not.
         settings = agents._read_settings(home / "settings.json")
@@ -592,12 +591,17 @@ def _probe_and_cache(alias: str) -> ProbeResult:
 
 
 def clear_probe_cache() -> None:
-    """Forget every cached availability verdict (``spawn --refresh``)."""
+    """Refresh this account; prune expired scopes without spending other logins' probes."""
+    directory = aisquare_home() / "cache"
+    for path in (_cache_path(), directory / "harness_models.json"):
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+    cutoff = (datetime.now(tz=UTC) - CACHE_TTL).timestamp()
     with contextlib.suppress(OSError):
-        directory = aisquare_home() / "cache"
-        for path in (*directory.glob("harness_models.*.json"), directory / "harness_models.json"):
+        for path in directory.glob("harness_models.*.json"):
             with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
 
 
 def resolve_model(

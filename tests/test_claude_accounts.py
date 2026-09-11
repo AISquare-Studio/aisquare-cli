@@ -70,7 +70,6 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A home of our own: the default slot's files land here, never in the developer's."""
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
-    monkeypatch.setattr(core, "_home", lambda: home)
     monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
     monkeypatch.delenv(core.CONFIG_DIR_VAR, raising=False)
     monkeypatch.delenv(core.TMPDIR_VAR, raising=False)

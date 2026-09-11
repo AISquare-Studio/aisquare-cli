@@ -86,6 +86,7 @@ def test_settings_never_persist_an_uninitialized_selection(
     config.team.profiles["coder"] = RoleLaunchProfile(agent="codex")
     config.fleet.roles["coder"].sandbox = "read-only"
     config.fleet.roles["coder"].approval_policy = "on-request"
+    config.fleet.roles["coder"].permission_mode = "plan"
     save_config(config)
 
     async def scenario(pilot: Pilot[None], host: Host) -> None:
@@ -93,7 +94,13 @@ def test_settings_never_persist_an_uninitialized_selection(
         await pilot.pause()
         view = host.query_one(SettingsView)
         lookup = view.query_one
-        selectors = ("#default-agent", "#family-coder", "#sandbox-coder", "#approval-coder")
+        selectors = (
+            "#default-agent",
+            "#family-coder",
+            "#sandbox-coder",
+            "#approval-coder",
+            "#perm-coder",
+        )
         uninitialized = {
             key: Select([("valid", "valid")], value="missing", allow_blank=False)
             for key in selectors
@@ -119,6 +126,7 @@ def test_settings_never_persist_an_uninitialized_selection(
         assert saved.team.profiles["coder"].agent == "codex"
         assert saved.fleet.roles["coder"].sandbox == "read-only"
         assert saved.fleet.roles["coder"].approval_policy == "on-request"
+        assert saved.fleet.roles["coder"].permission_mode == "plan"
 
     drive(team_project(tmp_path), scenario)
 

@@ -26,31 +26,49 @@ def presence_lines() -> Text:
     from aisquare.services import agent_launch
 
     text = Text()
-    tools = [("tmux", "the fleet's session substrate — agents run inside it")]
+    tools = [
+        (
+            "tmux",
+            "the fleet's session substrate — agents run inside it",
+            shutil.which("tmux"),
+            f"install: {INSTALL_HINT['tmux']}",
+        )
+    ]
     try:
         selected = agent_launch.resolve()
     except ValueError as exc:
-        selected = None
-        text.append(f"  ✗ coding agent: {exc}\n", style="red")
-        text.append(
-            "    Fix the agent selection in Settings or aisquare agents use.\n", style="dim"
+        tools.append(
+            (
+                "coding agent:",
+                str(exc),
+                None,
+                "Fix the agent selection in Settings or aisquare agents use.",
+            )
         )
-    if selected is not None:
-        tools.append((selected.binary.binary, f"selected coding agent ({selected.adapter.label})"))
-    tools.append(("gh", "PRs for the coder and reviewer"))
-    for tool, why in tools:
-        found = (
-            agent_launch.executable(selected)
-            if selected is not None and tool == selected.binary.binary
-            else shutil.which(tool)
+    else:
+        tools.append(
+            (
+                selected.binary.binary,
+                f"selected coding agent ({selected.adapter.label})",
+                agent_launch.executable(selected),
+                f"install: {selected.adapter.install_hint}",
+            )
         )
+    tools.append(
+        (
+            "gh",
+            "PRs for the coder and reviewer",
+            shutil.which("gh"),
+            f"install: {INSTALL_HINT['gh']}",
+        )
+    )
+    for tool, why, found, hint in tools:
         mark = "✓" if found else "✗"
         text.append(f"  {mark} {tool:<7}", style="green" if found else "red")
         text.append(f" {why}\n", style="dim")
         if not found:
-            hint = INSTALL_HINT.get(tool, selected.adapter.install_hint if selected else "")
             text.append(
-                f"            install: {hint}\n",
+                f"            {hint}\n",
                 style="dim italic",
             )
     return text

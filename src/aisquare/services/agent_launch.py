@@ -81,11 +81,11 @@ def resolve(
         raise ValueError(
             f"{chosen_binary.binary!r} runs {inferred.id}, but {adapter.id} was selected"
         )
-    elif inferred is None and source not in {"flag", "role"}:
+    elif inferred is None and source == "default":
         raise ValueError(
             f"The agent family of {chosen_binary.binary!r} is unknown; pass --agent "
-            f"or bind it with aisquare team bind {role} --agent {adapter.id} "
-            "--bin PATH before launching this wrapper"
+            f"or choose a default with aisquare agents use {adapter.id}, or bind it "
+            f"with aisquare team bind {role} --agent {adapter.id} --bin PATH"
         )
     effective_env = {**os.environ, **profile.env}
     return ResolvedAgent(

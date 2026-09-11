@@ -255,13 +255,8 @@ class SettingsView(VerticalScroll):
         roles = dict(current.roles)
         for role in self._roles:
             suffix = widget_suffix(role)
-            value = self.query_one(f"#perm-{suffix}", Select).value
-            mode = (
-                value
-                if isinstance(value, str)
-                else current.roles.get(role, FleetRoleSettings()).permission_mode
-            )
             existing = current.roles.get(role, FleetRoleSettings())
+            mode = self._optional_selection(f"#perm-{suffix}", existing.permission_mode) or ""
             roles[role] = existing.model_copy(
                 update={
                     "permission_mode": mode,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from unittest.mock import Mock
@@ -26,8 +26,9 @@ from tests.test_fleet_service import FakeTmux
 
 
 @pytest.mark.parametrize("role", ["coder", "reviewer", "reviewer2"])
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
 def test_saved_codex_permissions_do_not_prevent_a_claude_spawn(
-    role: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    role: str, agent: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = load_config()
     config.fleet.roles[harness.base_role(role)] = FleetRoleSettings(
@@ -38,14 +39,26 @@ def test_saved_codex_permissions_do_not_prevent_a_claude_spawn(
     monkeypatch.setattr(fleet, "server", lambda config: tmux)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/agent")
     project = team_project(tmp_path)
-    receipt = fleet.spawn(project, role, agent="claude-code")
-    assert receipt.agent.agent == "claude-code"
+    receipt = fleet.spawn(project, role, agent=agent)
+    assert receipt.agent.agent == agent
     command = tmux.spawned[-1]["command"]
     assert isinstance(command, list)
-    assert command[command.index("--permission-mode") + 1] == "plan"
-    assert "--sandbox" not in command and "--ask-for-approval" not in command
-    with pytest.raises(fleet.FleetError, match="Claude Code uses"):
-        fleet.spawn(project, role, agent="claude-code", sandbox="read-only")
+    if agent == "claude-code":
+        assert command[command.index("--permission-mode") + 1] == (
+            "auto" if role == "reviewer2" else "plan"
+        )
+        assert "--sandbox" not in command and "--ask-for-approval" not in command
+        with pytest.raises(fleet.FleetError, match="Claude Code uses"):
+            fleet.spawn(project, role, agent=agent, sandbox="read-only")
+    else:
+        assert command[command.index("--sandbox") + 1] == "read-only"
+        assert command[command.index("--ask-for-approval") + 1] == "on-request"
+        assert "--permission-mode" not in command
+        fleet.spawn(project, role, agent=agent, sandbox="workspace-write", approval_policy="never")
+        override = tmux.spawned[-1]["command"]
+        assert isinstance(override, list)
+        assert override[override.index("--sandbox") + 1] == "workspace-write"
+        assert override[override.index("--ask-for-approval") + 1] == "never"
 
 
 @pytest.mark.parametrize("role", ["reviewer", "reviewer2", "reviewer12"])
@@ -55,12 +68,20 @@ def test_numbered_reviewers_inherit_read_only_defaults(role: str) -> None:
     config = load_config()
     config.fleet.roles["reviewer"].sandbox = "read-only"
     config.fleet.roles["reviewer"].approval_policy = "on-request"
-    assert fleet.role_settings(role, config.fleet) == config.fleet.roles["reviewer"]
+    settings = fleet.role_settings(role, config.fleet)
+    assert settings.sandbox == "read-only"
+    assert settings.approval_policy == "on-request"
+    if role != "reviewer":
+        assert not settings.worktree
+        assert settings.permission_mode == "auto"
+        assert not settings.extra_args
     config.fleet.roles[role] = FleetRoleSettings(sandbox="workspace-write")
     assert fleet.role_settings(role, config.fleet).sandbox == "workspace-write"
+    if role != "reviewer":
+        assert fleet.role_settings(role, config.fleet).approval_policy == "on-request"
 
 
-def test_mcp_tries_both_bindings_before_refusing_a_local_identity(
+def test_mcp_tries_both_bindings_before_using_a_virtual_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = team_project(tmp_path)
@@ -80,11 +101,11 @@ def test_mcp_tries_both_bindings_before_refusing_a_local_identity(
         )
         store.set_meta("fleet-session:bound-fleet", "native-board-session")
     assert mcp_server.client_session_id(project.id) == "native-board-session"
-    with pytest.raises(ValueError, match="has not joined"):
-        mcp_server.client_session_id("prj_another")
+    assert mcp_server.client_session_id("prj_another") == "mcp:remote:anothe"
     monkeypatch.delenv("AISQUARE_FLEET_AGENT")
-    with pytest.raises(ValueError, match="has not joined"):
-        mcp_server.client_session_id(project.id)
+    assert mcp_server.client_session_id(project.id).startswith("mcp:remote:")
+    monkeypatch.setenv("AISQUARE_SERVE_CLIENT", "cursor")
+    assert mcp_server.client_session_id(project.id).startswith("mcp:cursor:")
     monkeypatch.delenv("AISQUARE_LAUNCH_ID")
     assert mcp_server.client_session_id(project.id).startswith("mcp:")
 
@@ -113,14 +134,23 @@ def test_codex_instructions_cannot_break_claude_detection(
     assert agents.context_files("codex") == ([path] if damage == "invalid-utf8" else [])
 
 
-def test_codex_context_precedence_is_evaluated_only_when_ingesting(tmp_path: Path) -> None:
+def test_codex_context_precedence_agrees_in_detection_and_ingestion(tmp_path: Path) -> None:
     adapter = get_adapter("codex")
     override, normal = adapter.context_files(tmp_path)
     normal.write_text("normal instructions")
     override.write_text(" \n")
     assert agents.context_files("codex", tmp_path) == [normal]
+    assert agents.detect("codex", tmp_path).config_paths == [normal]  # type: ignore[union-attr]
     override.write_text("override instructions")
     assert agents.context_files("codex", tmp_path) == [override]
+    assert agents.detect("codex", tmp_path).config_paths == [override]  # type: ignore[union-attr]
+    override.unlink()
+    normal.write_text("")
+    assert agents.context_files("codex", tmp_path) == []
+    assert agents.detect("codex", tmp_path).config_paths == []  # type: ignore[union-attr]
+    normal.unlink()
+    normal.mkdir()
+    assert agents.detect("codex", tmp_path).config_paths == []  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])
@@ -165,8 +195,17 @@ def test_unknown_wrappers_require_a_family_before_model_flags(
         agent_launch.use("codex", project=True, cwd=tmp_path)
     elif source == "inherited":
         monkeypatch.setenv("AISQUARE_CODING_AGENT", "codex")
-    with pytest.raises(ValueError, match="pass --agent"):
-        agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
+    if source == "default":
+        with pytest.raises(ValueError, match="pass --agent"):
+            agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
+    else:
+        monkeypatch.setenv("AISQUARE_MODEL_CODER", "fixture-codex-model")
+        selected = agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
+        assert selected.source == source and selected.adapter.id == "codex"
+        assert agent_launch.native_model_args(selected, "coder", [])[:2] == [
+            "--model",
+            "fixture-codex-model",
+        ]
     selected = agent_launch.resolve(
         agent="claude-code", binary="/fixture/claude-work", cwd=tmp_path
     )
@@ -187,6 +226,9 @@ def test_welcome_displays_selection_errors(source: str, monkeypatch: pytest.Monk
     message = presence_lines().plain
     assert "coding agent:" in message and "Settings" in message
     assert "tmux" in message and "gh" in message
+    rows = [line for line in message.splitlines() if "✓" in line or "✗" in line]
+    assert len(rows) == 3
+    assert "tmux" in rows[0] and "✗ coding agent:" in rows[1] and "gh" in rows[2]
 
 
 def test_damaged_config_keeps_codex_launch_native_and_clears_parent_tracing(
@@ -275,36 +317,48 @@ def test_probe_cache_ignores_session_churn_but_separates_logins_and_providers(
         harness._PROBE_CONTEXT.reset(token)
 
 
-def test_refresh_clears_all_probe_scopes_and_only_probe_scopes() -> None:
+def test_refresh_clears_this_scope_and_expired_scopes_but_keeps_other_accounts() -> None:
     directory = paths.aisquare_home() / "cache"
     directory.mkdir(parents=True)
     for name in (
         "harness_models.old.json",
+        "harness_models.other-account.json",
         "harness_models.default.json",
         "harness_models.json",
         "agent-hooks-keep.json",
     ):
         (directory / name).write_text("{}")
+    expired = (datetime.now(UTC) - harness.CACHE_TTL - timedelta(seconds=10)).timestamp()
+    os.utime(directory / "harness_models.old.json", (expired, expired))
     harness.clear_probe_cache()
-    assert [path.name for path in directory.iterdir()] == ["agent-hooks-keep.json"]
+    assert {path.name for path in directory.iterdir()} == {
+        "agent-hooks-keep.json",
+        "harness_models.other-account.json",
+    }
 
 
-def test_reconnect_preserves_every_owned_timeout_and_trust_observation(tmp_path: Path) -> None:
+def test_reconnect_preserves_context_headroom_and_bounds_other_hooks(tmp_path: Path) -> None:
     agents.install_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path)
     path = tmp_path / "hooks.json"
     payload = json.loads(path.read_text())
     for groups in payload["hooks"].values():
         groups[0]["hooks"][0]["timeout"] = 180
     path.write_text(json.dumps(payload, indent=2) + "\n")
-    # Normalize once, then verify another reconnect writes nothing.
+    assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
     agents.install_hooks("codex", tmp_path)
+    actual = json.loads(path.read_text())["hooks"]
+    for hook in get_adapter("codex").capabilities.hooks:
+        assert actual[hook.event][0]["hooks"][0]["timeout"] == (
+            180 if hook.event in {"SessionStart", "UserPromptSubmit"} else hook.timeout
+        )
+    # Reconciliation preserves the edited context definition, which needs a
+    # fresh native observation; only an unchanged reconnect preserves it.
+    assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
     agents.observe_hooks("codex", tmp_path)
     before, stamp = path.read_bytes(), path.stat().st_mtime_ns
     agents.install_hooks("codex", tmp_path)
     assert path.read_bytes() == before and path.stat().st_mtime_ns == stamp
-    assert all(
-        groups[0]["hooks"][0]["timeout"] == 180 for groups in json.loads(before)["hooks"].values()
-    )
     assert agents.integration_readiness("codex", tmp_path)[0] == "observed"
 
 
@@ -328,11 +382,11 @@ def test_other_handlers_do_not_reset_aisquare_readiness(tmp_path: Path, mixed: b
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])
 @pytest.mark.parametrize("action", ["connect", "disconnect"])
+@pytest.mark.parametrize("original", ['{"hooks": {},}', '{"hooks": []}', "[]"])
 def test_invalid_settings_are_preserved_with_an_actionable_cli_error(
-    agent: str, action: str, tmp_path: Path, runner: CliRunner
+    agent: str, action: str, original: str, tmp_path: Path, runner: CliRunner
 ) -> None:
     path = tmp_path / get_adapter(agent).settings_name
-    original = '{"hooks": {},}'
     path.write_text(original)
     result = runner.invoke(app, ["--json", "agents", action, agent, "--config-dir", str(tmp_path)])
     assert result.exit_code == 1, result.output
@@ -357,7 +411,8 @@ def test_empty_native_settings_can_be_connected(agent: str, tmp_path: Path) -> N
         (["-c", 'otel.exporter="none"'], True),
         (["--config", 'otel = {exporter="none"}'], True),
         (['--config=otel.exporter="none"'], True),
-        (['-cotel.exporter="none"'], True),
+        (["exec", "-please fix src/foo.py"], False),
+        (["exec", "--json", "-print the plan"], False),
         (["-c", 'model="hotel.py"'], False),
     ],
 )
@@ -386,7 +441,7 @@ def test_exporters_are_scoped_to_the_effective_home_and_selected_profile(
     assert not native_telemetry.operator_configured(home, [])
     assert not native_telemetry.operator_configured(home, ["--", "--profile", "unused"])
     assert native_telemetry.operator_configured(home, ["--profile", "unused"])
-    assert native_telemetry.operator_configured(home, ["-punused"])
+    assert native_telemetry.operator_configured(home, ["--profile=unused"])
     (home / "config.toml").write_text('profile="unused"\n')
     assert native_telemetry.operator_configured(home, [])
     assert not native_telemetry.operator_configured(home, ["--profile", "clean"])

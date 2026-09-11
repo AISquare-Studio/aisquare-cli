@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -954,28 +955,45 @@ def test_cached_probe_survives_a_naive_timestamp(monkeypatch: pytest.MonkeyPatch
     assert verdict is None or verdict.alias == "fable"
 
 
-def test_spawn_refresh_forgets_every_cached_verdict(isolated_home: Path) -> None:
+def test_spawn_refresh_forgets_this_accounts_verdicts_only(isolated_home: Path) -> None:
     """--refresh promises a re-check after an entitlement change; bypassing
     reads only re-verified the ladder being walked, leaving other roles'
-    stale verdicts in place. It must forget the whole cache (#36 review fix 3
-    — clear_probe_cache was dead code)."""
-    harness._save_cache(
-        {
-            "opus": harness.ProbeResult(
-                alias="opus",
-                available=False,
-                resolved_id=None,
-                checked_at=datetime.now(tz=UTC),
-            )
-        }
+    stale verdicts in place. Clear every role's verdict for the account the
+    spawn will use, while keeping another account's paid probes warm."""
+    from aisquare.services import agent_launch
+
+    selected = agent_launch.resolve()
+    context = harness.ProbeContext(selected.binary.binary, {**os.environ, **selected.profile.env})
+    other = harness.ProbeContext(
+        selected.binary.binary,
+        {**context.env, "CLAUDE_CONFIG_DIR": str(isolated_home / "other-account")},
     )
-    assert harness._cache_path().exists()
+    cache = {
+        "opus": harness.ProbeResult(
+            alias="opus",
+            available=False,
+            resolved_id=None,
+            checked_at=datetime.now(tz=UTC),
+        )
+    }
+    files = []
+    for scope in (context, other):
+        token = harness._PROBE_CONTEXT.set(scope)
+        try:
+            harness._save_cache(cache)
+            files.append(harness._cache_path())
+        finally:
+            harness._PROBE_CONTEXT.reset(token)
+    current_path, other_path = files
+    assert current_path != other_path and all(path.exists() for path in files)
+    other_before = other_path.read_bytes()
 
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--refresh", "--no-probe"])  # type: ignore[arg-type]
 
     assert result.exit_code == 0, result.output
-    assert not harness._cache_path().exists(), "spawn --refresh must forget the cache"
+    assert not current_path.exists(), "spawn --refresh must forget its account's cache"
+    assert other_path.read_bytes() == other_before
 
 
 # ── spawn x explainability wiring ────────────────────────────────────────────

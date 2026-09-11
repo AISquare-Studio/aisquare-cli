@@ -15,8 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -72,7 +71,11 @@ def _home() -> Path:
     return Path.home()
 
 
-def _claude_home(config_dir: Path | None = None) -> Path:
+def _claude_home(
+    config_dir: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
     """Claude Code's config directory.
 
     Users run parallel Claude installs via ``CLAUDE_CONFIG_DIR`` (e.g. an
@@ -80,12 +83,9 @@ def _claude_home(config_dir: Path | None = None) -> Path:
     actual ``claude`` command reads. Priority: explicit ``--config-dir``,
     then ``CLAUDE_CONFIG_DIR``, then ``~/.claude``.
     """
-    if config_dir is not None:
-        return config_dir.expanduser()
-    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if env:
-        return Path(env).expanduser()
-    return _home() / ".claude"
+    return config_home(
+        get_adapter("claude-code"), _home(), os.environ if env is None else env, config_dir
+    )
 
 
 def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
@@ -212,18 +212,24 @@ def _is_aisquare_hook_command(command: str) -> bool:
     return _is_aisquare_program(tokens[0]) or tokens[-4:-2] == ["-m", "aisquare"]
 
 
-def _is_aisquare_group(group: Any) -> bool:
+def _owned_handlers(group: Any) -> list[dict[str, Any]]:
+    """The handlers installed by AISquare, including those in mixed groups."""
     if not isinstance(group, dict):
-        return False
+        return []
     hooks = group.get("hooks")
     if not isinstance(hooks, list):
-        return False
-    return any(
-        isinstance(item, dict)
+        return []
+    return [
+        item
+        for item in hooks
+        if isinstance(item, dict)
         and isinstance(item.get("command"), str)
         and _is_aisquare_hook_command(item["command"])
-        for item in hooks
-    )
+    ]
+
+
+def _is_aisquare_group(group: Any) -> bool:
+    return bool(_owned_handlers(group))
 
 
 def _without_owned(groups: Any) -> list[Any]:
@@ -235,15 +241,8 @@ def _without_owned(groups: Any) -> list[Any]:
         if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
             kept.append(group)
             continue
-        handlers = [
-            item
-            for item in group["hooks"]
-            if not (
-                isinstance(item, dict)
-                and isinstance(item.get("command"), str)
-                and _is_aisquare_hook_command(item["command"])
-            )
-        ]
+        owned = _owned_handlers(group)
+        handlers = [item for item in group["hooks"] if item not in owned]
         if handlers:
             kept.append({**group, "hooks": handlers})
     return kept
@@ -290,6 +289,11 @@ def _settings_for_write(path: Path) -> dict[str, Any]:
             f"{path} must contain a JSON object; existing settings preserved. "
             "Repair the file and retry agents connect/disconnect."
         )
+    if "hooks" in value and not isinstance(value["hooks"], dict):
+        raise AgentSettingsError(
+            f"{path}: hooks must be an object; existing settings preserved. "
+            "Repair the file and retry agents connect/disconnect."
+        )
     return value
 
 
@@ -300,8 +304,6 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         return False
     settings = _settings_for_write(spec.settings_path)
     hooks = settings.get("hooks", {})
-    if not isinstance(hooks, dict):
-        raise AgentSettingsError(f"{spec.settings_path}: hooks must be an object")
     command = _aisquare_command()
     for hook in spec.hooks:
         groups = hooks.get(hook.event)
@@ -312,8 +314,8 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
             "command": f"{command} hook {hook.command}{suffix}",
         }
         installed_timeout = _installed_timeout(groups, hook.event)
-        if hook.timeout is not None or installed_timeout is not None:
-            entry["timeout"] = max(hook.timeout or 0, installed_timeout or 0)
+        if hook.timeout is not None:
+            entry["timeout"] = max(hook.timeout, installed_timeout or 0)
         group: dict[str, Any] = {"hooks": [entry]}
         if hook.matcher is not None:
             group["matcher"] = hook.matcher
@@ -408,25 +410,18 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
 
 
 def _installed_timeout(groups: Any, event: str) -> int | None:
-    """The ``timeout`` an existing aisquare entry for ``event`` already carries.
+    """Preserve extra headroom only for the two context-producing hooks.
 
-    Read before rewriting so ``connect`` raises a short one to our ceiling and
-    leaves a longer one alone — an operator who set 180 chose more headroom
-    than we need, and reconciling that down would discard their choice.
+    UI and decision hooks must reconcile to their adapter's bounded timeout;
+    Claude hooks without a spec timeout retain the native default.
     """
-    if not isinstance(groups, list):
+    if event not in _CONTEXT_HOOKS or not isinstance(groups, list):
         return None
     timeouts: list[int] = []
     for group in groups:
-        if not _is_aisquare_group(group):
-            continue
-        for item in (group or {}).get("hooks", []) if isinstance(group, dict) else []:
-            if not isinstance(item, dict) or not isinstance(item.get("command"), str):
-                continue
-            if not _is_aisquare_hook_command(item["command"]):
-                continue
+        for item in _owned_handlers(group):
             value = item.get("timeout")
-            if isinstance(value, int) and not isinstance(value, bool):
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 timeouts.append(value)
     return max(timeouts, default=None)
 
@@ -447,13 +442,10 @@ def _is_current_aisquare_group(group: Any, event: str) -> bool:
     if event not in _CONTEXT_HOOKS:
         return True
     return any(
-        isinstance(item, dict)
-        and isinstance(item.get("command"), str)
-        and _is_aisquare_hook_command(item["command"])
-        and isinstance(item.get("timeout"), int)
+        isinstance(item.get("timeout"), int)
         and not isinstance(item.get("timeout"), bool)
         and item["timeout"] >= CONTEXT_HOOK_TIMEOUT_SECONDS
-        for item in group.get("hooks", [])
+        for item in _owned_handlers(group)
     )
 
 
@@ -545,7 +537,7 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
 
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
-    existing = [path for path in spec.context_files if path.exists()]
+    existing = context_files(spec.name, spec.home)
     sites = [
         AgentHookSite(
             config_dir=directory,
@@ -578,17 +570,35 @@ def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
 
 
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
-    """Existing context files for an agent (its content, for ingestion)."""
+    """Readable, effective context files, using the same precedence as connect."""
+    documents, _ = read_context(name, config_dir)
+    return list(documents)
+
+
+def read_context(
+    name: str,
+    config_dir: Path | None = None,
+) -> tuple[dict[Path, str], list[str]]:
+    """Read effective instructions; missing/unreadable docs never block hook setup."""
     spec = _spec(name, config_dir)
     if spec is None:
-        return []
-    if spec.first_context_file_only:
-        for path in spec.context_files:
-            with suppress(OSError):
-                if path.read_text(encoding="utf-8", errors="replace").strip():
-                    return [path]
-        return []
-    return [path for path in spec.context_files if path.is_file()]
+        return {}, []
+    documents: dict[Path, str] = {}
+    notes: list[str] = []
+    for path in spec.context_files:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, IsADirectoryError):
+            continue
+        except OSError as exc:
+            notes.append(f"Skipped context file {path}: {exc}")
+            continue
+        if spec.first_context_file_only and not content.strip():
+            continue
+        documents[path] = content
+        if spec.first_context_file_only:
+            break
+    return documents, notes
 
 
 def hook_fingerprint(name: str, config_dir: Path) -> str:
@@ -604,16 +614,13 @@ def hook_fingerprint(name: str, config_dir: Path) -> str:
         if not isinstance(groups, list):
             continue
         for group in groups:
-            if not _is_aisquare_group(group):
+            handlers = _owned_handlers(group)
+            if not handlers:
                 continue
-            handlers = [
-                item
-                for item in group["hooks"]
-                if isinstance(item, dict)
-                and isinstance(item.get("command"), str)
-                and _is_aisquare_hook_command(item["command"])
-            ]
-            owned.setdefault(event, []).append({**group, "hooks": handlers})
+            definition: dict[str, Any] = {"hooks": handlers}
+            if "matcher" in group:
+                definition["matcher"] = group["matcher"]
+            owned.setdefault(event, []).append(definition)
     return hashlib.sha256(json.dumps(owned, sort_keys=True).encode()).hexdigest()
 
 

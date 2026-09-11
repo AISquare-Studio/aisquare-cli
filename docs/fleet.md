@@ -452,6 +452,9 @@ per concept: `aisquare team harness` (the ladder and the effort offsets),
 `AISQUARE_MODEL_<ROLE>`, `AISQUARE_EFFORT_<ROLE>` and `AISQUARE_BIN_<ROLE>` in
 the environment. A fleet launch is an `aisquare launch <role>` inside a tmux
 window, so all of it applies unchanged, as does the Explainability wiring.
+For an arbitrary wrapper binary, select its family with `aisquare agents use
+claude-code` (or `codex`), `AISQUARE_CODING_AGENT`, or the role's `--agent`
+binding. This also applies to `AISQUARE_AGENT_BIN` and `AISQUARE_BIN_<ROLE>`.
 
 **Native agent teams are off in fleet launches.** Claude Code's own
 experimental *agent teams* (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) let a

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import socket
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from pathlib import Path
 from typing import TypeVar
 
 import pytest
@@ -51,6 +53,22 @@ def fresh_remote_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(remote_server, "_runtime", None)
     yield
     remote_server.stop()
+
+
+@pytest.fixture(autouse=True)
+def installed_page(isolated_home: Path) -> Path:
+    """Every test here starts from a machine where the page IS installed.
+
+    ``start()`` refuses to serve a directory with no ``index.html`` (that is the
+    whole point of ``aisquare remote install-page``), so without this the tests
+    about the link, the QR and the password would all be testing the
+    no-page-installed path instead. The one test that wants that path deletes
+    this directory itself.
+    """
+    dist = paths.remote_dist_dir()
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "index.html").write_text("<!doctype html><title>asq remote</title>")
+    return dist
 
 
 def free_port() -> int:
@@ -181,6 +199,42 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
         assert "local only" in shown(modal.query_one("#remote-state", Static))
 
     drive(go, tunnel=missing_ngrok)
+
+
+def test_with_no_page_installed_the_modal_says_how_to_install_it_and_remote_stays_off(
+    installed_page: Path,
+) -> None:
+    """The fresh-machine path: ``m``, Remote on, and nothing to serve.
+
+    Before ``install-page`` existed this turned Remote ON against an empty
+    ``~/.aisquare/remote-dist`` and the phone got a 404 with no explanation
+    anywhere in the TUI. Now the switch comes back off and the status line
+    carries the command that fixes it.
+    """
+    shutil.rmtree(installed_page)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+
+        status = shown(modal.query_one("#remote-status", Static))
+        assert "no remote page installed" in status
+        assert "aisquare remote install-page" in status
+        assert not app.remote.running
+        assert app.remote.info is None
+        assert remote_server.status()["running"] is False
+        # The switch snaps back and the saved state is untouched: no blind retry at next start.
+        assert modal.query_one("#remote-on", Switch).value is False
+        assert shown(modal.query_one("#remote-state", Static)) == "off"
+        assert shown(modal.query_one("#remote-link", Static)) == "turn Remote on for a link"
+        assert app.remote.state.remote_enabled is False
+
+    drive(go, tunnel=missing_ngrok)
+    # A refused start persists nothing at all: no state file was even created here.
+    assert not paths.state_path().exists()
 
 
 def test_m_is_refused_while_focus_is_in_a_view_and_the_palette_lists_remote_control() -> None:

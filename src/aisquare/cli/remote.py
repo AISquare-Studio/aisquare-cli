@@ -25,6 +25,12 @@ def _fail_if_missing() -> None:
         fail(problem, error="remote_not_installed")
 
 
+def _fail_if_no_page(dist: Path | None) -> None:
+    problem = remote_server._page_missing(dist)
+    if problem is not None:
+        fail(problem, error="no_remote_page")
+
+
 def _describe(info: remote_server.RemoteInfo, *, allow_write: bool) -> dict[str, object]:
     return {
         "url_local": info.url_local,
@@ -50,6 +56,7 @@ def serve_remote(
 ) -> None:
     """Serve the page, the read-only JSON API and the live stream on 127.0.0.1 (Ctrl-C stops)."""
     _fail_if_missing()
+    _fail_if_no_page(dist)
     state = remote_server.runtime()
     info = state.info(port)
     payload = _describe(info, allow_write=state.allow_write)
@@ -66,6 +73,33 @@ def serve_remote(
         remote_server.run_foreground(dist, port)
     except OSError as exc:
         fail(f"cannot bind {remote_server.BIND}:{port} — {exc}", error="remote_bind_failed")
+
+
+@app.command("install-page")
+def install_page(
+    dist: Annotated[
+        Path,
+        typer.Argument(help="Built aisquare-remote dist/ directory (must contain index.html)."),
+    ],
+) -> None:
+    """Copy a built ``aisquare-remote`` page into ``~/.aisquare/remote-dist`` (atomic replace).
+
+    ``m`` on a fresh machine has nowhere to serve from until this runs once —
+    it is not something a fresh clone can do for itself (the built page lives
+    in the FE repo's dist/, not in this package).
+    """
+    source = dist.resolve()
+    if not (source / "index.html").is_file():
+        fail(
+            f"no index.html in {source} — build aisquare-remote first (npm run build)",
+            error="invalid_dist",
+            ref=str(source),
+        )
+    destination = remote_server.install_page(source)
+    if get_state().json_output:
+        typer.echo(json.dumps({"installed": str(destination)}))
+    else:
+        stdout_console().print(f"✓ installed the remote page → {destination}", markup=False)
 
 
 @app.command("status")

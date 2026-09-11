@@ -69,9 +69,6 @@ class RemotePanel(ModalScreen[None]):
     def __init__(self, controller: RemoteController) -> None:
         super().__init__()
         self.controller = controller
-        self._syncing = False
-        """Set while the switches are being painted FROM the controller, so their
-        ``Changed`` messages are not mistaken for the user's."""
         self._device_sids: list[str] = []
 
     # --- layout ---------------------------------------------------------------------------
@@ -123,12 +120,10 @@ class RemotePanel(ModalScreen[None]):
     def repaint(self) -> None:
         controller = self.controller
         running = controller.running
-        self._syncing = True
-        try:
-            self.query_one("#remote-on", Switch).value = running
-            self.query_one("#remote-allow-write", Switch).value = controller.state.allow_write
-        finally:
-            self._syncing = False
+        # The echoes these two writes produce are filtered in on_switch_changed,
+        # by value rather than by a flag — see the note there.
+        self.query_one("#remote-on", Switch).value = running
+        self.query_one("#remote-allow-write", Switch).value = controller.state.allow_write
         self.query_one("#remote-state", Static).update(self._state_text())
         self.query_one("#remote-status", Static).update(controller.message or "")
         self.query_one("#remote-password", Static).update(
@@ -175,14 +170,27 @@ class RemotePanel(ModalScreen[None]):
     # --- the controls ---------------------------------------------------------------------------
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if self._syncing:
-            return
+        """A switch moved. Act only when it DISAGREES with the controller.
+
+        The value a repaint writes back comes round as a ``Changed`` message of
+        its own, and Textual delivers those from the queue — so the ``_syncing``
+        flag this used to read was always back to ``False`` by the time the echo
+        arrived. Measured: a ``start()`` that refuses (no page installed) set the
+        status line, ``repaint`` snapped the switch back to off, and that echo
+        ran ``turn_off()`` — which cleared the very sentence the user needed.
+        Comparing against the controller needs no flag and cannot go stale: the
+        switch always shows the current state, so a real toggle never matches it.
+        """
         if event.switch.id == "remote-on":
+            if event.value == self.controller.running:
+                return
             if event.value:
                 self.controller.turn_on()
             else:
                 self.controller.turn_off()
         elif event.switch.id == "remote-allow-write":
+            if event.value == self.controller.state.allow_write:
+                return
             self.controller.set_allow_write(event.value)
             if event.value:
                 self.notify("Write actions are ON for remote devices", severity="warning")

@@ -46,6 +46,8 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
+import shutil
 import threading
 import time
 from collections import deque
@@ -94,6 +96,10 @@ WRITE_ENDPOINTS = (
 
 INSTALL_HINT = "pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli websockets)"
 
+NO_PAGE_HINT = "no remote page installed — run: aisquare remote install-page <dist>"
+"""Shown by the modal's status line, ``asq remote serve``'s exit, and ``start()``'s raise —
+one sentence, so a fresh machine never sees a server that quietly answers with nothing."""
+
 _PASSPHRASE_WORDS = (
     "amber", "birch", "cedar", "delta", "ember", "fjord", "glade", "harbor",
     "indigo", "juniper", "kestrel", "lagoon", "meadow", "nectar", "orchid", "pebble",
@@ -112,6 +118,10 @@ class RemoteError(RuntimeError):
 
 class RemoteUnavailable(RemoteError):
     """The ``remote`` extra is not installed."""
+
+
+class NoRemotePage(RemoteError):
+    """No built ``aisquare-remote`` page is installed at the directory the server would serve."""
 
 
 class RequestError(Exception):
@@ -1298,12 +1308,63 @@ _server: _Server | None = None
 _flusher: threading.Timer | None = None
 
 
+def _page_missing(dist_dir: Path | None) -> str | None:
+    """``None`` when the directory ``build_app`` would serve has an ``index.html``.
+
+    Checked up front by :func:`start` and :func:`run_foreground`, not by
+    :func:`build_app` itself: an explicit ``--dist``/``dist_dir`` that turns out
+    to be wrong is still a per-request 404 (``test_missing_dist_is_a_404_...``),
+    because the caller named that path on purpose and may still be building it.
+    What must never happen silently is the DEFAULT — ``dist_dir=None`` falling
+    back to :func:`remote_dist_dir`, which nothing populates until
+    :func:`install_page` runs — so a fresh machine's first ``m`` press gets a
+    sentence instead of a server that answers every request with nothing.
+    """
+    dist = (dist_dir or remote_dist_dir()).resolve()
+    return None if (dist / "index.html").is_file() else NO_PAGE_HINT
+
+
+def install_page(source: Path) -> Path:
+    """Copy a built ``aisquare-remote`` dist into :func:`remote_dist_dir`, atomically.
+
+    ``source`` must contain ``index.html`` (re-checked here even though the CLI
+    command already does, so a direct caller gets the same guard). The copy
+    lands in a staging directory beside the destination and is swapped in with
+    two renames — same filesystem, so each rename is atomic — rather than
+    removing the destination first, so a server reading the old page mid-swap
+    never sees a half-written one.
+    """
+    source = source.resolve()
+    if not (source / "index.html").is_file():
+        raise NoRemotePage(f"no index.html in {source} — build aisquare-remote first")
+    ensure_home()
+    destination = remote_dist_dir()
+    staging = destination.with_name(f".{destination.name}.staging-{os.getpid()}")
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.copytree(source, staging)
+    previous = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
+    shutil.rmtree(previous, ignore_errors=True)
+    if destination.exists():
+        destination.rename(previous)
+    try:
+        staging.rename(destination)
+    except OSError:
+        if previous.exists() and not destination.exists():
+            previous.rename(destination)
+        raise
+    shutil.rmtree(previous, ignore_errors=True)
+    return destination
+
+
 def start(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> RemoteInfo:
     """Serve in the background; idempotent while running. ``allow_write`` is left as persisted."""
     global _server
     problem = _dependency_error()
     if problem is not None:
         raise RemoteUnavailable(problem)
+    page_problem = _page_missing(dist_dir)
+    if page_problem is not None:
+        raise NoRemotePage(page_problem)
     state = runtime()
     with _lock:
         if _server is not None and _server.running:
@@ -1382,6 +1443,9 @@ def run_foreground(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> No
     problem = _dependency_error()
     if problem is not None:
         raise RemoteUnavailable(problem)
+    page_problem = _page_missing(dist_dir)
+    if page_problem is not None:
+        raise NoRemotePage(page_problem)
     import uvicorn
 
     app = build_app(runtime(), dist_dir=dist_dir)
@@ -1392,11 +1456,13 @@ __all__ = [
     "BIND",
     "COOKIE",
     "DEFAULT_PORT",
+    "NO_PAGE_HINT",
     "READ_ONLY_REASON",
     "WRITE_ENDPOINTS",
     "WS_CLOSE_UNAUTHORIZED",
     "Device",
     "DoctorVerdict",
+    "NoRemotePage",
     "NoSuchAgent",
     "RemoteError",
     "RemoteInfo",
@@ -1408,6 +1474,7 @@ __all__ = [
     "build_app",
     "build_local_url",
     "explainability_payload",
+    "install_page",
     "live_sources",
     "live_writes",
     "regenerate_password",

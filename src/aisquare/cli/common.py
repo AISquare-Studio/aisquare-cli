@@ -186,6 +186,13 @@ def _project_name(project: ProjectInfo) -> str:
     return project.root.name or project.id
 
 
+def projects_json(projects: list[ProjectInfo]) -> list[dict[str, object]]:
+    """The ``project list --json`` payload — shared with the Remote Control server verbatim."""
+    return [
+        {**project.model_dump(mode="json"), "name": _project_name(project)} for project in projects
+    ]
+
+
 def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
     """Render the project list — a JSON array under ``--json``, a table otherwise.
 
@@ -194,14 +201,7 @@ def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None
     by name had nothing to pick on.
     """
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                [
-                    {**project.model_dump(mode="json"), "name": _project_name(project)}
-                    for project in projects
-                ]
-            )
-        )
+        typer.echo(json.dumps(projects_json(projects)))
         return
     if not projects:
         stdout_console().print("No projects registered yet. Run: aisquare init")

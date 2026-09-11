@@ -72,6 +72,17 @@ explainability = [
   # join the proxy's Run instead of fragmenting into one Run per drain.
   "aisquare[explainability]>=1.1",
 ]
+remote = [
+  # `asq remote serve` and the fleet UI's Remote modal (services/remote_server.py):
+  # one local HTTP+WebSocket port that ngrok exposes to a phone. starlette and
+  # uvicorn are the SAME two the serve extra already resolves through mcp;
+  # websockets is the ONE addition (uvicorn's WebSocket backend — without it
+  # the /ws stream answers "No supported WebSocket library detected").
+  # Flagged for Anmol in the PR body, per the hackathon plan §4-G.
+  "starlette>=0.40",
+  "uvicorn>=0.30",
+  "websockets>=12",
+]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
   # was the documented way to get the board TUI before textual became core.
@@ -115,6 +126,9 @@ dev = [
   # py.typed and mypy runs strict over tests.
   "jsonschema>=4.18",
   "types-jsonschema>=4.18",
+  # The remote extra's one addition, so the dev env can run tests/test_remote_server.py
+  # (starlette + uvicorn already arrive through mcp above).
+  "websockets>=12",
 ]
 
 [project.scripts]

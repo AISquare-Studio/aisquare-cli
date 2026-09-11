@@ -7,6 +7,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Remote Control server: `asq remote serve`.** One local port (`127.0.0.1:8748`,
+  never anything else) that serves the built `aisquare-remote` page with SPA
+  fallback, a read-only JSON API and a WebSocket stream, so ngrok can show the
+  fleet to a phone. Every path sits under `/r/<32-char token>/`; a wrong token is
+  a 404 everywhere, so the URL leaks nothing. `POST api/unlock {password}` sets
+  an HttpOnly SameSite=Lax cookie; `/api` and `/ws` without it are 401; more than
+  five unlock attempts a minute per client is 429. `GET api/{projects,fleet,board,
+  tasks,memory}` return exactly what `asq --json project list|fleet ls|board|task
+  list|context list` print (the same builders, now `projects_json`, `agents_json`
+  and `board_json`); `api/panes/<agent>` is one `capture-pane -e` frame; `api/remote`
+  carries `{allow_write, auto_off_at, version}`; `api/devices` lists unlocked
+  browsers and `DELETE api/devices/<sid>` revokes one, closing its sockets with
+  code 4401. The stream sends `{type: board|fleet|remote, payload, ts}` every
+  second when something changed and `pane` frames for agents the client
+  subscribed to. Write endpoints (`task/claim`, `task/done`, `note`,
+  `project/switch|add|remove`, `send-keys`) exist and answer 403 until
+  `asq remote allow-write on` (default off; each allowed write is one line in
+  `~/.aisquare/remote-audit.log`). State lives in `~/.aisquare/remote.json` (0600).
+  `services.remote_server` also exposes `start/stop/status/revoke/set_allow_write/
+  regenerate_password` for the fleet UI's Remote modal. New optional extra
+  `remote`: starlette + uvicorn (already resolved by `serve`) and `websockets`,
+  the one new package.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

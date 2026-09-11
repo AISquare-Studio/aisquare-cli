@@ -47,7 +47,6 @@ from __future__ import annotations
 import contextlib
 import re
 import sqlite3
-from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -73,23 +72,29 @@ from aisquare.services.ci_contract import (
 )
 
 
-def available(cwd: Path | None = None) -> bool:
+def available() -> bool:
     """Whether the tool should be registered: the experiment is on and the run's
     descriptor lists ``mcp_pull``.
 
-    Resolves the project from ``cwd`` exactly as :func:`forward_recall` does,
-    then consults the descriptor (cached or fetched) through the gate. Opening
-    the store to resolve the project is a cost this predicate did not have
-    before the binding became per project; it is paid once, at registration.
-    Registration happens once per server process while every pull re-resolves
-    from the agent's own ``cwd``, so a server started in one checkout and asked
-    from another can advertise the tool under the first's binding - the pull
-    then records its own refusal against the second's, which is visible, rather
-    than serving the first's run. Never raises.
+    Resolves the project exactly as :func:`forward_recall` does - from THIS
+    process's working directory, through ``active_project`` - then consults the
+    descriptor (cached or fetched) through the gate. Opening the store to
+    resolve the project is a cost this predicate did not have before the
+    binding became per project; it is paid once, at registration. Never raises.
+
+    There is no agent ``cwd`` to resolve from: an MCP tool call carries no
+    working directory, so the server's own is the resolution for registration
+    and for every pull alike. Claude Code starts a project-scoped server from
+    the project directory, so the two normally agree; a server started in one
+    checkout and used from another binds to ITS checkout's project, and
+    ``aisquare doctor`` (the ``ci workspace`` line) is where that is visible.
+    Round 3 gave this and ``forward_recall`` a defaulted ``cwd`` parameter and
+    described a per-pull re-resolution that no production caller could supply;
+    the parameters are gone so the code and this description agree (round 4).
     """
     try:
         with store_session() as store:
-            project_id = active_project(store, cwd).id
+            project_id = active_project(store).id
         opened = ci_augment.gate(project_id)
     except Exception:
         return False
@@ -182,7 +187,7 @@ def collective_intelligence_recall(
 
 
 def forward_recall(
-    recall: RecallInput, *, cwd: Path | None = None
+    recall: RecallInput,
 ) -> tuple[ci_client.RecallCall | None, ci_augment.Augmentation]:
     """Carry one recall to the server's pull route and record the row.
 
@@ -191,9 +196,10 @@ def forward_recall(
     """
     trace_id = new_trace_id()
     # The project first: its binding decides which workspace's run the gate
-    # asks for, the same way the hook path passes `project.id`.
+    # asks for, the same way the hook path passes `project.id`. Resolved from
+    # this process's cwd - the only one there is; see `available`.
     with store_session() as store:
-        project = active_project(store, cwd)
+        project = active_project(store)
     opened = ci_augment.gate(project.id)
     if not opened.open or opened.descriptor is None or opened.run_id is None:
         augmentation = ci_augment.Augmentation(

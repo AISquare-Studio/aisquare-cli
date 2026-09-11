@@ -195,6 +195,48 @@ def test_a_server_that_does_not_answer_me_is_named_not_blamed_on_the_session(
     assert identity.fix and "aisquare login" not in identity.fix
 
 
+def test_a_server_that_predates_me_is_informational_when_a_run_is_exported(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """The harness and joint-smoke path: an exported run means the hooks never
+    ask GET /v1/me, and the server they talk to today does not serve it. Round 3
+    warned here with "turn the hooks off", to an operator whose delivery worked;
+    the line is informational and names the export that is in use (round 4)."""
+    signed_in(monkeypatch, stub)
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "k")
+    monkeypatch.setenv(ci_client.RUN_ENV_VAR, "run_kernel0001")
+    stub.me_status = 404
+
+    checks = ci_checks()
+
+    assert checks["ci test bed"].status is CheckStatus.ok
+    identity = checks["ci identity"]
+    assert identity.status is CheckStatus.ok
+    assert "404" in identity.detail and "run_kernel0001" in identity.detail
+    assert not identity.fix
+    assert "AISQUARE_CI=0" not in identity.detail
+
+
+def test_a_server_that_predates_me_warns_with_the_export_as_the_fix_when_no_run_is(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """Without an exported run the hooks WOULD ask GET /v1/me and get nothing,
+    so this is a real warning - and the fix is the export, not turning the
+    experiment off."""
+    signed_in(monkeypatch, stub)
+    stub.me_status = 404
+
+    checks = ci_checks()
+
+    identity = checks["ci identity"]
+    assert identity.status is CheckStatus.warn
+    assert "404" in identity.detail
+    assert identity.fix and "AISQUARE_CI_RUN" in identity.fix
+    assert "AISQUARE_CI=0" not in identity.fix
+    assert checks["ci test bed"].status is CheckStatus.warn
+    assert "no run resolved" in checks["ci test bed"].detail
+
+
 def test_an_exported_run_still_wins_and_the_identity_is_still_shown(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
 ) -> None:
@@ -553,11 +595,13 @@ def test_the_credentials_file_is_read_once_per_process(
 def test_a_sign_in_from_another_process_is_seen_without_a_restart(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
 ) -> None:
-    """The memo is keyed by the credentials file's mtime and size as well, so a
+    """The memo is keyed by a digest of the credentials file as well, so a
     long-lived `fleet ui` or `serve` sees a login done in another terminal on
-    its next call - `None` included, which the first draft would have kept."""
+    its next call - `None` included, which the first draft would have kept - and
+    a same-length rewrite that leaves the timestamp alone (a refresh on a
+    coarse filesystem) is seen too, where an mtime-and-size key needed a bumped
+    mtime to notice it (round 4)."""
     import os
-    import time
 
     from aisquare.core import credentials
     from aisquare.services import iam
@@ -569,24 +613,66 @@ def test_a_sign_in_from_another_process_is_seen_without_a_restart(
     ci_client.reset_cache()
     assert ci_client.api_key_and_source() == ("", "")
 
-    # "Another process" signs in: the file appears with a different mtime/size.
+    # "Another process" signs in.
     credentials.store(**{iam.KEY_API_URL: "https://api.test", iam.KEY_TOKEN: TOKEN})
-    stat = os.stat(paths.credentials_path())
-    os.utime(paths.credentials_path(), ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
-
     assert ci_client.api_key_and_source() == (TOKEN, ci_client.SIGNED_IN_SOURCE)
 
+    # A refresh rewrites the token at the same length inside one timestamp tick.
+    before = os.stat(paths.credentials_path())
+    replacement = TOKEN[:-1] + ("1" if TOKEN[-1] != "1" else "2")
+    credentials.store(**{iam.KEY_TOKEN: replacement})
+    os.utime(paths.credentials_path(), ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = os.stat(paths.credentials_path())
+    assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+    assert ci_client.api_key_and_source() == (replacement, ci_client.SIGNED_IN_SOURCE)
+
     credentials.drop(iam.KEY_TOKEN)
-    time.sleep(0.01)
     assert ci_client.api_key_and_source() == ("", "")
 
 
-def test_the_recall_predicate_takes_the_agents_cwd(
+def test_two_homes_without_a_credentials_file_are_not_one_memo_entry(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The memo key names the credentials PATH: two `AISQUARE_HOME`s that both
+    lack the file used to hash alike, and the first home's answer - `None`
+    included - was served for the second (round 4)."""
+    from aisquare.core import credentials
+    from aisquare.services import iam
+
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, stub.url)
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv("AISQUARE_TOKEN", raising=False)
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    monkeypatch.setenv("AISQUARE_HOME", str(first))
+    ci_client.reset_cache()
+    assert ci_client.api_key_and_source() == ("", "")
+
+    monkeypatch.setenv("AISQUARE_HOME", str(second))
+    credentials.store(**{iam.KEY_API_URL: "https://api.test", iam.KEY_TOKEN: TOKEN})
+    assert ci_client.api_key_and_source() == (TOKEN, ci_client.SIGNED_IN_SOURCE)
+
+    monkeypatch.setenv("AISQUARE_HOME", str(first))
+    assert ci_client.api_key_and_source() == ("", ""), "not the second home's session"
+
+
+def test_the_recall_predicate_resolves_the_project_from_the_servers_own_cwd(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path, tmp_path: Path
 ) -> None:
-    """available() and forward_recall resolve the project the same way, from the
-    caller's cwd; a binding for one checkout must not advertise the tool for another."""
+    """available() and forward_recall take no cwd, because an MCP tool call
+    carries none: the server process's working directory is the resolution for
+    registration and for every pull, and a server started in another checkout
+    binds to that checkout's project. Round 3 gave both a defaulted `cwd` that
+    no production caller supplied; the honest shape is pinned here (round 4)."""
+    import inspect
+
     from aisquare.services import ci_recall
+
+    assert "cwd" not in inspect.signature(ci_recall.available).parameters
+    assert "cwd" not in inspect.signature(ci_recall.forward_recall).parameters
 
     signed_in(monkeypatch, stub)
     here = tmp_path / "here"
@@ -599,8 +685,10 @@ def test_the_recall_predicate_takes_the_agents_cwd(
     save_config(config)
     ci_client.reset_cache()
 
-    assert ci_recall.available(cwd=here) is True
-    assert ci_recall.available(cwd=there) is False
+    monkeypatch.chdir(here)
+    assert ci_recall.available() is True
+    monkeypatch.chdir(there)
+    assert ci_recall.available() is False, "the other checkout has no binding"
 
 
 def test_the_transport_rule_has_one_home(monkeypatch: pytest.MonkeyPatch) -> None:

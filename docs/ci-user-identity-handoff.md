@@ -13,6 +13,19 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 4, 2026-09-11.** `available()` and `forward_recall` take no
+> `cwd` again: an MCP tool call carries none, so the server process's working
+> directory is the resolution for registration and every pull, and the
+> docstring says so instead of describing a per-pull re-resolution nothing
+> could supply. `doctor` treats a 404 from `GET /v1/me` as a server that
+> predates the route - informational when a run is exported (the hooks never
+> ask it then), a warning whose fix is the export when none is - rather than
+> as a server that is down. The session memo is keyed by the credentials
+> file's path and a digest of its bytes, so two homes without the file are not
+> one entry and a same-length rewrite inside one timestamp tick is seen. The
+> constant `has_bearer` condition is gone from the branch that could not
+> express it.
+>
 > **Review round 3, 2026-09-11.** `doctor` asks `GET /v1/me` for ANY bearer,
 > as the hooks do - an experiment token with no run exported resolves the
 > fixture workspace's run, and the `ci identity` line names harness bearers

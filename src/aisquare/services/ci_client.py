@@ -41,6 +41,7 @@ the base install must stay unchanged and this path has to work without the
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -216,13 +217,13 @@ def _signed_in_token() -> str:
 
 
 _SESSION_MEMO: dict[str, Any] = {}
-"""One read of the credentials file per change of it, keyed by the value of
-``AISQUARE_TOKEN`` (which wins over the file and can change between tests) and
-by the file's mtime and size.
-``iam.current_session()`` stats and parses ``~/.aisquare/credentials`` on every
-call; a hook asked for the bearer, its source, its problems, the doctor note and
-the scrubber once per recorded detail - six reads of one file per turn. Cleared
-by :func:`reset_cache`, which sign-in and sign-out call."""
+"""One parse of the credentials file per change of it, keyed by the value of
+``AISQUARE_TOKEN`` (which wins over the file and can change between tests), by
+the file's resolved path and by a digest of its bytes.
+``iam.current_session()`` parses and validates ``~/.aisquare/credentials`` on
+every call; a hook asked for the bearer, its source, its problems, the doctor
+note and the scrubber once per recorded detail - six parses of one file per
+turn. Cleared by :func:`reset_cache`, which sign-in and sign-out call."""
 
 
 def _signed_in_session() -> Any:
@@ -237,15 +238,18 @@ def _signed_in_session() -> Any:
     env_token = os.environ.get("AISQUARE_TOKEN", "").strip()
     # The key carries the credentials file's identity too, so a sign-in or
     # sign-out in ANOTHER process (a `login` in a second terminal while `fleet
-    # ui` or `serve` runs) is seen on the next call: one stat instead of a
-    # read-and-parse, and no answer - `None` included - outlives the file that
-    # produced it.
+    # ui` or `serve` runs) is seen on the next call: one small read instead of
+    # a parse, and no answer - `None` included - outlives the file that
+    # produced it. The path is in the key because two homes that both lack the
+    # file look alike otherwise, and it is the bytes that are hashed rather
+    # than mtime and size because a same-length rewrite within one timestamp
+    # tick (a refresh, on a coarse filesystem) left those unchanged (round 4).
+    path = paths.credentials_path()
     try:
-        stat = os.stat(paths.credentials_path())
-        file_key: tuple[int, int] = (stat.st_mtime_ns, stat.st_size)
+        digest: str | None = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
-        file_key = (0, 0)
-    key = (env_token, file_key)
+        digest = None
+    key = (env_token, str(path), digest)
     if _SESSION_MEMO.get("key") == key and "session" in _SESSION_MEMO:
         return _SESSION_MEMO["session"]
     try:

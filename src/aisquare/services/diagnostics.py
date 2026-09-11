@@ -1010,12 +1010,11 @@ def _experiment_checks() -> list[DoctorCheck]:
     key, key_source = ci_client.api_key_and_source()
     raw_run = ci_client.raw_run_id()
     run = ci_client.run_id()
-    # Whether there is a bearer to ask GET /v1/me with - the SAME question
-    # ci_augment._resolve_run asks. The first draft branched on the bearer's
-    # source, so an experiment-token caller with no run exported was told "no
-    # run" while the hooks resolved one from the fixture workspace's
-    # membership; the source is for display, never for the branch.
-    has_bearer = bool(key)
+    # The branches below ask "is there a bearer" (`key`) - the SAME question
+    # ci_augment._resolve_run asks - never "is it a signed-in one". The first
+    # draft branched on the bearer's source, so an experiment-token caller with
+    # no run exported was told "no run" while the hooks resolved one from the
+    # fixture workspace's membership; the source is for display only.
     checks: list[DoctorCheck] = []
     identity: list[DoctorCheck] = []
     if not key:
@@ -1048,11 +1047,12 @@ def _experiment_checks() -> list[DoctorCheck]:
                 "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
             )
         )
-    elif not raw_run and has_bearer:
-        # Nothing exported: the run is whatever GET /v1/me says is published in
-        # the bound workspace - for a signed-in developer AND for a harness
-        # token, whose fixture membership the server reports the same way. The
-        # identity lines below carry the reasons.
+    elif not raw_run:
+        # Nothing exported, and a bearer in hand (the `not key` arm above has
+        # claimed every other case): the run is whatever GET /v1/me says is
+        # published in the bound workspace - for a signed-in developer AND for
+        # a harness token, whose fixture membership the server reports the same
+        # way. The identity lines below carry the reasons.
         identity, resolved = _identity_checks(base, key, key_source, exported_run=None)
         run = resolved or ""
         if run:
@@ -1078,7 +1078,9 @@ def _experiment_checks() -> list[DoctorCheck]:
         # token exported and a signed-in session had no way to see which one won.
         checks.append(_ok(name, f"enabled for {shown}, run {run}, {_bearer_note(key_source)}"))
         # An exported run wins over the server's routing; who CI resolves the
-        # bearer to is still worth a line, for every kind of bearer.
+        # bearer to is still worth a line, for every kind of bearer. A server
+        # that does not serve GET /v1/me yet is named as such on this branch,
+        # not treated as down: the hooks never ask it here.
         identity, _resolved = _identity_checks(base, key, key_source, exported_run=run)
     checks.extend(identity)
     checks.append(_check_ci_endpoint(base, shown))
@@ -1134,7 +1136,9 @@ def _identity_checks(
     ``ci identity`` answers "who does CI think I am" from ``GET /v1/me``, fetched
     without caching (a diagnostic must not create state) and bounded like every
     other probe here - for ANY bearer, since the server answers for harness
-    tokens too. ``ci workspace`` applies the same routing the hooks apply —
+    tokens too. A 404 is a server that predates the route: informational when a
+    run is exported (the hooks never ask it then), a warning with the export as
+    the fix when none is. ``ci workspace`` applies the same routing the hooks apply —
     ``ci_me.run_for`` over this project's ``[experiment].bindings`` entry — so
     the run it prints is the run a session would use, and the fix for each way
     that can fail names the command that fixes it. When a run is exported the
@@ -1155,6 +1159,30 @@ def _identity_checks(
                     "Sign in again: aisquare login"
                     if signed_in
                     else "Export the token the controller issued: export AISQUARE_CI_KEY=…",
+                )
+            ], None
+        if answer.status == 404:
+            # This server predates the route (it ships with aisquare-ci #141,
+            # and the CLI releases on its own). With a run exported the hooks
+            # never ask it, so there is nothing to warn about - the round-4
+            # review found a harness operator whose delivery worked being told
+            # to consider turning the experiment off. Without one, the hooks
+            # WOULD ask and get nothing, and the fix is the export.
+            if exported_run is not None:
+                return [
+                    _ok(
+                        "ci identity",
+                        "not checked: this server does not serve GET /v1/me yet (http 404); "
+                        f"the exported run {exported_run} is used as-is",
+                    )
+                ], None
+            return [
+                _warn(
+                    "ci identity",
+                    "this server does not serve GET /v1/me yet (http 404), so no run can be "
+                    "resolved for this bearer",
+                    "Export the run the controller published until the server is upgraded: "
+                    "export AISQUARE_CI_RUN=run_…",
                 )
             ], None
         return [

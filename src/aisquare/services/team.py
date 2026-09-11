@@ -1856,10 +1856,7 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
     named = _fleet_row_named(store, project_id)
     if named is not None and named.session_id == session_id:
         return named
-    for agent in store.fleet_agents(project_id, live_only=True):
-        if agent.session_id == session_id:
-            return agent
-    return None
+    return store.fleet_agent_for_session(project_id, session_id)
 
 
 class Assignment(NamedTuple):
@@ -1892,18 +1889,38 @@ def _assignment(
     still alive and this is not that session's own ``clear``/``resume``, the
     caller is such a child — it is neither bound to the row nor briefed on the
     task, or it would steal both (review of the first version). Fail-open
-    throughout: an unreadable row costs the assignment line, never the board.
+    throughout: an unreadable row costs the assignment line, never the board —
+    the promise this docstring has always made, and the ``try`` below is what
+    finally keeps it (review of the third version).
     """
-    agent = _fleet_row_named(store, project_id) or _fleet_row_for(store, session_id, project_id)
+    try:
+        return _resolve_assignment(store, session_id, project_id, source)
+    except Exception:
+        return None
+
+
+def _resolve_assignment(
+    store: ContextStore, session_id: str, project_id: str, source: str | None
+) -> Assignment | None:
+    """The body of :func:`_assignment`, free to raise; see its docstring."""
+    agent = _fleet_row_named(store, project_id)
+    if agent is None:
+        agent = store.fleet_agent_for_session(project_id, session_id)
     if agent is None:
         return None
     previous = agent.session_id
-    if previous not in (None, session_id):
+    if previous is not None and previous != session_id:
         holder = store.get_session(previous)
         if holder is not None and holder.ended_at is None and source not in ("clear", "resume"):
             return None
-    if previous != session_id:
-        store.bind_fleet_agent_session(agent.id, session_id)
+    if previous != session_id and not store.bind_fleet_agent_session(agent.id, session_id):
+        # The row ended between the read above and this UPDATE. They are
+        # different processes — that is the whole reason the UPDATE is targeted
+        # rather than a row write — so `fleet stop` can land in between, and a
+        # stopped agent must not be briefed into claiming anything (review of
+        # the third version). Note ``previous`` may be None here: a row for a
+        # binary that cannot be started on a chosen id still binds on arrival.
+        return None
     if agent.task_id is None:
         return None
     task = store.get_task(agent.task_id)
@@ -1919,7 +1936,14 @@ def _assignment(
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         if store.reassign_claim(task.id, previous, session_id, lease):
             task = store.get_task(task.id) or task
-    return Assignment(task, task.claimed_by in (session_id, previous))
+    # ``claimed_by is None`` is NOT a match for an unbound row's ``previous``
+    # (also None): that read an untouched `todo` task as the agent's own work in
+    # flight, so it was told to carry on and never claimed it — and the pool
+    # handed it to somebody else. `session_id` is None for any binary that
+    # cannot be started on a chosen id (`models.FleetAgent`), so this is a live
+    # case, not a theoretical one (review of the third version).
+    mine = task.claimed_by is not None and task.claimed_by in (session_id, previous)
+    return Assignment(task, mine)
 
 
 _VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "validator"})
@@ -1932,21 +1956,23 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     once a task reaches review, and that tester's assignment is a ``[review]``
     task it must verify, not a ``[todo]`` one to claim — while a coder spawned at
     ``[review]`` is there for the rework, and was being handed the stop order
-    meant for a bystander. Likewise a session that ``/clear``s or resumes meets
-    its OWN in-flight task here and must be told to carry on (reviews of the
-    first two versions). Every branch ends in something to DO: the stop order is
-    for the one case that earns it — a teammate is live on the task right now.
+    meant for a bystander (reviews of the first two versions).
+
+    ``mine`` — this session IS the one holding the task, across a ``/clear``
+    that renamed it — is read INSIDE each state, not ahead of them. Read ahead,
+    it answered for states it had no answer for: an agent that put its own task
+    up for review and then cleared was told to "carry on … `task review` when it
+    is finished", for work already sitting with a verifier (review of the third
+    version).
+
+    Every branch ends in something to DO. The stop order is for the one case
+    that earns it — a teammate is live on the task right now.
     """
     task = assignment.task
+    mine = assignment.mine
     sid = short_id(me.id)
+    verifier = base_role(me.role) in _VERIFYING_ROLES
     head = f"ASSIGNED TO YOU: {task.id} [{task.status}] {task.title}"
-    if assignment.mine:
-        return [
-            head,
-            "You are the one working it — a clear or resume does not hand it back.",
-            f"Carry on: `aisquare task show {task.id}`, then `aisquare task review "
-            f"{task.id} --as {sid}` / `task done` when it is finished.",
-        ]
     if task.status == "todo":
         return [
             head,
@@ -1954,12 +1980,26 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
             f"contract with `aisquare task show {task.id}` and work it to review/done.",
             "Only when it is finished does your standing cycle's `task next` apply.",
         ]
+    if task.status == "doing" and mine:
+        return [
+            head,
+            "You are the one working it — a clear or resume does not hand it back.",
+            f"Carry on: `aisquare task show {task.id}`, then `aisquare task review "
+            f"{task.id} --as {sid}` / `task done` when it is finished.",
+        ]
     if task.status == "review":
-        if base_role(me.role) in _VERIFYING_ROLES:
+        if verifier:
             return [
                 head,
                 "It awaits your verification — start there: your standing cycle's",
                 f"`aisquare task next --status review --as {sid}` hands you this task first.",
+            ]
+        if mine:
+            return [
+                head,
+                "You put it up for review; it is a verifier's now, not yours to redo.",
+                "Take pool work with your standing cycle — if it comes back reopened,",
+                "it comes back to you.",
             ]
         return [
             head,

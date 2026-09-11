@@ -687,6 +687,7 @@ class ContextStore(Protocol):
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
+    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
@@ -1510,13 +1511,20 @@ class SqliteStore:
         the task. Without this the claim keeps naming an id nobody has: the board
         shows the work held by a ghost, and the agent's next start does not
         recognise its own claim and is told to stand down from work in progress
-        (review of #116). Narrow by construction — only a task still ``doing``
-        under exactly ``from_session`` moves, so it can never take a claim from a
-        session that is genuinely someone else.
+        (review of #116). Narrow by construction — only a task claimed by exactly
+        ``from_session`` moves, so it can never take a claim from a session that
+        is genuinely someone else.
+
+        Every status that KEEPS a claim, not just ``doing``: ``set_task_status``
+        clears ``claimed_by`` for ``done``/``dropped`` alone, so ``review`` and
+        ``blocked`` carry one too — and those were exactly the two the first cut
+        left naming a dead session (review of #116, round 3). The lease it writes
+        is read only for ``doing`` (``claim_task``, ``renew_leases``), so it is
+        inert on the others.
         """
         cursor = self._conn.execute(
             "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
-            "WHERE id = ? AND claimed_by = ? AND status = 'doing'",
+            "WHERE id = ? AND claimed_by = ?",
             (to_session, lease_until.isoformat(), _now_iso(), task_id, from_session),
         )
         self._conn.commit()
@@ -2030,6 +2038,22 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None:
+        """The live fleet row recorded against ``session_id``, if there is one.
+
+        One targeted lookup rather than materialising every live row and
+        scanning: this runs on the session-start hook AND on every ``task next``,
+        including the plain CLI ones that have no fleet row at all and paid for
+        the whole list to find that out (review of #116, round 3).
+        """
+        row = self._conn.execute(
+            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
+            "WHERE project_id = ? AND session_id = ? AND ended_at IS NULL "
+            "ORDER BY created_at DESC LIMIT 1",
+            (project_id, session_id),
+        ).fetchone()
+        return _row_to_fleet_agent(row) if row is not None else None
 
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True

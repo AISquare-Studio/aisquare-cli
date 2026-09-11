@@ -30,7 +30,7 @@ from aisquare.core import codenames, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
+from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import (
     _FACTS_FIELDS,
     Completed,
@@ -2095,6 +2095,123 @@ def test_a_blocked_assignment_is_told_to_unblock_it_not_to_stand_down(
     assert f"ASSIGNED TO YOU: {task.id} [blocked]" in board
     assert "names why" in board and f"aisquare task claim {task.id}" in board
     assert "Do not take another task on your own" not in board
+
+
+def test_a_row_with_no_session_id_does_not_read_an_unclaimed_task_as_its_own(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``FleetAgent.session_id`` is None for any binary that cannot be started on
+    a chosen id — ``--continue`` takes that branch here. Testing "is this claim
+    mine?" by membership then compared ``None`` against ``(sid, None)`` and said
+    yes, so an untouched `todo` task was reported as work in flight: the agent
+    was told to carry on, never claimed it, and the pool handed it to somebody
+    else (review of #116, round 3)."""
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(
+        project, "coder", task_id=mine.id, worktree=False, agent_args=["--continue"]
+    )
+    assert receipt.agent.session_id is None, "the premise: no id could be minted"
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+
+    board = team_service.hook_session_start("sess-nosid", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {mine.id} [todo]" in board
+    assert f"aisquare task claim {mine.id} --as sess-nos" in board, "claim it FIRST"
+    assert "You are the one working it" not in board
+    with store_session() as store:
+        row = store.get_fleet_agent(receipt.agent.id)
+        assert row is not None and row.session_id == "sess-nosid", "and it still binds"
+    # The same `None == None` read, on the branch that does consult it: a task
+    # sent to review without ever being claimed keeps `claimed_by = NULL`.
+    unclaimed = _task(project, "never claimed, straight to review")
+    team_service.review_task(unclaimed.id)
+    second = fleet_service.spawn(
+        project, "coder", task_id=unclaimed.id, worktree=False, agent_args=["--continue"]
+    )
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", second.agent.id)
+
+    review = team_service.hook_session_start("sess-nosid-2", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {unclaimed.id} [review]" in review
+    assert "spawned for the rework" in review
+    assert "it is a verifier's now" not in review, "nobody put it there; it is not 'yours'"
+
+
+def test_a_clear_after_review_moves_the_claim_and_does_not_reopen_the_work(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``set_task_status`` clears ``claimed_by`` for done/dropped only, so review
+    and blocked keep theirs — the two statuses the first claim-move missed. And
+    "you hold it, carry on to `task review`" is the wrong thing to tell an agent
+    whose task is already WITH a verifier (review of #116, round 3)."""
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(project, "coder", task_id=mine.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-rv1", project.root, "startup")
+    team_service.claim_task(mine.id, session_ref="sess-rv1")
+    team_service.review_task(mine.id, session_ref="sess-rv1")
+
+    cleared = team_service.hook_session_start("sess-rv2", project.root, "clear")
+
+    assert f"ASSIGNED TO YOU: {mine.id} [review]" in cleared
+    assert "it is a verifier's now" in cleared
+    assert "Carry on" not in cleared and "spawned for the rework" not in cleared
+    with store_session() as store:
+        held = store.get_task(mine.id)
+        assert held is not None and held.claimed_by == "sess-rv2", "the claim follows the agent"
+
+
+def test_a_row_that_ends_mid_hook_briefs_nobody(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fleet stop` and this hook are different processes, which is why the bind
+    is a targeted UPDATE — so the stop can land between the read and the write.
+    Its False was being discarded, and the stopped session was briefed "claim it
+    FIRST" and held the task under a dead row (review of #116, round 3)."""
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(project, "coder", task_id=mine.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    original = SqliteStore.bind_fleet_agent_session
+
+    def stop_first(self: SqliteStore, agent_id: str, session_id: str) -> bool:
+        # The race, made deterministic: the row ends after it was read.
+        self.end_fleet_agent(agent_id, exit_status=0)
+        return original(self, agent_id, session_id)
+
+    monkeypatch.setattr(SqliteStore, "bind_fleet_agent_session", stop_first)
+
+    board = team_service.hook_session_start("sess-raced", project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in board
+    with store_session() as store:
+        untouched = store.get_task(mine.id)
+        assert untouched is not None and untouched.status == "todo"
+
+
+def test_an_unreadable_fleet_row_costs_the_line_and_not_the_board(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The docstring has promised fail-open since the first version; only
+    AmbiguousIdError was ever caught, so any sqlite error propagated out of
+    `hook_session_start` and took the whole board with it (review of #116)."""
+    task = _task(project, "some task")
+    receipt = fleet_service.spawn(project, "coder", task_id=task.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+
+    def boom(self: SqliteStore, ref: str) -> FleetAgent | None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SqliteStore, "get_fleet_agent", boom)
+
+    board = team_service.hook_session_start("sess-damaged", project.root, "startup")
+
+    assert "ASSIGNED TO YOU" not in board
+    assert "<aisquare-team>" in board and task.id in board, "the board itself survives"
+    assert "Your standing cycle (coder)" in board
 
 
 def test_a_tester_spawned_for_a_review_task_is_told_to_verify_it(

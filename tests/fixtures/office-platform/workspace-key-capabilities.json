@@ -1,0 +1,35 @@
+{
+  "captured_by": "P12",
+  "derived_from": "source-mined evidence plus tests/office/platform_samples.py",
+  "entries": [
+    {
+      "pattern": "^/v1/studios/[^/]+/praxis/context/?$",
+      "reachable": true,
+      "reason": "the only studio-scoped Praxis route moved onto require_policy_check_access, which accepts a workspace key that owns the path studio"
+    },
+    {
+      "pattern": "^/v1/studios/[^/]+/praxis/insights/[^/]+/chain/?$",
+      "reachable": false,
+      "reason": "studio-scoped Praxis provenance is guarded by require_studio_access, which rejects a workspace-scoped key with 403 for every studio"
+    },
+    {
+      "pattern": "^/v1/studios/[^/]+/praxis/insights/?$",
+      "reachable": false,
+      "reason": "studio-scoped Praxis lessons are guarded by require_studio_access, which rejects a workspace-scoped key with 403 for every studio"
+    },
+    {
+      "pattern": "^/v1/studios/[^/]+/praxis/signals/?$",
+      "reachable": false,
+      "reason": "platform signal submission is studio-scoped and rejects a workspace-scoped key, so teaching is capability-unavailable under this profile"
+    },
+    {
+      "pattern": "^/v1/studios/[^/]+/praxis/runs/[^/]+/injection/?$",
+      "reachable": false,
+      "reason": "recorded injections are studio-scoped and reject a workspace-scoped key with 403"
+    }
+  ],
+  "family": "workspace-key-capabilities",
+  "live_calls_made": 0,
+  "note": "Mirrors aisquare.office.platform_config.WORKSPACE_KEY_CAPABILITIES. The test asserts they agree, so a code change that silently opens or closes a route fails here.",
+  "purpose": "Redacted response shapes for the deployed Explainability and Praxis APIs. Shapes and citations only: no values, no identifiers, no prose."
+}

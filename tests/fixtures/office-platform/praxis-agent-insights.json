@@ -1,0 +1,137 @@
+{
+  "auth": {
+    "dependency": "require_workspace_access",
+    "header": "X-API-KEY"
+  },
+  "captured_by": "P12",
+  "consumed_by": [
+    "P14"
+  ],
+  "derived_from": "source-mined evidence plus tests/office/platform_samples.py",
+  "evidence": "literal",
+  "family": "praxis-agent-insights",
+  "live_calls_made": 0,
+  "purpose": "Redacted response shapes for the deployed Explainability and Praxis APIs. Shapes and citations only: no values, no identifiers, no prose.",
+  "reachable_with_workspace_key": true,
+  "route": {
+    "method": "GET",
+    "path": "/v1/workspaces/{workspace_id}/praxis/agents/{agent_uid}/insights"
+  },
+  "source": {
+    "file": "gateway/main.py",
+    "lines": "11872-11913",
+    "repo": "explainability-sdk",
+    "symbol": "get_workspace_agent_insights"
+  },
+  "variants": [
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "ok",
+      "retryable": null,
+      "sample": "praxis-agent-insights",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "agent_uid": "string",
+          "insights": {
+            "array": {
+              "object": {
+                "agent_uid": "string",
+                "confidence": "number",
+                "created_at": "string",
+                "id": "string",
+                "is_current": "boolean",
+                "recorded_at": "string",
+                "retired_reason": "null",
+                "root_id": "string",
+                "run_id": "null",
+                "scope": "string",
+                "signal_ids": {
+                  "array": "string"
+                },
+                "source_ref": "null",
+                "status": "string",
+                "studio_id": "string",
+                "supersedes_id": "null",
+                "text": "string",
+                "ttl_expires_at": "null",
+                "updated_at": "string",
+                "valid_from": "string",
+                "valid_to": "null"
+              }
+            }
+          },
+          "source": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "valid_empty",
+      "note": "A workspace owning no studios short-circuits before Praxis is called, so an empty list is not evidence that Praxis is reachable.",
+      "retryable": null,
+      "sample": "praxis-agent-insights-empty",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "agent_uid": "string",
+          "insights": {
+            "array": "empty"
+          },
+          "source": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "detail_contains": "praxis not configured",
+      "error_code": "unsupported_capability",
+      "evidence": "literal",
+      "name": "unsupported_praxis_not_configured",
+      "note": "Capability state for the deployment. Stop retrying.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unsupported",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 503
+    },
+    {
+      "detail_contains": "praxis unavailable",
+      "error_code": "service_unavailable",
+      "evidence": "literal",
+      "name": "unavailable_praxis_unreachable",
+      "note": "A Praxis 500 and a Praxis timeout are indistinguishable by the time Office sees them; the detail is the only discriminator.",
+      "retryable": true,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 502
+    },
+    {
+      "detail_contains": "API key is not scoped to this workspace",
+      "error_code": "forbidden",
+      "evidence": "literal",
+      "name": "denied_key_wrong_workspace",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "forbidden",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 403
+    }
+  ]
+}

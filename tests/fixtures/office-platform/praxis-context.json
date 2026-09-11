@@ -1,0 +1,154 @@
+{
+  "auth": {
+    "dependency": "require_policy_check_access",
+    "header": "X-API-KEY"
+  },
+  "captured_by": "P12",
+  "consumed_by": [
+    "P14"
+  ],
+  "derived_from": "source-mined evidence plus tests/office/platform_samples.py",
+  "evidence": "literal",
+  "family": "praxis-context",
+  "live_calls_made": 0,
+  "never_send": {
+    "parameter": "run_id",
+    "why": "The assembler durably records an InjectionRecord when run_id is present. A preview carrying one would fabricate audit evidence that an agent consumed context it never saw."
+  },
+  "purpose": "Redacted response shapes for the deployed Explainability and Praxis APIs. Shapes and citations only: no values, no identifiers, no prose.",
+  "reachable_with_workspace_key": true,
+  "route": {
+    "method": "GET",
+    "path": "/v1/studios/{studio_id}/praxis/context"
+  },
+  "source": {
+    "file": "gateway/main.py",
+    "lines": "2076-2109",
+    "repo": "explainability-sdk",
+    "symbol": "get_praxis_context"
+  },
+  "variants": [
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "ok",
+      "retryable": null,
+      "sample": "praxis-context",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "bundle_id": "string",
+          "insights": {
+            "array": {
+              "object": {
+                "agent_uid": "string",
+                "confidence": "number",
+                "created_at": "string",
+                "id": "string",
+                "is_current": "boolean",
+                "recorded_at": "string",
+                "retired_reason": "null",
+                "root_id": "string",
+                "run_id": "null",
+                "scope": "string",
+                "signal_ids": {
+                  "array": "string"
+                },
+                "source_ref": "null",
+                "status": "string",
+                "studio_id": "string",
+                "supersedes_id": "null",
+                "text": "string",
+                "ttl_expires_at": "null",
+                "updated_at": "string",
+                "valid_from": "string",
+                "valid_to": "null"
+              }
+            }
+          },
+          "rule_ids": {
+            "array": "string"
+          },
+          "source": "string",
+          "tokens_used": "integer",
+          "vault_excerpts": {
+            "array": "empty"
+          }
+        }
+      },
+      "status": 200
+    },
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "valid_empty_no_lessons",
+      "retryable": null,
+      "sample": "praxis-context-empty",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "bundle_id": "string",
+          "insights": {
+            "array": "empty"
+          },
+          "rule_ids": {
+            "array": "empty"
+          },
+          "source": "string",
+          "tokens_used": "integer",
+          "vault_excerpts": {
+            "array": "empty"
+          }
+        }
+      },
+      "status": 200
+    },
+    {
+      "detail_contains": "praxis not configured",
+      "error_code": "unsupported_capability",
+      "evidence": "literal",
+      "name": "unsupported_praxis_not_configured",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unsupported",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 503
+    },
+    {
+      "detail_contains": "praxis unavailable",
+      "error_code": "service_unavailable",
+      "evidence": "literal",
+      "name": "unavailable_hot_path_timeout",
+      "note": "The gateway's hop budget is 0.8s, far tighter than Office's ordinary 3s read, so this is the least reliable call in the inventory.",
+      "retryable": true,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 502
+    },
+    {
+      "detail_contains": "scope",
+      "error_code": "forbidden",
+      "evidence": "inferred",
+      "name": "denied",
+      "note": "Ambiguous between a key lacking ingest:write and a workspace that does not own the studio, because the scope check runs first. Not read from the dependency's source.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "forbidden",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 403
+    }
+  ]
+}

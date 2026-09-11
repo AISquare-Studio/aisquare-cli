@@ -196,6 +196,31 @@ def test_alt_chords_keep_their_modifier_even_when_the_character_is_reported() ->
     assert translate("alt+p", None, printable=False) == key("M-p")
 
 
+def test_a_digit_chord_tmux_cannot_take_still_types_its_character() -> None:
+    """Widening the alt exception to digits sent ``ctrl+alt+1`` into the digit
+    branch, which refuses ctrl/shift because the shifted key is layout-specific
+    — so a keystroke that used to reach the agent as ``1`` started being
+    dropped. The chord is unspellable; the text still travels (review)."""
+    assert translate("ctrl+alt+1", "1", printable=True) == literal("1")
+    assert translate("alt+shift+1", "1", printable=True) == literal("1")
+    assert translate("ctrl+meta+9", "9", printable=True) == literal("9")
+    # The chord alone still is one, and without a character there is nothing
+    # to fall back to — that is the case the branch was written for.
+    assert translate("alt+1", "1", printable=True) == key("M-1")
+    assert translate("ctrl+alt+1", None, printable=False) is None
+    assert translate("alt+shift+1", None, printable=False) is None
+
+
+def test_a_malformed_key_name_still_types_the_character_it_reported() -> None:
+    """Only the unspellable modifier jumps the printable rule. The
+    malformed-name guard sits behind it, where it always did: a name ending in
+    ``+`` types its character rather than warning "dropped" (review)."""
+    assert translate("ctrl+", "c", printable=True) == literal("c")
+    assert translate("", "x", printable=True) == literal("x")
+    assert translate("ctrl+", None, printable=False) is None
+    assert translate("", None, printable=False) is None
+
+
 def test_alt_on_punctuation_stays_the_character_it_always_was() -> None:
     """Through the name table alt+punctuation was dropped (``;``) or turned into
     a control-sequence introducer (``M-[`` is ``ESC [``) — where before the

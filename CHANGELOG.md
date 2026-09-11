@@ -481,7 +481,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   — `M-é` never was. Shift and ctrl keep the existing rule. A modifier tmux
   cannot spell — `super`/`hyper`, which is how macOS Cmd arrives — now drops the
   key instead of falling through to its character, so Cmd+V no longer types a
-  `v`. Two limits are the parser's and are documented in `docs/fleet.md`: a
+  `v`. A digit chord tmux has no name for (`ctrl+alt+1`, `alt+shift+1` — the
+  shifted key is layout-specific) falls back to the character the terminal
+  reported, so it still types what it always typed. Two limits are the parser's
+  and are documented in `docs/fleet.md`: a
   kitty-protocol terminal reports the text and Textual then drops the `alt`
   token (so kitty, ghostty, wezterm, foot and macOS Option are the *worse* case
   here, not the better one), and Escape typed within ~100 ms before a letter

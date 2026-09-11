@@ -269,18 +269,21 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
     and Escape typed within ~100 ms before a letter is read by Textual's parser
     as that alt chord — both are the parser's, not this table's.
     """
-    if not key or key.endswith("+"):
-        return None
     *modifiers, base = key.split("+")
     if any(modifier not in MODIFIERS for modifier in modifiers):
         # A modifier tmux cannot spell: super/hyper, reported by kitty-protocol
-        # terminals and by macOS Cmd. Ahead of the printable rule on purpose —
-        # sending the bare character would type a ``v`` for Cmd+V.
+        # terminals and by macOS Cmd. This ONE test goes ahead of the printable
+        # rule — sending the bare character would type a ``v`` for Cmd+V. The
+        # malformed-name guard below stays behind it, where it has always been:
+        # a name ending in ``+`` still types its reported character rather than
+        # being dropped (review of the third version).
         return None
     ctrl = "ctrl" in modifiers
     alt = "alt" in modifiers or "meta" in modifiers
     if printable and character and not (alt and character.isascii() and character.isalnum()):
         return Translation("literal", character)
+    if not key or key.endswith("+"):
+        return None
     if key in CHORDS:
         return Translation("key", CHORDS[key])
     shift = "shift" in modifiers
@@ -317,7 +320,11 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
         if ctrl or shift:
             # ``C-1`` reaches the agent as ``1``; ``shift+1`` is ``!`` on one
             # layout and ``+`` on another — without the character we cannot know.
-            return None
+            # With the character we do: a kitty-protocol terminal reports it for
+            # ``ctrl+alt+1``, which used to type a ``1`` and started being
+            # dropped when alt+digit joined the exception (review of the third
+            # version). The chord is unspellable; the text still travels.
+            return Translation("literal", character) if printable and character else None
         return Translation("key", prefix + char)
     # Punctuation with a modifier.
     if char == ARGV_SEPARATOR:

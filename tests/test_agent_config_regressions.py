@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
@@ -631,7 +632,9 @@ def test_keychain_entitlement_changes_use_explicit_refresh(
     finally:
         harness._PROBE_CONTEXT.reset(token)
     help_result = runner.invoke(app, ["team", "spawn", "--help"])
-    assert "Keychain" in help_result.output and "--refresh" in help_result.output
+    # GitHub Actions forces Rich styling, including escapes inside option names.
+    help_text = unstyle(help_result.output)
+    assert "Keychain" in help_text and "--refresh" in help_text
 
 
 def test_normal_probe_cache_writes_prune_expired_binary_scopes_and_keep_other_accounts(

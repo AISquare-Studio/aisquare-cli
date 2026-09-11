@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`doctor` and `status` no longer call the proxy lane green without knowing
+  where the proxy ships.** Both rested on one `GET {proxy_url}/health`, whose
+  payload says what the process *is* — `service`, `mode`, `status` — and never
+  what it does with the traffic. So a proxy pointed at a different deployment
+  than the configured target read green everywhere. Measured on a real machine
+  with `target = stg` and a sidecar started with the SDK's own `.env` in its
+  environment: `proxy`, `gateway` and `ingest` all green, every line true, while
+  the Runs from a real Claude Code session landed on `127.0.0.1:8000` — 274
+  ingest batches in four hours, none of them where the operator was looking. The
+  reported symptom was "I ran one query and did not receive anything on stg."
+  `gateway` and `ingest` verify the *CLI's* path; the proxy carries the model
+  traffic down a second one, and nothing compared them. This is the failure
+  `_active_deployment` already records for the client lane ("Both halves looked
+  healthy. Nobody was told") — fixed there, still open here.
+  - `ProxyProbe` carries the `gateway` the proxy reports, when it reports one.
+    A proxy that predates the field is not broken, merely unverifiable, and the
+    two are now told apart rather than both rendered green.
+  - A reported gateway that disagrees with the target is **red**, and names both
+    URLs: an operator who is told only that something is wrong has to go and
+    find which of two levers moved.
+  - No reported gateway, a loopback proxy and a remote gateway is **amber** —
+    `ProxyState.caution`, the verdict this had to grow. A sidecar takes its
+    destination from whoever started it, which need not be the target this CLI
+    resolved, and that is exactly the combination that stranded the traffic
+    above. Green was a lie and red would have been one too.
+  - The topologies that *cannot* disagree stay silent: a hosted proxy is
+    addressed at the deployment, and a loopback proxy against a loopback gateway
+    is the self-hosted topology working as intended.
+  - Gateways are compared on scheme, host and port, not as strings, so a
+    trailing slash or an explicitly written default port is not a misroute.
+  - `explainability.is_loopback` is public for the second module that needs the
+    same discriminator, on the precedent `stored_api_key` set.
+
 ### Added
 - **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
   0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,

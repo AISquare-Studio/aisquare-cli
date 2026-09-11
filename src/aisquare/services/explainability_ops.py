@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from aisquare.core.config import (
@@ -59,6 +60,7 @@ from aisquare.services.explainability import (
     FALLBACK_ROLE,
     KEY_ENV_VAR,
     ProxyProbe,
+    is_loopback,
     key_path,
     probe_proxy,
     running_editable,
@@ -892,7 +894,26 @@ class ProxyState:
     healthy: bool
     problem: bool
     remediation: str = ""
+    caution: bool = False
+    """Answering, not wrong, and not provably right either.
 
+    ``problem`` was the only verdict a live proxy could earn, so a destination
+    that cannot be checked from here had to be rendered as one of two lies:
+    green (what shipped, and what let a whole afternoon of Runs land on the
+    wrong deployment) or red (a proxy that is very likely fine). It is neither,
+    and an operator can only act on being told which.
+    """
+
+
+#: Remediation for an ALIVE proxy whose destination is wrong or unknowable. It
+#: names both levers because either can be the mistaken one: the operator either
+#: pointed the CLI at the wrong proxy, or started the right proxy against the
+#: wrong gateway -- and only they know which they meant.
+_PROXY_DESTINATION_FIX = (
+    "Point this CLI at the proxy for the target "
+    "(aisquare explainability enable --proxy-url <deployment proxy>), or restart "
+    "the local proxy with EXPLAINABILITY_GATEWAY_URL set to the target's gateway."
+)
 
 #: Remediation for a proxy that was configured and is not answering. Shared so
 #: the two surfaces cannot offer different advice for the same state.
@@ -972,16 +993,82 @@ def proxy_state(
         )
     verdict = ask(target.proxy_url)
     if verdict.healthy:
-        return ProxyState(
-            summary=f"claude_code proxy healthy at {target.proxy_url}",
-            healthy=True,
-            problem=False,
-        )
+        return _destination(target, verdict)
     return ProxyState(
         summary=f"{verdict.reason} — sessions launch UNTRACED (they never block on this)",
         healthy=False,
         problem=True,
         remediation=_PROXY_FIX,
+    )
+
+
+def _destination(target: ResolvedTarget, verdict: ProxyProbe) -> ProxyState:
+    """An ALIVE proxy, judged on where it ships rather than on being alive.
+
+    `gateway` and `ingest` prove the CLI's own path to the deployment; this lane
+    carries the model traffic and is a different pipe. Answering `/health` says
+    only that a proxy is there -- a proxy shipping somewhere else answers it just
+    as cheerfully, and the Runs land on a deployment nobody is looking at while
+    every check reads green. That is the failure `_active_deployment` records for
+    the client lane ("Both halves looked healthy. Nobody was told"); it was fixed
+    there and not here.
+
+    A proxy that names its gateway is checked against the target. One that does
+    not is only SUSPECT where the combination can strand traffic -- a loopback
+    sidecar takes its destination from the environment whoever started it had,
+    which need not be the target this CLI resolved. A hosted proxy is addressed
+    at the deployment, so it cannot disagree with it; a loopback proxy against a
+    loopback gateway is the self-hosted topology working as intended. Both stay
+    green, and silent.
+    """
+    alive = f"claude_code proxy healthy at {target.proxy_url}"
+    if verdict.gateway:
+        if _same_deployment(verdict.gateway, target.gateway_url):
+            return ProxyState(
+                summary=f"{alive}, shipping to {target.name}", healthy=True, problem=False
+            )
+        return ProxyState(
+            summary=(
+                f"{alive}, but it ships to {verdict.gateway} while target "
+                f"{target.name!r} is {target.gateway_url} — model traffic lands on "
+                "the other deployment and nothing here will say so again"
+            ),
+            healthy=False,
+            problem=True,
+            remediation=_PROXY_DESTINATION_FIX,
+        )
+    if is_loopback(target.proxy_url) and target.gateway_url and not is_loopback(target.gateway_url):
+        return ProxyState(
+            summary=(
+                f"{alive}, but it does not report a gateway and a local proxy takes "
+                f"one from the environment it was started with — it may be shipping "
+                f"somewhere other than {target.gateway_url}, and this cannot be checked "
+                "from here"
+            ),
+            healthy=True,
+            problem=False,
+            caution=True,
+            remediation=_PROXY_DESTINATION_FIX,
+        )
+    return ProxyState(summary=alive, healthy=True, problem=False)
+
+
+def _same_deployment(reported: str, configured: str) -> bool:
+    """Whether two gateway URLs name one deployment.
+
+    Compared on scheme, host and port rather than by string: a proxy is free to
+    report the URL with a trailing slash, or the default port written out, and
+    neither makes it a different gateway. The path is not part of it -- the
+    proxy names the BASE it posts to and the CLI stores the same base, so a
+    difference there would be a bug in one of them, not a routing fault worth
+    calling an operator over.
+    """
+    one, two = urlparse(reported.rstrip("/")), urlparse(configured.rstrip("/"))
+    default = {"http": 80, "https": 443}
+    return (one.scheme, one.hostname, one.port or default.get(one.scheme)) == (
+        two.scheme,
+        two.hostname,
+        two.port or default.get(two.scheme),
     )
 
 
@@ -997,6 +1084,8 @@ def _check_proxy(target: ResolvedTarget, *, on: bool, live: bool = False) -> Doc
     state = proxy_state(target, on=on, live=live)
     if state.problem:
         return _fail(name, state.summary, state.remediation)
+    if state.caution:
+        return _warn(name, state.summary, state.remediation)
     return _ok(name, state.summary)
 
 

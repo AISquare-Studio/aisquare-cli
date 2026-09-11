@@ -160,6 +160,16 @@ class ProxyProbe:
 
     healthy: bool
     reason: str
+    gateway: str | None = None
+    """Where the proxy says IT ships, when it says so at all.
+
+    The payload describes what the process IS -- service, mode, status -- and
+    said nothing about where the traffic goes, so a proxy pointed at another
+    deployment than the configured target read green on every surface. Optional
+    because a proxy that predates the field is not broken, merely unverifiable;
+    :func:`aisquare.services.explainability_ops.proxy_state` is what decides
+    which of those two the operator is in.
+    """
 
 
 @dataclass(frozen=True)
@@ -369,8 +379,12 @@ def join_records(path: Path | None = None) -> list[dict[str, object]]:
     return records
 
 
-def _is_loopback(url: str) -> bool:
+def is_loopback(url: str) -> bool:
     """Whether ``url`` names this machine.
+
+    Public because it has two modules' callers now: this one, and
+    ``explainability_ops.proxy_state``, which needs the same discriminator to
+    tell a proxy whose destination it CANNOT verify from one it never had to.
 
     The discriminator between the two proxy topologies. A loopback sidecar with
     ``AISQUARE_PROXY_INBOUND_KEYS`` unset skips its auth gate entirely, so it
@@ -427,6 +441,7 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
             f"proxy at {url} runs mode {mode!r}, need {_EXPECTED_MODE!r} — "
             "point explainability.proxy_url at the claude_code proxy",
         )
+    gateway = payload.get("gateway")
     if status is not None and status != _EXPECTED_STATUS:
         # The field whose entire job is reporting health, previously discarded.
         # Tolerant of ABSENT on purpose: this rests on one payload from one
@@ -434,9 +449,11 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
         # only an explicit not-ok is rejected. Named in the reason, because
         # "proxy unhealthy" without the value sends the operator nowhere.
         return ProxyProbe(
-            False, f"proxy at {url} reports status {status!r}, not {_EXPECTED_STATUS!r}"
+            False,
+            f"proxy at {url} reports status {status!r}, not {_EXPECTED_STATUS!r}",
+            gateway=gateway if isinstance(gateway, str) else None,
         )
-    return ProxyProbe(True, "proxy healthy")
+    return ProxyProbe(True, "proxy healthy", gateway=gateway if isinstance(gateway, str) else None)
 
 
 def _custom_headers(agent_name: str, pipeline_id: str, api_key: str | None) -> str:
@@ -585,7 +602,7 @@ def wire_session(
     # fine — it does not leave the machine, and it is the documented local shape.
     if (
         api_key
-        and not _is_loopback(settings.proxy_url)
+        and not is_loopback(settings.proxy_url)
         and urlparse(settings.proxy_url).scheme != "https"
     ):
         return SessionWiring(
@@ -597,7 +614,7 @@ def wire_session(
             ),
         )
 
-    if not api_key and not _is_loopback(settings.proxy_url):
+    if not api_key and not is_loopback(settings.proxy_url):
         return SessionWiring(
             traced=False,
             reason=(

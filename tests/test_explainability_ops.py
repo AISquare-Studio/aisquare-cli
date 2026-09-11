@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, ClassVar
 
@@ -31,6 +32,7 @@ from aisquare.core.config import (
 )
 from aisquare.models import CheckStatus
 from aisquare.services import explainability_ops as ops
+from aisquare.services.explainability import ProxyProbe
 
 SECRET = "wk_live_do_not_print_me"
 
@@ -276,6 +278,94 @@ def test_the_proxy_is_not_probed_at_all_while_tracing_is_off() -> None:
     )
     proxy = next(c for c in ops.checks(settings, env={}) if c.name == "explainability proxy")
     assert proxy.status is CheckStatus.ok
+
+
+def _probes(gateway: str | None) -> Callable[[str], ProxyProbe]:
+    """A prober for a proxy that is ALIVE and reports ``gateway`` (or reports none)."""
+    return lambda _url: ProxyProbe(True, "proxy healthy", gateway=gateway)
+
+
+def test_a_live_proxy_shipping_to_another_deployment_is_red(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The measured bug (#131): three green checks while the Runs land elsewhere.
+
+    ``gateway`` and ``ingest`` prove the CLI's path; the proxy carries the model
+    traffic down a different one. Answering ``/health`` never meant it agreed
+    about the destination, and nothing compared them.
+    """
+    monkeypatch.setattr(ops, "probe_proxy", _probes("http://127.0.0.1:8000"))
+    settings = _wired("https://stg.example", proxy_url="http://127.0.0.1:9090")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.fail
+    assert "http://127.0.0.1:8000" in proxy.detail, "says where it actually ships"
+    assert "https://stg.example" in proxy.detail, "and where it was supposed to"
+    assert proxy.fix
+
+
+def test_a_live_proxy_shipping_to_the_target_is_green_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ops, "probe_proxy", _probes("https://stg.example"))
+    settings = _wired("https://stg.example", proxy_url="https://stg.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.ok
+    assert "stg" in proxy.detail
+
+
+@pytest.mark.parametrize(
+    "reported",
+    ["https://stg.example/", "https://stg.example:443"],
+    ids=["trailing-slash", "explicit-default-port"],
+)
+def test_one_deployment_written_two_ways_is_not_a_mismatch(
+    reported: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compared on scheme/host/port, never as strings — else every proxy that
+    normalises its own URL differently reads as misrouted."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(reported))
+    settings = _wired("https://stg.example", proxy_url="https://stg.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.ok
+
+
+def test_a_local_proxy_that_names_no_gateway_is_flagged_as_unverifiable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The combination that stranded traffic, on a proxy too old to answer for
+    itself: a sidecar takes its destination from whoever started it."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired("https://stg.example", proxy_url="http://127.0.0.1:9090")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn, "neither green nor red — it is unknown"
+    assert "cannot be checked" in proxy.detail
+    assert proxy.fix
+
+
+@pytest.mark.parametrize(
+    ("proxy_url", "gateway_url"),
+    [
+        ("https://stg.example:9443", "https://stg.example"),
+        ("http://127.0.0.1:9090", "http://127.0.0.1:8000"),
+    ],
+    ids=["hosted-proxy", "wholly-local"],
+)
+def test_the_topologies_that_cannot_disagree_stay_silent(
+    proxy_url: str, gateway_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative half. A hosted proxy is addressed AT the deployment, and a
+    loopback pair is the self-hosted topology working — neither earns a warning
+    for a field it did not send."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired(gateway_url, proxy_url=proxy_url)
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.ok
+    assert "cannot be checked" not in proxy.detail
 
 
 def test_a_broken_config_degrades_to_one_warning_rather_than_crashing(

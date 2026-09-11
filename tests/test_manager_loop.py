@@ -424,7 +424,9 @@ def test_a_garbage_counter_costs_the_count_not_the_wakeup(
     assert _meta(_counter_key(MANAGER)) == "1"
 
 
-@pytest.mark.parametrize("role", ["coder", "planner", "runner", "tester", "reviewer", "validator"])
+@pytest.mark.parametrize(
+    "role", ["coder", "planner", "runner", "tester", "reviewer", "validator", "ui-tester"]
+)
 def test_every_other_role_stays_silent_on_the_same_events(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, role: str
 ) -> None:
@@ -1026,6 +1028,8 @@ def test_the_manager_cycle_names_fleet_spawn_and_the_two_prohibitions() -> None:
     assert "fleet spawn" in text
     assert "never write code" in text.lower()
     assert "never merge" in text.lower()
+    assert "Stay in your lane (manager)" in text, "the lane rule closes the manager's cycle too"
+    assert "fleet spawn coder" in text, "asked to fix, the manager spawns a coder"
     assert "abcd1234" in text, "the commands are pre-filled with the session id"
 
 
@@ -1185,7 +1189,16 @@ def test_a_role_that_is_not_a_seat_of_a_real_role_gets_no_cycle(
 def test_the_roster_default_registers_every_fleet_role() -> None:
     roles = ExplainabilitySettings().roles
 
-    assert roles == ["planner", "coder", "runner", "manager", "tester", "reviewer", "validator"]
+    assert roles == [
+        "planner",
+        "coder",
+        "runner",
+        "manager",
+        "tester",
+        "reviewer",
+        "validator",
+        "ui-tester",
+    ]
     assert roles[:3] == ["planner", "coder", "runner"], "the runbooks quote these three first"
     assert set(FLEET_ROLES) <= set(roles)
 

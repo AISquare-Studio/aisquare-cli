@@ -265,6 +265,7 @@ def test_the_strip_covers_everything_a_traced_launch_exports() -> None:
     assert tuple(MARKER_ENV_VARS) == (
         explainability.PIPELINE_ID_ENV_VAR,
         explainability.TRACE_AGENT_NAME_ENV_VAR,
+        explainability.RUN_TRACE_ID_ENV_VAR,
     )
     assert tuple(IDENTITY_ENV_VARS) == (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 
@@ -283,10 +284,48 @@ def test_the_strip_covers_everything_a_traced_launch_exports() -> None:
         f"a traced launch exports {sorted(set(exported) - set(IDENTITY_ENV_VARS))}, which "
         "no seam strips — an excluded child would inherit it"
     )
-    # …and the marker really is the identity: disowning pops exactly these four.
+    # …and the marker really is the identity: disowning pops exactly the tuple,
+    # however many names that is (it was four, it is five).
     disownable = dict.fromkeys(IDENTITY_ENV_VARS, "x") | {"AISQUARE_PIPELINE_ID": "run-1"}
     assert explainability.disown_inherited_trace(disownable) == "run-1"
     assert disownable == {}, f"disown left {sorted(disownable)} — the two lists disagree"
+
+
+def test_disowning_follows_the_tuple_rather_than_matching_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Add a marker to the tuple and ``disown_inherited_trace`` must drop it.
+
+    The sibling test above proves the two AGREE today, which a hand-written
+    list satisfies just as well — that is exactly the state the code was in
+    when ``AISQUARE_RUN_TRACE_ID`` was added: every enumeration matched, until
+    a name arrived and each had to be widened by hand. One was missed, and a
+    session inherited a stale run trace id and wrote its session→Run join
+    against the previous session's Run.
+
+    So this pins the DERIVATION, not the agreement: a name that exists only in
+    :data:`IDENTITY_ENV_VARS` still has to be popped. It fails the moment
+    somebody re-spells the identity inside the function.
+    """
+    from aisquare.services import explainability
+
+    invented = "AISQUARE_MARKER_INVENTED_BY_THIS_TEST"
+    assert invented not in IDENTITY_ENV_VARS, "pick a name the tuple does not already hold"
+    monkeypatch.setattr(spawn, "IDENTITY_ENV_VARS", (*IDENTITY_ENV_VARS, invented))
+
+    env = {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:9190",
+        "AISQUARE_PIPELINE_ID": "run-1",
+        invented: "would-outlive-the-session",
+        "KEEP": "1",
+    }
+
+    assert explainability.disown_inherited_trace(env) == "run-1"
+    assert invented not in env, (
+        f"{invented} is in IDENTITY_ENV_VARS and survived disowning — the function is "
+        "naming the identity again instead of reading the tuple"
+    )
+    assert env == {"KEEP": "1"}, f"disown touched more than the identity: {sorted(env)}"
 
 
 # ── the strip itself ─────────────────────────────────────────────────────────
@@ -296,15 +335,20 @@ def test_the_strip_covers_everything_a_traced_launch_exports() -> None:
 def traced_parent(monkeypatch: pytest.MonkeyPatch) -> None:
     """An environment that looks like a live traced agent session.
 
-    All four names, because that is what ``aisquare launch`` exports: the header
-    pair AND the marker pair a child keys its own records on.
+    EVERY name a traced launch exports, not a subset — the header pair AND the
+    whole marker a child keys its own records on. Built by iterating
+    :data:`MARKER_ENV_VARS` rather than by listing it, because this fixture is
+    what the strip tests strip: a name absent here is a name they cannot prove
+    is removed, and the fixture used to stop at the two markers that existed
+    when it was written, so ``AISQUARE_RUN_TRACE_ID`` went unstripped-and-
+    unnoticed in every test below.
     """
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9190")
     monkeypatch.setenv(
         "ANTHROPIC_CUSTOM_HEADERS", "X-Agent-Name: aisquare-coder\nX-Pipeline-Id: run-1"
     )
-    monkeypatch.setenv("AISQUARE_PIPELINE_ID", "run-1")
-    monkeypatch.setenv("AISQUARE_TRACE_AGENT_NAME", "aisquare-coder")
+    for name in MARKER_ENV_VARS:
+        monkeypatch.setenv(name, "run-1" if name == "AISQUARE_PIPELINE_ID" else f"parent-{name}")
 
 
 def test_untraced_env_drops_the_identity_and_nothing_else(
@@ -321,9 +365,11 @@ def test_untraced_env_drops_the_identity_and_nothing_else(
     assert env["PATH"] == "/usr/bin"
     # The marker half, named rather than only iterated: it is the one that was
     # missing, and a shrunk IDENTITY_ENV_VARS must fail this test and not pass
-    # it by iterating over less.
+    # it by iterating over less. All three are spelled out here on purpose —
+    # this is the one place a literal name is the assertion.
     assert "AISQUARE_PIPELINE_ID" not in env
     assert "AISQUARE_TRACE_AGENT_NAME" not in env
+    assert "AISQUARE_RUN_TRACE_ID" not in env
     # Negative control on the same environment: an AISQUARE_ name that is not
     # the identity stays, so this is a strip and not a purge of our namespace.
     monkeypatch.setenv("AISQUARE_HOME", "/tmp/asq-home")

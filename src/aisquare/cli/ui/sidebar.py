@@ -51,6 +51,7 @@ ROLE_ICON: dict[str, str] = {
     "tester": "🧪",
     "runner": "🧪",
     "reviewer": "👀",
+    "ui-tester": "🌐",
     "validator": "🛡",
     "remote": "📡",
 }

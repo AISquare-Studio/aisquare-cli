@@ -83,6 +83,27 @@ def _claude_home(config_dir: Path | None = None) -> Path:
     return _home() / ".claude"
 
 
+def claude_json_paths(config_dir: Path) -> list[Path]:
+    """Every place Claude Code could be keeping ``config_dir``'s ``.claude.json``.
+
+    Inside the directory — where it lands whenever ``CLAUDE_CONFIG_DIR`` names
+    it, so every parallel-install slot (``~/.claude-c2``) has it there — and,
+    for the default ``~/.claude``, ALSO beside it at ``~/.claude.json``, which
+    is where a plain install keeps it and where ``claude mcp add`` writes.
+
+    Keyed on the DIRECTORY and never on this process's environment. A rule that
+    read ``CLAUDE_CONFIG_DIR`` would answer "inside" for a recorded ``~/.claude``
+    whenever the shell running doctor happened to point elsewhere — the same
+    class of dead layer as probing only inside, moved to a different machine.
+    Both paths are returned rather than one chosen, because a caller reading
+    files can read two and a missing one costs nothing.
+    """
+    paths = [config_dir / ".claude.json"]
+    if _dir_key(config_dir) == _dir_key(_home() / ".claude"):
+        paths.append(_home() / ".claude.json")
+    return paths
+
+
 def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
     home = _home()
     claude = _claude_home(config_dir)

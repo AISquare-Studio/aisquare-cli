@@ -56,6 +56,7 @@ off.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -71,7 +72,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from aisquare.core import insights, outbox, paths
+from aisquare.core import harness, insights, outbox, paths, spawn
 from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.store import store_session
 
@@ -108,12 +109,15 @@ _SAFE_ROLE = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROBE_TIMEOUT_SECONDS = 1.5
 
 #: The ONE program verified to accept ``--session-id <uuid>`` (Claude Code
-#: 2.1.233). Matched on the basename, so an absolute path counts and nothing
-#: else does — not ``claude2``, not a wrapper merely NAMED after claude. Since
-#: #57 a role can be bound to any executable, and an unknown flag kills the
-#: launch; every other binary joins through the hook seam instead, which needs
-#: no flag at all, so the narrow match costs nothing but a nicety.
-_SESSION_ID_AGENT = "claude"
+#: 2.1.233) — the name, for the note a refused pin prints. WHETHER a binary is
+#: that program is ``harness.is_default_agent``, the single predicate this and
+#: the role's own ``default_args`` now share: the two gates ran 55 lines apart
+#: in the same launch, each with its own ``"claude"`` literal, and each missed
+#: ``claude.cmd`` and a binding typed with a trailing slash. Since #57 a role
+#: can be bound to any executable, and an unknown flag kills the launch; every
+#: other binary joins through the hook seam instead, which needs no flag at
+#: all, so the narrow match costs nothing but a nicety.
+_SESSION_ID_AGENT = harness.DEFAULT_AGENT_BINARY
 
 #: Flags whose presence means the caller (or the human) already owns the
 #: session id, so we must read it rather than choose one.
@@ -153,6 +157,13 @@ PIPELINE_ID_ENV_VAR = "AISQUARE_PIPELINE_ID"
 #: internal plumbing and has no business sharing a name with a public contract.
 TRACE_AGENT_NAME_ENV_VAR = "AISQUARE_TRACE_AGENT_NAME"
 
+#: The gateway Run key a launch OWNS, exported beside the other two markers only
+#: when the launcher posted the Run's root span itself (see ``wire_session``).
+#: The hook inside the agent copies it into the join record, so ``joins.jsonl``
+#: names the exact Run a dashboard shows — the value a human pastes into a URL.
+#: Absent when the proxy keyed the Run, because then we do not know the key.
+RUN_TRACE_ID_ENV_VAR = "AISQUARE_RUN_TRACE_ID"
+
 
 @dataclass(frozen=True)
 class ProxyProbe:
@@ -171,6 +182,10 @@ class SessionWiring:
     env: dict[str, str] = field(default_factory=dict)
     agent_name: str | None = None
     pipeline_id: str | None = None
+    #: The gateway Run key, when this launch owns it (``owns_trace``). ``None``
+    #: means the proxy keyed the Run on the ``X-Pipeline-Id`` fallback path.
+    trace_id: str | None = None
+    owns_trace: bool = False
 
 
 @dataclass(frozen=True)
@@ -188,6 +203,73 @@ class SessionIdentity:
     session_id: str | None
     inject_args: tuple[str, ...] = ()
     note: str = ""
+
+
+@dataclass(frozen=True)
+class TraceIdentity:
+    """The gateway's key for one session's Run, derived from the pipeline id.
+
+    The gateway materialises ONE Run per OTel ``trace_id`` — ``X-Pipeline-Id``
+    is an attribute on one span, not the key. So two writers that want one Run
+    must agree on the trace id before either sends a byte, and the only value
+    both hold is the pipeline id. SHA-256 of it: the first 16 bytes are the
+    trace id, the next 8 the root span id. Deterministic on purpose — the
+    launcher, the proxy (through ``traceparent``), the shipper and a human
+    reading ``joins.jsonl`` all compute the same key from the same session id,
+    which is also what makes a Run findable from a board row at all.
+    """
+
+    trace_id: str
+    span_id: str
+
+    @property
+    def traceparent(self) -> str:
+        """The W3C header the proxy's tier-2 path reads: sampled, version 00."""
+        return f"00-{self.trace_id}-{self.span_id}-01"
+
+
+def trace_identity(pipeline_id: str) -> TraceIdentity:
+    """Derive the Run's trace id and root span id from a pipeline id."""
+    digest = hashlib.sha256(pipeline_id.encode("utf-8")).digest()
+    trace_id = digest[:16].hex()
+    span_id = digest[16:24].hex()
+    # W3C reserves the all-zero ids as "invalid"; ``extract()`` would drop the
+    # header SILENTLY and the proxy would key the Run itself. ~2^-128 per id,
+    # but a silent invalid header is exactly the failure this module refuses.
+    if trace_id == "0" * 32:
+        trace_id = "0" * 31 + "1"
+    if span_id == "0" * 16:
+        span_id = "0" * 15 + "1"
+    return TraceIdentity(trace_id=trace_id, span_id=span_id)
+
+
+@dataclass(frozen=True)
+class RootReceipt:
+    """What posting a Run's root span came back with."""
+
+    posted: bool
+    detail: str
+
+
+#: ``(gateway_url, api_key, agent_name, pipeline_id) -> RootReceipt``. Injected
+#: by tests; production resolves to :func:`_post_run_root` at CALL time.
+RootOpener = Callable[[str, str, str, str], RootReceipt]
+
+
+def _post_run_root(
+    gateway_url: str, api_key: str, agent_name: str, pipeline_id: str
+) -> RootReceipt:
+    """Post the Run's root span through the ops module's bounded HTTP path.
+
+    Imported inside the function: ``explainability_ops`` imports this module
+    for ``probe_proxy``, so a module-level import is a cycle. Looked up on the
+    module at call time, so a test that patches ``_post_run_root`` on THIS
+    module reaches every caller — the same seam ``probe_proxy`` uses.
+    """
+    from aisquare.services import explainability_ops
+
+    verdict = explainability_ops.open_run_root(gateway_url, api_key, agent_name, pipeline_id)
+    return RootReceipt(posted=verdict.ok, detail=verdict.detail)
 
 
 def _flag_value(args: Sequence[str], flag: str) -> tuple[bool, str | None]:
@@ -224,11 +306,30 @@ def disown_inherited_trace(env: MutableMapping[str, str]) -> str | None:
 
     ``None`` when there was nothing of ours to disown, which is every ordinary
     launch.
+
+    WHAT IT REMOVES IS :data:`core.spawn.IDENTITY_ENV_VARS`, the same tuple
+    every stripping seam removes and the same one the printed ``team spawn``
+    prelude unsets — not a list of names written out here. The two questions
+    this function asks are different and only one of them is an inventory:
+    "are these ``ANTHROPIC_*`` ours?" is answered by :data:`RESERVED_ENV_VARS`
+    plus the run key above, and stays spelled out because it is a
+    discriminator with a reason per name; "what is the identity?" is answered
+    by the tuple, because that answer grows. It grew once already:
+    ``AISQUARE_RUN_TRACE_ID`` was added to the wiring and every hand-written
+    copy of the identity had to be found and widened by hand, and the one in
+    the spawn prelude was missed — a session that inherited a stale run trace
+    id wrote its session→Run join against the previous session's Run. This
+    loop was widened correctly on that pass; it is derived now so the next
+    name needs no pass at all.
     """
     parent_run = (env.get(PIPELINE_ID_ENV_VAR) or "").strip()
     if not parent_run or not any(env.get(name) for name in RESERVED_ENV_VARS):
         return None
-    for name in (*RESERVED_ENV_VARS, PIPELINE_ID_ENV_VAR, TRACE_AGENT_NAME_ENV_VAR):
+    # Read off the module, not bound at import, so the derivation is testable:
+    # `tests/test_spawn_seams.py` adds a name to the tuple and asserts this
+    # pops it. A `from … import` here would coincidentally match the tuple
+    # today and silently stop following it tomorrow.
+    for name in spawn.IDENTITY_ENV_VARS:
         env.pop(name, None)
     return parent_run
 
@@ -249,7 +350,15 @@ def trace_marker(wiring: SessionWiring) -> dict[str, str]:
     marker = {PIPELINE_ID_ENV_VAR: wiring.pipeline_id}
     if wiring.agent_name:
         marker[TRACE_AGENT_NAME_ENV_VAR] = wiring.agent_name
+    if wiring.owns_trace and wiring.trace_id:
+        marker[RUN_TRACE_ID_ENV_VAR] = wiring.trace_id
     return marker
+
+
+def run_trace_id(env: Mapping[str, str] | None = None) -> str | None:
+    """The gateway Run key the launcher owned for this process, if it did."""
+    source = os.environ if env is None else env
+    return (source.get(RUN_TRACE_ID_ENV_VAR) or "").strip() or None
 
 
 def traced_by(env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
@@ -269,7 +378,7 @@ def accepts_session_id(binary: str) -> bool:
     """Whether ``binary`` is one we may hand ``--session-id`` to."""
     if os.environ.get(_PIN_ENV_VAR, "").strip().lower() in _OFF_VALUES:
         return False
-    return os.path.basename(binary) == _SESSION_ID_AGENT
+    return harness.is_default_agent(binary)
 
 
 def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
@@ -315,8 +424,14 @@ def record_join(
     role: str | None = None,
     cwd: str | None = None,
     now: datetime | None = None,
+    trace_id: str | None = None,
 ) -> str | None:
     """Append one board-session-to-Run mapping; return why it could not be.
+
+    ``trace_id`` is the gateway Run key when the launch owned it (the marker
+    :data:`RUN_TRACE_ID_ENV_VAR`), and ``None`` when the proxy keyed the Run —
+    recorded as unknown rather than guessed, because a derived id that the
+    proxy did not use would read as evidence of a Run that does not exist.
 
     Written from the hook running INSIDE the agent, which is the only place
     that holds both halves: Claude Code hands it the real session id — the id
@@ -336,6 +451,7 @@ def record_join(
         "agent_name": agent_name,
         "role": role,
         "cwd": cwd if cwd is not None else os.getcwd(),
+        "trace_id": trace_id,
     }
     path = paths.explainability_joins_path()
     try:
@@ -439,8 +555,22 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
     return ProxyProbe(True, "proxy healthy")
 
 
-def _custom_headers(agent_name: str, pipeline_id: str, api_key: str | None) -> str:
+def _custom_headers(
+    agent_name: str,
+    pipeline_id: str,
+    api_key: str | None,
+    *,
+    traceparent: str | None = None,
+) -> str:
     """The identity headers, plus the workspace key when the caller supplied one.
+
+    ``traceparent`` REPLACES ``X-Pipeline-Id`` rather than joining it. The proxy
+    resolves a request's Run in tiers and ``X-Pipeline-Id`` is tier 1: when it
+    is present the proxy opens a session of its own, with a trace id of its own,
+    and never reads the ``traceparent`` beside it. Sending both would therefore
+    change nothing — the one Run this header exists to produce needs the
+    pipeline id to step aside. The pipeline id still travels: it is the
+    ``agent.run_id`` on the root span the launcher posted, and the marker env.
 
     A LOOPBACK sidecar needs no key: with ``AISQUARE_PROXY_INBOUND_KEYS`` unset
     the proxy skips its auth gate entirely. A HOSTED proxy REQUIRES it and is the
@@ -461,7 +591,8 @@ def _custom_headers(agent_name: str, pipeline_id: str, api_key: str | None) -> s
     Omitted rather than sent empty when there is no key, so the loopback case is
     byte-identical to before.
     """
-    pairs = [f"X-Agent-Name: {agent_name}", f"X-Pipeline-Id: {pipeline_id}"]
+    correlation = f"traceparent: {traceparent}" if traceparent else f"X-Pipeline-Id: {pipeline_id}"
+    pairs = [f"X-Agent-Name: {agent_name}", correlation]
     # Stripped because this format is newline-delimited and the environment path
     # does not sanitise: `stored_api_key` strips its file, but
     # `environ.get(target.api_key_env)` hands back whatever was exported, and a
@@ -482,8 +613,40 @@ def wire_session(
     base_env: dict[str, str] | None = None,
     api_key: str | None = None,
     prober: Callable[[str], ProxyProbe] | None = None,
+    gateway_url: str | None = None,
+    root_opener: RootOpener | None = None,
+    post_root: bool = True,
 ) -> SessionWiring:
     """Build the env delta that traces one session, or explain why not.
+
+    ``gateway_url`` is the ACTIVE TARGET's gateway. With it and a key, the
+    launcher OWNS the Run: it derives the trace id from the pipeline id
+    (:func:`trace_identity`), posts the Run's root span to the gateway, and
+    hands the proxy a ``traceparent`` so the model traffic lands as children of
+    that root — the same trace the client lane ships into later. Without either,
+    or when the post fails, the wiring falls back to ``X-Pipeline-Id`` and the
+    proxy keys the Run itself; the model traffic is still recorded, in a Run
+    the client lane cannot find (two Runs per session, the pre-fix behaviour).
+    Never a third outcome: a failed post costs the join, not the launch.
+
+    ``post_root=False`` is the PRINT-ONLY mode: every check above still runs —
+    the probe, the guards, the header pair — but the root is not posted, and
+    the wiring comes back on the ``X-Pipeline-Id`` path even with a gateway
+    and a key in hand. Posting the root is a WRITE: it mints a dashboard Run on
+    the spot — a parentless, already-ended span the gateway files as a
+    ``completed`` Run of one 0 ms span and zero tokens, named after the role.
+    Launch and spawn keep the default because they are about to start the
+    agent that fills it. ``explainability env`` passes ``False`` by default
+    because its whole job is to print exports: it cannot know whether an agent
+    will ever start on the id it printed, and without a session id every
+    invocation mints a fresh one — a second terminal, a shell rc, a ``--json``
+    reader, an operator inspecting the delta — each of which used to leave an
+    empty Run behind, after up to three seconds of WAN I/O behind a print. The
+    cost of the mode is the documented fallback (the proxy keys the Run; the
+    client lane opens its own), never a network call. Its ``--post-root``
+    opt-in — what the printed ``team spawn`` command evals — takes the default
+    again, because on that line the agent starts on the very next command in
+    the same shell, so the unknown that justifies print-only is settled.
 
     ``session_id`` becomes the run's ``X-Pipeline-Id`` when given — pass the
     agent session id so board rows and dashboard Runs share a key; otherwise a
@@ -608,15 +771,44 @@ def wire_session(
         )
 
     pipeline_id = session_id or str(uuid.uuid4())
+    identity = trace_identity(pipeline_id)
+    owns_trace = False
+    if not post_root:
+        # Checked FIRST, ahead of the gateway and key: print-only means no
+        # write, and the reason must say that rather than blame a URL or a
+        # key the caller may well have handed over.
+        not_owned = "print-only — no agent is starting here, so no Run is claimed"
+    elif not gateway_url:
+        not_owned = "no gateway URL to post the run's root to"
+    elif not api_key:
+        not_owned = "no workspace key to post the run's root with"
+    else:
+        receipt = (root_opener or _post_run_root)(gateway_url, api_key, agent_name, pipeline_id)
+        owns_trace = receipt.posted
+        not_owned = receipt.detail
+    if owns_trace:
+        reason = f"traced as {agent_name} (pipeline {pipeline_id}, run {identity.trace_id})"
+    else:
+        reason = (
+            f"traced as {agent_name} (pipeline {pipeline_id}; the proxy keys the run — "
+            f"root not posted: {not_owned})"
+        )
     return SessionWiring(
         traced=True,
-        reason=f"traced as {agent_name} (pipeline {pipeline_id})",
+        reason=reason,
         env={
             "ANTHROPIC_BASE_URL": settings.proxy_url,
-            "ANTHROPIC_CUSTOM_HEADERS": _custom_headers(agent_name, pipeline_id, api_key),
+            "ANTHROPIC_CUSTOM_HEADERS": _custom_headers(
+                agent_name,
+                pipeline_id,
+                api_key,
+                traceparent=identity.traceparent if owns_trace else None,
+            ),
         },
         agent_name=agent_name,
         pipeline_id=pipeline_id,
+        trace_id=identity.trace_id if owns_trace else None,
+        owns_trace=owns_trace,
     )
 
 
@@ -635,6 +827,9 @@ def wire_session(
 #: issues and copy between machines.
 KEY_ENV_VAR = "EXPLAINABILITY_API_KEY"
 GATEWAY_ENV_VAR = "EXPLAINABILITY_GATEWAY_URL"
+#: Where the SDK keeps its delivery inbox (a SQLite file). Its default is
+#: RELATIVE — `explainability_inbox.db` in the current directory.
+SDK_INBOX_ENV_VAR = "EXPLAINABILITY_INBOX_PATH"
 AGENT_NAME_ENV_VAR = "AISQUARE_AGENT_NAME"
 AGENTS_ENV_VAR = "EXPLAINABILITY_AGENTS"
 
@@ -998,6 +1193,22 @@ def _init_sdk(gateway_url: str, api_key: str) -> Any:
     """
     os.environ[GATEWAY_ENV_VAR] = gateway_url
     os.environ[KEY_ENV_VAR] = api_key
+    # The SDK's delivery inbox is a SQLite file at a RELATIVE default path, so
+    # every drain left `explainability_inbox.db` (+ -shm/-wal) in whatever
+    # directory it ran from — a repo root by hand, $HOME from cron. Pinned into
+    # our own home unless the operator chose a location themselves — and the
+    # directory is CREATED here, because the SDK's `InboxWriter.ensure_schema()`
+    # calls `sqlite3.connect()` without making parents: on a fresh install, or
+    # an upgrade that has only ever run plain sessions, `~/.aisquare/
+    # explainability/` does not exist yet (configuration writes the home and
+    # the key file; only a traced join used to create this subdirectory), and
+    # the pin alone turned every drain into `unable to open database file`,
+    # deferred forever. Review of #107, round 2. An operator-supplied path is
+    # theirs: neither replaced nor created.
+    if not os.environ.get(SDK_INBOX_ENV_VAR):
+        inbox = paths.explainability_dir() / "inbox.db"
+        inbox.parent.mkdir(parents=True, exist_ok=True)
+        os.environ[SDK_INBOX_ENV_VAR] = str(inbox)
     sdk = importlib.import_module(SDK_MODULE)
     sdk.init_from_env(auto_instrument=False)
     return sdk
@@ -1027,8 +1238,19 @@ def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> Shi
         # pipeline id would miss and file a planner's Run under the generic
         # identity. The board id travels in the record for exactly this.
         agent_name = _agent_name_for(settings, _board_session_of(claimed))
+        # OWNERSHIP picks the lane — not the presence of a run key. A segment
+        # hangs under a root at `trace_identity(run_key)`, and that root exists
+        # only where the launcher POSTED it, which is exactly when it exported
+        # the owned key that `insights` spooled into these records. The run key
+        # itself is no evidence of one: `insights.run_key` falls back to the
+        # board session id, so EVERY plain session carries one, and reading
+        # that as "launched" parented a whole drain on a root nobody wrote.
+        # The gateway then elects the orphaned segment as a pseudo-root and its
+        # LINK_SPAN_CONTAINS_SPAN matches nothing: a ROOTLESS Run, where the
+        # SDK's root tracer had been opening a well-formed one.
+        owns_root = any(record.get("run_trace_id") for _, record in claimed)
         try:
-            with sdk.AgentRunTracer(agent_name=agent_name, run_id=run_key) as run:
+            with _open_run(sdk, agent_name, run_key, owns_root=owns_root) as run:
                 run.set_input(f"aisquare-cli session {run_key}")
                 for _, record in claimed:
                     _emit_span(sdk, record)
@@ -1057,6 +1279,96 @@ def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> Shi
         reason=f"{sent} shipped across {len(runs)} run(s)"
         + (f", {dead} dead-lettered" if dead else ""),
     )
+
+
+def _open_run(sdk: Any, agent_name: str, run_key: str, *, owns_root: bool) -> Any:
+    """The span every record of one drain nests under.
+
+    A launch that OWNS its Run — one whose launcher posted the root span — → a
+    segment INSIDE that trace (one Run with the model traffic). Everything else
+    → the SDK's own root tracer, which opens a new trace, exactly as before
+    this existed.
+
+    A fail-open launch (no gateway URL, no key, or a root post that did not
+    land) is deliberately in the second group even though it IS traced: its
+    proxy lane keyed a Run of its own that we cannot name, so a segment here
+    would attach to nothing. Two Runs for one session is the old, known cost;
+    one Run with no root is a worse thing than the bug it would be fixing.
+    """
+    if owns_root:
+        return _ClientLaneSegment(sdk, agent_name, run_key)
+    return sdk.AgentRunTracer(agent_name=agent_name, run_id=run_key)
+
+
+def _otel() -> tuple[Any, Any]:
+    """``(opentelemetry.trace, opentelemetry.context)`` — the SDK's dependency,
+    imported at the one place that needs it so this module stays import-light
+    for every path a human is waiting on. A seam for the tests, which run
+    without the extra."""
+    from opentelemetry import context as otel_context
+    from opentelemetry import trace as otel_trace
+
+    return otel_trace, otel_context
+
+
+class _ClientLaneSegment:
+    """One drain's worth of client-lane spans, attached INSIDE a launched Run.
+
+    The launcher posted the Run's root (``AgentRun:<agent>``, trace id and span
+    id both derived from the pipeline id) and the proxy parented the model
+    traffic under it. This opens an ``AgentRun`` segment whose parent is that
+    same root — a REMOTE parent, because the root lives in a request that
+    already happened — so the human prompts and board events land in the
+    same Run, and carries ``agent.name`` itself so the batch routes even when
+    the launcher's post never arrived. Same ``set_input``/``set_status`` face
+    as the SDK's root tracer, so ``_drain`` does not branch on which it holds.
+    """
+
+    def __init__(self, sdk: Any, agent_name: str, run_key: str) -> None:
+        self._sdk = sdk
+        self._agent_name = agent_name
+        self._run_key = run_key
+        self._span: Any = None
+        self._token: Any = None
+
+    def __enter__(self) -> _ClientLaneSegment:
+        otel_trace, otel_context = _otel()
+        identity = trace_identity(self._run_key)
+        root = otel_trace.SpanContext(
+            trace_id=int(identity.trace_id, 16),
+            span_id=int(identity.span_id, 16),
+            is_remote=True,
+            trace_flags=otel_trace.TraceFlags(otel_trace.TraceFlags.SAMPLED),
+        )
+        parent = otel_trace.set_span_in_context(otel_trace.NonRecordingSpan(root))
+        self._span = self._sdk.get_tracer("aisquare-cli").start_span(
+            name=f"AgentRun:{self._agent_name}",
+            context=parent,
+            attributes={
+                "openinference.span.kind": "AGENT",
+                "agent.name": self._agent_name,
+                "agent.run_id": self._run_key,
+                "agent.source": "aisquare-cli:client-lane",
+            },
+        )
+        self._token = otel_context.attach(otel_trace.set_span_in_context(self._span))
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        otel_trace, otel_context = _otel()
+        if exc_type is not None:
+            self._span.set_status(otel_trace.StatusCode.ERROR, str(exc_val))
+        else:
+            self._span.set_status(otel_trace.StatusCode.OK)
+        self._span.end()
+        if self._token is not None:
+            otel_context.detach(self._token)
+
+    def set_input(self, value: str) -> None:
+        self._span.set_attribute("input.value", value)
+
+    def set_status(self, status: str) -> None:
+        self._span.set_attribute("agent.run.status", status)
 
 
 def _emit_span(sdk: Any, record: dict[str, object]) -> None:

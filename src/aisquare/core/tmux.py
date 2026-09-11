@@ -197,6 +197,14 @@ class TmuxUnavailable(TmuxError):
     """No usable tmux: missing from PATH, or older than :data:`MIN_VERSION`."""
 
 
+#: How tmux says "there is no server on this socket" — and ONLY that. Measured
+#: on 3.7c: ``error connecting to /tmp/tmux-<uid>/<socket> (No such file or
+#: directory)``; older/other commands say ``no server running on <path>``. A
+#: refusal of a socket that IS there reads ``(Permission denied)`` instead, with
+#: the same exit code, which is why the exit code alone must never decide.
+_ABSENT_SERVER = re.compile(r"No such file or directory|no server running on", re.IGNORECASE)
+
+
 @dataclass(frozen=True)
 class Completed:
     """One finished tmux command."""
@@ -593,7 +601,7 @@ class TmuxServer:
         """
         try:
             return self.reachable()
-        except TmuxUnavailable:
+        except TmuxError:  # unavailable client, denied socket, timeout: not an answer
             return False
 
     def reachable(self) -> bool:
@@ -602,12 +610,21 @@ class TmuxServer:
         :class:`TmuxUnavailable` covers both a binary ``which`` cannot find and
         one that fails at EXECUTION — deleted between the check and the exec, or
         a shim whose interpreter is gone — because ``_tmux`` maps the
-        ``FileNotFoundError`` from ``subprocess.run`` to the same class. A
-        ``False`` from this method therefore means exactly one thing: the client
-        ran and no server answered (review of #121, round 5).
+        ``FileNotFoundError`` from ``subprocess.run`` to the same class (review of
+        #121, round 5). And a non-zero exit is NOT proof of absence: an
+        inaccessible LIVE socket also exits 1, with ``Permission denied`` where
+        an absent server says ``No such file or directory`` (round 7). So
+        ``False`` means exactly one thing — the client ran and tmux said there is
+        no server on this socket — and every other failed probe is a
+        :class:`TmuxError` carrying tmux's own words.
         """
         completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
-        return completed.returncode == 0
+        if completed.returncode == 0:
+            return True
+        detail = completed.stderr.strip()
+        if _ABSENT_SERVER.search(detail):
+            return False
+        raise TmuxError(detail or f"tmux display-message exited {completed.returncode}")
 
     def spawn_window(
         self,

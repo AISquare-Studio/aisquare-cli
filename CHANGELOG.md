@@ -50,7 +50,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   probe that RAISES on an unavailable client (`TmuxServer.reachable()`, rounds
   4-5) — a tmux that left PATH, or a shim whose interpreter is gone, after the
   initial guard is "could not ask", so a late agent on that socket is left live
-  and its project stays paused rather than recorded lost. **Exit status is recorded only where
+  and its project stays paused rather than recorded lost. `reachable()` reads
+  tmux's own words, not the exit code: `No such file or directory` / `no server
+  running on` is absence, anything else (`Permission denied` on a live socket) is
+  a `TmuxError` — never a row ended (round 7). Round 7 also: the inside-server
+  guard parses `$TMUX` from the right (`rsplit(",", 2)`), so a comma in the
+  socket path cannot slip past it; a final row scan the store refused is
+  `late_scan_failed` in the report (PARTLY, exit 1, every snapshot project keeps
+  its pause); and a forgotten registration's pause is skipped, not read, so
+  `shutdown --all` no longer clears the tombstone `project forget` wrote. **Exit status is recorded only where
   tmux exposes one**: `--force` kills a live pane and records none. It refuses
   rather than guess — no usable tmux, a socket that cannot be *asked* whether a
   server is there (a wedged server's 30 s timeout used to escape as a traceback

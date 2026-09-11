@@ -226,6 +226,11 @@ class ShutdownReport:
     """Project ids the shutdown could not confirm down — the set the pause rule
     and any caller that wants "is it really down?" should read, rather than
     re-deriving it from the other lists."""
+    late_scan_failed: str | None = None
+    """Why the final re-read of live rows did not happen (a store that refused).
+    A scan that did not run cannot vouch for anything, so every project in the
+    run's snapshot is marked not confirmed down and keeps its pause; the CLI
+    reports PARTLY and exits 1 (review of #121, round 7)."""
 
 
 @dataclass(frozen=True)
@@ -1597,7 +1602,12 @@ def _refuse_from_inside(sockets: Sequence[str], config: FleetSettings) -> None:
     server that is not running, and the two are compared with symlinks resolved
     because ``/tmp`` is one on macOS.
     """
-    inside = os.environ.get("TMUX", "").split(",")[0]
+    # `<socket-path>,<pid>,<session-index>`: the LAST two fields are the numbers,
+    # and the path may itself contain commas (a socket name or TMUX_TMPDIR with
+    # one), which tmux preserves — a `split(",")[0]` truncated such a path and
+    # let this guard accept the pane it was about to kill (review of #121,
+    # round 7).
+    inside = os.environ.get("TMUX", "").rsplit(",", 2)[0]
     if not inside:
         return
     here = Path(inside)
@@ -1872,6 +1882,8 @@ def _record_late_rows(
     answering: Mapping[str, bool],
     report: ShutdownReport,
     config: FleetSettings,
+    *,
+    snapshot: Sequence[tuple[ProjectInfo, list[FleetAgent]]] = (),
 ) -> None:
     """Rows that appeared DURING the run, re-read on EVERY socket in scope.
 
@@ -1890,8 +1902,16 @@ def _record_late_rows(
     del answering  # the initial probe is STALE by now; every socket is re-asked below
     try:
         targets = _shutdown_targets(project, config)
-    except Exception:
-        return  # a store that died mid-run: the report is still owed to the caller
+    except Exception as exc:
+        # A store that died mid-run: the report is still owed to the caller —
+        # but a scan that did not run cannot vouch for anything. Silently
+        # returning left a late-spawned agent unreported and its project
+        # "down" with its pause cleared (review of #121, round 7): the failure
+        # is recorded and every snapshot project stays not confirmed down.
+        report.late_scan_failed = f"{type(exc).__name__}: {exc}"
+        for current, _ in snapshot:
+            _not_down(report, current.id)
+        return
     # Reachability is re-read for every socket in scope, including the ones the
     # initial probe found absent: another terminal can bring a replacement
     # manager up on exactly that socket during the run, and skipping it left a
@@ -1983,7 +2003,16 @@ def _clear_pause(
     project this run CONFIRMED down: one with a row left live, a session left up
     or a listing that failed keeps its signal and is named in ``paused_kept``.
     """
+    # `is_paused`/`resume` resolve the board through `ensure_project`, which
+    # CLEARS a registration's tombstone. `shutdown --all` reads past tombstones
+    # on purpose (a forgotten project can hold live rows), so touching the pause
+    # of one would silently undo `project forget` (review of #121, round 7). A
+    # forgotten project's pause is nobody's standing order: skipped, not read.
+    with store_session() as store:
+        visible = {p.id for p in store.list_projects()}
     for project, _ in targets:
+        if project.id not in visible:
+            continue
         with suppress(Exception):  # a disabled board holds no signals; a missing root neither
             if not is_paused(project):
                 continue
@@ -2093,7 +2122,7 @@ def shutdown(
         # traceback instead of a report was left with a half-recorded fleet, a
         # live server, and nothing saying how far it got.
         _kill_fleet_sessions(targets, sockets, answering, report, config, every=project is None)
-        _record_late_rows(project, handled, answering, report, config)
+        _record_late_rows(project, handled, answering, report, config, snapshot=targets)
         _clear_pause(targets, report)
     return report
 

@@ -28,22 +28,23 @@ all of them must reach it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -61,6 +62,7 @@ from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
+from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core.store import store_session
 from aisquare.models import (
@@ -147,6 +149,7 @@ class HelpScreen(ModalScreen[None]):
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("t", "themes (applied live, autosaved)"),
+            ("m", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
             ("F1", "command palette"),
             ("q", "quit — from the sidebar; inside a pane every key goes to the agent"),
@@ -174,11 +177,20 @@ class FleetApp(App[None], inherit_bindings=False):
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
+        Binding("m", "remote_panel", "remote"),
         Binding("r", "refresh_now", "refresh"),
         Binding("question_mark", "help", "help", key_display="?"),
     ]
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"quit", "pick_theme", "refresh_now", "help", "command_palette", "change_theme"}
+        {
+            "quit",
+            "pick_theme",
+            "remote_panel",
+            "refresh_now",
+            "help",
+            "command_palette",
+            "change_theme",
+        }
     )
     """Actions that are live only while focus is in the sidebar (§4.3)."""
 
@@ -189,8 +201,11 @@ class FleetApp(App[None], inherit_bindings=False):
         doctor: DoctorRunner | None = diagnostics.doctor,
         escape_key: str | None = None,
         accounts: AccountsReader | None = accounts_service.overview,
+        remote: RemoteController | None = None,
     ) -> None:
         super().__init__()
+        self.remote = remote if remote is not None else RemoteController()
+        """The Remote (``m``) model — one per app, so the tunnel outlives the dialog."""
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
@@ -227,6 +242,13 @@ class FleetApp(App[None], inherit_bindings=False):
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
+        self.remote.restore()
+        self.set_interval(30.0, self.remote.enforce_auto_off)
+
+    def on_unmount(self) -> None:
+        # The TUI is leaving: no ngrok may outlive it. The saved switches stay,
+        # so a Remote that was on comes back on at the next start (restore()).
+        self.remote.shutdown()
 
     @property
     def sidebar(self) -> Sidebar:
@@ -273,6 +295,19 @@ class FleetApp(App[None], inherit_bindings=False):
         # The command palette's "Change theme" lands here — route it to the
         # stays-open picker instead of textual's pick-and-close one.
         self.action_pick_theme()
+
+    # --- remote (m) ------------------------------------------------------------------
+
+    def action_remote_panel(self) -> None:
+        self.push_screen(RemotePanel(self.remote))
+
+    def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand(
+            "Remote control",
+            "Remote on/off, link + QR, password, devices (m)",
+            self.action_remote_panel,
+        )
 
     def watch_theme(self, theme_name: str) -> None:
         # Fires on ANY theme change (our picker or the palette): every change is

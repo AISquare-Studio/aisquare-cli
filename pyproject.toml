@@ -31,6 +31,10 @@ dependencies = [
   # cli/watch.py and cli/ui/ lean on 8.2.x internals. Imported lazily, only by
   # the UI entry, so the hook path pays nothing for it.
   "textual>=8.2,<9",
+  # The Remote modal's QR (cli/ui/views/remote.py). Pure python, typed, one
+  # module; imported lazily by the QR renderer only. PLAN §4-G names it as the
+  # modal task's one new dependency — flagged for Anmol in the PR body.
+  "segno>=1.6",
 ]
 
 [project.optional-dependencies]

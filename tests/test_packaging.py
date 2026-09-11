@@ -41,7 +41,14 @@ def test_the_base_install_gains_no_dependencies() -> None:
 
     ``textual`` is in the set because the fleet UI made it core in 0.6.0, not
     because the experiment wants it: the CI transport is stdlib ``urllib`` so
-    that the hook path works in a base install."""
+    that the hook path works in a base install.
+
+    ``segno`` (pure python, typed, one module) is the Remote modal's QR — the
+    ONE new dependency aisquare-remote's PLAN §4-G grants the ``m``-modal task,
+    flagged for Anmol in that PR. It is imported lazily by the QR renderer
+    alone (``cli/ui/views/remote.py``), so the hook path never loads it; when
+    it is absent the modal says "QR unavailable — pip install segno" instead of
+    failing."""
     import re
     import tomllib
 
@@ -50,7 +57,7 @@ def test_the_base_install_gains_no_dependencies() -> None:
     # Split on every specifier character, so a future `foo<2` upper bound reads
     # as `foo` rather than failing with a confusing diff.
     required = {re.split(r"[<>=!~\[; ]", dep)[0].strip() for dep in data["project"]["dependencies"]}
-    assert required == {"typer", "rich", "pydantic", "tomli-w", "textual"}
+    assert required == {"typer", "rich", "pydantic", "tomli-w", "textual", "segno"}
 
 
 def test_the_experiment_extra_is_a_real_extra_in_the_built_metadata() -> None:

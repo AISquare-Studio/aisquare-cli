@@ -236,26 +236,39 @@ def _load_saved_theme() -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _save_theme(name: str) -> None:
-    """Autosave the board theme (every change persists — no save step).
+def _read_state() -> dict[str, Any]:
+    """The whole ``state.json`` as a dict; ``{}`` when it is missing or corrupt."""
+    path = paths.state_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _update_state(values: dict[str, Any]) -> None:
+    """Merge ``values`` into ``state.json`` (every change persists — no save step).
 
     Tolerates a corrupt state.json (same anticipation as the loader) and
     writes atomically (tmp + rename) so a mid-write crash can never leave
-    the shared state file truncated.
+    the shared state file truncated. Shared by the theme autosave and the
+    Remote modal's switches, so the file has one writer recipe.
     """
     try:
         paths.ensure_home()
         path = paths.state_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (OSError, ValueError):
-            data = {}
-        data[_THEME_KEY] = name
+        data = _read_state()
+        data.update(values)
         temp = path.with_suffix(".json.tmp")
         temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         temp.replace(path)
     except OSError:
         return
+
+
+def _save_theme(name: str) -> None:
+    """Autosave the board theme under its one key."""
+    _update_state({_THEME_KEY: name})
 
 
 def action_open_transcript(app: App[Any], command: list[str]) -> str | None:

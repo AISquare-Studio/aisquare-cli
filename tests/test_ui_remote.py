@@ -143,7 +143,7 @@ def test_m_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off() -> No
         assert shown(modal.query_one("#remote-link", Static)) == expected
         assert shown(modal.query_one("#remote-state", Static)).startswith("on")
         password = shown(modal.query_one("#remote-password", Static))
-        assert password == remote_server.runtime().password and len(password) == 8
+        assert password == remote_server.runtime().password and len(password.split("-")) == 4
         qr = shown(modal.query_one("#remote-qr", Static))
         assert qr == qr_text(expected) and 15 <= len(qr.splitlines()) <= 22
         assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON

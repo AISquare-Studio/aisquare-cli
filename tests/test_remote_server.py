@@ -346,7 +346,7 @@ def test_devices_lists_sessions_and_delete_revokes(client: TestClient, runtime: 
 def test_regenerate_password_drops_every_device(client: TestClient, runtime: Runtime) -> None:
     unlock(client, runtime)
     new = runtime.regenerate_password()
-    assert new != PASSWORD and len(new) == 8
+    assert new != PASSWORD and len(new.split("-")) == remote_server.PASSPHRASE_WORDS
     assert runtime.devices() == []
     assert client.get(f"{base(runtime)}/api/board").status_code == 401
     assert unlock(client, runtime, new).status_code == 200
@@ -624,9 +624,12 @@ def test_the_write_list_is_the_plan_verbatim() -> None:
     )
 
 
-def test_password_alphabet_has_no_lookalikes() -> None:
+def test_password_is_a_phone_typeable_passphrase_without_lookalikes() -> None:
     for _ in range(50):
         password = remote_server.new_password()
-        assert len(password) == 8
-        assert not set(password) & set("0O1lI")
+        words = password.split("-")
+        assert len(words) == remote_server.PASSPHRASE_WORDS
+        assert len(set(words)) == len(words)  # distinct words
+        assert all(word in remote_server._PASSPHRASE_WORDS for word in words)
+        assert password == password.lower() and not set(password) & set("0123456789")
         time.sleep(0)

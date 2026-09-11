@@ -89,7 +89,15 @@ WRITE_ENDPOINTS = (
 
 INSTALL_HINT = "pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli websockets)"
 
-_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+_PASSPHRASE_WORDS = (
+    "amber", "birch", "cedar", "delta", "ember", "fjord", "glade", "harbor",
+    "indigo", "juniper", "kestrel", "lagoon", "meadow", "nectar", "orchid", "pebble",
+    "quartz", "river", "saffron", "tundra", "umber", "velvet", "willow", "yarrow",
+    "zenith", "anchor", "beacon", "canyon", "dune", "falcon", "garnet", "heron",
+)  # fmt: skip
+"""Phone-typeable, lower-case, no look-alike letters: 4 distinct words of 32 ≈ 19 bits
+on top of the 32-character URL token (the modal task and RABIA-HANDOFF call for a passphrase)."""
+PASSPHRASE_WORDS = 4
 """Typed on a phone, read off a terminal: no 0/O, 1/l/I."""
 
 
@@ -131,10 +139,10 @@ def new_token() -> str:
 
 
 def new_password() -> str:
-    """An 8-character password from the unambiguous alphabet."""
+    """A 4-word hyphenated passphrase of DISTINCT words from :data:`_PASSPHRASE_WORDS`."""
     import secrets
 
-    return "".join(secrets.choice(_PASSWORD_ALPHABET) for _ in range(8))
+    return "-".join(secrets.SystemRandom().sample(_PASSPHRASE_WORDS, PASSPHRASE_WORDS))
 
 
 def _same(supplied: str, expected: str) -> bool:

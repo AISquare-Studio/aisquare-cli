@@ -72,7 +72,13 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from aisquare.core import insights, outbox, paths
-from aisquare.core.config import ExplainabilitySettings, load_config, save_config
+from aisquare.core.config import (
+    AppConfig,
+    ExplainabilitySettings,
+    ExplainabilityTarget,
+    load_config,
+    save_config,
+)
 from aisquare.core.store import store_session
 
 #: Vars the wiring wants to set. If the user's environment already defines one
@@ -760,6 +766,72 @@ def resolve_api_key() -> str | None:
     except OSError:
         return None
     return stored or None
+
+
+#: Port the deployment convention puts the hosted claude_code proxy on, beside
+#: the gateway it ships to. Not a protocol constant and not a guess: it is where
+#: both deployed proxies answer, and the ONE fact that separated an operator who
+#: traced in four commands from one who spent an afternoon running a sidecar —
+#: the shipped `proxy_url` default is loopback, and this CLI deliberately does
+#: not manage a local proxy (see the revert in 8090045). A self-hosted adopter
+#: with no proxy tier overrides it; nothing here refuses their value.
+HOSTED_PROXY_PORT = 9443
+
+
+def hosted_proxy_for(gateway_url: str) -> str | None:
+    """The proxy that convention puts beside ``gateway_url``, or ``None``.
+
+    A SUGGESTION, never a write: the caller offers it as a placeholder so a
+    blank field means "the usual one" and a filled field always wins. Returns
+    ``None`` for anything this cannot reason about — no scheme, no host — rather
+    than assembling a URL out of half an answer.
+    """
+    parsed = urlparse((gateway_url or "").strip().rstrip("/"))
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    return f"{parsed.scheme}://{parsed.hostname}:{HOSTED_PROXY_PORT}"
+
+
+def configure_target(
+    config: AppConfig,
+    *,
+    target_name: str | None = None,
+    gateway_url: str | None = None,
+    key_env: str | None = None,
+    proxy_url: str | None = None,
+    identity: str | None = None,
+    enable: bool = True,
+) -> str:
+    """Apply one deployment's settings to ``config`` and return the target's name.
+
+    The body of ``aisquare explainability enable``, lifted out of the Typer
+    command so the fleet UI's setup form is the SAME write rather than a second
+    one that agrees today. It mutates and returns; persisting is the caller's,
+    because the two have different failure surfaces to report into.
+
+    Every argument is optional and only a TRUTHY one is applied — repeating the
+    call with one field set is how a machine changes its proxy without restating
+    its gateway, and an empty string from a blank form field must not erase what
+    is configured.
+    """
+    settings = config.explainability
+    name = target_name or settings.target
+    if target_name:
+        settings.target = target_name
+    if gateway_url or key_env or proxy_url or identity:
+        target = settings.targets.get(name, ExplainabilityTarget())
+        if gateway_url:
+            target.gateway_url = gateway_url.rstrip("/")
+        if key_env:
+            target.api_key_env = key_env
+        if proxy_url:
+            target.proxy_url = proxy_url
+        if identity:
+            target.agent_name_template = identity
+        settings.targets[name] = target
+    if enable:
+        settings.enabled = True
+    return name
 
 
 def store_api_key(key: str) -> Path:

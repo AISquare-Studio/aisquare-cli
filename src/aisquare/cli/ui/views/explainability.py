@@ -26,7 +26,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.core import outbox
@@ -179,6 +179,11 @@ class ExplainabilityView(VerticalScroll):
     ExplainabilityView #explainability-actions { height: auto; }
     ExplainabilityView #explainability-actions Button { margin-right: 1; }
     ExplainabilityView #explainability-note { height: auto; margin-top: 1; color: $text-muted; }
+    ExplainabilityView .setup-row { height: auto; margin-bottom: 1; }
+    ExplainabilityView .setup-row Label { width: 18; padding-top: 1; }
+    ExplainabilityView .setup-row Input { width: 1fr; }
+    ExplainabilityView #explainability-setup-title { margin-top: 1; text-style: bold; }
+    ExplainabilityView #explainability-setup-note { height: auto; color: $text-muted; }
     """
 
     def __init__(self, *, id: str | None = None) -> None:
@@ -203,6 +208,32 @@ class ExplainabilityView(VerticalScroll):
             ),
             id="explainability-note",
         )
+        yield Static(Text("Setup"), id="explainability-setup-title")
+        yield Static(
+            Text(
+                "Everything a machine needs to start tracing. Blank leaves a field as it is, "
+                "so this is also how one setting is changed later. The key is written to "
+                "~/.aisquare/explainability-key at mode 600 and never shown back.",
+            ),
+            id="explainability-setup-note",
+        )
+        with Horizontal(classes="setup-row"):
+            yield Label("deployment")
+            yield Input(placeholder="stg", id="explainability-target")
+        with Horizontal(classes="setup-row"):
+            yield Label("gateway URL")
+            yield Input(placeholder="https://…", id="explainability-gateway")
+        with Horizontal(classes="setup-row"):
+            yield Label("proxy URL")
+            yield Input(placeholder="blank = the hosted proxy", id="explainability-proxy")
+        with Horizontal(classes="setup-row"):
+            yield Label("your prefix")
+            yield Input(placeholder="e.g. arbind", id="explainability-prefix")
+        with Horizontal(classes="setup-row"):
+            yield Label("workspace key")
+            yield Input(placeholder="AIS_…", password=True, id="explainability-key")
+        with Horizontal(classes="setup-row"):
+            yield Button("Save setup", id="explainability-save", variant="success")
 
     def on_mount(self) -> None:
         self.refresh_status()
@@ -250,6 +281,81 @@ class ExplainabilityView(VerticalScroll):
             )
             return False
         return True
+
+    @on(Button.Pressed, "#explainability-save")
+    def _save_setup(self) -> None:
+        """Everything a new machine needs, in one press — #131's second half.
+
+        The four settings and the key were reachable only from a shell, while
+        this tab could already SEE that they were missing: it rendered "key is
+        NOT set" beside a red probe and offered no way to act on either. An
+        external adopter's first contact with tracing was a runbook of flags,
+        and the one they could not guess (the hosted proxy's port, beside the
+        gateway) is the one that decides whether their Runs arrive.
+
+        A blank field changes nothing, so this is equally how one setting is
+        corrected later. The write is ``configure_target`` -- the same function
+        ``aisquare explainability enable`` calls -- because two writers for one
+        config file agree right up until they do not.
+        """
+        target = self.query_one("#explainability-target", Input).value.strip()
+        gateway = self.query_one("#explainability-gateway", Input).value.strip()
+        proxy = self.query_one("#explainability-proxy", Input).value.strip()
+        prefix = self.query_one("#explainability-prefix", Input).value.strip()
+        key_field = self.query_one("#explainability-key", Input)
+        key = key_field.value.strip()
+        if not any((target, gateway, proxy, prefix, key)):
+            self.notify("nothing to save — every field is blank", severity="warning", timeout=6)
+            return
+
+        config = self._read_config()
+        if config is None:
+            return
+        # Offered, not imposed: a gateway with no proxy beside it is the case
+        # that strands traffic, and the convention is the answer the operator
+        # would have had to be told. An explicit proxy always wins, and a
+        # self-hosted adopter with no proxy tier simply types their own.
+        if gateway and not proxy:
+            suggested = explainability_service.hosted_proxy_for(gateway)
+            if suggested is not None:
+                proxy = suggested
+        # The field asks for a NAME, not a template: `{role}` is the part that
+        # makes one prefix eight agent identities, and an operator who typed it
+        # themselves would be typing a format string into a form that says
+        # "your prefix". Composed here so it cannot be got wrong.
+        identity = f"{prefix}-{{role}}" if prefix else None
+        name = explainability_service.configure_target(
+            config,
+            target_name=target or None,
+            gateway_url=gateway or None,
+            proxy_url=proxy or None,
+            identity=identity,
+            enable=False,
+        )
+        if not self._write_config(config):
+            return
+        # The key AFTER the config: a written key with no target to use it is
+        # inert, while a target whose key failed to land is a red check that
+        # names its own fix. The cheaper failure is the one left behind.
+        if key:
+            try:
+                explainability_service.store_api_key(key)
+            except OSError as exc:
+                self.notify(
+                    f"settings saved, but the key could not be written: {exc}",
+                    severity="error",
+                    timeout=8,
+                    markup=False,
+                )
+                self.refresh_status()
+                return
+        key_field.value = ""  # never rendered back, not even masked
+        self.notify(
+            f"✓ setup saved for target '{name}' — press Enable tracing, then Register roster",
+            timeout=8,
+            markup=False,
+        )
+        self.refresh_status()
 
     @on(Button.Pressed, "#explainability-enable")
     def _turn_tracing_on(self) -> None:

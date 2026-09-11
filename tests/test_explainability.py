@@ -21,6 +21,7 @@ import pytest
 
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
+from aisquare.services import explainability
 from aisquare.services.explainability import (
     ProxyProbe,
     disown_inherited_trace,
@@ -671,3 +672,64 @@ def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type
     )
     assert echoed.returncode == 0, echoed.stderr
     assert echoed.stdout == f"{url}|X-Agent-Name: aisquare-coder\nX-Pipeline-Id: sess-9|sess-9"
+
+
+# ── the hosted proxy convention, and the one writer both surfaces use ────────
+
+
+@pytest.mark.parametrize(
+    ("gateway", "expected"),
+    [
+        ("https://stg-x.example", "https://stg-x.example:9443"),
+        ("https://stg-x.example/", "https://stg-x.example:9443"),
+        ("https://stg-x.example:8443", "https://stg-x.example:9443"),
+        ("http://127.0.0.1:8000", "http://127.0.0.1:9443"),
+    ],
+    ids=["plain", "trailing-slash", "other-port-replaced", "scheme-kept"],
+)
+def test_the_hosted_proxy_sits_beside_the_gateway(gateway: str, expected: str) -> None:
+    """The one fact an operator cannot guess, and the one that decides whether
+    their Runs arrive: the shipped proxy default is loopback, which this CLI
+    does not manage."""
+    assert explainability.hosted_proxy_for(gateway) == expected
+
+
+@pytest.mark.parametrize("gateway", ["", "   ", "not-a-url", "://missing-scheme"])
+def test_half_an_answer_yields_no_suggestion(gateway: str) -> None:
+    """Assembling a URL out of an unparseable string would offer a confident
+    wrong answer, which is worse than none."""
+    assert explainability.hosted_proxy_for(gateway) is None
+
+
+def test_configure_target_applies_only_what_was_given() -> None:
+    """A blank form field must not erase what is configured — the property the
+    UI's "blank leaves it alone" promise rests on."""
+    config = AppConfig()
+    explainability.configure_target(
+        config, target_name="stg", gateway_url="https://g.example", identity="me-{role}"
+    )
+    explainability.configure_target(config, proxy_url="https://g.example:9443")
+
+    target = config.explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example", "untouched by the second call"
+    assert target.agent_name_template == "me-{role}"
+    assert target.proxy_url == "https://g.example:9443"
+
+
+def test_configure_target_can_write_settings_without_turning_tracing_on() -> None:
+    """Consent stays a separate press: the setup form saves, Enable enables."""
+    config = AppConfig()
+    explainability.configure_target(
+        config, target_name="stg", gateway_url="https://g.example", enable=False
+    )
+    assert config.explainability.enabled is False
+    assert config.explainability.targets["stg"].gateway_url == "https://g.example"
+
+    explainability.configure_target(config)
+    assert config.explainability.enabled is True
+
+
+def test_a_trailing_slash_is_stripped_from_the_stored_gateway() -> None:
+    config = AppConfig()
+    explainability.configure_target(config, target_name="stg", gateway_url="https://g.example/")
+    assert config.explainability.targets["stg"].gateway_url == "https://g.example"

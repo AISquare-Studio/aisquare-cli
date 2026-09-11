@@ -42,6 +42,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     same discriminator, on the precedent `stored_api_key` set.
 
 ### Added
+
+- **Explainability setup is doable from the fleet UI.** The Explainability tab
+  could already *see* that a machine was unconfigured — it rendered
+  `$EXPLAINABILITY_API_KEY is NOT set` beside a red probe — and its five buttons
+  all operated on a configuration that had to exist already. So the path to a
+  first trace was four terminal commands, one of which (`--proxy-url …:9443`)
+  cannot be guessed: the shipped `proxy_url` default is a loopback sidecar this
+  CLI deliberately does not manage, while the hosted proxy sits beside the
+  gateway. Getting that one wrong is the silent failure above. A **Setup**
+  section now takes deployment, gateway URL, proxy URL, prefix and workspace key.
+  - A blank field leaves the setting alone, so the same form corrects one value
+    later without restating the rest.
+  - Type a gateway, leave the proxy blank, and the hosted proxy beside it is
+    filled in — offered, never imposed: an explicit value always wins, and a
+    self-hosted adopter with no proxy tier types their own. `hosted_proxy_for`
+    returns `None` rather than assembling a URL out of half an answer.
+  - The prefix field asks for a **name**, not a template: `nishil` becomes
+    `nishil-{role}`, so nobody types a format string into a form.
+  - The key is written to `~/.aisquare/explainability-key` at mode 600 and the
+    field is cleared — this view's own docstring already rules a key out of a
+    full-screen UI, and a masked `Input` still holds its value.
+  - Consent stays a separate press: saving configures, **Enable** enables.
+  - One writer. `explainability.configure_target` is lifted out of the Typer
+    command so the form and `aisquare explainability enable` are the same write,
+    rather than two that agree until they do not.
 - **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
   0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
   `localhost` and `::1` runs with no Host/Origin validation — described at

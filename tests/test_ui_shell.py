@@ -31,7 +31,7 @@ from textual import events
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.pilot import Pilot
-from textual.widgets import Button, Static, Switch
+from textual.widgets import Button, Input, Static, Switch
 from textual.widgets._toast import Toast
 from textual.worker import Worker, WorkerState
 
@@ -57,9 +57,11 @@ from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.core import tmux as tmux_core
+from aisquare.core.config import load_config
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 
 T = TypeVar("T")
@@ -751,6 +753,91 @@ def test_a_doctor_report_is_painted_only_in_the_scope_it_ran_for(
     # Control: the same string rendered AS MARKUP loses the bracketed segment —
     # the failure this assertion exists to catch, measured here.
     assert Content.from_markup(rendered).plain == rendered.replace("[archive]", "")
+
+
+def test_the_setup_form_wires_a_machine_without_a_shell(tmp_path: Path, script: Script) -> None:
+    """#131's second half: the tab could SEE the key was missing and not set it.
+
+    An external adopter's first contact with tracing was a runbook of flags, one
+    of which — the hosted proxy beside the gateway — decides whether their Runs
+    arrive and cannot be guessed. Typing a gateway is enough to get it.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-target", Input).value = "stg"
+        app.screen.query_one("#explainability-gateway", Input).value = "https://g.example"
+        app.screen.query_one("#explainability-prefix", Input).value = "nishil"
+        app.screen.query_one("#explainability-key", Input).value = "AIS_written_by_the_form"
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+
+    target = load_config().explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example"
+    assert target.proxy_url == "https://g.example:9443", "the hosted proxy, offered not demanded"
+    assert target.agent_name_template == "nishil-{role}"
+    assert explainability_service.stored_api_key() == "AIS_written_by_the_form"
+
+
+def test_saving_setup_does_not_by_itself_turn_tracing_on(tmp_path: Path, script: Script) -> None:
+    """Consent stays a button (#50's boundary): configuring is not enabling."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-gateway", Input).value = "https://g.example"
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert load_config().explainability.enabled is False
+
+
+def test_the_typed_key_is_never_rendered_back(tmp_path: Path, script: Script) -> None:
+    """The field is cleared after a save. A masked Input still holds the value,
+    and this view's own docstring rules the key out of a full-screen UI."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-key", Input).value = "AIS_secret"
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one("#explainability-key", Input).value
+
+    assert drive(go, notifications=True) == ""
+
+
+def test_a_blank_form_changes_nothing_and_says_so(tmp_path: Path, script: Script) -> None:
+    """The negative half: pressing Save with nothing typed is not a write."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        return app.screen.query_one(Toast).render().plain
+
+    assert "nothing to save" in drive(go, notifications=True)
+    assert load_config().explainability.targets == {}
 
 
 def test_the_explainability_views_toasts_keep_bracketed_data(

@@ -32,8 +32,9 @@ import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail
 from aisquare.core import outbox
-from aisquare.core.config import ExplainabilityTarget, load_config, save_config
+from aisquare.core.config import load_config, save_config
 from aisquare.core.state import get_state
+from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
@@ -201,23 +202,14 @@ def enable(
     """
     config = load_config()
     settings = config.explainability
-    name = target_name or settings.target
-    if target_name:
-        settings.target = target_name
-
-    if gateway_url or key_env or proxy_url or identity:
-        target = settings.targets.get(name, ExplainabilityTarget())
-        if gateway_url:
-            target.gateway_url = gateway_url.rstrip("/")
-        if key_env:
-            target.api_key_env = key_env
-        if proxy_url:
-            target.proxy_url = proxy_url
-        if identity:
-            target.agent_name_template = identity
-        settings.targets[name] = target
-
-    settings.enabled = True
+    name = explainability_service.configure_target(
+        config,
+        target_name=target_name,
+        gateway_url=gateway_url,
+        key_env=key_env,
+        proxy_url=proxy_url,
+        identity=identity,
+    )
     with expected_config_write_errors():
         save_config(config)
 

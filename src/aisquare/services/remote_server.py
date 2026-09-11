@@ -27,7 +27,7 @@ Remote-specific state has its own endpoint, ``GET /api/remote``.
 
 State (token, password, ``allow_write``, ``auto_off_at``, devices) lives in
 ``~/.aisquare/remote.json`` at 0600, and a serving process re-reads it when its
-mtime moves — ``aisquare remote allow-write on`` from another shell reaches the
+bytes change — ``aisquare remote allow-write on`` from another shell reaches the
 running server within a second (:meth:`Runtime.reload_if_changed`). Everything
 that touches real systems goes through :class:`Sources` and :class:`Writes`, two
 bags of callables the tests replace — the server itself never opens the store or
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import threading
@@ -245,20 +246,31 @@ class Runtime:
         self._audit_path = audit_path
         self._lock = threading.RLock()
         self._closers: dict[str, set[Callable[[], None]]] = {}
-        self._disk: tuple[int, int] | None = None
-        """``(st_mtime_ns, st_size)`` of the file as this process last wrote or read it."""
+        self._disk: bytes | None = None
+        """Digest of the file's bytes as this process last wrote or read them.
+
+        A content fingerprint, not ``(mtime_ns, size)``: the modal coder measured
+        195 of 200 same-size rewrites landing inside one mtime tick on this WSL2
+        filesystem, so a regenerated passphrase of equal length went unnoticed.
+        The file is a few hundred bytes; hashing it costs about what the stat did.
+        """
         self.reads = 0
         """How many times the file was parsed after startup — tests pin the short-circuit."""
         self._state = self._load()
 
     # -- persistence --
 
-    def _signature(self) -> tuple[int, int] | None:
+    @staticmethod
+    def _digest(data: bytes) -> bytes:
+        return hashlib.blake2b(data, digest_size=16).digest()
+
+    def _signature(self) -> tuple[bytes, bytes] | None:
+        """``(digest, bytes)`` of the file right now, or ``None`` when it cannot be read."""
         try:
-            stat = self._state_path.stat()
+            data = self._state_path.read_bytes()
         except OSError:
             return None
-        return (stat.st_mtime_ns, stat.st_size)
+        return (self._digest(data), data)
 
     def reload_if_changed(self) -> bool:
         """Re-read ``remote.json`` if ANOTHER process changed it; ``True`` when it had.
@@ -266,10 +278,12 @@ class Runtime:
         ``aisquare remote allow-write on``, ``regenerate-password`` and ``revoke``
         run in their own process and write the file; a serving process that only
         trusted memory kept answering with the old switches (measured: 30 s of
-        ``allow_write:false`` after the toggle). A ``stat()`` per check is the
-        whole cost; the file is parsed only when its mtime or size moved past
-        what this process last wrote or read. An unreadable or half-written file
-        keeps the state in hand and is retried on the next change.
+        ``allow_write:false`` after the toggle). One small read plus a blake2b
+        digest per check is the whole cost; the file is parsed only when its
+        BYTES differ from what this process last wrote or read. Not mtime: on
+        this filesystem 195 of 200 same-size rewrites shared an mtime tick, which
+        hid a regenerated passphrase of equal length. An unreadable or
+        half-written file keeps the state in hand and is retried on the next change.
 
         What applying the file means: switches and password replace; sessions
         the file no longer lists are revoked here too (cookie gone, websockets
@@ -277,16 +291,17 @@ class Runtime:
         """
         signature = self._signature()
         with self._lock:
-            if signature is None or signature == self._disk:
+            if signature is None or signature[0] == self._disk:
                 return False
+            digest, data = signature
             try:
-                raw = json.loads(self._state_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                raw = json.loads(data.decode("utf-8"))
+            except ValueError:
                 return False
             if not isinstance(raw, dict):
                 return False
             self.reads += 1
-            self._disk = signature
+            self._disk = digest
             incoming = _State.from_json(raw)
             known = {device.sid: device for device in self._state.sessions}
             for device in incoming.sessions:
@@ -313,11 +328,15 @@ class Runtime:
     def _write(self, state: _State) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._state_path.with_name(self._state_path.name + ".tmp")
-        tmp.write_text(json.dumps(state.as_json(), indent=2), encoding="utf-8")
+        encoded = json.dumps(state.as_json(), indent=2).encode("utf-8")
+        tmp.write_bytes(encoded)
         tmp.chmod(0o600)
         tmp.replace(self._state_path)
         self._state_path.chmod(0o600)
-        self._disk = self._signature()
+        # Our own write, by content: the next check finds these exact bytes and
+        # skips the parse; a sibling process writing the same size in the same
+        # mtime tick is still seen, because its bytes differ.
+        self._disk = self._digest(encoded)
 
     def _save(self) -> None:
         with self._lock:

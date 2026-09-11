@@ -42,7 +42,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (never on plain 127.0.0.1); `GET api/devices` marks the caller's own row
   `current: true` so the page can label "this device".
 - A running Remote Control server re-reads `~/.aisquare/remote.json` when its
-  mtime moves, so `aisquare remote allow-write on|off`, `regenerate-password`
+  content changes (a blake2b fingerprint, not mtime — same-size rewrites within
+  one mtime tick were being missed), so `aisquare remote allow-write on|off`, `regenerate-password`
   and `revoke <sid>` from another shell reach it: the next `GET api/remote`
   and the next write request see the switch, the stream pushes a `remote`
   frame within a second, and a session the file no longer lists is dropped

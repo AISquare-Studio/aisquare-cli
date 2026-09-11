@@ -54,14 +54,13 @@ def client(runtime: Runtime, tmp_path: Path) -> TestClient:
 def other_process_writes(mutate: Any) -> None:
     """What ``aisquare remote …`` in a second shell does: rewrite the file atomically."""
     path = remote_state_path()
-    before = path.stat()
     raw = json.loads(path.read_text())
     mutate(raw)
     tmp = path.with_name(path.name + ".other")
     tmp.write_text(json.dumps(raw, indent=2))
     os.replace(tmp, path)
-    # Filesystems with coarse timestamps must still see a change.
-    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    # No utime nudge on purpose: the fingerprint has to notice a rewrite that
+    # lands in the same mtime tick with the same size (measured 195/200 here).
 
 
 def base(runtime: Runtime) -> str:
@@ -168,11 +167,34 @@ def test_regenerated_password_from_another_process_applies(
     assert fresh.status_code == 200
 
 
-def test_a_half_written_file_keeps_the_state_in_hand(runtime: Runtime) -> None:
+def test_a_same_size_rewrite_in_the_same_mtime_tick_is_seen(runtime: Runtime) -> None:
+    """The measured failure: equal-length passphrase, same size, same mtime."""
     path = remote_state_path()
     before = path.stat()
+    current = runtime.password
+    swapped = current[::-1] if current[::-1] != current else current[1:] + current[0]
+    assert len(swapped) == len(current)
+    other_process_writes(lambda raw: raw.__setitem__("password", swapped))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))  # pin the SAME mtime
+    after = path.stat()
+    assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+    assert runtime.reload_if_changed() is True
+    assert runtime.password == swapped
+
+
+def test_same_size_regenerations_in_a_tight_loop_are_all_seen(isolated_home: Path) -> None:
+    server = Runtime(remote_state_path(), remote_audit_path())
+    shell = Runtime(remote_state_path(), remote_audit_path())
+    seen = 0
+    for _ in range(50):
+        shell.set_allow_write(not shell.allow_write)
+        seen += server.allow_write == shell.allow_write
+    assert seen == 50
+
+
+def test_a_half_written_file_keeps_the_state_in_hand(runtime: Runtime) -> None:
+    path = remote_state_path()
     path.write_text("{ not json")
-    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
     assert runtime.reload_if_changed() is False
     assert runtime.password == PASSWORD
     assert runtime.allow_write is False

@@ -146,6 +146,7 @@ class HelpScreen(ModalScreen[None]):
             ("click", "select a project, an agent, Accounts, Doctor; + onboards a project"),
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
+            ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("F1", "command palette"),

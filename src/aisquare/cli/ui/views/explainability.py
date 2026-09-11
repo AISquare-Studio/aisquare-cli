@@ -26,11 +26,12 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Label, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.core import outbox
 from aisquare.core.config import AppConfig, load_config, save_config
+from aisquare.models import CheckStatus
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import RESERVED_ENV_VARS
@@ -59,6 +60,10 @@ class StatusReport:
     rows: tuple[tuple[str, str], ...]
     problem: bool
     """Tracing is on and the proxy would not take a session — the red state."""
+    caution: bool = False
+    """Tracing is on, sessions ARE traced, and something about where they land
+    could not be checked from here — amber, which this tab used to render as
+    green because it read ``healthy`` alone."""
 
 
 def status_report() -> StatusReport:
@@ -85,7 +90,15 @@ def status_report() -> StatusReport:
         ("proxy", target.proxy_url),
         ("identity", target.agent_name_template),
         ("agents", ", ".join(target.agent_names) or "(none)"),
-        ("probe", proxy.summary),
+        (
+            "probe",
+            proxy.summary
+            + (
+                f"\n  → {proxy.remediation}"
+                if proxy.remediation and proxy.severity is not CheckStatus.ok
+                else ""
+            ),
+        ),
         ("shipping", shipping.reason),
         (
             "spool",
@@ -93,7 +106,11 @@ def status_report() -> StatusReport:
         ),
         ("redaction", ops.redaction_summary(config.redaction.level)),
     )
-    return StatusReport(rows=rows, problem=settings.enabled and not proxy.healthy)
+    return StatusReport(
+        rows=rows,
+        problem=settings.enabled and not proxy.healthy,
+        caution=settings.enabled and proxy.severity is CheckStatus.warn,
+    )
 
 
 def render_status(report: StatusReport) -> Text:
@@ -101,7 +118,9 @@ def render_status(report: StatusReport) -> Text:
     width = max(len(label) for label, _ in report.rows) + 1
     for label, value in report.rows:
         text.append(f"{label + ':':<{width}} ", style="bold")
-        style = "bold red" if report.problem and label == "probe" else ""
+        style = ""
+        if label == "probe":
+            style = "bold red" if report.problem else ("yellow" if report.caution else "")
         text.append(f"{value}\n", style=style)
     return text
 
@@ -176,6 +195,29 @@ def stale_shell_export(config: AppConfig) -> str | None:
     return None
 
 
+def _has_scheme(url: str) -> bool:
+    """Whether ``url`` names a scheme this CLI can hand to an agent.
+
+    A bare host is the mistake the form has to catch rather than store: it
+    parses as a PATH, so every later reader sees no host at all.
+    """
+    split = explainability_service.split_url(url)
+    return split is not None and split.scheme in ("http", "https")
+
+
+def _configured_proxy(config: AppConfig, target_name: str) -> str:
+    """The proxy ALREADY stored for the target the form is about to write.
+
+    Read from the target the save will land in -- which is the typed name when
+    one was given, and the active target otherwise -- so a correction to one
+    deployment cannot be judged against another's settings.
+    """
+    settings = config.explainability
+    name = target_name or settings.target
+    existing = settings.targets.get(name)
+    return (existing.proxy_url if existing else "") or ""
+
+
 class ExplainabilityView(VerticalScroll):
     """Status of the tracing lanes and the buttons that change them."""
 
@@ -185,6 +227,11 @@ class ExplainabilityView(VerticalScroll):
     ExplainabilityView #explainability-actions { height: auto; }
     ExplainabilityView #explainability-actions Button { margin-right: 1; }
     ExplainabilityView #explainability-note { height: auto; margin-top: 1; color: $text-muted; }
+    ExplainabilityView .setup-row { height: auto; margin-bottom: 1; }
+    ExplainabilityView .setup-row Label { width: 18; padding-top: 1; }
+    ExplainabilityView .setup-row Input { width: 1fr; }
+    ExplainabilityView #explainability-setup-title { margin-top: 1; text-style: bold; }
+    ExplainabilityView #explainability-setup-note { height: auto; color: $text-muted; }
     """
 
     def __init__(self, *, id: str | None = None) -> None:
@@ -209,6 +256,35 @@ class ExplainabilityView(VerticalScroll):
             ),
             id="explainability-note",
         )
+        yield Static(Text("Setup"), id="explainability-setup-title")
+        yield Static(
+            Text(
+                "Everything a machine needs to start tracing. Blank leaves a field as it is, "
+                "so this is also how one setting is changed later. The key is written to "
+                "~/.aisquare/explainability-key at mode 600 and never shown back.",
+            ),
+            id="explainability-setup-note",
+        )
+        with Horizontal(classes="setup-row"):
+            yield Label("deployment")
+            yield Input(placeholder="stg", id="explainability-target")
+        with Horizontal(classes="setup-row"):
+            yield Label("gateway URL")
+            yield Input(placeholder="https://…", id="explainability-gateway")
+        with Horizontal(classes="setup-row"):
+            yield Label("proxy URL")
+            yield Input(placeholder="blank = the hosted proxy", id="explainability-proxy")
+        with Horizontal(classes="setup-row"):
+            yield Label("your prefix")
+            yield Input(placeholder="e.g. arbind", id="explainability-prefix")
+        with Horizontal(classes="setup-row"):
+            yield Label("key variable")
+            yield Input(placeholder="EXPLAINABILITY_API_KEY", id="explainability-key-env")
+        with Horizontal(classes="setup-row"):
+            yield Label("workspace key")
+            yield Input(placeholder="AIS_…", password=True, id="explainability-key")
+        with Horizontal(classes="setup-row"):
+            yield Button("Save setup", id="explainability-save", variant="success")
 
     def on_mount(self) -> None:
         self.refresh_status()
@@ -256,6 +332,126 @@ class ExplainabilityView(VerticalScroll):
             )
             return False
         return True
+
+    @on(Button.Pressed, "#explainability-save")
+    def _save_setup(self) -> None:
+        """Everything a new machine needs, in one press — #131's second half.
+
+        The four settings and the key were reachable only from a shell, while
+        this tab could already SEE that they were missing: it rendered "key is
+        NOT set" beside a red probe and offered no way to act on either. An
+        external adopter's first contact with tracing was a runbook of flags,
+        and the one they could not guess (the hosted proxy's port, beside the
+        gateway) is the one that decides whether their Runs arrive.
+
+        A blank field changes nothing, so this is equally how one setting is
+        corrected later. The write is ``configure_target`` -- the same function
+        ``aisquare explainability enable`` calls -- because two writers for one
+        config file agree right up until they do not.
+        """
+        target = self.query_one("#explainability-target", Input).value.strip()
+        gateway = self.query_one("#explainability-gateway", Input).value.strip()
+        proxy = self.query_one("#explainability-proxy", Input).value.strip()
+        prefix = self.query_one("#explainability-prefix", Input).value.strip()
+        key_env = self.query_one("#explainability-key-env", Input).value.strip()
+        key_field = self.query_one("#explainability-key", Input)
+        key = key_field.value.strip()
+        if not any((target, gateway, proxy, prefix, key_env, key)):
+            self.notify("nothing to save — every field is blank", severity="warning", timeout=6)
+            return
+
+        # A schemeless host parses with the WHOLE string as the path: no host,
+        # so no suggestion, and `is_loopback` reads the empty host as local and
+        # suppresses the very caution that would have flagged it. The operator
+        # ends configured, green and stranded -- this form's own failure mode,
+        # reached by omitting four characters. Refuse instead.
+        if gateway and not _has_scheme(gateway):
+            self.notify(
+                f"gateway needs a scheme — try https://{gateway}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        if proxy and not _has_scheme(proxy):
+            self.notify(
+                f"proxy needs a scheme — try https://{proxy}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            return
+        # The field asks for a NAME. An operator who has read the `--identity`
+        # examples types `nishil-{role}` and would get `nishil-{role}-{role}`,
+        # which renders as `nishil-coder-coder`; a stray `{` makes every
+        # `.format(role=...)` raise, `agent_names` come back empty, and Register
+        # point at the wrong setting. Take the name out of what they typed.
+        if prefix and ("{" in prefix or "}" in prefix):
+            cleaned = prefix.split("{")[0].rstrip("-_ ")
+            if not cleaned:
+                self.notify(
+                    "prefix is a name, not a template — try 'nishil', not 'nishil-{role}'",
+                    severity="warning",
+                    timeout=8,
+                    markup=False,
+                )
+                return
+            self.notify(
+                f"prefix is a name, not a template — using '{cleaned}'",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
+            prefix = cleaned
+
+        config = self._read_config()
+        if config is None:
+            return
+        # Offered, not imposed -- and offered only where there is nothing to
+        # overwrite. The test was `not proxy`, the BLANK FIELD, so a target with
+        # a deliberate proxy whose gateway the operator merely corrected had it
+        # silently replaced: the opposite of the "a blank field changes nothing"
+        # contract printed above this form, which the service-level test asserts
+        # one layer down. `hosted_proxy_for` is silent for a loopback gateway,
+        # whose own convention is the shipped 9090 default and not 9443.
+        if gateway and not proxy and not _configured_proxy(config, target):
+            suggested = explainability_service.hosted_proxy_for(gateway)
+            if suggested is not None:
+                proxy = suggested
+        identity = f"{prefix}-{{role}}" if prefix else None
+        name = explainability_service.configure_target(
+            config,
+            target_name=target or None,
+            gateway_url=gateway or None,
+            key_env=key_env or None,
+            proxy_url=proxy or None,
+            identity=identity,
+            enable=False,
+        )
+        if not self._write_config(config):
+            return
+        # The key AFTER the config: a written key with no target to use it is
+        # inert, while a target whose key failed to land is a red check that
+        # names its own fix. The cheaper failure is the one left behind.
+        if key:
+            try:
+                explainability_service.store_api_key(key)
+            except OSError as exc:
+                self.notify(
+                    f"settings saved, but the key could not be written: {exc}",
+                    severity="error",
+                    timeout=8,
+                    markup=False,
+                )
+                self.refresh_status()
+                return
+        key_field.value = ""  # never rendered back, not even masked
+        self.notify(
+            f"✓ setup saved for target '{name}' — press Enable tracing, then Register roster",
+            timeout=8,
+            markup=False,
+        )
+        self.refresh_status()
 
     @on(Button.Pressed, "#explainability-enable")
     def _turn_tracing_on(self) -> None:

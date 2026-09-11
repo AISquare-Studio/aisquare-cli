@@ -21,6 +21,7 @@ import pytest
 
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, ExplainabilitySettings, load_config, save_config
+from aisquare.services import explainability
 from aisquare.services.explainability import (
     ProxyProbe,
     disown_inherited_trace,
@@ -61,7 +62,9 @@ class _HealthHandler(BaseHTTPRequestHandler):
         return
 
 
-def _serve(payload: dict[str, str]) -> tuple[HTTPServer, str]:
+def _serve(payload: object) -> tuple[HTTPServer, str]:
+    """Any JSON-serialisable body, not only an object: a health endpoint can
+    answer ``[]`` or ``"ok"``, and the probe has to survive both."""
     handler = type("Handler", (_HealthHandler,), {"payload": payload})
     server = HTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -570,6 +573,53 @@ def test_probe_rejects_a_foreign_service() -> None:
     assert verdict.healthy is False
 
 
+@pytest.mark.parametrize("payload", [[], "ok", 3], ids=["list", "string", "number"])
+def test_probe_survives_valid_json_that_is_not_an_object(payload: object) -> None:
+    """Review #13. ``[]`` and ``"ok"`` are valid JSON and have no ``.get``.
+
+    The decode SUCCEEDS, so the handler around ``json.loads`` is already past,
+    and four ``payload.get`` reads follow — this branch added the fourth. Any
+    server on the port can produce it, and the wrong service answering is the
+    case this function exists to catch: it must SAY so rather than raise.
+    """
+    server, url = _serve(payload)
+    try:
+        verdict = probe_proxy(url)
+    finally:
+        server.shutdown()
+    assert verdict.healthy is False
+    assert "not a health object" in verdict.reason
+
+
+def test_probe_reads_the_gateway_a_proxy_reports() -> None:
+    """The field the whole destination check rests on, end to end."""
+    server, url = _serve(
+        {
+            "status": "ok",
+            "service": "aisquare-proxy",
+            "mode": "claude_code",
+            "gateway": "https://g.example",
+        }
+    )
+    try:
+        verdict = probe_proxy(url)
+    finally:
+        server.shutdown()
+    assert verdict.healthy is True
+    assert verdict.gateway == "https://g.example"
+
+
+def test_a_proxy_that_reports_no_gateway_is_unverifiable_not_broken() -> None:
+    """Backward compatibility, stated: today's proxies send no ``gateway``."""
+    server, url = _serve({"status": "ok", "service": "aisquare-proxy", "mode": "claude_code"})
+    try:
+        verdict = probe_proxy(url)
+    finally:
+        server.shutdown()
+    assert verdict.healthy is True
+    assert verdict.gateway is None
+
+
 def test_probe_reports_a_silent_port() -> None:
     server, url = _serve({})
     server.shutdown()
@@ -671,3 +721,147 @@ def test_env_exports_survive_a_posix_shell(runner, monkeypatch) -> None:  # type
     )
     assert echoed.returncode == 0, echoed.stderr
     assert echoed.stdout == f"{url}|X-Agent-Name: aisquare-coder\nX-Pipeline-Id: sess-9|sess-9"
+
+
+# ── the hosted proxy convention, and the one writer both surfaces use ────────
+
+
+@pytest.mark.parametrize(
+    ("gateway", "expected"),
+    [
+        ("https://stg-x.example", "https://stg-x.example:9443"),
+        ("https://stg-x.example/", "https://stg-x.example:9443"),
+        ("https://stg-x.example:8443", "https://stg-x.example:9443"),
+        ("http://stg-x.example", "http://stg-x.example:9443"),
+        ("https://[2001:db8::1]:8000", "https://[2001:db8::1]:9443"),
+    ],
+    ids=["plain", "trailing-slash", "other-port-replaced", "scheme-kept", "ipv6-rebracketed"],
+)
+def test_the_hosted_proxy_sits_beside_the_gateway(gateway: str, expected: str) -> None:
+    """The one fact an operator cannot guess, and the one that decides whether
+    their Runs arrive: the shipped proxy default is loopback, which this CLI
+    does not manage.
+
+    IPv6 is not decoration. ``urlsplit().hostname`` strips the brackets, and
+    ``https://2001:db8::1:9443`` is not a URL any client can reach -- a
+    suggestion that cannot be dialled is worse than none, because it is stored.
+    """
+    assert explainability.hosted_proxy_for(gateway) == expected
+
+
+@pytest.mark.parametrize(
+    "gateway",
+    [
+        "",
+        "   ",
+        "not-a-url",
+        "://missing-scheme",
+        "stg-x.example",
+        "http://[::1",
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "https://[::1]:8000",
+    ],
+    ids=[
+        "empty",
+        "blank",
+        "bare-word",
+        "no-scheme",
+        "schemeless-host",
+        "malformed-ipv6",
+        "loopback-ip",
+        "localhost",
+        "loopback-ipv6",
+    ],
+)
+def test_no_suggestion_where_one_would_be_wrong(gateway: str) -> None:
+    """Silence for half an answer AND for a confidently wrong one.
+
+    Unparseable or schemeless is half an answer -- a bare host parses with the
+    whole string as the PATH, so a suggestion built from it names no host.
+
+    A LOOPBACK gateway is the wrong answer, not the missing one, and it is the
+    case the review caught: ``HOSTED_PROXY_PORT`` is the hosted deployments'
+    convention, while the wholly-local topology's own port is the shipped
+    ``proxy_url`` default. Suggesting 9443 there repoints a self-hosted adopter
+    -- the very topology in this PR's measured repro -- at a port with nothing
+    on it. Silence leaves their configured value alone.
+    """
+    assert explainability.hosted_proxy_for(gateway) is None
+
+
+def test_the_loopback_suggestion_would_have_contradicted_the_shipped_default() -> None:
+    """Why the loopback case is silent, stated as the contradiction it was."""
+    from aisquare.core.config import ExplainabilitySettings
+
+    shipped = ExplainabilitySettings().proxy_url
+    assert shipped == "http://127.0.0.1:9090"
+    assert explainability.hosted_proxy_for("http://127.0.0.1:8000") != shipped.replace(
+        "9090", str(explainability.HOSTED_PROXY_PORT)
+    )
+
+
+@pytest.mark.parametrize("url", ["http://[::1", "https://[not-an-address]"])
+def test_a_malformed_url_never_raises_out_of_a_parser(url: str) -> None:
+    """The two crashes the review reproduced, at their shared root.
+
+    ``urlsplit`` raises ``ValueError`` on a malformed authority, and both
+    callers took it from a human: ``is_loopback`` off a config value, so
+    ``aisquare doctor`` tracebacked, and ``hosted_proxy_for`` off a form field,
+    so a Textual button handler took the UI down. Neither has anything to do
+    with URL syntax.
+    """
+    assert explainability.split_url(url) is None
+    assert explainability.is_loopback(url) is False
+    assert explainability.hosted_proxy_for(url) is None
+
+
+def test_a_bad_PORT_is_not_a_bad_HOST() -> None:
+    """``urlsplit`` defers the port's range check to ``.port``, so an authority
+    with a good host and a nonsense port SPLITS. The host is what
+    ``is_loopback`` answers about, and it is genuinely local here -- the port is
+    only read where it matters, inside `_same_deployment`'s own guard."""
+    assert explainability.split_url("http://[::1]:99999x") is not None
+    assert explainability.is_loopback("http://[::1]:99999x") is True
+
+
+def test_an_unparseable_url_is_not_treated_as_local() -> None:
+    """``is_loopback`` decides whether a workspace key may be omitted, so an
+    unestablished host must not read as 'this machine'. An EMPTY host still
+    does: that is the shipped default and a bare path."""
+    assert explainability.is_loopback("http://[::1") is False
+    assert explainability.is_loopback("") is True
+
+
+def test_configure_target_applies_only_what_was_given() -> None:
+    """A blank form field must not erase what is configured — the property the
+    UI's "blank leaves it alone" promise rests on."""
+    config = AppConfig()
+    explainability.configure_target(
+        config, target_name="stg", gateway_url="https://g.example", identity="me-{role}"
+    )
+    explainability.configure_target(config, proxy_url="https://g.example:9443")
+
+    target = config.explainability.targets["stg"]
+    assert target.gateway_url == "https://g.example", "untouched by the second call"
+    assert target.agent_name_template == "me-{role}"
+    assert target.proxy_url == "https://g.example:9443"
+
+
+def test_configure_target_can_write_settings_without_turning_tracing_on() -> None:
+    """Consent stays a separate press: the setup form saves, Enable enables."""
+    config = AppConfig()
+    explainability.configure_target(
+        config, target_name="stg", gateway_url="https://g.example", enable=False
+    )
+    assert config.explainability.enabled is False
+    assert config.explainability.targets["stg"].gateway_url == "https://g.example"
+
+    explainability.configure_target(config)
+    assert config.explainability.enabled is True
+
+
+def test_a_trailing_slash_is_stripped_from_the_stored_gateway() -> None:
+    config = AppConfig()
+    explainability.configure_target(config, target_name="stg", gateway_url="https://g.example/")
+    assert config.explainability.targets["stg"].gateway_url == "https://g.example"

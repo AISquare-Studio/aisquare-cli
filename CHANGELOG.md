@@ -6,6 +6,98 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every URL this integration takes from a human now goes through one guarded
+  parse.** `urlsplit` raises `ValueError` on a malformed authority — `http://[::1`
+  (a typo'd IPv6 bracket) is reachable by typing — and two callers took it
+  unguarded: `is_loopback` off a config value, so `aisquare doctor` tracebacked
+  where `main` returns its checks normally, and `hosted_proxy_for` off a form
+  field, so a Textual `Button.Pressed` handler took the fleet UI down while every
+  other failure in that handler was caught and shown as a notice. `split_url`
+  answers `None` instead of raising and is now the module's only parser, so a new
+  caller cannot reintroduce the hazard by forgetting a `try`. An unparseable URL
+  is **not** treated as loopback: that question decides whether a workspace key
+  may be omitted. `probe_proxy` likewise answers rather than raising when
+  `/health` returns valid JSON that is not an object (`[]`, `"ok"`) — the decode
+  succeeded, so its handler was already past, and four `payload.get` reads
+  followed.
+- **The hosted-proxy suggestion is silent where it would be wrong, not merely
+  where it is unsure.** `HOSTED_PROXY_PORT` is the hosted deployments'
+  convention; the wholly-local topology's own port is the shipped `proxy_url`
+  default (9090). Suggesting 9443 for a loopback gateway repointed a self-hosted
+  adopter — the topology in this change's own measured repro — at a port with
+  nothing on it. IPv6 hosts are re-bracketed, because `urlsplit().hostname`
+  strips them and `https://::1:9443` is not a URL any client can reach.
+- **The Setup form no longer overwrites a proxy the operator chose.** It tested
+  the blank *field*, not the stored *value*, so a target with a deliberate
+  `proxy_url` whose gateway was merely corrected had its proxy silently replaced
+  — the opposite of the "a blank field changes nothing" contract printed above
+  the form and asserted one layer down in `configure_target`. It also refuses a
+  schemeless gateway (which parses with the whole string as the path, leaving no
+  host, no suggestion, and an empty host that reads as loopback and suppresses
+  the very warning that would have flagged it), takes the prefix as a **name**
+  even when typed as a template (`nishil-{role}` would have composed to
+  `nishil-coder-coder`, and a stray brace empties `agent_names` entirely), and
+  can set `key_env`, which it was `configure_target`'s only caller to omit.
+- **An unset gateway is no longer reported as a misroute.** `resolve_target`
+  legitimately yields `gateway_url == ""`, and an empty string equals no
+  deployment, so the comparison called every such machine misrouted — printing a
+  sentence with a blank where a URL goes, and making `explainability status` exit
+  1. Nothing is misrouted; the CLI has no second value. Amber, and it says so.
+- **A hosted proxy on a host that is not the gateway's is no longer waved
+  through** — the failure class this change exists to close, still open inside
+  it. Such a proxy fell past the amber branch (which required a *loopback* proxy)
+  to the bare green return, on the docstring's assumption that "a hosted proxy is
+  addressed at the deployment, so it cannot disagree with it". That is an
+  assumption about the operator's typing, and `hosted_proxy_for` is this module's
+  own statement that the two share a host, so the comparison was available.
+- **The proxy verdict is one severity rather than three booleans.**
+  `healthy`/`problem`/`caution` could express states that mean nothing
+  (`problem` and `caution` together), and only `doctor` read the third — so the
+  amber rendered **green** on `explainability status` and in the fleet tab.
+  `ProxyState.severity` is the `CheckStatus` vocabulary every other check already
+  speaks; `problem` survives as a property so the surfaces reading it stay
+  correct. Both surfaces now render the amber as amber **and** print its
+  remediation, against this module's own rule that a line which is not ok without
+  its next command is half a doctor. `status --json` gains `probe_severity` and
+  `probe_fix`, so a script watching for a misroute no longer has to regex an
+  English sentence.
+
+
+- **`doctor` and `status` no longer call the proxy lane green without knowing
+  where the proxy ships.** Both rested on one `GET {proxy_url}/health`, whose
+  payload says what the process *is* — `service`, `mode`, `status` — and never
+  what it does with the traffic. So a proxy pointed at a different deployment
+  than the configured target read green everywhere. Measured on a real machine
+  with `target = stg` and a sidecar started with the SDK's own `.env` in its
+  environment: `proxy`, `gateway` and `ingest` all green, every line true, while
+  the Runs from a real Claude Code session landed on `127.0.0.1:8000` — 274
+  ingest batches in four hours, none of them where the operator was looking. The
+  reported symptom was "I ran one query and did not receive anything on stg."
+  `gateway` and `ingest` verify the *CLI's* path; the proxy carries the model
+  traffic down a second one, and nothing compared them. This is the failure
+  `_active_deployment` already records for the client lane ("Both halves looked
+  healthy. Nobody was told") — fixed there, still open here.
+  - `ProxyProbe` carries the `gateway` the proxy reports, when it reports one.
+    A proxy that predates the field is not broken, merely unverifiable, and the
+    two are now told apart rather than both rendered green.
+  - A reported gateway that disagrees with the target is **red**, and names both
+    URLs: an operator who is told only that something is wrong has to go and
+    find which of two levers moved.
+  - No reported gateway, a loopback proxy and a remote gateway is **amber** —
+    `ProxyState.caution`, the verdict this had to grow. A sidecar takes its
+    destination from whoever started it, which need not be the target this CLI
+    resolved, and that is exactly the combination that stranded the traffic
+    above. Green was a lie and red would have been one too.
+  - The topologies that *cannot* disagree stay silent: a hosted proxy is
+    addressed at the deployment, and a loopback proxy against a loopback gateway
+    is the self-hosted topology working as intended.
+  - Gateways are compared on scheme, host and port, not as strings, so a
+    trailing slash or an explicitly written default port is not a misroute.
+  - `explainability.is_loopback` is public for the second module that needs the
+    same discriminator, on the precedent `stored_api_key` set.
+
 ### Added
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
@@ -198,6 +290,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     only ever declared on `.duo` left every `.duo-wide` block silently stacking
     rather than splitting into two columns.
 
+
+- **Explainability setup is doable from the fleet UI.** The Explainability tab
+  could already *see* that a machine was unconfigured — it rendered
+  `$EXPLAINABILITY_API_KEY is NOT set` beside a red probe — and its five buttons
+  all operated on a configuration that had to exist already. So the path to a
+  first trace was four terminal commands, one of which (`--proxy-url …:9443`)
+  cannot be guessed: the shipped `proxy_url` default is a loopback sidecar this
+  CLI deliberately does not manage, while the hosted proxy sits beside the
+  gateway. Getting that one wrong is the silent failure above. A **Setup**
+  section now takes deployment, gateway URL, proxy URL, prefix and workspace key.
+  - A blank field leaves the setting alone, so the same form corrects one value
+    later without restating the rest.
+  - Type a gateway, leave the proxy blank, and the hosted proxy beside it is
+    filled in — offered, never imposed: an explicit value always wins, and a
+    self-hosted adopter with no proxy tier types their own. `hosted_proxy_for`
+    returns `None` rather than assembling a URL out of half an answer.
+  - The prefix field asks for a **name**, not a template: `nishil` becomes
+    `nishil-{role}`, so nobody types a format string into a form.
+  - The key is written to `~/.aisquare/explainability-key` at mode 600 and the
+    field is cleared — this view's own docstring already rules a key out of a
+    full-screen UI, and a masked `Input` still holds its value.
+  - Consent stays a separate press: saving configures, **Enable** enables.
+  - One writer. `explainability.configure_target` is lifted out of the Typer
+    command so the form and `aisquare explainability enable` are the same write,
+    rather than two that agree until they do not.
 - **`aisquare serve` says out loud what a non-loopback `--bind` gives up.**
   0.6.0 changed the HTTP transport so that a bind outside `127.0.0.1`,
   `localhost` and `::1` runs with no Host/Origin validation — described at

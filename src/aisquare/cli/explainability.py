@@ -32,8 +32,10 @@ import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail
 from aisquare.core import outbox
-from aisquare.core.config import ExplainabilityTarget, load_config, save_config
+from aisquare.core.config import load_config, save_config
 from aisquare.core.state import get_state
+from aisquare.models import CheckStatus
+from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
@@ -109,6 +111,12 @@ def status(
                     "identity": target.agent_name_template,
                     "agents": list(target.agent_names),
                     "probe": proxy.summary,
+                    # The verdict as a FIELD, not only as prose in `probe`. A
+                    # script watching for a misroute had to regex an English
+                    # sentence that this PR is free to reword; `probe_severity`
+                    # is the same vocabulary `doctor --json` publishes.
+                    "probe_severity": str(proxy.severity),
+                    "probe_fix": proxy.remediation or None,
                     "redaction": str(level),
                     # The spool counters live HERE, not under a top-level
                     # "spool", even though the human view below prints them on
@@ -148,6 +156,12 @@ def status(
         typer.echo(f"identity: {target.agent_name_template}")
         typer.echo(f"agents:   {', '.join(target.agent_names) or '(none)'}")
         typer.echo(f"probe:    {proxy.summary}")
+        # "A red line without its next command is half a doctor" -- this
+        # module's own rule, and the amber verdict reached the operator without
+        # one: `status` and the fleet tab both rendered `summary` and dropped
+        # `remediation`, so the only surface carrying the fix was `doctor`.
+        if proxy.remediation and proxy.severity is not CheckStatus.ok:
+            typer.echo(f"          → {proxy.remediation}")
         typer.echo(f"shipping: {state.reason}")
         # On THIS line and not a new one: "how much is queued" and "where is it"
         # are one question, and the empty case is exactly when someone goes
@@ -201,23 +215,14 @@ def enable(
     """
     config = load_config()
     settings = config.explainability
-    name = target_name or settings.target
-    if target_name:
-        settings.target = target_name
-
-    if gateway_url or key_env or proxy_url or identity:
-        target = settings.targets.get(name, ExplainabilityTarget())
-        if gateway_url:
-            target.gateway_url = gateway_url.rstrip("/")
-        if key_env:
-            target.api_key_env = key_env
-        if proxy_url:
-            target.proxy_url = proxy_url
-        if identity:
-            target.agent_name_template = identity
-        settings.targets[name] = target
-
-    settings.enabled = True
+    name = explainability_service.configure_target(
+        config,
+        target_name=target_name,
+        gateway_url=gateway_url,
+        key_env=key_env,
+        proxy_url=proxy_url,
+        identity=identity,
+    )
     with expected_config_write_errors():
         save_config(config)
 

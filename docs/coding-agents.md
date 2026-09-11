@@ -50,11 +50,12 @@ restores the bounded timeouts for the other lifecycle hooks.
 Selection order is explicit `--agent`, role binding, an exact known binary
 override (legacy shorthand), project preference, inherited session selection,
 user default, then Claude Code. An arbitrary wrapper declares its family with
-`team bind ROLE --agent NAME --bin PATH`, `--agent` at launch, or an explicit
-user/project default (`agents use NAME`, optionally `--project`). An inherited
-`AISQUARE_CODING_AGENT` choice also identifies a wrapper's family. Without an
-explicit choice, an unknown wrapper asks for one. Conflicting known binaries
-and families are rejected.
+`team bind ROLE --agent NAME --bin PATH` or `--agent` at launch (`NAME` is
+`claude-code` or `codex`). User/project defaults and the inherited
+`AISQUARE_CODING_AGENT` choice do not identify a wrapper's family. An unknown
+wrapper requires a per-role or per-launch declaration before it receives
+native flags, account configuration or model probes. Conflicting known
+binaries and families are rejected.
 Changing a default affects future launches.
 
 Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
@@ -105,10 +106,14 @@ Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`; Claude effort
 aliases and model ladders are not reused. Native model availability is left to
 Codex, without paid discovery probes. Claude retains its ladder, but probes
 now use the selected executable and effective account. Cache keys include the
-resolved executable's upgrade fingerprint, login entitlements and provider inputs.
+resolved executable's upgrade fingerprint, login identity and provider inputs.
+File-backed Claude credentials also contribute their subscription and rate-limit
+tier. On macOS those entitlements live in Keychain and are not read for cache
+hashing: use `team spawn ROLE --refresh` after a plan change, or wait for expiry.
 Parent-session variables, OAuth refresh timestamps and hook edits do not
-invalidate the 24-hour cache. `--refresh` clears the selected account's scope
-and prunes expired scopes, retaining other accounts' valid cached verdicts.
+invalidate the 24-hour cache. `--refresh` clears the selected account's scope.
+Both refresh and ordinary cache writes prune expired scopes while retaining
+other accounts' valid cached verdicts.
 
 ```sh
 asq fleet spawn reviewer --agent codex --sandbox read-only --approval on-request
@@ -147,8 +152,11 @@ Install the `serve` extra first. This is ephemeral launch configuration;
 unrelated servers are retained. The launch identity and AISquare configuration
 environment are forwarded explicitly to Codex's MCP child. MCP tools reuse a
 hook-bound session for the requested project when available. Until hooks join
-(including while awaiting native trust), or on another board, they use a
-project-scoped virtual identity, as external clients do.
+(including while awaiting native trust), local clients use a provisional
+identity unique to the project and launch token (or fleet token when there is
+no launch token). The native join adopts its claims, history and focus, renews
+its leases, and retires the provisional presence. Late tool calls resolve to
+the native row. External clients retain their project-scoped virtual identity.
 
 With both `explainability.enabled` and `explainability.ship` enabled, Codex
 exports native OTLP JSON logs to a per-launch, authenticated loopback receiver on
@@ -157,7 +165,13 @@ POSIX/WSL. It spools allowlisted, redacted event metadata. Existing
 through the SDK under the same run binding. User-configured native OTEL
 exporters in the effective account home, selected profile, system config or
 explicit `-c`/`--config` overrides are preserved; AISquare reports that it
-has stood down. Prompts and unselected profiles do not disable tracing.
+has stood down. Unreadable or invalid native config also leaves telemetry
+unchanged, with a message naming the affected layer and file. Missing files
+are treated as absent. Attached native options such as `-cotel.exporter="none"`,
+`-pwork` and `-p=work` are inspected too. Prompts and unselected profiles do not
+disable tracing. Use a second `--` to keep a prompt beginning with an option
+literal, for example `asq launch coder --agent codex -- exec -- '-pwork'`:
+the first terminator belongs to AISquare, the second to Codex.
 Codex [ignores `otel` in project-local config](https://learn.chatgpt.com/docs/config-file/config-advanced),
 so AISquare does not search ancestor projects or other account homes for
 exporters. Usage is counted from native logs once, with the observed provider

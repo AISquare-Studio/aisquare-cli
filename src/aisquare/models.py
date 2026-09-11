@@ -244,6 +244,7 @@ class ClaudeAccountStatus(BaseModel):
     subscription: str | None = None
     """The plan the credentials file names (``max``, ``team``, …), when it does."""
     hooks_installed: bool = False
+    detail: str = ""
     usage: ClaudeUsage | None = None
 
 

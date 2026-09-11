@@ -335,7 +335,8 @@ def spawn(
         bool,
         typer.Option(
             "--refresh",
-            help="Ignore cached availability verdicts (use after an entitlement changes).",
+            help="Ignore this account's cached availability verdicts. Use after an entitlement "
+            "changes; macOS Keychain plan changes cannot be detected automatically.",
         ),
     ] = False,
     effort: Annotated[

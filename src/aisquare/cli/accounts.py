@@ -136,6 +136,9 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         cells.append(Text(_short(status.account.config_dir), style="dim"))
         table.add_row(*cells)
     console.print(table)
+    for status in overview.accounts:
+        if status.detail:
+            console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
     console.print(
         Text(
             "add one: aisquare accounts add · open one: aisquare accounts run <slot> · "
@@ -247,6 +250,8 @@ def add() -> None:
     console.print(
         Text.assemble(("✓ ", "green"), f"Added Claude account {account.slot}: {landed.email}")
     )
+    if described.detail:
+        console.print(described.detail, markup=False, style="yellow")
     if not described.hooks_installed:
         console.print(
             "  ⚠ aisquare's hooks did not install into it — "

@@ -1325,7 +1325,9 @@ def test_spawn_exec_still_posts_the_root_it_is_about_to_fill(
 
     monkeypatch.setattr(service, "_post_run_root", fake_post)
     seen: dict[str, Any] = {}
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.executable", lambda _selected: "/usr/bin/claude"
+    )
     monkeypatch.setattr(
         "aisquare.cli.team.os.execvpe", lambda file, argv, env: seen.update(argv=argv, env=env)
     )

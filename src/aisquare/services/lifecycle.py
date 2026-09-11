@@ -135,6 +135,8 @@ def initialize(
             continue
         hook_note = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
         notes.append(f"Connected {agent}: {hook_note}, imported {connection.imported} entries.")
+        if connection.detail:
+            notes.append(f"{agent}: {connection.detail}")
 
     return SetupReport(
         home=home,

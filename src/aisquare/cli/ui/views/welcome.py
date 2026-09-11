@@ -42,7 +42,9 @@ def presence_lines() -> Text:
                 "coding agent:",
                 str(exc),
                 None,
-                "Fix the agent selection in Settings or aisquare agents use.",
+                exc.fix
+                if isinstance(exc, agent_launch.UnknownWrapperError)
+                else "Fix the agent selection in Settings or aisquare agents use.",
             )
         )
     else:

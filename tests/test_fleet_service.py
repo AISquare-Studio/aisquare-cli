@@ -799,7 +799,7 @@ def test_spawn_forwards_a_bound_binary_the_tmux_server_cannot_see(
     other.chmod(0o755)
     monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
 
-    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, agent="claude-code")
     command = _command(tmux)
     assert _flag(command, "--command") == "claude2", "the binding reaches the window"
     assert receipt.agent.binary == "claude2", "and the row and the pane agree"

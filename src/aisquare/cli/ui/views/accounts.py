@@ -709,6 +709,8 @@ class AccountsView(Vertical):
             self._notice(
                 f"✓ {status.label}: {who} · {hooks}", "ok" if status.hooks_installed else "warn"
             )
+            if status.detail:
+                self._notice(status.detail, "warn")
         elif state is WorkerState.ERROR:
             self._notice(
                 f"⚠ signed in, but aisquare's hooks did not install: {worker.error} — "

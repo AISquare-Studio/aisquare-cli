@@ -16,6 +16,18 @@ from aisquare.core.store import store_session
 ACTIVE_AGENT_ENV = "AISQUARE_CODING_AGENT"
 
 
+class UnknownWrapperError(ValueError):
+    """A default names an agent, but does not identify an arbitrary executable."""
+
+    def __init__(self, binary: str, role: str) -> None:
+        self.fix = f"aisquare team bind {role} --agent AGENT --bin PATH"
+        super().__init__(
+            f"The agent family of {binary!r} is unknown. Bind this wrapper with {self.fix}, "
+            "or pass --agent AGENT for this launch (AGENT: claude-code or codex). "
+            "User, project and inherited defaults do not identify a wrapper's family."
+        )
+
+
 @dataclass(frozen=True)
 class ResolvedAgent:
     adapter: AgentAdapter
@@ -81,12 +93,8 @@ def resolve(
         raise ValueError(
             f"{chosen_binary.binary!r} runs {inferred.id}, but {adapter.id} was selected"
         )
-    elif inferred is None and source == "default":
-        raise ValueError(
-            f"The agent family of {chosen_binary.binary!r} is unknown; pass --agent "
-            f"or choose a default with aisquare agents use {adapter.id}, or bind it "
-            f"with aisquare team bind {role} --agent {adapter.id} --bin PATH"
-        )
+    elif inferred is None and source not in {"flag", "role"}:
+        raise UnknownWrapperError(chosen_binary.binary, role)
     effective_env = {**os.environ, **profile.env}
     return ResolvedAgent(
         adapter,

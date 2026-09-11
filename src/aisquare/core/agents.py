@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -558,7 +559,7 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
 
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
-    existing = context_files(spec.name, spec.home)
+    context = inspect_context(spec.name, spec.home)
     sites = [
         AgentHookSite(
             config_dir=directory,
@@ -569,10 +570,10 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
     readiness, detail = integration_readiness(spec.name, _hook_dir(spec))
     return AgentInfo(
         readiness=readiness,
-        detail=detail,
+        detail=" ".join(filter(None, [detail, *context.notes])),
         name=spec.name,
-        detected=spec.home.exists() or bool(existing),
-        config_paths=existing,
+        detected=spec.home.exists() or bool(context.paths),
+        config_paths=context.paths,
         connected=spec.name in _connected_set(registry),
         sites=sites,
     )
@@ -601,25 +602,43 @@ def read_context(
     config_dir: Path | None = None,
 ) -> tuple[dict[Path, str], list[str]]:
     """Read effective instructions; missing/unreadable docs never block hook setup."""
+    context = inspect_context(name, config_dir)
+    return context.documents, context.notes
+
+
+@dataclass
+class ContextInspection:
+    paths: list[Path]
+    documents: dict[Path, str]
+    notes: list[str]
+
+
+def inspect_context(name: str, config_dir: Path | None = None) -> ContextInspection:
+    """Keep failed candidates visible, while ingesting only effective regular files."""
     spec = _spec(name, config_dir)
+    result = ContextInspection([], {}, [])
     if spec is None:
-        return {}, []
-    documents: dict[Path, str] = {}
-    notes: list[str] = []
+        return result
     for path in spec.context_files:
         try:
+            if not stat.S_ISREG(path.stat().st_mode):
+                result.paths.append(path)
+                result.notes.append(f"Skipped context file {path}: not a regular file")
+                continue
             content = path.read_text(encoding="utf-8", errors="replace")
-        except (FileNotFoundError, IsADirectoryError):
+        except FileNotFoundError:
             continue
         except OSError as exc:
-            notes.append(f"Skipped context file {path}: {exc}")
+            result.paths.append(path)
+            result.notes.append(f"Skipped context file {path}: {exc}")
             continue
         if spec.first_context_file_only and not content.strip():
             continue
-        documents[path] = content
+        result.paths.append(path)
+        result.documents[path] = content
         if spec.first_context_file_only:
             break
-    return documents, notes
+    return result
 
 
 def hook_fingerprint(name: str, config_dir: Path) -> str:
@@ -638,9 +657,18 @@ def hook_fingerprint(name: str, config_dir: Path) -> str:
             handlers = _owned_handlers(group)
             if not handlers:
                 continue
-            definition: dict[str, Any] = {"hooks": handlers}
-            if "matcher" in group:
-                definition["matcher"] = group["matcher"]
+            # Annotations do not affect execution. Preserve every other key,
+            # including future native execution controls we do not yet know.
+            annotations = {"description", "note", "comment"}
+            definition = {
+                key: value
+                for key, value in group.items()
+                if key not in annotations and key != "hooks"
+            }
+            definition["hooks"] = [
+                {key: value for key, value in handler.items() if key not in annotations}
+                for handler in handlers
+            ]
             owned.setdefault(event, []).append(definition)
     return hashlib.sha256(json.dumps(owned, sort_keys=True).encode()).hexdigest()
 

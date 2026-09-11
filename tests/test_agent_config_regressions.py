@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import os
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from unittest.mock import Mock
@@ -15,9 +18,7 @@ from aisquare.cli.app import app
 from aisquare.core import agents, claude_accounts, harness
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
-from aisquare.core.store import store_session
-from aisquare.models import TeamSession
-from aisquare.services import agent_launch, fleet, mcp_server, native_telemetry, team
+from aisquare.services import agent_launch, fleet, lifecycle, native_telemetry
 from aisquare.services import claude_accounts as accounts_service
 from tests.test_fleet_service import FakeTmux
 
@@ -25,7 +26,7 @@ from tests.test_fleet_service import FakeTmux
 @pytest.mark.parametrize("binary_source", ["command", "role-env", "global-env", "config"])
 @pytest.mark.parametrize("family_source", ["user", "project", "inherited"])
 @pytest.mark.parametrize("family", ["claude-code", "codex"])
-def test_wrapper_launch_respects_explicit_family_defaults(
+def test_wrapper_launch_requires_a_declaration_even_with_family_defaults(
     binary_source: str,
     family_source: str,
     family: str,
@@ -58,6 +59,13 @@ def test_wrapper_launch_respects_explicit_family_defaults(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: wrapper)
     result = runner.invoke(app, args)
+    assert result.exit_code != 0, result.output
+    execute.assert_not_called()
+    assert "--agent AGENT" in result.output
+    assert "claude-code or codex" in result.output
+    declared = runner.invoke(app, ["team", "bind", "coder", "--agent", family, "--bin", wrapper])
+    assert declared.exit_code == 0, declared.output
+    result = runner.invoke(app, args)
     assert result.exit_code == 0, result.output
     binary, argv, env = execute.call_args.args
     assert binary == wrapper and env["AISQUARE_CODING_AGENT"] == family
@@ -65,6 +73,7 @@ def test_wrapper_launch_respects_explicit_family_defaults(
         assert argv[argv.index("--model") + 1] == "fixture-native-model"
     else:
         assert "--model" not in argv
+    monkeypatch.delenv("AISQUARE_AGENT_BIN", raising=False)
     status = runner.invoke(app, ["--json", "team", "harness"])
     assert status.exit_code == 0, status.output
     rows = json.loads(status.stdout)["roles"]
@@ -130,9 +139,9 @@ def test_unreadable_instructions_leave_a_note_and_still_install_hooks(
     assert connection["hooks_installed"] and connection["imported"] == 0
     assert str(unreadable) in connection["detail"] and "Skipped context" in connection["detail"]
     assert agents.hooks_installed(family, tmp_path)
-    if family == "claude-code":
-        account = claude_accounts.default_account({"CLAUDE_CONFIG_DIR": str(tmp_path)})
-        assert accounts_service.complete_sign_in(account).hooks_installed
+    detected = agents.detect(family, tmp_path)
+    assert detected is not None and unreadable in detected.config_paths
+    assert str(unreadable) in detected.detail and "permission denied" in detected.detail
 
 
 @pytest.mark.parametrize("timeout", [0, -1, 180])
@@ -157,7 +166,9 @@ def test_group_annotations_do_not_reset_readiness_but_execution_matchers_do(tmp_
     agents.observe_hooks("codex", tmp_path)
     path = tmp_path / "hooks.json"
     payload = json.loads(path.read_text())
-    payload["hooks"]["Stop"][0]["description"] = "reviewed by operator"
+    for key in ("description", "note", "comment"):
+        payload["hooks"]["Stop"][0][key] = "reviewed by operator"
+        payload["hooks"]["Stop"][0]["hooks"][0][key] = "reviewed command"
     path.write_text(json.dumps(payload))
     assert agents.integration_readiness("codex", tmp_path)[0] == "observed"
     payload["hooks"]["PreToolUse"][0]["matcher"] = "another_tool"
@@ -176,6 +187,8 @@ def test_codex_hook_runner_uses_the_same_home_as_detection(
 ) -> None:
     if home_value is not None:
         monkeypatch.setenv("CODEX_HOME", home_value)
+    else:
+        monkeypatch.delenv("CODEX_HOME", raising=False)
     handle = Mock(return_value="")
     monkeypatch.setattr("aisquare.services.agent_events.handle_codex", handle)
     result = runner.invoke(app, ["hook", "codex"], input="{}")
@@ -183,36 +196,12 @@ def test_codex_hook_runner_uses_the_same_home_as_detection(
     assert handle.call_args.args[1] == agents.ambient_hook_dir("codex")
     if not home_value or not home_value.strip():
         assert handle.call_args.args[1] == isolated_agent_home / ".codex"
+    empty = runner.invoke(app, ["hook", "codex", "--config-dir", ""], input="{}")
+    assert empty.exit_code == 0, empty.output
+    assert handle.call_args.args[1] == agents.ambient_hook_dir("codex")
     explicit = isolated_agent_home / " deliberate spaces "
     runner.invoke(app, ["hook", "codex", "--config-dir", str(explicit)], input="{}")
     assert handle.call_args.args[1] == explicit
-
-
-def test_mcp_tools_work_before_trust_and_switch_to_the_joined_native_session(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    project = team.activate()
-    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "pending-native-launch")
-    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "inherited-fleet")
-    monkeypatch.setenv("AISQUARE_SERVE_CLIENT", "codex")
-    virtual = mcp_server._ensure_virtual_session()
-    assert virtual.startswith("mcp:codex:")
-    with store_session() as store:
-        session = store.get_session(virtual)
-        assert session is not None and session.project_id == project.id
-        store.upsert_session(
-            TeamSession(
-                id="joined-native-session",
-                project_id=project.id,
-                role="coder",
-                started_at=datetime.now(UTC),
-                last_seen_at=datetime.now(UTC),
-            )
-        )
-        store.set_meta("launch-session:pending-native-launch", "joined-native-session")
-    assert mcp_server._ensure_virtual_session() == "joined-native-session"
 
 
 def test_account_readers_share_the_effective_environment_and_home(
@@ -254,7 +243,9 @@ def test_account_readers_share_the_effective_environment_and_home(
 def test_probe_cache_tracks_entitlements_without_tracking_token_refreshes(
     field: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(claude_accounts, "keychain_platform", lambda: False)
     credentials: dict[str, object] = {
         "accessToken": "fixture-only",
         "subscriptionType": "pro",
@@ -308,8 +299,9 @@ def test_provider_settings_in_native_config_separate_probe_scopes(
         ["-c", "profile.name=x"],
         ["-p", "../evil"],
         ["--profile=sub/dir"],
-        ["exec", "--json", "-please fix src/foo.py"],
-        ["exec", "--json", "-print the plan"],
+        ["exec", "--json", "--", "-please fix src/foo.py"],
+        ["exec", "--json", "--", "-print the plan"],
+        ["-c", 'profile="work\\u0000"'],
     ],
 )
 def test_native_launch_does_not_disable_tracing_for_prompts_or_unusable_config_options(
@@ -339,7 +331,7 @@ def test_native_launch_does_not_disable_tracing_for_prompts_or_unusable_config_o
 
 @pytest.mark.parametrize("layer", ["system", "user", "profile"])
 @pytest.mark.parametrize("damage", ["malformed", "directory", "permission", "invalid-utf8"])
-def test_unusable_native_config_layers_do_not_disable_tracing(
+def test_unusable_native_config_layers_stand_down_with_the_exact_path(
     layer: str,
     damage: str,
     tmp_path: Path,
@@ -355,6 +347,7 @@ def test_unusable_native_config_layers_do_not_disable_tracing(
     if damage == "directory":
         path.mkdir()
     elif damage == "permission":
+        path.write_text('[otel]\nexporter="none"\n')
         open_file = Path.open
 
         def open_path(candidate: Path, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
@@ -365,17 +358,29 @@ def test_unusable_native_config_layers_do_not_disable_tracing(
         monkeypatch.setattr(Path, "open", open_path)
     else:
         path.write_bytes(b"not toml =" if damage == "malformed" else b"\xff")
-    assert not native_telemetry.operator_configured(tmp_path, ["--profile", "work"])
+    with pytest.raises(native_telemetry.NativeConfigError) as error:
+        native_telemetry.operator_configured(tmp_path, ["--profile", "work"])
+    assert str(path) in str(error.value) and layer in str(error.value)
+    config = load_config()
+    config.explainability.enabled = config.explainability.ship = True
+    save_config(config)
+    start = Mock()
+    monkeypatch.setattr(native_telemetry, "start", start)
+    selected = agent_launch.resolve(agent="codex", env_overrides={"CODEX_HOME": str(tmp_path)})
+    injected, note = agent_launch.telemetry_args(selected, {}, ["--profile", "work"])
+    assert injected == [] and str(path) in note and layer in note
+    start.assert_not_called()
 
 
-def test_non_directory_home_and_table_profile_do_not_disable_tracing(
+def test_non_directory_home_stands_down_and_table_profile_is_ignored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
     home_file = tmp_path / "home-file"
     home_file.touch()
-    assert not native_telemetry.operator_configured(home_file, [])
+    with pytest.raises(native_telemetry.NativeConfigError, match="home-file"):
+        native_telemetry.operator_configured(home_file, [])
     (tmp_path / "config.toml").write_text('[profile]\nname="work"\n')
     assert not native_telemetry.operator_configured(tmp_path, [])
 
@@ -401,3 +406,259 @@ def test_profile_exporter_overrides_follow_the_selected_profile(
     (tmp_path / "config.toml").write_text('profile="work"\n')
     assert native_telemetry.operator_configured(tmp_path, overrides)
     assert not native_telemetry.operator_configured(tmp_path, [*overrides, "-p", "clean"])
+
+
+def test_sign_in_installs_hooks_into_a_fresh_home_despite_unreadable_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = claude_accounts.default_account({"CLAUDE_CONFIG_DIR": str(tmp_path)})
+    instruction = tmp_path / "CLAUDE.md"
+    instruction.touch()
+    read = Path.read_text
+
+    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path == instruction:
+            raise PermissionError("fixture: unreadable instructions")
+        return read(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert not accounts_service.describe(account).hooks_installed
+    assert not (tmp_path / "settings.json").exists()
+    completed = accounts_service.complete_sign_in(account)
+    assert completed.hooks_installed and (tmp_path / "settings.json").exists()
+    assert agents.hooks_installed("claude-code", tmp_path)
+    for status in (completed, accounts_service.describe(account)):
+        assert str(instruction) in status.detail and "unreadable instructions" in status.detail
+
+
+@pytest.mark.parametrize(
+    "family,filename,home_env",
+    [
+        ("claude-code", "CLAUDE.md", "CLAUDE_CONFIG_DIR"),
+        ("codex", "AGENTS.override.md", "CODEX_HOME"),
+    ],
+)
+def test_list_and_init_keep_failed_context_paths_and_explanations(
+    family: str,
+    filename: str,
+    home_env: str,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bad = tmp_path / filename
+    bad.mkdir()
+    monkeypatch.setenv(home_env, str(tmp_path))
+    if family == "codex":
+        (tmp_path / "AGENTS.md").write_text("Usable fallback instructions")
+    listed = runner.invoke(app, ["--json", "agents", "list"])
+    assert listed.exit_code == 0, listed.output
+    row = next(item for item in json.loads(listed.output) if item["name"] == family)
+    assert str(bad) in row["config_paths"] and str(bad) in row["detail"]
+    assert "not a regular file" in row["detail"]
+    report = lifecycle.initialize(
+        tmp_path,
+        api_key=None,
+        local=True,
+        agents=[family],
+        onboard=False,
+        reinit=False,
+        assume_yes=True,
+        explainability=False,
+    )
+    assert agents.hooks_installed(family, tmp_path)
+    assert any(str(bad) in note and "not a regular file" in note for note in report.notes)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX special file fixtures")
+@pytest.mark.parametrize("kind", ["fifo", "device", "regular-symlink"])
+def test_context_inspection_never_opens_special_files(kind: str, tmp_path: Path) -> None:
+    instruction = tmp_path / "AGENTS.md"
+    if kind == "fifo":
+        os.mkfifo(instruction)
+    elif kind == "device":
+        instruction.symlink_to(os.devnull)
+    else:
+        target = tmp_path / "real.md"
+        target.write_text("Readable instructions")
+        instruction.symlink_to(target)
+    code = """
+import json, sys
+from pathlib import Path
+from aisquare.core import agents
+from aisquare.services.agents import connect
+home = Path(sys.argv[1])
+info = agents.detect("codex", home)
+connection = connect("codex", home)
+print(json.dumps({
+    "info": info.model_dump(mode="json"),
+    "connected": connection.model_dump(mode="json"),
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    payload = json.loads(result.stdout)
+    assert str(instruction) in payload["info"]["config_paths"]
+    assert payload["connected"]["hooks_installed"]
+    if kind == "regular-symlink":
+        assert payload["connected"]["imported"] > 0
+    else:
+        assert payload["connected"]["imported"] == 0
+        assert "not a regular file" in payload["info"]["detail"]
+
+
+@pytest.mark.parametrize(
+    "level,key,value",
+    [
+        ("group", "enabled", False),
+        ("group", "future_control", "disabled"),
+        ("handler", "timeout", 99),
+        ("handler", "future_control", "disabled"),
+    ],
+)
+def test_hook_execution_changes_invalidate_observed_readiness(
+    level: str,
+    key: str,
+    value: object,
+    tmp_path: Path,
+) -> None:
+    agents.install_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path)
+    path = tmp_path / "hooks.json"
+    payload = json.loads(path.read_text())
+    group = payload["hooks"]["Stop"][0]
+    definition = group if level == "group" else group["hooks"][0]
+    definition[key] = value
+    path.write_text(json.dumps(payload))
+    assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
+
+
+@pytest.mark.parametrize(
+    "args,configured",
+    [
+        (['-cotel.exporter="none"'], True),
+        (['-c=otel.exporter="none"'], True),
+        (["-pwork"], True),
+        (["-p=work"], True),
+        (["exec", "--", "-pwork"], False),
+        (["exec", "--", '-cotel.exporter="none"'], False),
+    ],
+)
+def test_actual_launch_preserves_attached_options_and_native_prompt_terminators(
+    args: list[str],
+    configured: bool,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config()
+    config.explainability.enabled = config.explainability.ship = True
+    save_config(config)
+    (tmp_path / "work.config.toml").write_text('[otel]\nexporter="none"\n')
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
+    start = Mock(return_value=(["-c", "fixture.receiver=true"], "receiver started"))
+    execute = Mock()
+    monkeypatch.setattr(native_telemetry, "start", start)
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--", *args])
+    assert result.exit_code == 0, result.output
+    assert start.call_count == (0 if configured else 1)
+    assert execute.call_args.args[1][-len(args) :] == args
+
+
+def test_nul_profile_from_native_file_does_not_break_telemetry_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    (tmp_path / "config.toml").write_text('profile="work\\u0000"\n')
+    assert not native_telemetry.operator_configured(tmp_path, [])
+
+
+@pytest.mark.parametrize("layer", ["system", "user", "profile"])
+def test_readable_exporters_and_missing_layers_have_opposite_results(
+    layer: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system = tmp_path / "system.toml"
+    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", system)
+    assert not native_telemetry.operator_configured(tmp_path, ["-pwork"])
+    path = {
+        "system": system,
+        "user": tmp_path / "config.toml",
+        "profile": tmp_path / "work.config.toml",
+    }[layer]
+    path.write_text('[otel]\nexporter="none"\n')
+    assert native_telemetry.operator_configured(tmp_path, ["-pwork"])
+
+
+def test_keychain_entitlement_changes_use_explicit_refresh(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(claude_accounts, "keychain_platform", lambda: True)
+    read_credentials = Mock(side_effect=AssertionError("No Keychain/token read for scope hashing"))
+    monkeypatch.setattr(claude_accounts, "credentials", read_credentials)
+    token = harness._PROBE_CONTEXT.set(
+        harness.ProbeContext("/fixture/claude", {"CLAUDE_CONFIG_DIR": str(tmp_path)})
+    )
+    try:
+        before = harness.account_scope()
+        harness._save_cache(
+            {
+                "opus": harness.ProbeResult(
+                    alias="opus",
+                    available=False,
+                    checked_at=datetime.now(UTC),
+                )
+            }
+        )
+        (tmp_path / ".credentials.json").write_text('{"claudeAiOauth":{"subscriptionType":"max"}}')
+        assert harness.account_scope() == before
+        assert harness.cached_probe("opus") is not None
+        harness.clear_probe_cache()
+        assert harness.cached_probe("opus") is None
+        read_credentials.assert_not_called()
+    finally:
+        harness._PROBE_CONTEXT.reset(token)
+    help_result = runner.invoke(app, ["team", "spawn", "--help"])
+    assert "Keychain" in help_result.output and "--refresh" in help_result.output
+
+
+def test_normal_probe_cache_writes_prune_expired_binary_scopes_and_keep_other_accounts(
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "claude"
+    binary.write_text("version one")
+    context = harness.ProbeContext(str(binary), {"CLAUDE_CONFIG_DIR": str(tmp_path / "account")})
+    token = harness._PROBE_CONTEXT.set(context)
+    result = {
+        "opus": harness.ProbeResult(alias="opus", available=True, checked_at=datetime.now(UTC))
+    }
+    try:
+        harness._save_cache(result)
+        expired = harness._cache_path()
+        binary.write_text("version two, a newer binary")
+        assert harness._cache_path() != expired
+        harness._save_cache(result)
+        current = harness._cache_path()
+        context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "other-account")
+        harness._save_cache(result)
+        other = harness._cache_path()
+        assert other != current
+        old = (datetime.now(UTC) - harness.CACHE_TTL - timedelta(hours=1)).timestamp()
+        os.utime(expired, (old, old))
+        context.env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "account")
+        harness._save_cache(result)  # ordinary successful probe, no --refresh
+        assert not expired.exists() and current.exists() and other.exists()
+    finally:
+        harness._PROBE_CONTEXT.reset(token)

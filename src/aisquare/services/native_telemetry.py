@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import time
@@ -28,6 +29,10 @@ MAX_BYTES = 2_000_000
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
 
 
+class NativeConfigError(ValueError):
+    """A config layer could contain operator settings we cannot safely inspect."""
+
+
 def _option_values(args: list[str], short: str, long: str) -> Iterator[str]:
     tokens = iter(args)
     for arg in tokens:
@@ -39,14 +44,25 @@ def _option_values(args: list[str], short: str, long: str) -> Iterator[str]:
                 yield value
         elif arg.startswith(long + "="):
             yield arg.partition("=")[2]
+        elif arg.startswith(short) and len(arg) > len(short):
+            value = arg[len(short) :].removeprefix("=")
+            if value and not value.startswith("-"):
+                yield value
 
 
-def _read_config(path: Path) -> dict[str, Any]:
+def _read_config(path: Path, layer: str) -> dict[str, Any]:
     try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError("not a regular file")
         with path.open("rb") as handle:
             return tomllib.load(handle)
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError) as exc:
+        raise NativeConfigError(
+            f"Cannot inspect Codex {layer} config {path}: {exc}. "
+            "Native telemetry configuration left unchanged."
+        ) from exc
 
 
 def operator_configured(config_dir: Path, args: list[str]) -> bool:
@@ -73,14 +89,23 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
         # Keep each dotted override: a shallow update would erase sibling keys
         # under profiles when a later -c configures something else there.
         overrides.append(parsed)
-    configs = [_read_config(SYSTEM_CONFIG), _read_config(config_dir / "config.toml"), *overrides]
+    configs = [
+        _read_config(SYSTEM_CONFIG, "system"),
+        _read_config(config_dir / "config.toml", "user"),
+        *overrides,
+    ]
     profile = next((config["profile"] for config in reversed(configs) if "profile" in config), None)
     for value in _option_values(args, "-p", "--profile"):
         profile = value
-    if not isinstance(profile, str) or Path(profile).name != profile or profile in {".", ".."}:
+    if (
+        not isinstance(profile, str)
+        or "\x00" in profile
+        or Path(profile).name != profile
+        or profile in {".", ".."}
+    ):
         profile = None
     if profile:
-        configs.append(_read_config(config_dir / f"{profile}.config.toml"))
+        configs.append(_read_config(config_dir / f"{profile}.config.toml", f"profile {profile!r}"))
     for config in configs:
         if "otel" in config:
             return True

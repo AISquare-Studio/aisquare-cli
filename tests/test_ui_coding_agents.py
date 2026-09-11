@@ -15,6 +15,7 @@ from textual.widgets import Button, Select
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.cli.ui.views.spawn import SpawnScreen
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.models import FleetAgent
@@ -166,3 +167,28 @@ def test_spawn_dialog_uses_selected_agent(tmp_path: Path, monkeypatch: pytest.Mo
             assert not isinstance(host.screen, SpawnScreen)
 
     asyncio.run(scenario())
+
+
+def test_settings_round_trip_the_empty_native_permission_mode(tmp_path: Path) -> None:
+    config = load_config()
+    config.fleet.roles["coder"].permission_mode = ""
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> None:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        view = host.query_one(SettingsView)
+        control = view.query_one("#perm-coder", Select)
+        assert control.value == "" and control.value is not Select.NULL
+        view.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        saved = load_config().fleet.roles["coder"].permission_mode
+        assert saved == ""
+        assert "--permission-mode" not in get_adapter("claude-code").fleet_args(
+            "coder", "coder", saved
+        )
+        view.reload_form()
+        await pilot.pause()
+        assert view.query_one("#perm-coder", Select).value == ""
+
+    drive(team_project(tmp_path), scenario)

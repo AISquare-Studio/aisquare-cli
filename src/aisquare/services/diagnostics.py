@@ -1776,5 +1776,10 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                 )
             )
     except ValueError as exc:
-        checks.append(_warn("coding-agent", str(exc), "aisquare agents use claude-code"))
+        fix = (
+            exc.fix
+            if isinstance(exc, agent_launch.UnknownWrapperError)
+            else "aisquare agents use claude-code"
+        )
+        checks.append(_warn("coding-agent", str(exc), fix))
     return checks

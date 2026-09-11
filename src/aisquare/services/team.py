@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import brain, harness, insights, orchestrator, workspace
+from aisquare.core import agent_sessions, brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
@@ -1290,6 +1290,8 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        session = agent_sessions.adopt_local_session(store, session)
+        store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
@@ -1344,6 +1346,8 @@ def hook_prompt_heartbeat(
                     effort=harness.clean_effort(effort),
                 )
             )
+            session = agent_sessions.adopt_local_session(store, session)
+            store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
             return _render_board(
                 project,
                 store.team_sessions(project.id),
@@ -1351,6 +1355,7 @@ def hook_prompt_heartbeat(
                 store.recent_events(project.id, limit=_BOARD_EVENTS),
                 me=session,
             )
+        session = agent_sessions.adopt_local_session(store, session)
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
         # that only rides along with unrelated teammate traffic would go unseen for

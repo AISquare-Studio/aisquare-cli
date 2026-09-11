@@ -39,8 +39,9 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any, cast
 
+from aisquare.core import agent_sessions
 from aisquare.core import credentials as credentials_store
-from aisquare.core.store import is_locked_error, store_session
+from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
@@ -88,16 +89,18 @@ def client_session_id(project_id: str) -> str:
     the first kept a phantom live session forever.
     """
     with store_session() as store:
-        for env_key, prefix in (
-            ("AISQUARE_LAUNCH_ID", "launch"),
-            ("AISQUARE_FLEET_AGENT", "fleet"),
-        ):
-            token = os.environ.get(env_key)
-            if token:
-                bound = store.get_meta(f"{prefix}-session:{token}")
-                session = store.get_session(bound) if bound else None
-                if session is not None and session.project_id == project_id:
-                    return session.id
+        return _client_session_id(store, project_id)
+
+
+def _client_session_id(store: ContextStore, project_id: str) -> str:
+    tokens = agent_sessions.launch_tokens()
+    if tokens:
+        prefix, token = tokens[0]
+        bound = store.get_meta(f"{prefix}-session:{token}")
+        session = store.get_session(bound) if bound else None
+        if session is not None and session.project_id == project_id:
+            return agent_sessions.adopt_local_session(store, session).id
+        return agent_sessions.provisional_id(project_id, prefix, token)
     # Hooks may be untrusted, pending or inherited from a different board.
     # Keep MCP usable under its project-scoped identity until a native join.
     client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
@@ -105,7 +108,11 @@ def client_session_id(project_id: str) -> str:
 
 
 def _client_role() -> str:
-    return os.environ.get("AISQUARE_SERVE_ROLE", "").strip() or "remote"
+    return (
+        os.environ.get("AISQUARE_SERVE_ROLE", "").strip()
+        or (os.environ.get("AISQUARE_ROLE", "").strip() if agent_sessions.launch_tokens() else "")
+        or "remote"
+    )
 
 
 def _ensure_virtual_session() -> str:
@@ -116,38 +123,43 @@ def _ensure_virtual_session() -> str:
     project explicitly at startup). Without the gate, one read-only MCP call
     against a never-opted-in directory would permanently activate it.
     """
-    from datetime import UTC, datetime
+    from datetime import UTC, datetime, timedelta
 
-    from aisquare.core.orchestrator import team_enabled, team_project
+    from aisquare.core.orchestrator import lease_minutes, team_enabled, team_project
     from aisquare.core.store import store_session
 
     if not team_enabled():
         raise TeamDisabledError()
     with store_session() as store:
         project = team_project(None)
-        bound_id = client_session_id(project.id)
+        bound_id = _client_session_id(store, project.id)
         bound_session = store.get_session(bound_id)
         if bound_session is not None and not bound_id.startswith("mcp:"):
+            store.touch_session(bound_id)
+            store.renew_leases(bound_id, datetime.now(tz=UTC) + timedelta(minutes=lease_minutes()))
             return bound_id
         if not store.team_active(project.id):
             raise ValueError(
                 f"the agent orchestrator is not active for {project.root} — start `aisquare serve` "
                 "from the project (it activates it), or run `aisquare team on` there"
             )
-        session_id = client_session_id(project.id)
         store.ensure_project(project)
         now = datetime.now(tz=UTC)
-        store.upsert_session(
+        session = store.upsert_session(
             TeamSession(
-                id=session_id,
+                id=bound_id,
                 project_id=project.id,
                 role=_client_role(),
+                agent=os.environ.get("AISQUARE_CODING_AGENT")
+                if agent_sessions.launch_tokens()
+                else None,
                 started_at=now,
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
             )
         )
-    return session_id
+        store.renew_leases(session.id, now + timedelta(minutes=lease_minutes()))
+    return session.id
 
 
 def _tool_error(message: str) -> Exception:

@@ -432,7 +432,11 @@ def account_scope() -> str:
         identity.append(str(home.resolve()))
         account = claude_accounts.identity(selected_account, env=context.env)
         identity.append(account.model_dump() if account else None)
-        credentials = claude_accounts.credentials(selected_account)
+        credentials = (
+            None
+            if claude_accounts.keychain_platform()
+            else claude_accounts.credentials(selected_account)
+        )
         identity += [
             credentials.subscription_type if credentials else None,
             credentials.rate_limit_tier if credentials else None,
@@ -508,6 +512,7 @@ def _save_cache(cache: dict[str, ProbeResult]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {alias: item.model_dump(mode="json") for alias, item in cache.items()}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _prune_probe_scopes()
     except OSError:
         pass  # the cache is disposable; failing to write it must not surface
 
@@ -682,6 +687,12 @@ def clear_probe_cache() -> None:
     for path in (_cache_path(), directory / "harness_models.json"):
         with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
+    _prune_probe_scopes()
+
+
+def _prune_probe_scopes() -> None:
+    """Normal probe writes collect expired scopes left by upgrades or account changes."""
+    directory = aisquare_home() / "cache"
     cutoff = (datetime.now(tz=UTC) - CACHE_TTL).timestamp()
     with contextlib.suppress(OSError):
         for path in directory.glob("harness_models.*.json"):

@@ -228,7 +228,7 @@ def codex(config_dir: str | None = typer.Option(None, "--config-dir")) -> None:
             get_adapter("codex"),
             agents._home(),
             os.environ,
-            Path(config_dir) if config_dir is not None else None,
+            Path(config_dir) if config_dir else None,
         )
         output = handle_codex(_payload(), directory)
         if output:

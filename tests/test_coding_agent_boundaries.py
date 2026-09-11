@@ -81,7 +81,7 @@ def test_numbered_reviewers_inherit_read_only_defaults(role: str) -> None:
         assert fleet.role_settings(role, config.fleet).approval_policy == "on-request"
 
 
-def test_mcp_tries_both_bindings_before_using_a_virtual_identity(
+def test_mcp_launch_binding_takes_priority_over_an_inherited_fleet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = team_project(tmp_path)
@@ -100,14 +100,15 @@ def test_mcp_tries_both_bindings_before_using_a_virtual_identity(
             )
         )
         store.set_meta("fleet-session:bound-fleet", "native-board-session")
+    provisional = mcp_server.client_session_id(project.id)
+    assert provisional.startswith("mcp:local:")
+    assert mcp_server.client_session_id("prj_another") != provisional
+    monkeypatch.delenv("AISQUARE_LAUNCH_ID")
     assert mcp_server.client_session_id(project.id) == "native-board-session"
-    assert mcp_server.client_session_id("prj_another") == "mcp:remote:anothe"
     monkeypatch.delenv("AISQUARE_FLEET_AGENT")
     assert mcp_server.client_session_id(project.id).startswith("mcp:remote:")
     monkeypatch.setenv("AISQUARE_SERVE_CLIENT", "cursor")
     assert mcp_server.client_session_id(project.id).startswith("mcp:cursor:")
-    monkeypatch.delenv("AISQUARE_LAUNCH_ID")
-    assert mcp_server.client_session_id(project.id).startswith("mcp:")
 
 
 @pytest.mark.parametrize("damage", ["invalid-utf8", "unreadable"])
@@ -150,7 +151,9 @@ def test_codex_context_precedence_agrees_in_detection_and_ingestion(tmp_path: Pa
     assert agents.detect("codex", tmp_path).config_paths == []  # type: ignore[union-attr]
     normal.unlink()
     normal.mkdir()
-    assert agents.detect("codex", tmp_path).config_paths == []  # type: ignore[union-attr]
+    info = agents.detect("codex", tmp_path)
+    assert info is not None and info.config_paths == [normal]
+    assert str(normal) in info.detail and "not a regular file" in info.detail
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])
@@ -195,17 +198,9 @@ def test_unknown_wrappers_require_a_family_before_model_flags(
         agent_launch.use("codex", project=True, cwd=tmp_path)
     elif source == "inherited":
         monkeypatch.setenv("AISQUARE_CODING_AGENT", "codex")
-    if source == "default":
-        with pytest.raises(ValueError, match="pass --agent"):
-            agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
-    else:
-        monkeypatch.setenv("AISQUARE_MODEL_CODER", "fixture-codex-model")
-        selected = agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
-        assert selected.source == source and selected.adapter.id == "codex"
-        assert agent_launch.native_model_args(selected, "coder", [])[:2] == [
-            "--model",
-            "fixture-codex-model",
-        ]
+    monkeypatch.setenv("AISQUARE_MODEL_CODER", "fixture-codex-model")
+    with pytest.raises(ValueError, match="pass --agent"):
+        agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
     selected = agent_launch.resolve(
         agent="claude-code", binary="/fixture/claude-work", cwd=tmp_path
     )
@@ -411,8 +406,10 @@ def test_empty_native_settings_can_be_connected(agent: str, tmp_path: Path) -> N
         (["-c", 'otel.exporter="none"'], True),
         (["--config", 'otel = {exporter="none"}'], True),
         (['--config=otel.exporter="none"'], True),
-        (["exec", "-please fix src/foo.py"], False),
-        (["exec", "--json", "-print the plan"], False),
+        (["exec", "--", "-please fix src/foo.py"], False),
+        (["exec", "--json", "--", "-print the plan"], False),
+        (['-cotel.exporter="none"'], True),
+        (['-c=otel.exporter="none"'], True),
         (["-c", 'model="hotel.py"'], False),
     ],
 )
@@ -442,6 +439,9 @@ def test_exporters_are_scoped_to_the_effective_home_and_selected_profile(
     assert not native_telemetry.operator_configured(home, ["--", "--profile", "unused"])
     assert native_telemetry.operator_configured(home, ["--profile", "unused"])
     assert native_telemetry.operator_configured(home, ["--profile=unused"])
+    assert native_telemetry.operator_configured(home, ["-punused"])
+    assert native_telemetry.operator_configured(home, ["-p=unused"])
+    assert not native_telemetry.operator_configured(home, ["exec", "--", "-punused"])
     (home / "config.toml").write_text('profile="unused"\n')
     assert native_telemetry.operator_configured(home, [])
     assert not native_telemetry.operator_configured(home, ["--profile", "clean"])

@@ -103,6 +103,9 @@ def install() -> ClaudeInstall:
 def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
     """Everything about one slot that can be read without leaving the machine."""
     creds = core.credentials(account)
+    from aisquare.core import agents as agent_core
+
+    info = agent_core.detect(AGENT, account.config_dir)
     return ClaudeAccountStatus(
         account=account,
         label=core.label(account),
@@ -111,6 +114,7 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
         token_state=core.token_state(creds),
         subscription=core.subscription_label(creds),
         hooks_installed=_hooks_installed(account),
+        detail=info.detail if info else "",
     )
 
 

@@ -42,7 +42,7 @@ from aisquare.office.storage import (
     StorageError,
     StoragePathError,
 )
-from aisquare.office.storage_schema import StorageLimits
+from aisquare.office.storage_schema import MIGRATIONS, StorageLimits
 
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 
@@ -138,10 +138,10 @@ def test_a_first_open_creates_the_schema_under_the_resolved_home(tmp_path: Path)
 
     version = database.migrate()
 
-    assert version == 1
+    assert version == MIGRATIONS.latest_version()
     assert database.path == home / "office" / "observations.sqlite3"
     assert database.path.exists()
-    assert database.schema_version() == 1
+    assert database.schema_version() == MIGRATIONS.latest_version()
 
 
 def test_an_open_leaves_the_cli_context_db_untouched(tmp_path: Path) -> None:

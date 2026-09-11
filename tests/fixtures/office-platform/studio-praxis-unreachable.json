@@ -1,0 +1,42 @@
+{
+  "captured_by": "P12",
+  "consumed_by": [
+    "P14"
+  ],
+  "derived_from": "source-mined evidence plus tests/office/platform_samples.py",
+  "evidence": "literal",
+  "expected_status": 403,
+  "family": "studio-praxis-unreachable",
+  "live_calls_made": 0,
+  "no_request_is_made": true,
+  "purpose": "Redacted response shapes for the deployed Explainability and Praxis APIs. Shapes and citations only: no values, no identifiers, no prose.",
+  "reachable_with_workspace_key": false,
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v1/studios/{studio_id}/praxis/insights"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/studios/{studio_id}/praxis/signals"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/studios/{studio_id}/praxis/signals"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/studios/{studio_id}/praxis/runs/{run_id}/injection"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/studios/{studio_id}/praxis/insights/{insight_id}/chain"
+    }
+  ],
+  "source": {
+    "file": "gateway/auth.py",
+    "lines": "362, 966-1003",
+    "repo": "explainability-sdk"
+  },
+  "why": "validate_api_key is an alias for require_studio_access and returns None for a workspace key, so every handler comparing auth_studio_id != studio_id rejects unconditionally. The CLI's only credential is a workspace key."
+}

@@ -1,0 +1,313 @@
+{
+  "auth": {
+    "dependency": "require_workspace_access",
+    "header": "X-API-KEY"
+  },
+  "captured_by": "P12",
+  "consumed_by": [
+    "P13"
+  ],
+  "derived_from": "source-mined evidence plus tests/office/platform_samples.py",
+  "evidence": "literal",
+  "family": "workspace-runs-list",
+  "live_calls_made": 0,
+  "purpose": "Redacted response shapes for the deployed Explainability and Praxis APIs. Shapes and citations only: no values, no identifiers, no prose.",
+  "reachable_with_workspace_key": true,
+  "route": {
+    "method": "GET",
+    "path": "/v1/workspaces/{workspace_id}/runs"
+  },
+  "source": {
+    "file": "gateway/workspace_run_routes.py",
+    "lines": "859-1029",
+    "repo": "explainability-sdk",
+    "symbol": "list_workspace_runs"
+  },
+  "variants": [
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "ok",
+      "retryable": null,
+      "sample": "workspace-runs-list",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "next_offset": "null",
+          "page_limit": "integer",
+          "runs": {
+            "array": {
+              "object": {
+                "adherence_policies_version_id": "null",
+                "agent_name": "string",
+                "cost_usd": "null|number",
+                "customer_id": "null",
+                "customer_name": "null",
+                "decision": "null",
+                "domain": "null",
+                "duration_ms": "null|number",
+                "ended_at": "string",
+                "error_count": "integer|null",
+                "flagged_count": "integer|null",
+                "human_taught_count": "null",
+                "is_governed": "boolean|null",
+                "last_error": "null",
+                "node_count": "integer|null",
+                "parent_run_id": "null",
+                "policy_blocking_count": "integer",
+                "policy_failed_count": "integer",
+                "policy_improving_count": "integer",
+                "policy_needs_review_count": "integer",
+                "policy_passed_count": "integer",
+                "policy_skipped_count": "integer",
+                "policy_unverified_count": "integer",
+                "policy_warning_count": "integer",
+                "replay_mode": "null",
+                "replay_source_run_id": "null",
+                "run_id": "string",
+                "run_kind": "string",
+                "run_verdict": "null|string",
+                "runtime_blocked_count": "integer",
+                "runtime_decision_count": "integer",
+                "runtime_improved_count": "integer",
+                "runtime_warned_count": "integer",
+                "session_id": "null",
+                "started_at": "string",
+                "status": "string",
+                "studio_id": "string",
+                "summary_counts": {
+                  "nullable": true,
+                  "object": {
+                    "artifacts": "integer",
+                    "events": "integer",
+                    "policies": "integer",
+                    "spans": "integer"
+                  }
+                },
+                "title": "null",
+                "token_count": "integer|null",
+                "updated_at": "string"
+              }
+            }
+          },
+          "runs_reachable": "integer",
+          "since": "null",
+          "status": "string",
+          "studios_failed": {
+            "array": "empty"
+          },
+          "studios_omitted": "integer",
+          "studios_read": {
+            "array": "string"
+          },
+          "total_count": "integer",
+          "total_is_exact": "boolean",
+          "workspace_id": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "valid_empty_workspace_owns_no_studios",
+      "note": "An empty studios_read with an empty studios_failed is a success with nothing in it. Never map to unavailable.",
+      "retryable": null,
+      "sample": "workspace-runs-empty",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "next_offset": "null",
+          "page_limit": "integer",
+          "runs": {
+            "array": "empty"
+          },
+          "runs_reachable": "integer",
+          "since": "null",
+          "status": "string",
+          "studios_failed": {
+            "array": "empty"
+          },
+          "studios_omitted": "integer",
+          "studios_read": {
+            "array": "empty"
+          },
+          "total_count": "integer",
+          "total_is_exact": "boolean",
+          "workspace_id": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "partial_one_studio_failed",
+      "note": "Still a 200 carrying the runs that were read. Belongs in Page.partial with coverage, not in an error.",
+      "retryable": null,
+      "sample": "workspace-runs-partial",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "next_offset": "null",
+          "page_limit": "integer",
+          "runs": {
+            "array": {
+              "object": {
+                "adherence_policies_version_id": "null",
+                "agent_name": "string",
+                "cost_usd": "null|number",
+                "customer_id": "null",
+                "customer_name": "null",
+                "decision": "null",
+                "domain": "null",
+                "duration_ms": "null|number",
+                "ended_at": "string",
+                "error_count": "integer|null",
+                "flagged_count": "integer|null",
+                "human_taught_count": "null",
+                "is_governed": "boolean|null",
+                "last_error": "null",
+                "node_count": "integer|null",
+                "parent_run_id": "null",
+                "policy_blocking_count": "integer",
+                "policy_failed_count": "integer",
+                "policy_improving_count": "integer",
+                "policy_needs_review_count": "integer",
+                "policy_passed_count": "integer",
+                "policy_skipped_count": "integer",
+                "policy_unverified_count": "integer",
+                "policy_warning_count": "integer",
+                "replay_mode": "null",
+                "replay_source_run_id": "null",
+                "run_id": "string",
+                "run_kind": "string",
+                "run_verdict": "null|string",
+                "runtime_blocked_count": "integer",
+                "runtime_decision_count": "integer",
+                "runtime_improved_count": "integer",
+                "runtime_warned_count": "integer",
+                "session_id": "null",
+                "started_at": "string",
+                "status": "string",
+                "studio_id": "string",
+                "summary_counts": {
+                  "nullable": true,
+                  "object": {
+                    "artifacts": "integer",
+                    "events": "integer",
+                    "policies": "integer",
+                    "spans": "integer"
+                  }
+                },
+                "title": "null",
+                "token_count": "integer|null",
+                "updated_at": "string"
+              }
+            }
+          },
+          "runs_reachable": "integer",
+          "since": "null",
+          "status": "string",
+          "studios_failed": {
+            "array": "string"
+          },
+          "studios_omitted": "integer",
+          "studios_read": {
+            "array": "string"
+          },
+          "total_count": "integer",
+          "total_is_exact": "boolean",
+          "workspace_id": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "detail_contains": "API key is not scoped to this workspace",
+      "error_code": "forbidden",
+      "evidence": "literal",
+      "name": "denied_key_wrong_workspace",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "forbidden",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 403
+    },
+    {
+      "detail_contains": "Workspace not found",
+      "error_code": "upstream_error",
+      "evidence": "literal",
+      "name": "workspace_not_found",
+      "note": "A workspace-level 404 is a binding problem, not a masked object.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 404
+    },
+    {
+      "detail_contains": "is not an ISO-8601 timestamp",
+      "error_code": "upstream_invalid",
+      "evidence": "literal",
+      "name": "malformed_since",
+      "note": "Permanent validation refusal. Never retry.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 400
+    },
+    {
+      "detail_contains": "could not be read",
+      "error_code": "service_unavailable",
+      "evidence": "literal",
+      "name": "outage_all_studios_failed",
+      "retryable": true,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 503
+    },
+    {
+      "error_code": "upstream_invalid",
+      "evidence": "inferred",
+      "name": "malformed_sort_value",
+      "note": "sort is typed as a Literal, so FastAPI answers its standard envelope. The exact body was not read from source.",
+      "retryable": false,
+      "sample": "error-detail-structured",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": {
+            "array": {
+              "object": {
+                "loc": {
+                  "array": "string"
+                },
+                "msg": "string"
+              }
+            }
+          }
+        }
+      },
+      "status": 422
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "algorithm": "sha256",
+  "digest": "12312d64a1e65d13c4f7316ca428fe9608d12a0c480a77275be8baa37cc9a48a",
+  "file_count": 5,
+  "files": {
+    "praxis-agent-insights.json": "cf56198d792686a815b8b16291b58c679398a44bcc4016eefb70a6bc244408cf",
+    "praxis-context.json": "9b7776676c20a6371da4360f23d3db9312dd24a87f3d5701f7179005e5d49d61",
+    "studio-praxis-unreachable.json": "24cc382afbda3a71b3cc23697996c652be132bf993fe2724b78b12d95e014101",
+    "workspace-key-capabilities.json": "d4e717de9d2a2f58155b0389ced6234d61a1bfbf387efddb5158aca650e7471c",
+    "workspace-runs-list.json": "ceaf15cfc3530a53946a8366f9868c155c0759af7968333f780efc5db093165e"
+  },
+  "live_calls_made": 0
+}

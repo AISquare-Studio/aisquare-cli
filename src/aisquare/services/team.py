@@ -1011,7 +1011,13 @@ def _finish_task(
         if task is None:
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
-        updated = store.set_task_status(task.id, status)
+        if status == "done":
+            from aisquare.services.work_briefs import task_gate
+
+            revision_snapshot = task_gate(store, task)
+            updated = store.finish_verified_task(task.id, revision_snapshot)
+        else:
+            updated = store.set_task_status(task.id, status)
         text = updated.title if note is None else f"{updated.title} — {note}"
         event = _emit(
             store,
@@ -1287,13 +1293,59 @@ def hook_session_start(
             session = store.update_session(session.id, role=role)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return collision + _render_board(
+        board_context = collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
         )
+        from aisquare.services.work_briefs import session_context
+
+        return (
+            board_context
+            + _startup_task_assignment(store, project, session)
+            + session_context(store, project.id, session.id, session.role)
+        )
+
+
+def _startup_task_assignment(
+    store: ContextStore, project: ProjectInfo, session: TeamSession
+) -> str:
+    """The explicit launch task wins over generic work-pool instructions.
+
+    A fleet row may not have been persisted yet when the child starts. Its
+    absence is not an error; if present its identity must match this assignment.
+    Claims remain the existing atomic task command, never an implicit startup write.
+    """
+    ref = os.environ.get("AISQUARE_TASK_ID")
+    if not ref:
+        return ""
+    task = store.get_task(ref)
+    if task is None or task.project_id != project.id:
+        return "\nAssigned task unavailable on this board. STOP and report; do not pick another."
+    for agent in store.fleet_agents(project.id, live_only=True):
+        if agent.session_id == session.id and agent.task_id != task.id:
+            return "\nFleet/startup assignment mismatch. STOP and report; do not pick another."
+    lines = [
+        "\n<aisquare-assignment>",
+        "This explicit assignment overrides generic 'task next' instructions above.",
+        f"Task {task.id} [{task.status}]: {task.title}",
+        f"Contract: {task.detail or 'Missing; request clarification before work.'}",
+        f"Dependencies: {', '.join(task.needs) or 'none'}",
+    ]
+    if base_role(session.role) == "coder":
+        lines += [
+            f"Claim THIS task: `asq task claim {task.id} --as {short_id(session.id)}`.",
+            "If blocked, dependencies are unmet, or another worker owns it, report and stop.",
+        ]
+    else:
+        lines.append("Inspect THIS task and its evidence. Preserve its existing ownership.")
+    lines += [
+        "Do not silently choose another task. Report the result on this task.",
+        "</aisquare-assignment>",
+    ]
+    return "\n".join(lines)
 
 
 def hook_prompt_heartbeat(
@@ -1334,12 +1386,18 @@ def hook_prompt_heartbeat(
                     effort=harness.clean_effort(effort),
                 )
             )
-            return _render_board(
-                project,
-                store.team_sessions(project.id),
-                store.team_tasks(project.id),
-                store.recent_events(project.id, limit=_BOARD_EVENTS),
-                me=session,
+            from aisquare.services.work_briefs import session_context
+
+            return (
+                _render_board(
+                    project,
+                    store.team_sessions(project.id),
+                    store.team_tasks(project.id),
+                    store.recent_events(project.id, limit=_BOARD_EVENTS),
+                    me=session,
+                )
+                + _startup_task_assignment(store, project, session)
+                + session_context(store, project.id, session.id, session.role)
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning

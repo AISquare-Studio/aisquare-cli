@@ -111,6 +111,7 @@ class ExplainabilitySettings(BaseModel):
             "tester",
             "reviewer",
             "validator",
+            "ui-tester",
         ]
     )
     targets: dict[str, ExplainabilityTarget] = Field(default_factory=dict)
@@ -217,13 +218,14 @@ class FleetRoleSettings(BaseModel):
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
-    """The five fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6)."""
+    """The fleet roles and their built-in launch shape."""
     return {
         "manager": FleetRoleSettings(),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
         "reviewer": FleetRoleSettings(worktree=True, extra_args=["--restricted"]),
         "validator": FleetRoleSettings(),
+        "ui-tester": FleetRoleSettings(),
     }
 
 

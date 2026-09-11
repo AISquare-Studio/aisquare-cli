@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sqlite3
 from typing import Annotated
 
 import typer
@@ -33,13 +34,14 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
+from aisquare.core.store import AmbiguousIdError, store_session
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
-ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager")
+ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manager", "ui-tester")
 """Roles with a standing work cycle the orchestrator injects on every prompt.
 
 ``tester``, ``reviewer`` and ``manager`` are the fleet's roles
@@ -130,6 +132,9 @@ def launch(
             metavar="SLOT",
         ),
     ] = None,
+    task: Annotated[
+        str | None, typer.Option("--task", help="Board task assigned to this session (id prefix).")
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -202,6 +207,26 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
+    # An assignment belongs to this launch, never to whichever manager's shell
+    # happened to launch it. The session-start briefing reads this exact id.
+    env.pop("AISQUARE_TASK_ID", None)
+    if task is not None:
+        if project is None:
+            fail("cannot assign a task without a readable board", error="invalid_task")
+        try:
+            with store_session() as store:
+                assigned = store.get_task(task)
+            if assigned is None or assigned.project_id != project.id:
+                fail("task does not belong to this project's board", error="invalid_task")
+            env["AISQUARE_TASK_ID"] = assigned.id
+        except AmbiguousIdError:
+            fail(
+                "task prefix matches several tasks",
+                error="invalid_task",
+                hint="use a longer ID prefix",
+            )
+        except (KeyError, ValueError, OSError, sqlite3.Error) as exc:
+            fail(str(exc), error="invalid_task")
     if account is not None:
         # The account wins over the binding: the flag names an account this
         # launch is FOR, and the binding is the role's standing shape. For the

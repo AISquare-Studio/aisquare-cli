@@ -85,7 +85,7 @@ def _who(event: TeamEvent, roles: dict[str, str]) -> tuple[str, str, str]:
     return _ROLE_EMOJI.get(role, "🤖"), name, _ROLE_STYLE.get(role, "white")
 
 
-def feed_line(event: TeamEvent, roles: dict[str, str]) -> Text:
+def feed_line(event: TeamEvent, roles: dict[str, str], project: ProjectInfo | None = None) -> Text:
     """One bot-style feed line: ``🔨 coder·7188d074 🤝 claimed: wire auth``."""
     emoji, name, style = _who(event, roles)
     verb_emoji, verb = _KIND_VERB.get(event.kind, ("•", event.kind))
@@ -96,6 +96,12 @@ def feed_line(event: TeamEvent, roles: dict[str, str]) -> Text:
     line.append(event.text)
     if event.to_role:
         line.append(f" → {event.to_role}", style="italic yellow")
+    if project is not None:
+        from aisquare.services.personas import render_caption
+
+        narration = render_caption(event, project, roles.get(event.session_id or ""))
+        if narration:
+            line.append(f" · {narration}", style="italic")
     return line
 
 
@@ -441,7 +447,7 @@ def board_frame(height: int, width: int) -> Text:
     text.append("updates (newest last)\n", style="bold cyan")
     roles = {s.id: s.role for s in sessions}
     for event in events[-room:]:
-        text.append(feed_line(event, roles))
+        text.append(feed_line(event, roles, project))
         text.append("\n")
     return text
 

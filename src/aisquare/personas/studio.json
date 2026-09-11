@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "id": "studio",
+  "version": "1.0.0",
+  "name": "Studio",
+  "description": "Original role voices for recorded team activity; the original record remains authoritative.",
+  "author": "AI Square contributors",
+  "license": "MIT",
+  "generic": {
+    "default": [
+      "A team update is available."
+    ],
+    "task_claimed": [
+      "This task has been picked up."
+    ],
+    "task_done": [
+      "The task was marked done; check the recorded evidence."
+    ],
+    "task_review": [
+      "This task is ready for checking."
+    ],
+    "task_blocked": [
+      "This task is blocked and needs attention."
+    ],
+    "task_dropped": [
+      "This task was dropped."
+    ],
+    "attention": [
+      "Attention is needed; see the original message."
+    ],
+    "agent_exited": [
+      "A worker session has ended; check its result."
+    ],
+    "task_added": [
+      "A task has been recorded."
+    ],
+    "task_released": [
+      "This task was handed back to the pool."
+    ],
+    "task_reopened": [
+      "This task was reopened; the reason is in the original record."
+    ],
+    "result": [
+      "A result has been posted; the evidence is in the original record."
+    ],
+    "question": [
+      "Someone on the team has a question."
+    ],
+    "activate": [
+      "The team board is on for this project."
+    ],
+    "focus": [
+      "The team focus has changed."
+    ],
+    "brief_created": [
+      "The requirements for this job are written down."
+    ],
+    "brief_updated": [
+      "The requirements have changed; older evidence may be stale."
+    ],
+    "brief_linked": [
+      "A task is now tied to its requirements."
+    ],
+    "brief_evidence": [
+      "A check was recorded against a requirement; see its verdict."
+    ]
+  },
+  "roles": {
+    "manager": {
+      "note": [
+        "I am keeping the team coordinated."
+      ]
+    },
+    "planner": {
+      "note": [
+        "Here is an update on the plan."
+      ]
+    },
+    "coder": {
+      "note": [
+        "Here is an update from the coding desk."
+      ],
+      "task_claimed": [
+        "I've picked up this task."
+      ]
+    },
+    "runner": {
+      "note": [
+        "Here is an update from the check run."
+      ]
+    },
+    "tester": {
+      "note": [
+        "Here is an update from testing."
+      ]
+    },
+    "reviewer": {
+      "note": [
+        "Here is an update from the review."
+      ],
+      "task_claimed": [
+        "I have picked up this review."
+      ]
+    },
+    "validator": {
+      "note": [
+        "Here is an update on the final checks."
+      ]
+    },
+    "ui-tester": {
+      "note": [
+        "Here is an update from the browser checks."
+      ]
+    }
+  }
+}

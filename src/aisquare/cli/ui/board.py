@@ -46,6 +46,7 @@ from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
+from aisquare.cli.ui.persona_activity import PersonaActivity
 from aisquare.core.store import unmet_needs
 from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import team as team_service
@@ -190,6 +191,7 @@ class BoardPanel(Vertical):
                     yield Static(id="feedstatic")
         with VerticalScroll(id="detailwrap"):
             yield Static(id="detail")
+        yield PersonaActivity(self.project)
 
     def on_mount(self) -> None:
         table = self.query_one("#tasks", DataTable)

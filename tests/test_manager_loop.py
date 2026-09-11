@@ -1185,7 +1185,16 @@ def test_a_role_that_is_not_a_seat_of_a_real_role_gets_no_cycle(
 def test_the_roster_default_registers_every_fleet_role() -> None:
     roles = ExplainabilitySettings().roles
 
-    assert roles == ["planner", "coder", "runner", "manager", "tester", "reviewer", "validator"]
+    assert roles == [
+        "planner",
+        "coder",
+        "runner",
+        "manager",
+        "tester",
+        "reviewer",
+        "validator",
+        "ui-tester",
+    ]
     assert roles[:3] == ["planner", "coder", "runner"], "the runbooks quote these three first"
     assert set(FLEET_ROLES) <= set(roles)
 

@@ -477,6 +477,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     assert "--command" not in command, "no --bin given: launch resolves the binary itself"
     assert spawned["env"] == {
         "AISQUARE_FLEET_AGENT": agent.id,
+        "AISQUARE_HOME": str(Path(os.environ["AISQUARE_HOME"]).resolve()),
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
@@ -510,13 +511,15 @@ def test_spawn_with_an_account_carries_the_callers_environment_into_the_window(
     assert env["AISQUARE_HOME"] == str(Path(os.environ["AISQUARE_HOME"]).absolute())
     assert env["AISQUARE_FLEET_AGENT"]  # the fleet's own variables are still there
 
-    # The control: no --account, no carried environment, the command starts with python.
+    # The board home travels on every launch; account variables still travel
+    # only with --account. A long-lived tmux server may have a different home.
     fleet_service.spawn(project, "tester")
     plain_command, plain_env = tmux.spawned[-1]["command"], tmux.spawned[-1]["env"]
     assert isinstance(plain_command, list) and isinstance(plain_env, dict)
     assert plain_command[0] == sys.executable  # no env prefix: the launcher comes first…
     assert plain_command.index("-m") == module - 5  # …shaped exactly as the prefixed one after it
-    assert "AISQUARE_HOME" not in plain_env
+    assert plain_env["AISQUARE_HOME"] == str(Path(os.environ["AISQUARE_HOME"]).resolve())
+    assert "CLAUDE_CONFIG_DIR" not in plain_env
 
 
 def test_spawn_refuses_a_second_manager(
@@ -598,6 +601,8 @@ def test_spawn_with_a_task_names_the_label_and_the_branch_after_it(
 
     assert receipt.agent.label == f"coder-{short}"
     assert receipt.agent.task_id == task.id, "the full id is recorded, not the prefix given"
+    assert _flag(_command(tmux), "--task") == task.id
+    assert any(task.id in typed[2] for typed in tmux.typed), "assignment starts actual work"
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=receipt.agent.cwd) == (
         f"fleet/{_codename(project)}/{short}-wire-the-auth-flow"
     )
@@ -1141,7 +1146,10 @@ def test_spawn_can_keep_native_agent_teams_on(
     _settings(monkeypatch, disable_native_agent_teams=False)
     agent = _coder(project)
     env = tmux.spawned[0]["env"]
-    assert env == {"AISQUARE_FLEET_AGENT": agent.id}
+    assert env == {
+        "AISQUARE_FLEET_AGENT": agent.id,
+        "AISQUARE_HOME": str(Path(os.environ["AISQUARE_HOME"]).resolve()),
+    }
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(

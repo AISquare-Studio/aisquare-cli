@@ -308,6 +308,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "team_session": 1,
         "fleet_agent": 1,
         "metric": 1,
+        "work_brief": 0,
         "team_meta": 3,
         "project": 1,
     }

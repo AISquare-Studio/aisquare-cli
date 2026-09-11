@@ -147,6 +147,26 @@ prints one usage object so a `jq` pipeline gets JSON rather than a help page.
 **[The fleet guide](docs/fleet.md)** has the roles in full, the
 `aisquare fleet …` command reference and every default you can change.
 
+## Native role personalities and working improvements
+
+AI Square now includes two switchable character casts, versioned work briefs
+linked to the existing task board, and saved command reports. These are native
+features; no Ponytail, Spec Kit or RTK plugin is required.
+
+- [Personas](docs/personas.md): `asq persona use studio`, per-role choices,
+  local creation/import/downloads, and the AI Square `/persona` control box.
+  Narration appears beside the agent terminal; worker instructions stay unchanged.
+- [Native workflow](docs/native-workflow.md): requirements, focused assignments,
+  role-specific working rules, fresh evidence, and completion checks.
+- [Command reports](docs/command-reports.md): `asq exec -- COMMAND`, conservative
+  Git status/pytest compaction, and original-output recovery.
+- [End-to-end verification](docs/native-end-to-end.md): the real command-line
+  failure → correction → passing evidence scenario and clean-install checks.
+
+Personality Off affects narration only. Native working mode and command-report
+compaction have separate controls. Short reports are measured locally; they are
+not a promise of lower total model costs or better results on every task.
+
 ## The rest of aisquare
 
 The UI is a view over two halves, and they are **independent** — neither needs

@@ -40,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
-from aisquare.core import codenames, harness, selfcli
+from aisquare.core import codenames, harness, paths, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -57,7 +57,7 @@ from aisquare.models import (
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
-FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
+FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"
@@ -968,6 +968,8 @@ def spawn(
         )
     agent_id = new_agent_id()
     flags: list[str] = []
+    if resolved_task_id is not None:
+        flags += ["--task", resolved_task_id]
     if binary is not None:
         # `launch` re-resolves the binary inside the window; an explicit --bin
         # must reach it, or the row would name one agent and the pane run another.
@@ -982,7 +984,10 @@ def spawn(
         flags += ["--account", account]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
-    env = {"AISQUARE_FLEET_AGENT": agent_id}
+    env = {
+        "AISQUARE_FLEET_AGENT": agent_id,
+        "AISQUARE_HOME": str(paths.aisquare_home().resolve()),
+    }
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
     if account is not None:
@@ -1017,8 +1022,16 @@ def spawn(
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
-    if prompt:
-        _type_prompt(srv, stored.pane_id, prompt, notes)
+    kickoff = prompt
+    if kickoff is None and resolved_task_id is not None:
+        kickoff = (
+            f"Work on assigned board task {resolved_task_id}. Read it with "
+            f"aisquare --json task show {resolved_task_id}, follow your role's work cycle, "
+            "and report the result on that task. Claim it before editing; if another "
+            "worker owns it or dependencies are unmet, report that and do not duplicate work."
+        )
+    if kickoff:
+        _type_prompt(srv, stored.pane_id, kickoff, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
 
 

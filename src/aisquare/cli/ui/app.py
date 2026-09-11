@@ -28,18 +28,18 @@ all of them must reach it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
@@ -287,6 +287,19 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen(self.escape_key))
+
+    def get_system_commands(self, screen: Screen[None]) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand(
+            "Personas",
+            "Choose a role voice or enter a local /persona command",
+            self.action_personas,
+        )
+
+    def action_personas(self) -> None:
+        from aisquare.cli.ui.personas import PersonaScreen
+
+        self.push_screen(PersonaScreen(self._scoped_project()))
 
     def action_refresh_now(self) -> None:
         self.refresh_data()

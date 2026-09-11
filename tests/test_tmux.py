@@ -832,7 +832,8 @@ def test_the_seam_strips_the_whole_tracing_identity_and_nothing_else(
 ) -> None:
     """Every name of the identity, in the child's OWN environment.
 
-    The marker pair matters as much as the headers here: this server hands its
+    The marker matters as much as the headers here — all of it, whatever
+    ``core.spawn.MARKER_ENV_VARS`` holds: this server hands its
     environment to every window, and an agent that launches untraced (the
     default) keeps whatever it inherited — ``core.insights.run_key`` then files
     that agent's insights under the Run of whoever started the server, and the

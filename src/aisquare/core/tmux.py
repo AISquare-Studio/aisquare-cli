@@ -17,12 +17,13 @@ keys), ``send-keys -l`` (literal text) and ``load-buffer`` + ``paste-buffer -p``
 stripped: the server inherits the environment of whoever starts it and hands it
 to every window, so an inherited tracing identity here would become every
 agent's identity. Each window's agent takes its own through ``aisquare launch``.
-The whole identity goes — ``core.spawn.IDENTITY_ENV_VARS``, headers AND the
-``AISQUARE_PIPELINE_ID``/``AISQUARE_TRACE_AGENT_NAME`` marker: an agent that
-launches untraced (the default) keeps whatever marker it inherited, and that
-marker alone is what ``core.insights.run_key`` and the hook's session→Run join
-file records under. docs/fleet.md's "the tmux server inherits nothing of a
-tracing identity from whoever started it" is that sentence's contract.
+The whole identity goes — ``core.spawn.IDENTITY_ENV_VARS``, the headers AND
+every name in ``core.spawn.MARKER_ENV_VARS`` (read off the tuple, never listed
+here: it has grown once already): an agent that launches untraced (the default)
+keeps whatever marker it inherited, and that marker alone is what
+``core.insights.run_key`` and the hook's session→Run join file records under.
+docs/fleet.md's "the tmux server inherits nothing of a tracing identity from
+whoever started it" is that sentence's contract.
 
 Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 
@@ -175,6 +176,8 @@ _WINDOW_FIELDS = (
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+_ABSENT = re.compile(r"no server running on |error connecting to .*\(No such file or directory\)")
+"""tmux's two ways of saying there is no server behind a socket (see ``server_absent``)."""
 #: Characters tmux reads as target separators; a session named with one can be
 #: created but never addressed by name again (``=a.b`` → "can't find pane: b").
 _UNTARGETABLE = frozenset(".:")
@@ -601,6 +604,34 @@ class TmuxServer:
         except TmuxUnavailable:
             return False
         return completed.returncode == 0
+
+    def server_absent(self) -> bool:
+        """Whether tmux itself says NO SERVER is behind this socket — positive evidence.
+
+        Not the complement of :meth:`answers`. A client exits non-zero for a
+        protocol version mismatch too (the tmux package upgraded in place while
+        the private server keeps running the old binary), and for a wedged
+        server, and for a socket that lives under a different ``TMUX_TMPDIR``
+        than this shell's — in every one of those the agents are alive. Only two
+        answers mean the server is gone, and tmux spells both out on stderr
+        (measured on 3.4): ``no server running on <path>`` (the socket file is
+        there, nothing listens) and ``error connecting to <path> (No such file or
+        directory)`` (the file itself is gone — a reboot swept ``/tmp``). A
+        missing binary is not evidence either way.
+
+        One residual this cannot settle: a shell whose ``TMUX_TMPDIR`` differs
+        from the spawning shell's asks at a path that never had a server, and
+        gets the second message for a fleet that is alive elsewhere. That is why
+        ``fleet reap --server-down`` stays the operator's word — this predicate
+        narrows what the word may act on, it does not replace it.
+        """
+        try:
+            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+        except TmuxUnavailable:
+            return False
+        if completed.returncode == 0:
+            return False
+        return _ABSENT.search(completed.stderr) is not None
 
     def spawn_window(
         self,

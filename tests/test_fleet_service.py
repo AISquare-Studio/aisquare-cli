@@ -1823,14 +1823,20 @@ def test_after_a_clear_or_resume_the_agent_is_told_it_holds_its_own_task(
     team_service.claim_task(mine.id, session_ref="sess-c1")
 
     resumed = team_service.hook_session_start("sess-c1", project.root, "resume")
-    assert "You hold it" in resumed and "Do not take another" not in resumed
-    # A /clear gives Claude Code a NEW session id; the row follows it.
+    assert "You are the one working it" in resumed and "Do not take another" not in resumed
+    # A /clear gives Claude Code a NEW session id, so the claim on the agent's own
+    # work names an id it no longer has. Comparing against the live id alone read
+    # that as a stranger's claim and ordered the agent to stop (review of #116).
     cleared = team_service.hook_session_start("sess-c2", project.root, "clear")
     with store_session() as store:
         row = store.get_fleet_agent(receipt.agent.id)
         assert row is not None and row.session_id == "sess-c2"
     assert f"ASSIGNED TO YOU: {mine.id} [doing]" in cleared
-    assert "already doing by sess-c1" in cleared, "held by the id that is gone; ask, do not steal"
+    assert "You are the one working it" in cleared
+    assert "Do not take another" not in cleared and "already doing by" not in cleared
+    # And again: past one hop the claim still names sess-c1, which is gone.
+    again = team_service.hook_session_start("sess-c3", project.root, "clear")
+    assert "You are the one working it" in again and "Do not take another" not in again
 
 
 def test_a_child_process_of_the_agent_neither_takes_the_row_nor_the_task(
@@ -1857,6 +1863,73 @@ def test_a_child_process_of_the_agent_neither_takes_the_row_nor_the_task(
         role="coder", claim=True, session_ref="sess-parent", cwd=project.root
     )
     assert picked is not None and picked.id == mine.id, "the parent still gets its own task first"
+
+
+def test_a_child_process_cannot_claim_the_parents_assigned_task(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 of the review: the hook refused to brief a child, but ``task next``
+    resolved the row from the inherited variable alone and claimed the parent's
+    task out from under it. Identity is the recorded session id, not the name."""
+    older = _task(project, "the older task")
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(project, "coder", task_id=mine.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-parent-a", project.root, "startup")
+    team_service.hook_session_start("sess-child-a", project.root, "startup")
+
+    # The child carries the parent's AISQUARE_FLEET_AGENT and asks for work.
+    stolen = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-child-a", cwd=project.root
+    )
+
+    assert stolen is not None and stolen.id == older.id, "a child picks from the pool"
+    picked = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-parent-a", cwd=project.root
+    )
+    assert picked is not None and picked.id == mine.id, "the agent's own task is still there"
+
+
+def test_a_coder_spawned_for_rework_is_told_to_do_the_rework(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gating ``[review]`` on the verifying roles sent every other role to the
+    generic stop order, so a coder spawned to address review feedback stalled on
+    arrival while holding a slot (review of #116, round 2)."""
+    task = _task(project, "verify the auth flow")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-first-coder", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-first-coder")
+    team_service.review_task(task.id, session_ref="sess-first-coder")
+    receipt = fleet_service.spawn(project, "coder", task_id=task.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+
+    board = team_service.hook_session_start("sess-rework", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [review]" in board
+    assert "spawned for the rework" in board
+    assert "Do not take another task on your own" not in board
+
+
+def test_a_blocked_assignment_is_told_to_unblock_it_not_to_stand_down(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``blocked`` fell to the stop order too — and a blocked task is claimable,
+    so there was work to name."""
+    task = _task(project, "needs a decision")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-blocker", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-blocker")
+    team_service.block_task(task.id, reason="waiting on the API key", session_ref="sess-blocker")
+    receipt = fleet_service.spawn(project, "coder", task_id=task.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+
+    board = team_service.hook_session_start("sess-unblock", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [blocked]" in board
+    assert "names why" in board and f"aisquare task claim {task.id}" in board
+    assert "Do not take another task on your own" not in board
 
 
 def test_a_tester_spawned_for_a_review_task_is_told_to_verify_it(

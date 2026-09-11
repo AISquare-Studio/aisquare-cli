@@ -386,15 +386,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run task show …" notes by hand (observed 2026-09-10). `fleet spawn` already
   set `AISQUARE_FLEET_AGENT` on the window; the session-start hook now reads it,
   joins the session to its row, and puts an **ASSIGNED TO YOU** block at the top
-  of the briefing with the claim command — or, if someone already holds the
-  task, says so and tells the agent to ask the manager rather than take another;
-  an agent meeting its OWN claimed task after a `/clear` or resume is told to
-  carry on; a tester spawned for a `[review]` task is told to verify it. `task
-  next` puts the caller's assigned task first through the same query as every
-  other candidate, so parallel spawns stop racing. A nested `claude -p` inside
-  the agent inherits the variable and reaches the same hook: while the row's
-  recorded session is alive it is neither bound nor briefed, so it cannot steal
-  the row. `fleet spawn --task` refuses a task that is already `done` or
+  of the briefing saying what that task's state asks of *this* role — claim it,
+  verify it, do the rework it came back from review for, clear what blocks it.
+  The one branch that tells an agent to stand down and ask the manager is the
+  one that earns it: a teammate live on the task right now. An agent meeting its
+  OWN claimed task after a `/clear` or resume carries on — the claim moves with
+  the agent onto its new session id, so the board names a session that exists
+  and a second `/clear` still recognises the work. `task next` puts the caller's
+  assigned task first through the same query as every other candidate, so
+  parallel spawns stop racing. `AISQUARE_FLEET_AGENT` is inherited by every
+  process the agent starts, so a nested `claude -p` reaches both the hook and
+  `task next`: identity is the session id recorded on the row, never the
+  variable alone, so a child is neither briefed on nor able to claim its
+  parent's task. `fleet spawn --task` refuses a task that is already `done` or
   `dropped`.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for

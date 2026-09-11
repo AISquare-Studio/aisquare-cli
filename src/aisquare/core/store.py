@@ -647,6 +647,9 @@ class ContextStore(Protocol):
         prefer: str | None = None,
     ) -> TeamTask | None: ...
     def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool: ...
+    def reassign_claim(
+        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
+    ) -> bool: ...
     def open_turn(self, metric: TurnMetric) -> TurnMetric: ...
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None: ...
     def turn_metrics(
@@ -1494,6 +1497,27 @@ class SqliteStore:
             "WHERE id = ? AND (status IN ('todo', 'blocked') "
             "OR (status = 'doing' AND claim_expires_at < ?))",
             (session_ref, lease_until.isoformat(), _now_iso(), task_id, _now_iso()),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def reassign_claim(
+        self, task_id: str, from_session: str, to_session: str, lease_until: datetime
+    ) -> bool:
+        """Move a live claim between two ids of the SAME worker; False if none moved.
+
+        A ``/clear`` mints a new session id for the agent that is already working
+        the task. Without this the claim keeps naming an id nobody has: the board
+        shows the work held by a ghost, and the agent's next start does not
+        recognise its own claim and is told to stand down from work in progress
+        (review of #116). Narrow by construction — only a task still ``doing``
+        under exactly ``from_session`` moves, so it can never take a claim from a
+        session that is genuinely someone else.
+        """
+        cursor = self._conn.execute(
+            "UPDATE team_task SET claimed_by = ?, claim_expires_at = ?, updated_at = ? "
+            "WHERE id = ? AND claimed_by = ? AND status = 'doing'",
+            (to_session, lease_until.isoformat(), _now_iso(), task_id, from_session),
         )
         self._conn.commit()
         return cursor.rowcount == 1

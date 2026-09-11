@@ -188,7 +188,7 @@ def test_unlock_sets_an_httponly_lax_cookie(client: TestClient, runtime: Runtime
     assert "HttpOnly" in header
     assert "SameSite=lax" in header
     assert f"Path={base(runtime)}" in header
-    devices = runtime.devices()
+    devices = runtime.device_rows()
     assert len(devices) == 1 and devices[0]["sid"] == response.cookies[COOKIE]
 
 
@@ -354,7 +354,12 @@ def test_devices_lists_sessions_and_delete_revokes(client: TestClient, runtime: 
         False,
         True,
     ]
-    assert set(runtime.devices()[0]) == {"sid", "ua", "first_seen", "last_seen"}  # §4-F status()
+    assert set(runtime.device_rows()[0]) == {
+        "sid",
+        "ua",
+        "first_seen",
+        "last_seen",
+    }  # §4-F status()
     gone = client.delete(f"{base(runtime)}/api/devices/{second}")
     assert gone.status_code == 200
     assert other.get(f"{base(runtime)}/api/board").status_code == 401
@@ -366,7 +371,7 @@ def test_regenerate_password_drops_every_device(client: TestClient, runtime: Run
     unlock(client, runtime)
     new = runtime.regenerate_password()
     assert new != PASSWORD and len(new.split("-")) == remote_server.PASSPHRASE_WORDS
-    assert runtime.devices() == []
+    assert runtime.device_rows() == []
     assert client.get(f"{base(runtime)}/api/board").status_code == 401
     assert unlock(client, runtime, new).status_code == 200
 

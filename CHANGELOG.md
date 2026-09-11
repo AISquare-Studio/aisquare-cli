@@ -41,6 +41,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the unlock cookie carries `Secure` when the tunnel says `X-Forwarded-Proto: https`
   (never on plain 127.0.0.1); `GET api/devices` marks the caller's own row
   `current: true` so the page can label "this device".
+- A running Remote Control server re-reads `~/.aisquare/remote.json` when its
+  mtime moves, so `aisquare remote allow-write on|off`, `regenerate-password`
+  and `revoke <sid>` from another shell reach it: the next `GET api/remote`
+  and the next write request see the switch, the stream pushes a `remote`
+  frame within a second, and a session the file no longer lists is dropped
+  (cookie 401, websocket closed 4401). An unchanged file is never parsed again.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

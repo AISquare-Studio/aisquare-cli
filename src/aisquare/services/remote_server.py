@@ -26,9 +26,12 @@ the same builders the typer commands use (``projects_json``, ``agents_json``,
 Remote-specific state has its own endpoint, ``GET /api/remote``.
 
 State (token, password, ``allow_write``, ``auto_off_at``, devices) lives in
-``~/.aisquare/remote.json`` at 0600. Everything that touches real systems goes
-through :class:`Sources` and :class:`Writes`, two bags of callables the tests
-replace — the server itself never opens the store or spawns tmux.
+``~/.aisquare/remote.json`` at 0600, and a serving process re-reads it when its
+mtime moves — ``aisquare remote allow-write on`` from another shell reaches the
+running server within a second (:meth:`Runtime.reload_if_changed`). Everything
+that touches real systems goes through :class:`Sources` and :class:`Writes`, two
+bags of callables the tests replace — the server itself never opens the store or
+spawns tmux.
 
 Dependencies: starlette and uvicorn (already here through the ``serve`` extra) and
 ``websockets`` (uvicorn's WebSocket backend) — the ``remote`` extra in pyproject.
@@ -241,10 +244,60 @@ class Runtime:
         self._state_path = state_path
         self._audit_path = audit_path
         self._lock = threading.RLock()
-        self._state = self._load()
         self._closers: dict[str, set[Callable[[], None]]] = {}
+        self._disk: tuple[int, int] | None = None
+        """``(st_mtime_ns, st_size)`` of the file as this process last wrote or read it."""
+        self.reads = 0
+        """How many times the file was parsed after startup — tests pin the short-circuit."""
+        self._state = self._load()
 
     # -- persistence --
+
+    def _signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self._state_path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def reload_if_changed(self) -> bool:
+        """Re-read ``remote.json`` if ANOTHER process changed it; ``True`` when it had.
+
+        ``aisquare remote allow-write on``, ``regenerate-password`` and ``revoke``
+        run in their own process and write the file; a serving process that only
+        trusted memory kept answering with the old switches (measured: 30 s of
+        ``allow_write:false`` after the toggle). A ``stat()`` per check is the
+        whole cost; the file is parsed only when its mtime or size moved past
+        what this process last wrote or read. An unreadable or half-written file
+        keeps the state in hand and is retried on the next change.
+
+        What applying the file means: switches and password replace; sessions
+        the file no longer lists are revoked here too (cookie gone, websockets
+        closed with 4401); ``last_seen`` keeps the newer of memory and disk.
+        """
+        signature = self._signature()
+        with self._lock:
+            if signature is None or signature == self._disk:
+                return False
+            try:
+                raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            if not isinstance(raw, dict):
+                return False
+            self.reads += 1
+            self._disk = signature
+            incoming = _State.from_json(raw)
+            known = {device.sid: device for device in self._state.sessions}
+            for device in incoming.sessions:
+                previous = known.get(device.sid)
+                if previous is not None and previous.last_seen > device.last_seen:
+                    device.last_seen = previous.last_seen
+            kept = {device.sid for device in incoming.sessions}
+            self._state = incoming
+            for sid in [sid for sid in known if sid not in kept]:
+                self._close_sockets(sid)
+            return True
 
     def _load(self) -> _State:
         try:
@@ -264,6 +317,7 @@ class Runtime:
         tmp.chmod(0o600)
         tmp.replace(self._state_path)
         self._state_path.chmod(0o600)
+        self._disk = self._signature()
 
     def _save(self) -> None:
         with self._lock:
@@ -277,10 +331,12 @@ class Runtime:
 
     @property
     def password(self) -> str:
+        self.reload_if_changed()
         return self._state.password
 
     @property
     def allow_write(self) -> bool:
+        self.reload_if_changed()
         return self._state.allow_write
 
     def info(self, port: int = DEFAULT_PORT) -> RemoteInfo:
@@ -292,6 +348,7 @@ class Runtime:
 
     def remote_json(self) -> dict[str, object]:
         """``GET /api/remote`` — the ONE place remote-specific state is exposed (§4-B)."""
+        self.reload_if_changed()
         with self._lock:
             return {
                 "allow_write": self._state.allow_write,
@@ -303,17 +360,20 @@ class Runtime:
 
     def set_allow_write(self, enabled: bool) -> None:
         with self._lock:
+            self.reload_if_changed()
             self._state.allow_write = bool(enabled)
             self._save()
 
     def set_auto_off(self, at: datetime | None) -> None:
         with self._lock:
+            self.reload_if_changed()
             self._state.auto_off_at = at.isoformat(timespec="seconds") if at else None
             self._save()
 
     def regenerate_password(self) -> str:
         """A new password; every unlocked device is dropped with the old one."""
         with self._lock:
+            self.reload_if_changed()
             self._state.password = new_password()
             for device in list(self._state.sessions):
                 self._drop(device.sid)
@@ -325,6 +385,7 @@ class Runtime:
     def unlock(self, password: str, ua: str) -> str | None:
         """A new session id when ``password`` is right, else ``None``."""
         with self._lock:
+            self.reload_if_changed()
             if not _same(password, self._state.password):
                 return None
             sid = new_token()
@@ -337,6 +398,7 @@ class Runtime:
         """The device behind a cookie, its ``last_seen`` refreshed; ``None`` when invalid."""
         if not sid:
             return None
+        self.reload_if_changed()
         with self._lock:
             for device in self._state.sessions:
                 if _same(sid, device.sid):
@@ -344,31 +406,43 @@ class Runtime:
                     return device
         return None
 
-    def devices(self) -> list[dict[str, str]]:
+    def device_rows(self) -> list[dict[str, str]]:
+        """Every unlocked device as ``{sid, ua, first_seen, last_seen}`` (§4-F)."""
+        self.reload_if_changed()
         with self._lock:
             return [device.as_json() for device in self._state.sessions]
 
-    def _drop(self, sid: str) -> bool:
-        before = len(self._state.sessions)
-        self._state.sessions = [d for d in self._state.sessions if d.sid != sid]
+    def _close_sockets(self, sid: str) -> None:
         for close in self._closers.pop(sid, set()):
             try:
                 close()
             except Exception:  # a socket already gone must not stop the revoke
                 log.debug("remote: closing a websocket on revoke failed", exc_info=True)
+
+    def _drop(self, sid: str) -> bool:
+        before = len(self._state.sessions)
+        self._state.sessions = [d for d in self._state.sessions if d.sid != sid]
+        self._close_sockets(sid)
         return len(self._state.sessions) != before
 
     def revoke(self, sid: str) -> bool:
         """Drop the cookie session and close its websockets; ``True`` if it existed."""
         with self._lock:
+            self.reload_if_changed()
             dropped = self._drop(sid)
             if dropped:
                 self._save()
             return dropped
 
     def flush(self) -> None:
-        """Persist ``last_seen`` (called on a timer, not per request)."""
-        self._save()
+        """Persist ``last_seen`` (called on a timer, not per request).
+
+        Another process's change lands first: a flush that wrote memory over a
+        fresher file would undo the very ``allow-write on`` this is about.
+        """
+        with self._lock:
+            self.reload_if_changed()
+            self._save()
 
     def register_socket(self, sid: str, close: Callable[[], None]) -> None:
         with self._lock:
@@ -934,12 +1008,12 @@ def build_app(
             return _json_error(401, "unauthorized")
         return JSONResponse(runtime.remote_json())
 
-    async def devices(request: Request) -> Response:
+    async def devices_endpoint(request: Request) -> Response:
         device = device_of(request)
         if device is None:
             return _json_error(401, "unauthorized")
         rows: list[dict[str, object]] = [
-            {**row, "current": row["sid"] == device.sid} for row in runtime.devices()
+            {**row, "current": row["sid"] == device.sid} for row in runtime.device_rows()
         ]
         return JSONResponse(rows)
 
@@ -1119,7 +1193,7 @@ def build_app(
         Route("/api/board", guarded(reads.board, "board"), methods=["GET"]),
         Route("/api/tasks", guarded(reads.tasks, "tasks"), methods=["GET"]),
         Route("/api/memory", guarded(reads.memory, "memory"), methods=["GET"]),
-        Route("/api/devices", devices, methods=["GET"]),
+        Route("/api/devices", devices_endpoint, methods=["GET"]),
         Route("/api/devices/{sid}", revoke_device, methods=["DELETE"]),
         Route("/api/panes/{agent}", panes, methods=["GET"]),
         Route("/api/explainability/{agent}", explainability, methods=["GET"]),
@@ -1241,7 +1315,7 @@ def status() -> dict[str, object]:
     """``{running, sessions:[{sid, ua, first_seen, last_seen}]}`` (PLAN §4-F)."""
     with _lock:
         running = _server is not None and _server.running
-    return {"running": running, "sessions": runtime().devices()}
+    return {"running": running, "sessions": runtime().device_rows()}
 
 
 def revoke(sid: str) -> bool:

@@ -36,7 +36,7 @@ def _describe(info: remote_server.RemoteInfo, *, allow_write: bool) -> dict[str,
 
 
 @app.command("serve")
-def serve(
+def serve_remote(
     port: Annotated[
         int, typer.Option("--port", help="Local port.", envvar="AISQUARE_REMOTE_PORT")
     ] = remote_server.DEFAULT_PORT,
@@ -73,7 +73,7 @@ def status() -> None:
     """The link, the password and the unlocked devices, from ~/.aisquare/remote.json."""
     state = remote_server.runtime()
     payload = _describe(state.info(), allow_write=state.allow_write)
-    payload["sessions"] = state.devices()
+    payload["sessions"] = state.device_rows()
     if get_state().json_output:
         typer.echo(json.dumps(payload))
         return
@@ -81,7 +81,7 @@ def status() -> None:
     console.print(f"url:         {payload['url_local']}", markup=False)
     console.print(f"password:    {payload['password']}", markup=False)
     console.print(f"allow_write: {'on' if state.allow_write else 'off'}", markup=False)
-    devices = state.devices()
+    devices = state.device_rows()
     console.print(f"devices:     {len(devices)}", markup=False)
     for device in devices:
         console.print(f"  {device['sid']}  {device['ua'][:40]}  last {device['last_seen']}")

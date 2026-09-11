@@ -192,6 +192,19 @@ def test_unlock_sets_an_httponly_lax_cookie(client: TestClient, runtime: Runtime
     assert len(devices) == 1 and devices[0]["sid"] == response.cookies[COOKIE]
 
 
+def test_cookie_is_secure_only_behind_an_https_tunnel(client: TestClient, runtime: Runtime) -> None:
+    plain = unlock(client, runtime)
+    assert "Secure" not in plain.headers["set-cookie"]
+    tunnelled = client.post(
+        f"{base(runtime)}/api/unlock",
+        json={"password": PASSWORD},
+        headers={"X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.7"},
+    )
+    assert tunnelled.status_code == 200
+    header = tunnelled.headers["set-cookie"]
+    assert "Secure" in header and "HttpOnly" in header
+
+
 def test_unlock_without_a_body_is_400(client: TestClient, runtime: Runtime) -> None:
     response = client.post(f"{base(runtime)}/api/unlock", content=b"garbage")
     assert response.status_code == 400
@@ -335,7 +348,13 @@ def test_devices_lists_sessions_and_delete_revokes(client: TestClient, runtime: 
     second = unlock(other, runtime).cookies[COOKIE]
     rows = client.get(f"{base(runtime)}/api/devices").json()
     assert [row["sid"] for row in rows] == [first, second]
-    assert set(rows[0]) == {"sid", "ua", "first_seen", "last_seen"}
+    assert set(rows[0]) == {"sid", "ua", "first_seen", "last_seen", "current"}
+    assert [row["current"] for row in rows] == [True, False]
+    assert [row["current"] for row in other.get(f"{base(runtime)}/api/devices").json()] == [
+        False,
+        True,
+    ]
+    assert set(runtime.devices()[0]) == {"sid", "ua", "first_seen", "last_seen"}  # §4-F status()
     gone = client.delete(f"{base(runtime)}/api/devices/{second}")
     assert gone.status_code == 200
     assert other.get(f"{base(runtime)}/api/board").status_code == 401
@@ -607,9 +626,10 @@ def test_cli_serve_prints_link_and_password_then_serves(
     assert payload["url_local"].startswith("http://127.0.0.1:9001/r/")
     assert payload["allow_write"] is False
     assert served == [(None, 9001)]
-    human = CliRunner().invoke(cli, ["remote", "serve"])
+    human = CliRunner().invoke(cli, ["remote", "serve", "--port", "9002"])
     assert human.exit_code == 0
     assert "password:" in human.output and "read-only" in human.output
+    assert "ngrok http 9002" in human.output
 
 
 def test_the_write_list_is_the_plan_verbatim() -> None:

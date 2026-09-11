@@ -805,6 +805,12 @@ def _client_of(scope: Any) -> str:
     return str(client[0]) if client else "unknown"
 
 
+def _forwarded_https(request: Request) -> bool:
+    """Whether the browser reached us over TLS — ngrok's ``X-Forwarded-Proto`` says."""
+    proto = request.headers.get("x-forwarded-proto", "")
+    return proto.split(",")[0].strip().lower() == "https"
+
+
 def _json_error(status: int, error: str, message: str | None = None) -> Response:
     from starlette.responses import JSONResponse
 
@@ -911,7 +917,16 @@ def build_app(
         if sid is None:
             return _json_error(401, "wrong_password")
         response = JSONResponse({"ok": True})
-        response.set_cookie(COOKIE, sid, httponly=True, samesite="lax", path=cookie_path(request))
+        response.set_cookie(
+            COOKIE,
+            sid,
+            httponly=True,
+            samesite="lax",
+            path=cookie_path(request),
+            # Secure only when the hop to the browser is TLS (ngrok says so in
+            # X-Forwarded-Proto); on plain http://127.0.0.1 it would never be sent back.
+            secure=_forwarded_https(request),
+        )
         return response
 
     async def remote(request: Request) -> Response:
@@ -920,9 +935,13 @@ def build_app(
         return JSONResponse(runtime.remote_json())
 
     async def devices(request: Request) -> Response:
-        if device_of(request) is None:
+        device = device_of(request)
+        if device is None:
             return _json_error(401, "unauthorized")
-        return JSONResponse(runtime.devices())
+        rows: list[dict[str, object]] = [
+            {**row, "current": row["sid"] == device.sid} for row in runtime.devices()
+        ]
+        return JSONResponse(rows)
 
     async def revoke_device(request: Request) -> Response:
         device = device_of(request)

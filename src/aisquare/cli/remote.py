@@ -61,7 +61,7 @@ def serve(
         console.print(f"password: {info.password}", markup=False)
         gate = "ON — writes are audited" if state.allow_write else "off (read-only)"
         console.print(f"write actions: {gate}   · toggle: aisquare remote allow-write on|off")
-        console.print("expose with: ngrok http 8748   · Ctrl-C stops", markup=False)
+        console.print(f"expose with: ngrok http {port}   · Ctrl-C stops", markup=False)
     try:
         remote_server.run_foreground(dist, port)
     except OSError as exc:

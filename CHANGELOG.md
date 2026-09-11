@@ -37,6 +37,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through. The doctor verdict is cached for 30 s; the endpoint never raises — a
   failing lookup is `available:false` with the error as the reason, and an
   unknown agent is a 404 like `panes/<agent>`.
+- Remote Control tester nits: the serve banner's `ngrok http <port>` follows `--port`;
+  the unlock cookie carries `Secure` when the tunnel says `X-Forwarded-Proto: https`
+  (never on plain 127.0.0.1); `GET api/devices` marks the caller's own row
+  `current: true` so the page can label "this device".
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

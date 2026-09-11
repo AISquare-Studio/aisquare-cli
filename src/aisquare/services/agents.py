@@ -48,6 +48,9 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     documents, notes = agent_core.read_context(name, config_dir)
     sections = [section for content in documents.values() for section in _split_sections(content)]
 
+    # Validate and install hooks before committing imported user memories.
+    # A damaged native settings file must leave the shared pool untouched.
+    hooks_installed = agent_core.install_hooks(name, config_dir)
     added = 0
     with store_session() as store:
         existing = {entry.text for entry in store.entries("user")}
@@ -58,7 +61,6 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
             existing.add(text)
             added += 1
 
-    hooks_installed = agent_core.install_hooks(name, config_dir)
     agent_core.set_connected(name, True, config_dir)
     readiness, detail = (
         agent_core.integration_readiness(

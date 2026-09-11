@@ -1389,12 +1389,12 @@ def _emit_span(sdk: Any, record: dict[str, object]) -> None:
                 model=model, provider=str(facts.get("provider_name") or "unknown")
             ) as llm:
                 llm.set_token_counts(
-                    prompt=int(
+                    prompt=insights.token_count(
                         facts.get("input_token_count")
                         or facts.get("gen_ai.usage.input_tokens")
                         or 0
                     ),
-                    completion=int(
+                    completion=insights.token_count(
                         facts.get("output_token_count")
                         or facts.get("gen_ai.usage.output_tokens")
                         or 0

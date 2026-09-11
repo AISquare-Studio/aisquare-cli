@@ -3,7 +3,7 @@
 AISquare supports Claude Code and Codex through a coding-agent registry. Memory,
 the task board, claims, manager continuation, CI delivery, tmux, worktrees and the
 terminal UI are shared. An adapter supplies native hooks, config locations,
-model options, permission options, MCP configuration and session commands.
+model options, permission options and MCP configuration.
 
 Codex compatibility is tested against **CLI 0.153.4**. Use this version or a
 newer compatible release; older releases may lack the required hooks. Cursor
@@ -37,6 +37,11 @@ in Codex, review the definitions and trust them. Reconnect is idempotent and
 does not rewrite an identical file. Changing definitions requires native
 review again. AISquare never writes Codex trust records or automatically adds
 a trust-bypass flag.
+Connect validates and installs hooks before importing global memories. Malformed,
+unreadable or non-regular native settings produce a file repair diagnostic;
+existing settings and memories are preserved on that failure. Updates retain
+the file's permissions and symlink target. A change to a file with multiple
+hard links is refused; use one file or symlinks before retrying.
 
 Status distinguishes configured hooks from observed execution. `unverified`
 means the file is installed but this definition has not been observed running.
@@ -62,11 +67,16 @@ Coding agents are optional for a CLI-only installation (`install.sh --no-agent`)
 Doctor warns about a missing executable when an agent or launch profile has
 been configured explicitly. Managed `--account` slots belong to Claude Code;
 choose a Codex account through the role's `CODEX_HOME` binding instead.
+A merely present, unused Codex home is advisory. `team harness` reports a bad
+role with its repair hint alongside the roles that resolve successfully.
+`--json agents use codex --project` returns `scope: "project"` and `project_id`.
 
 The Settings tab has user and role agent choices; the spawn dialog supports a
 per-launch choice. Model/account profiles continue to use `team bind`.
 Settings retains custom values written by another version, so they can be
 reviewed or corrected without losing them when saving unrelated changes.
+A damaged AISquare config renders defaults and an error; saving preserves the
+damaged file until it has been repaired and reloaded.
 
 ## Native settings
 
@@ -99,12 +109,16 @@ env = { CODEX_HOME = "/path/to/codex-account" }
 [fleet.roles.coder]
 sandbox = "workspace-write"
 approval_policy = "on-request"
+agent_args = { codex = ["--no-alt-screen"] }
 ```
 
 `AISQUARE_MODEL_ROLE` and `AISQUARE_EFFORT_ROLE` remain explicit role pins.
-Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`; Claude effort
-aliases and model ladders are not reused. Native model availability is left to
-Codex, without paid discovery probes. Claude retains its ladder, but probes
+Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`. Shared effort
+names `max` and `ultracode` map to Codex's `xhigh`. Values are trimmed and effort
+names ignore case; blank environment/config pins fall through to native defaults.
+An explicitly empty `--effort` is a usage error. Native model availability is left to
+Codex, without paid discovery probes. `--probe`, `--no-probe` and `--refresh`
+explain that there is no AISquare Codex availability cache. Claude retains its ladder, but probes
 now use the selected executable and effective account. Cache keys include the
 resolved executable's upgrade fingerprint, login identity and provider inputs.
 File-backed Claude credentials also contribute their subscription and rate-limit
@@ -121,14 +135,20 @@ asq launch coder --agent codex -- resume NATIVE_SESSION_ID
 asq launch coder --agent codex -- exec --json 'Run the local checks'
 ```
 
-Use `--` before native Codex options, especially `-c` (AISquare's own `-c` is
-the executable override). Native sandbox and approval policies stay separate.
+Use `--` to explicitly separate native options from AISquare options. Codex
+`-c KEY=VALUE` and `-cKEY=VALUE` also work before the separator, as do attached
+model options such as `-mMODEL`. Legacy `-c BINARY` selects an executable;
+`--command BINARY` is unambiguous, including for a path containing `=`.
+Native sandbox and approval policies stay separate.
 Reviewers, including numbered seats such as `reviewer2`, default to read-only;
 other Codex fleet roles use workspace-write. Numbered seats inherit the base
 role's sandbox and approval policy per field unless configured separately.
 Their worktree, Claude permission mode and extra arguments keep their own
 defaults. Saved Codex sandbox/approval
 settings apply only to Codex; Claude Code keeps its own permission mode.
+Legacy fleet `extra_args` belong to Claude Code; `agent_args` maps each agent
+name to its own extra arguments. A customized Claude role therefore cannot
+forward `--restricted` or `--verbose` into a Codex fleet launch.
 No automatic approval bypass is added. Native subagents are disabled in fleet
 sessions when `fleet.disable_native_agent_teams` is enabled.
 
@@ -139,6 +159,9 @@ token and fleet token bind hooks without guessing a newest transcript. Binding
 metadata can arrive before the fleet row; resume keeps the same board identity.
 Callback deduplication prevents concurrent prompt capture and repeated manager
 decisions. Generated continuations have their own prompt source.
+Failed callbacks release their owned pending claim immediately so retries can
+recover. Pending claims expire after 180 seconds using a monotonic clock.
+An unavailable observation cache costs readiness evidence, not lifecycle processing.
 
 Initial fleet tasks use Codex's positional prompt. Subsequent automated input
 requires a linked waiting session; otherwise `fleet tell` files a board note.
@@ -176,6 +199,11 @@ Codex [ignores `otel` in project-local config](https://learn.chatgpt.com/docs/co
 so AISquare does not search ancestor projects or other account homes for
 exporters. Usage is counted from native logs once, with the observed provider
 name; duplicate exports and the parallel native span stream do not add usage again.
+Per-launch deduplication/provider metadata is removed when the receiver exits.
+Receivers also prune metadata idle for 24 hours and caches from older releases;
+project purge removes that project's native metadata, including unjoined launches.
+Queued insight records remain available for delivery. Malformed token counts
+are treated as unknown (zero), so they cannot indefinitely block later records.
 
 This transport does not change model routing, API keys or ChatGPT login. It
 does not capture raw model bodies or tool arguments. Native timestamps remain

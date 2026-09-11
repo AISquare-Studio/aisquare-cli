@@ -233,5 +233,7 @@ def codex(config_dir: str | None = typer.Option(None, "--config-dir")) -> None:
         output = handle_codex(_payload(), directory)
         if output:
             typer.echo(output)
+    except ManagerWakeupError as exc:
+        _cost_of_failing_open("codex", exc.cause, cost=_COST["manager-wakeup"])
     except Exception as exc:
         _cost_of_failing_open("codex", exc, cost="this native event was not recorded")

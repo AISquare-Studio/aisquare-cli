@@ -23,12 +23,12 @@ class AgentCapabilities:
     hooks: tuple[HookSpec, ...]
     assigns_session_id: bool = False
     requires_hook_trust: bool = False
-    structured_exec: bool = False
     model_proxy: bool = False
     model_ladders: bool = False
     positional_prompt: bool = False
     first_context_file_only: bool = False
     sandbox_permissions: bool = False
+    legacy_fleet_args: bool = False
 
 
 class AgentAdapter(Protocol):
@@ -69,8 +69,6 @@ class AgentAdapter(Protocol):
         approval: str | None = None,
     ) -> list[str]: ...
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]: ...
-    def resume_args(self, native_id: str) -> list[str]: ...
-    def exec_args(self, prompt: str, native_id: str | None = None) -> list[str]: ...
 
 
 def config_home(
@@ -91,4 +89,35 @@ def has_option(args: Sequence[str], *options: str) -> bool:
             break
         if arg.split("=", 1)[0] in options:
             return True
+        if any(
+            len(option) == 2
+            and option.startswith("-")
+            and arg.startswith(option)
+            and len(arg) > len(option)
+            for option in options
+        ):
+            return True
     return False
+
+
+def executable_name(binary: str) -> str:
+    """Canonical native executable name, including Windows paths and npm shims."""
+    name = binary.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    for suffix in (".exe", ".cmd", ".ps1"):
+        if name.endswith(suffix):
+            return name.removesuffix(suffix)
+    return name
+
+
+def fleet_extra_args(
+    adapter: AgentAdapter, legacy: Sequence[str], native: Mapping[str, list[str]]
+) -> list[str]:
+    """Old fleet args belong to Claude; native argument lists name their owner."""
+    return [
+        *(legacy if adapter.capabilities.legacy_fleet_args else []),
+        *native.get(adapter.id, []),
+    ]
+
+
+class BadEffortError(ValueError):
+    """An explicit reasoning level is invalid for the selected agent."""

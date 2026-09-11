@@ -9,6 +9,9 @@ from __future__ import annotations
 import errno
 import os
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -206,7 +209,8 @@ class FleetRoleSettings(BaseModel):
     ``permission_mode`` is any Claude Code ``--permission-mode`` value (``auto``,
     ``acceptEdits``, ``bypassPermissions``, ``manual``, ``dontAsk``, ``plan``); the
     empty string means "pass no flag". ``worktree`` puts the agent in its own git
-    worktree; ``extra_args`` are appended to the agent command verbatim.
+    worktree. Legacy ``extra_args`` belong to Claude Code; ``agent_args`` maps
+    an agent ID to additional native arguments for that agent only.
     Precedence: per-spawn flag > this config > built-in. NOT the environment:
     no ``[fleet]`` value is read from an env var (the orchestrator's own knobs
     — ``AISQUARE_TEAM``, ``AISQUARE_MODEL_<ROLE>`` and friends — are a
@@ -218,6 +222,7 @@ class FleetRoleSettings(BaseModel):
     approval_policy: str | None = None
     worktree: bool = False
     extra_args: list[str] = Field(default_factory=list)
+    agent_args: dict[str, list[str]] = Field(default_factory=dict)
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
@@ -359,12 +364,46 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     return merged
 
 
+_READ_SNAPSHOT: ContextVar[dict[Path, AppConfig | Exception] | None] = ContextVar(
+    "config_read_snapshot", default=None
+)
+
+
+@contextmanager
+def config_snapshot() -> Iterator[None]:
+    """One consistent file read for a diagnostic with multiple independent readers.
+
+    Scoped to the operation; subsequent commands see edits and repaired files.
+    Each reader gets its own model, so accidental changes cannot affect peers.
+    """
+    token = _READ_SNAPSHOT.set({})
+    try:
+        yield
+    finally:
+        _READ_SNAPSHOT.reset(token)
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """Load configuration from ``path`` (default: the standard location).
 
     A missing file yields the built-in defaults.
     """
     target = path or paths.config_path()
+    snapshot = _READ_SNAPSHOT.get()
+    if snapshot is None:
+        return _load_config_file(target)
+    if target not in snapshot:
+        try:
+            snapshot[target] = _load_config_file(target)
+        except Exception as exc:
+            snapshot[target] = exc
+    value = snapshot[target]
+    if isinstance(value, Exception):
+        raise value
+    return value.model_copy(deep=True)
+
+
+def _load_config_file(target: Path) -> AppConfig:
     if not target.exists():
         return AppConfig()
     with target.open("rb") as fh:

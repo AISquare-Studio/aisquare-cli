@@ -473,9 +473,22 @@ per concept: `aisquare team harness` (the ladder and the effort offsets),
 `AISQUARE_MODEL_<ROLE>`, `AISQUARE_EFFORT_<ROLE>` and `AISQUARE_BIN_<ROLE>` in
 the environment. A fleet launch is an `aisquare launch <role>` inside a tmux
 window, so all of it applies unchanged, as does the Explainability wiring.
-For an arbitrary wrapper binary, select its family with `aisquare agents use
-claude-code` (or `codex`), `AISQUARE_CODING_AGENT`, or the role's `--agent`
-binding. This also applies to `AISQUARE_AGENT_BIN` and `AISQUARE_BIN_<ROLE>`.
+For an arbitrary wrapper binary, declare its family with
+`aisquare team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`),
+or pass `--agent` on that launch. User/project defaults and the inherited
+`AISQUARE_CODING_AGENT` choice do not identify wrappers. This also applies to
+wrappers selected through `AISQUARE_AGENT_BIN` and `AISQUARE_BIN_<ROLE>`.
+
+Legacy `[fleet.roles.ROLE] extra_args` belong to Claude Code. Agent-specific
+arguments name their owner, for example:
+
+```toml
+[fleet.roles.reviewer]
+agent_args = { codex = ["--no-alt-screen"], claude-code = ["--verbose"] }
+```
+
+The selected adapter combines only its own arguments with the role's native
+permission flags. Explicit arguments on a spawn still go to that launch.
 
 **Native agent teams are off in fleet launches.** Claude Code's own
 experimental *agent teams* (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) let a

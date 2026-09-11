@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -196,12 +197,24 @@ def _aisquare_command() -> str:
     return " ".join(_quote(part) for part in selfcli.argv_for([]))
 
 
-def _read_settings(path: Path) -> dict[str, Any]:
+def _read_settings(path: Path, *, strict: bool = False) -> dict[str, Any]:
+    """Optional caches fail open; hook inspection must distinguish unreadable files."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        _regular_settings(path)
+        content = path.read_text(encoding="utf-8")
+        data = json.loads(content) if content.strip() else {}
+        if not isinstance(data, dict):
+            raise ValueError("must contain a JSON object")
+        return data
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except (OSError, UnicodeError, ValueError) as exc:
+        if strict:
+            raise AgentSettingsError(
+                f"Cannot read {path}: {exc}. Existing settings preserved; "
+                "repair the file and retry."
+            ) from exc
+        return {}
 
 
 def _is_aisquare_hook_command(command: str) -> bool:
@@ -229,7 +242,9 @@ def _is_aisquare_hook_command(command: str) -> bool:
         tokens = tokens[:-2]
     if len(tokens) < 3 or tokens[-2] != "hook":
         return False
-    if tokens[-1] not in {"codex", *(subcommand for _, subcommand in _HOOKS)}:
+    if tokens[-1] not in {
+        hook.command for adapter in adapters() for hook in adapter.capabilities.hooks
+    }:
         return False
     return _is_aisquare_program(tokens[0]) or tokens[-4:-2] == ["-m", "aisquare"]
 
@@ -274,15 +289,23 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
     import tempfile
 
     payload = json.dumps(settings, indent=2) + "\n"
+    existing = _regular_settings(path)
     # No change means no rewrite: Codex trust refers to the installed definition.
     if path.exists() and path.read_text(encoding="utf-8") == payload:
         return
+    if existing is not None and existing.st_nlink > 1:
+        raise AgentSettingsError(
+            f"Cannot update {path}: settings have multiple hard links. Existing settings "
+            "preserved; use a single file or symlinks before retrying."
+        )
     target = path.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, filename = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
     temp = Path(filename)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            if existing is not None:
+                os.chmod(temp, stat.S_IMODE(existing.st_mode))
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -292,25 +315,21 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
 
 
 class AgentSettingsError(ValueError):
-    """A native settings file cannot be safely changed."""
+    """A native settings file cannot be safely inspected or changed."""
+
+
+def _regular_settings(path: Path) -> os.stat_result | None:
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise AgentSettingsError(f"{path} is not a regular file; existing settings preserved.")
+    return info
 
 
 def _settings_for_write(path: Path) -> dict[str, Any]:
-    try:
-        content = path.read_text(encoding="utf-8")
-        value = json.loads(content) if content.strip() else {}
-    except FileNotFoundError:
-        return {}
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise AgentSettingsError(
-            f"Cannot update {path}: {exc}. Existing settings preserved; "
-            "repair the file and retry agents connect/disconnect."
-        ) from exc
-    if not isinstance(value, dict):
-        raise AgentSettingsError(
-            f"{path} must contain a JSON object; existing settings preserved. "
-            "Repair the file and retry agents connect/disconnect."
-        )
+    value = _read_settings(path, strict=True)
     if "hooks" in value and not isinstance(value["hooks"], dict):
         raise AgentSettingsError(
             f"{path}: hooks must be an object; existing settings preserved. "
@@ -350,7 +369,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
 
 def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
+    if spec is None or spec.settings_path is None:
         return False
     settings = _settings_for_write(spec.settings_path)
     hooks = settings.get("hooks")
@@ -418,9 +437,9 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
     """Lifecycle events with no aisquare group — or, with ``reconciled``, none
     whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`."""
     spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
+    if spec is None or spec.settings_path is None:
         return [hook.event for hook in spec.hooks] if spec else [event for event, _ in _HOOKS]
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    hooks = _settings_for_write(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return [hook.event for hook in spec.hooks] if spec else [event for event, _ in _HOOKS]
     accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
@@ -563,7 +582,8 @@ def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
     sites = [
         AgentHookSite(
             config_dir=directory,
-            hooks_installed=hooks_installed(spec.name, directory),
+            hooks_installed=integration_readiness(spec.name, directory)[0]
+            in {"configured", "observed", "unverified"},
         )
         for directory in connected_dirs(spec.name, registry)
     ]
@@ -647,7 +667,7 @@ def hook_fingerprint(name: str, config_dir: Path) -> str:
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return ""
-    settings = _read_settings(spec.settings_path)
+    settings = _settings_for_write(spec.settings_path)
     owned: dict[str, list[dict[str, Any]]] = {}
     hooks = settings.get("hooks", {})
     for event, groups in hooks.items() if isinstance(hooks, dict) else []:
@@ -682,17 +702,31 @@ def _observation_path(name: str, config_dir: Path) -> Path:
 
 def observe_hooks(name: str, config_dir: Path) -> None:
     """Evidence that the current native hook definition actually executed."""
-    _write_settings(
-        _observation_path(name, config_dir),
-        {
-            "fingerprint": hook_fingerprint(name, config_dir),
-        },
-    )
+    # Disposable evidence cannot block context/board/Stop processing.
+    # Without a successful write, readiness remains unverified.
+    with suppress(OSError, UnicodeError, AgentSettingsError):
+        spec = _spec(name, config_dir)
+        if spec is None or spec.settings_path is None:
+            return
+        info = _regular_settings(spec.settings_path)
+        if info is None:
+            return
+        stamp = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        observation = _observation_path(name, config_dir)
+        if _read_settings(observation).get("settings_stamp") == stamp:
+            return
+        _write_settings(
+            observation,
+            {"fingerprint": hook_fingerprint(name, config_dir), "settings_stamp": stamp},
+        )
 
 
 def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
-    if not hooks_installed(name, config_dir):
-        return "not_configured", ""
+    try:
+        if not hooks_installed(name, config_dir):
+            return "not_configured", ""
+    except AgentSettingsError as exc:
+        return "unreadable", str(exc)
     try:
         adapter = get_adapter(name)
     except ValueError:
@@ -700,7 +734,11 @@ def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
     if not adapter.capabilities.requires_hook_trust:
         return "configured", ""
     observed = _read_settings(_observation_path(name, config_dir))
-    if observed.get("fingerprint") == hook_fingerprint(name, config_dir):
+    try:
+        fingerprint = hook_fingerprint(name, config_dir)
+    except AgentSettingsError as exc:
+        return "unreadable", str(exc)
+    if observed.get("fingerprint") == fingerprint:
         return "observed", "Native hooks observed working; current session policy still applies"
     return (
         "unverified",
@@ -785,6 +823,7 @@ class HookSiteHealth:
     binary: Path | None = None
     binary_version: str | None = None
     binary_state: str | None = None
+    error: str | None = None
 
 
 def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
@@ -797,7 +836,7 @@ def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return []
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    hooks = _settings_for_write(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return []
     found: list[str] = []
@@ -937,9 +976,13 @@ def hook_site_health(
     cache: dict[HookBinary, tuple[str, str | None]] | None = None,
 ) -> HookSiteHealth:
     """Grade one config directory: are the hooks all there, and what do they run?"""
-    installed = hooks_installed(name, config_dir)
+    try:
+        installed = hooks_installed(name, config_dir)
+        commands = hook_commands(name, config_dir)
+    except AgentSettingsError as exc:
+        return HookSiteHealth(config_dir, False, recorded, error=str(exc))
     binaries: list[HookBinary] = []
-    for command in hook_commands(name, config_dir):
+    for command in commands:
         binary = hook_binary(command)
         if binary is not None and binary not in binaries:
             binaries.append(binary)
@@ -993,7 +1036,7 @@ def _agent_dirs_on_disk(name: str) -> list[Path]:
         seen.add(key)
         try:
             ours = bool(hook_commands(name, candidate))
-        except OSError:
+        except (OSError, AgentSettingsError):
             continue  # unreadable settings.json — see the docstring
         if ours:
             found.append(candidate)

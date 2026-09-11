@@ -104,6 +104,14 @@ def use(
     except ValueError as exc:
         fail(str(exc), error="unknown_agent")
     if get_state().json_output:
-        typer.echo(json.dumps({"agent": name, "scope": scope}))
+        typer.echo(
+            json.dumps(
+                {
+                    "agent": name,
+                    "scope": "project" if project else "user",
+                    **({"project_id": scope} if project else {}),
+                }
+            )
+        )
     else:
         typer.echo(f"Default coding agent: {name} ({scope})")

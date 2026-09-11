@@ -781,7 +781,6 @@ short_circuit() {
     # cell passes --no-agent.
     if [ "$WANT_AGENT" = 1 ]; then
         if [ "$SELECTED_AGENT" = codex ]; then
-            [ -n "$CODEX_VERSION" ] || return 1
             return 1 # init must also persist the explicitly selected agent
         else
             [ -n "$CLAUDE_VERSION" ] || return 1

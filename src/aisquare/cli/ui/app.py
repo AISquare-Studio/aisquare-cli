@@ -566,6 +566,11 @@ class FleetApp(App[None], inherit_bindings=False):
         project = self.snapshot.project(event.project_id) if self.snapshot else None
         if project is not None:
             self.push_screen(SpawnScreen(project))
+        else:
+            self.notify(
+                "Project data is not available yet; refresh and try spawning again.",
+                severity="warning",
+            )
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         await self._show(

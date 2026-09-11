@@ -26,10 +26,13 @@ from typing import Annotated
 
 import typer
 from rich.text import Text
+from typer._click.core import Context
+from typer.core import TyperCommand, TyperOption
 
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness
+from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.services import agent_launch, explainability_ops
@@ -61,6 +64,61 @@ ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manag
 _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
+
+
+class LaunchCommand(TyperCommand):
+    def parse_args(self, ctx: Context, args: list[str]) -> list[str]:
+        """Keep legacy -c BINARY while allowing Codex's -c KEY=VALUE overrides.
+
+        Normalize the native alias to its long spelling before Click sees it;
+        otherwise it is consumed as --command (or split as a short-option cluster).
+        Known AISquare option values and everything after -- remain untouched.
+        """
+        rewritten: list[str] = []
+        protected: dict[str, str] = {}
+        valued = {
+            option
+            for param in self.get_params(ctx)
+            if isinstance(param, TyperOption) and not param.is_flag
+            for option in param.opts
+        }
+        tokens = iter(args)
+        for token in tokens:
+            if token == "--":
+                rewritten.extend([token, *tokens])
+                break
+            if token == "-c":
+                value = next(tokens, None)
+                if value is not None and "=" in value:
+                    rewritten.append("--config=" + value)
+                else:
+                    rewritten.append(token)
+                    if value is not None:
+                        rewritten.append(value)
+            elif token.startswith("-c") and "=" in token[2:]:
+                rewritten.append("--config=" + token[2:])
+            elif (
+                token.startswith("-")
+                and not token.startswith("--")
+                and len(token) > 2
+                and token[:2] not in valued
+            ):
+                # Click otherwise parses known letters *inside* an unknown
+                # short option: -mexample used to become --env xample.
+                marker = f"--__aisquare_native_arg_{len(protected)}={token}"
+                while marker in args:
+                    marker = "-" + marker
+                protected[marker] = token
+                rewritten.append(marker)
+            else:
+                rewritten.append(token)
+                if token in valued:
+                    value = next(tokens, None)
+                    if value is not None:
+                        rewritten.append(value)
+        remaining = super().parse_args(ctx, rewritten)
+        remaining[:] = [protected.get(token, token) for token in remaining]
+        return remaining
 
 
 def _declared_roles() -> set[str]:
@@ -103,7 +161,8 @@ def launch(
         typer.Option(
             "--command",
             "-c",
-            help="Agent command to launch. Overrides the role's bound `bin`; "
+            help="Agent command to launch (-c BINARY; Codex -c KEY=VALUE is forwarded). "
+            "Overrides the role's bound `bin`; "
             f"defaults to that, then to `{DEFAULT_AGENT}`.",
             metavar="CMD",
         ),
@@ -157,11 +216,15 @@ def launch(
     # it: the docstring promised the profile supplied the binary, so `launch`
     # silently started the DEFAULT agent under the right role name and exited 0.
     try:
+        environment = harness.parse_env_pairs(env_pairs or [])
+    except ValueError as exc:
+        fail(str(exc), error="bad_env_pair")
+    try:
         selected = agent_launch.resolve(
             role,
             agent=agent,
             binary=command,
-            env_overrides=harness.parse_env_pairs(env_pairs or []),
+            env_overrides=environment,
         )
     except ValueError as exc:
         fail(str(exc), error="agent_configuration")
@@ -360,6 +423,8 @@ def launch(
         model_args = agent_launch.native_model_args(
             selected, role, [*profile.args, *role_args, *ctx.args]
         )
+    except BadEffortError as exc:
+        fail(str(exc), error="bad_effort")
     except ValueError as exc:
         fail(str(exc), error="agent_configuration")
     argv = [
@@ -392,5 +457,6 @@ def register(app: typer.Typer) -> None:
     """Attach ``launch`` to ``app``, forwarding unknown options to the agent."""
     app.command(
         "launch",
+        cls=LaunchCommand,
         context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     )(launch)

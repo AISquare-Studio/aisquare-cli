@@ -8,6 +8,7 @@ project list.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 
 from rich.text import Text
@@ -15,8 +16,6 @@ from textual.widgets import Static
 
 INSTALL_HINT: dict[str, str] = {
     "tmux": "apt install tmux · dnf install tmux · brew install tmux",
-    "claude": "npm install -g @anthropic-ai/claude-code",
-    "codex": "npm install -g @openai/codex",
     "gh": "https://cli.github.com",
 }
 
@@ -87,7 +86,7 @@ class WelcomeView(Static):
         super().__init__(id=id)
         self.escape_key = escape_key
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         text = Text()
         text.append("aisquare fleet\n", style="bold")
         text.append(
@@ -95,7 +94,7 @@ class WelcomeView(Static):
             "surfaced here. Press + in the sidebar to onboard a project, or click one.\n\n",
         )
         text.append("On this machine:\n", style="bold")
-        text.append(presence_lines())
+        text.append(await asyncio.to_thread(presence_lines))
         text.append(
             f"\n{self.escape_key.upper()} hands focus back to the sidebar from an agent pane"
             " · t themes · r refresh · ? help · q quits",

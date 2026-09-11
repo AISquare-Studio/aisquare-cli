@@ -1,10 +1,8 @@
 """One registry for supported terminal agents; adding an adapter is registration."""
 
-from pathlib import Path
-
 from aisquare.core.agent_adapters.claude_code import ClaudeCodeAdapter
 from aisquare.core.agent_adapters.codex import CodexAdapter
-from aisquare.core.agent_adapters.types import AgentAdapter
+from aisquare.core.agent_adapters.types import AgentAdapter, executable_name
 
 _ADAPTERS: dict[str, AgentAdapter] = {}
 
@@ -29,7 +27,7 @@ def get_adapter(name: str) -> AgentAdapter:
 
 
 def adapter_for_binary(binary: str) -> AgentAdapter | None:
-    name = Path(binary).name.removesuffix(".exe")
+    name = executable_name(binary)
     return next((adapter for adapter in adapters() if name == adapter.binary), None)
 
 

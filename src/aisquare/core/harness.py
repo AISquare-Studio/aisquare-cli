@@ -87,6 +87,7 @@ class ProbeContext:
 
 
 _PROBE_CONTEXT: ContextVar[ProbeContext | None] = ContextVar("agent_probe", default=None)
+_RESOLUTION_SCOPE: ContextVar[str | None] = ContextVar("agent_resolution_scope", default=None)
 
 #: alias → the family token that proves the alias actually resolved to it. Matched
 #: as a substring so full ids (``claude-sonnet-5``), dated legacy ids
@@ -411,6 +412,9 @@ def account_scope() -> str:
     ``CLAUDE_CONFIG_DIR`` is the only account selector Claude Code exposes to
     us; unset means the default ``~/.claude``.
     """
+    cached_scope = _RESOLUTION_SCOPE.get()
+    if cached_scope is not None:
+        return cached_scope
     context = _PROBE_CONTEXT.get()
     if context is not None:
         from aisquare.core import agents, claude_accounts
@@ -719,9 +723,14 @@ def resolve_model(
     """
     if context is not None:
         token = _PROBE_CONTEXT.set(context)
+        scope_token = _RESOLUTION_SCOPE.set(None)
         try:
+            # One immutable account identity per ladder walk. A later launch
+            # re-reads the files so account or executable changes still apply.
+            _RESOLUTION_SCOPE.set(account_scope())
             return resolve_model(role, probe=probe, refresh=refresh, effort=effort)
         finally:
+            _RESOLUTION_SCOPE.reset(scope_token)
             _PROBE_CONTEXT.reset(token)
     if refresh:
         clear_probe_cache()
@@ -1116,14 +1125,6 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
 #: The executable used when nothing else says otherwise.
 DEFAULT_AGENT_BINARY = "claude"
 
-#: Every basename that IS Claude Code's own executable. The ``.exe``/``.cmd``/
-#: ``.ps1`` spellings are what npm writes on Windows, where this CLI also
-#: installs (``install.ps1``) — a bare-name test dropped Claude Code's flags on
-#: every one of them.
-_DEFAULT_AGENT_BASENAMES = frozenset(
-    {DEFAULT_AGENT_BINARY, *(f"{DEFAULT_AGENT_BINARY}{ext}" for ext in (".exe", ".cmd", ".ps1"))}
-)
-
 
 def is_default_agent(binary: str) -> bool:
     """Whether ``binary`` is Claude Code, so Claude Code's flags apply to it.
@@ -1144,7 +1145,9 @@ def is_default_agent(binary: str) -> bool:
     unknown flag on a program the operator named after Claude Code. Anything
     else — ``claude2``, ``claude-next``, ``aider`` — gets nothing.
     """
-    return Path(binary.rstrip("/\\")).name.lower() in _DEFAULT_AGENT_BASENAMES
+    from aisquare.core.agent_adapters.types import executable_name
+
+    return executable_name(binary) == DEFAULT_AGENT_BINARY
 
 
 #: Per-role override, e.g. AISQUARE_BIN_CODER=claude2. Role names are upper-cased

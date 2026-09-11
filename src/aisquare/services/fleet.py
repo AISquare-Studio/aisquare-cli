@@ -930,6 +930,15 @@ def spawn(
             "install it, pass --bin, or change the role's binding"
         )
     role_config = role_settings(role, config)
+    from aisquare.core.agent_adapters.types import fleet_extra_args
+
+    role_args = fleet_extra_args(selected.adapter, role_config.extra_args, role_config.agent_args)
+    # Validate native model pins before creating a worktree/window or live row.
+    try:
+        if not selected.adapter.capabilities.model_ladders:
+            agent_launch.model_for(selected, role, probe=False)
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
     notes: list[str] = []
     with store_session() as store:
         project = ensure_codename(project, store)
@@ -984,10 +993,7 @@ def spawn(
         )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
-    role_args = list(role_config.extra_args)
     extra = list(agent_args)
-    if selected.adapter.id != "claude-code" and role_args == ["--restricted"]:
-        role_args = []  # legacy reviewer default belongs to the Claude adapter
     identity = (
         explainability_service.plan_session_identity(
             resolution.binary, [*selected.profile.args, *role_args, *extra]
@@ -1046,8 +1052,6 @@ def spawn(
         "AISQUARE_LAUNCH_ID": "",
         agent_launch.ACTIVE_AGENT_ENV: selected.adapter.id,
     }
-    with store_session() as store:
-        store.set_meta(f"fleet-pending:{agent_id}", selected.adapter.id)
     if config.disable_native_agent_teams:
         native_args, native_env = selected.adapter.disable_native_teams()
         flags += native_args

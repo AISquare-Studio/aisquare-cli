@@ -218,7 +218,7 @@ def test_codex_model_policy_uses_native_flags_without_probing(
         f'model_reasoning_effort="{effort}"',
     ]
     with pytest.raises(ValueError, match="reasoning effort"):
-        agent_launch.model_for(selected, "coder", effort="ultracode")
+        agent_launch.model_for(selected, "coder", effort="unknown-effort")
 
 
 @pytest.mark.parametrize("agent", ["claude-code", "codex"])
@@ -442,6 +442,9 @@ def test_project_purge_removes_native_bindings_and_callback_claims(
         store.set_meta(f"agent-event:{sid}:Stop:turn:False", '""')
         store.set_meta(f"continuation-prompt:{sid}", "digest")
         store.set_meta("launch-session:other-launch", "other-session")
+        for launch in ("purged-launch", "other-launch"):
+            store.set_meta(f"native-event:{launch}:digest", "1")
+            store.set_meta(f"native-provider:{launch}:thread", "provider")
         store.set_meta("unrelated", sid)
         store.purge_project(project)
         assert store.get_meta(f"coding-agent:{project}") is None
@@ -450,6 +453,10 @@ def test_project_purge_removes_native_bindings_and_callback_claims(
         assert store.get_meta(f"agent-event:{sid}:Stop:turn:False") is None
         assert store.get_meta(f"continuation-prompt:{sid}") is None
         assert store.get_meta("launch-session:other-launch") == "other-session"
+        assert store.get_meta("native-event:purged-launch:digest") is None
+        assert store.get_meta("native-provider:purged-launch:thread") is None
+        assert store.get_meta("native-event:other-launch:digest") == "1"
+        assert store.get_meta("native-provider:other-launch:thread") == "provider"
         assert store.get_meta("unrelated") == sid
 
 
@@ -507,12 +514,12 @@ def test_printed_codex_spawn_preserves_overrides_on_launch(
     )
     assert result.exit_code == 0, result.output
     command = shlex.split(json.loads(result.stdout)["command"])
-    assert command[0] == "aisquare"
+    assert command[0] == "AISQUARE_ROLE=coder"
     launch_cli = importlib.import_module("aisquare.cli.launch")
     execution = Mock()
     monkeypatch.setattr(launch_cli, "_exec", execution)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/test/codex")
-    launched = runner.invoke(app, command[1:])
+    launched = runner.invoke(app, command[command.index("launch") :])
     assert launched.exit_code == 0, launched.output
     _, argv, env = execution.call_args.args
     assert env["CODEX_HOME"] == override

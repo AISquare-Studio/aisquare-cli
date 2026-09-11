@@ -4,16 +4,38 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 from aisquare.core import agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, config_home
-from aisquare.core.config import AppConfig, load_config, save_config
+from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
 from aisquare.core.store import store_session
 
 ACTIVE_AGENT_ENV = "AISQUARE_CODING_AGENT"
+_PROJECT_CHOICE: ContextVar[tuple[Path, str | None] | None] = ContextVar(
+    "project_agent_choice", default=None
+)
+
+
+@contextmanager
+def selection_snapshot(cwd: Path | None = None) -> Iterator[None]:
+    """Resolve a diagnostic's roles against one config and project preference."""
+    root = (cwd or Path.cwd()).absolute()
+    try:
+        choice = project_default(root)
+    except Exception:
+        choice = None
+    token = _PROJECT_CHOICE.set((root, choice))
+    try:
+        with config_snapshot():
+            yield
+    finally:
+        _PROJECT_CHOICE.reset(token)
 
 
 class UnknownWrapperError(ValueError):
@@ -45,6 +67,9 @@ def executable(selected: ResolvedAgent) -> str | None:
 
 
 def project_default(cwd: Path | None = None) -> str | None:
+    snapshot = _PROJECT_CHOICE.get()
+    if snapshot is not None and snapshot[0] == (cwd or Path.cwd()).absolute():
+        return snapshot[1]
     # Do not create a store just to display defaults/doctor on a fresh machine.
     if not paths.db_path().exists():
         return None

@@ -17,7 +17,8 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail, local_time
-from aisquare.core import harness, orchestrator
+from aisquare.core import harness, orchestrator, selfcli
+from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
 from aisquare.core.spawn import IDENTITY_ENV_VARS
@@ -327,7 +328,8 @@ def spawn(
         bool | None,
         typer.Option(
             "--probe/--no-probe",
-            help="Verify model availability before picking (paid ~1-token probe, cached 24h). "
+            help="Claude Code: verify model availability before picking "
+            "(paid ~1-token probe, cached 24h). "
             "Default: probe, unless AISQUARE_HARNESS_PROBE=0.",
         ),
     ] = None,
@@ -335,8 +337,9 @@ def spawn(
         bool,
         typer.Option(
             "--refresh",
-            help="Ignore this account's cached availability verdicts. Use after an entitlement "
-            "changes; macOS Keychain plan changes cannot be detected automatically.",
+            help="Claude Code: ignore this account's cached availability verdicts. "
+            "Use after an entitlement changes; macOS Keychain plan changes cannot "
+            "be detected automatically.",
         ),
     ] = False,
     effort: Annotated[
@@ -373,8 +376,16 @@ def spawn(
         resolution = agent_launch.model_for(
             selected, role_name, probe=probe, refresh=refresh, effort=effort
         )
+    except BadEffortError as exc:
+        fail(str(exc), error="bad_effort")
     except ValueError as exc:
         fail(str(exc), error="agent_configuration")
+    if not selected.adapter.capabilities.model_ladders and (probe is not None or refresh):
+        typer.echo(
+            f"{selected.adapter.label} uses native model selection; --probe/--no-probe and "
+            "--refresh do not apply (no AISquare availability cache).",
+            err=True,
+        )
     try:
         tracing: ExplainabilitySettings | None = load_config().explainability
     except Exception as exc:  # fail-open: a broken config costs the trace, never the spawn
@@ -460,28 +471,31 @@ def spawn(
         # Forward overrides as launch flags: an env prefix would lose to the
         # role's configured env when launch resolves it again. Bound args are
         # already reapplied there; append only this invocation's extra args.
-        command = shlex.join(
-            [
-                "aisquare",
-                "launch",
-                role_name,
-                "--agent",
-                selected.adapter.id,
-                "--command",
-                binary.binary,
-                *(
-                    part
-                    for key, value in launch_profile.env.items()
-                    for part in ("--env", f"{key}={value}")
-                ),
-                "--",
-                *(
-                    selected.adapter.model_args(resolution.model or None, resolution.effort or None)
-                    if resolution
-                    else []
-                ),
-                *(extra_args or []),
-            ]
+        command = f"AISQUARE_ROLE={shlex.quote(role_name)} " + shlex.join(
+            selfcli.argv_for(
+                [
+                    "launch",
+                    role_name,
+                    "--agent",
+                    selected.adapter.id,
+                    "--command",
+                    binary.binary,
+                    *(
+                        part
+                        for key, value in launch_profile.env.items()
+                        for part in ("--env", f"{key}={value}")
+                    ),
+                    "--",
+                    *(
+                        selected.adapter.model_args(
+                            resolution.model or None, resolution.effort or None
+                        )
+                        if resolution
+                        else []
+                    ),
+                    *(extra_args or []),
+                ]
+            )
         )
     if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
         # Never burn a pipeline id into a printable command: every paste would
@@ -636,6 +650,7 @@ def spawn(
 
 
 @app.command("harness")
+@agent_launch.selection_snapshot()
 def harness_status() -> None:
     """Show the role→model matrix and how each ladder resolves right now."""
     if not orchestrator.team_enabled():
@@ -647,7 +662,17 @@ def harness_status() -> None:
             selected = agent_launch.resolve(name)
             resolution = agent_launch.model_for(selected, name, probe=False)
         except ValueError as exc:
-            fail(str(exc), error="agent_configuration")
+            rows.append(
+                {
+                    "role": name,
+                    "error": "agent_configuration",
+                    "detail": str(exc),
+                    "fix": exc.fix
+                    if isinstance(exc, agent_launch.UnknownWrapperError)
+                    else f"Check the agent/model settings for {name} in aisquare config.",
+                }
+            )
+            continue
         rows.append(
             {
                 "role": name,
@@ -692,6 +717,9 @@ def harness_status() -> None:
     console = stdout_console()
     console.print(f"base effort: {base} ({base_source})", markup=False)
     for row in rows:
+        if "error" in row:
+            console.print(f"{row['role']:<10} ⚠ {row['detail']} Fix: {row['fix']}", markup=False)
+            continue
         ladder = "→".join(row["ladder"]) or "native default"
         env_keys = ",".join(sorted(row["env"]))
         env_note = f" env={env_keys}" if env_keys else ""
@@ -783,15 +811,18 @@ def bind(
                 "nothing to bind — pass --bin, --env, --arg, --unset or --clear",
                 error="nothing_to_bind",
             )
-        with expected_config_write_errors():
-            bound = settings_service.bind_role(
-                role_name,
-                agent_bin=agent_bin,
-                agent=agent,
-                env=_parse_env(env_pairs or []),
-                unset=unset or [],
-                args=extra_args or [],
-            )
+        try:
+            with expected_config_write_errors():
+                bound = settings_service.bind_role(
+                    role_name,
+                    agent_bin=agent_bin,
+                    agent=agent,
+                    env=_parse_env(env_pairs or []),
+                    unset=unset or [],
+                    args=extra_args or [],
+                )
+        except ValueError as exc:
+            fail(str(exc), error="agent_configuration")
     path = settings_service.config_path()
     if get_state().json_output:
         typer.echo(

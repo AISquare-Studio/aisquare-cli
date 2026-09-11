@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from aisquare.core import harness
-from aisquare.core.agent_adapters.types import AgentCapabilities, HookSpec
+from aisquare.core.agent_adapters.types import AgentCapabilities, BadEffortError, HookSpec
 
 
 class CodexAdapter:
@@ -26,7 +26,6 @@ class CodexAdapter:
             HookSpec("PostToolUse", "codex", 3),
         ),
         requires_hook_trust=True,
-        structured_exec=True,
         positional_prompt=True,
         first_context_file_only=True,
         sandbox_permissions=True,
@@ -45,6 +44,7 @@ class CodexAdapter:
         from aisquare.core.agent_adapters.native_models import resolve_model
 
         result = resolve_model(self.id, role, env=env, effort=effort)
+        result = result.model_copy(update={"effort": self.reasoning_effort(result.effort) or ""})
         self.model_args(result.model or None, result.effort or None)
         return result
 
@@ -71,11 +71,20 @@ class CodexAdapter:
         return (home / "AGENTS.override.md", home / "AGENTS.md")
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
-        if effort is not None and effort not in {"minimal", "low", "medium", "high", "xhigh"}:
-            raise ValueError(f"Codex does not support reasoning effort {effort!r}")
+        effort = self.reasoning_effort(effort)
         return (["--model", model] if model else []) + (
             ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
         )
+
+    @staticmethod
+    def reasoning_effort(effort: str | None) -> str | None:
+        if effort is None or not effort.strip():
+            return None
+        normalized = effort.strip().lower()
+        normalized = {"max": "xhigh", "ultracode": "xhigh"}.get(normalized, normalized)
+        if normalized not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise BadEffortError(f"Codex does not support reasoning effort {effort!r}")
+        return normalized
 
     def fleet_args(
         self,
@@ -110,9 +119,3 @@ class CodexAdapter:
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
-
-    def resume_args(self, native_id: str) -> list[str]:
-        return ["resume", native_id]
-
-    def exec_args(self, prompt: str, native_id: str | None = None) -> list[str]:
-        return ["exec", *(["resume", native_id] if native_id else []), "--json", prompt]

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from aisquare.core import harness
-from aisquare.core.agent_adapters.types import AgentCapabilities, HookSpec
+from aisquare.core.agent_adapters.types import AgentCapabilities, BadEffortError, HookSpec
 
 
 class ClaudeCodeAdapter:
@@ -25,6 +25,7 @@ class ClaudeCodeAdapter:
         assigns_session_id=True,
         model_proxy=True,
         model_ladders=True,
+        legacy_fleet_args=True,
     )
 
     def resolve_model(
@@ -37,8 +38,8 @@ class ClaudeCodeAdapter:
         refresh: bool,
         effort: str | None,
     ) -> harness.ModelResolution | None:
-        if effort and harness.normalize_effort(effort) is None:
-            raise ValueError(f"Claude Code does not support effort {effort!r}")
+        if effort is not None and harness.normalize_effort(effort) is None:
+            raise BadEffortError(f"Claude Code does not support effort {effort!r}")
         return harness.resolve_model(
             role,
             probe=probe,
@@ -86,15 +87,3 @@ class ClaudeCodeAdapter:
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return [], {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
-
-    def resume_args(self, native_id: str) -> list[str]:
-        return ["--resume", native_id]
-
-    def exec_args(self, prompt: str, native_id: str | None = None) -> list[str]:
-        return [
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            *(self.resume_args(native_id) if native_id else []),
-        ]

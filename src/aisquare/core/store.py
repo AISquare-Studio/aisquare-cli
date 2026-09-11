@@ -664,6 +664,9 @@ class ContextStore(Protocol):
     def set_meta(self, key: str, value: str) -> None: ...
     def set_meta_once(self, key: str, value: str) -> bool: ...
     def compare_meta(self, key: str, expected: str, value: str) -> bool: ...
+    def delete_meta(self, key: str, *, expected: str | None = None) -> bool: ...
+    def clear_native_launch(self, launch_id: str) -> int: ...
+    def expire_native_launches(self, before: float) -> int: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
     def add_signal_event(
         self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
@@ -1136,6 +1139,7 @@ class SqliteStore:
         ]
         removed: dict[str, int] = {}
         with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+            removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             for table in (
                 "entry",
                 "prompt",
@@ -1149,7 +1153,6 @@ class SqliteStore:
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
                 )
                 removed[table] = cursor.rowcount
-            removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             cursor = self._conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
             removed["project"] = cursor.rowcount
         if removed["project"] != 1:
@@ -1160,7 +1163,7 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (two terms per session): one statement
+        :data:`_META_BATCH` sessions each (six terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
@@ -1171,6 +1174,18 @@ class SqliteStore:
                 f"signal/{_glob_prefix(project_id)[:-1]}/*",
             ),
         ).rowcount
+        removed += self._conn.execute(
+            "DELETE FROM team_meta WHERE key IN "
+            "(SELECT 'fleet-pending:' || id FROM fleet_agent WHERE project_id = ?)",
+            (project_id,),
+        ).rowcount
+        for key, raw in self.list_meta("native-launch:").items():
+            try:
+                marker = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(marker, dict) and marker.get("project_id") == project_id:
+                removed += self._clear_native_launch(key.removeprefix("native-launch:"))
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
             keys = [
@@ -1192,6 +1207,16 @@ class SqliteStore:
             ).rowcount
             # Binding values carry the canonical session ID; never match an
             # unrelated metadata value just because it contains the same text.
+            launches = self._conn.execute(
+                "SELECT key FROM team_meta WHERE key GLOB 'launch-session:*' AND value IN ("
+                + ",".join("?" for _ in batch)
+                + ")",
+                batch,
+            ).fetchall()
+            for launch in launches:
+                removed += self._clear_native_launch(
+                    str(launch["key"]).removeprefix("launch-session:")
+                )
             removed += self._conn.execute(
                 "DELETE FROM team_meta WHERE (key GLOB 'launch-session:*' "
                 "OR key GLOB 'fleet-session:*' OR key GLOB 'session-alias:*') AND value IN ("
@@ -1900,6 +1925,54 @@ class SqliteStore:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    def delete_meta(self, key: str, *, expected: str | None = None) -> bool:
+        clause = " AND value = ?" if expected is not None else ""
+        args = (key, expected) if expected is not None else (key,)
+        cursor = self._conn.execute("DELETE FROM team_meta WHERE key = ?" + clause, args)
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def _clear_native_launch(self, launch_id: str) -> int:
+        return self._conn.execute(
+            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            (
+                f"native-launch:{launch_id}",
+                _glob_prefix(f"native-event:{launch_id}:"),
+                _glob_prefix(f"native-provider:{launch_id}:"),
+            ),
+        ).rowcount
+
+    def clear_native_launch(self, launch_id: str) -> int:
+        """Drop transient native dedup/provider facts when their receiver exits."""
+        with self._conn:
+            return self._clear_native_launch(launch_id)
+
+    def expire_native_launches(self, before: float) -> int:
+        """Reap crashed receivers and metadata from releases without lifecycle markers."""
+        removed = 0
+        with self._conn:
+            for key, raw in self.list_meta("native-launch:").items():
+                try:
+                    marker = json.loads(raw)
+                    seen = marker.get("seen_at") if isinstance(marker, dict) else None
+                except ValueError:
+                    seen = None
+                if not isinstance(seen, (int, float)) or seen < before:
+                    removed += self._clear_native_launch(key.removeprefix("native-launch:"))
+            # Old versions had no marker, timestamp or owner to retain. These
+            # are only retry caches; queued insight records remain in outbox.
+            removed += self._conn.execute(
+                "DELETE FROM team_meta WHERE "
+                "(key GLOB 'native-event:*' OR key GLOB 'native-provider:*') "
+                "AND NOT EXISTS (SELECT 1 FROM team_meta AS marker WHERE marker.key = "
+                "'native-launch:' || substr(substr(team_meta.key, instr(team_meta.key, ':') + 1), "
+                "1, instr(substr(team_meta.key, instr(team_meta.key, ':') + 1), ':') - 1))"
+            ).rowcount
+            removed += self._conn.execute(
+                "DELETE FROM team_meta WHERE key GLOB 'fleet-pending:*'"
+            ).rowcount
+        return removed
 
     @_session_write
     def add_signal_event(

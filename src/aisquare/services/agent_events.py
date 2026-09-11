@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from aisquare.core import agents
 from aisquare.core.store import store_session
@@ -69,17 +69,60 @@ def handle_codex(payload: dict[str, Any], config_dir: Path) -> str | None:
         )
         cacheable = bool(turn) and event in {"UserPromptSubmit", "Stop"}
         if cacheable:
-            pending = json.dumps({"pending_at": time.time()})
+            pending = json.dumps(
+                {"pending_at": time.time(), "monotonic_at": time.monotonic(), "owner": uuid4().hex}
+            )
             claimed = store.set_meta_once(cached_key, pending)
             cached = store.get_meta(cached_key)
+            # A failed owner may have released the row between our INSERT
+            # and SELECT. We still need a claim before dispatching.
+            if not claimed and cached is None and not store.set_meta_once(cached_key, pending):
+                return None
             if not claimed and cached is not None:
-                value = json.loads(cached)
+                try:
+                    value = json.loads(cached)
+                except ValueError:
+                    value = None
                 if isinstance(value, str):
                     return value or None
-                if time.time() - value.get("pending_at", 0) < 180:
+                if _pending_fresh(value):
                     return None
                 if not store.compare_meta(cached_key, cached, pending):
                     return None
+    try:
+        output = _dispatch_codex(payload, config_dir, native, event, session_id, cwd, model)
+    except Exception:
+        if cacheable:
+            with store_session() as store:
+                store.delete_meta(cached_key, expected=pending)
+        raise
+    if cacheable:
+        with store_session() as store:
+            store.compare_meta(cached_key, pending, json.dumps(output or ""))
+    return output
+
+
+def _pending_fresh(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    monotonic = value.get("monotonic_at")
+    stamp = monotonic if monotonic is not None else value.get("pending_at")
+    if not isinstance(stamp, (int, float)):
+        return False
+    age = (time.monotonic() if monotonic is not None else time.time()) - stamp
+    # Negative ages indicate a reboot or a legacy wall-clock step backwards.
+    return 0 <= age < 180
+
+
+def _dispatch_codex(
+    payload: dict[str, Any],
+    config_dir: Path,
+    native: str,
+    event: str,
+    session_id: str,
+    cwd: Path | None,
+    model: str | None,
+) -> str | None:
     common = {"agent": "codex", "native_session_id": native, "account": str(config_dir)}
     output: str | None = None
     if event == "SessionStart":
@@ -138,9 +181,6 @@ def handle_codex(payload: dict[str, Any], config_dir: Path) -> str | None:
             if session:
                 store.touch_session(session_id, state="working")
                 store.renew_leases(session_id, harness_lease())
-    if cacheable:
-        with store_session() as store:
-            store.set_meta(cached_key, json.dumps(output or ""))
     return output
 
 

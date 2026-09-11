@@ -22,11 +22,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from aisquare.core import insights, outbox, selfcli, spawn
+from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
 from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+NATIVE_METADATA_TTL = 24 * 60 * 60
+_config_stamp: tuple[object, ...] | None = None
 
 
 class NativeConfigError(ValueError):
@@ -149,13 +151,17 @@ _FIELDS = frozenset(
 def _attributes(items: list[dict[str, Any]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for item in items:
+        if not isinstance(item, dict):
+            continue
         key = item.get("key")
         value = item.get("value", {})
-        if key not in _FIELDS or not isinstance(value, dict):
+        if not isinstance(key, str) or key not in _FIELDS or not isinstance(value, dict):
             continue
         for scalar in ("stringValue", "intValue", "doubleValue", "boolValue"):
             if scalar in value:
-                result[key] = value[scalar]
+                raw = value[scalar]
+                if isinstance(raw, (str, int, float, bool)):
+                    result[key] = insights.token_count(raw) if "token" in key else raw
                 break
     return result
 
@@ -183,14 +189,45 @@ def events(payload: dict[str, Any]) -> Iterator[dict[str, object]]:
                 yield record
 
 
+def _refresh_settings() -> None:
+    global _config_stamp
+    path = paths.config_path()
+    try:
+        info = path.stat()
+        stamp: tuple[object, ...] = (
+            path,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_size,
+            info.st_ino,
+        )
+    except OSError:
+        stamp = (path, None)
+    if stamp != _config_stamp:
+        insights.reset_cache()
+        _config_stamp = stamp
+
+
 def capture(payload: dict[str, Any], launch_id: str) -> int:
-    insights.reset_cache()
+    _refresh_settings()
     if not insights.shipping_enabled() or not insights.settings().enabled:
         return 0
     count = 0
     with store_session() as store:
         session_id = store.get_meta(f"launch-session:{launch_id}")
         session = store.get_session(session_id) if session_id else None
+        marker_key = f"native-launch:{launch_id}"
+        try:
+            marker = json.loads(store.get_meta(marker_key) or "{}")
+        except ValueError:
+            marker = {}
+        project_id = (
+            session.project_id
+            if session
+            else (marker.get("project_id") if isinstance(marker, dict) else None)
+        )
+        project_id = project_id or orchestrator.team_project().id
+        store.set_meta(marker_key, json.dumps({"seen_at": time.time(), "project_id": project_id}))
         observations = list(events(payload))
         for native in observations:
             if native.get("provider_name") and native.get("conversation.id"):
@@ -224,7 +261,7 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
                 "at": datetime.now(UTC).isoformat(),
                 "run_key": launch_id,
                 "session_id": session_id,
-                "project_id": session.project_id if session else None,
+                "project_id": project_id,
                 "text": "",
                 "native": clean,
             }
@@ -271,16 +308,25 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
         staging.write_text(json.dumps({"port": server.server_port, "token": token}))
         os.chmod(staging, 0o600)
         staging.replace(ready)
+        last_pruned = 0.0
         try:
             while True:
+                if time.monotonic() - last_pruned >= 60:
+                    with store_session() as store:
+                        store.expire_native_launches(time.time() - NATIVE_METADATA_TTL)
+                    last_pruned = time.monotonic()
                 server.handle_request()
                 try:
                     os.kill(owner_pid, 0)
                 except ProcessLookupError:
                     break
         finally:
-            ready.unlink(missing_ok=True)
-            ready.parent.rmdir()
+            try:
+                with store_session() as store:
+                    store.clear_native_launch(launch_id)
+            finally:
+                ready.unlink(missing_ok=True)
+                ready.parent.rmdir()
 
 
 def start(env: dict[str, str]) -> tuple[list[str], str]:

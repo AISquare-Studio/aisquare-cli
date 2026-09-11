@@ -112,10 +112,24 @@ class SettingsView(VerticalScroll):
 
     # --- layout ----------------------------------------------------------------------
 
+    def _read_config(self) -> AppConfig:
+        try:
+            config = load_config()
+            self._config_error = ""
+        except Exception as exc:
+            config = AppConfig()
+            self._config_error = (
+                f"Cannot read {paths.config_path()}: {exc}. Showing defaults; "
+                "repair the file and reload before saving."
+            )
+        self.fleet = config.fleet
+        return config
+
     def compose(self) -> ComposeResult:
         name = self.project.root.name or self.project.id
         yield Static(Text(f"fleet settings — {name}", style="bold"), id="settings-title")
-        config = load_config()
+        config = self._read_config()
+        yield Static(Text(self._config_error), id="settings-config-error")
         with Horizontal(classes="row"):
             yield Label("user coding agent")
             yield Select(
@@ -204,8 +218,8 @@ class SettingsView(VerticalScroll):
     @on(Button.Pressed, "#reload-settings")
     def reload_form(self) -> None:
         """Discard edits: show what the file holds (the roles list can change with it)."""
-        self.fleet = fleet_service.settings()
-        config = load_config()
+        config = self._read_config()
+        self.query_one("#settings-config-error", Static).update(Text(self._config_error))
         self.query_one("#default-agent", Select).set_options(
             _agent_options(config.agents.default or "")
         )

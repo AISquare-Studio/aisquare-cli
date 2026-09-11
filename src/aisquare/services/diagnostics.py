@@ -649,6 +649,13 @@ def _check_claude_code() -> DoctorCheck:
     if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
 
+    unreadable = [site for site in sites if site.error]
+    if unreadable:
+        return _warn(
+            "claude-code",
+            "; ".join(site.error or "" for site in unreadable),
+            "Repair native settings file access/JSON, then rerun aisquare doctor",
+        )
     unhooked = [site for site in sites if not site.hooks_installed]
     wrong_binary = [
         site for site in sites if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT)
@@ -1724,22 +1731,61 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
     from aisquare.services import agent_launch
 
     checks = []
+    selected = None
+    try:
+        selected = agent_launch.resolve(cwd=cwd)
+    except ValueError as exc:
+        fix = (
+            exc.fix
+            if isinstance(exc, agent_launch.UnknownWrapperError)
+            else "aisquare agents use claude-code"
+        )
+        checks.append(_warn("coding-agent", str(exc), fix))
     for adapter in adapters():
         if adapter.id == "claude-code":
             continue  # legacy diagnostic includes detailed timeout/version checks
         info = agent_core.detect(adapter.id)
         sites = {site.config_dir: site for site in agent_core.hook_sites(adapter.id)}
+        configured = selected is not None and selected.adapter.id == adapter.id
+        selected_dirs = set()
+        if configured and selected is not None:
+            selected_dirs.add(agent_core._dir_key(selected.config_dir))
+        if os.environ.get(adapter.home_env, "").strip():
+            ambient = agent_core.ambient_hook_dir(adapter.id)
+            if ambient is not None:
+                selected_dirs.add(agent_core._dir_key(ambient))
+        if configured and selected is not None and selected.config_dir not in sites:
+            sites[selected.config_dir] = agent_core.hook_site_health(
+                adapter.id, selected.config_dir, recorded=False
+            )
+        sites = {
+            path: site
+            for path, site in sites.items()
+            if agent_core._dir_key(path) in selected_dirs
+            or site.recorded
+            or site.hooks_installed
+            or site.binary_state is not None
+        }
         if info is None or (not info.detected and not sites):
             checks.append(_ok(adapter.id, f"{adapter.label} not detected on this machine"))
             continue
-        directories = set(sites)
-        ambient = agent_core.ambient_hook_dir(adapter.id)
-        if ambient:
-            directories.add(ambient)
-        for directory in sorted(directories):
+        if not sites:
+            checks.append(
+                _ok(adapter.id, f"{adapter.label} detected; AISquare integration not selected")
+            )
+        for directory in sorted(sites):
             state, detail = agent_core.integration_readiness(adapter.id, directory)
             site = sites.get(directory)
             fix = f"aisquare agents connect {adapter.id} --config-dir {shlex.quote(str(directory))}"
+            if state == "unreadable" or (site and site.error):
+                checks.append(
+                    _warn(
+                        adapter.id,
+                        detail or (site.error if site else "") or "Cannot read native settings",
+                        "Repair native settings file access/JSON, then rerun aisquare doctor",
+                    )
+                )
+                continue
             if site and site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT):
                 checks.append(_warn(adapter.id, "; ".join(_hook_binary_problems([site])), fix))
                 continue
@@ -1755,10 +1801,16 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                 if state == "unverified":
                     fix = "Open /hooks in Codex to review hooks; then start a session"
                 checks.append(
-                    _warn(adapter.id, f"{adapter.label}: {state} in {directory}. {detail}", fix)
+                    _warn(
+                        adapter.id,
+                        f"{adapter.label}: {state} in {directory}"
+                        + (f". {detail}" if detail else ""),
+                        fix,
+                    )
                 )
     try:
-        selected = agent_launch.resolve(cwd=cwd)
+        if selected is None:
+            return checks
         # Coding agents are optional on a fresh CLI-only install (--no-agent).
         # A user/project/role/binary choice is a dependency we should diagnose;
         # the implicit compatibility default is not an installation request.

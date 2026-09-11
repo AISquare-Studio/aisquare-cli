@@ -694,23 +694,26 @@ def test_an_operator_supplied_inbox_path_is_neither_replaced_nor_created(
     assert not paths.explainability_dir().exists(), "and ours is not created for nothing"
 
 
-def test_a_malformed_gateway_url_keeps_the_launch_fail_open() -> None:
+@pytest.mark.parametrize("bad_url", ["gateway.example", "https://[::1"])
+def test_a_malformed_gateway_url_keeps_the_launch_fail_open(bad_url: str) -> None:
     """Review of #107, round 2: ``gateway.example`` (no scheme) made
     ``urllib.request.Request`` raise ``ValueError`` before the request's own
     exception handler, so tracing stopped the agent from starting instead of
-    falling back to the proxy-keyed Run."""
+    falling back to the proxy-keyed Run. Round 3: ``https://[::1`` makes the
+    PARSER raise ("Invalid IPv6 URL"), so the scheme check itself has to sit
+    inside a handler."""
     from aisquare.services import explainability_ops as ops
 
-    verdict = ops.open_run_root("gateway.example", "k", "aisquare-coder", "sess-1")
+    verdict = ops.open_run_root(bad_url, "k", "aisquare-coder", "sess-1")
     assert verdict.ok is False
-    assert "not a usable URL" in verdict.detail and "gateway.example" in verdict.detail
+    assert "not a usable URL" in verdict.detail and bad_url in verdict.detail
 
     wiring = wire_session(
         _settings(),
         "coder",
         session_id="sess-1",
         api_key="k",
-        gateway_url="gateway.example",
+        gateway_url=bad_url,
         prober=_healthy,
     )
     assert wiring.traced is True, "the proxy lane still traces"

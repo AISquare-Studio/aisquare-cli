@@ -449,7 +449,15 @@ def _request(
     # agent from starting. Review of #107, round 2. Named as what it is
     # rather than "unreachable": the operator's next step is the config, not
     # the network.
-    if urlsplit(url).scheme not in ("http", "https"):
+    # Both spellings of "malformed" are verdicts: a URL with no scheme, and a
+    # URL the parser itself rejects (`https://[::1` — "Invalid IPv6 URL" is
+    # raised by `urlsplit`, so the check has to sit inside a handler too;
+    # review of #107, round 3).
+    try:
+        usable = urlsplit(url).scheme in ("http", "https")
+    except ValueError as exc:
+        return HttpVerdict(ok=False, status=None, detail=f"not a usable URL: {url!r} ({exc})")
+    if not usable:
         return HttpVerdict(
             ok=False,
             status=None,

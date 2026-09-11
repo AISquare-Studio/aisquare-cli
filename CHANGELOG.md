@@ -440,7 +440,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     path is neither replaced nor created.
   - **A mistyped gateway URL stays fail-open** (review round 2). A URL with no
     `http(s)://` scheme made `urllib`'s `Request` constructor raise before the
-    request's own error handling, so tracing stopped the agent from starting;
+    request's own error handling — and one the parser itself rejects
+    (`https://[::1`) raised from `urlsplit` too (review round 3) — so tracing
+    stopped the agent from starting;
     it is now a failed root receipt (`not a usable URL: …`) and the launch falls
     back to the proxy-keyed Run with the reason on the launch line.
   - **What the live check did and did not verify.** Re-measured against

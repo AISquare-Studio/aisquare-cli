@@ -20,8 +20,23 @@ which turns most confusion into a one-line answer.
 | **Proxy** | Model traffic — prompts, responses, tools, tokens, cost | your agent → proxy → gateway |
 | **Client** | Your prompts, board notes, task claims, session events | CLI → local spool → `explainability ship` → gateway |
 
-Both key on the same session id, so a board row, a live process and a dashboard
-Run share one identifier.
+Both key on the same **pipeline id**, so a board row, a live process and a
+dashboard Run share one identifier. Usually that id *is* the session id:
+`aisquare launch` mints one and pins it with `--session-id`. When it cannot —
+`--continue`, a bare `--resume`, or an agent binary that does not take the flag
+— it traces under a fresh id rather than guess, and the board row and the Run no
+longer share a key.
+
+The dashboard's Run id is derived from that pipeline id (SHA-256) **when the
+launcher owns the Run**, which is the default: it posts the Run's root span
+first and hands the proxy a `traceparent` naming it. Then `aisquare launch`
+prints the id — `traced as … (pipeline <session>, run <trace_id>)` — and
+`~/.aisquare/explainability/joins.jsonl` records it as `trace_id`, so a Run can
+be found from its board row without reading anything back. If that root could
+not be posted (no gateway, no key, refused) the proxy keys the Run itself: the
+launch line says so, `trace_id` is recorded as `null` rather than a derived id
+nobody used, and the Run is found by its `agent.run_id` — the pipeline id —
+instead.
 
 **Why a proxy at all?** Claude Code emits no telemetry of its own — the only
 interception point is `ANTHROPIC_BASE_URL`. So something has to sit in the

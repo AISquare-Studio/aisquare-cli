@@ -21,6 +21,7 @@ from aisquare.cli.common import expected_config_write_errors, fail, local_time
 from aisquare.core import harness, orchestrator
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
+from aisquare.core.spawn import IDENTITY_ENV_VARS
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     AmbiguousIdError,
@@ -64,12 +65,34 @@ _SESSION_ID_SUBSTITUTION = (
 #: ``AISQUARE_PIPELINE_ID`` is the discriminator, because nothing but our own
 #: wiring sets it. Present ⇒ the ANTHROPIC_* beside it are ours to clear.
 #: Absent ⇒ they are the operator's real gateway and stay untouched, so the
-#: "not overriding your routing" guard keeps working exactly as before.
+#: "not overriding your routing" guard keeps working exactly as before. It is
+#: also a sound discriminator for the whole set: ``trace_marker`` emits the run
+#: key unconditionally and the other markers only beside it, so there is no
+#: exported marker this guard can fail to see.
+#:
+#: What it clears is :data:`core.spawn.IDENTITY_ENV_VARS` — the same tuple every
+#: stripping seam removes — and NOT a hand-written list. Hand-writing the names
+#: is how ``AISQUARE_RUN_TRACE_ID`` came to be missed: paste 1 exported it,
+#: paste 2's clear-out took the other four, and if paste 2's own root post was
+#: then refused or timed out its ``trace_marker`` emitted no run trace id of its
+#: own — so paste 1's survived, and session 2's SessionStart hook wrote its join
+#: row against session 1's Run. ``disown_inherited_trace`` could not catch that
+#: either: the clear-out had already removed the run key it keys off, so it
+#: returned early.
+#:
+#: One tuple, one place to add a name — and that is now true of every reader of
+#: the identity, not just this one. :data:`core.spawn.MARKER_ENV_VARS` is where
+#: a marker is declared; this prelude, every stripping seam and
+#: ``services.explainability.disown_inherited_trace`` all read the tuple rather
+#: than naming its members. The one place that still names them one by one is
+#: ``trace_marker``, which EMITS rather than removes: each marker is emitted
+#: under its own condition (the run key always, the role when there is one, the
+#: run trace id only when this launch owns the Run), so there is nothing there
+#: to iterate. That asymmetry is the point — a name missing from an emitter
+#: costs a record, a name missing from a remover corrupts the next session's.
 _CLEAR_PREVIOUS_TRACE = (
     f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
-    f"unset {explainability_service.PIPELINE_ID_ENV_VAR} "
-    f"{explainability_service.TRACE_AGENT_NAME_ENV_VAR} "
-    f"{' '.join(explainability_service.RESERVED_ENV_VARS)}; fi"
+    f"unset {' '.join(IDENTITY_ENV_VARS)}; fi"
 )
 
 SessionRef = Annotated[
@@ -425,11 +448,24 @@ def spawn(
         # STARTED on it and its board row joins the Run (the correlation
         # spine). The clear-out leads because what a previous paste exported
         # outlives it — see _CLEAR_PREVIOUS_TRACE for the merge it prevents.
+        #
+        # `--post-root` is what makes the pasted line OWN its Run. A bare
+        # `explainability env` is print-only: it cannot know whether an agent
+        # will ever start on the id it printed, so it posts nothing and a
+        # session seeded from it runs on the fallback — the proxy keys the
+        # Run, the client lane opens its own, two Runs. Here that unknown is
+        # settled by construction: the agent starts on the very next command
+        # in the same shell. So this line, and only this line, opts in, and
+        # the eval posts the root exactly as `--exec` below and `launch` do —
+        # traceparent on the wire, AISQUARE_RUN_TRACE_ID exported. Same
+        # fail-open: a refused root falls back to X-Pipeline-Id, a dead proxy
+        # to untraced, and neither costs the paste.
         if explainability_service.accepts_session_id(binary.binary):
             command = f"{command} {_SESSION_ID_SUBSTITUTION}"
         command = (
             f"{_CLEAR_PREVIOUS_TRACE}; "
-            f'eval "$(aisquare explainability env {shlex.quote(role_name)})"; {command}'
+            f'eval "$(aisquare explainability env {shlex.quote(role_name)} --post-root)"; '
+            f"{command}"
         )
     if get_state().json_output:
         typer.echo(
@@ -510,9 +546,10 @@ def spawn(
             # re-prove.
             try:
                 effective = explainability_ops.effective_settings(tracing)
-                spawn_key = explainability_ops.resolve_target(tracing).api_key
+                spawn_target = explainability_ops.resolve_target(tracing)
+                spawn_key, spawn_gateway = spawn_target.api_key, spawn_target.gateway_url
             except Exception as exc:
-                effective, spawn_key = tracing, None
+                effective, spawn_key, spawn_gateway = tracing, None, None
                 typer.echo(f"explainability: target unreadable ({exc})", err=True)
             wiring = explainability_service.wire_session(
                 effective,
@@ -520,6 +557,7 @@ def spawn(
                 session_id=identity.session_id,
                 base_env=env,
                 api_key=spawn_key,
+                gateway_url=spawn_gateway,
             )
             env.update(wiring.env)
             typer.echo(f"explainability: {wiring.reason}", err=True)

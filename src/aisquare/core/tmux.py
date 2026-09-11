@@ -17,12 +17,13 @@ keys), ``send-keys -l`` (literal text) and ``load-buffer`` + ``paste-buffer -p``
 stripped: the server inherits the environment of whoever starts it and hands it
 to every window, so an inherited tracing identity here would become every
 agent's identity. Each window's agent takes its own through ``aisquare launch``.
-The whole identity goes — ``core.spawn.IDENTITY_ENV_VARS``, headers AND the
-``AISQUARE_PIPELINE_ID``/``AISQUARE_TRACE_AGENT_NAME`` marker: an agent that
-launches untraced (the default) keeps whatever marker it inherited, and that
-marker alone is what ``core.insights.run_key`` and the hook's session→Run join
-file records under. docs/fleet.md's "the tmux server inherits nothing of a
-tracing identity from whoever started it" is that sentence's contract.
+The whole identity goes — ``core.spawn.IDENTITY_ENV_VARS``, the headers AND
+every name in ``core.spawn.MARKER_ENV_VARS`` (read off the tuple, never listed
+here: it has grown once already): an agent that launches untraced (the default)
+keeps whatever marker it inherited, and that marker alone is what
+``core.insights.run_key`` and the hook's session→Run join file records under.
+docs/fleet.md's "the tmux server inherits nothing of a tracing identity from
+whoever started it" is that sentence's contract.
 
 Verified against tmux 3.7c (``tests/test_tmux.py`` re-verifies the live ones):
 

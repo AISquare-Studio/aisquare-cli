@@ -41,9 +41,11 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from aisquare.core.config import (
@@ -63,6 +65,7 @@ from aisquare.services.explainability import (
     probe_proxy,
     running_editable,
     stored_api_key,
+    trace_identity,
 )
 from aisquare.services.explainability import (
     INSTALL_HINT as _EXTRA_INSTALL_HINT,
@@ -104,6 +107,9 @@ GATEWAY_ENV_VAR = "EXPLAINABILITY_GATEWAY_URL"
 #: Gateway-side checks are opt-in, so they may take a beat — but never hang a
 #: terminal. Chosen over the proxy probe's 1.5s because this is a real WAN hop.
 _HTTP_TIMEOUT = 6.0
+#: Posting a Run's root sits on the LAUNCH path, where a human is waiting. The
+#: proxy probe beside it allows 1.5 s; this is a write and gets twice that.
+_ROOT_TIMEOUT = 3.0
 _SDK_DOCTOR_TIMEOUT = 30.0
 
 #: SDK doctor lines that are expected noise for this lane rather than findings:
@@ -438,10 +444,30 @@ def _request(
         headers["Content-Type"] = "application/json"
     if api_key:
         headers["X-API-KEY"] = api_key
-    request = Request(url, data=data, headers=headers)
+    # `Request(url)` itself raises `ValueError("unknown url type")` for a URL
+    # with no scheme (`gateway.example`), and it used to be built OUTSIDE this
+    # try — so a mistyped gateway escaped the fail-open promise and stopped the
+    # agent from starting. Review of #107, round 2. Named as what it is
+    # rather than "unreachable": the operator's next step is the config, not
+    # the network.
+    # Both spellings of "malformed" are verdicts: a URL with no scheme, and a
+    # URL the parser itself rejects (`https://[::1` — "Invalid IPv6 URL" is
+    # raised by `urlsplit`, so the check has to sit inside a handler too;
+    # review of #107, round 3).
     try:
+        usable = urlsplit(url).scheme in ("http", "https")
+    except ValueError as exc:
+        return HttpVerdict(ok=False, status=None, detail=f"not a usable URL: {url!r} ({exc})")
+    if not usable:
+        return HttpVerdict(
+            ok=False,
+            status=None,
+            detail=f"not a usable URL: {url!r} (it needs an http:// or https:// scheme)",
+        )
+    try:
+        request = Request(url, data=data, headers=headers)
         with urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
+            raw = _read_body(response)
             return HttpVerdict(
                 ok=200 <= response.status < 300,
                 status=response.status,
@@ -449,7 +475,10 @@ def _request(
                 payload=_maybe_json(raw),
             )
     except HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        # The error body is read under the same guard as a success body: a 503
+        # whose body is shorter than its Content-Length raises IncompleteRead
+        # from `exc.read()`, which used to escape from inside this very handler.
+        raw = _read_body(exc) if exc.fp else ""
         payload = _maybe_json(raw)
         return HttpVerdict(
             ok=False,
@@ -458,8 +487,37 @@ def _request(
             code=_gateway_code(payload),
             payload=payload,
         )
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
+    except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
+        # `HTTPException` covers what `urllib` raises from `http.client` rather
+        # than wrapping: `InvalidURL` for `:badport` or an unescaped space
+        # (before any network call) and `IncompleteRead` for a truncated body.
+        # Every one of them used to abort a launch with a healthy proxy
+        # (review of #107, round 4); a verdict keeps the fail-open promise.
         return HttpVerdict(ok=False, status=None, detail=f"unreachable: {exc}")
+
+
+def _read_body(response: Any) -> str:
+    """The response body as text, or what arrived of it — never an exception.
+
+    The status line has already been received by the time this runs, so the
+    body is DETAIL, not verdict: a body shorter than its Content-Length raises
+    ``IncompleteRead`` and the bytes that did arrive ride on the exception; a
+    gateway that sends its headers and then stalls or resets raises
+    ``TimeoutError`` / ``ConnectionResetError`` (an ``OSError``) from
+    ``read()``. Inside the ``except HTTPError`` branch there is no sibling
+    handler to catch those, so every transport failure here is turned into an
+    empty body and the caller keeps the status it already has (review of #107,
+    round 5). Measured with a real local server sending 503 headers and
+    withholding the body: the read timed out after the root timeout and
+    escaped ``wire_session``.
+    """
+    try:
+        raw = response.read()
+    except IncompleteRead as exc:
+        raw = exc.partial
+    except (HTTPException, OSError, TimeoutError):
+        raw = b""
+    return bytes(raw).decode("utf-8", "replace")
 
 
 def _maybe_json(raw: str) -> Any:
@@ -565,6 +623,74 @@ def probe_ingest(
                 f"HTTP {verdict.status} — the gateway answered but did not ACCEPT "
                 "the span (ingest acknowledges with 202); check the URL reaches "
                 "the gateway itself rather than a proxy in front of it"
+            ),
+            code=verdict.code,
+            payload=verdict.payload,
+        )
+    return verdict
+
+
+def open_run_root(
+    gateway_url: str,
+    api_key: str,
+    agent_name: str,
+    pipeline_id: str,
+    *,
+    timeout: float = _ROOT_TIMEOUT,
+) -> HttpVerdict:
+    """Post the root span of the Run a launch is about to produce.
+
+    The gateway keys a Run by OTel trace id, so the launcher derives that id
+    from the pipeline id (``trace_identity``) and sends the root FIRST: the
+    proxy's model spans arrive as children of ``span_id`` (the ``traceparent``
+    the launcher hands it names exactly this span), and the client lane's
+    spans join the same trace later. Sent before the agent starts so the trace
+    is routed — ``agent.name`` on this span is what routes it — by the time
+    the first child batch lands; a child-only batch with no route is held as
+    ``awaiting_trace_route`` and only clears once a root exists.
+
+    Shaped like ``AgentRunTracer``'s root, with ``agent.run_id`` = the pipeline
+    id so ``by-agent-run-id`` lookups keep working. Same 202 rule as
+    ``probe_ingest``: a 200 is an answer from something in front of the gateway.
+    """
+    identity = trace_identity(pipeline_id)
+    now_ns = time.time_ns()
+    batch = {
+        "trace_id": identity.trace_id,
+        "spans": [
+            {
+                "trace_id": identity.trace_id,
+                "span_id": identity.span_id,
+                "parent_span_id": None,
+                "name": f"AgentRun:{agent_name}",
+                "kind": "INTERNAL",
+                "start_time": now_ns,
+                "end_time": now_ns,
+                "duration_ms": 0.0,
+                "attributes": {
+                    "openinference.span.kind": "AGENT",
+                    "agent.name": agent_name,
+                    "agent.run_id": pipeline_id,
+                    "agent.source": "aisquare-cli:launch",
+                    "service.name": "aisquare-cli",
+                    "input.value": f"aisquare-cli session {pipeline_id}",
+                },
+            }
+        ],
+    }
+    verdict = _request(
+        f"{gateway_url.rstrip('/')}/v1/traces/ingest",
+        api_key=api_key,
+        body=batch,
+        timeout=timeout,
+    )
+    if verdict.ok and verdict.status != 202:
+        return HttpVerdict(
+            ok=False,
+            status=verdict.status,
+            detail=(
+                f"HTTP {verdict.status} — the gateway answered but did not ACCEPT "
+                "the root span (ingest acknowledges with 202)"
             ),
             code=verdict.code,
             payload=verdict.payload,

@@ -72,7 +72,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from aisquare.core import insights, outbox, paths, spawn
+from aisquare.core import harness, insights, outbox, paths, spawn
 from aisquare.core.config import ExplainabilitySettings, load_config, save_config
 from aisquare.core.store import store_session
 
@@ -109,12 +109,15 @@ _SAFE_ROLE = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROBE_TIMEOUT_SECONDS = 1.5
 
 #: The ONE program verified to accept ``--session-id <uuid>`` (Claude Code
-#: 2.1.233). Matched on the basename, so an absolute path counts and nothing
-#: else does — not ``claude2``, not a wrapper merely NAMED after claude. Since
-#: #57 a role can be bound to any executable, and an unknown flag kills the
-#: launch; every other binary joins through the hook seam instead, which needs
-#: no flag at all, so the narrow match costs nothing but a nicety.
-_SESSION_ID_AGENT = "claude"
+#: 2.1.233) — the name, for the note a refused pin prints. WHETHER a binary is
+#: that program is ``harness.is_default_agent``, the single predicate this and
+#: the role's own ``default_args`` now share: the two gates ran 55 lines apart
+#: in the same launch, each with its own ``"claude"`` literal, and each missed
+#: ``claude.cmd`` and a binding typed with a trailing slash. Since #57 a role
+#: can be bound to any executable, and an unknown flag kills the launch; every
+#: other binary joins through the hook seam instead, which needs no flag at
+#: all, so the narrow match costs nothing but a nicety.
+_SESSION_ID_AGENT = harness.DEFAULT_AGENT_BINARY
 
 #: Flags whose presence means the caller (or the human) already owns the
 #: session id, so we must read it rather than choose one.
@@ -375,7 +378,7 @@ def accepts_session_id(binary: str) -> bool:
     """Whether ``binary`` is one we may hand ``--session-id`` to."""
     if os.environ.get(_PIN_ENV_VAR, "").strip().lower() in _OFF_VALUES:
         return False
-    return os.path.basename(binary) == _SESSION_ID_AGENT
+    return harness.is_default_agent(binary)
 
 
 def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:

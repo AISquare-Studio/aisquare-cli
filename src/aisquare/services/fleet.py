@@ -57,7 +57,7 @@ from aisquare.models import (
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
-FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
+FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"
@@ -968,9 +968,19 @@ def spawn(
         )
     agent_id = new_agent_id()
     flags: list[str] = []
-    if binary is not None:
-        # `launch` re-resolves the binary inside the window; an explicit --bin
-        # must reach it, or the row would name one agent and the pane run another.
+    if resolution.source != "default":
+        # `launch` re-resolves the binary inside the window — and the window's
+        # environment is the long-lived tmux SERVER's, which never carries
+        # `AISQUARE_BIN_<ROLE>` or `AISQUARE_AGENT_BIN` (`core/tmux.py` spawns
+        # with `untraced_env()` and passes exactly two per-window keys). So
+        # ANYTHING but the default has to be carried explicitly, not just an
+        # explicit `--bin`: with the variable exported in this shell and not in
+        # the server's, the row recorded `claude2` while the pane silently ran
+        # `claude`. Measured on a role whose flags are keyed on the binary
+        # (`harness.role_defaults`), that also decided the flag question against
+        # the wrong executable — a ui-tester launched without `--chrome`, exit 0,
+        # nothing printed. `docs/fleet.md` promises `AISQUARE_BIN_<ROLE>` works
+        # for a fleet launch; this is what makes that true.
         flags += ["--command", resolution.binary]
     if mode:
         flags += ["--permission-mode", mode]

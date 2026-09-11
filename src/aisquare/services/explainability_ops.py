@@ -34,6 +34,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -200,6 +201,50 @@ class ResolvedTarget:
             if name not in names:
                 names.append(name)
         return tuple(names)
+
+
+def unregistered_roles(target: ResolvedTarget) -> tuple[str, ...]:
+    """First-class roles this CLI can launch that ``target``'s roster does not list.
+
+    Read off the RESOLVED roster, never off ``settings.roles``: any
+    ``[explainability.targets.<name>]`` may override the list
+    (``ExplainabilityTarget.roles``), and ``resolve_target`` is where that
+    override wins. Comparing against the top level was silent in exactly the
+    per-target configuration this hint was written for — a target listing two
+    roles while the top level lists eight publishes two identities and reports
+    no gap — and it nagged in the mirror case, handing over ``--role`` flags for
+    identities that are already registered.
+
+    Empty when nothing is missing, so every caller can just test it.
+    """
+    from aisquare.core.harness import ROLE_PROFILES
+
+    return tuple(role for role in ROLE_PROFILES if role not in target.roles)
+
+
+def unregistered_roles_note(roles: Sequence[str], target: ResolvedTarget) -> str:
+    """The one sentence every register surface shows for :func:`unregistered_roles`.
+
+    The suggested command names the TARGET the gap was measured on. Without it,
+    `register --target prod` on a machine whose active target is staging printed
+    a follow-up that registered the missing roles in staging and left prod's
+    roster gap exactly as it was (review of #112, round 2).
+
+    ONE renderer, for the reason ``key_origin`` above is one: a role the CLI can
+    launch but the workspace has never heard of ships spans under an unknown
+    identity and is rejected 409 ``agent_not_registered`` — a backlog until
+    someone registers it — and two phrasings of that fact drift, invisibly,
+    until an operator compares them mid-incident. An upgrade that adds a role to
+    the DEFAULTS does not edit an existing ``config.toml``, which is why the
+    gap exists at all.
+    """
+    listed = ", ".join(roles)
+    flags = " ".join(f"--role {role}" for role in roles)
+    return (
+        f"launchable but not in explainability.roles: {listed} — add them to "
+        "config.toml or run: aisquare explainability register "
+        f"--target {shlex.quote(target.name)} {flags}"
+    )
 
 
 def resolve_target(

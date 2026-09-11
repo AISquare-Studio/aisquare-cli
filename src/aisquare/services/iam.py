@@ -172,8 +172,7 @@ def resolve_api_url(explicit: str | None = None) -> str:
     raw = explicit or os.environ.get(API_URL_ENV_VAR) or load_config().api_url
     url = raw.strip().rstrip("/")
     parsed = urlparse(url)
-    loopback = parsed.scheme == "http" and (parsed.hostname or "") in LOOPBACK_HOSTS
-    if parsed.scheme != "https" and not loopback:
+    if not safe_transport(url) and parsed.hostname:
         raise IamError(
             "api_url_not_https",
             f"Refusing to send credentials over plain http to {url}. "
@@ -302,10 +301,20 @@ def _endpoints_from(document: dict[str, Any], api_url: str) -> Endpoints:
     )
 
 
-def _safe_scheme(url: str) -> bool:
+def safe_transport(url: str) -> bool:
+    """Whether a credential may travel to ``url``: https anywhere, http only to this machine.
+
+    THE rule, in one place. It gates the sign-in that mints the token
+    (``resolve_api_url``, the discovered endpoints) and, through
+    ``ci_client.signed_in_allowed``, whether that token is sent to the CI
+    server - three call sites, one predicate, so they cannot drift.
+    """
     parsed = urlparse(url)
     loopback = parsed.scheme == "http" and (parsed.hostname or "") in LOOPBACK_HOSTS
     return bool(parsed.hostname) and (parsed.scheme == "https" or loopback)
+
+
+_safe_scheme = safe_transport
 
 
 def _same_origin(value: Any, api_url: str) -> str:

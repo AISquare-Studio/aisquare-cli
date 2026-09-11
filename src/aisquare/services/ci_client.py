@@ -131,29 +131,29 @@ SIGNED_IN_WITHHELD_SOURCE = "signed-in token withheld"
 """What ``doctor`` calls the bearer when a signed-in token exists but this build
 refuses to send it — see :func:`signed_in_allowed`."""
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+SIGNED_IN_EXPIRED_SOURCE = "signed-in token expired"
+"""What ``doctor`` calls the bearer when the stored login has lapsed: nothing is
+sent, because a token known to be expired would only be refused."""
 
 
 def signed_in_allowed(base: str) -> bool:
     """Whether the signed-in user's token may be sent to ``base``.
 
-    ``https://`` anywhere; ``http://`` only to this machine. The experiment token
-    keeps its old latitude — it is purpose-minted for the test bed and set on
-    purpose — but the signed-in fallback is a 90-day OAuth access token carrying
-    the user's whole Studio account, and ``endpoint()`` accepts any URL with a
-    scheme. A stale ``experiment.url`` or an ``AISQUARE_CI_URL=http://…`` left in
-    a shell profile would otherwise put that credential on the wire in cleartext.
-    Loopback is exempt because nothing but this machine can read it, and it is
-    how the server is run locally. An empty ``base`` is allowed: with no
-    endpoint nothing is sent, and the missing URL is the line ``doctor`` should
-    lead with.
+    The predicate is :func:`aisquare.services.iam.safe_transport` - https
+    anywhere, http only to this machine - the same one that gates the sign-in
+    which minted the token, so the rule that decides whether a credential goes
+    on the wire in cleartext lives in one place. The experiment token keeps its
+    old latitude: it is purpose-minted for the test bed and set on purpose,
+    while the signed-in fallback is a 90-day OAuth token for the user's whole
+    Studio account and ``endpoint()`` accepts any URL with a scheme. An empty
+    ``base`` is allowed: with no endpoint nothing is sent, and the missing URL
+    is the line ``doctor`` should lead with.
     """
     if not base:
         return True
-    parts = urlsplit(base)
-    if parts.scheme.lower() == "https":
-        return True
-    return (parts.hostname or "").lower() in _LOOPBACK_HOSTS
+    from aisquare.services import iam
+
+    return iam.safe_transport(base)
 
 
 def api_key() -> str:
@@ -191,16 +191,40 @@ def api_key_and_source() -> tuple[str, str]:
     configured = _raw_api_key()
     if configured:
         return (configured if _single_line(configured) else ""), EXPERIMENT_TOKEN_SOURCE
-    token = _signed_in_token()
-    if token:
-        if not signed_in_allowed(endpoint()):
-            return "", SIGNED_IN_WITHHELD_SOURCE
-        return (token if _single_line(token) else ""), SIGNED_IN_SOURCE
-    return "", ""
+    session = _signed_in_session()
+    if session is None or not session.token.strip():
+        return "", ""
+    if _expired(session):
+        return "", SIGNED_IN_EXPIRED_SOURCE
+    if not signed_in_allowed(endpoint()):
+        return "", SIGNED_IN_WITHHELD_SOURCE
+    token = session.token.strip()
+    return (token if _single_line(token) else ""), SIGNED_IN_SOURCE
 
 
 def _signed_in_token() -> str:
     """The signed-in user's access token, or ``""``. Never raises.
+
+    Every fragment of a stored token is still a candidate for
+    :func:`scrub_secret` whether or not precedence would send it, which is why
+    this returns the token even when it has expired or is withheld - the
+    scrubber must cover the loser too.
+    """
+    session = _signed_in_session()
+    return session.token.strip() if session is not None else ""
+
+
+_SESSION_MEMO: dict[str, Any] = {}
+"""One read of the credentials file per process, keyed by the value of
+``AISQUARE_TOKEN`` (which wins over the file and can change between tests).
+``iam.current_session()`` stats and parses ``~/.aisquare/credentials`` on every
+call; a hook asked for the bearer, its source, its problems, the doctor note and
+the scrubber once per recorded detail - six reads of one file per turn. Cleared
+by :func:`reset_cache`, which sign-in and sign-out call."""
+
+
+def _signed_in_session() -> Any:
+    """The signed-in session, memoised per process. Never raises.
 
     Imported inside the function, not at module scope, so "off costs nothing"
     stays true: with ``AISQUARE_CI`` unset nothing here runs at all, and this
@@ -208,13 +232,29 @@ def _signed_in_token() -> str:
     (``tests/test_iam_single_reader.py`` pins ``iam`` as the ONE reader of the
     ``iam_*`` keys, and this is a caller rather than a second reader).
     """
+    env_token = os.environ.get("AISQUARE_TOKEN", "").strip()
+    if _SESSION_MEMO.get("key") == env_token and "session" in _SESSION_MEMO:
+        return _SESSION_MEMO["session"]
     try:
         from aisquare.services import iam
 
         session = iam.current_session()
     except Exception:  # a damaged credentials file must not cost the hook a turn
-        return ""
-    return session.token.strip() if session is not None else ""
+        session = None
+    _SESSION_MEMO.clear()
+    _SESSION_MEMO["key"] = env_token
+    _SESSION_MEMO["session"] = session
+    return session
+
+
+def _expired(session: Any) -> bool:
+    """Whether the stored login has lapsed. An environment token has no expiry."""
+    expires_at = getattr(session, "expires_at", None)
+    if expires_at is None:
+        return False
+    from datetime import UTC, datetime
+
+    return bool(expires_at <= datetime.now(UTC))
 
 
 def api_key_problem() -> str:
@@ -242,7 +282,14 @@ def bearer_problem() -> tuple[str, str]:
         )
     if not configured:
         signed_in = _signed_in_token()
+        session = _signed_in_session()
         base = endpoint()
+        if signed_in and session is not None and _expired(session):
+            when = session.expires_at.date().isoformat() if session.expires_at else "already"
+            return (
+                f"the signed-in session expired ({when}); a lapsed token would only be refused",
+                "Sign in again: aisquare login",
+            )
         if signed_in and not signed_in_allowed(base):
             host = urlsplit(base).hostname or "the server"
             return (
@@ -345,6 +392,7 @@ def reset_cache() -> None:
     same process.
     """
     _settings.cache_clear()
+    _SESSION_MEMO.clear()
 
 
 # --- one HTTP exchange under a wall-clock deadline ----------------------------

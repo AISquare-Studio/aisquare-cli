@@ -78,7 +78,9 @@ def available() -> bool:
     descriptor lists ``mcp_pull``. Consults the descriptor (cached or fetched);
     never raises."""
     try:
-        opened = ci_augment.gate()
+        with store_session() as store:
+            project_id = active_project(store).id
+        opened = ci_augment.gate(project_id)
     except Exception:
         return False
     return opened.open and opened.descriptor is not None and opened.descriptor.mcp_pull is not None
@@ -178,9 +180,11 @@ def forward_recall(
     whose row was written. Everything about *how* it travels lives here.
     """
     trace_id = new_trace_id()
-    opened = ci_augment.gate()
+    # The project first: its binding decides which workspace's run the gate
+    # asks for, the same way the hook path passes `project.id`.
     with store_session() as store:
         project = active_project(store, cwd)
+    opened = ci_augment.gate(project.id)
     if not opened.open or opened.descriptor is None or opened.run_id is None:
         augmentation = ci_augment.Augmentation(
             "agent_request", trace_id, opened.reason, opened.detail, run_id=opened.run_id

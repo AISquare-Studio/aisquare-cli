@@ -456,3 +456,135 @@ def test_sign_out_forgets_the_resolved_identity(
 
     assert not ci_me._cache_path(TOKEN).exists()
     assert not ci_me._refusal_path(TOKEN).exists()
+
+
+# --- review round 2 ----------------------------------------------------------
+
+
+def test_an_expired_login_is_not_sent_and_doctor_says_to_sign_in_again(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """A lapsed 90-day token would only be refused; sending it costs a
+    session-start round trip and then caches the refusal for a minute."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.core import credentials
+    from aisquare.services import iam
+
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, stub.url)
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv(ci_client.RUN_ENV_VAR, raising=False)
+    monkeypatch.delenv("AISQUARE_TOKEN", raising=False)
+    credentials.store(
+        **{
+            iam.KEY_API_URL: "https://api.test",
+            iam.KEY_TOKEN: TOKEN,
+            iam.KEY_EXPIRES_AT: (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        }
+    )
+    ci_client.reset_cache()
+
+    assert ci_client.api_key_and_source() == ("", ci_client.SIGNED_IN_EXPIRED_SOURCE)
+    problem, fix = ci_client.bearer_problem()
+    assert "expired" in problem and "aisquare login" in fix
+    assert "[signed-in token]" in ci_client.scrub_secret(f"x {TOKEN} y"), (
+        "the lapsed token is still scrubbed from details"
+    )
+
+    checks = ci_checks()
+
+    assert checks["ci test bed"].status is CheckStatus.warn
+    assert "expired" in checks["ci test bed"].detail
+    assert checks["ci test bed"].fix and "aisquare login" in checks["ci test bed"].fix
+    assert stub.me_fetches == 0
+
+
+def test_the_credentials_file_is_read_once_per_process(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """Six callers per hook each asked iam to stat and parse the credentials
+    file; the session is memoised, keyed by the environment token."""
+    from aisquare.services import iam
+
+    signed_in(monkeypatch, stub)
+    reads: list[int] = []
+    real = iam.current_session
+
+    def counting(api_url: str | None = None) -> object:
+        reads.append(1)
+        return real(api_url)
+
+    monkeypatch.setattr(iam, "current_session", counting)
+    ci_client.reset_cache()
+
+    for _ in range(3):
+        ci_client.api_key_and_source()
+        ci_client.bearer_problem()
+        ci_client.scrub_secret("nothing here")
+    assert len(reads) == 1
+
+    monkeypatch.setenv("AISQUARE_TOKEN", "aisq_another-token-00000000000000000000000000")
+    ci_client.api_key()
+    assert len(reads) == 2, "a different environment token starts a fresh read"
+
+
+def test_the_transport_rule_has_one_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ci_client defers to iam.safe_transport rather than carrying a third copy
+    of the https-or-loopback rule that also gates the sign-in itself."""
+    from aisquare.services import iam
+
+    calls: list[str] = []
+    real = iam.safe_transport
+
+    def spy(url: str) -> bool:
+        calls.append(url)
+        return real(url)
+
+    monkeypatch.setattr(iam, "safe_transport", spy)
+
+    assert ci_client.signed_in_allowed("https://ci.aisquare.studio") is True
+    assert ci_client.signed_in_allowed("http://ci.internal") is False
+    assert calls == ["https://ci.aisquare.studio", "http://ci.internal"]
+    assert ci_client.signed_in_allowed("") is True
+
+
+def test_bind_and_the_hooks_agree_on_the_project_even_under_a_stale_pin(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path, runner: CliRunner
+) -> None:
+    """A pin left by `project switch` for a project since unregistered must not
+    file the binding under an id no hook reads: both sides resolve through
+    active_project, which honours the pin only while it still resolves."""
+    from aisquare.core.store import store_session
+    from aisquare.core.workspace import active_project
+
+    signed_in(monkeypatch, stub)
+    paths.ensure_home()
+    workspace_core.pin_project("prj_stale_pin_never_registered")
+
+    result = _run(runner, TEAM)
+    assert result.exit_code == 0, _text(result)
+
+    with store_session() as store:
+        hooks_project = active_project(store).id
+    assert load_config().experiment.bindings == {hooks_project: TEAM}
+    assert ci_client.workspace_id(hooks_project) == TEAM
+    assert "ci workspace" in ci_checks() and ci_checks()["ci workspace"].status is CheckStatus.ok
+
+
+def test_the_recall_tool_sees_the_projects_binding(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path, tmp_path: Path
+) -> None:
+    """The MCP recall path used to call gate() with no project, so a bound
+    multi-workspace developer never got the tool registered while the hooks
+    worked - the binding looked correct everywhere doctor looked."""
+    from aisquare.services import ci_recall
+
+    signed_in(monkeypatch, stub)
+    monkeypatch.chdir(tmp_path)
+    assert ci_recall.available() is False, "two workspaces, none bound"
+
+    bind(TEAM)
+
+    assert ci_recall.available() is True
+    assert stub.me_fetches >= 1

@@ -13,8 +13,9 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail
-from aisquare.core import workspace as workspace_core
 from aisquare.core.config import load_config, save_config
+from aisquare.core.store import store_session
+from aisquare.core.workspace import active_project
 from aisquare.services import ci_client, ci_me
 
 app = typer.Typer(
@@ -25,10 +26,16 @@ app = typer.Typer(
 
 
 def _project_id() -> str:
-    """The project this checkout is: the pinned one when `project switch` set one,
-    else the one containing the current directory — the same resolution the hooks
-    use, so what is bound here is what a session reads."""
-    return workspace_core.pinned_project_id() or workspace_core.current_project().id
+    """The project this checkout is, resolved exactly as the hooks resolve it.
+
+    ``active_project``: the pinned project only while it is still registered,
+    else the one containing the current directory. The first draft returned the
+    pin unconditionally, so a stale pin left by ``project switch`` filed the
+    binding under an id no hook would ever read while ``doctor`` - using the
+    same shortcut - confirmed it. One answer to "which project is this".
+    """
+    with store_session() as store:
+        return active_project(store).id
 
 
 @app.command("bind-workspace")

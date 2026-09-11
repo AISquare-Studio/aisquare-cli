@@ -13,6 +13,15 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 2, 2026-09-11.** The MCP recall path now passes the project
+> to the gate (its argument is required, so a caller cannot forget it again);
+> `bind-workspace` and `doctor` resolve the project through `active_project`,
+> exactly as the hooks do, so a stale pin cannot file a binding no hook reads;
+> an expired stored login is withheld with "sign in again" rather than sent;
+> `run_for` returns a reason code that `doctor` switches on instead of matching
+> words; the https-or-loopback rule lives once, in `iam.safe_transport`; and
+> the credentials file is read once per process.
+>
 > **Progress, 2026-09-10.** Everything in this document is built. The client
 > half (C1–C4) landed first; C3's two identity lines and C2a's hidden
 > `aisquare ci bind-workspace` are in as of this revision, and the server half

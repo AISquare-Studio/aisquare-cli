@@ -229,7 +229,7 @@ class Gate:
         return self.reason is ClientReason.none
 
 
-def _resolve_run(base: str, key: str, project_id: str | None) -> tuple[str, str]:
+def _resolve_run(base: str, key: str, project_id: str) -> tuple[str, str]:
     """The run this session delivers against, and why — never raises.
 
     ``AISQUARE_CI_RUN`` (or ``experiment.run``) first and unchanged: the harness,
@@ -249,11 +249,11 @@ def _resolve_run(base: str, key: str, project_id: str | None) -> tuple[str, str]
     answer = ci_me.current(base=base, key=key)
     if answer.me is None:
         return "", f"no AISQUARE_CI_RUN, and GET /v1/me: {answer.detail}"
-    run, detail = ci_me.run_for(answer.me, ci_client.workspace_id(project_id) or None)
-    return (run or ""), detail
+    choice = ci_me.run_for(answer.me, ci_client.workspace_id(project_id) or None)
+    return (choice.run_id or ""), choice.detail
 
 
-def gate(project_id: str | None = None) -> Gate:
+def gate(project_id: str) -> Gate:
     """Master switch → usable URL → run id → descriptor, in that order.
 
     Each refusal is its own baseline or failure reason, so a machine that is
@@ -269,6 +269,11 @@ def gate(project_id: str | None = None) -> Gate:
     descriptor fetch, which is why it is bounded and negatively cached the same
     way — see :mod:`aisquare.services.ci_me`.
     """
+    # `project_id` is REQUIRED: the run comes from the project's own workspace
+    # binding, and a defaulted parameter is how two callers on the MCP recall
+    # path kept passing nothing through a refactor whose whole point was that
+    # the binding is per project (round-2 review). There is no caller that
+    # genuinely wants "no project".
     if not ci_client.enabled():
         return Gate(ClientReason.disabled)
     base = ci_client.endpoint()

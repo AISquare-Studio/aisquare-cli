@@ -30,6 +30,7 @@ def complete_sign_in(
         scope=scope,
         claims=claims,
     )
+    _reset_ci_session_memo()
     _retire(previous, api_url, endpoints, access_token)
     return session
 
@@ -72,6 +73,7 @@ def sign_in_with_token(api_url: str, token: str) -> iam.Session:
     session = iam.store_session(
         api_url=api_url, token=token, expires_in=None, scope="", claims=claims
     )
+    _reset_ci_session_memo()
     _retire(previous, api_url, endpoints, token)
     return session
 
@@ -86,7 +88,19 @@ def sign_out(session: iam.Session) -> bool:
         revoked = False
     _forget_ci_identity(session.token)
     iam.clear_session()
+    _reset_ci_session_memo()
     return revoked
+
+
+def _reset_ci_session_memo() -> None:
+    """The CI transport memoises the signed-in session per process; a sign-in or
+    sign-out in the same process (the fleet UI, a test) must not keep serving it."""
+    try:
+        from aisquare.services import ci_client
+
+        ci_client.reset_cache()
+    except Exception:
+        return
 
 
 def _forget_ci_identity(token: str) -> None:

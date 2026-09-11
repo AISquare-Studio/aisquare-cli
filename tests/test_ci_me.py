@@ -207,26 +207,29 @@ def _doc(**changes: object) -> MeDocument:
 
 
 def test_the_bound_workspaces_run_is_the_one_used() -> None:
-    run, detail = ci_me.run_for(_doc(), "ws_kernel01")
+    choice = ci_me.run_for(_doc(), "ws_kernel01")
 
-    assert run == "run_kernel0001"
-    assert "ws_kernel01" in detail
+    assert choice.run_id == "run_kernel0001"
+    assert choice.reason is ci_me.RunReason.resolved
+    assert "ws_kernel01" in choice.detail
 
 
 def test_a_workspace_with_no_run_is_a_reason_not_a_run() -> None:
-    run, detail = ci_me.run_for(_doc(), "ws_9a8b7c6d5e4f30211203948576abcdef")
+    choice = ci_me.run_for(_doc(), "ws_9a8b7c6d5e4f30211203948576abcdef")
 
-    assert run is None
-    assert "no run published" in detail
+    assert choice.run_id is None
+    assert choice.reason is ci_me.RunReason.no_run
+    assert "no run published" in choice.detail
 
 
 def test_several_workspaces_and_none_bound_refuses_to_guess() -> None:
     """Guessing would bind a project to whichever the server listed first, and
     every row afterwards would name the wrong tenant."""
-    run, detail = ci_me.run_for(_doc(), None)
+    choice = ci_me.run_for(_doc(), None)
 
-    assert run is None
-    assert "none is bound" in detail and "bind-workspace" in detail
+    assert choice.run_id is None
+    assert choice.reason is ci_me.RunReason.unbound
+    assert "none is bound" in choice.detail and "bind-workspace" in choice.detail
 
 
 def test_a_single_workspace_needs_no_binding() -> None:
@@ -234,23 +237,25 @@ def test_a_single_workspace_needs_no_binding() -> None:
     only = fixture("me.v1.valid")
     only["workspaces"] = only["workspaces"][:1]
 
-    run, _ = ci_me.run_for(MeDocument.model_validate(only), None)
+    choice = ci_me.run_for(MeDocument.model_validate(only), None)
 
-    assert run == "run_kernel0001"
+    assert choice.run_id == "run_kernel0001"
 
 
 def test_membership_of_nothing_is_signed_in_with_nowhere_to_ask() -> None:
-    run, detail = ci_me.run_for(_doc(workspaces=[]), None)
+    choice = ci_me.run_for(_doc(workspaces=[]), None)
 
-    assert run is None
-    assert "member of no workspace" in detail
+    assert choice.run_id is None
+    assert choice.reason is ci_me.RunReason.no_workspaces
+    assert "member of no workspace" in choice.detail
 
 
 def test_a_workspace_the_user_is_not_in_says_so() -> None:
-    run, detail = ci_me.run_for(_doc(), "ws_somebody_elses")
+    choice = ci_me.run_for(_doc(), "ws_somebody_elses")
 
-    assert run is None
-    assert "not a member of ws_somebody_elses" in detail
+    assert choice.run_id is None
+    assert choice.reason is ci_me.RunReason.not_a_member
+    assert "not a member of ws_somebody_elses" in choice.detail
 
 
 # --- the gate ----------------------------------------------------------------
@@ -264,7 +269,7 @@ def test_an_exported_run_still_wins_and_costs_no_me_call(
     the harness depend on whoever happened to be logged in."""
     wire(monkeypatch, stub)
 
-    opened = ci_augment.gate()
+    opened = ci_augment.gate(_project())
 
     assert opened.open and opened.run_id == RUN
     assert stub.me_fetches == 0, "GET /v1/me must not be asked when the run is exported"
@@ -293,7 +298,7 @@ def test_no_bearer_means_no_run_and_no_round_trip(
     monkeypatch.delenv(ci_client.RUN_ENV_VAR, raising=False)
     monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
 
-    opened = ci_augment.gate()
+    opened = ci_augment.gate(_project())
 
     assert not opened.open and opened.reason is ClientReason.no_run
     assert "no bearer" in opened.detail
@@ -307,7 +312,7 @@ def test_a_refused_me_is_no_run_with_the_servers_reason(
     monkeypatch.delenv(ci_client.RUN_ENV_VAR, raising=False)
     stub.me_status = 401
 
-    opened = ci_augment.gate()
+    opened = ci_augment.gate(_project())
 
     assert not opened.open and opened.reason is ClientReason.no_run
     assert "token rejected (401)" in opened.detail

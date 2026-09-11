@@ -1111,6 +1111,8 @@ def _bearer_note(source: str) -> str:
     """
     if source == ci_client.EXPERIMENT_TOKEN_SOURCE:
         return f"experiment token from {ci_client.EXPERIMENT_TOKEN_SOURCE}"
+    if source in (ci_client.SIGNED_IN_WITHHELD_SOURCE, ci_client.SIGNED_IN_EXPIRED_SOURCE):
+        return source
     if source == ci_client.SIGNED_IN_SOURCE:
         try:
             from aisquare.services import iam
@@ -1166,24 +1168,46 @@ def _identity_checks(base: str, key: str) -> tuple[list[DoctorCheck], str | None
             f"{count} workspace{plural}",
         )
     ]
-    # The same binding the hooks read: this checkout's (or the pinned project's).
-    project_id = workspace_core.pinned_project_id() or workspace_core.current_project().id
-    bound = ci_client.workspace_id(project_id) or None
-    run, detail = ci_me.run_for(me, bound)
-    member = me.membership(bound)
-    if run and member is not None:
-        lines.append(_ok("ci workspace", f"{member.workspace_id} ({member.role}), run {run}"))
-        return lines, run
-    if "none is bound" in detail:
-        fix = "Bind this project to one: aisquare ci bind-workspace <ws_…> (run it in the checkout)"
-    elif "not a member" in detail:
-        fix = "Bind this project to a workspace you are in: aisquare ci bind-workspace"
-    elif "no run published" in detail:
-        fix = "Ask the controller to publish a run there; until then every prompt records no_run"
-    else:
-        fix = "Join a workspace in AISquare Studio; until then every prompt records no_run"
-    lines.append(_warn("ci workspace", detail, fix))
+    # THE project the hooks would act for - `active_project`, the pinned one
+    # only while it is still registered - so what doctor confirms is what a
+    # session reads. Opening the store needs a home; without one there is no
+    # pin either, and the cwd's project is the whole answer.
+    bound = ci_client.workspace_id(_bound_project_id()) or None
+    choice = ci_me.run_for(me, bound)
+    if choice.run_id and choice.workspace is not None:
+        lines.append(
+            _ok(
+                "ci workspace",
+                f"{choice.workspace.workspace_id} ({choice.workspace.role}), run {choice.run_id}",
+            )
+        )
+        return lines, choice.run_id
+    # The fix follows the branch run_for took, never words in its detail -
+    # the rule bearer_problem states, applied to the other half of the feature.
+    fixes = {
+        ci_me.RunReason.unbound: (
+            "Bind this project to one: aisquare ci bind-workspace <ws_…> (run it in the checkout)"
+        ),
+        ci_me.RunReason.not_a_member: (
+            "Bind this project to a workspace you are in: aisquare ci bind-workspace"
+        ),
+        ci_me.RunReason.no_run: (
+            "Ask the controller to publish a run there; until then every prompt records no_run"
+        ),
+        ci_me.RunReason.no_workspaces: (
+            "Join a workspace in AISquare Studio; until then every prompt records no_run"
+        ),
+    }
+    lines.append(_warn("ci workspace", choice.detail, fixes[choice.reason]))
     return lines, None
+
+
+def _bound_project_id() -> str:
+    """The project whose binding the hooks read, resolved the way the hooks resolve it."""
+    if not paths.aisquare_home().exists():
+        return workspace_core.current_project().id
+    with store_session() as store:
+        return active_project(store).id
 
 
 def _signed_in_as(auth_subject: str) -> str:

@@ -44,6 +44,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -159,27 +160,58 @@ def parse_me(body: str) -> tuple[MeDocument | None, str]:
         return None, f"me: {first_error(exc)}"
 
 
-def run_for(me: MeDocument, workspace_id: str | None) -> tuple[str | None, str]:
+class RunReason(StrEnum):
+    """Why :func:`run_for` chose what it chose - a code, so a caller that picks
+    a fix (``doctor``) switches on the branch that was taken rather than on
+    words in the detail, which a later edit could reword."""
+
+    resolved = "resolved"
+    no_workspaces = "no_workspaces"
+    not_a_member = "not_a_member"
+    unbound = "unbound"
+    no_run = "no_run"
+
+
+@dataclass(frozen=True)
+class RunChoice:
+    """The run this client should use (or none), the branch that decided, and why."""
+
+    run_id: str | None
+    reason: RunReason
+    detail: str
+    workspace: WorkspaceMembership | None = None
+
+
+def run_for(me: MeDocument, workspace_id: str | None) -> RunChoice:
     """The run this client should use, and why — never raises.
 
-    Returns ``(run_id, detail)``. ``run_id`` is ``None`` whenever the developer
-    has nowhere to ask, which is a normal state and not a failure: a token can
-    be perfectly good while no run is published for them yet.
+    ``run_id`` is ``None`` whenever the developer has nowhere to ask, which is
+    a normal state and not a failure: a token can be perfectly good while no
+    run is published for them yet.
     """
     if not me.workspaces:
-        return None, "signed in, but a member of no workspace"
+        return RunChoice(None, RunReason.no_workspaces, "signed in, but a member of no workspace")
     member = me.membership(workspace_id)
     if member is None:
         if workspace_id:
-            return None, f"not a member of {workspace_id}"
+            return RunChoice(None, RunReason.not_a_member, f"not a member of {workspace_id}")
         listed = ", ".join(m.workspace_id for m in me.workspaces)
-        return None, (
+        return RunChoice(
+            None,
+            RunReason.unbound,
             f"a member of {len(me.workspaces)} workspaces ({listed}) and none is bound — "
-            "run aisquare ci bind-workspace in this checkout"
+            "run aisquare ci bind-workspace in this checkout",
         )
     if member.active_run_id is None:
-        return None, f"no run published in {member.workspace_id}"
-    return member.active_run_id, f"run {member.active_run_id} from {member.workspace_id}"
+        return RunChoice(
+            None, RunReason.no_run, f"no run published in {member.workspace_id}", member
+        )
+    return RunChoice(
+        member.active_run_id,
+        RunReason.resolved,
+        f"run {member.active_run_id} from {member.workspace_id}",
+        member,
+    )
 
 
 def _status_detail(status: int | None) -> str:
@@ -298,6 +330,8 @@ __all__ = [
     "MAX_ME_BYTES",
     "ME_PATH",
     "MeResult",
+    "RunChoice",
+    "RunReason",
     "WorkspaceMembership",
     "current",
     "fetch",

@@ -111,6 +111,7 @@ class ExplainabilitySettings(BaseModel):
             "tester",
             "reviewer",
             "validator",
+            "ui-tester",
         ]
     )
     targets: dict[str, ExplainabilityTarget] = Field(default_factory=dict)
@@ -220,13 +221,19 @@ class FleetRoleSettings(BaseModel):
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
-    """The five fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6)."""
+    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6).
+
+    ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
+    default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
+    inside the window, so it applies to a hand-started ui-tester too.
+    """
     return {
         "manager": FleetRoleSettings(),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
         "reviewer": FleetRoleSettings(worktree=True, extra_args=["--restricted"]),
         "validator": FleetRoleSettings(),
+        "ui-tester": FleetRoleSettings(),
     }
 
 

@@ -129,11 +129,11 @@ That's the whole setup. From inside the UI:
    session fills the pane. **Type your goal in prose**, exactly as you would to
    any supported terminal agent session.
 3. **Watch the agents appear** under the project, each with a role icon
-   (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a live
+   (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a live
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU**, **💤 exited**.
    Click one to see and drive its session.
-4. **Press `F12`** to hand focus back to the sidebar — it's the one key a pane
-   never swallows. There, `t` picks a theme and `q` quits. **The agents keep
+4. **Press `F12`** to hand focus back to the sidebar — the pane swallows only it
+   and the scroll keys (shift/alt+PgUp/PgDn, shift+Home/End). There, `t` picks a theme and `q` quits. **The agents keep
    running**; reopen `asq` and it re-attaches to what it finds.
 
 The manager never writes code and never merges — a human does that.
@@ -309,7 +309,8 @@ Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:
 
 - **planner** — turns your intent into contract-carrying tasks on the shared
-  board (objective, why, acceptance criteria, boundaries)
+  board (objective, why, acceptance criteria, boundaries); told to "fix"
+  something, it writes the tasks for it rather than editing code itself
 - **coder** — loops `task next --claim` → work → `task review`; blocks
   instead of guessing when a task has no usable contract
 - **runner** — the adversarial verifier: runs the full check the acceptance
@@ -318,6 +319,13 @@ automatically — no standing prompts to paste:
   back to whichever coder picks the task up next
 - **validator** — gates the assembled deliverable once, before handoff
   (final accountability review, severity-ordered findings)
+- **ui-tester** — verifies anything a user sees in a real browser (Claude in
+  Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever the window
+  has) and measures instead of eyeballing; names the branch and URL it
+  verified, and reopens rather than passes a UI task it could not open in a
+  browser. Launched with `--chrome` by the role itself, so the tool is not one
+  operator's alias. Its briefing ASKS it to be read-only; nothing in this
+  checkout enforces that (no allowed-tools list is passed)
 
 ### The model harness: each role on the right model
 
@@ -691,7 +699,7 @@ aisquare
 ├── board [-w] [-i SECONDS] · recall <query>
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
-│                   tester, reviewer), a numbered seat (coder1), or any role you
+│                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
@@ -699,7 +707,7 @@ aisquare
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
 │                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
-│                   attach · reap [--all] · rename <codename> · pause · resume
+│                   attach · reap [--all] [--server-down] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
 ├── auth            status [--live] · token

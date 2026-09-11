@@ -634,7 +634,7 @@ def test_a_role_bound_to_a_session_id_is_not_given_a_second_one(
 ) -> None:
     """Session planning has to read the EFFECTIVE argv, not just what was typed.
 
-    `argv` is `[binary, *profile.args, *ctx.args, *pinned_id]`, so a role bound
+    `argv` is `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a role bound
     with `--session-id` via `team bind --arg` carries it without it ever
     appearing in `ctx.args`. Planning on `ctx.args` alone read this launch as
     fresh and appended a SECOND `--session-id`, silently overriding the id the

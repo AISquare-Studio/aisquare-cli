@@ -197,6 +197,72 @@ def test_planner_cycle_demands_a_dispatch_contract() -> None:
     assert "reopened twice" in text
 
 
+def test_every_first_class_cycle_ends_with_its_own_lane_rule() -> None:
+    """Measured 2026-09-10: a planner told "get it fixed in the same PR" edited four
+    files and pushed while two coders sat on an empty task list. A briefing that
+    says what a role does loses to a direct instruction for something else unless
+    it names the trigger and the substitute action. Every role now closes with
+    that paragraph, addressed to itself, naming what to do instead."""
+    for role in harness.ROLE_PROFILES:
+        lines = harness.role_cycle(role, "abcd1234")
+        text = " ".join(lines)
+        trigger, _instead = harness._LANE[role]
+        assert f"Stay in your lane ({role}). When you are {trigger}" in text, role
+        assert "Instead:" in text, role
+        assert "if the human insists" in text, role
+        # the paragraph is three lines and reads only the reader's own trigger
+        assert len(lines) - len(harness._role_cycle_core(role, "abcd1234")) == 3, role
+        for other, (other_trigger, _) in harness._LANE.items():
+            if other_trigger != trigger:
+                assert other_trigger not in text, (role, other)
+    # a seat is briefed as its role, lane included
+    assert "Stay in your lane (coder)" in " ".join(harness.role_cycle("coder2", "abcd1234"))
+    # an unknown role has no cycle, so no lane is invented for it
+    assert harness.role_cycle("stenographer", "abcd1234") == []
+    # and a role with a cycle but no lane entry gets no paragraph — never a KeyError,
+    # which the session-start hook would swallow together with the whole team block
+    assert harness._lane_rule("stenographer", "abcd1234", merge_said=False) == []
+
+
+def test_the_lane_rules_substitute_commands_run_as_written() -> None:
+    """Review of #111: the lane paragraph was the only board-writing text in a
+    briefing without `--as <sid>` — the coder's `aisquare task review` even lacked
+    its required task id. Every substitute is now a command that runs and is
+    attributed, pre-filled the way the core cycle pre-fills its own."""
+    for role in harness.ROLE_PROFILES:
+        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        assert "{sid}" not in text, role
+        assert "`aisquare " not in text or "--as abcd1234" in text, role
+    coder = " ".join(harness.role_cycle("coder", "abcd1234"))
+    assert "aisquare task review <id> --as abcd1234" in coder
+    assert 'aisquare note "…" --to planner --as abcd1234' in coder
+    planner = " ".join(harness.role_cycle("planner", "abcd1234"))
+    assert '--detail "<contract>" --as abcd1234' in planner
+    manager = " ".join(harness.role_cycle("manager", "abcd1234"))
+    assert "aisquare fleet spawn coder --task <id> --as abcd1234" in manager
+
+
+def test_no_role_reads_never_merge_twice() -> None:
+    """The manager's and reviewer's cycles already forbid merging; the lane rule
+    adds the prohibition only where the core does not say it, so no briefing
+    repeats the same rule two paragraphs apart."""
+    for role in harness.ROLE_PROFILES:
+        text = " ".join(harness.role_cycle(role, "abcd1234")).lower()
+        assert text.count("never merge") == 1, (role, text.count("never merge"))
+
+
+def test_the_planner_lane_routes_a_fix_to_tasks_and_names_the_hand_off() -> None:
+    text = " ".join(harness.role_cycle("planner", "abcd1234"))
+    assert "aisquare task add" in text
+    assert "check the board" in text, "the human is told how the hand-off completes"
+
+
+def test_the_verifier_lanes_route_a_fix_back_to_the_coder() -> None:
+    for role in ("runner", "tester", "reviewer", "validator", "ui-tester"):
+        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        assert "the coder fixes, not you" in text, role
+
+
 def test_coder_cycle_forbids_guessing() -> None:
     text = " ".join(harness.role_cycle("coder", "abcd1234"))
     assert "don't" in text and "guess" in text
@@ -1023,6 +1089,11 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     The clear-out in front is part of that promise, not decoration: the eval
     EXPORTS what it minted, so it outlives one paste, and a later spawn in the
     same terminal would otherwise inherit the previous session's identity.
+
+    The unset list is the WHOLE identity — ``core.spawn.IDENTITY_ENV_VARS``,
+    the same tuple every stripping seam removes — so pinning it here is pinning
+    what a reader sees, not a second copy of the list. A name added to the tuple
+    lands in the printed command by construction.
     """
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
@@ -1030,11 +1101,73 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["command"].startswith(
-        'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset AISQUARE_PIPELINE_ID '
-        "AISQUARE_TRACE_AGENT_NAME ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS; fi; "
-        'eval "$(aisquare explainability env coder)"; AISQUARE_ROLE=coder '
+        'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset ANTHROPIC_BASE_URL '
+        "ANTHROPIC_CUSTOM_HEADERS AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME "
+        "AISQUARE_RUN_TRACE_ID; fi; "
+        'eval "$(aisquare explainability env coder --post-root)"; AISQUARE_ROLE=coder '
     )
     assert "X-Pipeline-Id" not in payload["command"]
+
+
+def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
+    isolated_home: Path,
+) -> None:
+    """Two pastes, one Run — the half a hand-written unset list kept missing.
+
+    Paste 1 is the printed command, whose eval is ``explainability env coder
+    --post-root`` (pinned below — a bare ``env`` is print-only and could never
+    export the key this scenario turns on): it posts a root and exports
+    ``AISQUARE_RUN_TRACE_ID=T1``; the agent exits, the shell keeps it. Paste 2
+    clears and re-wires, but its own root post is refused or times out, so
+    ``trace_marker`` emits no run trace id of its own and nothing overwrites T1
+    (``test_one_run_per_session`` pins that refused-root fallback for the
+    opt-in: exit 0, ``X-Pipeline-Id``, no run key). Session 2's SessionStart
+    hook then calls ``run_trace_id()`` and writes its join row against session
+    1's Run — and ``disown_inherited_trace`` cannot save it, because the
+    clear-out already removed the run key it keys off, so it returns early.
+
+    So the prelude must leave NO marker behind, whether or not the second wiring
+    owns a trace of its own. The stale env is synthesised rather than produced
+    by a real paste 1: the prelude is the unit under test, and it must clear
+    what ANY earlier paste left, not what one particular run of it left. Run
+    through real ``sh``, which also proves the snippet is valid POSIX shell —
+    reading the string cannot.
+    """
+    import subprocess
+    import sys
+
+    from aisquare.core import spawn
+
+    _tracing_enabled("http://127.0.0.1:9")
+    runner, app = _cli()
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    assert result.exit_code == 0, result.output
+    prelude, _, evaluated = json.loads(result.output)["command"].partition("; eval ")
+    assert prelude.startswith('if [ -n "'), prelude
+    # Paste 1 can only have exported T1 because the composed line opts in.
+    assert evaluated.startswith('"$(aisquare explainability env coder --post-root)"'), evaluated
+
+    # Paste 1's exports, still in the shell. The second wiring owns no trace,
+    # so nothing after the prelude re-exports any of them.
+    stale = dict.fromkeys(spawn.IDENTITY_ENV_VARS, "from-paste-1") | {
+        "AISQUARE_RUN_TRACE_ID": "T1",
+        "PATH": os.environ["PATH"],
+    }
+    probe = "import os,sys; print(' '.join(os.environ.get(n, '<unset>') for n in sys.argv[1:]))"
+    argv = [sys.executable, "-c", probe, *spawn.IDENTITY_ENV_VARS]
+    cleared = subprocess.run(
+        ["sh", "-c", f'{prelude}; exec "$@"', "sh", *argv],
+        env=stale,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert cleared.stdout.split() == ["<unset>"] * len(spawn.IDENTITY_ENV_VARS), cleared.stdout
+
+    # Negative control: without the prelude the probe reports every value, so a
+    # row of "<unset>" is the clear-out's work and not a blind reader.
+    kept = subprocess.run(argv, env=stale, capture_output=True, text=True, check=True)
+    assert "T1" in kept.stdout.split()
 
 
 def test_spawn_printed_command_takes_its_session_id_from_the_shell(
@@ -1066,7 +1199,7 @@ def test_spawn_printed_command_omits_the_flag_an_agent_may_not_speak(
     result = runner.invoke(app, argv)  # type: ignore[arg-type]
     command = json.loads(result.output)["command"]
     assert "--session-id" not in command
-    assert 'eval "$(aisquare explainability env coder)"' in command, "it still traces"
+    assert 'eval "$(aisquare explainability env coder --post-root)"' in command, "it still traces"
 
 
 def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
@@ -1232,14 +1365,14 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     runner, app = _cli()
     printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     command = json.loads(printed.output)["command"]
-    assert 'eval "$(aisquare explainability env coder)"; ' in command
+    assert 'eval "$(aisquare explainability env coder --post-root)"; ' in command
 
     venv_bin = Path(sys.executable).parent
     child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
 
     # Premise: refusal → stderr only, stdout EMPTY, nonzero exit.
     refusal = subprocess.run(
-        [str(venv_bin / "aisquare"), "explainability", "env", "coder"],
+        [str(venv_bin / "aisquare"), "explainability", "env", "coder", "--post-root"],
         capture_output=True,
         text=True,
         timeout=60,

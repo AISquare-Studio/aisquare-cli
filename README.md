@@ -693,7 +693,7 @@ aisquare
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
 │                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
-│                   attach · reap [--all] · rename <codename> · pause · resume
+│                   attach · reap [--all] [--server-down] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
 ├── auth            status [--live] · token

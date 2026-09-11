@@ -1435,7 +1435,7 @@ def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxE
     return window.dead_status if window is not None else None
 
 
-def reap(project: ProjectInfo | None = None) -> ReapReport:
+def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
     """Record dead panes as ended, mark vanished panes lost, remove merged worktrees.
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
@@ -1443,9 +1443,20 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
     still be running. That is decided per SOCKET — each row is asked of the
     server it was started on — so an operator who changed ``[fleet]
     tmux_socket`` does not thereby lose every agent still running on the old one.
+
+    ``server_down`` is the operator's word that a server which does not answer
+    is genuinely gone (a reboot swept ``/tmp``; ``kill-server``). Even then the
+    rows are marked only on a socket tmux ITSELF reports as having no server
+    (:meth:`~aisquare.core.tmux.TmuxServer.server_absent`): a client that exits
+    non-zero for a protocol mismatch, a wedged server or a socket under another
+    ``TMUX_TMPDIR`` is not a dead server, and the agents behind it are alive.
+    Such a socket is then a server with no panes — the view is empty and the
+    ordinary "pane is gone → lost" branch does the rest. A missing tmux binary
+    marks nothing: that is a question that could not be put.
     """
     config = settings()
     report = ReapReport()
+    absent: dict[str, bool] = {}
     with store_session() as store:
         if project is not None:
             projects = [store.get_project(project.id) or project]
@@ -1456,6 +1467,15 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
             if live:
                 tmux_session = session_name(current.codename) if current.codename else None
                 views = _observe_sockets(live, tmux_session, config)
+                if server_down:
+                    for socket, view in views.items():
+                        if view is None:
+                            # Asked once per socket for the whole sweep, so a
+                            # server coming up mid-sweep cannot split the answer.
+                            if socket not in absent:
+                                absent[socket] = server_for(socket, config).server_absent()
+                            if absent[socket]:
+                                views[socket] = {}  # no server: no panes
                 for agent in live:
                     observed = views.get(agent.tmux_socket)
                     if observed is None:

@@ -175,6 +175,8 @@ _WINDOW_FIELDS = (
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
+_ABSENT = re.compile(r"no server running on |error connecting to .*\(No such file or directory\)")
+"""tmux's two ways of saying there is no server behind a socket (see ``server_absent``)."""
 #: Characters tmux reads as target separators; a session named with one can be
 #: created but never addressed by name again (``=a.b`` → "can't find pane: b").
 _UNTARGETABLE = frozenset(".:")
@@ -601,6 +603,34 @@ class TmuxServer:
         except TmuxUnavailable:
             return False
         return completed.returncode == 0
+
+    def server_absent(self) -> bool:
+        """Whether tmux itself says NO SERVER is behind this socket — positive evidence.
+
+        Not the complement of :meth:`answers`. A client exits non-zero for a
+        protocol version mismatch too (the tmux package upgraded in place while
+        the private server keeps running the old binary), and for a wedged
+        server, and for a socket that lives under a different ``TMUX_TMPDIR``
+        than this shell's — in every one of those the agents are alive. Only two
+        answers mean the server is gone, and tmux spells both out on stderr
+        (measured on 3.4): ``no server running on <path>`` (the socket file is
+        there, nothing listens) and ``error connecting to <path> (No such file or
+        directory)`` (the file itself is gone — a reboot swept ``/tmp``). A
+        missing binary is not evidence either way.
+
+        One residual this cannot settle: a shell whose ``TMUX_TMPDIR`` differs
+        from the spawning shell's asks at a path that never had a server, and
+        gets the second message for a fleet that is alive elsewhere. That is why
+        ``fleet reap --server-down`` stays the operator's word — this predicate
+        narrows what the word may act on, it does not replace it.
+        """
+        try:
+            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+        except TmuxUnavailable:
+            return False
+        if completed.returncode == 0:
+            return False
+        return _ABSENT.search(completed.stderr) is not None
 
     def spawn_window(
         self,

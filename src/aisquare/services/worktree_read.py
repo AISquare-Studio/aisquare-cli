@@ -12,11 +12,16 @@ So this module is the public, **read-only** answer, and every part of its shape
 is a consequence of one fact: the tree being read belongs to an agent that is
 probably editing it right now.
 
-**It never takes the index lock.** ``GIT_OPTIONAL_LOCKS=0`` on every call. A
-plain ``git diff`` refreshes the index and takes ``.git/index.lock`` to do it,
-which is a write into a repository somebody else is working in, and it fails
-outright when their own git happens to hold it. Reading must not be able to
-disturb — or be disturbed by — the work it is reading.
+**It asks git not to take the index lock, and git obeys for some commands and
+not others.** ``GIT_OPTIONAL_LOCKS=0`` is set on every call, and measured on git
+2.50 it is honoured by ``status`` and NOT by ``diff``: a ``git diff`` against a
+worktree still stats the files and may rewrite ``.git/index`` with the refreshed
+stat cache. So the honest claim is narrower than "it never writes": the *content*
+of the repository — its objects, refs, branches and working tree — is never
+touched, and the one thing that can change is a cache git maintains for its own
+speed, exactly as any ``git status`` the user runs would. An earlier version of
+this docstring claimed the lock was never taken at all, which was simply not
+true, and a safety claim that is not true is worse than no claim.
 
 **It never mutates.** The commands are ``diff``, ``rev-parse``,
 ``symbolic-ref``, ``worktree list`` and ``merge-base``. There is no ``add``, no
@@ -38,6 +43,7 @@ cannot be read, deserves an answer rather than a traceback.
 from __future__ import annotations
 
 import subprocess
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -54,6 +60,40 @@ MAX_FILES: Final = 2_000
 """Rows in one answer. A refactor that touched more is a count, not a list."""
 
 FileStatus = Literal["added", "modified", "deleted", "renamed"]
+
+_SAFE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+-]{0,255}$")
+"""What may be passed to git as a ref.
+
+Narrow on purpose, and the leading character is the whole point: git reads any
+argument beginning with ``-`` as an OPTION, so a ``base`` of
+``--output=/path/to/file`` made ``git diff`` write a file wherever the caller
+named. That was reachable from every caller of :func:`read_diff`, and a browser
+is two hops away from one. A ref cannot begin with ``-`` (git refuses it), so
+refusing it here costs nothing real and closes the channel.
+
+``..`` is excluded separately below: it is legal in a ref pattern but turns one
+argument into a range, which is a different question than the caller asked.
+"""
+
+
+class UnsafeRef(ValueError):
+    """A ref that git would read as an option, or as something other than a ref."""
+
+
+def _checked_ref(ref: str) -> str:
+    """``ref`` if it is unmistakably a ref, else raise.
+
+    Validation rather than escaping: there is no quoting to get right when the
+    argument list never reaches a shell, and the only real hazard is argv
+    position. A name that passes this cannot be an option and cannot be a range.
+    """
+    text = str(ref)
+    if not _SAFE_REF.match(text) or ".." in text:
+        raise UnsafeRef(
+            "a base must be a plain ref name (letters, digits, . _ / @ + -), "
+            "may not begin with '-', and may not contain '..'"
+        )
+    return text
 
 _STATUS: Final[dict[str, FileStatus]] = {
     "A": "added",
@@ -94,6 +134,22 @@ class WorktreeDiff:
     """True when ``patch`` was dropped or ``files`` was capped."""
     untracked: int = 0
     """Files git can see but is not tracking. Counted, never diffed — see above."""
+
+
+def _new_path(raw: str) -> str:
+    """The path a rename ENDED at, from numstat's two spellings of one.
+
+    ``old => new`` for a plain rename and ``dir/{old => new}`` when a prefix is
+    shared. A reader wants the file it can open now, and the status column is
+    what says a rename happened.
+    """
+    if "=>" not in raw:
+        return raw
+    if "{" in raw and "}" in raw:
+        head, _, rest = raw.partition("{")
+        inner, _, tail = rest.partition("}")
+        return f"{head}{inner.split('=>')[-1].strip()}{tail}".replace("//", "/")
+    return raw.split("=>")[-1].strip()
 
 
 def _git(root: Path, *args: str, timeout: float) -> str | None:
@@ -180,7 +236,7 @@ def counts(root: Path, *, base: str | None = None, timeout: float = DEFAULT_TIME
     """
     status = _git(root, "status", "--porcelain", timeout=timeout)
     dirty = len([line for line in (status or "").splitlines() if line.strip()])
-    ref = base or default_branch(root, timeout=timeout)
+    ref = _checked_ref(base) if base else default_branch(root, timeout=timeout)
     counted = _git(root, "rev-list", "--count", f"{ref}..HEAD", timeout=timeout)
     try:
         ahead = int(counted or 0)
@@ -210,7 +266,7 @@ def read_diff(
     if not is_repository(root, timeout=timeout):
         return None
 
-    ref = base or default_branch(root, timeout=timeout)
+    ref = _checked_ref(base) if base else default_branch(root, timeout=timeout)
     # The fork point. When there is no common ancestor — an unrelated history, or
     # a base that does not exist here — fall back to the ref itself rather than
     # answering with nothing: a diff against something is more useful than a
@@ -222,6 +278,10 @@ def read_diff(
     if numstat is None or names is None:
         return None
 
+    # `--name-status` reports a rename as "R100\told\tnew" and `--numstat` as
+    # "a\td\told => new" (or the brace form "sub/{a => b}"). Both are keyed on the
+    # NEW path here, which is the one a reader can open. Getting this wrong made
+    # every rename read as a "modified" file whose path was an arrow.
     status_by_path: dict[str, FileStatus] = {}
     for line in names.splitlines():
         parts = line.split("\t")
@@ -237,7 +297,7 @@ def read_diff(
         parts = line.split("\t")
         if len(parts) < 3:
             continue
-        added, removed, path = parts[0], parts[1], parts[-1].strip()
+        added, removed, path = parts[0], parts[1], _new_path(parts[-1].strip())
         if len(files) >= max_files:
             truncated = True
             break
@@ -275,6 +335,7 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "MAX_FILES",
     "DiffFile",
+    "UnsafeRef",
     "FileStatus",
     "WorktreeDiff",
     "counts",

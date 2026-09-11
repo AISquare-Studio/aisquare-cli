@@ -187,3 +187,50 @@ def test_the_module_names_no_mutating_git_command() -> None:
     body = source.split('"""', 2)[-1]  # past the module docstring
     for forbidden in ('"add"', '"commit"', '"stash"', '"checkout"', '"reset"', '"clean"', '"push"'):
         assert forbidden not in body, f"{forbidden} has no business in a read-only view"
+
+
+def test_a_base_that_git_would_read_as_an_option_is_refused(repo: Path, tmp_path: Path) -> None:
+    """``base`` reaches git's argv, so it must be a ref and nothing else.
+
+    Not theoretical: ``base="--output=/path"`` made ``git diff`` WRITE A FILE at
+    an arbitrary location, and every caller of :func:`read_diff` could reach it.
+    git refuses a ref beginning with ``-`` anyway, so refusing it here costs
+    nothing a real caller wanted.
+    """
+    victim = tmp_path / "written-by-git.txt"
+    with pytest.raises(wr.UnsafeRef):
+        wr.read_diff(repo, base=f"--output={victim}")
+    assert not victim.exists(), "git wrote a file through the base argument"
+
+    for hostile in ("--upload-pack=touch /tmp/x", "-x", "main..HEAD", "--exit-code"):
+        with pytest.raises(wr.UnsafeRef):
+            wr.read_diff(repo, base=hostile)
+
+    # An ordinary ref is unaffected.
+    assert wr.read_diff(repo, base="main") is not None
+
+
+def test_counts_refuses_the_same_hostile_base(repo: Path) -> None:
+    with pytest.raises(wr.UnsafeRef):
+        wr.counts(repo, base="--output=/tmp/nope")
+
+
+def test_a_rename_is_reported_as_a_rename_at_its_new_path(repo: Path) -> None:
+    """git spells a rename two different ways; both mean one file, now here."""
+    git(repo, "checkout", "-qb", "feature")
+    git(repo, "mv", "kept.txt", "renamed.txt")
+    (repo / "sub").mkdir()
+    (repo / "sub" / "alpha.txt").write_text("a\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "rename")
+    git(repo, "mv", "sub/alpha.txt", "sub/beta.txt")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "rename in a subdirectory")
+
+    diff = wr.read_diff(repo, base="main")
+    assert diff is not None
+    paths = {f.path for f in diff.files}
+    assert "renamed.txt" in paths, f"a rename must report the new path, got {paths}"
+    assert not any("=>" in path for path in paths), f"an arrow is not a path: {paths}"
+    renamed = next(f for f in diff.files if f.path == "renamed.txt")
+    assert renamed.status == "renamed"

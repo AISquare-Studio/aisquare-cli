@@ -1,0 +1,159 @@
+{
+  "auth": {
+    "dependency": "require_workspace_access",
+    "header": "X-API-KEY"
+  },
+  "captured_by": "P13",
+  "consumed_by": [
+    "P13",
+    "P15"
+  ],
+  "derived_from": "source-mined evidence recorded in the Office repository's platform fixture inventory (docs/research/platform-fixtures), re-derived here against the adapter",
+  "evidence": "literal",
+  "family": "run-detail",
+  "live_calls_made": 0,
+  "never_admitted": [
+    "root_input",
+    "root_output"
+  ],
+  "purpose": "Redacted response shapes for the deployed Explainability read routes P13 consumes. Shapes and citations only: no values, no identifiers, no prose.",
+  "reachable_with_workspace_key": true,
+  "route": {
+    "method": "GET",
+    "path": "/v1/workspaces/{workspace_id}/runs/{run_id}"
+  },
+  "source": {
+    "file": "gateway/workspace_run_routes.py",
+    "lines": "1032-1046",
+    "repo": "explainability-sdk",
+    "symbol": "get_workspace_run"
+  },
+  "values_are_synthetic": true,
+  "variants": [
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "ok",
+      "retryable": null,
+      "sample": "run-detail",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "poll_after_ms": "null",
+          "run": {
+            "object": {
+              "agent_name": "string",
+              "cost_usd": "number",
+              "duration_ms": "number",
+              "ended_at": "string",
+              "error_count": "integer",
+              "flagged_count": "integer",
+              "graph_available": "boolean",
+              "last_error": "null",
+              "node_count": "integer",
+              "root_input": {
+                "object": {
+                  "text": "string"
+                }
+              },
+              "root_output": {
+                "object": {
+                  "text": "string"
+                }
+              },
+              "root_output_missing_reason": "null",
+              "run_id": "string",
+              "started_at": "string",
+              "status": "string",
+              "summary_counts": {
+                "object": {
+                  "artifacts": "integer",
+                  "events": "integer",
+                  "policies": "integer",
+                  "spans": "integer"
+                }
+              },
+              "token_count": "integer",
+              "updated_at": "string"
+            }
+          },
+          "status": "string",
+          "updated_at": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "still_processing",
+      "note": "A successful read of an unfinished run. poll_after_ms is non-null only while the run is unfinished and is the cleanest pollable signal here.",
+      "retryable": null,
+      "sample": "run-detail-processing",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "poll_after_ms": "integer",
+          "run": {
+            "object": {
+              "agent_name": "string",
+              "cost_usd": "null",
+              "duration_ms": "null",
+              "ended_at": "null",
+              "error_count": "null",
+              "flagged_count": "null",
+              "graph_available": "boolean",
+              "last_error": "null",
+              "node_count": "null",
+              "root_input": "null",
+              "root_output": "null",
+              "root_output_missing_reason": "null",
+              "run_id": "string",
+              "started_at": "string",
+              "status": "string",
+              "summary_counts": "null",
+              "token_count": "null",
+              "updated_at": "string"
+            }
+          },
+          "status": "string",
+          "updated_at": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "detail_contains": "Run {run_id} not found",
+      "error_code": "upstream_error",
+      "evidence": "literal",
+      "meaning": "masked",
+      "name": "not_found_or_masked",
+      "note": "Identical wording for a run that does not exist and a run in another workspace, deliberately, so the response cannot confirm existence. Never convert to 403.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 404
+    },
+    {
+      "detail_contains": "API key is not scoped to this workspace",
+      "error_code": "forbidden",
+      "evidence": "literal",
+      "name": "denied",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "forbidden",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 403
+    }
+  ],
+  "why_never_admitted": "both carry verbatim human and model text; the adapter reads neither, so RunDetail.summary_text is always null from this route"
+}

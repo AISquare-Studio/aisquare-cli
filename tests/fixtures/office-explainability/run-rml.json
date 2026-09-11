@@ -1,0 +1,106 @@
+{
+  "auth": {
+    "dependency": "require_workspace_access",
+    "header": "X-API-KEY"
+  },
+  "captured_by": "P13",
+  "consumed_by": [
+    "P13",
+    "P15"
+  ],
+  "derived_from": "source-mined evidence recorded in the Office repository's platform fixture inventory (docs/research/platform-fixtures), re-derived here against the adapter",
+  "evidence": "literal",
+  "family": "run-rml",
+  "live_calls_made": 0,
+  "never_admitted": [
+    "extractor_model"
+  ],
+  "purpose": "Redacted response shapes for the deployed Explainability read routes P13 consumes. Shapes and citations only: no values, no identifiers, no prose.",
+  "reachable_with_workspace_key": true,
+  "route": {
+    "method": "GET",
+    "path": "/v1/workspaces/{workspace_id}/runs/{run_id}/rml"
+  },
+  "shape_warning": "The handler runs SELECT * on rml_analyses and returns the row verbatim, so the wire shape is the table's current columns and any new one appears without warning. This is the least stable shape in the inventory and the one most needing byte bounds, which P12 applies before decoding.",
+  "source": {
+    "file": "gateway/workspace_run_routes.py",
+    "lines": "1049-1068",
+    "repo": "explainability-sdk",
+    "symbol": "get_workspace_run_rml"
+  },
+  "values_are_synthetic": true,
+  "variants": [
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "ok",
+      "retryable": null,
+      "sample": "run-rml",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "analysis_id": "string",
+          "assumptions": {
+            "array": "string"
+          },
+          "claims": {
+            "array": "string"
+          },
+          "evidence_attribution": {
+            "array": "empty"
+          },
+          "extracted_at": "string",
+          "extraction_confidence": "number",
+          "extractor_model": "string",
+          "inference_chain": {
+            "array": "empty"
+          },
+          "low_confidence": "boolean",
+          "policy_triggers": {
+            "array": "empty"
+          },
+          "rml_version": "string",
+          "run_id": "string",
+          "studio_id": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "adapter_state": "processing",
+      "detail_contains": "Run {run_id} is in workspace {workspace_id} but has no RML analysis yet. Extraction runs asynchronously after ingest; poll this endpoint. This is not a bad run id \u2014 the run resolved.",
+      "error_code": "upstream_error",
+      "evidence": "literal",
+      "meaning": "not_ready",
+      "name": "not_ready_extraction_pending",
+      "note": "The clearest genuinely pollable not-ready: it names async extraction.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 404
+    },
+    {
+      "adapter_state": "not_available",
+      "detail_contains": "Run {run_id} is in workspace {workspace_id} and its RML analysis is gone. The trace was pruned. Polling will not change this. This is not a bad run id \u2014 the run resolved.",
+      "error_code": "upstream_error",
+      "evidence": "literal",
+      "meaning": "gone",
+      "name": "gone",
+      "note": "Terminal. The helper never says 'yet' and says polling will not change this, so a poller stops.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 404
+    }
+  ]
+}

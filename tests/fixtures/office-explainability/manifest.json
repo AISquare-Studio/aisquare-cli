@@ -1,0 +1,12 @@
+{
+  "algorithm": "sha256",
+  "digest": "f421fd02131f35e2c013a94f072b94102bde7ec477a9706625b2c4d1a1f86cda",
+  "file_count": 4,
+  "files": {
+    "run-detail.json": "6270b5467c15a0b80b0613d6ac42a6a2c0f79a5e310ec3997138d5c5e909a936",
+    "run-policies.json": "448306a5d730398ee90b843e9e966ef7b51a23fa75473b9a899b4009207093a1",
+    "run-rml.json": "a17bea8c5385c5938fc5288873a490536bb2c7d23a4066445076b4e016c52b19",
+    "run-story.json": "c64737aadeb03cfa52373f182141c60d1137081eaf5e19a9b893643d6c7e1162"
+  },
+  "live_calls_made": 0
+}

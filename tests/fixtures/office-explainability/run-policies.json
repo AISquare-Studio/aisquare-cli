@@ -1,0 +1,192 @@
+{
+  "auth": {
+    "dependency": "require_workspace_access",
+    "header": "X-API-KEY"
+  },
+  "captured_by": "P13",
+  "consumed_by": [
+    "P13",
+    "P15"
+  ],
+  "derived_from": "source-mined evidence recorded in the Office repository's platform fixture inventory (docs/research/platform-fixtures), re-derived here against the adapter",
+  "evidence": "literal",
+  "family": "run-policies",
+  "live_calls_made": 0,
+  "never_admitted": [
+    "before",
+    "after",
+    "detail",
+    "plain_english"
+  ],
+  "purpose": "Redacted response shapes for the deployed Explainability read routes P13 consumes. Shapes and citations only: no values, no identifiers, no prose.",
+  "reachable_with_workspace_key": true,
+  "route": {
+    "method": "GET",
+    "path": "/v1/workspaces/{workspace_id}/runs/{run_id}/policies"
+  },
+  "shape_warning": "This route declares Dict[str, Any] and has no response model, so unknown keys pass through unfiltered. Decode only admitted fields.",
+  "source": {
+    "file": "gateway/workspace_run_routes.py",
+    "lines": "1071-1090",
+    "repo": "explainability-sdk",
+    "symbol": "get_workspace_run_policies"
+  },
+  "values_are_synthetic": true,
+  "variants": [
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "ok",
+      "note": "gates is the post-hoc audit and enforcements is what the live gate did. Two systems in one body; never merged, never summed.",
+      "retryable": null,
+      "sample": "run-policies",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "adherence_policies_version_id": "string",
+          "aisquare_audit_at": "string",
+          "deductions": {
+            "array": "empty"
+          },
+          "enforcement_summary": {
+            "object": {
+              "blocked": "integer",
+              "decisions": "integer",
+              "improved": "integer",
+              "warned": "integer"
+            }
+          },
+          "enforcements": {
+            "array": {
+              "object": {
+                "action": "string",
+                "after": "string",
+                "before": "string",
+                "degraded": "boolean",
+                "evaluation_mode": "string",
+                "outcome": "string",
+                "span_id": "string",
+                "span_name": "string",
+                "violation_count": "integer"
+              }
+            }
+          },
+          "gates": {
+            "array": {
+              "object": {
+                "action": "string",
+                "category": "string",
+                "degraded_reason": "null|string",
+                "detail": "string",
+                "evaluation_mode": "string",
+                "gate": "string",
+                "lifecycle_state": "string",
+                "name": "string",
+                "outcome": "string",
+                "passed": "boolean",
+                "rule_id": "string",
+                "severity": "string",
+                "span_id": "string",
+                "span_name": "string",
+                "tag": "string",
+                "triggered": "boolean"
+              }
+            }
+          },
+          "is_governed": "boolean",
+          "run_id": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "never_audited",
+      "note": "Empty lists are forced when the stored JSON is null, so is_governed and aisquare_audit_at are what carry 'never graded'.",
+      "retryable": null,
+      "sample": "run-policies-never-audited",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "aisquare_audit_at": "null",
+          "deductions": {
+            "array": "empty"
+          },
+          "enforcement_summary": "null",
+          "enforcements": {
+            "array": "empty"
+          },
+          "gates": {
+            "array": "empty"
+          },
+          "is_governed": "null",
+          "run_id": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "error_code": null,
+      "evidence": "literal",
+      "name": "ungoverned_run",
+      "note": "A positive fact: the agent ran with no rule book bound.",
+      "retryable": null,
+      "sample": "run-policies-ungoverned",
+      "service_status": "ok",
+      "shape": {
+        "object": {
+          "aisquare_audit_at": "string",
+          "deductions": {
+            "array": "empty"
+          },
+          "enforcement_summary": "null",
+          "enforcements": {
+            "array": "empty"
+          },
+          "gates": {
+            "array": "empty"
+          },
+          "is_governed": "boolean",
+          "run_id": "string"
+        }
+      },
+      "status": 200
+    },
+    {
+      "adapter_state": "processing",
+      "detail_contains": "Run {run_id} is in workspace {workspace_id} but has no policy audit yet. The run graph may still be building, or this run was never graded. This is not a bad run id \u2014 the run resolved.",
+      "error_code": "upstream_error",
+      "evidence": "literal",
+      "meaning": "not_ready",
+      "name": "not_ready_or_never_graded",
+      "note": "The message admits two causes, so polling cannot terminate on it alone. The adapter polls on the run's own state and bounds it.",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 404
+    },
+    {
+      "detail_contains": "Run {run_id} not found",
+      "error_code": "upstream_error",
+      "evidence": "literal",
+      "meaning": "masked",
+      "name": "not_found_or_masked",
+      "retryable": false,
+      "sample": "error-detail-string",
+      "service_status": "unavailable",
+      "shape": {
+        "object": {
+          "detail": "string"
+        }
+      },
+      "status": 404
+    }
+  ],
+  "why_never_admitted": "an enforcement's before/after carry the raw model output that was blocked or rewritten"
+}

@@ -42,8 +42,8 @@ cannot be read, deserves an answer rather than a traceback.
 
 from __future__ import annotations
 
-import subprocess
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -229,7 +229,9 @@ def worktree_branches(root: Path, *, timeout: float = DEFAULT_TIMEOUT) -> dict[P
     return out
 
 
-def counts(root: Path, *, base: str | None = None, timeout: float = DEFAULT_TIMEOUT) -> tuple[int, int]:
+def counts(
+    root: Path, *, base: str | None = None, timeout: float = DEFAULT_TIMEOUT
+) -> tuple[int, int]:
     """``(dirty, ahead)`` — files changed against HEAD, commits not on the base.
 
     The two numbers a status line wants without paying for a whole diff.
@@ -335,8 +337,8 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "MAX_FILES",
     "DiffFile",
-    "UnsafeRef",
     "FileStatus",
+    "UnsafeRef",
     "WorktreeDiff",
     "counts",
     "current_branch",

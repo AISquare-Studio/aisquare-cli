@@ -2274,6 +2274,37 @@ def test_shutdown_reconciles_a_late_row_on_an_initially_absent_socket(
     assert report.paused_kept == [project.root.name] and report.paused_cleared == []
 
 
+def test_shutdown_keeps_a_late_row_live_when_tmux_left_path_before_the_final_pass(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 4 (P1): `answers()` returns False for an unavailable
+    BINARY as well as for an absent server, so the round-3 fresh probe read "tmux
+    left PATH after the initial guard" as "no server" and recorded a still-running
+    late agent lost — session ended, claim released, pause cleared."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_spawn_then_lose_tmux(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))
+        tmux.installed = False  # the client vanishes; the server and the pane are still up
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_spawn_then_lose_tmux)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.recorded == [], "an unaskable socket is never proof of a dead pane"
+    assert [row.agent.id for row in report.failed] == [late[0].id]
+    assert "could not be asked" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    tmux.installed = True
+    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
+
+
 def test_shutdown_kills_only_the_fleets_own_sessions(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

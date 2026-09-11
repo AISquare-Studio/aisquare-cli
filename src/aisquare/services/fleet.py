@@ -1893,9 +1893,16 @@ def _record_late_rows(
     # #121, round 3). `None` is "could not be asked", which is never "gone".
     fresh: dict[str, bool | None] = {}
     for socket in _shutdown_sockets(targets, config):
+        srv = server_for(socket, config)
         try:
-            fresh[socket] = _server_answers(server_for(socket, config))
-        except TmuxError:
+            # `answers()` swallows an unavailable BINARY into False — the same
+            # answer as "no server" — so the client is asked for first: tmux
+            # leaving PATH after the initial guard is "cannot ask", never
+            # "gone", and a late agent on that socket must not be recorded
+            # lost on the strength of it (review of #121, round 4).
+            srv.binary()
+            fresh[socket] = _server_answers(srv)
+        except TmuxError:  # TmuxUnavailable included
             fresh[socket] = None
     for _, agents in targets:
         for agent in agents:

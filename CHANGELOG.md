@@ -444,7 +444,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (`https://[::1`) raised from `urlsplit` too (review round 3), and `http.client`'s
     own `InvalidURL` (`:badport`, an unescaped space) and `IncompleteRead` (a body
     shorter than its Content-Length, on a 202 or inside a 503's error body) escaped
-    the handler as well (round 4) — so tracing stopped the agent from starting;
+    the handler as well (round 4), as did a timeout or connection reset while
+    reading a 503's body (round 5) — so tracing stopped the agent from starting;
     it is now a failed root receipt (`not a usable URL: …`) and the launch falls
     back to the proxy-keyed Run with the reason on the launch line.
   - **What the live check did and did not verify.** Re-measured against

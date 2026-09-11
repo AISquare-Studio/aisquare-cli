@@ -497,17 +497,26 @@ def _request(
 
 
 def _read_body(response: Any) -> str:
-    """The response body as text, or what arrived of it.
+    """The response body as text, or what arrived of it — never an exception.
 
-    A body shorter than its Content-Length raises ``IncompleteRead`` from
-    ``read()``; the bytes that did arrive ride on the exception, and a partial
-    body is still a better detail than none. Anything else is left to the
-    caller's handler.
+    The status line has already been received by the time this runs, so the
+    body is DETAIL, not verdict: a body shorter than its Content-Length raises
+    ``IncompleteRead`` and the bytes that did arrive ride on the exception; a
+    gateway that sends its headers and then stalls or resets raises
+    ``TimeoutError`` / ``ConnectionResetError`` (an ``OSError``) from
+    ``read()``. Inside the ``except HTTPError`` branch there is no sibling
+    handler to catch those, so every transport failure here is turned into an
+    empty body and the caller keeps the status it already has (review of #107,
+    round 5). Measured with a real local server sending 503 headers and
+    withholding the body: the read timed out after the root timeout and
+    escaped ``wire_session``.
     """
     try:
         raw = response.read()
     except IncompleteRead as exc:
         raw = exc.partial
+    except (HTTPException, OSError, TimeoutError):
+        raw = b""
     return bytes(raw).decode("utf-8", "replace")
 
 

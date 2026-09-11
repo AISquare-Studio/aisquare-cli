@@ -742,13 +742,16 @@ def test_an_http_client_rejected_url_is_a_failed_receipt(bad_url: str) -> None:
     assert "X-Pipeline-Id: sess-1" in wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
 
 
-def _truncated(status: int, partial: bytes = b'{"acc') -> object:
-    """A stdlib-shaped response whose body is shorter than its Content-Length."""
+def _truncated(
+    status: int, partial: bytes = b'{"acc', failure: BaseException | None = None
+) -> object:
+    """A stdlib-shaped response whose body read fails: shorter than its
+    Content-Length by default, or with the transport ``failure`` given."""
     from http.client import IncompleteRead
 
     class _Body:
         def read(self) -> bytes:
-            raise IncompleteRead(partial, expected=40)
+            raise failure if failure is not None else IncompleteRead(partial, expected=40)
 
     class _Response(_Body):
         def __init__(self) -> None:
@@ -793,6 +796,48 @@ def test_a_truncated_gateway_response_is_a_failed_receipt_not_an_exception(
     verdict = ops.open_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1")
     assert verdict.ok is False and verdict.status == 503
 
+    wiring = wire_session(
+        _settings(),
+        "coder",
+        session_id="sess-1",
+        api_key="k",
+        gateway_url="https://gateway.example",
+        prober=_healthy,
+    )
+    assert wiring.traced is True and wiring.owns_trace is False, "the launch stays fail-open"
+
+
+@pytest.mark.parametrize(
+    "failure", [TimeoutError("timed out"), ConnectionResetError(54, "reset by peer")]
+)
+def test_a_stalled_or_reset_error_body_is_a_failed_receipt_with_its_status(
+    monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    """Review of #107, round 5: a gateway that sends 503 headers and then stalls or
+    resets raises `TimeoutError` / `ConnectionResetError` from `exc.read()` inside
+    the `except HTTPError` branch, where no sibling handler can catch it — and a
+    healthy-proxy launch aborted. Measured with a real local server withholding
+    the body after its headers."""
+    from email.message import Message
+    from urllib.error import HTTPError
+
+    from aisquare.services import explainability_ops as ops
+
+    def _raise_503(request: object, timeout: float) -> object:
+        err = HTTPError("https://gateway.example", 503, "unavailable", Message(), None)
+        err.fp = _truncated(503, failure=failure)  # type: ignore[assignment]
+        raise err
+
+    monkeypatch.setattr(ops, "urlopen", _raise_503)
+    verdict = ops.open_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1")
+    assert verdict.ok is False and verdict.status == 503, "the status already arrived"
+
+    # the same failure on a 202's body: the post was accepted, the body is detail
+    monkeypatch.setattr(ops, "urlopen", lambda request, timeout: _truncated(202, failure=failure))
+    accepted = ops.open_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1")
+    assert accepted.ok is True and accepted.status == 202
+
+    monkeypatch.setattr(ops, "urlopen", _raise_503)
     wiring = wire_session(
         _settings(),
         "coder",

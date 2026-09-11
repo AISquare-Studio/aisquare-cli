@@ -409,6 +409,107 @@ def test_the_topologies_that_cannot_disagree_stay_silent(
     assert "cannot be checked" not in proxy.detail
 
 
+def test_doctor_survives_a_malformed_gateway_url() -> None:
+    """The review's blocker #1: a regression this branch introduced.
+
+    ``proxy_state`` calls ``is_loopback(target.gateway_url)``, and an operator
+    can type ``http://[::1`` into config. The ``ValueError`` propagated
+    ``proxy_state`` -> ``_check_proxy`` -> ``checks`` -> ``run_checks`` and
+    tracebacked out of ``aisquare doctor``, where only the config LOAD was
+    wrapped. ``main`` returns its checks normally for the same input.
+    """
+    settings = _wired("http://[::1", proxy_url=_NO_PROXY)
+    checks = ops.checks(settings, env=_env())  # must not raise
+    assert any(c.name == "explainability proxy" for c in checks)
+
+
+def test_an_unset_gateway_is_not_reported_as_a_misroute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #5. ``resolve_target`` legitimately yields ``gateway_url == ''``.
+
+    An empty string equals no deployment, so the strict comparison called every
+    such machine misrouted -- printing a sentence with a blank where a URL goes,
+    and making ``explainability status`` exit 1. Nothing is misrouted; the CLI
+    simply has no second value to compare against.
+    """
+    monkeypatch.setattr(ops, "probe_proxy", _probes("https://g.example"))
+    settings = ExplainabilitySettings(
+        enabled=True,
+        targets={"stg": ExplainabilityTarget(gateway_url="", proxy_url="https://p.example:9443")},
+    )
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn, "unknown, not wrong"
+    assert "no gateway is configured" in proxy.detail
+    assert " is  " not in proxy.detail, "never a sentence with a blank where a URL goes"
+    assert proxy.fix
+
+
+def test_a_hosted_proxy_on_another_host_is_no_longer_waved_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #6: the failure class this PR exists to close, still open in it.
+
+    A hosted proxy that does not report its gateway fell past the amber branch
+    (which required a LOOPBACK proxy) to the bare green return. "A hosted proxy
+    is addressed at the deployment, so it cannot disagree" was an assumption
+    about the operator's typing -- and ``hosted_proxy_for`` is this module's own
+    statement that the two share a host, so the comparison was available.
+    """
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired("https://g.example", proxy_url="https://WRONG.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.warn
+    assert "cannot be checked" in proxy.detail
+    assert proxy.fix
+
+
+def test_a_hosted_proxy_on_the_gateways_host_stays_green_and_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The negative half of #6: the real hosted topology must not go amber."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(None))
+    settings = _wired("https://g.example", proxy_url="https://g.example:9443")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is CheckStatus.ok
+    assert "cannot be checked" not in proxy.detail
+
+
+def test_the_verdict_cannot_contradict_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review #7. Three independent booleans could express ``problem`` AND
+    ``caution`` together, and only ``_check_proxy`` read the third -- so an
+    amber rendered green on ``status`` and in the fleet tab. One severity
+    cannot be half-read."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes("http://elsewhere.example"))
+    target = ops.resolve_target(_wired("https://g.example", proxy_url="https://p.example:9443"))
+    state = ops.proxy_state(target, on=True)
+
+    assert state.severity is CheckStatus.fail
+    assert state.problem is True, "the old name still answers, for the surfaces that read it"
+    assert isinstance(state.severity, CheckStatus)
+
+
+@pytest.mark.parametrize(
+    ("reported", "severity"),
+    [("http://elsewhere.example", CheckStatus.fail), (None, CheckStatus.warn)],
+    ids=["misroute", "unverifiable"],
+)
+def test_a_non_green_verdict_carries_its_next_command(
+    reported: str | None, severity: CheckStatus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #8, against this module's own rule: a line that is not ok without
+    its next command is half a doctor."""
+    monkeypatch.setattr(ops, "probe_proxy", _probes(reported))
+    settings = _wired("https://g.example", proxy_url="http://127.0.0.1:9090")
+    proxy = next(c for c in ops.checks(settings, env=_env()) if c.name == "explainability proxy")
+
+    assert proxy.status is severity
+    assert proxy.fix, "every non-ok verdict names what to do"
+
+
 def test_a_broken_config_degrades_to_one_warning_rather_than_crashing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

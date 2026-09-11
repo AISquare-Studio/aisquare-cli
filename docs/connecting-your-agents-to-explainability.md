@@ -139,6 +139,23 @@ whichever `target` names, and keys never cross between them.
 
 ---
 
+### The proxy sits beside the gateway
+
+`--proxy-url` is the deployment's **proxy**, not its gateway: same host, port
+**9443**. It is the one value in this runbook nobody can guess, and getting it
+wrong is silent — sessions launch, traffic goes somewhere else, and `doctor`
+used to call that green.
+
+Two ways not to get it wrong:
+
+- **In `asq`** — the Explainability tab's **Setup** form fills it in from the
+  gateway you type. Leave the proxy field blank.
+- **On the command line** — pass it explicitly, as the examples above do.
+
+Self-hosting with no proxy tier? Use your own, or the local sidecar at
+`http://127.0.0.1:9090`. The form suggests nothing for a loopback gateway,
+precisely so it cannot repoint you at a port with nothing on it.
+
 ## 5. Register your agent identities
 
 ```bash
@@ -242,6 +259,7 @@ proxy, including one on your own machine:
 
 ```bash
 aisquare explainability enable --proxy-url http://127.0.0.1:9090
+# (the local sidecar's own port — 9443 is the HOSTED convention and does not apply here)
 ```
 
 Reasons to: model traffic that must not leave the machine, or a self-hosted
@@ -282,6 +300,9 @@ whose Runs land somewhere else.
 | `401 Invalid API key` | Key belongs to a different deployment, or was rotated |
 | `409` / `not a registered identity` | Step 5 |
 | `explainability proxy: unreachable` | Wrong `--proxy-url`, or a local proxy that is not running |
+| `proxy … but it ships to <url> while target … is <url>` | **Red.** The proxy is alive and posting to another deployment — your Runs are landing there. Point this CLI at the target's proxy, or restart a local proxy with `EXPLAINABILITY_GATEWAY_URL` set to the target's gateway |
+| `proxy … does not report a gateway … cannot be checked from here` | **Amber**, not a fault. The proxy is too old to say where it ships and is not on the gateway's host, so the destination is unverified. Confirm it yourself, or move to the deployment's own proxy |
+| `proxy … no gateway is configured for target` | **Amber.** Tracing is on and there is nothing to compare the proxy against — set `--gateway-url` |
 | Everything green, nothing on the dashboard | The spool is not being drained — step 10 |
 
 `aisquare explainability status --json` is the machine-readable view, and the one

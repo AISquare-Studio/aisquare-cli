@@ -69,7 +69,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import SplitResult, urlsplit
 from urllib.request import urlopen
 
 from aisquare.core import harness, insights, outbox, paths, spawn
@@ -501,6 +501,23 @@ def join_records(path: Path | None = None) -> list[dict[str, object]]:
     return records
 
 
+def split_url(url: str) -> SplitResult | None:
+    """``urlsplit`` that answers ``None`` instead of raising.
+
+    EVERY url in this module arrives from a human -- a config file, a form field,
+    a flag -- and ``urlsplit`` raises ``ValueError`` on a malformed authority:
+    ``http://[::1`` (a typo'd IPv6 bracket) and an out-of-range port are both
+    reachable by typing. Unguarded, that exception leaves a parser and ends a
+    command: it propagated out of ``aisquare doctor`` and out of a Textual button
+    handler, neither of which has anything to do with URL syntax. One helper, so
+    a new caller cannot reintroduce the hazard by forgetting a ``try``.
+    """
+    try:
+        return urlsplit((url or "").strip().rstrip("/"))
+    except ValueError:
+        return None
+
+
 def is_loopback(url: str) -> bool:
     """Whether ``url`` names this machine.
 
@@ -512,8 +529,16 @@ def is_loopback(url: str) -> bool:
     ``AISQUARE_PROXY_INBOUND_KEYS`` unset skips its auth gate entirely, so it
     needs no workspace key; anything else is a hosted proxy that REQUIRES one and
     denies every request without it.
+
+    An EMPTY host counts as loopback, which is what the shipped default and a
+    bare path both produce; an UNPARSEABLE url does not, because nothing about
+    it has been established and the caller that asks this question is deciding
+    whether a workspace key may be omitted.
     """
-    host = (urlparse(url.strip()).hostname or "").lower()
+    split = split_url(url)
+    if split is None:
+        return False
+    host = (split.hostname or "").lower()
     return host in ("127.0.0.1", "localhost", "::1", "") or host.startswith("127.")
 
 
@@ -526,11 +551,8 @@ def _usable_base_url(value: str) -> bool:
     reaching its environment, because that failure mode is not a lost trace,
     it is a dead session.
     """
-    try:
-        parsed = urlparse(value.strip())
-    except ValueError:
-        return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    split = split_url(value)
+    return split is not None and split.scheme in ("http", "https") and bool(split.netloc)
 
 
 def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> ProxyProbe:
@@ -549,6 +571,12 @@ def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> Prox
             payload = json.loads(response.read().decode("utf-8"))
     except (URLError, OSError, TimeoutError, ValueError) as exc:
         return ProxyProbe(False, f"proxy unreachable at {url}: {exc}")
+    # `[]` and `"ok"` are valid JSON and have no `.get`; the decode succeeded, so
+    # the handler above is already past. Four attribute reads follow, and any
+    # server on the port can produce this -- the wrong service answering is the
+    # case this function exists to catch, and it must SAY so rather than raise.
+    if not isinstance(payload, dict):
+        return ProxyProbe(False, f"{url} answered {type(payload).__name__}, not a health object")
     service = payload.get("service")
     mode = payload.get("mode")
     status = payload.get("status")
@@ -772,7 +800,7 @@ def wire_session(
     if (
         api_key
         and not is_loopback(settings.proxy_url)
-        and urlparse(settings.proxy_url).scheme != "https"
+        and (split_url(settings.proxy_url) or SplitResult("", "", "", "", "")).scheme != "https"
     ):
         return SessionWiring(
             traced=False,
@@ -976,15 +1004,31 @@ HOSTED_PROXY_PORT = 9443
 def hosted_proxy_for(gateway_url: str) -> str | None:
     """The proxy that convention puts beside ``gateway_url``, or ``None``.
 
-    A SUGGESTION, never a write: the caller offers it as a placeholder so a
-    blank field means "the usual one" and a filled field always wins. Returns
-    ``None`` for anything this cannot reason about — no scheme, no host — rather
-    than assembling a URL out of half an answer.
+    A SUGGESTION, never a write: the caller offers it so a blank field means
+    "the usual one" and a filled field always wins. ``None`` for anything this
+    cannot reason about, rather than assembling a URL out of half an answer --
+    and three things are not half an answer but a WRONG one:
+
+    * an unparseable authority (``split_url`` returns ``None``);
+    * no scheme or no host -- a schemeless ``stg.example`` parses with the whole
+      thing as the PATH, so a suggestion built from it would name no host;
+    * a LOOPBACK gateway. :data:`HOSTED_PROXY_PORT` is the hosted deployments'
+      convention; the wholly-local topology's own port is the shipped
+      ``proxy_url`` default (9090), and pointing a self-hosted adopter at 9443
+      sends them to a port with nothing on it. Silence leaves their configured
+      value alone, which is the right answer for the one topology that does not
+      use a hosted tier.
+
+    IPv6 hosts are re-bracketed: ``urlsplit().hostname`` strips them, and
+    ``https://::1:9443`` is not a URL any client can reach.
     """
-    parsed = urlparse((gateway_url or "").strip().rstrip("/"))
-    if not parsed.scheme or not parsed.hostname:
+    split = split_url(gateway_url)
+    if split is None or not split.scheme or not split.hostname:
         return None
-    return f"{parsed.scheme}://{parsed.hostname}:{HOSTED_PROXY_PORT}"
+    if is_loopback(gateway_url):
+        return None
+    host = f"[{split.hostname}]" if ":" in split.hostname else split.hostname
+    return f"{split.scheme}://{host}:{HOSTED_PROXY_PORT}"
 
 
 def configure_target(

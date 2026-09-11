@@ -24,7 +24,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import pytest
 from textual import events
@@ -58,7 +58,7 @@ from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.onboard import OnboardFailed, ProjectOnboarded
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import load_config
+from aisquare.core.config import load_config, save_config
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
@@ -845,6 +845,160 @@ def test_the_setup_form_wires_a_machine_without_a_shell(tmp_path: Path, script: 
     assert target.proxy_url == "https://g.example:9443", "the hosted proxy, offered not demanded"
     assert target.agent_name_template == "nishil-{role}"
     assert explainability_service.stored_api_key() == "AIS_written_by_the_form"
+
+
+def _setup(app: Any, **fields: str) -> None:
+    """Type into the Setup form's fields by id (``key-env`` as ``key_env=``)."""
+    for name, value in fields.items():
+        app.screen.query_one(f"#explainability-{name.replace('_', '-')}", Input).value = value
+
+
+def test_a_configured_proxy_is_never_replaced_by_the_suggestion(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review blocker #3: the test was the BLANK FIELD, not the stored value.
+
+    A target with a deliberate ``proxy_url`` whose gateway the operator merely
+    corrects (gateway typed, proxy left blank) had its proxy silently replaced
+    — the opposite of the "a blank field changes nothing" contract printed above
+    this very form, which ``test_configure_target_applies_only_what_was_given``
+    asserts one layer down.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    config = load_config()
+    explainability_service.configure_target(
+        config,
+        target_name="stg",
+        gateway_url="https://old.example",
+        proxy_url="http://127.0.0.1:9090",
+        enable=False,
+    )
+    save_config(config)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://new.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    target = load_config().explainability.targets["stg"]
+    assert target.gateway_url == "https://new.example", "the correction lands"
+    assert target.proxy_url == "http://127.0.0.1:9090", "the deliberate proxy survives it"
+
+
+def test_the_suggestion_still_fills_an_empty_proxy(tmp_path: Path, script: Script) -> None:
+    """The negative half of #3: with nothing to overwrite, the offer stands."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="https://g.example")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert load_config().explainability.targets["stg"].proxy_url == "https://g.example:9443"
+
+
+def test_a_malformed_gateway_does_not_take_the_ui_down(tmp_path: Path, script: Script) -> None:
+    """Review blocker #2: ``ValueError`` escaping a ``Button.Pressed`` handler.
+
+    Every other failure in ``_save_setup`` — read, write, key — is caught and
+    turned into a notice; this one propagated.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="http://[::1")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one(Toast).render().plain
+
+    assert drive(go, notifications=True)  # the app is alive to be read at all
+
+
+def test_a_schemeless_gateway_is_refused_rather_than_stored(tmp_path: Path, script: Script) -> None:
+    """Review #12: the stranded state this PR prevents, reached through the form.
+
+    A bare host parses with the whole string as the PATH, so there is no host:
+    no suggestion is offered, the proxy stays at the loopback default, and
+    ``is_loopback`` reads the empty host as local — suppressing the very caution
+    that would have flagged it. Configured, green and stranded, four characters
+    from correct.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", gateway="stg-x.aisquare.studio")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+        return app.screen.query_one(Toast).render().plain
+
+    rendered = drive(go, notifications=True)
+    assert "scheme" in rendered and "https://stg-x.aisquare.studio" in rendered
+    assert load_config().explainability.targets == {}, "nothing is stored"
+
+
+def test_a_prefix_typed_as_a_template_is_taken_as_a_name(tmp_path: Path, script: Script) -> None:
+    """Review #10. An operator who has read the ``--identity`` examples types
+    ``nishil-{role}``; composed again that is ``nishil-{role}-{role}`` ->
+    ``nishil-coder-coder``, and a stray brace makes every ``.format`` raise, so
+    ``agent_names`` empties and the tab shows ``agents: (none)``."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", prefix="nishil-{role}")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    template = load_config().explainability.targets["stg"].agent_name_template
+    assert template == "nishil-{role}"
+    assert template.format(role="coder") == "nishil-coder"
+
+
+def test_the_form_can_name_the_key_variable(tmp_path: Path, script: Script) -> None:
+    """Review #11: ``configure_target`` already took ``key_env`` and the form was
+    its one caller omitting it, so a target configured with ``--key-env MY_VAR``
+    got a success toast and no effect."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await app.content.add_content(ExplainabilityView(id="tracing"), set_current=True)
+        await pilot.pause()
+        await settle(app)
+        _setup(app, target="stg", key_env="MY_WORKSPACE_KEY")
+        app.screen.query_one("#explainability-save", Button).press()
+        await pilot.pause()
+        await settle(app)
+
+    drive(go, notifications=True)
+    assert load_config().explainability.targets["stg"].api_key_env == "MY_WORKSPACE_KEY"
 
 
 def test_saving_setup_does_not_by_itself_turn_tracing_on(tmp_path: Path, script: Script) -> None:

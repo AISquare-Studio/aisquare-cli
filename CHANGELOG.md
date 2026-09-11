@@ -8,6 +8,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Every URL this integration takes from a human now goes through one guarded
+  parse.** `urlsplit` raises `ValueError` on a malformed authority — `http://[::1`
+  (a typo'd IPv6 bracket) is reachable by typing — and two callers took it
+  unguarded: `is_loopback` off a config value, so `aisquare doctor` tracebacked
+  where `main` returns its checks normally, and `hosted_proxy_for` off a form
+  field, so a Textual `Button.Pressed` handler took the fleet UI down while every
+  other failure in that handler was caught and shown as a notice. `split_url`
+  answers `None` instead of raising and is now the module's only parser, so a new
+  caller cannot reintroduce the hazard by forgetting a `try`. An unparseable URL
+  is **not** treated as loopback: that question decides whether a workspace key
+  may be omitted. `probe_proxy` likewise answers rather than raising when
+  `/health` returns valid JSON that is not an object (`[]`, `"ok"`) — the decode
+  succeeded, so its handler was already past, and four `payload.get` reads
+  followed.
+- **The hosted-proxy suggestion is silent where it would be wrong, not merely
+  where it is unsure.** `HOSTED_PROXY_PORT` is the hosted deployments'
+  convention; the wholly-local topology's own port is the shipped `proxy_url`
+  default (9090). Suggesting 9443 for a loopback gateway repointed a self-hosted
+  adopter — the topology in this change's own measured repro — at a port with
+  nothing on it. IPv6 hosts are re-bracketed, because `urlsplit().hostname`
+  strips them and `https://::1:9443` is not a URL any client can reach.
+- **The Setup form no longer overwrites a proxy the operator chose.** It tested
+  the blank *field*, not the stored *value*, so a target with a deliberate
+  `proxy_url` whose gateway was merely corrected had its proxy silently replaced
+  — the opposite of the "a blank field changes nothing" contract printed above
+  the form and asserted one layer down in `configure_target`. It also refuses a
+  schemeless gateway (which parses with the whole string as the path, leaving no
+  host, no suggestion, and an empty host that reads as loopback and suppresses
+  the very warning that would have flagged it), takes the prefix as a **name**
+  even when typed as a template (`nishil-{role}` would have composed to
+  `nishil-coder-coder`, and a stray brace empties `agent_names` entirely), and
+  can set `key_env`, which it was `configure_target`'s only caller to omit.
+- **An unset gateway is no longer reported as a misroute.** `resolve_target`
+  legitimately yields `gateway_url == ""`, and an empty string equals no
+  deployment, so the comparison called every such machine misrouted — printing a
+  sentence with a blank where a URL goes, and making `explainability status` exit
+  1. Nothing is misrouted; the CLI has no second value. Amber, and it says so.
+- **A hosted proxy on a host that is not the gateway's is no longer waved
+  through** — the failure class this change exists to close, still open inside
+  it. Such a proxy fell past the amber branch (which required a *loopback* proxy)
+  to the bare green return, on the docstring's assumption that "a hosted proxy is
+  addressed at the deployment, so it cannot disagree with it". That is an
+  assumption about the operator's typing, and `hosted_proxy_for` is this module's
+  own statement that the two share a host, so the comparison was available.
+- **The proxy verdict is one severity rather than three booleans.**
+  `healthy`/`problem`/`caution` could express states that mean nothing
+  (`problem` and `caution` together), and only `doctor` read the third — so the
+  amber rendered **green** on `explainability status` and in the fleet tab.
+  `ProxyState.severity` is the `CheckStatus` vocabulary every other check already
+  speaks; `problem` survives as a property so the surfaces reading it stay
+  correct. Both surfaces now render the amber as amber **and** print its
+  remediation, against this module's own rule that a line which is not ok without
+  its next command is half a doctor. `status --json` gains `probe_severity` and
+  `probe_fix`, so a script watching for a misroute no longer has to regex an
+  English sentence.
+
+
 - **`doctor` and `status` no longer call the proxy lane green without knowing
   where the proxy ships.** Both rested on one `GET {proxy_url}/health`, whose
   payload says what the process *is* — `service`, `mode`, `status` — and never

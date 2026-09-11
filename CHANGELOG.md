@@ -377,6 +377,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **The wheel goes to the program that can use it — Claude Code's fullscreen
+  TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
+  + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate
+  screen (`?1049`) and mouse reporting (`?1000` + `?1006`) and scrolls its own
+  transcript on the wheel; the agent pane spent every notch on tmux's history
+  — which the alternate screen does not have — so nothing moved and the program
+  never saw the wheel. The pane now reads tmux's `mouse_any_flag` /
+  `mouse_sgr_flag` / `alternate_on` / `pane_in_mode` with every frame and
+  routes each notch: a program tracking the mouse gets the notches as the SGR
+  (or, as raw bytes via `send-keys -H`, X10) events it asked for, at the
+  pointer's pane cell, coalesced into one tmux call per frame; a fullscreen
+  program that does not track the mouse is left alone and the user told once
+  (arrow keys would land in its prompt); a view already scrolled into history
+  always comes back with the wheel; a pane in tmux copy mode stays tmux's;
+  everything else scrolls tmux history as before. A pane that dies under the
+  wheel reports `(pane gone)` like every other path.
+- **Agent panes scroll from the keyboard, and show that they are scrolled.**
+  Reported from WSL2 + Windows Terminal (2026-09-08): "scroll not working". The
+  wheel was the only way into a pane's history, and a scrolled pane looked
+  identical to a quiet live one. Now shift+PgUp / shift+PgDn — or alt+PgUp /
+  alt+PgDn, since many terminals keep shift's for their own scrollback — scroll
+  a screen at a time, shift+Home and shift+End go to the top and back to live,
+  through the same owner decision as the wheel: on a Claude Code pane they
+  scroll Claude's transcript rather than pulling stale shell lines over it. A
+  `[↑k/history]` marker sits in the top-right corner while the view is in tmux
+  history, tracking history that grows under a frozen view, and leaves with
+  the offset. None of the keys reach the agent; any other key still returns
+  the view to live.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

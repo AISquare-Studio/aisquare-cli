@@ -159,6 +159,8 @@ _FACTS_FIELDS = (
     "pane_dead_status",
     "pane_in_mode",
     "pane_current_command",
+    "mouse_any_flag",
+    "mouse_sgr_flag",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -267,6 +269,11 @@ class PaneFacts:
     in_mode: bool
     current_command: str
     title: str
+    mouse_on: bool = False
+    """The program in the pane has turned mouse reporting on (``?1000``/``?1002``/
+    ``?1003``) — it wants the wheel itself. Claude Code's fullscreen TUI does."""
+    mouse_sgr: bool = False
+    """…and asked for SGR encoding (``?1006``), the form every modern program uses."""
 
 
 @dataclass(frozen=True)
@@ -336,6 +343,8 @@ def _facts(line: str) -> PaneFacts:
         in_mode=values["pane_in_mode"] == "1",
         current_command=values["pane_current_command"],
         title=values["pane_title"],
+        mouse_on=values["mouse_any_flag"] == "1",
+        mouse_sgr=values["mouse_sgr_flag"] == "1",
     )
 
 
@@ -795,6 +804,17 @@ class TmuxServer:
         """
         if text:
             self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
+
+    def send_bytes(self, pane_id: str, data: bytes) -> None:
+        """Raw bytes, one hex pair per argument (``-H``).
+
+        The one way to put a byte above 0x7f in front of a program: ``-l`` takes
+        a string and tmux re-emits it as UTF-8, so ``chr(0x98)`` arrives as
+        ``C2 98`` — measured on 3.7c, the X10 mouse encoding's column byte for
+        any cell past 95 split in two, with the row byte then read as text.
+        """
+        if data:
+            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in data))
 
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line.

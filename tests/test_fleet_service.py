@@ -32,6 +32,7 @@ from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import (
+    _FACTS_FIELDS,
     Completed,
     PaneFacts,
     Runner,
@@ -1198,7 +1199,7 @@ def _answering_server(*sessions: str) -> TmuxServer:
         if "display-message" in args:
             # tmux 3.7c's answer for a pane it cannot find: status 0 and every
             # field empty, because display-message's target may fail.
-            return Completed(0, "|~|" * 12 + "\n", "")
+            return Completed(0, "|~|" * (len(_FACTS_FIELDS) - 1) + "\n", "")
         return Completed(0, "", "")  # list-panes -s / -a: the server holds no panes
 
     return _real_server(answering)

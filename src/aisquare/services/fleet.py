@@ -1697,7 +1697,11 @@ def _kill_fleet_sessions(
     # LIVE (review of #121, round 2). So a session is also spared when one of
     # its panes is a row left live — asked of tmux only when there is such a
     # row, so the ordinary path costs nothing extra.
-    spared_panes = {row.agent.pane_id for row in report.failed if row.agent.tmux_socket}
+    # Keyed by (socket, pane id): pane ids are unique only within ONE tmux
+    # server (every server starts at %0), so a failed `%1` on the old socket
+    # must not spare an unrelated session holding `%1` on the current one
+    # (review of #121, round 3).
+    spared_panes = {(row.agent.tmux_socket, row.agent.pane_id) for row in report.failed}
     for socket in sockets:
         if not answering.get(socket):
             continue
@@ -1725,9 +1729,9 @@ def _kill_fleet_sessions(
                 report.sessions_left_up.append(qualified)
                 _not_down(report, project_id)
                 continue
-            if spared_panes:
+            if any(spared_socket == socket for spared_socket, _ in spared_panes):
                 try:
-                    hosted = {window.pane_id for window in srv.list_windows(name)}
+                    hosted = {(socket, window.pane_id) for window in srv.list_windows(name)}
                 except TmuxError as exc:
                     # Cannot tell whether a left-live pane lives here: not killed,
                     # and said so — never a kill on a guess.
@@ -1863,7 +1867,7 @@ def _record_late_rows(
     report: ShutdownReport,
     config: FleetSettings,
 ) -> None:
-    """Rows that appeared DURING the run, re-read on every socket that answered.
+    """Rows that appeared DURING the run, re-read on EVERY socket in scope.
 
     The snapshot is taken before the first stop and each stop can cost the whole
     grace, so the window is real: the manager (stopped first, to narrow it), a
@@ -1877,16 +1881,45 @@ def _record_late_rows(
     the kill phase brought a session of its own back up, and that agent is
     running. Those stay live and are reported, never recorded.
     """
-    touched = {socket for socket, reachable in answering.items() if reachable}
-    if not touched:
-        return
+    del answering  # the initial probe is STALE by now; every socket is re-asked below
     try:
         targets = _shutdown_targets(project, config)
     except Exception:
         return  # a store that died mid-run: the report is still owed to the caller
+    # Reachability is re-read for every socket in scope, including the ones the
+    # initial probe found absent: another terminal can bring a replacement
+    # manager up on exactly that socket during the run, and skipping it left a
+    # live row unreported, the project "down" and its pause cleared (review of
+    # #121, round 3). `None` is "could not be asked", which is never "gone".
+    fresh: dict[str, bool | None] = {}
+    for socket in _shutdown_sockets(targets, config):
+        try:
+            fresh[socket] = _server_answers(server_for(socket, config))
+        except TmuxError:
+            fresh[socket] = None
     for _, agents in targets:
         for agent in agents:
-            if agent.id in handled or agent.tmux_socket not in touched:
+            if agent.id in handled:
+                continue
+            reachable = fresh.get(agent.tmux_socket)
+            if reachable is None:
+                report.failed.append(
+                    ShutdownRow(
+                        agent,
+                        "it was spawned during the shutdown and tmux could not be asked whether "
+                        f"a server is up on socket {agent.tmux_socket!r} — its row is left live; "
+                        "run shutdown again once tmux answers",
+                    )
+                )
+                _not_down(report, agent.project_id)
+                continue
+            if reachable is False:
+                _record_lost(
+                    agent,
+                    f"it was spawned during the shutdown and no server answers on socket "
+                    f"{agent.tmux_socket!r} now",
+                    report,
+                )
                 continue
             try:
                 facts = server_for(agent.tmux_socket, config).pane_facts(agent.pane_id)

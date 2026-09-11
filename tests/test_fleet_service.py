@@ -2219,6 +2219,61 @@ def test_shutdown_keeps_a_surviving_project_paused(
     assert report.paused_cleared == [] and report.paused_kept == [project.root.name]
 
 
+def test_shutdown_spared_panes_are_scoped_to_their_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 3: pane ids are unique only within one tmux server
+    (every server starts at %0). A failed `%1` on the old socket must not spare an
+    unrelated `asq-*` session holding `%1` on the current socket."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    stale = _coder(project)  # %1 on asq-old
+    old.fail_input = True  # its /exit does not go through: the row will be LEFT LIVE
+    _settings(monkeypatch, tmux_socket="asq")
+    tmux.spawn_window("asq-other", name="manager", cwd=project.root, command=["cat"])  # %1 on asq
+    assert stale.pane_id == "%1" and tmux.sessions["asq-other"][0].pane_id == "%1"
+
+    report = fleet_service.shutdown()  # every project: both sockets, the prefix sweep runs
+
+    assert [row.agent.id for row in report.failed] == [stale.id]
+    assert f"asq-old:{_session_of(project).split(':', 1)[1]}" in report.sessions_left_up
+    assert "asq:asq-other" in report.sessions_killed, "an unrelated %1 elsewhere is not spared"
+    assert "asq-other" not in tmux.sessions
+
+
+def test_shutdown_reconciles_a_late_row_on_an_initially_absent_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 3: the initial reachability snapshot is stale by the
+    final pass. A replacement manager started by another terminal on a socket the
+    probe found ABSENT was skipped — its live row unreported, the project "down",
+    its pause cleared, exit 0."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    stale = _coder(project)
+    old.running = False  # killed outside the CLI before the shutdown started
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_replacement(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))  # spawn_window brings the old socket's server back up
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_replacement)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [row.agent.id for row in report.recorded] == [stale.id]
+    assert [row.agent.id for row in report.failed] == [late[0].id]
+    assert "still alive" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    assert fleet_service.is_paused(project), "a surviving replacement keeps the standing order"
+    assert report.paused_kept == [project.root.name] and report.paused_cleared == []
+
+
 def test_shutdown_kills_only_the_fleets_own_sessions(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

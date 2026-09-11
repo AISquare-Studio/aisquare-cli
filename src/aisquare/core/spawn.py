@@ -70,6 +70,12 @@ narrowing their environment would be change without a reason:
     (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
     model; stripped anyway because it runs inside a traced session's hook and
     a child of a hook is not the agent.
+  * ``services/worktree_read.py::_git`` — the public read-only view of what an
+    agent has changed (``diff``, ``rev-parse``, ``worktree list``,
+    ``merge-base``). No model, and no mutation of any kind: it exists so a
+    caller outside this package can ask "what is in that worktree?" without
+    spawning git of its own. Stripped, and it sets ``GIT_OPTIONAL_LOCKS=0`` so
+    reading a tree cannot contend with the agent still editing it.
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
@@ -220,6 +226,12 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/ci_snapshot.py::_git": Seam(
         EXCLUDED,
         "git plumbing for the CI turn snapshot — a child of a traced hook is not the agent",
+        strips_identity=True,
+    ),
+    "aisquare/services/worktree_read.py::_git": Seam(
+        EXCLUDED,
+        "the public read-only view of an agent's worktree — no model, no mutation, and "
+        "GIT_OPTIONAL_LOCKS=0 so reading cannot contend with the agent still editing",
         strips_identity=True,
     ),
     "aisquare/core/editor.py::edit_text": Seam(

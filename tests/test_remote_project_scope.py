@@ -331,6 +331,106 @@ def test_send_keys_with_an_unknown_agent_in_a_real_project_still_says_so(
         live_writes().handlers["send-keys"]({"agent": "ghost", "project": other, "enter": True})
 
 
+# --- the audit line for a key send (§4-E) ------------------------------------------------
+#
+# The FE's five write controls (confirmed against coder-fe-scaffold's payloads):
+# reply field {text, enter}, Stop 1st {keys:[Escape]}, Stop 2nd {keys:[C-c]},
+# key strip {keys:[Up|Down|Enter|Escape|Tab]}, digit {text:"3"}. A trail that
+# logged only a COUNT could not tell a Ctrl-C to a live agent from an arrow key.
+
+
+def _summary_for(body: dict[str, Any]) -> str:
+    _result, summary = live_writes().handlers["send-keys"]({"agent": "coder-1", **body})
+    return summary
+
+
+def test_each_write_control_leaves_a_distinct_audit_summary(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    current, _other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    here = f"coder-1@{current}"
+
+    reply = _summary_for({"text": "hello world!", "enter": True})
+    stop_first = _summary_for({"keys": ["Escape"]})
+    stop_escalated = _summary_for({"keys": ["C-c"]})
+    named_key = _summary_for({"keys": ["Up"]})
+    digit = _summary_for({"text": "3"})
+
+    assert reply == f"{here} text=12ch keys=0 enter=True"
+    assert stop_first == f"{here} text=0ch keys=[Escape] enter=False"
+    assert stop_escalated == f"{here} text=0ch keys=[C-c] enter=False"
+    assert named_key == f"{here} text=0ch keys=[Up] enter=False"
+    assert digit == f"{here} text=1ch keys=0 enter=False"
+
+    lines = [reply, stop_first, stop_escalated, named_key, digit]
+    assert len(set(lines)) == 5, "every control must be distinguishable in the log"
+
+
+def test_an_interrupt_reads_as_an_escalation_not_a_bare_fact(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    """Stop escalates, so a real interrupt logs Escape then C-c — the human tried
+    the soft one first. That sequence is the forensic payoff of names over counts."""
+    current, _other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    trail = [_summary_for({"keys": ["Escape"]}), _summary_for({"keys": ["C-c"]})]
+    assert [line.split("keys=")[1].split(" ")[0] for line in trail] == ["[Escape]", "[C-c]"]
+
+
+def test_the_typed_text_is_counted_never_captured(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    """§4-E: key names are a bounded vocabulary; what a human typed is not."""
+    current, _other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    secret = "hunter2 my-api-key"
+    summary = _summary_for({"text": secret, "enter": True})
+    assert f"text={len(secret)}ch" in summary
+    assert secret not in summary
+    for word in ("hunter2", "my-api-key"):
+        assert word not in summary
+
+
+def test_a_key_name_cannot_forge_an_audit_line(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    """The log is one line per write, and this is the first caller-controlled
+    string to reach it — a newline in a key name must not buy a second line."""
+    current, _other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    forged = "Up\n2026-01-01T00:00:00+00:00 someone-else note nothing-to-see"
+    summary = _summary_for({"keys": [forged]})
+    assert "\n" not in summary and "\r" not in summary
+    assert "someone-else" not in summary
+    assert summary.startswith(f"coder-1@{current} text=0ch keys=[Up?")
+
+
+def test_the_audit_line_written_to_disk_carries_the_key_name(
+    runtime: Runtime, tmp_path: Path, two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    """End to end: through the HTTP write gate and into remote-audit.log."""
+    current, _other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    client = TestClient(
+        build_app(runtime, sources=_sources(FLEETS), writes=live_writes(), dist_dir=tmp_path)
+    )
+    assert (
+        client.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD}).status_code
+        == 200
+    )
+    runtime.set_allow_write(True)
+    sent = client.post(
+        f"/r/{runtime.token}/api/send-keys", json={"agent": "coder-1", "keys": ["C-c"]}
+    )
+    assert sent.status_code == 200
+    line = remote_audit_path().read_text().splitlines()[-1]
+    _ts, sid, endpoint, summary = line.split(" ", 3)
+    assert endpoint == "send-keys"
+    assert sid == client.cookies[COOKIE]
+    assert summary == f"coder-1@{current} text=0ch keys=[C-c] enter=False"
+
+
 # --- GET /api/projects carries the counts ------------------------------------------------
 
 

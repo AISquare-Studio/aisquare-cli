@@ -54,6 +54,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -792,6 +793,30 @@ def _required(body: dict[str, Any], key: str) -> str:
     return value.strip()
 
 
+_UNSAFE_IN_A_KEY_NAME = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _audit_keys(keys: list[str] | None) -> str:
+    """The key NAMES for a send-keys audit line — ``[Escape]``, ``[C-c]``, or ``0``.
+
+    The count alone (``keys=1``) could not tell a Ctrl-C sent to a live agent
+    from an arrow key, which is exactly the difference a write trail exists to
+    record. Key names are a bounded tmux vocabulary, so recording them is safe;
+    the typed TEXT stays a length only (``text=12ch``) because it is unbounded
+    user content — counted, never captured (PLAN §4-E).
+
+    Each name is scrubbed to the characters a tmux key name can actually hold.
+    ``remote-audit.log`` is line-oriented (``ts sid endpoint summary``) and this
+    is the first caller-controlled string to reach it, so a name carrying a
+    newline would let an authenticated device forge an audit line — and an
+    authenticated device is precisely who the trail exists to hold to account.
+    """
+    if not keys:
+        return "0"
+    scrubbed = [_UNSAFE_IN_A_KEY_NAME.sub("?", key)[:32] or "?" for key in keys]
+    return "[" + ",".join(scrubbed) + "]"
+
+
 def _optional(body: dict[str, Any], key: str) -> str | None:
     value = body.get(key)
     return value if isinstance(value, str) and value.strip() else None
@@ -893,7 +918,7 @@ def live_writes() -> Writes:
         if enter:
             server.send_keys(agent.pane_id, "Enter")
         summary = (
-            f"{label}@{target.id} text={len(text or '')}ch keys={len(keys or [])} enter={enter}"
+            f"{label}@{target.id} text={len(text or '')}ch keys={_audit_keys(keys)} enter={enter}"
         )
         return {"agent": label, "project": target.id, "sent": True}, summary
 

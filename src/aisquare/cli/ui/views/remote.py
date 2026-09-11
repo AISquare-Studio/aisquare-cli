@@ -57,7 +57,7 @@ class RemotePanel(ModalScreen[None]):
     #remotebox .row Switch { margin-right: 1; }
     #remotebox .row Button { margin-top: 1; margin-left: 2; }
     #remote-status { height: auto; min-height: 1; color: $warning; }
-    #remote-link { width: 1fr; }
+    #remote-link { width: 100%; height: auto; }
     #remote-auto-off { width: 16; }
     #remote-auto-off-label { padding-top: 2; }
     #remote-qr { height: auto; width: auto; }
@@ -82,10 +82,17 @@ class RemotePanel(ModalScreen[None]):
                 yield Switch(self.controller.running, id="remote-on")
                 yield Static("", id="remote-state")
             yield Static("", id="remote-status")
+            # Copy sits on the LABEL row and the link gets a line of its own.
+            # Sharing one row cost the demo its most important control: a real
+            # ngrok link is ~84 characters, which with the 22-wide label runs
+            # past the 104-wide dialog and pushed Copy off the edge — measured,
+            # the button was laid out at x=135 inside a box ending at x=151 and
+            # painted nowhere. On its own line the link can be any length (it
+            # wraps instead of shoving a neighbour out) and Copy cannot move.
             with Horizontal(classes="row"):
                 yield Label("Link")
-                yield Static("", id="remote-link")
                 yield Button("Copy", id="remote-copy", compact=True)
+            yield Static("", id="remote-link")
             yield Static("", id="remote-qr")
             with Horizontal(classes="row"):
                 yield Label("Password")
@@ -98,7 +105,7 @@ class RemotePanel(ModalScreen[None]):
             with Horizontal(classes="row"):
                 yield Label("Auto-off", id="remote-auto-off-label")
                 yield Select(
-                    [(f"{minutes} min", minutes) for minutes in AUTO_OFF_CHOICES],
+                    [(_auto_off_label(minutes), minutes) for minutes in AUTO_OFF_CHOICES],
                     value=state.auto_off_minutes,
                     allow_blank=False,
                     id="remote-auto-off",
@@ -148,6 +155,10 @@ class RemotePanel(ModalScreen[None]):
             text.append("  · local only — no tunnel yet", style="dim")
         if controller.auto_off_at is not None:
             text.append(f"  · auto-off at {controller.auto_off_at:%H:%M}", style="dim")
+        elif controller.state.auto_off_minutes is None:
+            # Never: say so, rather than leave the slot the timer usually fills empty —
+            # "on" with nothing after it reads like the timer simply has not armed yet.
+            text.append("  · no auto-off", style="dim")
         return text
 
     def _paint_devices(self) -> None:
@@ -197,7 +208,7 @@ class RemotePanel(ModalScreen[None]):
         self.repaint()
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id != "remote-auto-off" or not isinstance(event.value, int):
+        if event.select.id != "remote-auto-off" or event.value not in AUTO_OFF_CHOICES:
             return
         if event.value == self.controller.state.auto_off_minutes:
             return  # the Select announcing its initial value at mount — not a change
@@ -229,6 +240,11 @@ class RemotePanel(ModalScreen[None]):
 
     def action_close_panel(self) -> None:
         self.dismiss(None)
+
+
+def _auto_off_label(minutes: int | None) -> str:
+    """What the Auto-off picker shows for a choice; ``None`` is Never."""
+    return "Never" if minutes is None else f"{minutes} min"
 
 
 def _short(value: Any, width: int) -> str:

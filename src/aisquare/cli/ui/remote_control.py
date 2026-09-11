@@ -30,7 +30,13 @@ from aisquare.cli.watch import _read_state, _update_state
 from aisquare.services import remote_server
 from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url
 
-AUTO_OFF_CHOICES: tuple[int, ...] = (30, 60, 120)
+AUTO_OFF_CHOICES: tuple[int | None, ...] = (30, 60, 120, None)
+"""Minutes until Remote switches itself off — ``None`` is "Never".
+
+Never is a DELIBERATE choice, never the resting posture: the page is publicly
+tunnelled, so a session the human forgets about is a session anyone with the
+link can keep reaching. The default stays :data:`DEFAULT_AUTO_OFF`, and only an
+explicit pick (persisted as ``null``) switches the timer off."""
 DEFAULT_AUTO_OFF = 60
 STATE_KEYS = ("remote_enabled", "allow_write", "auto_off_minutes")
 READ_ONLY_REASON = "read-only build (allow write actions is off in the TUI)"
@@ -44,13 +50,17 @@ class RemoteState:
 
     remote_enabled: bool = False
     allow_write: bool = False
-    auto_off_minutes: int = DEFAULT_AUTO_OFF
+    auto_off_minutes: int | None = DEFAULT_AUTO_OFF
+    """``None`` = Never; see :data:`AUTO_OFF_CHOICES`."""
 
 
 def load_remote_state() -> RemoteState:
     """The saved switches; a missing or malformed key falls back to its (safe) default."""
     data = _read_state()
-    minutes = data.get("auto_off_minutes")
+    # The fallback is the DEFAULT, not ``None``: an absent key is a fresh machine
+    # and must mean 60 minutes, while a key that is present and null is the
+    # human having chosen Never. ``data.get(key)`` alone would conflate the two.
+    minutes = data.get("auto_off_minutes", DEFAULT_AUTO_OFF)
     return RemoteState(
         remote_enabled=data.get("remote_enabled") is True,
         allow_write=data.get("allow_write") is True,
@@ -184,7 +194,8 @@ class RemoteController:
         if self.running:
             self._server.set_allow_write(bool(enabled))
 
-    def set_auto_off(self, minutes: int) -> None:
+    def set_auto_off(self, minutes: int | None) -> None:
+        """Pick a timer, or ``None`` for Never. Takes effect at once while Remote is on."""
         if minutes not in AUTO_OFF_CHOICES:
             raise ValueError(f"auto-off must be one of {AUTO_OFF_CHOICES}, not {minutes}")
         self._set_state(auto_off_minutes=minutes)
@@ -224,8 +235,11 @@ class RemoteController:
     # --- auto-off -------------------------------------------------------------------------------
 
     def _arm_auto_off(self) -> None:
-        self.auto_off_at = self._now() + timedelta(minutes=self.state.auto_off_minutes)
-        # The server shows it as GET /api/remote's auto_off_at (PLAN §4-B).
+        """Set (or clear, for Never) the deadline; the server reports it as ``auto_off_at``."""
+        minutes = self.state.auto_off_minutes
+        self.auto_off_at = None if minutes is None else self._now() + timedelta(minutes=minutes)
+        # The server shows it as GET /api/remote's auto_off_at (PLAN §4-B); Never is
+        # null there, which is the same thing it shows while Remote is off.
         self._server.set_auto_off(self.auto_off_at)
 
     def enforce_auto_off(self) -> bool:

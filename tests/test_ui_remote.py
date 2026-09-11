@@ -20,7 +20,7 @@ from typing import TypeVar
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Select, Static, Switch
+from textual.widgets import Button, Select, Static, Switch
 
 from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController
@@ -37,6 +37,9 @@ from tests.test_remote_control import FakeTunnel, fake_tunnel_factory
 T = TypeVar("T")
 SIZE = (140, 40)
 PUBLIC = "https://abcd-12.ngrok-free.app"
+REAL_PUBLIC = "https://substantial-kestrel-92417.ngrok-free.dev"
+"""A host the length ngrok really hands out: with ``/r/<32-char token>/`` the link is ~84
+characters, which is what pushed Copy off the row (the short PUBLIC above never did)."""
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +92,7 @@ def drive(
     fn: Callable[[Pilot[None]], Awaitable[T]],
     *,
     tunnel: Callable[[int], NgrokTunnel],
+    size: tuple[int, int] = SIZE,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` whose Remote uses the stub server + ``tunnel``."""
 
@@ -97,11 +101,27 @@ def drive(
             server=remote_server, tunnel_factory=tunnel, url_timeout=2, port=free_port()
         )
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
-        async with app.run_test(size=SIZE, notifications=True) as pilot:
+        async with app.run_test(size=size, notifications=True) as pilot:
             await pilot.pause()
             return await fn(pilot)
 
     return asyncio.run(run())
+
+
+def painted(app: FleetApp) -> list[str]:
+    """Every row of the screen as the terminal would actually show it.
+
+    Widget geometry is not the claim here: the Copy button that started this
+    work WAS laid out, at x=135 inside a dialog ending at x=151, and painted
+    nowhere. Only the composited strips answer "can the human see it".
+    """
+    update = app.screen._compositor.render_full_update()
+    strips = update.strips
+    strips = list(strips.values()) if isinstance(strips, dict) else list(strips)
+    return [
+        strip.text if hasattr(strip, "text") else "".join(getattr(s, "text", "") for s in strip)
+        for strip in strips
+    ]
 
 
 def shown(widget: Static) -> str:
@@ -235,6 +255,108 @@ def test_with_no_page_installed_the_modal_says_how_to_install_it_and_remote_stay
     drive(go, tunnel=missing_ngrok)
     # A refused start persists nothing at all: no state file was even created here.
     assert not paths.state_path().exists()
+
+
+@pytest.mark.parametrize("size", [(155, 68), (100, 30)], ids=["real-terminal", "cramped"])
+def test_copy_stays_visible_beside_a_real_length_ngrok_link(size: tuple[int, int]) -> None:
+    """The demo's most important control must survive an ~84-character link.
+
+    Sharing one row with the link, Copy was laid out past the dialog's right
+    edge and painted nowhere — the human could see a link they had no way to
+    copy. Copy now sits on the label row and the link has a line of its own.
+    """
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        for _ in range(20):  # the URL arrives from the tunnel's thread
+            if app.remote.public_url is not None:
+                break
+            await asyncio.sleep(0.1)
+        modal.repaint()
+        await pilot.pause()
+
+        link = app.remote.link_url()
+        assert link is not None and len(link) >= 80, f"the test's link is too short: {link!r}"
+        rows = painted(app)
+        assert any("Copy" in row for row in rows), f"Copy is not painted at {size}"
+        assert any(link in row for row in rows), f"the link is not painted whole at {size}"
+
+        # And it copies THAT link, not a truncated or decorated version of it.
+        modal.query_one("#remote-copy", Button).press()
+        await pilot.pause()
+        assert app.clipboard == link
+
+    drive(go, tunnel=fake_tunnel_factory(url=REAL_PUBLIC), size=size)
+
+
+# --- auto-off: Never ------------------------------------------------------------------------
+
+
+def test_never_is_selectable_stops_the_timer_and_says_so() -> None:
+    """The human's server died 60 minutes into a session; Never is the way to stop that."""
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        modal = await open_panel(pilot)
+        modal.query_one("#remote-on", Switch).toggle()
+        await pilot.pause()
+        assert app.remote.auto_off_at is not None  # 60 minutes by default
+        assert "auto-off at" in shown(modal.query_one("#remote-state", Static))
+
+        modal.query_one("#remote-auto-off", Select).value = None
+        await pilot.pause()
+
+        assert app.remote.state.auto_off_minutes is None
+        assert app.remote.auto_off_at is None
+        assert app.remote.running, "choosing Never must not turn Remote off"
+        assert app.remote.enforce_auto_off() is False  # the timer can never fire now
+        state_line = shown(modal.query_one("#remote-state", Static))
+        assert "no auto-off" in state_line and "auto-off at" not in state_line
+        # The server reports it the same way it reports "no timer" anywhere else (§4-B).
+        assert json.loads(paths.remote_state_path().read_text())["auto_off_at"] is None
+
+    drive(go, tunnel=missing_ngrok)
+
+
+def test_never_survives_a_restart_while_a_fresh_machine_still_defaults_to_sixty() -> None:
+    """Never persists as ``null``; an ABSENT key is a fresh machine and still means 60.
+
+    The two must not be conflated: ``state.json`` with no auto-off key at all is
+    a machine that has never chosen, and never-by-default would be the wrong
+    resting posture for a page anyone with the link can reach.
+    """
+
+    async def fresh(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        assert app.remote.state.auto_off_minutes == 60
+        modal = await open_panel(pilot)
+        assert modal.query_one("#remote-auto-off", Select).value == 60
+        modal.query_one("#remote-auto-off", Select).value = None
+        await pilot.pause()
+
+    drive(fresh, tunnel=missing_ngrok)
+    assert json.loads(paths.state_path().read_text())["auto_off_minutes"] is None
+
+    async def after_restart(pilot: Pilot[None]) -> None:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        assert app.remote.state.auto_off_minutes is None
+        modal = await open_panel(pilot)
+        assert modal.query_one("#remote-auto-off", Select).value is None
+        assert "Never" in "".join(painted(app))
+        # …and a timer can still be chosen again afterwards.
+        modal.query_one("#remote-auto-off", Select).value = 30
+        await pilot.pause()
+        assert app.remote.state.auto_off_minutes == 30
+
+    drive(after_restart, tunnel=missing_ngrok)
+    assert json.loads(paths.state_path().read_text())["auto_off_minutes"] == 30
 
 
 def test_m_is_refused_while_focus_is_in_a_view_and_the_palette_lists_remote_control() -> None:

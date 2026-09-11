@@ -103,6 +103,10 @@ class FakeTmux(TmuxServer):
         server, so a regression that typed into an unreachable server read as a
         clean exit."""
         self.answers_raises: str | None = None
+        self.exec_unavailable = False
+        """`which` finds the client but running it fails (`FileNotFoundError` from
+        `subprocess.run` — a shim whose interpreter is gone): `binary()` succeeds,
+        `reachable()` raises `TmuxUnavailable`, `answers()` returns False."""
         """Set to make `answers()` RAISE `TmuxError` — the real one does not catch
         that (only `TmuxUnavailable`), and a 30 s `_COMMAND_TIMEOUT` on a wedged
         server is exactly this shape. The wedged server is the case `shutdown`
@@ -172,9 +176,17 @@ class FakeTmux(TmuxServer):
         new ``TmuxServer`` method is covered automatically.
         """
         try:
-            self.binary()
+            return self.reachable()
         except TmuxUnavailable:
             return False
+
+    def reachable(self) -> bool:
+        """The raising probe: an unavailable client — missing (`installed`) or
+        failing at EXECUTION (`exec_unavailable`: the binary is found but its
+        interpreter is gone) — is `TmuxUnavailable`, never False."""
+        self.binary()
+        if self.exec_unavailable:
+            raise TmuxUnavailable("tmux is not runnable: bad interpreter (fake)")
         if self.answers_raises is not None:
             raise TmuxError(self.answers_raises)
         return self.running
@@ -2301,6 +2313,36 @@ def test_shutdown_keeps_a_late_row_live_when_tmux_left_path_before_the_final_pas
     assert "could not be asked" in report.failed[0].reason
     assert report.incomplete_projects == [project.id]
     tmux.installed = True
+    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
+
+
+def test_shutdown_keeps_a_late_row_live_when_the_client_fails_at_execution(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 5 (P1): `binary()` succeeding does not stop `answers()`
+    from swallowing an execution-time `TmuxUnavailable` (an executable whose
+    interpreter is missing) into False — so the round-4 guard still recorded a
+    live late agent lost. `reachable()` propagates it: unknown, row kept."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_spawn_then_break_the_client(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))
+        tmux.exec_unavailable = True  # `which` still finds it; running it fails
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_spawn_then_break_the_client)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.recorded == [], "a client that cannot run is never proof of a dead pane"
+    assert [row.agent.id for row in report.failed] == [late[0].id]
+    assert "could not be asked" in report.failed[0].reason
+    tmux.exec_unavailable = False
     assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
 

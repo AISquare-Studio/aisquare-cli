@@ -46,7 +46,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose `list-sessions` fails after a good probe is reported as a failed kill
   (`<socket>:*`), so the command exits 1 instead of printing a clean shutdown
   over a surviving session. `incomplete_projects` in the `--json` report is the
-  set every one of those rules reads. **Exit status is recorded only where
+  set every one of those rules reads. The final pass asks reachability with a
+  probe that RAISES on an unavailable client (`TmuxServer.reachable()`, rounds
+  4-5) — a tmux that left PATH, or a shim whose interpreter is gone, after the
+  initial guard is "could not ask", so a late agent on that socket is left live
+  and its project stays paused rather than recorded lost. **Exit status is recorded only where
   tmux exposes one**: `--force` kills a live pane and records none. It refuses
   rather than guess — no usable tmux, a socket that cannot be *asked* whether a
   server is there (a wedged server's 30 s timeout used to escape as a traceback

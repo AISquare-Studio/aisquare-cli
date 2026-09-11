@@ -1895,13 +1895,15 @@ def _record_late_rows(
     for socket in _shutdown_sockets(targets, config):
         srv = server_for(socket, config)
         try:
-            # `answers()` swallows an unavailable BINARY into False — the same
-            # answer as "no server" — so the client is asked for first: tmux
-            # leaving PATH after the initial guard is "cannot ask", never
-            # "gone", and a late agent on that socket must not be recorded
-            # lost on the strength of it (review of #121, round 4).
-            srv.binary()
-            fresh[socket] = _server_answers(srv)
+            # `answers()` swallows an unavailable client into False — the same
+            # answer as "no server" — and a `binary()` pre-check (round 4) only
+            # covered a client `which` cannot find, not one that fails at
+            # EXECUTION (deleted between check and exec, a shim whose
+            # interpreter is gone). `reachable()` lets that `TmuxUnavailable`
+            # through, so tmux leaving PATH after the initial guard is "cannot
+            # ask", never "gone", and a late agent on that socket is not
+            # recorded lost on the strength of it (review of #121, rounds 4-5).
+            fresh[socket] = srv.reachable()
         except TmuxError:  # TmuxUnavailable included
             fresh[socket] = None
     for _, agents in targets:

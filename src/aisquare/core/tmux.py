@@ -586,12 +586,27 @@ class TmuxServer:
         set) also exits 0 with the version — where ``list-sessions`` exits 0
         with no output and is therefore indistinguishable from absence.
 
-        Never raises: an unavailable binary is not a server that answered.
+        Never raises: an unavailable binary is not a server that answered. A
+        caller that must tell "could not ask" from "no server" — the one place
+        that ends rows on that distinction is ``fleet shutdown``'s final pass —
+        uses :meth:`reachable`, which propagates :class:`TmuxUnavailable`.
         """
         try:
-            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+            return self.reachable()
         except TmuxUnavailable:
             return False
+
+    def reachable(self) -> bool:
+        """:meth:`answers`, except that "could not ask" is raised, not swallowed.
+
+        :class:`TmuxUnavailable` covers both a binary ``which`` cannot find and
+        one that fails at EXECUTION — deleted between the check and the exec, or
+        a shim whose interpreter is gone — because ``_tmux`` maps the
+        ``FileNotFoundError`` from ``subprocess.run`` to the same class. A
+        ``False`` from this method therefore means exactly one thing: the client
+        ran and no server answered (review of #121, round 5).
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
         return completed.returncode == 0
 
     def spawn_window(

@@ -519,7 +519,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   another widget and crosses into a pane highlights without copying, since the
   terminal gives that gesture to the widget it began on, and ctrl+c takes it.
   The `(exited 0)` notice row is tinted by the drag that copies it, like every
-  other row. Switching the pane to another agent drops the selection, and
+  other row, and so is the `[↑k/history]` marker — whatever a row displays is
+  what it highlights and what it copies, cut to the columns the pane shows
+  rather than to the width of a tmux window that outgrew it. Each drag reads the
+  screen it was made on: the rows are re-frozen when a gesture starts, so a
+  second drag begun while the first still stands no longer copies the earlier
+  screen. Switching the pane to another agent drops the selection, and
   changing the theme drops the highlight's resolved colour so a theme picked
   mid-drag does not leave the tint in the old palette.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**

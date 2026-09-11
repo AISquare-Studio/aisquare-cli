@@ -68,6 +68,7 @@ then ever fewer).
 from __future__ import annotations
 
 import contextlib
+from bisect import bisect_left, bisect_right
 from typing import ClassVar
 
 from rich.cells import cell_len
@@ -223,6 +224,10 @@ class TerminalPane(Widget, can_focus=True):
         """The selection tint, resolved once per selection rather than per row."""
         self._drag_from: Offset | None = None
         """Where the left button went down, while it is still down."""
+        self._selection_anchor: Offset | None = None
+        """The selection start ``_selection_rows`` was frozen for."""
+        self._painted_span: Selection | None = None
+        """The selection the rows on screen were last painted for."""
 
     # --- what is shown -----------------------------------------------------------------
 
@@ -495,13 +500,18 @@ class TerminalPane(Widget, can_focus=True):
         # those boundaries come from. Read only when one of them actually runs:
         # ``Strip.text`` joins every segment, is uncached, and the common row has
         # no cursor, selection or marker on it (review of the third version).
-        text = self._row_text(y)
+        raw = self._raw_row_text(y)
         if cursor_x is not None:
-            strip = self._with_cursor(strip, cursor_x, text)
-        if span is not None:
-            strip = self._with_selection(strip, span, text, width)
+            strip = self._with_cursor(strip, cursor_x, raw)
         if marker:
-            strip = self._with_scroll_marker(strip, width, text)
+            strip = self._with_scroll_marker(strip, width, raw)
+        if span is not None:
+            # LAST, and against the row's DISPLAYED text — which now includes the
+            # marker. Painted before it, the marker rebuilt the tail of row 0 and
+            # threw the tint away while `_extract` copied that text anyway; and
+            # its replacement changed the row's character count, so the offsets
+            # stamped on the tail no longer indexed it (review of the fourth).
+            strip = self._with_selection(strip, span, self._row_text(y), width)
         return strip
 
     @staticmethod
@@ -520,8 +530,10 @@ class TerminalPane(Widget, can_focus=True):
         for char in text:
             bounds.append(bounds[-1] + cell_len(char))
         span = bounds[-1]
-        snapped_start = max(b for b in bounds if b <= start) if start < span else start
-        snapped_end = min(b for b in bounds if b >= end) if end < span else end
+        # ``bounds`` is ascending, so a binary search replaces two full scans of
+        # it — this runs once per overlay per row (review of the fourth version).
+        snapped_start = bounds[bisect_right(bounds, start) - 1] if start < span else start
+        snapped_end = bounds[bisect_left(bounds, end)] if end < span else end
         return snapped_start, snapped_end
 
     def _restyled(self, strip: Strip, start: int, end: int, style: Style, text: str) -> Strip:
@@ -560,15 +572,56 @@ class TerminalPane(Widget, can_focus=True):
             self._selection_bg = Style(bgcolor=bg) if bg is not None else Style(reverse=True)
         return self._restyled(strip, min(cell_start, width), cell_end, self._selection_bg, text)
 
+    @staticmethod
+    def _clip(text: str, width: int) -> str:
+        """``text`` cut to ``width`` cells, as ``adjust_cell_length`` cuts the strip.
+
+        A row longer than the widget renders truncated but was copied whole: a
+        failed ``resize-window`` leaves the tmux window at its spawn geometry
+        while captures keep succeeding, which is the documented state where rows
+        are wider than the pane (review of the fourth version).
+        """
+        if width <= 0:
+            return ""
+        cells = 0
+        for index, char in enumerate(text):
+            cells += cell_len(char)
+            if cells > width:
+                return text[:index]
+        return text
+
+    def _raw_row_text(self, y: int) -> str:
+        """The row's own text, clipped to the widget — before any overlay."""
+        width = self.content_size.width
+        if self.notice is not None and y == self.content_size.height - 1:
+            return self._clip(self.notice, width)  # displayed, not the row under it
+        line = self._lines[y] if y < len(self._lines) else ""
+        return self._clip(self._strip_for(line).text.rstrip(), width)
+
     def _row_text(self, y: int) -> str:
-        """Row ``y`` as plain text — from the frozen snapshot while a drag stands."""
+        """Row ``y`` as the widget DISPLAYS it — the text a drag over it copies.
+
+        The frozen snapshot while a drag stands; otherwise the row's own text
+        plus whatever is composed into it — the notice, and the
+        ``[↑k/history]`` marker on row 0 while the view is scrolled. The marker
+        replaces the tail of that row on screen, so a selection there has to be
+        measured, painted and copied against the same string.
+        """
         rows = self._selection_rows
         if rows is not None and y < len(rows):
             return rows[y]
-        if self.notice is not None and y == self.content_size.height - 1:
-            return self.notice  # what is displayed, not the row hidden under it
-        line = self._lines[y] if y < len(self._lines) else ""
-        return self._strip_for(line).text.rstrip()
+        text = self._raw_row_text(y)
+        if y == 0 and self.scrollback:
+            layout = self._marker_layout(text, self.content_size.width)
+            if layout is not None:
+                cut, gap, marker = layout
+                # Padded out to ``cut``, not merely cut to it: the STRIP is the
+                # full-width row, so cropping it to ``cut`` keeps the blanks a
+                # short row was padded with, and the text has to carry them too
+                # or the two stop lining up cell for cell.
+                head = self._clip(text, cut)
+                text = head + " " * (cut - cell_len(head) + gap) + marker
+        return text
 
     def _row_texts(self) -> list[str]:
         # As many rows as the widget RENDERS, not as many as the last frame
@@ -601,13 +654,46 @@ class TerminalPane(Widget, can_focus=True):
         return extracted[0] if extracted and extracted[0] else None
 
     def selection_updated(self, selection: Selection | None) -> None:
+        """Freeze the rows a gesture is selecting, so the copy matches the paint.
+
+        Re-frozen whenever the ANCHOR moves, not only when the selection was
+        cleared. Textual clears a selection only on a release that moved
+        nothing, and its watcher is async, so a second drag begun while the
+        first still stood kept the first drag's snapshot — and under a printing
+        agent that is a screen that no longer exists, so the clipboard got
+        whatever had been at those coordinates (review of the fourth version).
+        """
         if selection is None:
             self._selection_rows = None
             self._selection_bg = None
             self._drag_from = None
-        elif self._selection_rows is None:
+            self._selection_anchor = None
+        elif self._selection_rows is None or selection.start != self._selection_anchor:
             self._selection_rows = self._row_texts()  # freeze what is being selected
-        self.refresh()
+            self._selection_anchor = selection.start
+        self._repaint_selection(selection)
+
+    def _repaint_selection(self, selection: Selection | None) -> None:
+        """Repaint the rows this selection change can have altered.
+
+        A bare ``refresh()`` here redrew every row of the widget on every
+        MouseMove of a drag — and each row with a span pays for a text join and
+        a glyph-boundary scan (review of the fourth version). An endpoint off the
+        row list (``None``, the shape Textual hands a widget a drag crossed out
+        of) still means the whole widget.
+        """
+        rows = self._selection_row_span(selection) | self._selection_row_span(self._painted_span)
+        self._painted_span = selection
+        if rows:
+            self._repaint_rows(rows)
+
+    def _selection_row_span(self, selection: Selection | None) -> set[int]:
+        if selection is None:
+            return set()
+        start, end = selection.start, selection.end
+        if start is None or end is None:
+            return set(range(self.content_size.height))
+        return set(range(min(start.y, end.y), max(start.y, end.y) + 1))
 
     def _with_scroll_marker(self, strip: Strip, width: int, text: str) -> Strip:
         """``[↑k/history]`` in the top-right corner while the view is in history.
@@ -616,22 +702,29 @@ class TerminalPane(Widget, can_focus=True):
         pane is indistinguishable from a live one that happens to be quiet. The
         cut is snapped to a glyph boundary; a widened gap is blank.
         """
-        marker = f"[↑{self.scrollback}/{self.history_size}]"
-        if len(marker) >= width:
+        layout = self._marker_layout(text, width)
+        if layout is None:
             return strip
-        cut, _ = self._snap(text, width - len(marker), width - len(marker))
-        gap = " " * (width - len(marker) - cut)
+        cut, gap, marker = layout
         return Strip.join(
             [
                 strip.crop(0, cut),
                 Strip(
                     [
-                        Segment(gap, self.rich_style),
+                        Segment(" " * gap, self.rich_style),
                         Segment(marker, self.rich_style + SCROLL_MARKER),
                     ]
                 ),
             ]
         )
+
+    def _marker_layout(self, text: str, width: int) -> tuple[int, int, str] | None:
+        """``(cut, gap, marker)`` in cells — one answer for the strip and the text."""
+        marker = f"[↑{self.scrollback}/{self.history_size}]"
+        if len(marker) >= width:
+            return None
+        cut, _ = self._snap(text, width - len(marker), width - len(marker))
+        return cut, width - len(marker) - cut, marker
 
     def _strip_for(self, line: str) -> Strip:
         strip = self._strip_cache.get(line)
@@ -668,11 +761,16 @@ class TerminalPane(Widget, can_focus=True):
         if action is not None:
             self._scroll_by_key(action)
             return
-        if event.key == "ctrl+c" and self._copy_selection():
+        if event.key == "ctrl+c":
             # Every terminal emulator does this: ctrl+c copies while text is
-            # selected. Without a selection it is the agent's interrupt.
-            self.screen.clear_selection()
-            return
+            # selected. Without a selection it falls through to the agent's
+            # interrupt. Called as a statement, not as a boolean operand:
+            # `_copy_selection` writes the clipboard and raises a toast, which
+            # is not what a predicate in an `and` chain reads as (review).
+            copied = self._copy_selection()
+            if copied:
+                self.screen.clear_selection()
+                return
         if event.key == "super+c":
             # macOS Cmd+C is copy and nothing else. It must not fall through to
             # the key table either: ``super`` is not a modifier tmux can spell,
@@ -778,8 +876,16 @@ class TerminalPane(Widget, can_focus=True):
     # --- selection and copy ------------------------------------------------------------
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        """Remember where a left-button drag began, so its release can copy."""
+        """Remember where a left-button drag began, so its release can copy.
+
+        A press also ends whatever gesture came before it, so the frozen rows go
+        with it: a second drag that happens to start at the first one's anchor
+        would otherwise reuse its snapshot, and a double click reads the rows
+        before Textual's async clear has run (review of the fourth version).
+        """
         self._drag_from = event.offset if event.button == 1 else None
+        self._selection_rows = None
+        self._selection_anchor = None
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         """Copy on release — the drag itself is the request to copy.

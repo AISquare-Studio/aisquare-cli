@@ -1479,6 +1479,83 @@ def test_a_drag_that_starts_outside_the_pane_copies_nothing_but_ctrl_c_takes_it(
     assert toasts_after == 1
 
 
+def test_a_second_drag_copies_the_screen_it_was_made_on(fake: FakeTmux, tmp_path: Path) -> None:
+    """The rows were frozen only when the selection had been cleared, and Textual
+    clears one only on a release that moved nothing — so a second drag made while
+    the first still stood reused the first drag's snapshot. Under a printing
+    agent that is a screen which no longer exists, and the clipboard got whatever
+    had been at those coordinates (review)."""
+
+    async def drive() -> tuple[str, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await _drag(pilot, pane, (0, 1), (5, 1))
+            first = host.clipboard
+            fake.panes["%1"].screen = ["AAA newest", "BBB middle", "CCC bottom"]
+            await wait_until(pilot, lambda: "CCC bottom" in pane._lines)
+            # No intervening click: the first selection is still standing.
+            await _drag(pilot, pane, (0, 2), (5, 2))
+            return first, host.clipboard
+
+    first, second = run(drive())
+    assert first == "second"
+    assert second == "CCC bo", "the live screen, not the one the first drag froze"
+
+
+def test_a_row_wider_than_the_pane_copies_only_what_is_shown(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """`adjust_cell_length` truncates a row longer than the widget, so it renders
+    cut — while `_extract` read the whole thing and put 200 columns on the
+    clipboard. A failed `resize-window` leaves the tmux window at its spawn
+    geometry while captures keep succeeding, which is the documented state where
+    rows are wider than the pane (review)."""
+    fake.panes["%1"].screen = ["x" * 200, "y" * 200, "z" * 200]
+
+    async def drive() -> tuple[str | None, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await _drag(pilot, pane, (0, 0), (39, 2))
+            return pane.selected_text(), rows(pane)[1].cell_length
+
+    copied, painted_width = run(drive())
+    assert copied is not None
+    lines = copied.split("\n")
+    assert [len(line) for line in lines] == [40, 40, 40], lines
+    assert painted_width == 40, "the row renders 40 cells wide; the copy matches it"
+
+
+def test_the_scroll_marker_is_part_of_the_row_it_sits_on(fake: FakeTmux, tmp_path: Path) -> None:
+    """The marker was layered AFTER the selection and rebuilt the tail of row 0,
+    throwing the tint away while `_extract` copied that text anyway — and the
+    replacement changed the row's character count, so the offsets stamped on the
+    tail no longer indexed it (review)."""
+    pane = fake.panes["%1"]
+    pane.history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[str, str | None, Style, Style]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            widget.focus()
+            await wait_until(pilot, lambda: synced(widget))
+            widget.post_message(scroll_event(widget, up=True))
+            await wait_until(pilot, lambda: widget.scrollback > 0)
+            await _drag(pilot, widget, (0, 0), (39, 0))
+            row = rows(widget)[0]
+            return row.text, widget.selected_text(), style_at(row, 2), style_at(row, 35)
+
+    shown, copied, left, over_marker = run(drive())
+    assert "[↑" in shown, shown
+    assert copied == shown.rstrip("\n")[:40], "what is copied is the row as displayed"
+    assert copied is not None and "[↑" in copied, "the marker is on the row, so it copies"
+    assert left.bgcolor == over_marker.bgcolor, "the whole dragged row is tinted, marker included"
+
+
 def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) -> None:
     async def drive() -> int:
         host = Host(fake.server(tmp_path), "%1")

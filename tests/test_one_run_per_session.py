@@ -722,6 +722,88 @@ def test_a_malformed_gateway_url_keeps_the_launch_fail_open(bad_url: str) -> Non
     assert "not a usable URL" in wiring.reason
 
 
+@pytest.mark.parametrize(
+    "bad_url", ["https://gateway.example:badport", "https://gateway example/ingest"]
+)
+def test_an_http_client_rejected_url_is_a_failed_receipt(bad_url: str) -> None:
+    """Review of #107, round 4: `http.client.InvalidURL` (a nonnumeric port, an
+    unescaped space) is raised by urllib BEFORE any network call and is not a
+    `URLError`, so it escaped `_request()` and aborted the launch."""
+    from aisquare.services import explainability_ops as ops
+
+    verdict = ops.open_run_root(bad_url, "k", "aisquare-coder", "sess-1")
+    assert verdict.ok is False and verdict.status is None
+    assert "unreachable" in verdict.detail or "not a usable URL" in verdict.detail
+
+    wiring = wire_session(
+        _settings(), "coder", session_id="sess-1", api_key="k", gateway_url=bad_url, prober=_healthy
+    )
+    assert wiring.traced is True and wiring.owns_trace is False
+    assert "X-Pipeline-Id: sess-1" in wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+
+
+def _truncated(status: int, partial: bytes = b'{"acc') -> object:
+    """A stdlib-shaped response whose body is shorter than its Content-Length."""
+    from http.client import IncompleteRead
+
+    class _Body:
+        def read(self) -> bytes:
+            raise IncompleteRead(partial, expected=40)
+
+    class _Response(_Body):
+        def __init__(self) -> None:
+            self.status = status
+            self.fp = self  # HTTPError reads through .fp; a truthy fp means "has a body"
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    return _Response()
+
+
+def test_a_truncated_gateway_response_is_a_failed_receipt_not_an_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #107, round 4: a 202 whose body is shorter than its
+    Content-Length raises `IncompleteRead` from `response.read()`; a truncated
+    error body raises it from `exc.read()` INSIDE the `except HTTPError` branch.
+    Both used to escape `wire_session()` under a healthy proxy."""
+    from email.message import Message
+    from urllib.error import HTTPError
+
+    from aisquare.services import explainability_ops as ops
+
+    # 1. truncated success body: the 202 status line arrived, so the root WAS
+    #    accepted — a partial body is a detail, not an exception, and the
+    #    launcher owns the Run
+    monkeypatch.setattr(ops, "urlopen", lambda request, timeout: _truncated(202))
+    verdict = ops.open_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1")
+    assert verdict.ok is True and verdict.status == 202
+
+    # 2. truncated ERROR body: raised from the error handler's own read
+    def _raise_503(request: object, timeout: float) -> object:
+        err = HTTPError("https://gateway.example", 503, "unavailable", Message(), None)
+        err.fp = _truncated(503)  # type: ignore[assignment]
+        raise err
+
+    monkeypatch.setattr(ops, "urlopen", _raise_503)
+    verdict = ops.open_run_root("https://gateway.example", "k", "aisquare-coder", "sess-1")
+    assert verdict.ok is False and verdict.status == 503
+
+    wiring = wire_session(
+        _settings(),
+        "coder",
+        session_id="sess-1",
+        api_key="k",
+        gateway_url="https://gateway.example",
+        prober=_healthy,
+    )
+    assert wiring.traced is True and wiring.owns_trace is False, "the launch stays fail-open"
+
+
 def test_the_sdk_inbox_lives_in_our_home_not_the_cwd(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

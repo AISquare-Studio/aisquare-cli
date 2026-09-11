@@ -41,6 +41,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -466,7 +467,7 @@ def _request(
     try:
         request = Request(url, data=data, headers=headers)
         with urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
+            raw = _read_body(response)
             return HttpVerdict(
                 ok=200 <= response.status < 300,
                 status=response.status,
@@ -474,7 +475,10 @@ def _request(
                 payload=_maybe_json(raw),
             )
     except HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        # The error body is read under the same guard as a success body: a 503
+        # whose body is shorter than its Content-Length raises IncompleteRead
+        # from `exc.read()`, which used to escape from inside this very handler.
+        raw = _read_body(exc) if exc.fp else ""
         payload = _maybe_json(raw)
         return HttpVerdict(
             ok=False,
@@ -483,8 +487,28 @@ def _request(
             code=_gateway_code(payload),
             payload=payload,
         )
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
+    except (URLError, HTTPException, OSError, TimeoutError, ValueError) as exc:
+        # `HTTPException` covers what `urllib` raises from `http.client` rather
+        # than wrapping: `InvalidURL` for `:badport` or an unescaped space
+        # (before any network call) and `IncompleteRead` for a truncated body.
+        # Every one of them used to abort a launch with a healthy proxy
+        # (review of #107, round 4); a verdict keeps the fail-open promise.
         return HttpVerdict(ok=False, status=None, detail=f"unreachable: {exc}")
+
+
+def _read_body(response: Any) -> str:
+    """The response body as text, or what arrived of it.
+
+    A body shorter than its Content-Length raises ``IncompleteRead`` from
+    ``read()``; the bytes that did arrive ride on the exception, and a partial
+    body is still a better detail than none. Anything else is left to the
+    caller's handler.
+    """
+    try:
+        raw = response.read()
+    except IncompleteRead as exc:
+        raw = exc.partial
+    return bytes(raw).decode("utf-8", "replace")
 
 
 def _maybe_json(raw: str) -> Any:

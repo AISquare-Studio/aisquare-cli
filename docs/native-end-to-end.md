@@ -69,3 +69,24 @@ The successful package snapshot's SHA-256 values were:
 
 These identify that tested snapshot, not a promise that later source edits are
 covered. Rebuild and repeat the clean-install check after runtime changes.
+
+## Package validation record — 2026-09-11, after the stress test
+
+The same scenario was repeated after the adversarial review's fixes landed
+(checkpoint 52d7ab8 and the hardening commit that follows it). The wheel was again
+built from the generated sdist, installed into a fresh virtual environment with
+runtime dependencies only, and passed `pip check`, `asq --version`, the module and
+pack presence check, and this end-to-end test. The whole test suite, ruff and
+`mypy --strict` were run on the tree at the same time, and the real interface was
+driven inside a private tmux server (project view, F1 → Personas dialog, a typed
+`/persona use mission-control --reset-roles`, Escape) with the narration panel
+re-rendering over unchanged records.
+
+- Wheel: `8e74e032f50b40a9543d26ef596b5640dbd8cacaca0812cea2948a0713a905e8`
+- Sdist: `50d59fa3abc6064c5b2afed0e912ad0a35c4f0bf23a1fe4a2c7d2e6c81fe025a`
+
+The regression tests added by that review live in `tests/test_native_hardening.py`,
+`tests/test_persona_isolation.py`, `tests/test_source_revision_hardening.py` and
+`tests/test_team_fleet_harness_assignment.py`. What remains unverified is
+unchanged: no real language model planned or coded this example, no browser check
+ran, and no token or cost comparison against a baseline has been measured.

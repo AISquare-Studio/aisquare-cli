@@ -987,10 +987,15 @@ class SqliteStore:
             for task_id, status in task_statuses.items():
                 if status not in ("todo", "blocked"):
                     raise ValueError("unsupported brief task transition")
+                # Back to the pool means unowned; blocked keeps its owner, who is the
+                # one that has to see the blocker. A dropped task is never revived.
                 changed = self._conn.execute(
-                    "UPDATE team_task SET status = ?, claimed_by = NULL, claim_expires_at = NULL, "
-                    "updated_at = ? WHERE id = ? AND project_id = ?",
-                    (status, _now_iso(), task_id, project_id),
+                    "UPDATE team_task SET status = ?, "
+                    "claimed_by = CASE WHEN ? = 'blocked' THEN claimed_by ELSE NULL END, "
+                    "claim_expires_at = "
+                    "CASE WHEN ? = 'blocked' THEN claim_expires_at ELSE NULL END, "
+                    "updated_at = ? WHERE id = ? AND project_id = ? AND status != 'dropped'",
+                    (status, status, status, _now_iso(), task_id, project_id),
                 ).rowcount
                 if changed != 1:
                     raise ValueError("linked task disappeared or changed board")
@@ -1242,8 +1247,8 @@ class SqliteStore:
         ).rowcount
         for sid in sessions:
             work_removed += self._conn.execute(
-                "DELETE FROM team_meta WHERE key IN (?, ?)",
-                (f"work_rules/{sid}", f"work_rules_text/{sid}"),
+                "DELETE FROM team_meta WHERE key IN (?, ?, ?)",
+                (f"work_rules/{sid}", f"work_rules_text/{sid}", f"work_rules_role/{sid}"),
             ).rowcount
         removed = (
             work_removed

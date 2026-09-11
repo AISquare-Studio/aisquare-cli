@@ -204,6 +204,9 @@ SEAMS: dict[str, Seam] = {
     "aisquare/core/source_revision.py::source_root_for": Seam(
         EXCLUDED, "local git checkout path lookup for command/evidence provenance; no model"
     ),
+    "aisquare/core/source_revision.py::_gitlink": Seam(
+        EXCLUDED, "`git ls-files -s` for the commit a submodule entry records; no model"
+    ),
     "aisquare/cli/persona.py::_edit_pack": Seam(
         EXCLUDED,
         "the user's local text editor for a persona draft, with no shell or model invocation; "

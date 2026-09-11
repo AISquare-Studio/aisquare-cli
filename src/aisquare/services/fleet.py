@@ -1024,12 +1024,22 @@ def spawn(
     )
     kickoff = prompt
     if kickoff is None and resolved_task_id is not None:
-        kickoff = (
-            f"Work on assigned board task {resolved_task_id}. Read it with "
-            f"aisquare --json task show {resolved_task_id}, follow your role's work cycle, "
-            "and report the result on that task. Claim it before editing; if another "
-            "worker owns it or dependencies are unmet, report that and do not duplicate work."
-        )
+        # Same protocol as the session-start <aisquare-assignment> block: coders
+        # claim, every verifying role inspects and leaves ownership alone.
+        if harness.base_role(role) == "coder":
+            kickoff = (
+                f"Work on assigned board task {resolved_task_id}. Read it with "
+                f"aisquare --json task show {resolved_task_id}, follow your role's work cycle, "
+                "and report the result on that task. Claim it before editing; if another "
+                "worker owns it or dependencies are unmet, report that and do not duplicate work."
+            )
+        else:
+            kickoff = (
+                f"Work on assigned board task {resolved_task_id}. Read it with "
+                f"aisquare --json task show {resolved_task_id}. Inspect it and its evidence, "
+                "preserve its existing ownership and do not claim it; follow your role's work "
+                "cycle and report the result on that task."
+            )
     if kickoff:
         _type_prompt(srv, stored.pane_id, kickoff, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)

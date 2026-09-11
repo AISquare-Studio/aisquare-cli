@@ -57,6 +57,17 @@ def plain_text(value: str) -> str:
     )
 
 
+def single_line(value: str) -> str:
+    """One display line: controls neutralized AND line breaks flattened.
+
+    ``plain_text`` keeps newlines because event text is allowed to span lines.
+    Facts that sit inside a caption or its header (the session role, ids) are
+    not: an agent that names its role ``coder\\nOriginal record …`` must not be
+    able to forge a second official-looking line in the operator's panel.
+    """
+    return " ".join(plain_text(value).replace("\t", " ").split("\n")).replace("\r", " ")
+
+
 def clean_text(value: str) -> str:
     """Pack prose must be plain printable text, never terminal control sequences."""
     if plain_text(value) != value or "\t" in value or "\n" in value or "\r" in value:
@@ -64,9 +75,21 @@ def clean_text(value: str) -> str:
     return value
 
 
+_SEAT = re.compile(r"^(?P<base>[a-z][a-z-]*[a-z])-?(?P<seat>\d+)$")
+
+
 def base_role(role: str) -> str:
-    """Numbered seats inherit their role (coder2, coder-2, ui-tester3)."""
-    return re.sub(r"-?\d+$", "", role)
+    """Numbered seats inherit their role (coder2, coder-2, ui-tester3).
+
+    Mirrors ``harness.base_role`` without importing the harness: only a seat of a
+    role this module KNOWS collapses, so a declared role called ``bot7`` or
+    ``gpt4`` stays itself instead of being promoted to a pack role it never had.
+    """
+    match = _SEAT.match(role)
+    if match is None:
+        return role
+    base = match.group("base")
+    return base if base in ROLES else role
 
 
 def validate_identifier(value: str) -> str:
@@ -112,9 +135,16 @@ class PersonaPack(BaseModel):
             raise ValueError("too many roles or generic events")
         if "default" not in self.generic:
             raise ValueError("generic.default is required")
+        if not self.name.strip():
+            raise ValueError("persona name must not be blank")
         total = 0
         for role, patterns in [("generic", self.generic), *self.roles.items()]:
             validate_identifier(role)
+            if role != "generic" and base_role(role) != role:
+                # The renderer looks patterns up by BASE role; a seat key could never match.
+                raise ValueError(
+                    f"use the base role name {base_role(role)!r}, not the seat {role!r}"
+                )
             if len(patterns) > len(EVENTS):
                 raise ValueError("too many event patterns")
             for event, alternatives in patterns.items():
@@ -126,6 +156,8 @@ class PersonaPack(BaseModel):
                     total += len(template)
                     if not 1 <= len(template) <= 400:
                         raise ValueError("each pattern must be between 1 and 400 characters")
+                    if not template.strip():
+                        raise ValueError("a pattern must not be blank")
                     clean_text(template)
                     for _, field, spec, conversion in _FORMATTER.parse(template):
                         if field is not None and (field not in PLACEHOLDERS or spec or conversion):
@@ -151,7 +183,14 @@ def parse_pack(raw: bytes) -> PersonaPack:
             result[key] = value
         return result
 
-    return PersonaPack.model_validate(json.loads(raw, object_pairs_hook=unique_keys))
+    try:
+        document = json.loads(raw, object_pairs_hook=unique_keys)
+    except RecursionError:
+        # json's C decoder recurses per nesting level; a hostile pack must be a
+        # ValueError like every other damaged pack, never a crash that skips the
+        # "damaged pack cannot suppress activity" guards.
+        raise ValueError("persona JSON is nested too deeply") from None
+    return PersonaPack.model_validate(document)
 
 
 def pack_bytes(pack: PersonaPack) -> bytes:
@@ -170,11 +209,12 @@ def caption(
     """One event keeps the same phrase over redraws; never guess missing facts."""
     role_patterns = pack.roles.get(base_role(role), {})
     patterns = role_patterns.get(kind) or pack.generic.get(kind) or pack.generic["default"]
-    facts = {"role": role, "event_kind": kind}
+    # Facts come from the board, i.e. from agents; they are display data, not markup.
+    facts = {"role": single_line(role), "event_kind": single_line(kind)}
     if task_id:
-        facts["task_id"] = task_id
+        facts["task_id"] = single_line(task_id)
     if session_id:
-        facts["session_id"] = session_id
+        facts["session_id"] = single_line(session_id)
     eligible = [
         p
         for p in patterns
@@ -183,4 +223,4 @@ def caption(
     if not eligible:
         return ""
     index = int(hashlib.sha256(event_id.encode()).hexdigest()[:8], 16) % len(eligible)
-    return plain_text(eligible[index].format_map(facts))
+    return single_line(eligible[index].format_map(facts))

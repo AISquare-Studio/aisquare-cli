@@ -31,10 +31,28 @@ app = typer.Typer(
 
 
 @app.callback()
-def main(ctx: typer.Context) -> None:
+def main(
+    ctx: typer.Context,
+    global_scope: Annotated[
+        bool, typer.Option("--global", help="Show or change the global fallback.")
+    ] = False,
+    project: Annotated[
+        str | None, typer.Option("--project", help="Registered project ID or name.")
+    ] = None,
+) -> None:
     """Show project status when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        _run(shlex.join(["status", *ctx.args]))
+        scope = ["--global"] if global_scope else (["--project", project] if project else [])
+        _run(shlex.join(["status", *scope, *ctx.args]))
+
+
+def _passthrough(ctx: typer.Context) -> list[str]:
+    """A trailing ``--json`` belongs to us, like on every other command group."""
+    words = list(ctx.args)
+    if "--json" in words:
+        words.remove("--json")
+        get_state().json_output = True
+    return words
 
 
 def _run(command: str) -> None:
@@ -101,7 +119,7 @@ def _edit_pack(initial: str) -> str | None:
 
 def _command(ctx: typer.Context) -> None:
     """Run a local persona action. See `asq persona --help` for supported forms."""
-    _run(shlex.join([ctx.info_name or "status", *ctx.args]))
+    _run(shlex.join([ctx.info_name or "status", *_passthrough(ctx)]))
 
 
 def _pack_command(
@@ -109,7 +127,7 @@ def _pack_command(
     pack: Annotated[str, typer.Argument(help="Pack ID or ID@version.", metavar="PACK")],
 ) -> None:
     """Run a local persona action on one pack. See `asq persona --help`."""
-    _run(shlex.join([ctx.info_name or "status", pack, *ctx.args]))
+    _run(shlex.join([ctx.info_name or "status", pack, *_passthrough(ctx)]))
 
 
 def _export_command(
@@ -118,7 +136,7 @@ def _export_command(
     output: Annotated[str, typer.Option("--output", help="Destination JSON file.")],
 ) -> None:
     """Export one pack as a JSON file; refuses to overwrite an existing file."""
-    _run(shlex.join(["export", pack, "--output", output, *ctx.args]))
+    _run(shlex.join(["export", pack, "--output", output, *_passthrough(ctx)]))
 
 
 _EXTRA = {"allow_extra_args": True, "ignore_unknown_options": True}

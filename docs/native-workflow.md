@@ -121,11 +121,16 @@ asq brief finding BRIEF_ID R3 --task TASK_ID \
   --artifact /absolute/path/outside/source/phone-failure.png
 ```
 
-This reuses the linked task and reopens it. Without `--task`, the command uses an
-existing linked task, or creates one correction task with an idempotency key.
-Repeating identical evidence does not add another finding. Three distinct failures
-for the same requirement block its task so the manager must re-plan or ask the
-user, rather than creating an endless chain of replacement tasks.
+This reuses the linked task. A finding against a task in review or done returns
+it to todo; a task someone is still working on keeps its owner and status (the
+failure reaches them through the brief), and a dropped task stays dropped. Without
+`--task`, the command uses an existing linked task, or creates one correction task
+with an idempotency key. Repeating the latest record exactly does not add another
+finding, but an identical failure reported after a later pass supersedes that
+pass. Three distinct failures by the same task against the same requirement
+revision block that task so the manager must re-plan or ask the user, rather than
+creating an endless chain of replacement tasks; correcting the requirement starts
+the count again, and one task's failures never block another.
 
 After the fix and a real new browser check:
 
@@ -160,8 +165,12 @@ asq brief update BRIEF_ID --source-revision build-2 --affected R3
 
 Omit `--affected` to apply the revision change to every requirement. Independently,
 automatic source fingerprints detect actual edits even if this command is
-forgotten. That file check is conservative: an edit can invalidate evidence for
-other requirements checked in the same checkout.
+forgotten. That file check is conservative and it wins: any edit to the checkout
+invalidates the command evidence of every requirement checked in that checkout,
+including ones you did not name in `--affected`. `--affected` therefore narrows
+the bookkeeping (which requirements' revisions move), not the safety check; after
+a real edit, rerun the affected checks and expect the fingerprint to demand the
+rest too.
 
 Now inspect coverage and finish verified work:
 
@@ -193,8 +202,10 @@ For one assembled delivery checkout, ask the validator for a strict check:
 asq brief check BRIEF_ID --source-root /absolute/path/to/assembled-checkout
 ```
 
-All proof must match that checkout's source identity. If it does not, run and
-record fresh checks there. Deliveries spanning several repositories also need
+The path must exist and be this project's checkout, a directory inside it, or a
+git worktree of it; a typo is an error rather than a page of "stale". All proof
+must match that checkout's source identity. If it does not, run and record fresh
+checks there. Deliveries spanning several repositories also need
 explicit integration checks across them; one repository's passing tests cannot
 certify another repository's behaviour.
 
@@ -213,9 +224,12 @@ Exports are snapshots. Update the stored brief through commands; editing an expo
 does not update the board. Export refuses to overwrite an existing file.
 
 `mode off` keeps the existing role cycles and turns off the additional native
-working rules for new sessions. `mode native` enables them for new sessions.
-Sessions retain their recorded rule version and text when resumed. These controls
-are independent of persona selection. Existing factual requirements still apply.
+working rules and the evidence-recording instructions for new sessions; the
+linked requirements are still shown, because they are facts about the project.
+`mode native` enables the rules for new sessions. Sessions retain their recorded
+rule version when resumed; the rule text follows the session's current role, so a
+session relaunched as a tester gets tester habits. These controls are independent
+of persona selection.
 
 For a file shortlist, a worker can use `asq context focus "login error"`. This
 uses the existing snapshot index. It is a map to possible files, not proof or a
@@ -231,9 +245,17 @@ or newly added files.
   the requested behaviour. Manual screenshots remain manual claims.
 - The software detects exact requirement/boundary overlap, not every possible
   contradiction in natural language. The manager/planner must resolve ambiguity.
-- Source fingerprints include Git HEAD and tracked/nonignored files. Ignored build
-  outputs, external services, environment changes, and production data can change
-  behaviour without changing that fingerprint; relevant checks must account for them.
+- Source fingerprints hash the contents of tracked and nonignored files, plus the
+  commit each submodule records. They deliberately exclude Git HEAD (an empty
+  commit or a branch switch that changes no byte keeps evidence valid) and
+  well-known generated directories (`__pycache__`, `.pytest_cache`, `node_modules`,
+  virtual environments and the like) even when a project forgot to gitignore them.
+  Ignored build outputs, external services, environment changes, and production
+  data can change behaviour without changing that fingerprint; relevant checks
+  must account for them.
+- A command report captured with `--task` can only back evidence for that task.
+  A report captured without `--task` may back any task linked to the requirement,
+  so pass `--task` whenever the check belongs to one task.
 - Evidence files must remain available and unchanged. Removing or changing a report
   makes its coverage stale. Command report retention also applies. Keep referenced
   reports if coverage must remain checkable; exporting a brief copies its records

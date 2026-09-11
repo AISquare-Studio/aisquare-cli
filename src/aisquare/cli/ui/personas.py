@@ -126,7 +126,8 @@ class PersonaScreen(ModalScreen[None]):
             packs = personas.list_packs()
             picker = self.query_one("#persona-pack", Select)
             previous = picker.value
-            picker.set_options([(f"{p.name} ({p.reference})", p.reference) for p in packs])
+            # Pack names are data from a file someone downloaded: never Rich/Textual markup.
+            picker.set_options([(Text(f"{p.name} ({p.reference})"), p.reference) for p in packs])
             self.query_one("#persona-command", Input).suggester = SuggestFromList(
                 [
                     "/persona status",
@@ -166,10 +167,10 @@ class PersonaScreen(ModalScreen[None]):
         try:
             words = shlex.split(command)
             action = words[1] if len(words) > 1 and words[0] == "/persona" else "picker"
+            scoped = any(word == "--global" or word.startswith("--project") for word in words)
             if (
                 self.project is None
-                and "--global" not in words
-                and "--project" not in words
+                and not scoped
                 and action in {"picker", "status", "use", "off", "reset"}
             ):
                 command += " --global"

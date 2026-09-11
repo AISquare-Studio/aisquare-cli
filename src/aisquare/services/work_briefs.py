@@ -99,10 +99,35 @@ def _scope(store: ContextStore, cwd: Path | None = None) -> str:
 
 
 def _load(store: ContextStore, ref: str, project_id: str) -> WorkBrief:
+    if not ref.strip():
+        # An empty prefix matches every brief; with one brief it would "resolve".
+        raise ValueError("a brief id (or unambiguous prefix) is required")
     data = store.get_work_brief(ref, project_id)
     if data is None:
         raise KeyError(f"brief {ref!r} is not on this project's board")
     return WorkBrief.model_validate_json(data)
+
+
+def referenced_report_ids(store: ContextStore | None = None) -> set[str]:
+    """Every command report some recorded evidence points at, across all boards.
+
+    Report retention consults this so it never deletes the file that backs a
+    recorded pass; a missing report would flip a VERIFIED brief to NOT VERIFIED.
+    """
+    from aisquare.services import project as projects
+
+    def collect(active: ContextStore) -> set[str]:
+        found: set[str] = set()
+        for info in projects.list_projects():
+            for data in active.work_briefs(info.id):
+                brief = WorkBrief.model_validate_json(data)
+                found.update(e.report_id for e in brief.evidence if e.report_id is not None)
+        return found
+
+    if store is not None:
+        return collect(store)
+    with store_session() as active:
+        return collect(active)
 
 
 def _requirement(brief: WorkBrief, ref: str) -> Requirement:
@@ -263,6 +288,9 @@ def update(
                 requirement.revision += 1
                 for task_id in requirement.task_ids:
                     task = store.get_task(task_id)
+                    # Finished work returns to the pool; work in progress keeps its
+                    # owner (the correction reaches them through the brief), and a
+                    # dropped task stays dropped.
                     if task is not None and task.status in ("done", "review"):
                         statuses[task_id] = "todo"
         for text in add or []:
@@ -310,9 +338,16 @@ def link(
 
 
 def _artifact(path: Path) -> tuple[str, str]:
-    resolved = path.expanduser().resolve(strict=True)
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+    except RuntimeError as exc:
+        # Python 3.12 reports a symlink loop as RuntimeError; callers handle OSError
+        # and ValueError, so it must become one of those rather than a traceback.
+        raise ValueError(f"evidence artifact unavailable: {path} ({exc})") from None
+    # is_file() follows links and is False for FIFOs, sockets and devices, so an
+    # unbounded read of /dev/zero or a blocking pipe never starts.
     if not resolved.is_file():
-        raise ValueError("evidence artifact must be an existing regular file")
+        raise ValueError(f"evidence artifact must be an existing regular file: {path}")
     if resolved.stat().st_size > 20_000_000:
         raise ValueError("evidence artifact exceeds 20 MB; use a focused report")
     return str(resolved), hashlib.sha256(resolved.read_bytes()).hexdigest()
@@ -399,20 +434,25 @@ def record_evidence(
             # A failed old check stays attached to its actual source, never
             # relabelled as evidence for whatever source happens to exist now.
             fingerprint = report.source_fingerprint_after or "unknown-command-source"
-        for previous in brief.evidence:
-            if (
-                previous.requirement_id == requirement_id
-                and previous.requirement_revision == requirement.revision
-                and previous.source_revision == requirement.source_revision
-                and previous.task_id == task.id
-                and previous.verdict == verdict
-                and previous.summary == summary
-                and previous.artifact_sha256 == digest
-                and previous.source_fingerprint == fingerprint
-                and previous.report_id == report_id
-                and previous.report_sha256 == report_digest
-            ):
-                return brief
+        same_lane = [
+            e for e in brief.evidence if e.requirement_id == requirement_id and e.task_id == task.id
+        ]
+        # Idempotent only against the LATEST record of this lane: an identical
+        # failure re-reported after a later pass is new information and must
+        # supersede that pass, not vanish as a duplicate.
+        previous = same_lane[-1] if same_lane else None
+        if (
+            previous is not None
+            and previous.requirement_revision == requirement.revision
+            and previous.source_revision == requirement.source_revision
+            and previous.verdict == verdict
+            and previous.summary == summary
+            and previous.artifact_sha256 == digest
+            and previous.source_fingerprint == fingerprint
+            and previous.report_id == report_id
+            and previous.report_sha256 == report_digest
+        ):
+            return brief
         if len(brief.evidence) >= 512:
             raise ValueError("brief has 512 evidence records; export and create a follow-up brief")
         expected = brief.revision
@@ -437,11 +477,22 @@ def record_evidence(
         brief.evidence.append(evidence)
         brief.revision += 1
         statuses: dict[str, str] = {}
-        if verdict in ("fail", "blocked"):
+        if verdict in ("fail", "blocked") and task.status != "dropped":
+            # Per task and per requirement REVISION: a correction to the requirement
+            # starts the count again, and one task's failures never block another.
             failures = sum(
-                e.requirement_id == requirement_id and e.verdict == "fail" for e in brief.evidence
+                e.requirement_id == requirement_id
+                and e.task_id == task.id
+                and e.requirement_revision == requirement.revision
+                and e.verdict == "fail"
+                for e in brief.evidence
             )
-            statuses[task.id] = "blocked" if verdict == "blocked" or failures >= 3 else "todo"
+            if verdict == "blocked" or failures >= 3:
+                statuses[task.id] = "blocked"
+            elif task.status in ("review", "done"):
+                statuses[task.id] = "todo"
+            # A task in progress keeps its owner and status: the failure reaches the
+            # worker through the brief, and stripping the claim would orphan the work.
         return _save(
             store,
             brief,
@@ -598,6 +649,21 @@ def check(
         project = store.get_project(brief.project_id)
         if project is None:
             raise ValueError("brief project is unavailable")
+        if source_root is not None:
+            resolved = source_root.expanduser().resolve()
+            root = project.root.resolve()
+            # A typo here must not read as "everything is stale": the strict check
+            # only makes sense against a checkout of THIS project.
+            if not resolved.is_dir():
+                raise ValueError(f"--source-root is not a directory: {source_root}")
+            if not (
+                resolved == root or resolved.is_relative_to(root) or (resolved / ".git").exists()
+            ):
+                raise ValueError(
+                    f"--source-root must be this project's checkout or a git worktree of it: "
+                    f"{resolved}"
+                )
+            source_root = resolved
         return coverage(brief, store.team_tasks(brief.project_id), source_root=source_root)
 
 
@@ -689,16 +755,22 @@ def session_context(store: ContextStore, project_id: str, session_id: str, role:
         store.set_meta(key, version)
     lines = [f"Working rules: {version}"]
     if version != "off":
+        # The text is pinned per session AND per role: a session re-launched under
+        # another role gets that role's habits, not the first role's.
+        base = harness.base_role(role)
         saved_rules = store.get_meta(f"work_rules_text/{session_id}")
-        if saved_rules is None:
+        if saved_rules is None or store.get_meta(f"work_rules_role/{session_id}") != base:
             saved_rules = json.dumps(harness.working_rules(role))
             store.set_meta(f"work_rules_text/{session_id}", saved_rules)
+            store.set_meta(f"work_rules_role/{session_id}", base)
         lines.extend(str(line) for line in json.loads(saved_rules))
-    lines.append(
-        f"For source-bound check evidence use `asq exec --project {project_id} "
-        "--task TASK -- pytest ...`, then `asq brief evidence BRIEF R1 --task TASK "
-        "--verdict pass --summary 'actual check' --report REPORT_ID`."
-    )
+        lines.append(
+            f"For source-bound check evidence use `asq exec --project {project_id} "
+            "--task TASK -- pytest ...`, then `asq brief evidence BRIEF R1 --task TASK "
+            "--verdict pass --summary 'actual check' --report REPORT_ID`."
+        )
+    # `mode off` means no native instructions at all; the requirements below are
+    # facts about the project and are shown either way.
     # Requirements are factual project state, not a work-mode preference.
     task_id = os.environ.get("AISQUARE_TASK_ID")
     for data in store.work_briefs(project_id):

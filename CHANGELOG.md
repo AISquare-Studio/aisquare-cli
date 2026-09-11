@@ -7,6 +7,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native role personalities, work briefs and command reports.** Three separate
+  features with separate controls, none of which requires the Ponytail, Spec Kit
+  or RTK plugins ([docs/personas.md](docs/personas.md),
+  [docs/native-workflow.md](docs/native-workflow.md),
+  [docs/command-reports.md](docs/command-reports.md)).
+  - *Personas* narrate recorded board activity in a chosen cast — two ship,
+    **Studio** and **Mission Control**, with a voice per role and a fallback —
+    in a **Role narration** panel beside the manager, each worker and the Board,
+    newest record first with the original record under every caption. `asq
+    persona` (`list`, `status`, `preview`, `use [--role]`, `off`, `reset`, `add`
+    from a file, an HTTPS URL or a text description, `edit`, `export`, `remove`)
+    and the same `/persona …` commands in the interface's **Personas** dialog
+    (Persona… button, or F1 → Personas), which focuses its command box on open.
+    Personas are display-only: they never enter worker prompts, launch arguments,
+    task notes, `--json` output or Explainability events, and a replay test pins
+    every agent-facing surface byte-for-byte across Off/Studio/Mission Control.
+    Packs are validated data (no code, no markup, no control characters; a
+    hostile deeply nested document is an error, not a crash), installed
+    atomically under `~/.aisquare/personas`, versioned, and downloadable without
+    following redirects. Pattern kinds are exactly the event kinds the board
+    records (`task_added`, `task_claimed`, `task_reopened`, `brief_evidence`, …).
+  - *Work briefs* record what was asked as stable requirements (`R1`, `R2`, …)
+    linked to ordinary board tasks, with evidence per requirement and per task;
+    `asq task done` refuses a linked task without fresh evidence, `asq brief
+    check` exits 1 while anything is missing, failed, blocked or stale, and a
+    correction reopens finished tasks while a task still being worked on keeps
+    its owner. Command evidence is bound to a content fingerprint of the
+    checkout (tracked and nonignored files, submodule commits; not Git HEAD, not
+    `__pycache__`-style generated directories), so a real edit — and only a real
+    edit — makes a pass stale. Three failures by one task against one
+    requirement revision block that task; a correction restarts the count.
+    Role-specific working rules (`native-1`) reach manager-spawned and directly
+    launched sessions through the shared session-start briefing and follow the
+    session's current role; `asq brief mode off` turns them off for new sessions.
+  - *Command reports*: `asq exec -- COMMAND` runs a command exactly once, keeps
+    the original bytes (first 1 MiB per stream) under `~/.aisquare/reports`,
+    gives the agent a shorter report for recognised `git status` and pytest
+    output (progress lines from the collection zone only; `-s`, also inside a
+    cluster such as `-sv`, disables it), and `asq reports show ID --raw` recovers
+    the originals without ever re-running. Interrupts are forwarded to the
+    command's process group and escalate (SIGINT → SIGTERM → SIGKILL) with the
+    interruption recorded; retention (14 days / newest 64) never removes a report
+    that backs recorded evidence.
+  - A **ui-tester** fleet role (browser checks of a changed interface), registered
+    in the Explainability roster with its own standing cycle; `fleet spawn --task`
+    now hands the task to the worker (`AISQUARE_TASK_ID`, a role-aware kickoff
+    typed into the pane, and a session-start `<aisquare-assignment>` block that
+    follows the task's real claim and status).
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

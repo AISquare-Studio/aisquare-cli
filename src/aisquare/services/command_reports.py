@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +43,14 @@ _OFF = {"0", "false", "no", "off"}
 # Strip complete terminal sequences before parsing; raw files never go through this.
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
 _PROGRESS = re.compile(r"^(?:[^\r\n]*test[^\r\n]*\.py\s+)?[.sfxXFE]+\s*\[\s*\d+%\]\s*$")
+#: A progress line is short; the optional path prefix above backtracks
+#: quadratically, so anything longer is never even offered to it.
+_PROGRESS_MAX = 512
+_PYTEST_BANNER = re.compile(r"^=+ .+ =+$")
+#: Report metadata is read back with this bound; argv is capped so the whole
+#: indented document always fits.
+_REPORT_JSON_LIMIT = 262_144
+_ARGV_LIMIT = 32_768
 _PYTEST_END = re.compile(
     r"(?:^=+\s*|^)(?:\d+ "
     r"(?:passed|failed|error|errors|skipped|deselected|xfailed|xpassed|warnings?)"
@@ -70,6 +78,11 @@ class CommandReport(BaseModel):
     returncode: int
     signal: int | None = None
     launch_error: str | None = None
+    #: The signal the OPERATOR sent the wrapper while the command ran, forwarded to
+    #: the command's process group. Distinct from ``signal`` (how the child died):
+    #: a child that swallowed the interrupt and exited 0 still shows the run was
+    #: interrupted rather than looking like a clean pass.
+    interrupted_by: int | None = None
     session_id: str | None = None
     task_id: str | None = None
     project_id: str | None = None
@@ -142,7 +155,7 @@ def _read_file(path: Path, limit: int) -> bytes:
 
 def load_report(report_id: str) -> CommandReport:
     report = CommandReport.model_validate_json(
-        _read_file(_directory(report_id) / "report.json", 65536)
+        _read_file(_directory(report_id) / "report.json", _REPORT_JSON_LIMIT)
     )
     if report.id != report_id:
         raise ValueError("Saved report ID does not match its directory.")
@@ -180,20 +193,86 @@ def list_reports() -> list[CommandReport]:
     return sorted(result, key=lambda item: item.finished_at, reverse=True)
 
 
-def prune_reports(*, keep: int = RETAIN_REPORTS, days: int = RETAIN_DAYS) -> list[str]:
-    """Remove completed owned records only, never unfinished concurrent runs."""
+def protected_report_ids() -> set[str]:
+    """Reports that back recorded requirement evidence; retention must keep them.
+
+    Imported lazily: work_briefs imports this module, and a store problem while
+    reading evidence must not stop a command from running, so an unreadable
+    board protects nothing rather than raising here.
+    """
+    try:
+        from aisquare.services.work_briefs import referenced_report_ids
+
+        return referenced_report_ids()
+    except Exception:
+        return set()
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _prune_orphaned_pending(root: Path) -> list[str]:
+    """A wrapper killed with SIGKILL leaves ``.pending-*`` behind forever otherwise.
+
+    An entry is orphaned only when the wrapper pid it recorded is gone AND it is
+    older than an hour; a live long-running command keeps its directory.
+    """
+    removed: list[str] = []
+    for path in root.glob(".pending-*"):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        try:
+            age = time.time() - path.stat().st_mtime
+            pid_text = (path / "wrapper.pid").read_text(encoding="ascii").strip()
+            alive = _pid_alive(int(pid_text))
+        except (OSError, ValueError):
+            # No readable pid record means we cannot prove the owner is gone: a
+            # directory another runner is still filling must never be removed.
+            continue
+        if not alive and age > 3600:
+            with suppress(OSError):
+                shutil.rmtree(path)
+                removed.append(path.name)
+    return removed
+
+
+def prune_reports(
+    *, keep: int = RETAIN_REPORTS, days: int = RETAIN_DAYS, protect: Collection[str] = ()
+) -> list[str]:
+    """Remove completed owned records only, never unfinished concurrent runs.
+
+    ``protect`` names reports that back recorded requirement evidence: deleting
+    one would flip a VERIFIED brief to NOT VERIFIED, so those never count
+    against ``keep`` and never expire here.
+    """
     if keep < 0 or days < 0:
         raise ValueError("Retention values must be non-negative.")
     cutoff = time.time() - days * 86400
+    protected = set(protect)
     removed: list[str] = []
-    for index, report in enumerate(list_reports()):
-        if index >= keep or report.finished_at.timestamp() < cutoff:
+    kept = 0
+    for report in list_reports():
+        if report.id in protected:
+            continue
+        if kept >= keep or report.finished_at.timestamp() < cutoff:
             path = _directory(report.id)
             try:
                 shutil.rmtree(path)
             except FileNotFoundError:
                 continue  # another runner pruned the same old completed report
             removed.append(report.id)
+        else:
+            kept += 1
+    root = reports_dir()
+    if root.is_dir() and not root.is_symlink():
+        removed.extend(_prune_orphaned_pending(root))
     return removed
 
 
@@ -225,12 +304,10 @@ def compact_stdout(argv: Sequence[str], data: bytes, *, truncated: bool) -> tupl
     lines = text.splitlines(keepends=True)
     if (
         is_pytest
-        and not any(
-            arg == "-s" or arg.startswith("--capture=") or arg == "--capture" for arg in argv[1:]
-        )
+        and not _pytest_capture_disabled(argv[1:])
         and any(_PYTEST_END.search(line.strip()) for line in lines)
     ):
-        compacted = "".join(line for line in lines if not _PROGRESS.fullmatch(line.strip()))
+        compacted = "".join(_pytest_without_progress(lines))
         output = compacted.encode()
         if len(output) < len(data):
             return "pytest", output
@@ -254,14 +331,63 @@ def compact_stdout(argv: Sequence[str], data: bytes, *, truncated: bool) -> tupl
     return "passthrough", data
 
 
+def _pytest_capture_disabled(args: Sequence[str]) -> bool:
+    """``-s`` alone or folded into a short-option cluster (``-sv``, ``-xqs``)."""
+    for arg in args:
+        if arg == "--capture" or arg.startswith("--capture="):
+            return True
+        if arg.startswith("-") and not arg.startswith("--") and "s" in arg[1:]:
+            return True
+    return False
+
+
+def _pytest_without_progress(lines: Sequence[str]) -> Iterator[str]:
+    """Drop progress lines from the collection zone only.
+
+    Pytest prints ``tests/x.py ..F [ 40%]`` lines between its opening banner and
+    the first section banner (FAILURES, ERRORS, warnings summary, …). A test's
+    captured stdout inside a FAILURES section may contain look-alike lines, and
+    those are part of the evidence, so once a banner is seen nothing is dropped.
+    """
+    in_zone = True
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if index > 0 and _PYTEST_BANNER.match(stripped) and "test session starts" not in stripped:
+            in_zone = False
+        if in_zone and len(stripped) <= _PROGRESS_MAX and _PROGRESS.fullmatch(stripped):
+            continue
+        yield line
+
+
+class _Interrupts:
+    """What the operator sent while the command ran, and the escalation ladder."""
+
+    def __init__(self) -> None:
+        self.first: int | None = None
+        self.count = 0
+
+
 @contextmanager
-def _forward_signals(child: subprocess.Popen[bytes]) -> Iterator[None]:
+def _forward_signals(child: subprocess.Popen[bytes], seen: _Interrupts) -> Iterator[None]:
+    """Forward SIGINT/SIGTERM/SIGHUP to the command's process group, escalating.
+
+    A child that ignores SIGINT would otherwise hold the operator's terminal
+    until they SIGKILL the wrapper, orphaning the child with the pipes open. The
+    second interrupt sends SIGTERM to the group, the third SIGKILL; the report
+    is still written, with what was sent recorded.
+    """
     previous: dict[int, Callable[[int, FrameType | None], Any] | int | None] = {}
     if threading.current_thread() is threading.main_thread():
 
         def forward(number: int, frame: object) -> None:
+            seen.count += 1
+            if seen.first is None:
+                seen.first = number
+            escalated = (
+                number if seen.count == 1 else signal.SIGTERM if seen.count == 2 else signal.SIGKILL
+            )
             with suppress(ProcessLookupError):
-                os.killpg(child.pid, number)
+                os.killpg(child.pid, escalated)
 
         for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             previous[number] = signal.signal(number, forward)
@@ -272,8 +398,33 @@ def _forward_signals(child: subprocess.Popen[bytes]) -> Iterator[None]:
             signal.signal(old_number, handler)
 
 
+@contextmanager
+def _defer_interrupts() -> Iterator[None]:
+    """The command already ran: finish publishing its report, THEN honour Ctrl-C.
+
+    Discarding a report because the operator interrupted the source scan or the
+    compaction step would lose the record of a command that did execute.
+    """
+    pending: list[int] = []
+    previous: dict[int, Callable[[int, FrameType | None], Any] | int | None] = {}
+    if threading.current_thread() is threading.main_thread():
+
+        def defer(number: int, frame: object) -> None:
+            pending.append(number)
+
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous[number] = signal.signal(number, defer)
+    try:
+        yield
+    finally:
+        for old_number, handler in previous.items():
+            signal.signal(old_number, handler)
+        if pending:
+            raise KeyboardInterrupt if pending[0] == signal.SIGINT else SystemExit(128 + pending[0])
+
+
 def _capture(
-    child: subprocess.Popen[bytes], directory: Path, limit: int
+    child: subprocess.Popen[bytes], directory: Path, limit: int, seen: _Interrupts
 ) -> dict[str, StreamRecord]:
     counts = {"stdout": 0, "stderr": 0}
     kept = {"stdout": 0, "stderr": 0}
@@ -285,7 +436,7 @@ def _capture(
                 fd = os.open(directory / f"{name}.bin", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 handles[name] = os.fdopen(fd, "wb")
                 selector.register(pipe, selectors.EVENT_READ, data=name)
-            with _forward_signals(child):
+            with _forward_signals(child, seen):
                 while selector.get_map():
                     for key, _ in selector.select():
                         pipe = cast(BinaryIO, key.fileobj)
@@ -346,7 +497,8 @@ def _source_before(project_id: str | None, cwd: Path) -> tuple[Path | None, str 
         root = source_root_for(root, cwd)
         return root, source_fingerprint(root), None
     except Exception as exc:  # source capture is an observer, never an execution gate
-        return root, None, f"Before command: {exc}"[:2048]
+        # No usable "before" means no proof either way; do not spend an "after" scan.
+        return None, None, f"Before command: {exc}"[:2048]
 
 
 def _source_after(root: Path | None) -> tuple[str | None, str | None]:
@@ -379,7 +531,8 @@ def run_command(
         raise ValueError("Provide a command and arguments without NUL characters.")
     if not 1 <= max_output_bytes <= MAX_STREAM_LIMIT:
         raise ValueError(f"Output limit must be between 1 and {MAX_STREAM_LIMIT} bytes per stream.")
-    if len(json.dumps(list(argv)).encode()) > 32768:
+    # Measured the way the report is WRITTEN (indented), against the same bound.
+    if len(json.dumps(list(argv), indent=2).encode()) > _ARGV_LIMIT:
         raise ValueError("Command arguments exceed the report's 32 KiB metadata limit.")
     pipeline_id = os.environ.get("AISQUARE_PIPELINE_ID") or None
     for value in (session_id, task_id, project_id, pipeline_id):
@@ -389,10 +542,12 @@ def run_command(
             )
     directory_root = reports_dir()
     _private_directory(directory_root)
-    prune_reports(keep=RETAIN_REPORTS - 1)
+    prune_reports(keep=RETAIN_REPORTS - 1, protect=protected_report_ids())
     report_id = uuid.uuid4().hex
     pending = directory_root / f".pending-{report_id}"
     pending.mkdir(mode=0o700)
+    _write_file(pending / "wrapper.pid", f"{os.getpid()}\n".encode("ascii"))
+    seen = _Interrupts()
     started = datetime.now(UTC)
     working_dir = (cwd or Path.cwd()).resolve()
     launch_error = None
@@ -421,48 +576,74 @@ def run_command(
                 ),
             }
         else:
-            records = _capture(child, pending, max_output_bytes)
+            records = _capture(child, pending, max_output_bytes, seen)
             returncode = child.returncode
-        source_after, after_error = _source_after(source_root)
-        source_error = source_error or after_error
-        enabled = compact and os.environ.get("AISQUARE_REPORTS", "").lower() not in _OFF
-        original = _read_file(pending / "stdout.bin", MAX_STREAM_LIMIT)
-        format_name, displayed = (
-            compact_stdout(argv, original, truncated=records["stdout"].truncated)
-            if enabled
-            else ("raw", original)
-        )
-        stderr = _read_file(pending / "stderr.bin", MAX_STREAM_LIMIT)
-        _write_file(pending / "stdout.display", displayed)
-        _write_file(pending / "stderr.display", stderr)
-        report = CommandReport(
-            id=report_id,
-            argv=list(argv),
-            cwd=str(working_dir),
-            started_at=started,
-            finished_at=datetime.now(UTC),
-            returncode=returncode,
-            signal=-returncode if returncode < 0 else None,
-            launch_error=launch_error,
-            session_id=session_id,
-            task_id=task_id,
-            project_id=project_id,
-            pipeline_id=pipeline_id,
-            source_root=str(source_root) if source_root is not None else None,
-            source_fingerprint_before=source_before,
-            source_fingerprint_after=source_after,
-            source_capture_error=source_error,
-            stdout=records["stdout"],
-            stderr=records["stderr"],
-            compaction_enabled=enabled,
-            format=format_name,
-            display_stdout_bytes=len(displayed),
-            display_stderr_bytes=len(stderr),
-            per_stream_limit=max_output_bytes,
-        )
-        _write_file(pending / "report.json", report.model_dump_json(indent=2).encode())
-        pending.rename(_directory(report_id))
-        return report
+        with _defer_interrupts():
+            return _publish(
+                pending,
+                CommandReport(
+                    id=report_id,
+                    argv=list(argv),
+                    cwd=str(working_dir),
+                    started_at=started,
+                    finished_at=started,  # replaced when the report is finalized
+                    returncode=returncode,
+                    signal=-returncode if returncode < 0 else None,
+                    launch_error=launch_error,
+                    interrupted_by=seen.first,
+                    session_id=session_id,
+                    task_id=task_id,
+                    project_id=project_id,
+                    pipeline_id=pipeline_id,
+                    source_root=str(source_root) if source_root is not None else None,
+                    source_fingerprint_before=source_before,
+                    source_capture_error=source_error,
+                    stdout=records["stdout"],
+                    stderr=records["stderr"],
+                    compaction_enabled=False,
+                    format="raw",
+                    display_stdout_bytes=0,
+                    display_stderr_bytes=0,
+                    per_stream_limit=max_output_bytes,
+                ),
+                source_root=source_root,
+                compact=compact,
+            )
     except BaseException:
-        shutil.rmtree(pending)
+        shutil.rmtree(pending, ignore_errors=True)
         raise
+
+
+def _publish(
+    pending: Path, draft: CommandReport, *, source_root: Path | None, compact: bool
+) -> CommandReport:
+    """Everything after the child exited: after-scan, compaction, files, rename."""
+    source_after, after_error = _source_after(source_root)
+    enabled = compact and os.environ.get("AISQUARE_REPORTS", "").lower() not in _OFF
+    original = _read_file(pending / "stdout.bin", MAX_STREAM_LIMIT)
+    format_name, displayed = (
+        compact_stdout(draft.argv, original, truncated=draft.stdout.truncated)
+        if enabled
+        else ("raw", original)
+    )
+    stderr = _read_file(pending / "stderr.bin", MAX_STREAM_LIMIT)
+    _write_file(pending / "stdout.display", displayed)
+    _write_file(pending / "stderr.display", stderr)
+    report = draft.model_copy(
+        update={
+            "finished_at": datetime.now(UTC),
+            "source_fingerprint_after": source_after,
+            "source_capture_error": draft.source_capture_error or after_error,
+            "compaction_enabled": enabled,
+            "format": format_name,
+            "display_stdout_bytes": len(displayed),
+            "display_stderr_bytes": len(stderr),
+        }
+    )
+    payload = report.model_dump_json(indent=2).encode()
+    if len(payload) > _REPORT_JSON_LIMIT:
+        raise ValueError("Report metadata exceeds its size limit.")
+    _write_file(pending / "report.json", payload)
+    (pending / "wrapper.pid").unlink(missing_ok=True)
+    pending.rename(_directory(report.id))
+    return report

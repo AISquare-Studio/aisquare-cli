@@ -63,17 +63,25 @@ class PersonaActivity(Vertical):
                     self.project = store.get_project(self.project_id)
                 if self.project is None:
                     return
-            project, sessions, _, events = team_service.board_data(events=30, project=self.project)
+            # An agent view filters to ONE session, so it needs a deeper window: with
+            # thirty project events the agent's own records vanish behind teammates'.
+            window = 30 if self.session_id is None else 400
+            project, sessions, _, events = team_service.board_data(
+                events=window, project=self.project
+            )
             self.project = project
             roles = {session.id: session.role for session in sessions}
             if self.session_id is not None:
                 events = [event for event in events if event.session_id == self.session_id]
             # Newest first: the record a person is waiting for must not sit below the fold.
             events = events[-3:][::-1]
+            # Only a view pinned to a session may fall back to that agent's role; a
+            # project/board panel narrates each record in its own author's role.
+            fallback = self.role if self.session_id is not None else None
             self.original = json.dumps([e.model_dump(mode="json") for e in events], indent=2)
             lines = [
                 personas.render_event(
-                    event, project, role=roles.get(event.session_id or "", self.role)
+                    event, project, role=roles.get(event.session_id or "", fallback)
                 )
                 for event in events
             ]
@@ -103,6 +111,15 @@ class PersonaActivity(Vertical):
         from aisquare.cli.ui.terminal import TerminalPane
 
         event.stop()
+        if self.project is None and self.project_id is not None:
+            # The project could not be read: opening the GLOBAL dialog here would let
+            # "Use" silently rewrite the fallback for every project.
+            self.notify(
+                "Project unavailable; persona controls need a readable project.",
+                severity="error",
+                markup=False,
+            )
+            return
         # Clicking the Persona button moves focus away from the terminal before
         # opening the modal. Restore that nearby agent explicitly on dismissal;
         # a Board-only activity panel has no terminal and retains ordinary focus.
@@ -119,4 +136,6 @@ class PersonaActivity(Vertical):
     def copy_original(self, event: Button.Pressed) -> None:
         event.stop()
         self.app.copy_to_clipboard(self.original)
-        self.notify("Original activity records copied.")
+        # Textual copies through OSC 52, which some terminals (macOS Terminal among
+        # them) ignore; the app cannot observe whether the clipboard took it.
+        self.notify("Copy requested (OSC 52); terminal support varies.", markup=False)

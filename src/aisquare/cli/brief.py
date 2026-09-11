@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
 import typer
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from aisquare.cli.common import fail
 from aisquare.core.state import get_state
+from aisquare.core.store import AmbiguousIdError
 from aisquare.services import work_briefs as service
 
 app = typer.Typer(
@@ -25,26 +27,55 @@ Requirements = Annotated[
 ]
 
 
+def _plain(text: str) -> str:
+    """Brief text is agent-authored; controls never reach the operator's terminal.
+
+    Deliberately local: this module must not import persona code, whose helper
+    of the same shape serves display captions.
+    """
+    return "".join(
+        ch if ch in "\n\t" or unicodedata.category(ch)[0] != "C" else "\ufffd" for ch in text
+    )
+
+
 @contextmanager
 def _errors() -> Iterator[None]:
     try:
         yield
+    except AmbiguousIdError as exc:
+        fail(
+            f"{exc} matches several records; use a longer id",
+            error="brief_error",
+            detail=str(exc),
+            hint="use a longer id prefix",
+        )
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(part) for part in first["loc"]) or "brief"
+        message = f"invalid {where}: {first['msg']}"
+        fail(message, error="brief_error", detail=message)
     except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-        fail(str(exc), error="brief_error")
+        message = str(exc)
+        # `--json` callers only see the payload: the reason and any retry
+        # instruction the docs promise must ride along as detail/hint.
+        hint = "read the latest brief and retry" if "retry" in message else None
+        fail(_plain(message), error="brief_error", detail=message, hint=hint)
 
 
 def _emit(value: BaseModel) -> None:
     if get_state().json_output:
         typer.echo(value.model_dump_json())
     elif isinstance(value, service.WorkBrief):
-        typer.echo(service.export_markdown(value))
+        typer.echo(_plain(service.export_markdown(value)))
     elif isinstance(value, service.BriefCheck):
         verdict = "VERIFIED" if value.complete else "NOT VERIFIED"
         typer.echo(f"{value.brief_id} r{value.revision}: {verdict}")
         for requirement in value.requirements:
-            typer.echo(f"{requirement.requirement_id} [{requirement.status}]: {requirement.reason}")
+            typer.echo(
+                _plain(f"{requirement.requirement_id} [{requirement.status}]: {requirement.reason}")
+            )
         for warning in value.warnings:
-            typer.echo(f"Warning: {warning}")
+            typer.echo(_plain(f"Warning: {warning}"))
         if value.manual_evidence:
             typer.echo(
                 "Manual evidence (requires independent validator review): "
@@ -85,7 +116,7 @@ def list_() -> None:
             typer.echo(json.dumps([brief.model_dump(mode="json") for brief in briefs]))
         else:
             for brief in briefs:
-                typer.echo(f"{brief.id} r{brief.revision}: {brief.title}")
+                typer.echo(_plain(f"{brief.id} r{brief.revision}: {brief.title}"))
             if not briefs:
                 typer.echo('No briefs yet. Use: asq brief create "change" -r "outcome"')
 
@@ -214,7 +245,7 @@ def export(
         text = (
             brief.model_dump_json(indent=2)
             if get_state().json_output
-            else service.export_markdown(brief)
+            else _plain(service.export_markdown(brief))
         )
         if output is None:
             typer.echo(text)

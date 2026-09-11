@@ -35,8 +35,11 @@ recognised repeated Git usage hints can be omitted. Machine formats such as
 
 Pytest keeps test counts, failures, warnings, and details. Recognised progress
 lines ending with a percentage can be omitted when a normal final count is
-present. Output capture explicitly changed with `-s` or `--capture` disables this
-compaction. Unrecognised output, colour/control sequences, binary data, and
+present, and only from the collection zone before the first section banner: a
+look-alike line inside a failing test's captured output is evidence and stays.
+Output capture explicitly changed with `-s` (also folded into a cluster such as
+`-sv`) or `--capture` disables this compaction. Lines longer than 512 bytes are
+never offered to the progress matcher. Unrecognised output, colour/control sequences, binary data, and
 truncated results pass through. Standard error is always retained unchanged.
 There is no AI summariser, external service, automatic hook, or broad claim of
 support for all test runners.
@@ -60,8 +63,10 @@ asq --json reports show REPORT_ID --raw
 `show` reads saved bytes. It never executes the saved command, even if that
 command wrote files or originally failed. A successful retrieval exits zero;
 the original command status is in its receipt/metadata. `--stream stderr` sends
-the saved error stream to standard error. `both` preserves the two separate
-streams, not their original interleaving.
+the saved error stream to standard error and puts the receipt line on standard
+output, so the recovered stream is byte-exact; otherwise the receipt goes to
+standard error. `both` preserves the two separate streams, not their original
+interleaving.
 
 Raw output sent to a pipe preserves bytes. Terminal displays escape control
 characters. JSON `--raw` returns base64 for exact binary recovery; regular JSON
@@ -78,8 +83,19 @@ per-stream limit up to 16 MiB for a particular invocation.
 Completed reports are kept under `~/.aisquare/reports` (or `AISQUARE_HOME/reports`)
 with private directory/file permissions. A report is published only after its
 originals and metadata have been written. New commands apply a default retention
-policy of 14 days and the newest 64 completed reports. In-progress reports are
-not deleted by retention.
+policy of 14 days and the newest 64 completed reports. A report that backs
+recorded requirement evidence (`asq brief evidence --report`) is protected: it
+neither counts against the 64 nor expires, because deleting it would turn a
+verified brief stale. In-progress reports are not deleted by retention; an
+in-progress directory whose wrapper process is gone for more than an hour is
+treated as abandoned and removed.
+
+Signals: while the command runs, SIGINT, SIGTERM and SIGHUP are forwarded to its
+process group. A second interrupt escalates to SIGTERM and a third to SIGKILL, so
+a command that ignores Ctrl-C cannot hold your terminal. The report is still
+saved, with `interrupted_by` recording what you sent; an interrupt that arrives
+after the command finished (during the source scan or compaction) is honoured
+only after the report is published.
 
 ```sh
 asq exec --raw -- python -m pytest -q

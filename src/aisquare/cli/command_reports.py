@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+from contextlib import suppress
 from typing import Annotated, Literal
 
 import typer
@@ -55,16 +56,35 @@ def _emit_report(
         return
     _emit_bytes(stdout)
     _emit_bytes(stderr, stderr=True)
+    _emit_footer(report, raw=raw, stream=stream)
+
+
+def _emit_footer(
+    report: service.CommandReport,
+    *,
+    raw: bool,
+    stream: Literal["stdout", "stderr", "both"],
+) -> None:
     truncated = [
         f"{name} retained {record.retained_bytes}/{record.observed_bytes} bytes"
         for name, record in (("stdout", report.stdout), ("stderr", report.stderr))
         if record.truncated
     ]
     truncation = f"; TRUNCATED: {', '.join(truncated)}" if truncated else ""
+    interrupted = (
+        f"; interrupted by signal {report.interrupted_by}" if report.interrupted_by else ""
+    )
+    hint = (
+        f"Originals: asq reports show {report.id} --raw (saved bytes; never reruns)."
+        if not raw
+        else f"Saved bytes of report {report.id}; nothing was re-run."
+    )
+    # The footer must not land in the stream being recovered: a `--stream stderr`
+    # recovery reads our stderr, so the receipt goes to stdout there.
     typer.echo(
-        f"\n[asq report {report.id}; exit {report.exit_code}; {report.format}{truncation}]\n"
-        f"Originals: asq reports show {report.id} --raw (saved bytes; never reruns).",
-        err=True,
+        f"\n[asq report {report.id}; exit {report.exit_code}; {report.format}"
+        f"{truncation}{interrupted}]\n{hint}",
+        err=stream != "stderr",
     )
 
 
@@ -108,13 +128,19 @@ def exec_command(
             project_id=project,
             max_output_bytes=max_output_bytes,
         )
-        _emit_report(report, raw=raw)
     except (OSError, ValueError) as exc:
         fail(
             f"Command report failed: {exc}. "
             "The command may already have run; inspect before retrying.",
             error="command_report_failed",
         )
+    try:
+        _emit_report(report, raw=raw)
+    except BrokenPipeError:
+        # Our reader went away; the report is saved and the child's status is known,
+        # so the footer (to stderr) and the exit status still tell the truth.
+        with suppress(OSError):
+            _emit_footer(report, raw=raw, stream="both")
     if report.signal is not None:
         # Preserve signal termination for subprocess callers, not merely a
         # coincidentally equal numeric exit status. Output/record is saved first.
@@ -208,7 +234,9 @@ def prune(
 ) -> None:
     """Apply retention to completed reports; removes saved outputs, not project files."""
     try:
-        removed = service.prune_reports(keep=keep, days=days)
+        removed = service.prune_reports(
+            keep=keep, days=days, protect=service.protected_report_ids()
+        )
     except (OSError, ValueError) as exc:
         fail(str(exc), error="reports_unavailable")
     if get_state().json_output:

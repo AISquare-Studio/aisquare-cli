@@ -58,7 +58,23 @@ original records and all working improvements.
 
 ## Make your own character
 
-Export a starting pack, edit its message patterns, then import your own version:
+Export a starting pack, edit its message patterns, then import your own version.
+A pack has a `generic` section and an optional per-role section (`manager`,
+`planner`, `coder`, `runner`, `tester`, `reviewer`, `validator`, `ui-tester`;
+use the base role name, never a numbered seat such as `coder2`). Patterns are
+keyed by the event kinds the team board actually records:
+
+```text
+note  result  question  attention  signal  activate  focus
+task_added  task_claimed  task_released  task_review  task_reopened
+task_done  task_blocked  task_dropped  agent_exited
+brief_created  brief_updated  brief_linked  brief_evidence  default
+```
+
+A kind with no pattern falls back to `default`. Placeholders are limited to
+`{role}`, `{task_id}`, `{session_id}` and `{event_kind}`; those values come from
+the board and are flattened to one plain line before display. Whitespace-only
+patterns and unknown kinds are rejected on import.
 
 ```sh
 asq persona export studio --output ./my-team.json
@@ -90,7 +106,17 @@ data: it cannot install code, change permissions or add agent instructions.
 
 Different contents cannot overwrite an existing ID/version. Editing creates a
 new version. Bundled files are not modified. Invalid files or failed downloads
-leave the active choice intact.
+leave the active choice intact, and a document that is not a pack is reported by
+the fields that failed, never echoed into your terminal.
+
+`asq persona remove ID@version` removes one version; `asq persona remove ID`
+removes every installed version of that character. Any project or role choice
+that pointed at a removed version becomes Off.
+
+Exit codes: a malformed command line (missing pack, unknown flag, `--global`
+combined with `--project`) exits 2; a real failure such as an unknown pack, a bad
+file or a refused download exits 1. Under `--json` the payload carries
+`"error": "usage"` or `"error": "persona_error"` with the reason in `detail`.
 
 ## Scope and persistence
 
@@ -107,10 +133,16 @@ asq persona use mission-control --reset-roles
 ```
 
 Resolution is: project Off → role override → project default → global default →
-Off. Numbered seats such as `coder2` inherit `coder`. A role choice saved while
-the project is Off stays inactive until a project-wide `use` turns narration on.
-Switching the project cast preserves deliberate role overrides unless you ask
-to reset them. Open views refresh after changes from another shell.
+Off. Numbered seats such as `coder2` inherit `coder`; a declared role that is not
+one of the eight (say `bot7`) keeps its own name and uses the generic patterns.
+A role choice saved while the project is Off stays inactive until a project-wide
+`use` turns narration on. Switching the project cast preserves deliberate role
+overrides unless you ask to reset them. Open views refresh after changes from
+another shell.
+
+Choices live in `~/.aisquare/personas/selections.json`. If that file is ever
+damaged, `status` and `use` name it and refuse; `asq persona off` or
+`asq persona reset` rewrites it from empty choices so you are never locked out.
 
 These are AI Square's own packs and code. No Ponytail, Spec Kit or RTK installation
 is required. The separate [native workflow](native-workflow.md) changes how work

@@ -15,7 +15,7 @@ import sqlite3
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from importlib import import_module
 from importlib.resources import files
 from pathlib import Path
@@ -34,6 +34,7 @@ from aisquare.core.personas import (
     pack_bytes,
     parse_pack,
     plain_text,
+    single_line,
     validate_identifier,
     validate_version,
 )
@@ -151,11 +152,29 @@ def _settings() -> Selections:
     with path.open("rb") as stream:
         raw = stream.read(1_048_577)
     if len(raw) > 1_048_576:
-        raise ValueError("persona selections file is too large")
-    selections = Selections.model_validate_json(raw)
+        raise ValueError(f"persona selections file is too large: {path}")
+    try:
+        selections = Selections.model_validate_json(raw)
+    except (ValueError, RecursionError) as exc:
+        # Name the file: the recovery is to fix or delete it, and `persona off` /
+        # `persona reset` below start from empty choices rather than staying bricked.
+        raise ValueError(
+            f"persona selections file is damaged: {path} ({type(exc).__name__}); "
+            "`asq persona reset` or `asq persona off` rewrites it from empty choices"
+        ) from None
     if selections.schema_version != 1:
-        raise ValueError("unsupported persona selections schema")
+        raise ValueError(f"unsupported persona selections schema in {path}")
     return selections
+
+
+def _settings_for_write(action: str) -> tuple[Selections, str | None]:
+    """Damaged selections block `use` (a choice would be lost) but not `off`/`reset`."""
+    try:
+        return _settings(), None
+    except ValueError as exc:
+        if action not in {"off", "reset"}:
+            raise
+        return Selections(), f"Warning: {exc}. Rewritten from empty choices."
 
 
 def _save_settings(settings: Selections) -> None:
@@ -219,6 +238,19 @@ def load_pack(reference: str) -> PersonaPack:
     return max(matches, key=lambda p: tuple(int(n) for n in p.version.split(".")))
 
 
+def _pack_error(exc: Exception, what: str) -> ValueError:
+    """Describe WHERE a document failed validation without echoing its content."""
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValidationError):
+        places = sorted(
+            {".".join(str(part) for part in error["loc"]) or "<root>" for error in exc.errors()}
+        )
+        shown = ", ".join(places[:6]) + (", …" if len(places) > 6 else "")
+        return ValueError(f"{what} is not a valid persona pack (invalid: {shown})")
+    return ValueError(f"{what} is not a valid persona pack: {exc}")
+
+
 def install_pack(pack: PersonaPack, *, source: str = "local") -> PersonaReceipt:
     """Copy validated data; different content can never overwrite a saved version."""
     pack = parse_pack(pack_bytes(pack))
@@ -253,15 +285,22 @@ def install_pack(pack: PersonaPack, *, source: str = "local") -> PersonaReceipt:
 
 def import_pack(path: Path) -> PersonaReceipt:
     source = path.expanduser()
+    if not source.exists():
+        raise ValueError(f"persona file not found: {source}")
     if source.is_symlink() or not source.is_file():
-        raise ValueError("import needs a regular JSON file, not a symlink")
+        raise ValueError("import needs a regular JSON file, not a symlink or directory")
     with source.open("rb") as stream:
-        pack = parse_pack(stream.read(MAX_PACK_BYTES + 1))
+        raw = stream.read(MAX_PACK_BYTES + 1)
+    try:
+        pack = parse_pack(raw)
+    except ValueError as exc:
+        raise _pack_error(exc, str(source)) from None
     return install_pack(pack, source=f"file:{source.resolve()}")
 
 
 def download_pack(url: str) -> PersonaReceipt:
     # Network modules load only here: nothing else in the CLI pays for ssl/http.
+    import http.client
     import urllib.error
     import urllib.parse
     import urllib.request
@@ -301,9 +340,14 @@ def download_pack(url: str) -> PersonaReceipt:
                     raise ValueError("persona download exceeded 30 seconds")
                 if not chunk:
                     break
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
         raise ValueError(f"persona download failed: {exc}") from exc
-    return install_pack(parse_pack(bytes(content)), source=url)
+    try:
+        pack = parse_pack(bytes(content))
+    except ValueError as exc:
+        # Never echo a remote document into the operator's terminal.
+        raise _pack_error(exc, "the downloaded document") from None
+    return install_pack(pack, source=url)
 
 
 def resolve_project(project: ProjectInfo | None = None, ref: str | None = None) -> ProjectInfo:
@@ -311,7 +355,12 @@ def resolve_project(project: ProjectInfo | None = None, ref: str | None = None) 
     from aisquare.services import project as projects
 
     if ref:
-        return projects.resolve(ref)
+        try:
+            return projects.resolve(ref)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(
+                f"unknown project {ref!r}; `asq project list` shows registered projects"
+            ) from exc
     if project is not None:
         return project
     cwd = Path.cwd().resolve()
@@ -335,17 +384,19 @@ def persona_status(project: ProjectInfo | None = None) -> dict[str, Any]:
     settings = _settings()
     choice = settings.projects.get(project.id, Selection()) if project else Selection()
     effective: dict[str, Any] = {}
+    active = False
     for role in ROLES:
         reference = _effective(settings, project, role)
         try:
             if reference:
                 load_pack(reference)
+                active = True
             effective[role] = reference or "off"
         except ValueError:
             effective[role] = f"off (missing or damaged: {reference})"
     return {
         "scope": project.id if project else "global",
-        "enabled": any(not str(value).startswith("off") for value in effective.values()),
+        "enabled": active,
         "project_off": choice.enabled is False,
         "global_default": settings.global_default or "off",
         "default": choice.default,
@@ -372,9 +423,11 @@ def select(
         role = base_role(validate_identifier(role))
     if project is None and role:
         raise ValueError("global role overrides are not supported; choose a project")
-    pack_ref = load_pack(reference).reference if reference else None
     with _locked():
-        settings = _settings()
+        # Resolve under the lock: a concurrent `remove` cannot slip between the
+        # existence check and the saved reference.
+        pack_ref = load_pack(reference).reference if reference else None
+        settings, warning = _settings_for_write(action)
         if project is None:
             settings.global_default = pack_ref if action == "use" else None
         else:
@@ -408,36 +461,57 @@ def select(
     )
     if report["role_overrides"]:
         message += f" Role overrides retained: {report['role_overrides']}."
+    if warning:
+        message += f" {warning}"
     return PersonaReceipt(action=action, message=message, data=report)
 
 
 def remove_pack(reference: str) -> PersonaReceipt:
-    pack = load_pack(reference)
-    if any(p.reference == pack.reference for p in _bundled()):
+    """Remove one version (``ID@version``) or, for a bare ``ID``, every installed version."""
+    parts = reference.split("@")
+    validate_identifier(parts[0])
+    if len(parts) > 2:
+        raise ValueError("use an ID or ID@version")
+    if any(p.id == parts[0] for p in _bundled()):
         raise ValueError("bundled packs cannot be removed; use persona off instead")
     affected: list[str] = []
+    removed: list[str] = []
     with _locked():
+        targets = [
+            p
+            for p, bundled in _all_packs()
+            if not bundled and p.id == parts[0] and (len(parts) == 1 or p.version == parts[1])
+        ]
+        if not targets:
+            raise ValueError(f"persona {reference!r} is missing or damaged")
+        references = {p.reference for p in targets}
         settings = _settings()
-        if settings.global_default == pack.reference:
+        if settings.global_default in references:
             settings.global_default = None
             affected.append("global")
         for project_id, selection in settings.projects.items():
-            if selection.default == pack.reference:
+            if selection.default in references:
                 selection.default = "off"
                 affected.append(project_id)
             for role, selected in selection.roles.items():
-                if selected == pack.reference:
+                if selected in references:
                     selection.roles[role] = "off"
                     affected.append(f"{project_id}:{role}")
         # First resolve selections to plain output; then remove pack data.
         _save_settings(settings)
-        target = _safe(_root() / pack.id / pack.version / "pack.json")
-        target.unlink()
-        _safe(target.with_name("provenance.json")).unlink(missing_ok=True)
+        for pack in targets:
+            target = _safe(_root() / pack.id / pack.version / "pack.json")
+            target.unlink()
+            _safe(target.with_name("provenance.json")).unlink(missing_ok=True)
+            removed.append(pack.reference)
+            with suppress(OSError):
+                target.parent.rmdir()
+        with suppress(OSError):
+            _safe(_root() / parts[0]).rmdir()
     return PersonaReceipt(
         action="remove",
-        message=f"Removed {pack.reference}; affected choices are Off.",
-        data={"affected": affected},
+        message=f"Removed {', '.join(removed)}; affected choices are Off.",
+        data={"affected": affected, "removed": removed},
     )
 
 
@@ -479,7 +553,12 @@ def edit_draft(reference: str) -> PersonaPack:
 
 
 def save_draft(pack: PersonaPack | str) -> PersonaReceipt:
-    parsed = parse_pack(pack.encode()) if isinstance(pack, str) else parse_pack(pack_bytes(pack))
+    try:
+        parsed = (
+            parse_pack(pack.encode()) if isinstance(pack, str) else parse_pack(pack_bytes(pack))
+        )
+    except ValueError as exc:
+        raise _pack_error(exc, "the edited draft") from None
     return install_pack(parsed, source="local-editor")
 
 
@@ -515,7 +594,8 @@ def render_caption(event: TeamEvent, project: ProjectInfo | None, role: str | No
             task_id=event.task_id,
             session_id=event.session_id,
         )
-        return f"Role narration · {pack.name} · {actual_role}: {line}" if line else ""
+        # The role is agent-controlled board data: one line, no controls.
+        return f"Role narration · {pack.name} · {single_line(actual_role)}: {line}" if line else ""
     except (ValueError, OSError):
         return ""
 
@@ -629,7 +709,7 @@ def run_persona_command(text: str, project: ProjectInfo | None = None) -> Person
         pack = load_pack(args.value)
         role = args.role or "coder"
         samples = {
-            kind: caption(pack, role=role, kind=kind, event_id="preview", task_id="T42")
+            kind: caption(pack, role=role, kind=kind, event_id=f"preview-{kind}", task_id="T42")
             for kind in ("task_claimed", "task_review", "task_blocked", "attention", "task_done")
         }
         return PersonaReceipt(

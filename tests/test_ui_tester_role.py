@@ -821,6 +821,34 @@ def test_the_register_hint_keeps_the_selected_target(
     assert "--target stg" not in result.output
 
 
+def test_the_register_hint_shell_quotes_the_target_name(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, registered_ok: None
+) -> None:
+    """Review of #112, round 3: `register --target "prod west"` is a valid
+    selection, and the unquoted hint split the name into two arguments — following
+    it exited 2 with an unexpected `west`."""
+    config = AppConfig()
+    config.explainability.enabled = True
+    config.explainability.target = "stg"
+    config.explainability.roles = list(ExplainabilitySettings().roles)
+    config.explainability.targets = {
+        "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
+        "prod west": ExplainabilityTarget(
+            gateway_url="https://west.example", roles=["planner", "coder"]
+        ),
+    }
+    save_config(config)
+    explainability_service.store_api_key("wk-test")
+    result = runner.invoke(app, ["explainability", "register", "--target", "prod west"])
+    assert result.exit_code == 0, result.output
+    assert "register --target 'prod west' --role" in result.output
+    # and the printed command actually selects that target when followed
+    followed = runner.invoke(
+        app, ["explainability", "register", "--target", "prod west", "--role", "tester"]
+    )
+    assert followed.exit_code == 0, followed.output
+
+
 def test_register_stays_quiet_when_the_target_registers_everything(
     runner: CliRunner, work_dir: Path, isolated_home: Path, registered_ok: None
 ) -> None:

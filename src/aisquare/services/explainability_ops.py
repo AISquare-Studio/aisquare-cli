@@ -34,6 +34,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -240,7 +241,8 @@ def unregistered_roles_note(roles: Sequence[str], target: ResolvedTarget) -> str
     flags = " ".join(f"--role {role}" for role in roles)
     return (
         f"launchable but not in explainability.roles: {listed} — add them to "
-        f"config.toml or run: aisquare explainability register --target {target.name} {flags}"
+        "config.toml or run: aisquare explainability register "
+        f"--target {shlex.quote(target.name)} {flags}"
     )
 
 

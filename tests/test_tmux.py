@@ -53,7 +53,7 @@ from aisquare.core.tmux import (
 )
 
 OK = Completed(0, "", "")
-FACTS_FIELDS = 13
+FACTS_FIELDS = len(tmux_module._FACTS_FIELDS)  # what display-message is asked for
 WINDOW_FIELDS = 7
 
 
@@ -96,6 +96,8 @@ def _facts_line(**overrides: str) -> str:
         "pane_dead_status": "",
         "pane_in_mode": "0",
         "pane_current_command": "claude",
+        "mouse_any_flag": "0",
+        "mouse_sgr_flag": "0",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -830,7 +832,8 @@ def test_the_seam_strips_the_whole_tracing_identity_and_nothing_else(
 ) -> None:
     """Every name of the identity, in the child's OWN environment.
 
-    The marker pair matters as much as the headers here: this server hands its
+    The marker matters as much as the headers here — all of it, whatever
+    ``core.spawn.MARKER_ENV_VARS`` holds: this server hands its
     environment to every window, and an agent that launches untraced (the
     default) keeps whatever it inherited — ``core.insights.run_key`` then files
     that agent's insights under the Run of whoever started the server, and the

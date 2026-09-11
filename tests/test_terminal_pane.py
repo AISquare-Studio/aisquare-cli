@@ -72,6 +72,14 @@ class FakePane:
     dead_status: int | None = None
     gone: bool = False
     """``True`` makes every command targeting the pane fail like a killed window."""
+    alternate_on: bool = False
+    """The program switched to the alternate screen (a fullscreen TUI)."""
+    mouse_on: bool = False
+    """The program turned mouse reporting on — it wants the wheel itself."""
+    in_mode: bool = False
+    """The pane is in a tmux mode (copy mode): tmux owns it for the moment."""
+    mouse_sgr: bool = False
+    """…in SGR encoding (``?1006``); False is the X10 encoding older programs use."""
 
     def facts(self, pane_id: str, fmt: str) -> str:
         """``display-message`` output for ``fmt`` — any field order the caller asks for."""
@@ -82,11 +90,13 @@ class FakePane:
             "cursor_x": str(self.cursor[0]),
             "cursor_y": str(self.cursor[1]),
             "cursor_flag": "1" if self.cursor_visible else "0",
-            "alternate_on": "0",
+            "alternate_on": "1" if self.alternate_on else "0",
+            "mouse_any_flag": "1" if self.mouse_on else "0",
+            "mouse_sgr_flag": "1" if self.mouse_sgr else "0",
             "history_size": str(len(self.history)),
             "pane_dead": "1" if self.dead else "0",
             "pane_dead_status": "" if self.dead_status is None else str(self.dead_status),
-            "pane_in_mode": "0",
+            "pane_in_mode": "1" if self.in_mode else "0",
             "pane_current_command": "sh",
             "pane_title": "",
             "window_activity_flag": "0",
@@ -278,8 +288,22 @@ def rows(pane: TerminalPane) -> list[Strip]:
     return pane.render_lines(Region(0, 0, width, height))
 
 
+_MARKER = re.compile(r"\s*\[\u2191\d+/\d+\]$")
+
+
 def screen_text(pane: TerminalPane) -> list[str]:
-    return [strip.text.rstrip() for strip in rows(pane)]
+    """The pane's rows as text — with the ``[↑k/history]`` marker removed from
+    row 0 ONLY while the pane is scrolled, which is the one place it may be.
+
+    Tests that use this ask WHICH rows are shown. Scoped rather than blanket:
+    a marker painted on any other row, on a live pane, or left behind after
+    the view returns to live must stay visible to every caller, and a row of
+    agent output that happens to end in ``[↑3/5]`` must not be rewritten.
+    """
+    texts = [strip.text.rstrip() for strip in rows(pane)]
+    if pane.scrollback and texts:
+        texts[0] = _MARKER.sub("", texts[0])
+    return texts
 
 
 def style_at(strip: Strip, x: int) -> Style:
@@ -793,6 +817,244 @@ def test_a_stale_height_hint_still_shows_a_full_screen(fake: FakeTmux, tmp_path:
     rows_per_capture, text = run(drive())
     assert rows_per_capture[:2] == [4, 16]  # the short answer, then the refetch
     assert text == ["old 40", "old 41", "old 42", "old 43", "old 44", "old 45"]
+
+
+def _notch(widget: TerminalPane, *, up: bool, x: int = 4, y: int = 2) -> None:
+    cls = events.MouseScrollUp if up else events.MouseScrollDown
+    widget.post_message(cls(widget, x, y, 0, -1 if up else 1, 0, False, False, False))
+
+
+def test_the_wheel_reaches_a_program_that_tracks_the_mouse_as_its_own_event(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Claude Code's fullscreen TUI (``?1000`` + ``?1006`` + ``?1049``) scrolls its
+    own transcript on the wheel. Reported 2026-09-08 as "scroll not working":
+    this widget scrolled tmux's history — empty on the alternate screen — and
+    the program never saw a notch. Now it gets the SGR events it asked for, at
+    the pointer's cell, notches within one flush in ONE tmux call, and the
+    history offset does not move."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    pane.history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[int, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            _notch(widget, up=True)
+            _notch(widget, up=False)
+            await pilot.pause(0.1)
+            return widget.scrollback, [call for call in fake.input if call[0] == "send-keys"]
+
+    scrollback, sent = run(drive())
+    assert scrollback == 0, "the history offset is not what a mouse-tracking program wants"
+    assert sent == [("send-keys", "%1", "-l", "--", "\x1b[<64;5;3M\x1b[<65;5;3M")], sent
+
+
+def test_the_x10_encoding_goes_as_raw_bytes_because_a_string_cannot_carry_it(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``chr(32 + column)`` is above 0x7f past column 95, and ``send-keys -l``
+    re-emits a string as UTF-8 — measured: the byte arrived as two, the row byte
+    became the column and the real row was typed as text. ``-H`` carries bytes."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = True
+    pane.mouse_sgr = False
+    pane.width = 200
+
+    async def drive() -> list[tuple[str, ...]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(140, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            _notch(widget, up=True, x=119, y=2)  # column 120: 32 + 120 = 0x98
+            await pilot.pause(0.1)
+            return [call for call in fake.input if call[0] == "send-keys"]
+
+    sent = run(drive())
+    assert sent == [("send-keys", "%1", "-H", "1b", "5b", "4d", "60", "98", "23")], sent
+
+
+def test_the_wheel_on_a_plain_alternate_screen_sends_nothing_and_says_why(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """A fullscreen program that does not track the mouse has no history behind
+    it, and arrow keys would land in its prompt — Claude Code's ``Up`` recalls a
+    previous prompt. Nothing is sent; the user is told once."""
+    pane = fake.panes["%1"]
+    pane.alternate_on, pane.mouse_on = True, False
+
+    async def drive() -> tuple[int, list[tuple[str, ...]], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            _notch(widget, up=True)
+            _notch(widget, up=True)
+            await pilot.pause(0.1)
+            return widget.scrollback, fake.sent(), list(host.notices)
+
+    scrollback, sent, notices = run(drive())
+    assert scrollback == 0 and sent == []
+    assert len([n for n in notices if "fullscreen" in n]) == 1, notices
+
+
+def test_a_scrolled_view_comes_back_with_the_wheel_whatever_the_program_wants(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """History the widget has scrolled into is the widget's own: the wheel
+    always returns it, or a Claude Code pane scrolled with the keyboard would
+    freeze — every notch forwarded, the view never moving."""
+    pane = fake.panes["%1"]
+    pane.mouse_on = pane.mouse_sgr = True
+    pane.history = [f"old {n}" for n in range(9)]
+
+    async def drive() -> tuple[int, int, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            widget.scroll_history(6)
+            await pilot.pause()
+            scrolled = widget.scrollback
+            _notch(widget, up=False)
+            await pilot.pause(0.1)
+            return scrolled, widget.scrollback, fake.sent()
+
+    scrolled, after, sent = run(drive())
+    assert scrolled == 6 and after == 3
+    assert sent == [], "nothing was forwarded while the view was in history"
+
+
+def test_the_wheel_in_tmux_copy_mode_uses_history_not_the_program(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Forwarding a mouse event into copy mode cancels the mode and delivers
+    nothing (measured on 3.7c); the pane belongs to tmux for the moment."""
+    pane = fake.panes["%1"]
+    pane.mouse_on = pane.mouse_sgr = pane.in_mode = True
+    pane.history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[int, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            _notch(widget, up=True)
+            await pilot.pause(0.1)
+            return widget.scrollback, fake.sent()
+
+    scrollback, sent = run(drive())
+    assert scrollback == 3 and sent == []
+
+
+def test_a_wheel_over_a_pane_that_just_died_fails_open(fake: FakeTmux, tmp_path: Path) -> None:
+    """The module's contract: a pane that vanishes never takes the app down.
+    The forwarding path reports ``(pane gone)`` like every other tmux call here."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str | None, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            pane.gone = True
+            _notch(widget, up=True)
+            await pilot.pause(0.1)
+            return widget.notice, list(host.notices)
+
+    notice, notices = run(drive())
+    assert notice == "(pane gone)"
+    assert any("pane gone" in n for n in notices)
+
+
+def test_scroll_keys_move_history_and_never_reach_the_agent(fake: FakeTmux, tmp_path: Path) -> None:
+    """The wheel is not a given (reported from WSL2 + Windows Terminal: "scroll
+    not working"). shift+PgUp is what most terminals use for their own
+    scrollback and some never forward it, so alt+PgUp does the same job."""
+    fake.panes["%1"].history = [f"old {n}" for n in range(20)]
+
+    async def drive() -> list[int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await wait_until(pilot, lambda: synced(pane))
+            seen: list[int] = []
+            for key in (
+                "shift+pageup",
+                "shift+home",
+                "shift+pagedown",
+                "alt+pagedown",
+                "alt+pageup",
+                "shift+end",
+            ):
+                await pilot.press(key)
+                seen.append(pane.scrollback)
+            return seen
+
+    assert run(drive()) == [5, 20, 15, 10, 15, 0]
+    assert fake.sent() == [], "none of the scroll keys was forwarded"
+
+
+def test_scroll_keys_go_to_a_program_that_owns_its_own_transcript(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """On a Claude Code pane the keys must not pull stale pre-launch shell lines
+    over the transcript: they take the wheel's route — the one scroll
+    vocabulary such a program is known to speak — and history does not move."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    pane.history = [f"pre-launch shell line {n}" for n in range(20)]
+
+    async def drive() -> tuple[int, list[tuple[str, ...]], list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            widget.focus()
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.press("shift+pageup")
+            await pilot.pause(0.1)
+            return widget.scrollback, list(fake.input), screen_text(widget)
+
+    scrollback, calls, text = run(drive())
+    assert scrollback == 0, "tmux history is not this program's transcript"
+    sent = [c for c in calls if c[0] == "send-keys"]
+    assert sent == [("send-keys", "%1", "-l", "--", "\x1b[<64;21;4M")], sent
+    assert not any("pre-launch" in row for row in text)
+
+
+def test_a_scrolled_pane_shows_its_position_in_the_corner_and_keeps_it_current(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """A scrolled pane looked identical to a quiet live one. tmux's own marker,
+    in tmux's own corner — and it tracks history that keeps growing under a
+    frozen view (the denominator moves), then leaves with the offset."""
+    pane = fake.panes["%1"]
+    pane.history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[str, str, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            widget.focus()
+            await wait_until(pilot, lambda: synced(widget))
+            widget.post_message(scroll_event(widget, up=True))
+            await pilot.pause()
+            scrolled = rows(widget)[0].text
+            pane.history.append("old 5")  # the agent kept printing
+            await wait_until(pilot, lambda: rows(widget)[0].text.endswith("[↑3/6]"))
+            grown = rows(widget)[0].text
+            await pilot.press("a")
+            await pilot.pause()
+            return scrolled, grown, rows(widget)[0].text
+
+    scrolled, grown, live = run(drive())
+    assert scrolled.endswith("[↑3/5]"), scrolled
+    assert grown.endswith("[↑3/6]"), grown
+    assert "[↑" not in live
 
 
 def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) -> None:

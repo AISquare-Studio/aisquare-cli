@@ -237,7 +237,9 @@ def test_startup_assignment_receives_intended_contract_and_matching_requirements
 
 def test_ui_tester_has_real_browser_cycle_and_native_evidence_habits() -> None:
     assert "ui-tester" in harness.ROLE_PROFILES
-    assert "real browser" in " ".join(harness.role_cycle("ui-tester2", "sid"))
+    # The canonical ui-tester cycle (kept from main on the merge) verifies UI in a
+    # real browser; match case-insensitively since it emphasises "REAL browser".
+    assert "real browser" in " ".join(harness.role_cycle("ui-tester2", "sid")).lower()
     assert "stale screenshots" in " ".join(harness.working_rules("ui-tester"))
 
 

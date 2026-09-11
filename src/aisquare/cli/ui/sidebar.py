@@ -51,8 +51,8 @@ ROLE_ICON: dict[str, str] = {
     "tester": "🧪",
     "runner": "🧪",
     "reviewer": "👀",
-    "validator": "🛡",
     "ui-tester": "🌐",
+    "validator": "🛡",
     "remote": "📡",
 }
 STATE_CHIP: dict[str, tuple[str, str]] = {

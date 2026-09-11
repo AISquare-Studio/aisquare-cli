@@ -1,8 +1,9 @@
 """The ``m`` modal: opens from the sidebar, toggles Remote, shows the ngrok hint, survives restarts.
 
 Driven headless with ``App.run_test`` at 140x40 as ``test_ui_shell.py`` drives the
-shell. The server is the stub module (its real one is another branch); the
-tunnel factory is scripted per test — ngrok is absent on the build machine, and
+shell. The server is the REAL ``services.remote_server`` on a free port (its
+process-wide runtime is reset per test, as its own tests do); the tunnel
+factory is scripted per test — ngrok is absent on the build machine, and
 the acceptance says that case must be a sentence in the modal, not a crash.
 Every assertion reads what a widget SHOWS.
 """
@@ -11,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Sequence
+import socket
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import TypeVar
 
 import pytest
@@ -44,6 +46,20 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def fresh_remote_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The server's runtime is loaded once per process; each test's home is new."""
+    monkeypatch.setattr(remote_server, "_runtime", None)
+    yield
+    remote_server.stop()
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.fixture(autouse=True)
 def no_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     def none(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return []
@@ -59,7 +75,9 @@ def drive(
     """Run ``fn`` against a mounted ``FleetApp`` whose Remote uses the stub server + ``tunnel``."""
 
     async def run() -> T:
-        controller = RemoteController(server=remote_server, tunnel_factory=tunnel, url_timeout=2)
+        controller = RemoteController(
+            server=remote_server, tunnel_factory=tunnel, url_timeout=2, port=free_port()
+        )
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [], remote=controller)
         async with app.run_test(size=SIZE, notifications=True) as pilot:
             await pilot.pause()
@@ -85,6 +103,12 @@ async def open_panel(pilot: Pilot[None]) -> RemotePanel:
     await pilot.press("m")
     await pilot.pause()
     return panel(pilot)
+
+
+def sessions() -> list[dict[str, str]]:
+    listed = remote_server.status()["sessions"]
+    assert isinstance(listed, list)
+    return listed
 
 
 def missing_ngrok(port: int) -> NgrokTunnel:
@@ -119,7 +143,7 @@ def test_m_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off() -> No
         assert shown(modal.query_one("#remote-link", Static)) == expected
         assert shown(modal.query_one("#remote-state", Static)).startswith("on")
         password = shown(modal.query_one("#remote-password", Static))
-        assert password == remote_server.start(None).password and len(password.split("-")) == 4
+        assert password == remote_server.runtime().password and len(password) == 8
         qr = shown(modal.query_one("#remote-qr", Static))
         assert qr == qr_text(expected) and 15 <= len(qr.splitlines()) <= 22
         assert shown(modal.query_one("#remote-write-hint", Static)) == READ_ONLY_REASON
@@ -151,7 +175,9 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
         assert status == INSTALL_HINT
         assert "ngrok is not installed" in status and "ngrok config add-authtoken" in status
         link = shown(modal.query_one("#remote-link", Static))
-        assert link == f"http://127.0.0.1:8748/r/{app.remote.info.token}"  # type: ignore[union-attr]
+        info = app.remote.info
+        assert info is not None
+        assert link == info.url_local == f"http://127.0.0.1:{app.remote._port}/r/{info.token}/"
         assert "local only" in shown(modal.query_one("#remote-state", Static))
 
     drive(go, tunnel=missing_ngrok)
@@ -220,7 +246,7 @@ def test_the_modal_state_survives_a_restart_of_the_tui() -> None:
         assert modal.query_one("#remote-auto-off", Select).value == 120
         assert shown(modal.query_one("#remote-write-hint", Static)) == "writes reach the fleet"
         # The persisted token is the same one, so the link the phone kept still works.
-        assert remote_server.start(None).token in shown(modal.query_one("#remote-link", Static))
+        assert remote_server.runtime().token in shown(modal.query_one("#remote-link", Static))
         modal.query_one("#remote-allow-write", Switch).toggle()
         await pilot.pause()
         assert json.loads(paths.state_path().read_text())["allow_write"] is False
@@ -252,25 +278,20 @@ def test_devices_list_shows_sessions_from_remote_json_and_revoke_drops_one() -> 
         modal = await open_panel(pilot)
         modal.query_one("#remote-on", Switch).toggle()
         await pilot.pause()
-        path = remote_server.remote_state_path()
-        data = json.loads(path.read_text())
-        data["sessions"] = [
-            {
-                "sid": "sid_phone",
-                "ua": "iPhone Safari",
-                "first_seen": "18:31",
-                "last_seen": "18:32",
-            },
-            {"sid": "sid_laptop", "ua": "Firefox", "first_seen": "18:33", "last_seen": "18:34"},
-        ]
-        path.write_text(json.dumps(data))
+        runtime = remote_server.runtime()
+        assert runtime.unlock(runtime.password, "iPhone Safari") is not None
+        assert runtime.unlock(runtime.password, "Firefox") is not None
+        assert runtime.unlock("wrong", "Burglar") is None
+        assert len(sessions()) == 2
+        assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         modal.repaint()
         await pilot.pause()
         table = modal.query_one("#remote-devices")
         assert table.row_count == 2  # type: ignore[attr-defined]
         modal.query_one("#remote-revoke").press()  # type: ignore[attr-defined]
         await pilot.pause()
-        assert [s["sid"] for s in remote_server.status()["sessions"]] == ["sid_laptop"]
+        left = sessions()
+        assert len(left) == 1 and left[0]["ua"] == "Firefox"  # the cursor was on the first row
         assert table.row_count == 1  # type: ignore[attr-defined]
 
     drive(go, tunnel=missing_ngrok)

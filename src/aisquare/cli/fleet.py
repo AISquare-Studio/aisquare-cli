@@ -106,11 +106,16 @@ def _agent_line(status: FleetAgentStatus) -> str:
     return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{extra}  {agent.pane_id}"
 
 
+def agents_json(project: ProjectInfo, agents: list[FleetAgentStatus]) -> dict[str, object]:
+    """The ``fleet ls --json`` payload — shared with the Remote Control server verbatim."""
+    payload = _project_json(project)
+    payload["agents"] = [status.model_dump(mode="json") for status in agents]
+    return payload
+
+
 def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
     if get_state().json_output:
-        payload = _project_json(project)
-        payload["agents"] = [status.model_dump(mode="json") for status in agents]
-        typer.echo(json.dumps(payload))
+        typer.echo(json.dumps(agents_json(project, agents)))
         return
     console = stdout_console()
     title = _display_name(project)

@@ -199,7 +199,7 @@ class RemotePanel(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "remote-regen":
             if self.controller.regenerate_password() is not None:
-                self.notify("New password — devices already unlocked stay unlocked")
+                self.notify("New password — every device has to unlock again")
         elif event.button.id == "remote-copy":
             url = self.controller.link_url()
             if url is not None:

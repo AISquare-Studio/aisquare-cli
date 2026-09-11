@@ -31,6 +31,7 @@ from aisquare.core.store import (
     is_corrupt_error,
     is_locked_error,
 )
+from aisquare.models import ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import settings as settings_service
@@ -1123,6 +1124,21 @@ def note(
         )
 
 
+def board_json(
+    project: ProjectInfo,
+    sessions: list[TeamSession],
+    tasks: list[TeamTask],
+    events: list[TeamEvent],
+) -> dict[str, object]:
+    """The ``board --json`` payload — shared with the Remote Control server verbatim."""
+    return {
+        "project": project.model_dump(mode="json"),
+        "sessions": [s.model_dump(mode="json") for s in sessions],
+        "tasks": [t.model_dump(mode="json") for t in tasks],
+        "events": [e.as_envelope().model_dump(mode="json") for e in events],
+    }
+
+
 def board(
     watch: Annotated[
         bool, typer.Option("--watch", "-w", help="Full-screen live board; Ctrl-C exits.")
@@ -1143,16 +1159,7 @@ def board(
         _fail_team(exc)
     warn_board_scope(None)
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "project": project.model_dump(mode="json"),
-                    "sessions": [s.model_dump(mode="json") for s in sessions],
-                    "tasks": [t.model_dump(mode="json") for t in tasks],
-                    "events": [e.as_envelope().model_dump(mode="json") for e in events],
-                }
-            )
-        )
+        typer.echo(json.dumps(board_json(project, sessions, tasks, events)))
         return
     if not sessions and not tasks:
         stdout_console().print(

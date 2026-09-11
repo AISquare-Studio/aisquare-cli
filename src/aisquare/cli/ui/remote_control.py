@@ -113,12 +113,19 @@ class RemoteController:
         """Start the server, then the tunnel; the public URL arrives on a background thread."""
         if self.running:
             return
-        self.info = self._server.start(self._dist_dir, port=self._port)
+        self.public_url = None
+        try:
+            self.info = self._server.start(self._dist_dir, port=self._port)
+        except Exception as exc:  # the remote extra is missing, or the port is taken
+            # RemoteUnavailable / RemoteError carry the sentence to show; Remote stays
+            # off and the saved switch is not flipped, so a restart does not retry blindly.
+            self.info = None
+            self.message = f"Remote could not start — {exc}"
+            return
         # The server owns allow_write at request time; hand it the saved switch so the
         # two never disagree (and a fresh state hands it False).
         self._server.set_allow_write(self.state.allow_write)
         self._arm_auto_off()
-        self.public_url = None
         self.message = None
         self._set_state(remote_enabled=True)
         tunnel = self._tunnel_factory(self._port)
@@ -152,6 +159,7 @@ class RemoteController:
         if tunnel is not None:
             tunnel.stop()
         if self.info is not None:
+            self._server.set_auto_off(None)
             self._server.stop()
         self.info = None
         self.public_url = None
@@ -217,6 +225,8 @@ class RemoteController:
 
     def _arm_auto_off(self) -> None:
         self.auto_off_at = self._now() + timedelta(minutes=self.state.auto_off_minutes)
+        # The server shows it as GET /api/remote's auto_off_at (PLAN §4-B).
+        self._server.set_auto_off(self.auto_off_at)
 
     def enforce_auto_off(self) -> bool:
         """Turn Remote off when its timer has run out; ``True`` when it just did."""

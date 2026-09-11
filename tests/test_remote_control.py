@@ -55,7 +55,7 @@ STARTED = {"lvl": "info", "msg": "started tunnel", "url": "https://abcd-12.ngrok
     ],
 )
 def test_build_public_url_is_one_canonical_form_for_every_host_spelling(host: str) -> None:
-    assert build_public_url(host, "tok_123") == "https://abcd-12.ngrok-free.app/r/tok_123"
+    assert build_public_url(host, "tok_123") == "https://abcd-12.ngrok-free.app/r/tok_123/"
 
 
 def test_the_link_the_modal_shows_is_the_url_builder_verbatim(tmp_path: Path) -> None:
@@ -68,7 +68,7 @@ def test_the_link_the_modal_shows_is_the_url_builder_verbatim(tmp_path: Path) ->
     assert controller._waiter is not None
     controller._waiter.join(timeout=5)
     assert controller.link_url() == build_public_url(STARTED["url"], server.token)
-    assert controller.link_url() == f"https://abcd-12.ngrok-free.app/r/{server.token}"
+    assert controller.link_url() == f"https://abcd-12.ngrok-free.app/r/{server.token}/"
     assert controller.message is None
 
 
@@ -162,15 +162,19 @@ class FakeServer(types.ModuleType):
         self.password = "amber-birch-cedar-delta"
         self.running = False
         self.allow_write_calls: list[bool] = []
+        self.auto_off_calls: list[datetime | None] = []
         self.revoked: list[str] = []
+        self.fail_start: Exception | None = None
         self.sessions: list[dict[str, Any]] = []
         self.DEFAULT_PORT = 8748
         self.RemoteInfo = remote_server.RemoteInfo
 
     def start(self, dist_dir: Path | None, port: int = 8748) -> remote_server.RemoteInfo:
+        if self.fail_start is not None:
+            raise self.fail_start
         self.running = True
         return remote_server.RemoteInfo(
-            self.token, self.password, f"http://127.0.0.1:{port}/r/{self.token}"
+            self.token, self.password, f"http://127.0.0.1:{port}/r/{self.token}/"
         )
 
     def stop(self) -> None:
@@ -185,6 +189,9 @@ class FakeServer(types.ModuleType):
 
     def set_allow_write(self, enabled: bool) -> None:
         self.allow_write_calls.append(enabled)
+
+    def set_auto_off(self, at: datetime | None) -> None:
+        self.auto_off_calls.append(at)
 
     def regenerate_password(self) -> str:
         self.password = "ember-fjord-glade-harbor"
@@ -254,7 +261,19 @@ def test_without_ngrok_remote_is_on_locally_and_the_status_line_says_how_to_inst
     assert controller.running and server.running
     assert controller.tunnel is None
     assert controller.message == INSTALL_HINT
-    assert controller.link_url() == f"http://127.0.0.1:8748/r/{server.token}"  # PLAN §6 fallback
+    assert controller.link_url() == f"http://127.0.0.1:8748/r/{server.token}/"  # §6 fallback
+
+
+def test_a_server_that_cannot_start_is_a_sentence_in_the_modal_not_a_crash() -> None:
+    """The real module raises RemoteUnavailable (extra missing) or RemoteError (port busy)."""
+    server = fake_server()
+    server.fail_start = remote_server.RemoteUnavailable("the remote extra is not installed")
+    controller = RemoteController(server=server, tunnel_factory=fake_tunnel_factory(url="x"))
+    controller.turn_on()
+    assert not controller.running and not server.running
+    assert controller.message == "Remote could not start — the remote extra is not installed"
+    assert controller.state.remote_enabled is False  # a restart must not retry blindly
+    assert _read_state() == {}  # nothing was persisted by a failed start
 
 
 def test_the_switches_survive_a_restart_of_the_tui_next_to_the_theme_key() -> None:
@@ -298,11 +317,13 @@ def test_auto_off_turns_remote_off_when_the_timer_runs_out() -> None:
     controller.set_auto_off(30)
     controller.turn_on()
     assert controller.auto_off_at == datetime(2026, 9, 11, 18, 30)
+    assert server.auto_off_calls == [datetime(2026, 9, 11, 18, 30)]  # shown via GET /api/remote
     clock[0] += timedelta(minutes=29)
     assert controller.enforce_auto_off() is False and controller.running
     clock[0] += timedelta(minutes=1)
     assert controller.enforce_auto_off() is True
     assert not controller.running and not server.running
+    assert server.auto_off_calls[-1] is None  # cleared on the way off
     assert controller.message is not None and "auto-off" in controller.message
     with pytest.raises(ValueError):
         controller.set_auto_off(45)
@@ -324,34 +345,3 @@ def test_regenerate_devices_and_revoke_go_through_the_server() -> None:
     controller.revoke("sid_a")
     assert server.revoked == ["sid_a"]
     assert [d["sid"] for d in controller.devices()] == ["sid_b"]
-
-
-# --- the stub server module keeps remote.json in the PLAN §1 shape -----------------------------
-
-
-def test_the_stub_server_mints_token_and_password_and_keeps_remote_json_private() -> None:
-    info = remote_server.start(None)
-    path = remote_server.remote_state_path()
-    assert path.parent == paths.aisquare_home()
-    assert (path.stat().st_mode & 0o777) == 0o600
-    data = json.loads(path.read_text())
-    assert set(data) == {"token", "password", "allow_write", "auto_off_at", "sessions"}
-    assert data["allow_write"] is False
-    assert info.token == data["token"] and info.password == data["password"]
-    assert info.url_local == f"http://127.0.0.1:8748/r/{info.token}"
-    assert len(info.password.split("-")) == 4
-    assert remote_server.status()["running"] is True
-    assert remote_server.start(None).token == info.token  # reused, not re-minted
-    new = remote_server.regenerate_password()
-    assert new != info.password and json.loads(path.read_text())["password"] == new
-    remote_server.set_allow_write(True)
-    assert json.loads(path.read_text())["allow_write"] is True
-    remote_server.set_allow_write(False)
-    data = json.loads(path.read_text())
-    data["sessions"] = [{"sid": "s1", "ua": "x", "first_seen": "a", "last_seen": "b"}]
-    path.write_text(json.dumps(data))
-    assert remote_server.status()["sessions"][0]["sid"] == "s1"
-    remote_server.revoke("s1")
-    assert remote_server.status()["sessions"] == []
-    remote_server.stop()
-    assert remote_server.status()["running"] is False

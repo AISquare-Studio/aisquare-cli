@@ -293,6 +293,192 @@ def _exec_attach(argv: list[str]) -> None:
     os.execvp(argv[0], argv)
 
 
+def _stdin_is_a_terminal() -> bool:
+    """Whether there is somebody to ask (indirection so tests can intercept).
+
+    The same question ``project prune`` asks with ``sys.stdin.isatty()``; behind a
+    name because ``CliRunner`` replaces ``sys.stdin`` for the duration of an
+    invocation, so the confirmation branch of a destructive command would
+    otherwise be unreachable from a test.
+    """
+    return sys.stdin.isatty()
+
+
+def _row_json(row: fleet_service.ShutdownRow) -> dict[str, object]:
+    """A row with the reason the SERVICE gave for it — never a cause guessed here."""
+    return {"agent": row.agent.model_dump(mode="json"), "reason": row.reason}
+
+
+def _emit_shutdown_plan(plan: fleet_service.ShutdownPlan) -> None:
+    """What a shutdown would end, printed before anything is asked of tmux.
+
+    Mirrors ``project prune``: the plan is the same shape under ``--json``, where
+    it carries ``dry_run`` so a script cannot mistake it for a result.
+    """
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "projects": [p.model_dump(mode="json") for p in plan.projects],
+                    "agents": [a.model_dump(mode="json") for a in plan.agents],
+                    "sessions": plan.sessions,
+                    "absent_sockets": plan.absent_sockets,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    if not plan.agents and not plan.sessions:
+        console.print("nothing to shut down: no live agents and no fleet tmux sessions")
+        return
+    console.print(
+        f"about to shut down {len(plan.agents)} agent(s) "
+        f"and kill {len(plan.sessions)} fleet session(s):"
+    )
+    names = {p.id: (p.codename or p.root.name or p.id) for p in plan.projects}
+    for agent in plan.agents:
+        where = names.get(agent.project_id, agent.project_id)
+        if agent.tmux_socket in plan.absent_sockets:
+            console.print(
+                f"  ✗ {agent.label} · {where} — recorded lost "
+                f"(no server answers on '{agent.tmux_socket}')"
+            )
+        else:
+            console.print(f"  💤 {agent.label} · {where} — stopped ({agent.pane_id})")
+    for session in plan.sessions:
+        console.print(f"  ⌧ tmux session {session}")
+
+
+def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
+    """The result, with the service's reason per row and no claim it did not make."""
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "stopped": [a.model_dump(mode="json") for a in report.stopped],
+                    "recorded": [_row_json(row) for row in report.recorded],
+                    "failed": [_row_json(row) for row in report.failed],
+                    "sessions_killed": report.sessions_killed,
+                    "sessions_absent": report.sessions_absent,
+                    "sessions_failed": report.sessions_failed,
+                    "sessions_left_up": report.sessions_left_up,
+                    "servers_absent": report.servers_absent,
+                    "claims_released": report.claims_released,
+                    "paused_cleared": report.paused_cleared,
+                    "paused_kept": report.paused_kept,
+                    "incomplete_projects": report.incomplete_projects,
+                    "late_scan_failed": report.late_scan_failed,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    partial = bool(report.failed or report.sessions_failed or report.late_scan_failed)
+    console.print(
+        f"{'⚠' if partial else '✓'} fleet {'PARTLY ' if partial else ''}shut down: "
+        f"{len(report.stopped)} stopped, {len(report.recorded)} recorded lost, "
+        f"{len(report.failed)} left live; "
+        f"sessions killed: {', '.join(report.sessions_killed) or 'none'}"
+    )
+    for agent in report.stopped:
+        # No exit status is the ordinary shape under --force (a live pane is
+        # killed, and a status only ever comes from a pane that already died).
+        code = f" (exit {agent.exit_status})" if agent.exit_status is not None else ""
+        console.print(f"  💤 {agent.label}{code}")
+    for row in report.recorded:
+        console.print(f"  ✗ {row.agent.label}  recorded lost — {row.reason}")
+    for row in report.failed:
+        console.print(f"  ⚠ {row.agent.label}  LEFT LIVE — {row.reason}")
+    for session in report.sessions_failed:
+        console.print(f"  ⚠ tmux refused to kill session {session}")
+    for session in report.sessions_left_up:
+        console.print(f"  ⚠ session {session} left up: it holds a row left live")
+    for session in report.sessions_absent:
+        console.print(f"  · session {session} was already gone with its last window")
+    if report.claims_released:
+        console.print(
+            f"  🔓 {len(report.claims_released)} claimed task(s) released back to the board"
+        )
+    for name in report.paused_cleared:
+        console.print(f"  ▶ the fleet-paused signal on {name} was cleared")
+    for name in report.paused_kept:
+        console.print(f"  ⏸ {name} stays fleet-paused: it was not confirmed down")
+    if report.late_scan_failed:
+        console.print(
+            f"  ⚠ the final scan for rows spawned during the shutdown did not run "
+            f"({report.late_scan_failed}) — nothing below is confirmed down; re-run once the "
+            "store answers"
+        )
+    if partial:
+        console.print(
+            "  rows above marked LEFT LIVE were NOT ended: `aisquare fleet ls --all`, then "
+            "stop them (or re-run this) once tmux answers"
+        )
+    console.print(
+        "  board notes and tasks kept (claims of the rows this ended are released); "
+        "the next asq / fleet spawn starts a fresh server"
+    )
+
+
+@app.command("shutdown")
+def shutdown(
+    project: ProjectRef = None,
+    every: Annotated[
+        bool, typer.Option("--all", help="Every project's fleet, not just this one.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Shut down without asking; required off a terminal.")
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Kill every agent without a graceful /exit.")
+    ] = False,
+) -> None:
+    """Stop this project's agents, kill the fleet's sessions, record every row.
+
+    The fleet's off switch. Unlike `tmux -L asq kill-server` by hand, the rows
+    are recorded: agents on an answering server are stopped (exit status where
+    tmux exposes one — `--force` kills a live pane and records none), and rows
+    whose server is already gone are ended as lost, on your word, each with the
+    reason. What is killed is the fleet's own `asq-<codename>` sessions, never
+    the server, so nothing else on that socket goes with it; a server with
+    nothing left on it exits by itself.
+
+    This project by default, `--all` for every project. It prints what it would
+    end and asks first at a terminal; off a terminal it is a dry run unless
+    --yes, and under --json without --yes it prints the plan and changes nothing.
+    Board notes and tasks are kept, the ended rows' claims are released, and a
+    `fleet-paused` signal is cleared. Exits 1 when any row was left live.
+    """
+    target = None if every else _project(project)
+    if not yes:
+        try:
+            plan = fleet_service.shutdown_plan(target)
+        except fleet_service.FleetError as exc:
+            _fail_fleet(exc)
+        _emit_shutdown_plan(plan)
+        if get_state().json_output or not (plan.agents or plan.sessions):
+            return
+        if not _stdin_is_a_terminal():
+            stdout_console().print(
+                "dry run: nothing stopped — re-run with --yes to shut the fleet down"
+            )
+            return
+        noun = "agent" if len(plan.agents) == 1 else "agents"
+        if not typer.confirm(f"Shut down {len(plan.agents)} {noun}?", default=False):
+            stdout_console().print("nothing stopped")
+            return
+    try:
+        report = fleet_service.shutdown(target, force=force)
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    _emit_shutdown(report)
+    if report.failed or report.sessions_failed or report.late_scan_failed:
+        # The fleet is not down. Said in the report AND in the exit code, so a
+        # script that only reads the code cannot mistake a partial run for one.
+        raise typer.Exit(code=1)
+
+
 @app.command("attach")
 def attach(project: ProjectRef = None) -> None:
     """Attach this terminal to the project's fleet session (full-fidelity tmux)."""

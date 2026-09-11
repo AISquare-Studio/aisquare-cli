@@ -201,6 +201,14 @@ class TmuxUnavailable(TmuxError):
     """No usable tmux: missing from PATH, or older than :data:`MIN_VERSION`."""
 
 
+#: How tmux says "there is no server on this socket" — and ONLY that. Measured
+#: on 3.7c: ``error connecting to /tmp/tmux-<uid>/<socket> (No such file or
+#: directory)``; older/other commands say ``no server running on <path>``. A
+#: refusal of a socket that IS there reads ``(Permission denied)`` instead, with
+#: the same exit code, which is why the exit code alone must never decide.
+_ABSENT_SERVER = re.compile(r"No such file or directory|no server running on", re.IGNORECASE)
+
+
 @dataclass(frozen=True)
 class Completed:
     """One finished tmux command."""
@@ -597,13 +605,37 @@ class TmuxServer:
         set) also exits 0 with the version — where ``list-sessions`` exits 0
         with no output and is therefore indistinguishable from absence.
 
-        Never raises: an unavailable binary is not a server that answered.
+        Never raises: an unavailable binary is not a server that answered. A
+        caller that must tell "could not ask" from "no server" — the one place
+        that ends rows on that distinction is ``fleet shutdown``'s final pass —
+        uses :meth:`reachable`, which propagates :class:`TmuxUnavailable`.
         """
         try:
-            completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
-        except TmuxUnavailable:
+            return self.reachable()
+        except TmuxError:  # unavailable client, denied socket, timeout: not an answer
             return False
-        return completed.returncode == 0
+
+    def reachable(self) -> bool:
+        """:meth:`answers`, except that "could not ask" is raised, not swallowed.
+
+        :class:`TmuxUnavailable` covers both a binary ``which`` cannot find and
+        one that fails at EXECUTION — deleted between the check and the exec, or
+        a shim whose interpreter is gone — because ``_tmux`` maps the
+        ``FileNotFoundError`` from ``subprocess.run`` to the same class (review of
+        #121, round 5). And a non-zero exit is NOT proof of absence: an
+        inaccessible LIVE socket also exits 1, with ``Permission denied`` where
+        an absent server says ``No such file or directory`` (round 7). So
+        ``False`` means exactly one thing — the client ran and tmux said there is
+        no server on this socket — and every other failed probe is a
+        :class:`TmuxError` carrying tmux's own words.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{version}"), None)
+        if completed.returncode == 0:
+            return True
+        detail = completed.stderr.strip()
+        if _ABSENT_SERVER.search(detail):
+            return False
+        raise TmuxError(detail or f"tmux display-message exited {completed.returncode}")
 
     def server_absent(self) -> bool:
         """Whether tmux itself says NO SERVER is behind this socket — positive evidence.

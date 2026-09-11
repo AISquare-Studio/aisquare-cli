@@ -190,6 +190,20 @@ def test_list_and_get_projects(store: ContextStore) -> None:
     assert store.get_project("prj_missing") is None
 
 
+def test_list_projects_hides_a_forgotten_registration_unless_asked(store: ContextStore) -> None:
+    """``include_forgotten`` is for the one question a tombstone must not hide: a
+    forgotten registration can still hold LIVE ``fleet_agent`` rows, whose panes are
+    real processes. ``fleet shutdown`` asks this way so it cannot take a pane down
+    while leaving its row live with nothing able to reconcile it."""
+    gone = ProjectInfo(id="prj_gone", root=Path("/tmp/gone-app"), linked_repos=[])
+    store.ensure_project(gone)
+    store.forget_project("prj_gone")
+
+    assert [p.id for p in store.list_projects()] == [PROJECT.id], "the default still hides it"
+    assert {p.id for p in store.list_projects(include_forgotten=True)} == {PROJECT.id, "prj_gone"}
+    assert store.get_project("prj_gone") is None, "every OTHER read keeps the promise"
+
+
 def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
     assert [p.id for p in store.find_projects("example-project")] == [PROJECT.id]  # by name
     assert [p.id for p in store.find_projects(PROJECT.id[:8])] == [PROJECT.id]  # by id prefix

@@ -598,7 +598,7 @@ class ContextStore(Protocol):
     def delete(self, entry_id: str) -> None: ...
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
-    def list_projects(self) -> list[ProjectInfo]: ...
+    def list_projects(self, *, include_forgotten: bool = False) -> list[ProjectInfo]: ...
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
@@ -1035,9 +1035,21 @@ class SqliteStore:
         )
         self._conn.commit()
 
-    def list_projects(self) -> list[ProjectInfo]:
+    def list_projects(self, *, include_forgotten: bool = False) -> list[ProjectInfo]:
+        """Every registration; ``include_forgotten`` also returns the tombstoned ones.
+
+        The default hides a forgotten registration, which is the promise
+        :func:`forget_project` makes. ``include_forgotten=True`` is for the one
+        question a tombstone must not hide: a forgotten project can still hold
+        LIVE ``fleet_agent`` rows (``forget`` reads liveness and writes the
+        tombstone in separate statements, and ``ensure_project`` revives the row
+        on a concurrent ``fleet spawn``), and those agents' panes are real
+        processes. ``fleet shutdown`` asks this way so a tombstone cannot leave a
+        row live on a socket it just took down, with nothing able to reconcile it.
+        """
+        clause = "" if include_forgotten else " WHERE forgotten_at IS NULL"
         rows = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL ORDER BY name"
+            f"SELECT {_PROJECT_COLUMNS} FROM project{clause} ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 

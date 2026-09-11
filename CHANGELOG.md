@@ -28,6 +28,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     atomically under `~/.aisquare/personas`, versioned, and downloadable without
     following redirects. Pattern kinds are exactly the event kinds the board
     records (`task_added`, `task_claimed`, `task_reopened`, `brief_evidence`, …).
+    Optionally, `asq persona voice on` makes the agents *themselves* speak in
+    the cast: each new session AI Square launches for that project receives the
+    pack's per-role voice through Claude Code's `--append-system-prompt`, framed
+    to govern wording only. Off by default; a pack created from a plain
+    description uses that description as its voice.
   - *Work briefs* record what was asked as stable requirements (`R1`, `R2`, …)
     linked to ordinary board tasks, with evidence per requirement and per task;
     `asq task done` refuses a linked task without fresh evidence, `asq brief

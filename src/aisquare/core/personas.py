@@ -117,6 +117,10 @@ class PersonaPack(BaseModel):
     license: str = Field(default="All rights reserved", max_length=120)
     generic: dict[str, list[str]]
     roles: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
+    #: How a role should SOUND when it talks to the human: one short instruction
+    #: per role, plus ``default``. Used only when the operator opts in with
+    #: ``persona voice on``; then it is appended to the agent's system prompt.
+    voice: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -164,6 +168,16 @@ class PersonaPack(BaseModel):
                             raise ValueError(f"unsupported placeholder: {field}")
         if total > 48_000:
             raise ValueError("persona patterns are too large")
+        if len(self.voice) > len(ROLES) + 1:
+            raise ValueError("too many voice entries")
+        for role, instruction in self.voice.items():
+            if role != "default":
+                validate_identifier(role)
+                if base_role(role) != role:
+                    raise ValueError(f"voice uses the base role name, not the seat {role!r}")
+            if not 1 <= len(instruction) <= 800 or not instruction.strip():
+                raise ValueError("each voice instruction is one line of 1 to 800 characters")
+            clean_text(instruction)
         return self
 
     @property
@@ -224,3 +238,8 @@ def caption(
         return ""
     index = int(hashlib.sha256(event_id.encode()).hexdigest()[:8], 16) % len(eligible)
     return single_line(eligible[index].format_map(facts))
+
+
+def voice_text(pack: PersonaPack, role: str) -> str | None:
+    """The pack's speaking instruction for this role, its default, or nothing."""
+    return pack.voice.get(base_role(role)) or pack.voice.get("default") or None

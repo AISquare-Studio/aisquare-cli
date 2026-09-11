@@ -40,6 +40,46 @@ and view the activity through the AI Square interface.
 The task keeps running while the dialog is open. Closing the dialog returns
 you to the agent without sending the persona command into its conversation.
 
+## Voice in Claude's own replies (opt-in)
+
+The panel above narrates *records*. If you also want the agents themselves to
+*talk* in the chosen character, turn the voice on for a project:
+
+```sh
+asq persona use mission-control
+asq persona voice on
+```
+
+From then on every **new** agent session AI Square launches for that project
+(the manager, and every worker it spawns) receives the selected pack's voice
+instruction for its role through Claude Code's own `--append-system-prompt`
+flag. Sessions already running do not change. `asq persona voice off` stops it
+for the next sessions; project-wide `asq persona off` also silences it.
+
+This is the one persona setting that reaches an agent, and it is off by default
+for a reason: it is text in the prompt, so it costs a few dozen tokens per
+session and, like any style instruction, it can subtly colour how the model
+phrases things. The instruction is framed so it applies only to the wording of
+replies to you and never to code, file contents, commit messages, board notes,
+task text, evidence or commands, and it tells the model to keep facts, failures
+and results exact. Records, evidence, working rules and the narration panel are
+unaffected either way, and a test proves the start-up briefing and every board
+record are byte-identical with voice on or off. A role bound to a binary other
+than `claude` never receives the flag.
+
+Each bundled pack carries a voice per role. A pack you create from a plain
+description uses that description as its voice, so:
+
+```sh
+asq persona add --name calm-dev --text "Calm, friendly developer; brief updates, no jargon."
+asq persona use calm-dev
+asq persona voice on
+```
+
+gives you agents that speak that way in their next sessions, with no model call
+needed to set it up. The panel phrases of such a pack start as copies of
+Studio's until you edit them.
+
 ## What changes, and what stays factual
 
 When a coder actually claims a task, the display adds that cast's coder caption.
@@ -47,10 +87,11 @@ The underlying event still contains the real task ID, actor, time and status.
 The panel labels captions as **role narration**; they are not quotations from
 the worker. **Copy originals** copies the underlying records.
 
-Persona settings affect this display only. They do not enter worker prompts,
-task notes, command results, evidence, machine-readable JSON or Explainability
-events. They do not rewrite Claude's original terminal replies. Changing a
-persona cannot make a failed test pass or make a reviewer skip checks.
+Persona settings affect this display only, with the single exception of the
+opt-in voice above. They do not enter task notes, command results, evidence,
+machine-readable JSON or Explainability events. Without `voice on` they do not
+touch Claude's replies at all. Changing a persona cannot make a failed test pass
+or make a reviewer skip checks.
 
 Custom prose can still be misleading, so it never replaces the official event.
 Preview includes a failure example. Turning personalities off retains the
@@ -94,10 +135,10 @@ asq persona edit calm-dev
 
 In a terminal, these open your local editor (`VISUAL` or `EDITOR`, with a local
 fallback). In the AI Square dialog they open a JSON text editor. The description
-starts a draft based on Studio; **you edit the actual phrases**. AI Square does
-not claim a description automatically creates a new voice. Non-interactive
-scripts must import ready JSON instead. There are no model calls for authoring,
-switching or rendering.
+becomes the pack's **voice** (what the agents sound like when voice is on) and
+starts a draft of panel phrases based on Studio; **you edit those phrases**
+yourself. Non-interactive scripts must import ready JSON instead. There are no
+model calls for authoring, switching or rendering.
 
 For a pack someone has published, use `asq persona add --url HTTPS_URL`. Downloads
 are bounded, validated and copied into AI Square's local storage with a checksum

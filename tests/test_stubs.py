@@ -134,6 +134,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "edit",
             "export",
             "remove",
+            "voice",
         )
     ),
     *(

@@ -23,7 +23,8 @@ app = typer.Typer(
         "Manage display-only role personalities. Commands: list, status, preview PACK, "
         "use PACK [--role ROLE] [--project PROJECT|--global], off, reset, "
         "add FILE|--url URL|--name NAME --text TEXT, edit PACK, export PACK --output FILE, "
-        "remove PACK. Type /persona in the AI Square command box, not the Claude terminal."
+        "remove PACK, voice on|off. Type /persona in the AI Square command box, "
+        "not the Claude terminal."
     ),
     invoke_without_command=True,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
@@ -139,9 +140,23 @@ def _export_command(
     _run(shlex.join(["export", pack, "--output", output, *_passthrough(ctx)]))
 
 
+def _voice_command(
+    ctx: typer.Context,
+    state: Annotated[str, typer.Argument(help="on or off.", metavar="on|off")],
+) -> None:
+    """Opt this project's NEW agents into the selected pack's speaking style.
+
+    The one persona setting that reaches an agent: `asq launch` appends the
+    pack's voice instruction to the system prompt. Records, evidence, rules and
+    the panel are unaffected; running sessions do not change.
+    """
+    _run(shlex.join(["voice", state, *_passthrough(ctx)]))
+
+
 _EXTRA = {"allow_extra_args": True, "ignore_unknown_options": True}
 for _name in ("list", "status", "off", "reset", "add"):
     app.command(_name, context_settings=_EXTRA)(_command)
+app.command("voice", context_settings=_EXTRA)(_voice_command)
 for _name in ("preview", "use", "edit", "remove"):
     app.command(_name, context_settings=_EXTRA)(_pack_command)
 app.command("export", context_settings=_EXTRA)(_export_command)

@@ -155,7 +155,9 @@ features; no Ponytail, Spec Kit or RTK plugin is required.
 
 - [Personas](docs/personas.md): `asq persona use studio`, per-role choices,
   local creation/import/downloads, and the AI Square `/persona` control box.
-  Narration appears beside the agent terminal; worker instructions stay unchanged.
+  Narration appears beside the agent terminal; worker instructions stay unchanged
+  unless you opt in with `asq persona voice on`, which lets new agent sessions
+  speak in the cast too.
 - [Native workflow](docs/native-workflow.md): requirements, focused assignments,
   role-specific working rules, fresh evidence, and completion checks.
 - [Command reports](docs/command-reports.md): `asq exec -- COMMAND`, conservative

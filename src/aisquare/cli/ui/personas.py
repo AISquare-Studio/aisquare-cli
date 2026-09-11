@@ -134,6 +134,8 @@ class PersonaScreen(ModalScreen[None]):
                     "/persona list",
                     "/persona off",
                     "/persona reset",
+                    "/persona voice on",
+                    "/persona voice off",
                     "/persona add ",
                     "/persona add --name ",
                     "/persona add --url https://",

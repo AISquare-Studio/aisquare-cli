@@ -37,6 +37,7 @@ from aisquare.core.personas import (
     single_line,
     validate_identifier,
     validate_version,
+    voice_text,
 )
 from aisquare.models import ProjectInfo, TeamEvent
 
@@ -62,6 +63,8 @@ class Selection(BaseModel):
     enabled: bool | None = None
     default: str | None = None
     roles: dict[str, str] = Field(default_factory=dict)
+    #: Opt-in: the selected pack's voice is appended to NEW agents' system prompts.
+    voice: bool = False
 
 
 class Selections(BaseModel):
@@ -394,6 +397,15 @@ def persona_status(project: ProjectInfo | None = None) -> dict[str, Any]:
             effective[role] = reference or "off"
         except ValueError:
             effective[role] = f"off (missing or damaged: {reference})"
+    voiced: list[str] = []
+    if choice.voice:
+        for role in ROLES:
+            reference = _effective(settings, project, role)
+            try:
+                if reference and voice_text(load_pack(reference), role):
+                    voiced.append(role)
+            except ValueError:
+                continue
     return {
         "scope": project.id if project else "global",
         "enabled": active,
@@ -402,7 +414,60 @@ def persona_status(project: ProjectInfo | None = None) -> dict[str, Any]:
         "default": choice.default,
         "role_overrides": choice.roles,
         "effective": effective,
+        # The one persona setting that reaches an agent, and only new sessions.
+        "voice": choice.voice,
+        "voice_roles": voiced,
     }
+
+
+def set_voice(project: ProjectInfo, enabled: bool) -> PersonaReceipt:
+    """Opt a project's NEW agent sessions in or out of the pack's speaking style.
+
+    Panel narration stays display-only either way. Voice is the deliberate
+    exception: when on, `asq launch` appends the selected pack's instruction to
+    the agent's system prompt. Running sessions are untouched.
+    """
+    with _locked():
+        settings, warning = _settings_for_write("voice")
+        choice = settings.projects.setdefault(project.id, Selection())
+        choice.voice = enabled
+        _save_settings(settings)
+    report = persona_status(project)
+    state = "on" if enabled else "off"
+    message = f"Persona voice {state} for new sessions in this project."
+    if enabled and not report["voice_roles"]:
+        message += " No selected pack has voice text yet, so nothing is appended."
+    if warning:
+        message += f" {warning}"
+    return PersonaReceipt(action="voice", message=message, data=report)
+
+
+def voice_instruction(project: ProjectInfo | None, role: str) -> str | None:
+    """What `asq launch` appends to a new agent's system prompt, or None.
+
+    None unless the project opted in AND the role's effective pack has voice
+    text. The frame around the pack's words confines the effect to the wording
+    of replies to the human: never code, records, evidence or commands.
+    """
+    if project is None:
+        return None
+    settings = _settings()
+    if not settings.projects.get(project.id, Selection()).voice:
+        return None
+    reference = _effective(settings, project, role)
+    if not reference:
+        return None
+    pack = load_pack(reference)
+    text = voice_text(pack, role)
+    if not text:
+        return None
+    return (
+        f"AI Square persona voice ({pack.name}, {base_role(role)} role): {text} "
+        "This shapes only the WORDING of your conversational replies to the human. "
+        "It never changes code, file contents, commit messages, board notes, task "
+        "text, evidence, commands or their output, and you never mention it there. "
+        "Facts, failures and results stay exact and unsoftened."
+    )
 
 
 def select(
@@ -537,6 +602,9 @@ def author_draft(name: str, description: str, starter: str = "studio") -> Person
         description=description,
         author="Local user",
         license="All rights reserved",
+        # The description IS the speaking style; the starter's phrases stay for
+        # the panel until the author edits them.
+        voice={"default": description},
     )
     return PersonaPack.model_validate(data)
 
@@ -636,6 +704,7 @@ def _parser() -> argparse.ArgumentParser:
             "edit",
             "export",
             "remove",
+            "voice",
         ],
     )
     parser.add_argument("value", nargs="?")
@@ -682,12 +751,17 @@ def run_persona_command(text: str, project: ProjectInfo | None = None) -> Person
         "edit": {"value"},
         "export": {"value", "output"},
         "remove": {"value"},
+        "voice": {"value", "project"},
     }
     for key, value in vars(args).items():
         if key != "action" and value not in (None, False) and key not in allowed[action]:
             raise PersonaUsageError(f"{key.replace('_', '-')} is not valid for persona {action}")
     if action in {"preview", "use", "edit", "export", "remove"} and not args.value:
         raise PersonaUsageError(f"persona {action} needs a pack ID or ID@version")
+    if action == "voice":
+        if args.value not in {"on", "off"}:
+            raise PersonaUsageError("persona voice needs on or off")
+        return set_voice(resolve_project(project, args.project), args.value == "on")
     if action == "list":
         return PersonaReceipt(
             action=action,

@@ -582,9 +582,10 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`), the scroll keys below, and ctrl+c while text is selected (it copies). Printable characters travel as typed; special keys are
-translated into tmux's names (Enter, BSpace, ctrl+c → `C-c` when nothing is selected, shift+tab →
-`BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
+hatch (`F12`), the scroll keys below, ctrl+c while text is selected (it copies)
+and cmd+c, which is only ever the copy. Printable characters travel as typed;
+special keys are translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`
+when nothing is selected, shift+tab → `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and
 scrolls its transcript; a fullscreen program that does not is left alone (its own
@@ -598,9 +599,11 @@ decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
 Drag to select text in a pane (double-click selects a word): it is copied to
 your clipboard on release (OSC 52 — your terminal has to accept it; Windows
-Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c copies again while the
-selection stands. What is copied is what was highlighted, even if the agent kept
-printing meanwhile. Modifier
+Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies again
+while the selection stands. Only the left-button drag that made a selection
+copies it, so a right-click over a highlight leaves your clipboard alone. What
+is copied is what was highlighted, even if the agent kept printing meanwhile.
+Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter

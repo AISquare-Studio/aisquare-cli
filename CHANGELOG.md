@@ -418,10 +418,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it, since the theme's selection style resolves with foreground equal to
   background. The text is copied on release from the rows frozen when the drag
   began; ctrl+c copies again while a selection stands and is the agent's
-  interrupt otherwise; double-click selects a word and a triple click nothing
+  interrupt otherwise; cmd+c is only ever the copy, and types nothing when
+  there is no selection; double-click selects a word and a triple click nothing
   (Textual's defaults would select the whole pane, and the next ctrl+c would
-  copy it instead of interrupting the agent). Switching the pane to another
-  agent drops the selection.
+  copy it instead of interrupting the agent). Only the left-button drag that
+  made a selection copies it — a right-button drag across a standing highlight
+  used to replace the clipboard with whatever it crossed. Switching the pane to
+  another agent drops the selection; changing the theme drops the rows the
+  render cache had already painted, which otherwise kept their old colours on
+  every quiet pane.
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet

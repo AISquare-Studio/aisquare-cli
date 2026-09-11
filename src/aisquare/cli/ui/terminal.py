@@ -220,11 +220,15 @@ class TerminalPane(Widget, can_focus=True):
         self._marker: tuple[int, int] | None = None
         """``(scrollback, history)`` the corner marker last showed, or ``None``."""
         self._offset_cache: dict[tuple[str, int], Strip] = {}
+        """Offset-stamped rows, already painted in ``rich_style`` — so emptied
+        whenever the resolved style changes (see :meth:`notify_style_update`)."""
         self._selection_rows: list[str] | None = None
         """The rows' plain text frozen when a drag began, so what is copied is what
         was highlighted — the live buffer moves every 50 ms under a printing agent."""
         self._selection_bg: Style | None = None
         """The selection tint, resolved once per selection rather than per row."""
+        self._drag_from: Offset | None = None
+        """Where the left button went down, while it is still down."""
 
     # --- what is shown -----------------------------------------------------------------
 
@@ -253,6 +257,19 @@ class TerminalPane(Widget, can_focus=True):
                     version = self.server.version()
             self._extended = version is None or version >= EXTENDED_MINIMUM
         return self._extended
+
+    def notify_style_update(self) -> None:
+        """Textual's "your resolved styles changed" hook — empty the painted cache.
+
+        ``_offset_cache`` holds rows with ``rich_style`` already applied, so a
+        live theme change (the ``t`` picker, the command palette) or any CSS
+        refresh left every quiet row painted in the OLD colours, and a fully
+        idle pane never recovered (review). Unlike ``_strip_cache``, which
+        stores rows BEFORE the base style is applied and is theme-safe, this one
+        has the theme baked in.
+        """
+        super().notify_style_update()
+        self._offset_cache.clear()
 
     def attach(self, pane_id: str | None) -> None:
         """Show ``pane_id`` (``None`` clears the pane) and restart the render loop."""
@@ -535,7 +552,7 @@ class TerminalPane(Widget, can_focus=True):
 
     def _row_text(self, y: int) -> str:
         """Row ``y`` as plain text — from the frozen snapshot while a drag stands."""
-        rows = self._selection_rows if self._selection_rows is not None else None
+        rows = self._selection_rows
         if rows is not None and y < len(rows):
             return rows[y]
         if self.notice is not None and y == self.content_size.height - 1:
@@ -544,7 +561,13 @@ class TerminalPane(Widget, can_focus=True):
         return self._strip_for(line).text.rstrip()
 
     def _row_texts(self) -> list[str]:
-        return [self._row_text(y) for y in range(len(self._lines))]
+        # As many rows as the widget RENDERS, not as many as the last frame
+        # filled: ``render_line`` stamps offsets up to ``content_size.height``,
+        # while ``_lines`` is only re-padded to that height by the next
+        # successful frame. Between a grow-resize (or a ``_fail`` that returns
+        # early) and that frame, ``_extract``'s clamp folded a drag on the new
+        # bottom rows onto the LAST row's text and copied that (review).
+        return [self._row_text(y) for y in range(max(len(self._lines), self.content_size.height))]
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The plain text under ``selection``, from the rows this widget shows.
@@ -639,6 +662,14 @@ class TerminalPane(Widget, can_focus=True):
             # selected. Without a selection it is the agent's interrupt.
             self.screen.clear_selection()
             return
+        if event.key == "super+c":
+            # macOS Cmd+C is copy and nothing else. It must not fall through to
+            # the key table either: ``super`` is not a modifier tmux can spell,
+            # the event carries a printable ``c``, and the pane typed a bare
+            # ``c`` into the agent for a copy gesture (review).
+            if self._copy_selection():
+                self.screen.clear_selection()
+            return
         translation = translate(
             event.key,
             event.character,
@@ -732,12 +763,23 @@ class TerminalPane(Widget, can_focus=True):
 
     # --- selection and copy ------------------------------------------------------------
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Remember where a left-button drag began, so its release can copy."""
+        self._drag_from = event.offset if event.button == 1 else None
+
     def on_mouse_up(self, event: events.MouseUp) -> None:
         """Copy on release — the drag itself is the request to copy.
 
-        A click that moves nothing has its selection cleared by Textual before
-        this runs, so there is nothing stale to guard against here.
+        Only the release of the drag that MADE the selection copies. Copying on
+        any release while a selection stood meant a triple click, or a right
+        click over a highlight left by a double click, copied it a second time
+        and raised a "copied N characters" toast for a gesture that selected
+        nothing new (review). A click that moves nothing has its selection
+        cleared by Textual before this runs.
         """
+        start, self._drag_from = self._drag_from, None
+        if start is None or event.offset == start:
+            return
         if self.text_selection is not None:
             self._copy_selection()
 

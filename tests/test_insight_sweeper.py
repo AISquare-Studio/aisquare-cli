@@ -112,6 +112,20 @@ def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
     insights.reset_cache()
     monkeypatch.delenv(service.KEY_ENV_VAR, raising=False)
     monkeypatch.delenv(service.GATEWAY_ENV_VAR, raising=False)
+    # These tests capture through the REAL `insights` seam, which reads the
+    # ambient environment. A developer running the suite from INSIDE a traced
+    # session would otherwise have every record key on THEIR pipeline id and
+    # claim THEIR owned Run — sending drains down the segment lane in tests
+    # written for the plain one. The answer must not depend on whose terminal
+    # ran it. (Measured: `test_outside_a_traced_session_the_board_id_is_still_
+    # the_run_key` fails on such a machine without this.) Each test that wants
+    # a marker still sets it, as they do below.
+    for marker in (
+        service.PIPELINE_ID_ENV_VAR,
+        service.TRACE_AGENT_NAME_ENV_VAR,
+        service.RUN_TRACE_ID_ENV_VAR,
+    ):
+        monkeypatch.delenv(marker, raising=False)
 
 
 def _configure(*, ship: bool = True, key: str | None = "wk-test") -> None:
@@ -507,6 +521,12 @@ def test_the_run_key_env_var_matches_the_launcher() -> None:
     assert insights.RUN_KEY_ENV_VAR == service.PIPELINE_ID_ENV_VAR
 
 
+def test_the_owned_run_env_var_matches_the_launcher() -> None:
+    """Same duplication, and it decides which lane a drain opens — so it is
+    worth more than the run key's name is."""
+    assert insights.RUN_TRACE_ID_ENV_VAR == service.RUN_TRACE_ID_ENV_VAR
+
+
 def test_insights_captured_inside_a_traced_session_key_on_its_pipeline_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -531,6 +551,9 @@ def test_insights_captured_inside_a_traced_session_key_on_its_pipeline_id(
 def test_an_unjoined_session_ships_into_the_proxys_run(
     sdk: FakeSDK, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Keyed on the pipeline id the launcher chose, in a root of our own: no
+    marker said the launcher OWNED that Run, so there is no root to hang under
+    (``test_a_fail_open_launchs_insights_still_open_their_own_run``)."""
     _configure()
     monkeypatch.setenv(insights.RUN_KEY_ENV_VAR, "minted-pipeline-id")
     insights.record_prompt("p", session_id="board-session-id")

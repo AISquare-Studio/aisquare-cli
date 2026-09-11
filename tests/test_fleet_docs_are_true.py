@@ -73,6 +73,42 @@ def test_the_bare_json_invocation_does_what_the_page_says(tmp_path: Path, page: 
     assert "help" not in claim.group(0).lower() or "json" in claim.group(0).lower(), claim.group(0)
 
 
+def test_the_roles_section_counts_its_own_table(page: str) -> None:
+    """The page names a number of roles and then tabulates them.
+
+    The number went stale the moment a role was added: the sentence said "Five
+    roles" above a six-row table, and nothing caught it — this file asserts the
+    page's mechanically-checkable claims and never counted the rows. Both halves
+    are read from the page, and the table is checked against `FLEET_ROLES`, so
+    the next role has to update the sentence to pass.
+    """
+    from aisquare.services.fleet import FLEET_ROLES
+
+    words = {
+        "One": 1,
+        "Two": 2,
+        "Three": 3,
+        "Four": 4,
+        "Five": 5,
+        "Six": 6,
+        "Seven": 7,
+        "Eight": 8,
+        "Nine": 9,
+        "Ten": 10,
+    }
+    pattern = rf"^({'|'.join(words)}) roles, each a briefing"
+    stated = re.search(pattern, page, re.MULTILINE)
+    assert stated is not None, "the roles section no longer opens with a count"
+    section = page.split("## The roles", 1)[1].split("\n## ", 1)[0]
+    rows = re.findall(r"^\| \*\*([a-z-]+)\*\* \|", section, re.MULTILINE)
+    assert words[stated.group(1)] == len(rows), (
+        f"the page says {stated.group(1)} roles and tabulates {len(rows)}: {rows}"
+    )
+    assert set(rows) == set(FLEET_ROLES), (
+        f"the table and FLEET_ROLES disagree: {sorted(set(FLEET_ROLES) ^ set(rows))}"
+    )
+
+
 def test_the_page_promises_no_automated_permission_fallback(page: str) -> None:
     """Round 1 found this sentence promising a retry the spawn path never had."""
     for forbidden in ("detects the refusal", "falls back to `acceptEdits`", "falls back to auto"):

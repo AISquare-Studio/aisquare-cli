@@ -208,17 +208,38 @@ def test_an_exported_run_still_wins_and_the_identity_is_still_shown(
     assert checks["ci identity"].status is CheckStatus.ok
 
 
-def test_the_experiment_token_path_shows_no_identity_lines(
+def test_the_experiment_token_gets_an_identity_line_and_no_workspace_line(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
 ) -> None:
+    """The server resolves harness bearers too, so "who does CI think I am" has
+    an answer for an experiment token; the exported run wins, so the binding is
+    not consulted and there is no workspace line to warn about."""
     signed_in(monkeypatch, stub)
     monkeypatch.setenv(ci_client.KEY_ENV_VAR, "k")
     monkeypatch.setenv(ci_client.RUN_ENV_VAR, "run_kernel0001")
 
     checks = ci_checks()
 
-    assert "ci identity" not in checks and "ci workspace" not in checks
-    assert stub.me_fetches == 0
+    assert checks["ci identity"].status is CheckStatus.ok
+    assert "experiment token from AISQUARE_CI_KEY" in checks["ci identity"].detail
+    assert "ci workspace" not in checks
+    assert stub.me_fetches == 1
+
+
+def test_an_experiment_token_with_no_run_exported_resolves_one_like_the_hooks_do(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """Doctor used to say "no run id" here while _resolve_run asked GET /v1/me
+    and found one: the gate is "has a bearer", not "is signed in"."""
+    signed_in(monkeypatch, stub)
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "k")
+    bind(TEAM)
+
+    checks = ci_checks()
+
+    assert checks["ci test bed"].status is CheckStatus.ok
+    assert "run_kernel0001 from GET /v1/me" in checks["ci test bed"].detail
+    assert checks["ci workspace"].status is CheckStatus.ok
 
 
 def test_doctor_probes_me_without_caching_it(
@@ -527,6 +548,59 @@ def test_the_credentials_file_is_read_once_per_process(
     monkeypatch.setenv("AISQUARE_TOKEN", "aisq_another-token-00000000000000000000000000")
     ci_client.api_key()
     assert len(reads) == 2, "a different environment token starts a fresh read"
+
+
+def test_a_sign_in_from_another_process_is_seen_without_a_restart(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """The memo is keyed by the credentials file's mtime and size as well, so a
+    long-lived `fleet ui` or `serve` sees a login done in another terminal on
+    its next call - `None` included, which the first draft would have kept."""
+    import os
+    import time
+
+    from aisquare.core import credentials
+    from aisquare.services import iam
+
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, stub.url)
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv("AISQUARE_TOKEN", raising=False)
+    ci_client.reset_cache()
+    assert ci_client.api_key_and_source() == ("", "")
+
+    # "Another process" signs in: the file appears with a different mtime/size.
+    credentials.store(**{iam.KEY_API_URL: "https://api.test", iam.KEY_TOKEN: TOKEN})
+    stat = os.stat(paths.credentials_path())
+    os.utime(paths.credentials_path(), ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    assert ci_client.api_key_and_source() == (TOKEN, ci_client.SIGNED_IN_SOURCE)
+
+    credentials.drop(iam.KEY_TOKEN)
+    time.sleep(0.01)
+    assert ci_client.api_key_and_source() == ("", "")
+
+
+def test_the_recall_predicate_takes_the_agents_cwd(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path, tmp_path: Path
+) -> None:
+    """available() and forward_recall resolve the project the same way, from the
+    caller's cwd; a binding for one checkout must not advertise the tool for another."""
+    from aisquare.services import ci_recall
+
+    signed_in(monkeypatch, stub)
+    here = tmp_path / "here"
+    there = tmp_path / "there"
+    here.mkdir()
+    there.mkdir()
+    config = AppConfig()
+    config.experiment.enabled = True
+    config.experiment.bindings[workspace_core.current_project(here).id] = TEAM
+    save_config(config)
+    ci_client.reset_cache()
+
+    assert ci_recall.available(cwd=here) is True
+    assert ci_recall.available(cwd=there) is False
 
 
 def test_the_transport_rule_has_one_home(monkeypatch: pytest.MonkeyPatch) -> None:

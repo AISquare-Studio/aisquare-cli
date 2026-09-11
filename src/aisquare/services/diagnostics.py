@@ -1010,7 +1010,12 @@ def _experiment_checks() -> list[DoctorCheck]:
     key, key_source = ci_client.api_key_and_source()
     raw_run = ci_client.raw_run_id()
     run = ci_client.run_id()
-    signed_in = bool(key) and key_source == ci_client.SIGNED_IN_SOURCE
+    # Whether there is a bearer to ask GET /v1/me with - the SAME question
+    # ci_augment._resolve_run asks. The first draft branched on the bearer's
+    # source, so an experiment-token caller with no run exported was told "no
+    # run" while the hooks resolved one from the fixture workspace's
+    # membership; the source is for display, never for the branch.
+    has_bearer = bool(key)
     checks: list[DoctorCheck] = []
     identity: list[DoctorCheck] = []
     if not key:
@@ -1043,19 +1048,12 @@ def _experiment_checks() -> list[DoctorCheck]:
                 "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
             )
         )
-    elif not raw_run and not signed_in:
-        checks.append(
-            _warn(
-                name,
-                f"enabled for {shown}, but no run id — every prompt records no_run",
-                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
-            )
-        )
-    elif not raw_run:
-        # Signed in and nothing exported: the run is whatever GET /v1/me says
-        # is published in the bound workspace, which is the path a real
-        # developer takes. The identity lines below carry the reasons.
-        identity, resolved = _identity_checks(base, key)
+    elif not raw_run and has_bearer:
+        # Nothing exported: the run is whatever GET /v1/me says is published in
+        # the bound workspace - for a signed-in developer AND for a harness
+        # token, whose fixture membership the server reports the same way. The
+        # identity lines below carry the reasons.
+        identity, resolved = _identity_checks(base, key, key_source, exported_run=None)
         run = resolved or ""
         if run:
             checks.append(
@@ -1068,7 +1066,7 @@ def _experiment_checks() -> list[DoctorCheck]:
             checks.append(
                 _warn(
                     name,
-                    f"enabled for {shown}, but no run resolved for the signed-in user — "
+                    f"enabled for {shown}, but no run resolved for this bearer — "
                     "every prompt records no_run",
                     "See the ci identity and ci workspace lines",
                 )
@@ -1079,11 +1077,9 @@ def _experiment_checks() -> list[DoctorCheck]:
         # was unanswerable from the output: an operator with both an experiment
         # token exported and a signed-in session had no way to see which one won.
         checks.append(_ok(name, f"enabled for {shown}, run {run}, {_bearer_note(key_source)}"))
-        if signed_in:
-            # An exported run wins over the server's routing; the identity is
-            # still worth a line, because "who does CI think I am" is the
-            # question this path exists to answer.
-            identity, _resolved = _identity_checks(base, key)
+        # An exported run wins over the server's routing; who CI resolves the
+        # bearer to is still worth a line, for every kind of bearer.
+        identity, _resolved = _identity_checks(base, key, key_source, exported_run=run)
     checks.extend(identity)
     checks.append(_check_ci_endpoint(base, shown))
     descriptor: DeliveryDescriptor | None = None
@@ -1130,24 +1126,35 @@ _CI_PROBE_MS = 3_000
 the transport's wall-clock deadline is what bounds each probe."""
 
 
-def _identity_checks(base: str, key: str) -> tuple[list[DoctorCheck], str | None]:
-    """The two signed-in lines: who CI resolves the bearer to, and where it asks.
+def _identity_checks(
+    base: str, key: str, key_source: str, *, exported_run: str | None
+) -> tuple[list[DoctorCheck], str | None]:
+    """The identity lines: who CI resolves the bearer to, and where it asks.
 
     ``ci identity`` answers "who does CI think I am" from ``GET /v1/me``, fetched
     without caching (a diagnostic must not create state) and bounded like every
-    other probe here. ``ci workspace`` applies the same routing the hooks apply
-    — ``ci_me.run_for`` over this project's ``[experiment].bindings`` entry — so the run it
-    prints is the run a session would use, and the fix for each way that can
-    fail names the command that fixes it. Returns the lines and the run.
+    other probe here - for ANY bearer, since the server answers for harness
+    tokens too. ``ci workspace`` applies the same routing the hooks apply —
+    ``ci_me.run_for`` over this project's ``[experiment].bindings`` entry — so
+    the run it prints is the run a session would use, and the fix for each way
+    that can fail names the command that fixes it. When a run is exported the
+    workspace line is skipped: the export wins and the binding is not consulted,
+    so a warning about it would be a warning about nothing. Returns the lines
+    and the run the binding resolved (``None`` when a run was exported).
     """
     answer = ci_me.fetch(base=base, key=key, cache=False, deadline_ms=_CI_PROBE_MS)
     if answer.me is None:
         if answer.status == 401:
+            signed_in = key_source == ci_client.SIGNED_IN_SOURCE
             return [
                 _warn(
                     "ci identity",
-                    "token rejected (401) — the signed-in session has expired or was revoked",
-                    "Sign in again: aisquare login",
+                    "token rejected (401) — the signed-in session has expired or was revoked"
+                    if signed_in
+                    else "token rejected (401) — the experiment token is not one the server knows",
+                    "Sign in again: aisquare login"
+                    if signed_in
+                    else "Export the token the controller issued: export AISQUARE_CI_KEY=…",
                 )
             ], None
         return [
@@ -1161,13 +1168,19 @@ def _identity_checks(base: str, key: str) -> tuple[list[DoctorCheck], str | None
     me = answer.me
     count = len(me.workspaces)
     plural = "" if count == 1 else "s"
+    who = (
+        _signed_in_as(me.auth_subject)
+        if key_source == ci_client.SIGNED_IN_SOURCE
+        else _bearer_note(key_source)
+    )
     lines = [
         _ok(
             "ci identity",
-            f"{_signed_in_as(me.auth_subject)} — CI resolves {me.principal_id} in "
-            f"{count} workspace{plural}",
+            f"{who} — CI resolves {me.principal_id} in {count} workspace{plural}",
         )
     ]
+    if exported_run is not None:
+        return lines, None
     # THE project the hooks would act for - `active_project`, the pinned one
     # only while it is still registered - so what doctor confirms is what a
     # session reads. Opening the store needs a home; without one there is no
@@ -1198,7 +1211,10 @@ def _identity_checks(base: str, key: str) -> tuple[list[DoctorCheck], str | None
             "Join a workspace in AISquare Studio; until then every prompt records no_run"
         ),
     }
-    lines.append(_warn("ci workspace", choice.detail, fixes[choice.reason]))
+    # .get, because a diagnostic must never raise out of the code that reports
+    # failures: `resolved` cannot reach here today, but the invariant spans two
+    # files and nothing asserts it.
+    lines.append(_warn("ci workspace", choice.detail, fixes.get(choice.reason, "")))
     return lines, None
 
 

@@ -13,6 +13,15 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 3, 2026-09-11.** `doctor` asks `GET /v1/me` for ANY bearer,
+> as the hooks do - an experiment token with no run exported resolves the
+> fixture workspace's run, and the `ci identity` line names harness bearers
+> too (the workspace line is skipped when a run is exported, since the export
+> wins). The session memo is keyed by the credentials file's mtime and size as
+> well as the environment token, so a sign-in in another terminal is seen by a
+> running `fleet ui` or `serve`; `available()` takes the agent's `cwd`; and the
+> fix table is indexed safely.
+>
 > **Review round 2, 2026-09-11.** The MCP recall path now passes the project
 > to the gate (its argument is required, so a caller cannot forget it again);
 > `bind-workspace` and `doctor` resolve the project through `active_project`,

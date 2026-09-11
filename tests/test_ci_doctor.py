@@ -72,8 +72,16 @@ def test_a_missing_token_and_a_missing_run_are_named_separately(
     no_key = _ci_checks()["ci test bed"]
     assert no_key.status is CheckStatus.warn and "bearer token" in no_key.detail
     monkeypatch.setenv(ci_client.KEY_ENV_VAR, "k")
-    no_run = _ci_checks()["ci test bed"]
-    assert no_run.status is CheckStatus.warn and "no run id" in no_run.detail
+    checks = _ci_checks()
+    # A bearer with no run exported asks GET /v1/me, whatever kind of bearer it
+    # is - the same question the hooks ask. The stub's identity belongs to two
+    # workspaces and none is bound, so the run does not resolve and the reason
+    # is on the identity lines rather than a bare "no run id".
+    no_run = checks["ci test bed"]
+    assert no_run.status is CheckStatus.warn and "no run resolved" in no_run.detail
+    assert checks["ci identity"].status is CheckStatus.ok
+    assert "experiment token" in checks["ci identity"].detail
+    assert checks["ci workspace"].status is CheckStatus.warn
     monkeypatch.setenv(ci_client.RUN_ENV_VAR, "kernel0001")
     bad_run = _ci_checks()["ci test bed"]
     assert bad_run.status is CheckStatus.warn and "not a run id" in bad_run.detail
@@ -93,17 +101,22 @@ def test_a_multi_line_token_is_named_not_echoed(
         assert "SUPERSECRET" not in line.detail and "SUPERSECRET" not in (line.fix or "")
 
 
-def test_a_healthy_stub_is_three_green_lines(
+def test_a_healthy_stub_is_four_green_lines(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
 ) -> None:
+    """Test bed, identity, endpoint, descriptor. The identity line is there for
+    an experiment token too - the server resolves harness bearers as well - and
+    the workspace line is not, because an exported run wins over the binding."""
     wire(monkeypatch, stub)
     checks = _ci_checks()
     assert {name: c.status for name, c in checks.items()} == {
         "ci test bed": CheckStatus.ok,
+        "ci identity": CheckStatus.ok,
         "ci endpoint": CheckStatus.ok,
         "ci descriptor": CheckStatus.ok,
     }
     assert RUN in checks["ci test bed"].detail
+    assert "experiment token" in checks["ci identity"].detail
     assert "/ready answered 200" in checks["ci endpoint"].detail
     descriptor = checks["ci descriptor"].detail
     assert "hook_push on prompt_submit" in descriptor and "mcp_pull" in descriptor

@@ -73,13 +73,23 @@ from aisquare.services.ci_contract import (
 )
 
 
-def available() -> bool:
+def available(cwd: Path | None = None) -> bool:
     """Whether the tool should be registered: the experiment is on and the run's
-    descriptor lists ``mcp_pull``. Consults the descriptor (cached or fetched);
-    never raises."""
+    descriptor lists ``mcp_pull``.
+
+    Resolves the project from ``cwd`` exactly as :func:`forward_recall` does,
+    then consults the descriptor (cached or fetched) through the gate. Opening
+    the store to resolve the project is a cost this predicate did not have
+    before the binding became per project; it is paid once, at registration.
+    Registration happens once per server process while every pull re-resolves
+    from the agent's own ``cwd``, so a server started in one checkout and asked
+    from another can advertise the tool under the first's binding - the pull
+    then records its own refusal against the second's, which is visible, rather
+    than serving the first's run. Never raises.
+    """
     try:
         with store_session() as store:
-            project_id = active_project(store).id
+            project_id = active_project(store, cwd).id
         opened = ci_augment.gate(project_id)
     except Exception:
         return False

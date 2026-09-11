@@ -31,7 +31,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     is not sent either: `doctor` says to sign in again instead of spending a
     round trip to be refused. Signing out also forgets the cached `GET /v1/me`
     answer for that token, and that answer is served only for the server it
-    came from.
+    came from. `doctor` asks `GET /v1/me` for an experiment token too, so the
+    `ci identity` line always says who the server resolved.
   - **`doctor` says who CI thinks you are.** The `ci test bed` line names the
     credential in play (experiment token, or signed in as you — never its
     value); signed in, two more lines follow: `ci identity` (the principal the

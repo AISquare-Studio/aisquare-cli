@@ -52,6 +52,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from aisquare.core import paths
 from aisquare.core.config import ExperimentSettings, load_config
 from aisquare.models import BriefingStatus, ClientReason, HookAction
 from aisquare.services.ci_contract import (
@@ -215,8 +216,9 @@ def _signed_in_token() -> str:
 
 
 _SESSION_MEMO: dict[str, Any] = {}
-"""One read of the credentials file per process, keyed by the value of
-``AISQUARE_TOKEN`` (which wins over the file and can change between tests).
+"""One read of the credentials file per change of it, keyed by the value of
+``AISQUARE_TOKEN`` (which wins over the file and can change between tests) and
+by the file's mtime and size.
 ``iam.current_session()`` stats and parses ``~/.aisquare/credentials`` on every
 call; a hook asked for the bearer, its source, its problems, the doctor note and
 the scrubber once per recorded detail - six reads of one file per turn. Cleared
@@ -233,7 +235,18 @@ def _signed_in_session() -> Any:
     ``iam_*`` keys, and this is a caller rather than a second reader).
     """
     env_token = os.environ.get("AISQUARE_TOKEN", "").strip()
-    if _SESSION_MEMO.get("key") == env_token and "session" in _SESSION_MEMO:
+    # The key carries the credentials file's identity too, so a sign-in or
+    # sign-out in ANOTHER process (a `login` in a second terminal while `fleet
+    # ui` or `serve` runs) is seen on the next call: one stat instead of a
+    # read-and-parse, and no answer - `None` included - outlives the file that
+    # produced it.
+    try:
+        stat = os.stat(paths.credentials_path())
+        file_key: tuple[int, int] = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        file_key = (0, 0)
+    key = (env_token, file_key)
+    if _SESSION_MEMO.get("key") == key and "session" in _SESSION_MEMO:
         return _SESSION_MEMO["session"]
     try:
         from aisquare.services import iam
@@ -242,7 +255,7 @@ def _signed_in_session() -> Any:
     except Exception:  # a damaged credentials file must not cost the hook a turn
         session = None
     _SESSION_MEMO.clear()
-    _SESSION_MEMO["key"] = env_token
+    _SESSION_MEMO["key"] = key
     _SESSION_MEMO["session"] = session
     return session
 

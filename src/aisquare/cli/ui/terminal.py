@@ -143,9 +143,6 @@ class TerminalPane(Widget, can_focus=True):
     #: Textual's defaults would select the whole pane, and ctrl+c would then
     #: copy 3000 characters instead of interrupting the agent.
     ALLOW_SELECT: ClassVar[bool] = True
-    OFFSET_CACHE_LIMIT: int = 2048
-    """Offset-stamped rows kept per ``(line, y)`` before the cache is emptied."""
-
     FAST_INTERVAL: float = 0.05
     """Seconds between frames while the screen is changing (~20 fps)."""
     IDLE_INTERVAL: float = 0.5
@@ -219,9 +216,6 @@ class TerminalPane(Widget, can_focus=True):
         self._wheel_timer: Timer | None = None
         self._marker: tuple[int, int] | None = None
         """``(scrollback, history)`` the corner marker last showed, or ``None``."""
-        self._offset_cache: dict[tuple[str, int], Strip] = {}
-        """Offset-stamped rows, already painted in ``rich_style`` — so emptied
-        whenever the resolved style changes (see :meth:`notify_style_update`)."""
         self._selection_rows: list[str] | None = None
         """The rows' plain text frozen when a drag began, so what is copied is what
         was highlighted — the live buffer moves every 50 ms under a printing agent."""
@@ -259,17 +253,17 @@ class TerminalPane(Widget, can_focus=True):
         return self._extended
 
     def notify_style_update(self) -> None:
-        """Textual's "your resolved styles changed" hook — empty the painted cache.
+        """Textual's "your resolved styles changed" hook — drop what bakes in a theme.
 
-        ``_offset_cache`` holds rows with ``rich_style`` already applied, so a
-        live theme change (the ``t`` picker, the command palette) or any CSS
-        refresh left every quiet row painted in the OLD colours, and a fully
-        idle pane never recovered (review). Unlike ``_strip_cache``, which
-        stores rows BEFORE the base style is applied and is theme-safe, this one
-        has the theme baked in.
+        ``_selection_bg`` memoises ``selection_style.bgcolor`` and was reset only
+        when the selection cleared, so picking a theme mid-drag repainted every
+        row around a highlight still tinted from the old palette — possibly
+        invisible against it (review of the third version). It is the only field
+        here with a theme baked in: ``_strip_cache`` stores rows BEFORE the base
+        style is applied, and ``render_line`` applies the live one every time.
         """
         super().notify_style_update()
-        self._offset_cache.clear()
+        self._selection_bg = None
 
     def attach(self, pane_id: str | None) -> None:
         """Show ``pane_id`` (``None`` clears the pane) and restart the render loop."""
@@ -284,7 +278,7 @@ class TerminalPane(Widget, can_focus=True):
         self._reported_gone = False
         self._marker = None
         self._selection_rows = None
-        self._offset_cache.clear()
+        self._drag_from = None
         if self.is_mounted and self.text_selection is not None:
             self.screen.clear_selection()  # agent A's highlight must not sit on agent B
         self._wheel_queue = []
@@ -444,33 +438,23 @@ class TerminalPane(Widget, can_focus=True):
     # --- the Line API ------------------------------------------------------------------
 
     def render_line(self, y: int) -> Strip:
-        # Every return is offset-stamped: the compositor reads a drag's content
+        # Every row is offset-stamped: the compositor reads a drag's content
         # offset from segment metadata that Textual's ``render()`` path stamps
         # and a Line API widget must stamp itself — on EVERY row, or a drag that
         # touches an unstamped one (the notice row, a blank row) resolves to
         # "select all".
-        plain = (
-            self.pane_id is not None
-            and self.text_selection is None
-            and not (self._cursor is not None and self._cursor[1] == y)
-            and not (y == 0 and self.scrollback)
-            and not (self.notice is not None and y == self.content_size.height - 1)
-        )
-        if not plain:
-            return self._render_row(y).apply_offsets(0, y)
-        # The common row — no cursor, selection, marker or notice on it — is a
-        # pure function of its text and row, so the stamped strip is kept:
-        # ``apply_offsets`` rebuilds every segment's style otherwise, and the
-        # render loop asks for the same rows twenty times a second.
-        key = (self._lines[y] if y < len(self._lines) else "", y)
-        cached = self._offset_cache.get(key)
-        if cached is not None and cached.cell_length == self.content_size.width:
-            return cached
-        if len(self._offset_cache) >= self.OFFSET_CACHE_LIMIT:
-            self._offset_cache.clear()
-        stamped = self._render_row(y).apply_offsets(0, y)
-        self._offset_cache[key] = stamped
-        return stamped
+        #
+        # Stamped fresh each time, with no cache of the finished strip. One was
+        # tried and measured: on the render loop it never hit, because
+        # ``_repaint_rows`` only asks for rows whose text just CHANGED — 0 hits
+        # in 1500 calls, 21% slower per changed row for the insert, and the dict
+        # churning to its cap. It paid only on a full repaint with no selection
+        # (50 rows, 0.63 ms → 0.15 ms), which is resize, focus and theme — never
+        # the drag, since a standing selection skipped the cache anyway. Against
+        # that: it held rows with ``rich_style`` already applied, so it had to be
+        # invalidated on every theme and CSS change or an idle pane kept the old
+        # palette (review of the second and third versions). Not worth it.
+        return self._render_row(y).apply_offsets(0, y)
 
     def _render_row(self, y: int) -> Strip:
         width, height = self.content_size
@@ -482,36 +466,62 @@ class TerminalPane(Widget, can_focus=True):
             if y == 0:
                 return Strip([Segment(NO_PANE, base + PLACEHOLDER)]).adjust_cell_length(width, base)
             return Strip.blank(width, base)
-        if self.notice is not None and y == height - 1:
-            return Strip([Segment(self.notice, base + NOTICE)]).adjust_cell_length(width, base)
-        line = self._lines[y] if y < len(self._lines) else ""
-        strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
+        notice = self.notice if y == height - 1 else None
+        if notice is not None:
+            # Built, not returned: the overlays below still apply. Returning here
+            # left the one row that `_row_text` reports as displayed — and that a
+            # drag therefore COPIES — as the only row a selection never tinted
+            # (review of the third version).
+            strip = Strip([Segment(notice, base + NOTICE)]).adjust_cell_length(width, base)
+        else:
+            line = self._lines[y] if y < len(self._lines) else ""
+            strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
+        cursor = self._cursor
+        cursor_x = (
+            cursor[0]
+            if notice is None and cursor is not None and cursor[1] == y and cursor[0] < width
+            else None
+        )
+        selection = self.text_selection
+        span = None if selection is None else selection.get_span(y)
+        marker = y == 0 and bool(self.scrollback)
+        if cursor_x is None and span is None and not marker:
+            return strip
         # Every restyle below crops the strip, and ``Strip.crop`` through a wide
         # glyph renders it as two single-cell spaces — one character more than
         # the row had, which shifts every offset stamped after it (measured: a
         # cursor on ``日`` at cell 0 moved a drag's whole selection by one).
         # So every crop is snapped to a glyph boundary, and this is the text
-        # those boundaries come from.
+        # those boundaries come from. Read only when one of them actually runs:
+        # ``Strip.text`` joins every segment, is uncached, and the common row has
+        # no cursor, selection or marker on it (review of the third version).
         text = self._row_text(y)
-        if self._cursor is not None and self._cursor[1] == y and self._cursor[0] < width:
-            strip = self._with_cursor(strip, self._cursor[0], text)
-        selection = self.text_selection
-        if selection is not None:
-            span = selection.get_span(y)
-            if span is not None:
-                strip = self._with_selection(strip, span, text, width)
-        if y == 0 and self.scrollback:
+        if cursor_x is not None:
+            strip = self._with_cursor(strip, cursor_x, text)
+        if span is not None:
+            strip = self._with_selection(strip, span, text, width)
+        if marker:
             strip = self._with_scroll_marker(strip, width, text)
         return strip
 
     @staticmethod
     def _snap(text: str, start: int, end: int) -> tuple[int, int]:
-        """``[start, end)`` in cells, widened to the glyph boundaries of ``text``."""
+        """``[start, end)`` in cells, widened to the glyph boundaries of ``text``.
+
+        Only WITHIN the text. Past its last glyph every cell is one cell wide and
+        blank, so there is no boundary to widen to — and widening anyway stretched
+        a span that starts out there back to the end of the text. The cursor is
+        the caller that lands there: ``capture-pane -e`` trims trailing spaces, so
+        on any row where the cursor sits past the last printed glyph — every quiet
+        shell pane — one reverse-video cell became a black bar all the way from
+        the text to the cursor (review of the third version).
+        """
         bounds = [0]
         for char in text:
             bounds.append(bounds[-1] + cell_len(char))
-        snapped_start = max((b for b in bounds if b <= start), default=start)
-        snapped_end = min((b for b in bounds if b >= end), default=end)
+        span = bounds[-1]
+        snapped_start = max(b for b in bounds if b <= start) if start < span else start
+        snapped_end = min(b for b in bounds if b >= end) if end < span else end
         return snapped_start, snapped_end
 
     def _restyled(self, strip: Strip, start: int, end: int, style: Style, text: str) -> Strip:
@@ -594,6 +604,7 @@ class TerminalPane(Widget, can_focus=True):
         if selection is None:
             self._selection_rows = None
             self._selection_bg = None
+            self._drag_from = None
         elif self._selection_rows is None:
             self._selection_rows = self._row_texts()  # freeze what is being selected
         self.refresh()
@@ -723,25 +734,28 @@ class TerminalPane(Widget, can_focus=True):
             self._fail(PANE_GONE)
         self._schedule(self.FAST_INTERVAL)
 
-    def on_click(self, event: events.Click) -> None:
-        self.focus()
-
     async def _on_click(self, event: events.Click) -> None:
-        """Double-click selects the word under the pointer; a triple click nothing.
+        """Focus the pane; a double click selects the word under the pointer.
 
         Textual's defaults select the whole widget on a double click and the
         whole container on a triple — and the next ctrl+c, meant as the agent's
         interrupt, would copy the entire screen instead (reproduced in review).
+
+        ONE handler, and no ``super()`` call. ``_get_dispatch_methods`` takes
+        ``_on_click`` OR ``on_click`` per class in the MRO, never both, so the
+        separate ``on_click`` that used to hold ``self.focus()`` was never
+        called — click-to-focus survived only through the screen's own MouseDown
+        focus. And the loop dispatches ``Widget._on_click`` itself, so calling it
+        here as well brokered every plain click twice (review of the third
+        version). ``prevent_default`` stops that loop before the base class, so
+        the double-click path owns the gesture and brokers it itself.
         """
+        self.focus()
         if event.widget is self and event.chain >= 2:
-            # Textual runs the handler of EVERY class in the MRO; without this
-            # the base class still selects the whole widget after ours ran.
             event.prevent_default()
             if event.chain == 2:
                 self._select_word(event.x, event.y)
             await self.broker_event("click", event)
-            return
-        await super()._on_click(event)
 
     def _select_word(self, x: int, y: int) -> None:
         text = self._row_text(y)

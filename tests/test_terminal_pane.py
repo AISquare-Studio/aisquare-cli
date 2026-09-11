@@ -39,6 +39,7 @@ from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.selection import Selection
 from textual.strip import Strip
+from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Input, Static
 
 from aisquare.cli.ui.terminal import (
@@ -1248,26 +1249,36 @@ def test_attach_to_another_pane_drops_the_selection(fake: FakeTmux, tmp_path: Pa
     assert run(drive()) is None
 
 
-def test_a_theme_change_repaints_rows_the_cache_had_already_painted(
+def test_a_theme_change_reaches_quiet_rows_and_a_standing_highlight(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
-    """The offset cache holds rows with the base style already applied, so a
-    live theme change (the ``t`` picker, the command palette) left every quiet
-    row painted in the OLD colours and a fully idle pane never recovered
-    (review). Textual's own style-update hook empties it."""
+    """Anything holding a resolved colour has to be dropped when the theme
+    changes. A cache of finished rows had to be (and was measured not to be
+    worth keeping); ``_selection_bg`` memoises the highlight's background and
+    was reset only when the selection cleared, so a theme picked mid-drag
+    repainted every row around a highlight still tinted from the old palette —
+    possibly invisible against it (review)."""
 
-    async def drive() -> tuple[Style, Style]:
+    async def drive() -> tuple[Style, Style, Style, Style]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             pane = host.pane
             await wait_until(pilot, lambda: synced(pane))
-            before = style_at(rows(pane)[1], 0)  # rendered once — now cached
+            await _drag(pilot, pane, (0, 1), (5, 1))
+            quiet_before = style_at(rows(pane)[2], 0)
+            tint_before = style_at(rows(pane)[1], 2)
             host.theme = "textual-light"
             await pilot.pause()
-            return before, style_at(rows(pane)[1], 0)
+            return (
+                quiet_before,
+                style_at(rows(pane)[2], 0),
+                tint_before,
+                style_at(rows(pane)[1], 2),
+            )
 
-    before, after = run(drive())
-    assert before.bgcolor != after.bgcolor, "a quiet row kept the theme it was painted in"
+    quiet_before, quiet_after, tint_before, tint_after = run(drive())
+    assert quiet_before.bgcolor != quiet_after.bgcolor, "a quiet row kept the old theme"
+    assert tint_before.bgcolor != tint_after.bgcolor, "the highlight kept the old palette"
 
 
 def test_cmd_c_copies_a_selection_and_types_nothing_without_one(
@@ -1346,6 +1357,125 @@ def test_a_drag_on_rows_the_last_frame_did_not_fill_copies_nothing(
     bottom, filled = run(drive())
     assert bottom == "", "an unfilled row holds no text — least of all the last row's"
     assert filled == "third", "the rows that are filled copy as before"
+
+
+def test_the_cursor_is_one_cell_even_past_the_end_of_the_row(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Snapping the cursor span to glyph boundaries widened it to everything
+    between the trimmed text and the cursor: `capture-pane -e` trims trailing
+    spaces, so every quiet shell pane whose cursor is not flush against the text
+    showed a black bar instead of a cell (review)."""
+    fake.panes["%1"] = FakePane(screen=["hello", "", ""], cursor=(20, 0))
+
+    async def drive() -> tuple[list[int], list[int]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            pane.focus()
+            await pilot.pause()
+            past = [x for x in range(40) if style_at(rows(pane)[0], x).reverse]
+            pane._cursor = (2, 0)
+            pane._lines[0] = "日本語ab"
+            pane.refresh()
+            await pilot.pause()
+            wide = [x for x in range(40) if style_at(rows(pane)[0], x).reverse]
+            return past, wide
+
+    past, wide = run(drive())
+    assert past == [20], "one cell, at the cursor — not a bar back to the text"
+    assert wide == [2, 3], "and still both cells of a wide glyph it sits on"
+
+
+def test_a_click_is_handled_once_and_focuses_the_pane(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Textual resolves ``_on_click`` OR ``on_click`` per class in the MRO, never
+    both — so a separate ``on_click`` holding ``self.focus()`` was never called,
+    and calling ``super()._on_click`` from the other handler brokered every plain
+    click twice, since the dispatch loop runs the base class itself (review)."""
+    assert "on_click" not in vars(TerminalPane), "one handler, not a dead one beside it"
+    brokered: list[str] = []
+    original = Widget.broker_event
+
+    async def counted(self: Widget, event_name: str, event: events.Event) -> bool:
+        if event_name == "click" and isinstance(self, TerminalPane):
+            brokered.append(event_name)
+        return await original(self, event_name, event)
+
+    monkeypatch.setattr(Widget, "broker_event", counted)
+
+    async def drive() -> bool:
+        host = Host(fake.server(tmp_path), "%1", with_input=True)
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            host.query_one("#other", Input).focus()
+            await pilot.pause()
+            brokered.clear()
+            await pilot.click(pane, offset=(1, 1))
+            await pilot.pause()
+            return pane.has_focus
+
+    focused = run(drive())
+    assert focused, "the click focuses the pane"
+    assert len(brokered) == 1, brokered
+
+
+def test_the_notice_row_is_highlighted_by_the_same_drag_that_copies_it(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """`_row_text` reports the notice as the row's text, so a drag copies it —
+    while the early return that built the notice strip skipped every overlay, so
+    it was the one row a selection never tinted (review)."""
+
+    dead = fake.panes["%1"]
+    dead.dead, dead.dead_status = True, 0
+
+    async def drive() -> tuple[str | None, Style, Style]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: pane.notice == "(exited 0)")
+            await _drag(pilot, pane, (0, 5), (4, 5))
+            row = rows(pane)[5]
+            return pane.selected_text(), style_at(row, 2), style_at(row, 8)
+
+    copied, inside, outside = run(drive())
+    assert copied == "(exit", "the cell under the pointer at release is included"
+    assert inside.bgcolor != outside.bgcolor, "what is copied is what is painted"
+
+
+def test_a_drag_that_starts_outside_the_pane_copies_nothing_but_ctrl_c_takes_it(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Textual captures a drag to the widget its press landed on, so a drag from
+    another widget into the pane never reaches this pane's release handler and
+    cannot copy on its own. It still highlights, and ctrl+c is the way to take
+    it — pinned so the boundary is a decision and not a surprise (review)."""
+
+    async def drive() -> tuple[str, int, str, int]:
+        host = Host(fake.server(tmp_path), "%1", with_input=True)
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            other = host.query_one("#other", Input)
+            await wait_until(pilot, lambda: synced(pane))
+            await pilot.mouse_down(other, offset=(1, 0))
+            await pilot.hover(pane, offset=(4, 1))
+            await pilot.mouse_up(pane, offset=(4, 1))
+            await pilot.pause()
+            assert pane.text_selection is not None, "it does highlight"
+            on_release, toasts = host.clipboard, len(host.notices)
+            pane.focus()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return on_release, toasts, host.clipboard, len(host.notices)
+
+    on_release, toasts, after_key, toasts_after = run(drive())
+    assert on_release == "" and toasts == 0, "no release of ours, no copy and no toast"
+    assert after_key.startswith("red plain"), "ctrl+c copies what the pane shows as selected"
+    assert toasts_after == 1
 
 
 def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) -> None:

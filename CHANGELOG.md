@@ -515,10 +515,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (Textual's defaults would select the whole pane, and the next ctrl+c would
   copy it instead of interrupting the agent). Only the left-button drag that
   made a selection copies it — a right-button drag across a standing highlight
-  used to replace the clipboard with whatever it crossed. Switching the pane to
-  another agent drops the selection; changing the theme drops the rows the
-  render cache had already painted, which otherwise kept their old colours on
-  every quiet pane.
+  used to replace the clipboard with whatever it crossed; a drag that begins in
+  another widget and crosses into a pane highlights without copying, since the
+  terminal gives that gesture to the widget it began on, and ctrl+c takes it.
+  The `(exited 0)` notice row is tinted by the drag that copies it, like every
+  other row. Switching the pane to another agent drops the selection, and
+  changing the theme drops the highlight's resolved colour so a theme picked
+  mid-drag does not leave the tint in the old palette.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
   Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the

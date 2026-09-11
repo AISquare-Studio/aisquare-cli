@@ -8,6 +8,7 @@ from typing import Annotated
 
 import typer
 
+from aisquare.cli import auth as auth_cli
 from aisquare.cli.common import (
     emit_block,
     emit_doctor,
@@ -21,7 +22,6 @@ from aisquare.cli.common import (
     resolve_pool,
 )
 from aisquare.models import CheckStatus
-from aisquare.services import auth as auth_service
 from aisquare.services import context as context_service
 from aisquare.services import diagnostics as diagnostics_service
 from aisquare.services import explainability as explainability_service
@@ -195,21 +195,6 @@ def open_() -> None:
     diagnostics_service.open_home()
 
 
-def login() -> None:
-    """Authenticate this machine with the aisquare cloud."""
-    auth_service.login()
-
-
-def logout() -> None:
-    """Discard stored credentials."""
-    auth_service.logout()
-
-
-def whoami() -> None:
-    """Show which account this machine is authenticated as."""
-    auth_service.whoami()
-
-
 def upgrade() -> None:
     """Upgrade aisquare and refresh agent hooks."""
     lifecycle_service.upgrade()
@@ -236,8 +221,9 @@ def register(app: typer.Typer) -> None:
     app.command("why")(why)
     app.command("log")(log)
     app.command("open", hidden=True)(open_)
-    app.command("login", hidden=True)(login)
-    app.command("logout", hidden=True)(logout)
-    app.command("whoami", hidden=True)(whoami)
+    # Sign-in lives in cli/auth.py; the same functions back `aisquare auth`.
+    app.command("login")(auth_cli.login)
+    app.command("logout")(auth_cli.logout)
+    app.command("whoami")(auth_cli.whoami)
     app.command("upgrade", hidden=True)(upgrade)
     app.command("uninstall", hidden=True)(uninstall)

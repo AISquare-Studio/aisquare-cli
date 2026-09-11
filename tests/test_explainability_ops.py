@@ -285,6 +285,47 @@ def _probes(gateway: str | None) -> Callable[[str], ProxyProbe]:
     return lambda _url: ProxyProbe(True, "proxy healthy", gateway=gateway)
 
 
+@pytest.mark.parametrize(
+    ("reported", "configured", "same"),
+    [
+        ("https://g.example", "https://g.example", True),
+        ("https://g.example/", "https://g.example", True),
+        ("https://g.example:443", "https://g.example", True),
+        ("http://127.0.0.1:8000/", "http://127.0.0.1:8000", True),
+        ("http://g.example", "https://g.example", False),
+        ("https://g.example:8443", "https://g.example", False),
+        ("https://other.example", "https://g.example", False),
+        ("http://127.0.0.1:8000", "http://127.0.0.1:9000", False),
+        ("https://g.example:99999", "https://g.example", False),
+        ("", "https://g.example", False),
+    ],
+    ids=[
+        "identical",
+        "trailing-slash",
+        "explicit-default-port",
+        "loopback-slash",
+        "scheme-differs",
+        "port-differs",
+        "host-differs",
+        "loopback-ports-differ",
+        "unparseable-port",
+        "empty",
+    ],
+)
+def test_same_deployment_compares_scheme_host_and_port(
+    reported: str, configured: str, same: bool
+) -> None:
+    """Directly, because the review found it reachable only through ``checks``.
+
+    The equivalences are the ones a proxy actually produces by normalising its
+    own URL, and the differences are each a real misroute. ``urlsplit`` raises
+    on a malformed authority — an out-of-range port is the reachable case — and
+    a proxy reporting nonsense must not take ``doctor`` down, nor be shown to
+    agree with a target it cannot be compared to.
+    """
+    assert ops._same_deployment(reported, configured) is same
+
+
 def test_a_live_proxy_shipping_to_another_deployment_is_red(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -778,6 +819,7 @@ def test_register_prints_each_identity_with_its_publication_id(
             "aisquare-tester",
             "aisquare-reviewer",
             "aisquare-validator",
+            "aisquare-ui-tester",
             "aisquare-cli",
         ]
     }
@@ -900,6 +942,7 @@ def test_register_renders_the_same_verdict_in_both_forms(
         "aisquare-tester": None,
         "aisquare-reviewer": None,
         "aisquare-validator": None,
+        "aisquare-ui-tester": None,
         "aisquare-cli": None,
     }, payload
 

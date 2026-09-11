@@ -160,6 +160,15 @@ def spawn(
     prompt: Annotated[
         str | None, typer.Option("--prompt", help="First message to type once the agent is up.")
     ] = None,
+    account: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Claude Code account to run under: a slot number or email (see "
+            "`aisquare accounts`).",
+            metavar="SLOT",
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -182,6 +191,7 @@ def spawn(
             prompt=prompt,
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",
+            account=account,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -319,11 +329,20 @@ def reap(
     every: Annotated[
         bool, typer.Option("--all", help="Every project's fleet, not just this one.")
     ] = False,
+    server_down: Annotated[
+        bool,
+        typer.Option(
+            "--server-down",
+            help="The private tmux server is gone (reboot, kill-server): mark every live "
+            "row on a socket that does not answer as lost. Without it a silent server "
+            "marks nothing, because it may be alive under another TMUX_TMPDIR.",
+        ),
+    ] = False,
 ) -> None:
     """Record exited agents, mark vanished panes lost, remove merged worktrees."""
     target = None if every else _project(project)
     try:
-        report = fleet_service.reap(target)
+        report = fleet_service.reap(target, server_down=server_down)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:

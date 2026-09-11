@@ -32,7 +32,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -41,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
-from aisquare.core import codenames, harness
+from aisquare.core import codenames, harness, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -55,9 +54,10 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
-FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator")
+FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 MANAGER_LABEL = "manager"
@@ -871,6 +871,7 @@ def spawn(
     prompt: str | None = None,
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
+    account: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -878,7 +879,10 @@ def spawn(
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
     project, and an unknown role — each with the reason in the message.
 
-    The window runs ``python -m aisquare launch <role> …`` (§3.4): permission
+    The window runs ``python -P -m aisquare launch <role> …`` (§3.4; ``-P`` is
+    :func:`aisquare.core.selfcli.argv_for`'s guard against a project's own
+    ``aisquare/`` package, and travels in the command because a window inherits
+    the tmux SERVER's environment, not the spawner's): permission
     mode as ``--permission-mode`` (flag > role config > ``auto``; the empty
     string passes no flag), the minted ``--session-id`` unless the caller
     already named or resumed a session, ``--name <label>``, then the role's
@@ -964,18 +968,41 @@ def spawn(
         )
     agent_id = new_agent_id()
     flags: list[str] = []
-    if binary is not None:
-        # `launch` re-resolves the binary inside the window; an explicit --bin
-        # must reach it, or the row would name one agent and the pane run another.
+    if resolution.source != "default":
+        # `launch` re-resolves the binary inside the window — and the window's
+        # environment is the long-lived tmux SERVER's, which never carries
+        # `AISQUARE_BIN_<ROLE>` or `AISQUARE_AGENT_BIN` (`core/tmux.py` spawns
+        # with `untraced_env()` and passes exactly two per-window keys). So
+        # ANYTHING but the default has to be carried explicitly, not just an
+        # explicit `--bin`: with the variable exported in this shell and not in
+        # the server's, the row recorded `claude2` while the pane silently ran
+        # `claude`. Measured on a role whose flags are keyed on the binary
+        # (`harness.role_defaults`), that also decided the flag question against
+        # the wrong executable — a ui-tester launched without `--chrome`, exit 0,
+        # nothing printed. `docs/fleet.md` promises `AISQUARE_BIN_<ROLE>` works
+        # for a fleet launch; this is what makes that true.
         flags += ["--command", resolution.binary]
     if mode:
         flags += ["--permission-mode", mode]
     flags += list(identity.inject_args)
+    if account is not None:
+        # Carried to `launch`, which resolves the slot and sets the account's
+        # variables inside the window; a slot that does not exist fails there
+        # with `unknown_account`, exactly as a hand-typed launch would.
+        flags += ["--account", account]
     flags += ["--name", picked]
-    command = [sys.executable, "-m", "aisquare", "launch", role, *flags, *role_args, *extra]
+    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {"AISQUARE_FLEET_AGENT": agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
+    if account is not None:
+        # `launch --account 1` restores "this shell's" login, and inside the
+        # window that shell would be whoever started the private server — so
+        # the CALLER's aisquare home and account variables travel with the
+        # window (set as absolute paths, or unset through `env -u`), exactly as
+        # the Accounts page's sign-in window carries them.
+        command, carried = claude_accounts_service.carry_environment(command)
+        env.update(carried)
     tmux_session = session_name(codename)
     try:
         window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)
@@ -1418,7 +1445,7 @@ def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxE
     return window.dead_status if window is not None else None
 
 
-def reap(project: ProjectInfo | None = None) -> ReapReport:
+def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:
     """Record dead panes as ended, mark vanished panes lost, remove merged worktrees.
 
     When tmux cannot be asked nothing is marked: absence of evidence is not a
@@ -1426,9 +1453,20 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
     still be running. That is decided per SOCKET — each row is asked of the
     server it was started on — so an operator who changed ``[fleet]
     tmux_socket`` does not thereby lose every agent still running on the old one.
+
+    ``server_down`` is the operator's word that a server which does not answer
+    is genuinely gone (a reboot swept ``/tmp``; ``kill-server``). Even then the
+    rows are marked only on a socket tmux ITSELF reports as having no server
+    (:meth:`~aisquare.core.tmux.TmuxServer.server_absent`): a client that exits
+    non-zero for a protocol mismatch, a wedged server or a socket under another
+    ``TMUX_TMPDIR`` is not a dead server, and the agents behind it are alive.
+    Such a socket is then a server with no panes — the view is empty and the
+    ordinary "pane is gone → lost" branch does the rest. A missing tmux binary
+    marks nothing: that is a question that could not be put.
     """
     config = settings()
     report = ReapReport()
+    absent: dict[str, bool] = {}
     with store_session() as store:
         if project is not None:
             projects = [store.get_project(project.id) or project]
@@ -1439,6 +1477,15 @@ def reap(project: ProjectInfo | None = None) -> ReapReport:
             if live:
                 tmux_session = session_name(current.codename) if current.codename else None
                 views = _observe_sockets(live, tmux_session, config)
+                if server_down:
+                    for socket, view in views.items():
+                        if view is None:
+                            # Asked once per socket for the whole sweep, so a
+                            # server coming up mid-sweep cannot split the answer.
+                            if socket not in absent:
+                                absent[socket] = server_for(socket, config).server_absent()
+                            if absent[socket]:
+                                views[socket] = {}  # no server: no panes
                 for agent in live:
                     observed = views.get(agent.tmux_socket)
                     if observed is None:

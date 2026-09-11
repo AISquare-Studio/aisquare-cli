@@ -8,15 +8,21 @@ and an *undecided* one is not neutral: a probe subprocess that inherits a real
 role's identity mints a junk Run under that role and corrupts the dataset the
 morning experiments measure.
 
-The headers are not the whole identity. A traced launch also exports the run
-key and the role it ran as (``AISQUARE_PIPELINE_ID``,
-``AISQUARE_TRACE_AGENT_NAME`` — ``services.explainability.trace_marker``), and
-those are what a process DOWNSTREAM of the agent keys its records on:
-``core.insights.run_key`` reads the first one, and the session→Run join the
-hook writes reads both. So a child that keeps them files its work under the
-parent's Run even when its own model traffic is untraced — which is why
+The headers are not the whole identity. A traced launch also exports a MARKER
+beside them — :data:`MARKER_ENV_VARS`, written by
+``services.explainability.trace_marker`` — and that is what a process
+DOWNSTREAM of the agent keys its records on: ``core.insights.run_key`` files
+every insight under the run key, and the session→Run join the hook writes reads
+the rest. So a child that keeps the marker files its work under the parent's
+Run even when its own model traffic is untraced — which is why
 :data:`IDENTITY_ENV_VARS`, not :data:`TRACING_ENV_VARS`, is what a stripping
 seam removes.
+
+The names are deliberately not re-spelled in this prose. The marker started as
+a pair and is three names now, and every place that had written the pair out by
+hand had to be found and widened by hand when the third arrived — one of them
+was missed, and a session inherited a stale run trace id and filed its join
+against the previous session's Run. Point at the tuple; it is the inventory.
 
 So the decisions are written down here rather than left implicit, and
 ``tests/test_spawn_seams.py`` walks the AST of this package on every run to
@@ -52,6 +58,9 @@ otherwise inherit a live identity:
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
+  * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
+    a string: doctor asking another install of this CLI what version it is,
+    so hooks that name a stale binary stop grading as healthy (#84).
   * ``core/snapshot.py::node_version`` — ``node --version``, a string. Backs the
     doctor's repomix line, which has to gate on the floor repomix declares
     (``node >= 22``) rather than on whether ``npx`` exists.
@@ -104,23 +113,32 @@ from dataclasses import dataclass
 #: seam registry rather than imported from ``services.explainability`` because
 #: ``core`` does not depend on ``services`` — ``tests/test_spawn_seams.py`` pins
 #: the two against each other so they cannot drift apart. What a seam strips is
-#: :data:`IDENTITY_ENV_VARS`, which is this plus the marker pair below.
+#: :data:`IDENTITY_ENV_VARS`, which is this plus :data:`MARKER_ENV_VARS` below.
 TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 
-#: The MARKER half: the run key and role a traced launch exports beside the
-#: headers (``services.explainability.trace_marker``). Duplicated here for the
-#: same reason as above, and pinned to the wiring's own names by
+#: The MARKER half, and the INVENTORY of it: the run key, the role the launch
+#: ran as, and — when the launch owns its Run rather than letting the proxy key
+#: it — the gateway Run key, all exported beside the headers by
+#: ``services.explainability.trace_marker``. Duplicated here for the same reason
+#: as above, and pinned to the wiring's own names by
 #: ``tests/test_spawn_seams.py`` in both directions.
 #:
+#: THIS TUPLE IS WHERE A NEW MARKER IS ADDED, and everything that strips,
+#: unsets or disowns an identity reads it rather than naming its members: the
+#: seams here through :data:`IDENTITY_ENV_VARS`, the printed ``team spawn``
+#: prelude, and ``services.explainability.disown_inherited_trace``. It went from
+#: two names to three once, and the copies that were prose rather than reads had
+#: to be chased down one at a time — the one in the spawn prelude was missed.
+#:
 #: They are not decoration: ``core.insights.run_key`` files every insight under
-#: ``AISQUARE_PIPELINE_ID`` when it is set, and the hook reads both to write the
+#: the run key when it is set, and the hook reads the marker to write the
 #: session→Run join. Stripping only the headers left an excluded child with the
 #: parent's run key — measured on the tmux seam, where the private server hands
 #: its environment to every window: an agent that then launched untraced (the
 #: default) filed its insights and its join under whoever started the server,
 #: which ``trace_marker``'s own docstring calls "worse than no record because it
 #: reads as evidence".
-MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME")
+MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME", "AISQUARE_RUN_TRACE_ID")
 
 #: Everything :func:`untraced_env` removes: the whole identity, header and
 #: marker. Separate from :data:`TRACING_ENV_VARS` because that tuple has a
@@ -172,7 +190,27 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
         strips_identity=True,
     ),
+    "aisquare/cli/accounts.py::_exec": Seam(
+        EXCLUDED,
+        "`aisquare accounts run` replaces itself with a plain Claude Code session on one "
+        "account — not a board role, so it takes no identity and drops an inherited one",
+        strips_identity=True,
+    ),
+    "aisquare/services/claude_accounts.py::run_session": Seam(
+        EXCLUDED,
+        "the foreground Claude Code session `aisquare accounts add` waits on so the user can "
+        "sign in — the same plain session as `accounts run`, and identity-stripped for the "
+        "same reason",
+        strips_identity=True,
+    ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
+    "aisquare/core/agents.py::hook_binary_version": Seam(
+        EXCLUDED,
+        "`<the aisquare a hook names> --version`, a string — doctor asking another "
+        "install of this CLI its version, so hooks pointing at a stale binary stop "
+        "grading as healthy (#84). An eager callback that exits before any command "
+        "runs; no model process",
+    ),
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
     "aisquare/core/snapshot.py::node_version": Seam(
         EXCLUDED, "`node --version`, a string — the floor repomix declares"

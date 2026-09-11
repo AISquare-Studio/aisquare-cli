@@ -34,7 +34,7 @@ def get(
 @app.command("set")
 def set_(
     key: Annotated[str, typer.Argument(help="Dotted key, e.g. 'capture.enabled'.")],
-    value: Annotated[str, typer.Argument(help="New value.")],
+    value: Annotated[str, typer.Argument(help="New value; comma-separated items for a list key.")],
 ) -> None:
     """Set a configuration value and save it."""
     try:

@@ -91,12 +91,13 @@ tmux can see and its row says so (`no hooks`).
 3. **Click the project.** The Project view opens on its **Manager** tab. Press
    *Start manager* and the manager's live Claude Code session fills the pane.
    Type your goal to it in prose, exactly as you would to any Claude session. It
-   writes contract-carrying tasks, spawns coders, a tester and a reviewer as the
+   writes contract-carrying tasks, spawns coders, a tester, a ui-tester for
+   anything a user sees, and a reviewer as the
    work needs them, reopens what fails, calls a validator once everything is
    done, and posts `READY: <PRs + evidence>` when its gate passes. It never
    writes code and never merges — a human does (Phase 5).
 4. **Watch the agents appear**, indented under the project, each with a role
-   icon (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a
+   icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
    bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. `＋ spawn
@@ -122,20 +123,21 @@ aisquare --json fleet ls                  # what the UI and any automation read
 
 ## The roles
 
-Five roles, each a briefing the harness injects at launch and a place in the
+Six roles, each a briefing the harness injects at launch and a place in the
 manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
-ladder (`fable → opus → sonnet`); coder, tester and reviewer start on `sonnet`
+ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
 tier above the work it gates.
 
 | Fleet role | Repo role | Job in the loop | Runs in |
 | --- | --- | --- | --- |
-| **manager** | `planner` + fleet authority | intake → contracts → `fleet spawn` → steer → report. One per project. Never codes, never merges. | the repo root |
+| **manager** | `planner` + fleet authority | intake → contracts → `fleet spawn` → steer → report. One per project. Never codes — a direct "fix this" becomes a coder spawn — never merges. | the repo root |
 | **coder** | `coder` | implements one task to its acceptance criteria; pushes and opens the PR | its own git worktree |
 | **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`; read-only by construction | its own worktree, `--restricted` |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
+| **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the
@@ -177,7 +179,7 @@ follows as a `⚠` line.
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `<role>` | `manager`, `coder`, `tester`, `reviewer`, `validator`, or any role you have bound with `team bind` | — |
+| `<role>` | `manager`, `coder`, `tester`, `ui-tester`, `reviewer`, `validator`, or any role you have bound with `team bind` | — |
 | `--label L` / `-l L` | the agent's label (see [Naming](#naming)) | `<role>-<task short id>` with `--task`, else `<role>-<n>` |
 | `--task ID` | the board task this agent is for (id or prefix) | none |
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
@@ -236,7 +238,10 @@ graceful exit.
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH` — the row is **left live** and the command fails saying so, rather
 than reporting `✓ stopped` over an agent that is still running. Re-run it once
-tmux answers again, or `fleet reap` after the server comes back.
+tmux answers again, or `fleet reap` after the server comes back. If the server is
+genuinely gone — a reboot, `kill-server` — `fleet reap --all --server-down` marks
+the rows on it lost; it acts only where tmux itself reports no server behind the
+socket, never on a server that is merely not answering.
 
 ### `fleet attach`
 
@@ -254,12 +259,22 @@ instead of running it.
 ```sh
 aisquare fleet reap
 aisquare fleet reap --all
+aisquare fleet reap --all --server-down
 ```
 
 Records agents whose panes have died as ended (with their exit code), marks
 agents whose panes have vanished as lost, and removes the worktrees of ended
 agents **whose branch is merged**. It never deletes unmerged work. `--all`
 walks every project's fleet, not just this one.
+
+A tmux server that does not answer marks **nothing** by default: silence is not
+evidence that its panes are dead — the server may be alive under another
+`TMUX_TMPDIR`, wedged, or running an older binary than the client after an
+upgrade. `--server-down` is the operator's word that the server is genuinely
+gone (a reboot swept `/tmp`; `kill-server`). Even with it, rows are marked lost
+only on a socket where tmux itself reports no server (`no server running on …`
+or `error connecting to … (No such file or directory)`); a protocol mismatch or
+a hung server still marks nothing, and so does a missing `tmux` binary.
 
 ### `fleet rename`
 
@@ -294,6 +309,72 @@ the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
 ---
 
+## Accounts
+
+The **Accounts** section at the bottom of the sidebar opens one page for the two
+logins the fleet leans on.
+
+**AISquare** is on top. The card reads the session `aisquare login` stores and
+shows who you are and when it expires. *Sign in* runs the same browser flow the
+terminal runs — your one-time code and the link appear on the card, the browser
+opens when one can reach you, and *Cancel* stops the wait — and *Sign out*
+revokes the session exactly as `aisquare logout` does. A token supplied through
+`AISQUARE_TOKEN` is shown as such and cannot be signed out from here.
+
+**Claude Code** is below it: one row per account, with who is signed in, the
+plan, and the five-hour and seven-day usage as bars once they have been read.
+Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
+was in the shell you started `asq` from, `~/.claude` otherwise). Every other
+slot is a directory the CLI created under `~/.aisquare/claude-accounts/` and
+launches by pointing `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` at it — the
+c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
+
+- **+ Add Claude account** makes the next free slot and opens Claude Code's own
+  login in a pane on this page. Sign in there as you always do. The page
+  watches the slot's directory; the moment Claude Code has written the login,
+  the account is recorded, aisquare's hooks go into its `settings.json`, and the
+  pane closes by itself. Close the pane without signing in, or press *Cancel
+  sign-in*, and the empty slot is discarded.
+- **Sign in** on a row does the same for a slot that has no login (slot 1
+  included).
+- **Remove** forgets a slot the CLI owns. Its directory is renamed beside
+  itself as `<n>.removed-<stamp>` — the login, the settings and the transcripts
+  kept, never listed again, deletable by hand — and the number is free for the
+  next add. Slot 1 cannot be removed; sign out of it inside Claude Code.
+- Usage comes from the endpoint Claude Code's own `/usage` reads, called with
+  the token in the account's credentials file, once a minute while the page is
+  open. It is not a documented API; when it does not answer, the row says why
+  (`usage unavailable`, `token expired — open a session to refresh it`) and
+  nothing else on the page is affected. On macOS the token lives in the
+  Keychain, which the CLI does not read, so the row says so.
+
+Nothing on this page writes into Claude Code's own files: the email and plan
+are read from what Claude Code recorded, and a token is never refreshed by the
+CLI. Claude Code refreshes it on the account's next session.
+
+Everything the page does is a command, and every reporting one takes `--json`:
+
+```sh
+aisquare accounts list                 # slots, who is signed in, plan, hooks
+aisquare accounts list --usage         # …plus the two windows (one request per account)
+aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
+aisquare accounts run 2                # a plain Claude Code session on account 2
+aisquare accounts run 2 --model opus   # arguments after the slot go to claude
+aisquare accounts usage                # the windows, per signed-in account
+aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
+aisquare launch coder --account 2      # a board role on account 2
+aisquare fleet spawn coder --account 2 # a fleet agent on account 2
+```
+
+`add` and `run` hand the terminal to Claude Code, so they have no `--json`
+form and `add` refuses outside an interactive terminal. `aisquare doctor` gains a
+`claude-accounts` line naming any slot that still needs a sign-in. Accounts laid
+out some other way — a wrapper, a proxy, a directory of your own — still bind
+to a role as a launch profile (`aisquare team bind coder1 --env …`, README
+"Several accounts, one team").
+
+---
+
 ## Permission modes and every default you can change
 
 Autonomy means answering permission prompts. Claude Code offers
@@ -309,6 +390,7 @@ answer.
 | manager | `auto` | its tool use is board and fleet CLI calls |
 | coder, tester, validator | `auto` | the classifier answers every tool call, the project's own check commands included. A project allowlist that pre-approves `make check`, `pytest`, `git` and `gh` is designed (plan §3.6) and **is not in this checkout**: nothing here writes or passes an allowed-tools list |
 | reviewer | `auto` + `--restricted` | read-only by construction |
+| ui-tester | `auto` + `--chrome` | `--chrome` comes from the role, not this table: `aisquare launch ui-tester` adds it for the default `claude` binary wherever the role starts, and `--no-chrome` in `extra_args` or on the command turns it off. Its "read-only" is a briefing instruction, NOT construction — the row above says so, and the sentence in the coder/tester cell applies here too: nothing here writes or passes an allowed-tools list, so a PreToolUse allowlist (plan §3.6, not in this checkout) is what would enforce it |
 
 The mode is passed straight through to `claude` and nothing here reads its
 answer, so where `auto` is unavailable to the account the refusal appears in
@@ -370,6 +452,11 @@ permission_mode = "auto"
 worktree = true
 extra_args = ["--restricted"]             # read-only by construction
 
+[fleet.roles.ui-tester]
+permission_mode = "auto"
+worktree = false                          # tests the running app, not a tree of its own
+extra_args = []                           # --chrome is the role's own default; put "--no-chrome" here to drop it
+
 [fleet.roles.validator]
 permission_mode = "auto"
 worktree = false
@@ -422,6 +509,12 @@ attach hint, branch names, `fleet` command arguments. Elsewhere it is a dim
 badge beside the name. `fleet rename` changes it; `aisquare project switch
 amber-otter` and `--project amber-otter` both resolve it, and the "matches
 several projects" error lists codenames, because basenames are what collide.
+
+**Registrations you no longer want** — a deleted checkout, a throwaway worktree —
+go with `aisquare project forget <name|path>`; `aisquare project prune` sweeps
+roots that are gone from disk and worktrees of a repository that is itself
+registered, showing the plan and asking first. The navigator only loads what is
+registered, so this is also how a slow start is cured (#83).
 
 **tmux.** Session `asq-<codename>`, always targeted exactly (`=asq-amber-otter`)
 so `asq-ruby-fox` never prefix-matches an `asq-ruby-foxhound`. Window name =
@@ -510,10 +603,21 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`). Printable characters travel as typed; special keys are
+hatch (`F12`) and the scroll keys below. Printable characters travel as typed; special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
 `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
-per line. The wheel scrolls a pane's history; any key returns to live. Modifier
+per line. The wheel goes to whoever can use it: a program that tracks the mouse
+(Claude Code's fullscreen TUI does) receives it as its own mouse event and
+scrolls its transcript; a fullscreen program that does not is left alone (its own
+keys scroll it — arrow keys would land in its prompt), and you are told so once;
+anything else scrolls the pane's tmux history, and any key returns to live. A view
+already scrolled into history always comes back with the wheel, and a pane in
+tmux copy mode stays tmux's. The keyboard scrolls too: shift+PgUp / shift+PgDn
+(or alt+PgUp / alt+PgDn where your terminal keeps shift's for its own
+scrollback), shift+Home (the top) and shift+End (live) — through the same
+decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
+A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
+Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
@@ -561,6 +665,14 @@ whose branch is merged are removed; unmerged work is never deleted:
 ```sh
 aisquare fleet reap
 aisquare fleet reap --all
+```
+
+If `doctor` says the private server is *not running* and `reap` reconciles
+nothing, the server is silent and `reap` refuses to guess. When it is genuinely
+gone — you rebooted, or ran `kill-server` — say so:
+
+```sh
+aisquare fleet reap --all --server-down
 ```
 
 To stop everything the fleet ever started, on every project, kill the private

@@ -17,7 +17,8 @@ preferences, each project's conventions — so every session starts oriented
 instead of cold.
 
 It's a single CLI, local-first, backed by one SQLite file. No daemon, no
-account, no cloud dependency.
+account, no cloud dependency. Sign in with `aisquare login` only when a command
+needs to act as you on AISquare (see [docs/signing-in.md](docs/signing-in.md)).
 
 ## Install
 
@@ -122,11 +123,11 @@ That's the whole setup. From inside the UI:
    session fills the pane. **Type your goal in prose**, exactly as you would to
    any Claude session.
 3. **Watch the agents appear** under the project, each with a role icon
-   (🧭 manager · 🔨 coder · 🧪 tester · 👀 reviewer · 🛡 validator) and a live
+   (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a live
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU**, **💤 exited**.
    Click one to see and drive its session.
-4. **Press `F12`** to hand focus back to the sidebar — it's the one key a pane
-   never swallows. There, `t` picks a theme and `q` quits. **The agents keep
+4. **Press `F12`** to hand focus back to the sidebar — the pane swallows only it
+   and the scroll keys (shift/alt+PgUp/PgDn, shift+Home/End). There, `t` picks a theme and `q` quits. **The agents keep
    running**; reopen `asq` and it re-attaches to what it finds.
 
 The manager never writes code and never merges — a human does that.
@@ -222,12 +223,52 @@ one board. Set a repo's conventions up once and every worktree of it starts
 oriented; identity comes from `git rev-parse --git-common-dir`, not from
 walking up to the nearest marker.
 
+Registrations accumulate — every directory a command once ran in is one, and
+the fleet UI loads state for all of them. `aisquare project forget` drops one
+(its context, prompt history and board rows stay in the store, hidden, until
+the root is registered again; `--purge` deletes them and the snapshot too), and
+`aisquare project prune` sweeps the stale ones: roots that no longer exist, and
+worktrees of a repository that is itself registered. It shows the plan and asks
+before dropping anything; off a terminal it is a dry run unless `--yes`. Both
+refuse a project that has live fleet agents.
+
+```sh
+aisquare project forget ../old-checkout       # one registration; --purge deletes its history too
+aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
+```
+
 `aisquare project onboard` (also run by `init`) packs the codebase with
 Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
 **full pack** (every file), a **skeleton** (structure + signatures — the
 cheap thing agents read first), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
+
+A pack has to fit a **token budget**: `[snapshot] max_tokens` in
+`~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
+The full pack is tried first, then a compressed one; when even that is over,
+the compressed pack is kept as the **skeleton** with its per-file index and the
+full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
+skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
+budget 150000 (10990000 tokens)`, and agents are oriented from it as usual.
+The budget gates only the full pack: an agent is handed paths and opens slices
+through the index, never a whole pack in a prompt. To keep the full pack too,
+raise the budget or leave more out, then re-pack:
+
+```sh
+aisquare config set snapshot.max_tokens 300000   # raise the budget for a repo you know is big
+aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'   # leave generated trees out
+aisquare project onboard --refresh               # re-pack; a plain onboard only reuses the verdict
+```
+
+`[snapshot] ignore` takes Repomix glob patterns (comma-separated on the command
+line) and **extends** the built-in list rather than replacing it:
+`node_modules`, `.venv`/`venv`, `.git`, `__pycache__`, `dist`, `build`,
+`coverage`, `.aisquare-worktrees`, `*.worktrees`, and any nested git repository
+or worktree found below the root — another project's checkout is never packed
+into this one. The repo's own `.gitignore` and a `.repomixignore` at the repo
+root apply on top, read by Repomix itself. A smaller pack is also a cheaper one
+for every agent that reads it.
 
 ---
 
@@ -262,7 +303,8 @@ Every session is told its id, its teammates, and its **role's work cycle**
 automatically — no standing prompts to paste:
 
 - **planner** — turns your intent into contract-carrying tasks on the shared
-  board (objective, why, acceptance criteria, boundaries)
+  board (objective, why, acceptance criteria, boundaries); told to "fix"
+  something, it writes the tasks for it rather than editing code itself
 - **coder** — loops `task next --claim` → work → `task review`; blocks
   instead of guessing when a task has no usable contract
 - **runner** — the adversarial verifier: runs the full check the acceptance
@@ -271,6 +313,13 @@ automatically — no standing prompts to paste:
   back to whichever coder picks the task up next
 - **validator** — gates the assembled deliverable once, before handoff
   (final accountability review, severity-ordered findings)
+- **ui-tester** — verifies anything a user sees in a real browser (Claude in
+  Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever the window
+  has) and measures instead of eyeballing; names the branch and URL it
+  verified, and reopens rather than passes a UI task it could not open in a
+  browser. Launched with `--chrome` by the role itself, so the tool is not one
+  operator's alias. Its briefing ASKS it to be read-only; nothing in this
+  checkout enforces that (no allowed-tools list is passed)
 
 ### The model harness: each role on the right model
 
@@ -500,36 +549,57 @@ Orchestration has no config files — a handful of env knobs:
 
 ### Several accounts, one team
 
-Running parallel Claude installs for separate rate limits? Connect each
-config dir once, then **bind** each seat to the environment it launches with:
+Running parallel Claude Code logins for separate rate limits? The CLI owns them
+for you. **Slot 1** is the plain `claude` of your machine. Every account you
+**add** is a numbered slot with its own config directory under
+`~/.aisquare/claude-accounts/`, signed in through Claude Code's own login and
+launched by number — the c1/c2/c3 shell aliases, without the aliases:
+
+```sh
+aisquare accounts list             # who is signed in where, plan, hooks
+aisquare accounts add              # a fresh slot: Claude Code opens, you sign in, it is recorded
+aisquare accounts run 2            # a plain session on account 2 (what a c2 alias did)
+aisquare accounts usage            # the 5-hour and weekly windows, per account
+aisquare accounts remove 2         # forget it; the directory is kept as 2.removed-<stamp>
+
+aisquare launch coder --account 2  # a board role on account 2
+aisquare fleet spawn coder --account 2
+```
+
+The same page lives in `asq` under **Accounts**: the AISquare sign-in on top
+(a card that runs the same browser flow as `aisquare login`), then every Claude
+account with its usage bars, **+ Add Claude account** — the login opens in a
+pane right there and closes by itself the moment it lands — and **Remove**.
+`aisquare doctor` gets a `claude-accounts` line naming any slot that still needs
+a sign-in.
+
+An account is two variables, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR`, set
+for the launch and nothing else. Slot 1 sets neither: it is whatever `claude`
+already is in the shell you launch from. The CLI never writes into Claude
+Code's own files — it reads the email and plan Claude Code recorded, and the
+usage numbers come from the endpoint Claude Code's `/usage` reads, best effort:
+if that endpoint changes, a row says `usage unavailable` and nothing else
+breaks.
+
+Accounts laid out some other way — a wrapper script, a proxy, a directory you
+made yourself — still bind to a role as a **launch profile**: a binary, a set
+of env vars and extra args, carried through verbatim.
 
 ```sh
 aisquare agents connect claude-code --config-dir ~/.claude-account1
-aisquare agents connect claude-code --config-dir ~/.claude-account2
-
 aisquare team bind coder1 \
   --env CLAUDE_CONFIG_DIR='$HOME/.claude-account1' \
   --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account1'
-aisquare team bind coder2 \
-  --env CLAUDE_CONFIG_DIR='$HOME/.claude-account2' \
-  --env CLAUDE_CODE_TMPDIR='$HOME/.cache/claude-account2'
-
-aisquare launch planner            # your default account
 aisquare launch coder1             # bound above — nothing to retype
-aisquare launch coder2
 ```
 
-A binding is a **launch profile**: a binary, a set of env vars and extra args,
-carried through verbatim. `~` and `$VAR` expand at launch, so one binding
-follows you across machines with different homes, and an undefined variable is
-left as written rather than blanked — a silently empty `CLAUDE_CONFIG_DIR`
-starts a fresh unauthenticated profile that reads as a login failure hours
-later instead of the typo it is.
-
-Set **both** variables. `CLAUDE_CONFIG_DIR` alone gives a session the right
-credentials and the *default* scratch directory, silently shared with every
-other account; it looks correctly isolated right up until two parallel sessions
-collide in temp.
+`~` and `$VAR` expand at launch, so one binding follows you across machines
+with different homes, and an undefined variable is left as written rather than
+blanked — a silently empty `CLAUDE_CONFIG_DIR` starts a fresh unauthenticated
+profile that reads as a login failure hours later instead of the typo it is.
+Set **both** variables: `CLAUDE_CONFIG_DIR` alone shares the *default* scratch
+directory with every other account, which looks isolated right up until two
+parallel sessions collide in temp. `--account` sets both for you.
 
 For a one-off, `aisquare launch <role> --env KEY=VALUE` merges over the
 binding per key. Shell aliases (`alias claude1='CLAUDE_CONFIG_DIR=… claude'`)
@@ -537,12 +607,13 @@ can **not** be passed to `--command` — an alias is not an executable — but a
 alias is only env vars around a binary, which is exactly what `--env` sets.
 
 Each session records **which config dir it runs under**, and the board labels
-sessions with it once more than one account is in play:
+sessions with it once more than one account is in play — `account 2` for a
+slot the CLI owns, the directory name for anything else:
 
 ```
 sessions:
-  - a1b2c3d4 coder [.claude-account1] — 2m ago
-  - e5f6a7b8 coder [.claude-account2] — 1m ago
+  - a1b2c3d4 coder [account 2] — 2m ago
+  - e5f6a7b8 coder [.claude-account1] — 1m ago
 ```
 
 So when one account hits its limit you can see exactly which terminals to
@@ -604,9 +675,12 @@ aisquare
 ├── context (ctx)   add · list · show · edit · remove · search · preview
 │                   promote · import · export · —  your persistent memory
 ├── inject · why · log · status · doctor
-├── project (workspace)  info · list · switch · link · onboard [--refresh]
+├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
+│                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
+├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
+│                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness
@@ -617,17 +691,20 @@ aisquare
 │                   block --reason · drop · release        (all with [--as SESSION])
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
-├── launch <role> [--command CMD] [--env KEY=VALUE]… [… agent args]
+├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
-│                   tester, reviewer), a numbered seat (coder1), or any role you
+│                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
-│                             [--permission-mode M] [--bin B] [--prompt TEXT] [-- agent args]
+│                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
+│                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
-│                   attach · reap [--all] · rename <codename> · pause · resume
+│                   attach · reap [--all] [--server-down] · rename <codename> · pause · resume
 │                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
+├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
+├── auth            status [--live] · token
 ├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>
 └── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
 ```
@@ -645,9 +722,8 @@ registered but hidden until they do something real.
 
 ### Roadmap commands
 
-`auth` / `login` / `logout` / `whoami`, `sync`, `connectors`, `capture`,
-`policy` / `enforce`, `open`, `upgrade` and `uninstall` are the cloud roadmap
-(sync across machines, managed connectors). They are **hidden from `--help`**
+`sync`, `connectors`, `capture`, `policy` / `enforce`, `open`, `upgrade` and
+`uninstall` are the cloud roadmap (sync across machines, managed connectors). They are **hidden from `--help`**
 so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in

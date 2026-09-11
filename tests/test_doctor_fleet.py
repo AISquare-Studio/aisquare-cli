@@ -42,6 +42,7 @@ from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, S
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from aisquare.services.onboarding import fix_commands
 
 # --- fakes and seeds -------------------------------------------------------------------
 
@@ -81,9 +82,11 @@ class FakeServer(TmuxServer):
         socket: str = "asq",
         version_raises: bool = False,
         facts_raise: bool = False,
+        absent: bool = False,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
+        self._absent = absent
         self._version = version
         self._sessions = sessions
         self._panes = panes or {}
@@ -108,6 +111,10 @@ class FakeServer(TmuxServer):
     def list_sessions(self) -> list[str]:
         self.asked.append("list_sessions")
         return list(self._sessions)
+
+    def server_absent(self) -> bool:
+        self.asked.append("server_absent")
+        return self._present and self._absent
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.asked.append(f"pane_facts:{pane_id}")
@@ -515,16 +522,45 @@ def test_fleet_check_treats_a_display_message_error_as_a_gone_pane(
 def test_fleet_check_warns_when_the_private_server_is_not_running(
     home: Path, tmp_path: Path
 ) -> None:
+    """tmux itself says there is no server behind the socket — the one case the
+    flag may act on. The check is machine-wide, so the command is ``--all``; and
+    doctor runs in this shell, blind to a fleet under another ``TMUX_TMPDIR``, so
+    the flag comes with its condition rather than as a prescription."""
     project = _seed(tmp_path / "repo")
     _seed(tmp_path / "repo", _agent(project.id, "manager", "%1"))
-    server = FakeServer(sessions=(), panes={})
+    server = FakeServer(sessions=(), panes={}, absent=True)
 
     check = diagnostics._check_fleet(lambda socket: server)
 
     assert check.status is CheckStatus.warn
     assert "private tmux server 'asq' is not running" in check.detail
     assert "manager" in check.detail
-    assert check.fix and "aisquare fleet reap" in check.fix
+    assert check.fix and "aisquare fleet reap --all;" in check.fix
+    assert "genuinely gone" in check.fix and "TMUX_TMPDIR" in check.fix
+    assert check.fix.endswith("aisquare fleet reap --all --server-down")
+
+
+def test_fleet_check_does_not_vouch_for_a_server_that_is_silent_but_not_absent(
+    home: Path, tmp_path: Path
+) -> None:
+    """A protocol mismatch after an in-place tmux upgrade, a wedged server: every
+    client call fails, the agents are alive. The first version of this check read
+    ``list_sessions() == []`` as "not running" and prescribed ``--server-down`` —
+    advice that would have ended every live row. Now it describes the condition
+    and names only the plain sweep."""
+    project = _seed(tmp_path / "repo")
+    _seed(tmp_path / "repo", _agent(project.id, "coder-1", "%2"))
+    server = FakeServer(sessions=(), panes={}, absent=False)
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "does not answer" in check.detail and "version mismatch" in check.detail
+    assert "is not running" not in check.detail
+    assert check.fix == (
+        "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap --all"
+    )
+    assert "server_absent" in server.asked, "decided by the same predicate reap uses"
 
 
 def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_path: Path) -> None:
@@ -537,7 +573,8 @@ def test_fleet_check_names_exited_agents_still_recorded_live(home: Path, tmp_pat
 
     assert check.status is CheckStatus.warn
     assert "1 exited but still recorded live" in check.detail and "tester-1" in check.detail
-    assert check.fix and "fleet reap" in check.fix
+    assert check.fix and "fleet reap --all" in check.fix
+    assert "--server-down" not in check.fix, "the server answered; the flag is for absence"
 
 
 def test_fleet_check_ignores_ended_rows(home: Path, tmp_path: Path) -> None:
@@ -670,6 +707,100 @@ def _ready_snapshot(project_id: str) -> None:
         file_count=3,
     )
     snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
+
+
+def _too_large_snapshot(project_id: str) -> Snapshot:
+    directory = snapshot_core.snapshot_dir(project_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    meta = Snapshot(
+        project_id=project_id,
+        generated_at=datetime.now(tz=UTC),
+        pack_path=snapshot_core.pack_path(project_id),
+        skeleton_path=snapshot_core.skeleton_path(project_id),
+        index_path=snapshot_core.index_path(project_id),
+        token_count=203_991,
+        compressed=True,
+        status="too_large",
+        full_token_count=412_318,
+        max_tokens=150_000,
+    )
+    snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
+    return meta
+
+
+def _skeleton_only_snapshot(project_id: str) -> Snapshot:
+    directory = snapshot_core.snapshot_dir(project_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    meta = Snapshot(
+        project_id=project_id,
+        generated_at=datetime.now(tz=UTC),
+        pack_path=snapshot_core.pack_path(project_id),
+        skeleton_path=snapshot_core.skeleton_path(project_id),
+        index_path=snapshot_core.index_path(project_id),
+        token_count=2_030_000,
+        skeleton_token_count=2_030_000,
+        file_count=1234,
+        compressed=True,
+        status="skeleton_only",
+        full_token_count=10_990_000,
+        max_tokens=150_000,
+    )
+    snapshot_core.meta_path(project_id).write_text(meta.model_dump_json(), encoding="utf-8")
+    return meta
+
+
+def test_doctor_treats_a_skeleton_only_snapshot_as_usable_and_offers_no_fix(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skeleton and its index are what agents are handed, so this is green — and has no fix.
+
+    Measured on the issue: the Doctor tab's fix ran ``onboard --refresh``, showed a
+    tick, and changed nothing, forever. A fix here would be that button again.
+    """
+    root = tmp_path / "huge"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
+    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    verdict = _skeleton_only_snapshot(_seed(root).id)
+
+    check = _by_name(diagnostics.doctor())["snapshot"]
+
+    assert check.status is CheckStatus.ok
+    assert check.detail == snapshot_core.skeleton_only_detail(verdict)
+    assert check.detail == (
+        "skeleton only: 2030000 tokens, 1234 files indexed; "
+        "full pack skipped over budget 150000 (10990000 tokens)"
+    )
+    assert check.fix is None
+    assert fix_commands([check]) == []
+
+
+def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#82: a ``too_large`` verdict is not "no codebase snapshot" — it has numbers and a way out.
+
+    The fix is ``--refresh`` on purpose: the old hint, ``Pack one: aisquare
+    project onboard``, reloaded the same verdict, which is how the line stayed a
+    warning forever. The detail is the SAME sentence ``project onboard`` prints,
+    by identity, so the two can never disagree on the numbers; and the UI turns
+    the hint into the ``--refresh`` button its fix table already knows.
+    """
+    root = tmp_path / "big"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
+    monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    verdict = _too_large_snapshot(_seed(root).id)
+
+    check = _by_name(diagnostics.doctor())["snapshot"]
+
+    assert check.status is CheckStatus.warn
+    assert check.detail == snapshot_core.too_large_detail(verdict)
+    assert "full 412318 tokens, compressed 203991 tokens, budget 150000" in check.detail
+    assert check.fix == "Re-pack: aisquare project onboard --refresh"
+    assert [fix.argv for fix in fix_commands([check])] == [("project", "onboard", "--refresh")]
 
 
 def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(

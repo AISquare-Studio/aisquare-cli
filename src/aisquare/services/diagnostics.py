@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
 import re
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Container, Sequence
 from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
@@ -22,7 +24,7 @@ from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
-from aisquare.core.version import DISTRIBUTION
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import (
     CheckStatus,
@@ -34,6 +36,7 @@ from aisquare.models import (
     StatusReport,
 )
 from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
@@ -95,8 +98,8 @@ def doctor(
     explainability gateway round-trip). Everything else stays offline, so a
     plain ``aisquare doctor`` still answers on a train.
 
-    ``cwd`` is the directory whose PROJECT the three project-scoped checks
-    (snapshot, brain, harness) report on; ``None`` is the process cwd, which is
+    ``cwd`` is the directory whose PROJECT the project-scoped checks (snapshot,
+    brain, harness, self-invocation) report on; ``None`` is the process cwd, which is
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
@@ -113,12 +116,20 @@ def doctor(
         _check_repomix(),
         _check_tiktoken(),
         _check_claude_code(),
+        *_claude_accounts_checks(),
         _check_tmux(),
         _check_gh(),
         _check_snapshot(cwd),
         _check_brain(cwd),
         _check_harness(cwd),
+        _check_self_invocation(cwd),
         _check_fleet(),
+        # After the actionable machine checks on purpose. The fleet UI's sidebar
+        # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
+        # within the warn group), so a row inserted at position 12 evicted one
+        # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
+        # act on — from the only doctor surface visible without a click.
+        _check_browser_tools(cwd),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
     ]
@@ -582,33 +593,74 @@ def claude_code_version(binary: str | None = None) -> str | None:
     return None
 
 
+def _site_label(site: agent_core.HookSiteHealth) -> str:
+    """A directory, marked when this home never connected it (#84's second gap)."""
+    if site.recorded:
+        return str(site.config_dir)
+    return f"{site.config_dir} (found on disk, not connected in this home)"
+
+
+def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
+    """One clause per distinct (binary, verdict): what the hooks run, and why that is wrong.
+
+    Grouped by binary rather than listed per directory because the real case is
+    every directory naming the same stale venv, and five copies of one path
+    bury the one comparison that matters — which is stated once, at the end:
+    this install's path and version.
+    """
+    groups: dict[tuple[str | None, Path | None, str | None], list[str]] = {}
+    for site in sites:
+        key = (site.binary_state, site.binary, site.binary_version)
+        groups.setdefault(key, []).append(_site_label(site))
+    clauses: list[str] = []
+    for (state, binary, version), dirs in groups.items():
+        where = ", ".join(dirs)
+        if state == agent_core.HOOK_BINARY_MISSING:
+            clauses.append(f"hooks in {where} point at {binary}, which does not exist")
+        elif state == agent_core.HOOK_BINARY_UNKNOWN:
+            clauses.append(f"hooks in {where} point at {binary}, whose version could not be read")
+        else:
+            clauses.append(f"hooks in {where} point at {binary} ({version})")
+    return clauses
+
+
 def _check_claude_code() -> DoctorCheck:
+    """Claude Code: are our hooks in every config dir, and do they run THIS install?
+
+    Graded per directory over recorded sites UNION the ambient dir UNION every
+    ``~/.claude*`` on disk that carries our hooks (``agent_core.hook_sites``).
+    Two ways a directory goes red, both with the same one-line fix:
+
+    * hooks missing or partial — the check this always made;
+    * hooks present but naming an aisquare that is not this install — the #84
+      gap. The text of a hook is ours whichever binary it names; for weeks every
+      board update on one box ran a 0.3-era checkout while this line was green.
+
+    Read-only, like every check here: doctor never rewrites ``settings.json``.
+    """
     info = agent_core.detect("claude-code")
-    if info is None or not info.detected:
+    sites = agent_core.hook_sites("claude-code")
+    if info is None or (not info.detected and not sites):
         return _ok("claude-code", "Claude Code not detected on this machine")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
-    # Checked: recorded sites UNION the ambient dir. Parallel installs
-    # (CLAUDE_CONFIG_DIR=~/.claude2) each own a settings.json, so registry
-    # health alone hid unhooked siblings — and site health alone says nothing
-    # about the AMBIENT dir, the one a `claude` from this shell actually
-    # starts from, when it was never registered.
-    health = {site.config_dir: site.hooks_installed for site in info.sites}
-    ambient = agent_core.ambient_hook_dir("claude-code")
-    if ambient is not None and ambient not in health:
-        health[ambient] = agent_core.hooks_installed("claude-code")
-    if not health:
+    if not sites:
         return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
-    broken = [path for path, hooked in health.items() if not hooked]
-    if not broken:
-        # Installed and firing, but a context hook may carry a shorter timeout
-        # than the CI hook can wait for — a settings.json from 0.6.0, or one
-        # hand-edited. Its own sentence: the hooks are not "missing", and saying
-        # so sent the operator to a command that rewrites entries they chose.
+
+    unhooked = [site for site in sites if not site.hooks_installed]
+    wrong_binary = [
+        site for site in sites if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT)
+    ]
+    if not unhooked and not wrong_binary:
+        # Installed, firing, and running THIS install — but a context hook may
+        # still carry a shorter timeout than the CI hook can wait for (a
+        # settings.json from 0.6.0, or one hand-edited). Its own sentence: the
+        # hooks are not "missing", and saying so sent the operator to a command
+        # that rewrites entries they chose.
         short = {
-            path: agent_core.hook_timeout_shortfall("claude-code", path)
-            for path in health
-            if agent_core.hook_timeout_shortfall("claude-code", path)
+            site.config_dir: shortfall
+            for site in sites
+            if (shortfall := agent_core.hook_timeout_shortfall("claude-code", site.config_dir))
         }
         if short:
             listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
@@ -619,14 +671,64 @@ def _check_claude_code() -> DoctorCheck:
                 "inside the run's ceiling would be cut off and its row never written",
                 "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in short),
             )
-        where = f" in {len(health)} config dirs" if len(health) > 1 else ""
-        return _ok("claude-code", f"{product} connected{where} (all lifecycle hooks installed)")
-    listed = ", ".join(str(path) for path in broken)
+        where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
+        unrecorded = [str(site.config_dir) for site in sites if not site.recorded]
+        note = (
+            f"; {', '.join(unrecorded)} found on disk, not connected in this home"
+            if unrecorded
+            else ""
+        )
+        return _ok(
+            "claude-code", f"{product} connected{where} (all lifecycle hooks installed{note})"
+        )
+
+    problems: list[str] = []
+    if unhooked:
+        listed = ", ".join(_site_label(site) for site in unhooked)
+        problems.append(f"{_STALE_HOOKS} in: {listed}")
+    if wrong_binary:
+        clauses = "; ".join(_hook_binary_problems(wrong_binary))
+        this = f"{agent_core.current_install()} ({__version__})"
+        problems.append(f"{clauses} — this install is {this}")
+    broken: list[Path] = []
+    for site in sites:
+        if (site in unhooked or site in wrong_binary) and site.config_dir not in broken:
+            broken.append(site.config_dir)
     return _warn(
         "claude-code",
-        f"{product} {_STALE_HOOKS} in: {listed}",
+        f"{product} {'; '.join(problems)}",
         "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
     )
+
+
+def _claude_accounts_checks() -> list[DoctorCheck]:
+    """One line for the Claude accounts the CLI added, or none when it added none.
+
+    The default account is the ``claude-code`` line's business above. Reads
+    only: ``managed_accounts`` lists directories and ``describe`` reads the
+    files Claude Code left in them, so a machine that never added an account
+    is left exactly as it was (``tests/test_doctor_does_not_create_state.py``).
+    """
+    managed = claude_accounts_core.managed_accounts()
+    if not managed:
+        return []
+    statuses = [claude_accounts_service.describe(account) for account in managed]
+    parts = [
+        f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
+        for status in statuses
+    ]
+    detail = f"{len(statuses)} added beside the default: " + " · ".join(parts)
+    unsigned = [status.account.slot for status in statuses if not status.signed_in]
+    if unsigned:
+        return [
+            _warn(
+                "claude-accounts",
+                detail,
+                "Sign in from asq → Accounts, or: "
+                + "; ".join(f"aisquare accounts run {slot}" for slot in unsigned),
+            )
+        ]
+    return [_ok("claude-accounts", detail)]
 
 
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------
@@ -754,6 +856,262 @@ def _gh_login_note() -> str:
     return " (no login found: gh auth login)"
 
 
+#: Plugins and MCP servers that actually PROVIDE browser control, by the
+#: identifier they are published under. A declared table, not a name pattern:
+#: the name is the operator's to choose, and `playwright|chrome|devtools|
+#: browser|puppeteer` read `react-devtools`, `file-browser`, `s3-browser`,
+#: `chrome-history-reader` and a linter published on `chrome-plugins-market` as
+#: browser tooling, while missing the real shape
+#: `{"command": "npx", "args": ["@playwright/mcp@latest"]}`, whose only signal
+#: is in the args. The row is advisory and never affects the exit code, so its
+#: whole value is being right. Add an identifier here when a new provider ships.
+_BROWSER_PROVIDERS: tuple[str, ...] = (
+    "chrome-devtools-mcp",
+    "claude-in-chrome",
+    "@playwright/mcp",
+    "playwright-mcp",
+    "mcp-playwright",
+    "playwright",
+    "puppeteer-mcp-server",
+    "mcp-puppeteer",
+    "puppeteer",
+    "@browsermcp/mcp",
+    "browsermcp",
+    "browser-use",
+    "browser-mcp",
+    "selenium",
+    "webdriver",
+    "stagehand",
+)
+
+#: Each identifier bounded by non-alphanumerics, so it matches as an identifier
+#: rather than as a substring: `@playwright/mcp@latest` and `npx
+#: chrome-devtools-mcp` hit, `browserslist-mcp` and `file-browser` do not.
+_BROWSER_PROVIDER_RE = re.compile(
+    "|".join(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])" for name in _BROWSER_PROVIDERS),
+    re.IGNORECASE,
+)
+
+
+def _read_json(path: Path) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _mcp_servers(source: dict[str, object]) -> dict[str, object]:
+    servers = source.get("mcpServers")
+    return servers if isinstance(servers, dict) else {}
+
+
+def _browser_servers(servers: dict[str, object], *, declined: Container[str] = ()) -> list[str]:
+    """The ``mcpServers`` entries that declare browser tooling, as short labels.
+
+    Matched on the ``command`` and ``args`` as well as the name, because the
+    canonical declaration puts the provider in the args
+    (``{"command": "npx", "args": ["@playwright/mcp@latest"]}``) and leaves the
+    name to the operator. Labelled by the name, which is what they will
+    recognise and what ``claude mcp remove`` takes.
+    """
+    found: list[str] = []
+    for name, spec in servers.items():
+        if name in declined:
+            continue
+        candidates = [str(name)]
+        if isinstance(spec, dict):
+            candidates.append(str(spec.get("command", "")))
+            args = spec.get("args")
+            if isinstance(args, list):
+                candidates.extend(str(arg) for arg in args)
+        if any(_BROWSER_PROVIDER_RE.search(text) for text in candidates):
+            found.append(f"mcp {name}")
+    return found
+
+
+def _browser_tools_in(config_dir: Path) -> list[str]:
+    """Browser tooling ONE Claude Code config directory declares, as short labels.
+
+    ``settings.json`` is read for ``enabledPlugins`` only. Claude Code never
+    reads ``mcpServers`` from it — ``claude mcp add``'s three scopes write
+    ``.claude.json`` (user, local) or ``.mcp.json`` (project), and
+    ``settings.json``'s MCP surface is the APPROVAL keys — so scanning it for
+    servers could never match, and the fix line that sent an operator to write
+    one there sent them somewhere Claude Code will not look.
+
+    ``.claude.json`` is read wherever the layout puts it
+    (:func:`agent_core.claude_json_paths`): the default install keeps it BESIDE
+    the directory at ``~/.claude.json``, so probing only inside it left this
+    whole layer — including the ``projects`` fan-out — dead on the common
+    layout, and told an operator who had just run ``claude mcp add`` to install
+    what they already had.
+    """
+    found: list[str] = []
+    settings = _read_json(config_dir / "settings.json")
+    plugins = settings.get("enabledPlugins")
+    if isinstance(plugins, dict):
+        for key, enabled in plugins.items():
+            # The plugin, not the marketplace it came from: `<plugin>@<market>`,
+            # and matching the whole key credited `my-linter@chrome-plugins-market`
+            # to the market's name while labelling only `my-linter`. Match and
+            # label the same string.
+            plugin = str(key).rsplit("@", 1)[0]
+            if enabled and _BROWSER_PROVIDER_RE.search(plugin):
+                found.append(f"plugin {plugin}")
+    for path in agent_core.claude_json_paths(config_dir):
+        claude_json = _read_json(path)
+        found.extend(_browser_servers(_mcp_servers(claude_json)))
+        projects = claude_json.get("projects")
+        if isinstance(projects, dict):
+            for block in projects.values():
+                if isinstance(block, dict):
+                    found.extend(_browser_servers(_mcp_servers(block)))
+    # de-duplicated, order kept
+    return list(dict.fromkeys(found))
+
+
+def _declined_project_servers(cwd: Path, dirs: Sequence[Path]) -> set[str]:
+    """``.mcp.json`` servers this machine's operator has explicitly declined.
+
+    An unapproved project server never starts, and the record of that decision
+    lives beside the config: every ``.claude.json`` ``projects.<path>`` block
+    carries ``disabledMcpjsonServers`` and ``enabledMcpjsonServers``. Without
+    reading them, a committed ``.mcp.json`` playwright entry the operator
+    declined read as green.
+
+    A name in BOTH lists is treated as approved — this row's job is to avoid
+    telling an operator to install what they have — and a name in neither is
+    not declined: Claude Code asks at the next start rather than refusing.
+    The project block is keyed by absolute path, so both spellings of ``cwd``
+    are tried (``/tmp`` vs ``/private/tmp``).
+    """
+    keys = {str(cwd)}
+    with contextlib.suppress(OSError):
+        keys.add(str(cwd.resolve()))
+    declined: set[str] = set()
+    approved: set[str] = set()
+    for directory in dirs:
+        for path in agent_core.claude_json_paths(directory):
+            projects = _read_json(path).get("projects")
+            if not isinstance(projects, dict):
+                continue
+            for key in keys:
+                block = projects.get(key)
+                if not isinstance(block, dict):
+                    continue
+                for field, sink in (
+                    ("disabledMcpjsonServers", declined),
+                    ("enabledMcpjsonServers", approved),
+                ):
+                    listed = block.get(field)
+                    if isinstance(listed, list):
+                        sink.update(str(item) for item in listed)
+    return declined - approved
+
+
+def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
+    """browser tools: what the ui-tester role will find when it looks (§ui-tester).
+
+    Reads, never runs: the plugins and MCP servers this home's Claude Code
+    directories declare, plus the project's ``.mcp.json``. Claude in Chrome is
+    the one it cannot see — the extension lives in the browser, not on disk —
+    so the row says so rather than guessing; the ui-tester is launched with
+    ``--chrome`` and finds out at its first tool call.
+
+    **OK either way, with the guidance in the detail.** Nothing here is a
+    defect: the role runs without browser tooling and degrades honestly
+    ("UI not browser-verified"), and `install.sh` word-splits its amber list
+    against `EXPECTED_AMBER` — so a row that was amber by design on a healthy
+    machine split into two phantom checks named `browser` and `tools`, exited
+    the installer 2, and failed `tests/install/cell.sh`'s exact-set assertion
+    in every matrix cell.
+    """
+    name = "browser tools"
+    # `None` means the process cwd, which is what the CLI means (`cli/root.py`
+    # passes no cwd at all) — the neighbours all resolve it the same way
+    # (`_check_self_invocation`). Treating `None` as "no project" made this row
+    # disagree with itself between the CLI and the fleet UI, and the CLI was
+    # the surface telling operators to install what their repo declares.
+    cwd = Path.cwd() if cwd is None else cwd
+    dirs = _claude_config_dirs()
+    declared: list[str] = []
+    for directory in dirs:
+        declared.extend(
+            f"{tool} ({_short_path(directory)})" for tool in _browser_tools_in(directory)
+        )
+    mcp_json = cwd / ".mcp.json"
+    # Parsed ONCE, outside the per-directory loop: its content cannot vary by
+    # config dir, so reading it per dir opened and parsed one file four times
+    # on a four-directory machine and deduped three of the results away.
+    project_servers = _browser_servers(
+        _mcp_servers(_read_json(mcp_json)), declined=_declined_project_servers(cwd, dirs)
+    )
+    declared.extend(f"{tool} ({_short_path(mcp_json)})" for tool in project_servers)
+    chrome_note = (
+        "Claude in Chrome cannot be detected from here (a browser extension); "
+        "the ui-tester role passes --chrome and learns at its first tool call"
+    )
+    if declared:
+        # The directory beside each tool, which is the one thing an operator
+        # debugging "which of my Claude dirs declares playwright?" wants — and
+        # what the previous `sorted({...})` collapse threw away.
+        return _ok(
+            name,
+            f"{', '.join(dict.fromkeys(declared))} declared — the ui-tester can measure; "
+            f"{chrome_note}",
+        )
+    return _ok(
+        name,
+        f"no browser MCP/plugin declared in {len(dirs)} config dir(s) or {_short_path(mcp_json)}; "
+        f"{chrome_note}. Without one the ui-tester reopens UI tasks as 'not browser-verified' "
+        "rather than passing them on code alone — add the Chrome DevTools MCP with "
+        "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
+        "Claude in Chrome extension (claude.ai/chrome)",
+    )
+
+
+def _claude_config_dirs() -> list[Path]:
+    """The Claude Code directories a ui-tester of THIS home could start in.
+
+    The dirs this home connected plus the ambient one, and deliberately NOT
+    :func:`agent_core.hook_sites`, for two measured reasons.
+
+    It GRADES every site: ``hook_site_health`` runs ``classify_hook_binary``,
+    which runs a real ``<that install's aisquare> --version`` subprocess with a
+    10 s timeout, and its dedupe cache is built fresh per call. ``_check_claude_code``
+    already called it earlier in this same ``doctor()`` run, so a second call
+    re-ran every probe: 1 → 2 scans, 3 → 6 subprocesses, 683 ms → 1246 ms on a
+    four-directory machine (+82% on the whole run) for grading this row never
+    reads — on a path the fleet UI re-runs on every project switch, every
+    Doctor-tab activation and every one-click fix.
+
+    And it includes directories this home never connected
+    (``_claude_dirs_on_disk``, the #84 gap), which answers a different question:
+    "does ANY Claude install on this box declare a browser tool" rather than
+    "will the ui-tester's window find one". A playwright MCP in ``~/.claude4``
+    made the row green while the fleet spawned its ui-tester on ``~/.claude``,
+    where nothing answered.
+    """
+    dirs = [*agent_core.connected_dirs("claude-code"), agent_core._claude_home()]
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for directory in dirs:
+        key = agent_core._dir_key(directory)
+        if key not in seen:
+            seen.add(key)
+            unique.append(directory)
+    return unique
+
+
+def _short_path(path: Path) -> str:
+    """``path`` with the user's home as ``~`` — a detail line is read, not parsed."""
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
 def _check_gh() -> DoctorCheck:
     """GitHub CLI: the fleet's coder and reviewer open and review PRs through it (§3.5)."""
     name = "gh"
@@ -794,6 +1152,16 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         return _ok(
             "snapshot", f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
         )
+    if snap is not None and snap.status == "skeleton_only":
+        # Usable: the session-start directive points agents at the skeleton and
+        # its index. No fix, deliberately — re-packing would not change it, and a
+        # fix here is the button that was pressed forever with a green tick.
+        return _ok("snapshot", snapshot_core.skeleton_only_detail(snap))
+    if snap is not None and snap.status == "too_large":
+        # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
+        # The fix is `--refresh` because a plain `onboard` only reloads this
+        # verdict — which is how the line stayed a warning forever.
+        return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
     return _warn(
         "snapshot",
         "no codebase snapshot for the active project",
@@ -1175,6 +1543,32 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
         return _ok(name, "not evaluated")
 
 
+def _check_self_invocation(cwd: Path | None = None) -> DoctorCheck:
+    """Whether a bare ``python -m aisquare`` typed in ``cwd`` would run US (#81).
+
+    ``-m`` puts the cwd first on ``sys.path``, so a project whose root holds a
+    regular ``aisquare/`` package (an ``__init__.py`` — a bare directory is a
+    namespace portion and loses to the real package) or an ``aisquare.py``
+    shadows the installed CLI. The CLI's own re-invocations pass ``-P``
+    (:func:`aisquare.core.selfcli.argv_for`) and are immune; this row is for the
+    human who types the module form, and for hooks a pre-``-P`` CLI wrote.
+    """
+    root = Path.cwd() if cwd is None else cwd
+    shadow = next(
+        (p for p in (root / "aisquare" / "__init__.py", root / "aisquare.py") if p.is_file()),
+        None,
+    )
+    if shadow is None:
+        return _ok("self-invocation", "no ./aisquare package or aisquare.py shadows the CLI here")
+    return _warn(
+        "self-invocation",
+        f"{shadow.relative_to(root)} in {root} shadows `python -m aisquare` run from here "
+        "(the cwd goes first on sys.path); the CLI's own re-invocations pass -P and are fine",
+        "By hand, use the `aisquare`/`asq` script or `python -P -m aisquare`; hooks written by "
+        "an earlier CLI use the bare module form — re-run `aisquare agents connect <agent>`",
+    )
+
+
 def _fleet_conf() -> Path:
     """The bundled tmux conf's PATH, without writing it.
 
@@ -1248,6 +1642,7 @@ def _check_fleet(
             elif facts.dead:
                 exited.append(agent)
         problems: list[str] = []
+        server_down = False
         by_socket: dict[str, list[FleetAgent]] = {}
         for agent in gone:
             by_socket.setdefault(agent.tmux_socket, []).append(agent)
@@ -1255,21 +1650,46 @@ def _check_fleet(
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
                 problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
-            else:
+            elif servers[sock].server_absent():
+                # tmux itself says there is no server — the one case reap's
+                # --server-down acts on, decided by the SAME predicate reap uses.
+                # A plain `reap` refuses a silent server (it may be alive under
+                # another TMUX_TMPDIR), so the fix prescribed here used to do
+                # nothing — measured: 10 rows reported, 0 reconciled.
+                server_down = True
                 problems.append(
                     f"{len(agents)} recorded live but the private tmux server "
                     f"'{sock}' is not running: {listed}"
+                )
+            else:
+                # Silent but not absent: a protocol mismatch after a tmux upgrade,
+                # a wedged server, a socket under another TMUX_TMPDIR. The agents
+                # may well be alive; nothing here should vouch otherwise.
+                problems.append(
+                    f"{len(agents)} recorded live but the private tmux server '{sock}' "
+                    f"does not answer (not a missing server — a version mismatch or a "
+                    f"different TMUX_TMPDIR?): {listed}"
                 )
         if exited:
             problems.append(
                 f"{len(exited)} exited but still recorded live: {_fleet_labels(exited, names)}"
             )
         if problems:
-            return _warn(
-                name,
-                "; ".join(problems),
-                "Reconcile the rows with tmux (ended, lost, merged worktrees): aisquare fleet reap",
+            # This check is machine-wide; the command it names must be too.
+            fix = (
+                "Reconcile the rows with tmux (ended, lost, merged worktrees): "
+                "aisquare fleet reap --all"
             )
+            if server_down:
+                # tmux says no server is there — but doctor runs in this shell and
+                # cannot see a fleet alive under another TMUX_TMPDIR, so the flag
+                # is offered with its condition, not prescribed.
+                fix += (
+                    "; if that server is genuinely gone (a reboot, kill-server) and not "
+                    "merely under another TMUX_TMPDIR, mark its rows lost: "
+                    "aisquare fleet reap --all --server-down"
+                )
+            return _warn(name, "; ".join(problems), fix)
         sessions = servers[socket].list_sessions()
         if live:
             return _ok(

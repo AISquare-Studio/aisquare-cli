@@ -293,6 +293,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "prompt": "run the suite",
         "agent_args": [],
         "spawned_by": "mgr-session",
+        "account": None,
     }
 
 
@@ -783,6 +784,21 @@ def test_reap_all_sweeps_every_project_without_resolving_one(
     assert reap.args == (None,)
     assert resolved.calls == []  # --all never asks "which project?"
     assert "✓ reaped: 0 ended, 0 lost, 0 worktrees removed" in _plain(result.stdout)
+
+
+def test_reap_server_down_reaches_the_service_as_a_keyword(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag doctor prescribes for a silent server must arrive at ``reap`` as
+    ``server_down=True`` — and its absence as ``False``, never as a positional."""
+    reap = _install(monkeypatch, "reap", ReapReport())
+
+    assert runner.invoke(app, ["fleet", "reap", "--server-down"]).exit_code == 0
+    args, kwargs = reap.calls[-1]
+    assert args == (PROJECT,) and kwargs == {"server_down": True}
+    assert runner.invoke(app, ["fleet", "reap", "--all"]).exit_code == 0
+    args, kwargs = reap.calls[-1]
+    assert args == (None,) and kwargs == {"server_down": False}
 
 
 def test_reap_json(runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch) -> None:

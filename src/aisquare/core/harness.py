@@ -107,6 +107,13 @@ class RoleProfile(BaseModel):
     ordering survives whatever base the user picks."""
     mission: str
     """One line of intent for the spawn banner — why this role exists."""
+    default_args: list[str] = []
+    """Flags the role needs on the agent binary wherever it starts — ``launch``,
+    ``team spawn``, a fleet window — applied only to the default agent (``claude``)
+    and only when the operator has not already said otherwise (see
+    :func:`role_defaults`). A role's tooling is the role's business: the
+    ui-tester needs Claude in Chrome, and asking every operator to remember
+    ``--chrome`` is how the role silently degrades on the second machine."""
 
 
 #: The role -> model x effort matrix. Order within a ladder is the fallback order;
@@ -151,7 +158,86 @@ ROLE_PROFILES: dict[str, RoleProfile] = {
         ladder=["sonnet", "opus"],
         mission="reads the PR as the stranger who will maintain it — read-only findings",
     ),
+    "ui-tester": RoleProfile(
+        role="ui-tester",
+        ladder=["sonnet", "opus"],
+        mission="verifies user-facing work in a real browser — evidence, not eyeballing",
+        default_args=["--chrome"],
+    ),
 }
+
+
+class RoleDefaults(BaseModel):
+    """The role's own flags this launch gets, and what it did not get, and why.
+
+    ``notes`` exists because a WITHHELD flag is invisible otherwise: the
+    operator sees a successful launch and a ui-tester that reopens every UI
+    task as "not browser-verified" with nothing on screen explaining why. Same
+    shape and same reason as ``explainability.SessionIdentity``, which carries
+    the note for the launch it could not pin.
+    """
+
+    args: list[str] = []
+    notes: list[str] = []
+
+
+def _opt_out_of(flag: str) -> str:
+    """The flag that means "no" to ``flag``.
+
+    Generated rather than tabled: ``--no-<flag>`` is the convention this CLI
+    already relies on everywhere (``--worktree``/``--no-worktree``,
+    ``--probe``/``--no-probe``), so it covers the next ``default_args`` entry
+    the day it is added instead of the day someone remembers a table.
+    """
+    return f"--no-{flag.removeprefix('--')}"
+
+
+def _flag_present(args: Sequence[str], flag: str) -> bool:
+    """Whether ``args`` already says ``flag``, in either spelling.
+
+    ``--chrome`` and ``--chrome=1`` are the same flag to the agent, so both
+    count as the operator having said it — mirroring
+    ``explainability._flag_value``, which parses these same two shapes out of
+    this same argv for ``--session-id``. Exact-token matching read
+    ``--no-chrome=1`` as an unrelated word and appended ``--chrome`` beside it,
+    defeating the documented opt-out.
+    """
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
+
+
+def role_defaults(role: str, *, binary: str, args: Sequence[str]) -> RoleDefaults:
+    """The role's :attr:`RoleProfile.default_args` this launch still needs.
+
+    Applied only when the agent is Claude Code (:func:`is_default_agent`) — a
+    wrapper or another agent has its own flags and would reject Claude Code's;
+    skipped for any flag already present in ``args`` (a binding, a fleet
+    ``extra_args``, the operator's own line) and for any flag whose ``--no-``
+    opt-out is present. So the fleet's ``aisquare launch ui-tester`` inside a
+    tmux window and an operator's ``ais-cli-ais ui-tester --chrome`` both end
+    with exactly one ``--chrome``, and ``--no-chrome`` anywhere wins.
+
+    Only the BINARY gate produces a note. The other two withholdings are
+    already on screen — the flag or its opt-out is in the command the operator
+    typed — while this one happens inside a tmux window nobody watched, for a
+    binding made in another shell.
+    """
+    profile = ROLE_PROFILES.get(base_role(role))
+    if profile is None or not profile.default_args:
+        return RoleDefaults()
+    if not is_default_agent(binary):
+        return RoleDefaults(
+            notes=[
+                f"{', '.join(profile.default_args)} withheld: "
+                f"{os.path.basename(binary)!r} is not {DEFAULT_AGENT_BINARY}"
+            ]
+        )
+    return RoleDefaults(
+        args=[
+            flag
+            for flag in profile.default_args
+            if not _flag_present(args, flag) and not _flag_present(args, _opt_out_of(flag))
+        ]
+    )
 
 
 #: A numbered SEAT: a first-class role with a crew index glued on (``coder1``).
@@ -691,13 +777,107 @@ def interfering_env() -> list[str]:
 # always-injected context, so every line has to earn its tokens.
 
 
+#: What each role does INSTEAD when the human asks for work another role owns,
+#: as a ``(trigger, instead)`` pair. Only the reader's own pair is emitted — a
+#: role never reads the other roles' triggers, so adding a role adds one entry
+#: here and rewrites no shared sentence. ``instead`` names a COMMAND with
+#: ``{sid}`` where the session id goes, because "don't" without a runnable
+#: alternative is what lost to a direct "fix it" in the incident this fixes.
+#: ``tester`` shares ``runner``'s by construction (the two cycles must stay
+#: byte-identical up to the label — see the manager-loop test that pins it).
+_LANE: dict[str, tuple[str, str]] = {
+    "planner": (
+        "asked to fix or build something yourself",
+        'add the tasks (`aisquare task add "<title>" --role coder --detail "<contract>" '
+        "--as {sid}`), say how many, and tell the human to prompt each coder tab with "
+        '"check the board"',
+    ),
+    "coder": (
+        "asked to verify, review or plan your own work",
+        "do your task; verification is the runner's (`aisquare task review <id> --as {sid}`), "
+        'planning is the planner\'s (`aisquare note "…" --to planner --as {sid}`)',
+    ),
+    "runner": (
+        "asked to edit or fix the code",
+        '`aisquare task reopen <id> --reason "<what failed>" --as {sid}` — the coder fixes, '
+        "not you",
+    ),
+    "validator": (
+        "asked to edit or fix the code",
+        "findings in your GATE note — the coder fixes, not you",
+    ),
+    "reviewer": (
+        "asked to edit or fix the code",
+        "findings on the PR and one board note — the coder fixes, not you",
+    ),
+    "manager": (
+        "asked to write code or fix something yourself",
+        "spawn a coder for it (`aisquare fleet spawn coder --task <id> --as {sid}`)",
+    ),
+    "ui-tester": (
+        "asked to edit or fix the code",
+        '`aisquare task reopen <id> --reason "<what failed + screenshot path>" --as {sid}` — '
+        "the coder fixes, not you",
+    ),
+}
+_LANE["tester"] = _LANE["runner"]
+
+
+def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
+    """The closing paragraph of a first-class role's cycle: stay in the role.
+
+    A standing note that only says what a role does loses to a direct
+    instruction that asks for something else — measured 2026-09-10, when a
+    planner told "get it fixed in the same PR" edited four files and pushed
+    while two coders sat on an empty task list. What holds is naming the
+    trigger AND the substitute action, and the substitute has to be a command
+    that runs: every ``--as`` is pre-filled here exactly as the core cycle
+    pre-fills its own. The human can still override — that is theirs to do —
+    but never by accident.
+
+    Three lines, because this block is always-injected context and lands last
+    in it (the first thing truncated on a busy board). ``merge_said`` skips the
+    "Never merge" the role's own cycle already states, so no role reads the
+    same prohibition twice. A role with no entry gets no paragraph — never a
+    ``KeyError``, which the session-start hook would swallow together with the
+    whole team block.
+    """
+    lane = _LANE.get(role)
+    if lane is None:
+        return []
+    trigger, instead = lane
+    closing = (
+        "Read-only investigation is always fine; say in one line what you routed and to "
+        "whom, and if the human insists, say once which role owns it and offer them the command."
+    )
+    if not merge_said:
+        closing += " Never merge."
+    return [
+        f"Stay in your lane ({role}). When you are {trigger}, do not do it here.",
+        f"Instead: {instead.format(sid=sid)}.",
+        closing,
+    ]
+
+
 def role_cycle(role: str, session_short_id: str) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
-    the role it is a seat of — the number is an identity, not a new role.
+    the role it is a seat of — the number is an identity, not a new role. Every
+    first-class cycle ends with :func:`_lane_rule`; an unknown role has no
+    cycle and therefore no lane either. The role is normalised once, here.
     """
     role = base_role(role)
+    core = _role_cycle_core(role, session_short_id)
+    if not core:
+        return []
+    merge_said = any("merge" in line.lower() for line in core)
+    return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said)]
+
+
+def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
+    """The role-specific half of the cycle for an already-normalised ``role``;
+    see :func:`role_cycle`."""
     sid = session_short_id
     if role == "planner":
         return [
@@ -707,7 +887,9 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             "already known or ruled out · acceptance criteria the runner can execute ·",
             "boundaries (what NOT to touch). Re-emitting is safe. Record choices:",
             f'`aisquare note "…" --kind decision --as {sid}`. A task reopened twice is',
-            "yours again: re-spec or split it instead of letting it bounce.",
+            "yours again: re-spec or split it instead of letting it bounce. Anything a user",
+            'SEES is a task titled "UI: …" whose acceptance criteria are browser steps — URL,',
+            "login, action, expected text/pixels/request — so the ui-tester can run them.",
         ]
     if role == "coder":
         return [
@@ -731,7 +913,12 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             "produced this session: `aisquare task done <id> "
             f'--note "verified: <evidence>" --as {sid}`,',
             f'or `aisquare task reopen <id> --reason "<what failed + repro>" --as {sid}`.',
-            "Criteria missing? Reopen as underspecified — never rubber-stamp. Repeat.",
+            "Criteria missing? Reopen as underspecified — never rubber-stamp. A task titled",
+            '"UI: …" belongs to the ui-tester when one is on the board (`aisquare board`) and',
+            "NOT marked (stale) — a stale row is a crashed or hung tester, not an available one;",
+            "otherwise run its non-browser checks and reopen it —",
+            f'`aisquare task reopen <id> --reason "UI not browser-verified" --as {sid}` —',
+            "never done. Repeat.",
         ]
     if role == "validator":
         return [
@@ -756,7 +943,10 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
             f"`aisquare fleet spawn coder --label coder-<purpose> --task <id> --as {sid}` —",
             "one per parallelisable task, within the agent cap; `fleet spawn tester` once work",
-            "reaches review, `fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
+            'reaches review — `fleet spawn ui-tester --prompt "<branch or worktree to check +',
+            'the URL to open>"` for tasks titled "UI: …", which it verifies in a real browser',
+            "and cannot otherwise place, since nothing moves it into the coder's tree —",
+            "`fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
             "once every task is done. Board updates reach you every turn: reopen with reasons,",
             '`aisquare fleet tell <label> "…"` to steer, re-spec or split what bounces. Spawn',
             "nothing while the `fleet-paused` signal is set. When the validator's gate is PASS:",
@@ -764,6 +954,28 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
             "(coder-auth, not coder-2).",
+        ]
+    if role == "ui-tester":
+        return [
+            f"Your standing cycle (ui-tester): `aisquare task next --status review --as {sid}`;",
+            'take tasks titled "UI: …" (leave the rest to the runner). That returns only the',
+            "HEAD of the review pool, so if it hands you a non-UI task, find your `UI:` tasks",
+            "on the board (`aisquare board`) and act on them by id; if there are none, tell the",
+            "user and stop. Verify in a REAL browser with whatever this window has, in this",
+            "order: Claude in Chrome (present when the window was started with `--chrome` and",
+            "the extension is connected), the Chrome DevTools MCP, Playwright MCP. Check which",
+            "of them answer BEFORE you start. Do the acceptance steps as written — URL, login,",
+            "action — and MEASURE: screenshots, computed sizes, console errors, network",
+            "responses; never pass a visual requirement by reading code. You get no worktree of",
+            "your own, so SAY WHICH BUILD you measured — branch or commit, and the URL — in",
+            "your verdict; if the task names neither, reopen it as underspecified instead of",
+            "screenshotting whatever the root happens to hold. Verdict with evidence:",
+            '`aisquare task done <id> --note "verified in <tool> on <branch/commit> at <url>:',
+            f'<evidence>" --as {sid}`, or `aisquare task reopen <id> --reason "<what failed> +',
+            f"<screenshot path>\" --as {sid}`. No browser tool answers? Run the task's",
+            'non-browser checks, then reopen it with "UI not browser-verified in this window" —',
+            "never done. You are ASKED to be read-only and nothing here enforces it (no",
+            "allowed-tools list is written or passed): never edit, never push. Repeat.",
         ]
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
@@ -775,7 +987,9 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
             "push, never merge. Findings go on the PR (`gh pr review --comment` or",
             "`--request-changes`), severity-ordered (critical|major|minor|nit), each with",
             'evidence, then one summary note: `aisquare note "REVIEW <pr>: …" --kind result',
-            f"--as {sid}`. Approve only what you would merge yourself. Repeat.",
+            f"--as {sid}`. A PR that touches the frontend with no ui-tester evidence on its",
+            "task (`aisquare task show <id>`) gets request-changes, not approval. Approve only",
+            "what you would merge yourself. Repeat.",
         ]
     return []
 
@@ -789,6 +1003,37 @@ def role_cycle(role: str, session_short_id: str) -> list[str]:
 
 #: The executable used when nothing else says otherwise.
 DEFAULT_AGENT_BINARY = "claude"
+
+#: Every basename that IS Claude Code's own executable. The ``.exe``/``.cmd``/
+#: ``.ps1`` spellings are what npm writes on Windows, where this CLI also
+#: installs (``install.ps1``) — a bare-name test dropped Claude Code's flags on
+#: every one of them.
+_DEFAULT_AGENT_BASENAMES = frozenset(
+    {DEFAULT_AGENT_BINARY, *(f"{DEFAULT_AGENT_BINARY}{ext}" for ext in (".exe", ".cmd", ".ps1"))}
+)
+
+
+def is_default_agent(binary: str) -> bool:
+    """Whether ``binary`` is Claude Code, so Claude Code's flags apply to it.
+
+    ONE predicate, because two places decide it: the role's ``default_args``
+    here and ``--session-id`` pinning in ``explainability.accepts_session_id``,
+    which used to carry its own ``"claude"`` literal 55 lines away in the same
+    launch.
+
+    Matched on the basename with the Windows shims included and a trailing
+    separator tolerated — ``os.path.basename("claude/")`` is ``""``, so a
+    binding typed with a slash silently lost the role's flags.
+
+    **A wrapper script literally named ``claude`` is accepted**, deliberately:
+    ``~/bin/claude`` and ``/opt/wrap/claude`` are the shape operators actually
+    use to add an account or a flag to Claude Code, from here a wrapper is
+    indistinguishable from the real thing, and the cost of being wrong is one
+    unknown flag on a program the operator named after Claude Code. Anything
+    else — ``claude2``, ``claude-next``, ``aider`` — gets nothing.
+    """
+    return Path(binary.rstrip("/\\")).name.lower() in _DEFAULT_AGENT_BASENAMES
+
 
 #: Per-role override, e.g. AISQUARE_BIN_CODER=claude2. Role names are upper-cased
 #: and non-alphanumerics become underscores, so `code-reviewer` reads

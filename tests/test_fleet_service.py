@@ -32,6 +32,7 @@ from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import (
+    _FACTS_FIELDS,
     Completed,
     PaneFacts,
     Runner,
@@ -777,6 +778,39 @@ def test_spawn_records_no_session_for_a_binary_that_takes_no_session_id(
     assert fleet_service.status_of(receipt.agent).detail == "no hooks"
 
 
+def test_spawn_forwards_a_bound_binary_the_tmux_server_cannot_see(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fleet window re-resolves its binary in the tmux SERVER's environment.
+
+    That environment is not this shell's: `core/tmux.py` spawns with
+    `untraced_env()` and passes two per-window keys, so `AISQUARE_BIN_<ROLE>`
+    and `AISQUARE_AGENT_BIN` never arrive. Forwarding only an explicit `--bin`
+    left the row naming `claude2` while the pane silently ran `claude` — and
+    decided the role's binary-keyed flags against the wrong executable.
+    `docs/fleet.md` promises the variable works for a fleet launch.
+    """
+    other = claude_on_path.with_name("claude2")
+    other.write_text(claude_on_path.read_text(encoding="utf-8"), encoding="utf-8")
+    other.chmod(0o755)
+    monkeypatch.setenv("AISQUARE_BIN_CODER", "claude2")
+
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    command = _command(tmux)
+    assert _flag(command, "--command") == "claude2", "the binding reaches the window"
+    assert receipt.agent.binary == "claude2", "and the row and the pane agree"
+
+
+def test_spawn_leaves_the_default_binary_to_the_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Only a CHOSEN binary is forwarded: `resolution.source == "default"` means
+    nothing asked for anything, and `launch` resolving it itself keeps the fleet's
+    command line the shortest true one."""
+    fleet_service.spawn(project, "coder", worktree=False)
+    assert "--command" not in _command(tmux)
+
+
 def test_spawn_suffixes_a_label_a_live_agent_holds(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -1188,6 +1222,18 @@ def _unreachable_server() -> TmuxServer:
     return _real_server(refusing)
 
 
+_MISMATCH = "protocol version mismatch (client 8, server 7)"
+"""tmux's answer when the package was upgraded in place under a running server:
+every client call exits 1, and every agent behind that server is alive."""
+
+
+def _mismatched_server() -> TmuxServer:
+    def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        return Completed(1, "", _MISMATCH)
+
+    return _real_server(refusing)
+
+
 def _answering_server(*sessions: str) -> TmuxServer:
     """A server that answers every question and knows none of the panes asked about."""
 
@@ -1198,7 +1244,7 @@ def _answering_server(*sessions: str) -> TmuxServer:
         if "display-message" in args:
             # tmux 3.7c's answer for a pane it cannot find: status 0 and every
             # field empty, because display-message's target may fail.
-            return Completed(0, "|~|" * 12 + "\n", "")
+            return Completed(0, "|~|" * (len(_FACTS_FIELDS) - 1) + "\n", "")
         return Completed(0, "", "")  # list-panes -s / -a: the server holds no panes
 
     return _real_server(answering)
@@ -1241,6 +1287,125 @@ def test_an_unreachable_tmux_server_is_not_read_as_every_pane_gone(
     assert fleet_service._observe(answering, session, [agent]) == {}
     assert fleet_service.status_of(agent).state == "lost"
     assert [a.id for a in fleet_service.reap(project).lost] == [agent.id]
+
+
+def test_reap_server_down_marks_rows_on_a_silent_server_lost(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix doctor prescribes after a reboot has to exist.
+
+    Measured on the reporting box: doctor said "10 recorded live but the private
+    tmux server 'asq' is not running" and pointed at ``fleet reap``, which
+    reconciled 0 — the refusal above is correct by default and left the
+    operator with no command that acted. ``--server-down`` is their word that
+    the server is gone; the rows on it are then lost, and nothing else changes.
+    """
+    agent = fleet_service.spawn(project, "coder").agent
+    dead = _unreachable_server()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+    assert fleet_service.reap(project).lost == [], "the default still refuses"
+    report = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in report.lost] == [agent.id]
+    assert report.ended == [], "lost, never ended: no exit status was ever observed"
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+
+
+def test_reap_server_down_only_touches_the_socket_that_is_silent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows span sockets; the flag vouches for the silent one, not for all of them."""
+    _settings(monkeypatch, tmux_socket="asq-old")
+    on_old = _coder(project)
+    _settings(monkeypatch, tmux_socket="asq-new")
+    on_new = _coder(project)
+    dead = _unreachable_server()
+
+    def per_socket(config: FleetSettings | None = None) -> TmuxServer:
+        return dead if config is not None and config.tmux_socket == "asq-old" else tmux
+
+    monkeypatch.setattr(fleet_service, "server", per_socket)
+    report = fleet_service.reap(project, server_down=True)
+    assert [a.id for a in report.lost] == [on_old.id]
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [on_new.id]
+
+
+def test_server_absent_needs_tmux_to_say_so() -> None:
+    """Positive evidence only: the two stderr shapes tmux uses for 'no server'
+    (measured on 3.4) — never the bare fact that a client call exited non-zero."""
+    assert _unreachable_server().server_absent() is True
+    absent_file = _real_server(lambda argv, stdin: Completed(1, "", "no server running on /x\n"))
+    assert absent_file.server_absent() is True
+    assert _mismatched_server().server_absent() is False
+    assert _answering_server("asq-a").server_absent() is False
+
+    def raising(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        raise TmuxUnavailable("tmux is not installed")
+
+    assert _real_server(raising).server_absent() is False, "no binary: no evidence"
+
+
+def test_reap_server_down_leaves_a_server_with_a_protocol_mismatch_alone(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of the first version: the predicate was ``not answers()``, which is
+    also False for a protocol mismatch (tmux upgraded in place, old server still
+    running) and for a wedged server — with the flag, every live row was ended
+    for agents still working. The word may act only where tmux says no server."""
+    agent = _coder(project)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: _mismatched_server())
+
+    report = fleet_service.reap(project, server_down=True)
+
+    assert report.lost == [] and report.ended == []
+    with store_session() as store:
+        assert [a.id for a in store.fleet_agents(project.id, live_only=True)] == [agent.id]
+
+
+def test_reap_server_down_asks_each_socket_once_across_every_project(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    plain_project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One probe per socket per sweep — not one per project — so a server coming
+    up mid-``reap --all`` cannot mark the first projects' rows lost and keep the
+    rest: one command, one answer. (Review of the first version.)"""
+    here = _coder(project)
+    there = fleet_service.spawn(plain_project, "coder", worktree=False).agent
+    probes: list[Sequence[str]] = []
+
+    def refusing(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        if "display-message" in argv and "#{version}" in argv:
+            probes.append(argv)
+        return Completed(1, "", _UNREACHABLE)
+
+    dead = _real_server(refusing)
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: dead)
+
+    report = fleet_service.reap(None, server_down=True)
+
+    assert {a.id for a in report.lost} == {here.id, there.id}
+    # _observe asks once per project to learn the socket is silent (that is the
+    # refusal the default relies on); the flag's own question is asked ONCE.
+    observe_probes = 2
+    assert len(probes) == observe_probes + 1, probes
+
+
+def test_reap_server_down_still_marks_nothing_without_a_tmux_binary(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """No tmux at all is a question that could not be asked, not a silent server."""
+    coder = _coder(project)
+    tmux.installed = False
+    report = fleet_service.reap(project, server_down=True)
+    assert report.lost == [] and report.ended == []
+    tmux.installed = True
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
 
 
 def test_unknown_blames_tmux_first_and_the_missing_hooks_second(

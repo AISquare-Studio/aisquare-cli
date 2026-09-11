@@ -175,8 +175,8 @@ not by a supervisor loop. The TUI polls the store the way `board -w` does.
   | **validator** | `validator` (existing) | one final gate over the assembled deliverable before the manager says READY |
 
   `planner` stays available for standalone use outside a fleet; `runner` stays
-  accepted wherever `tester` is. Five fleet roles; each one is a briefing to
-  maintain, so the bar for a sixth is high.
+  accepted wherever `tester` is. Six fleet roles; each one is a briefing to
+  maintain, so the bar for a seventh is high.
 
 ### 3.4 One launch seam, reused
 

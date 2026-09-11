@@ -51,6 +51,98 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aisq_` token shape. Contract: `docs/plans/aisquare-login.md`; guide:
   `docs/signing-in.md`. The `auth rotate` stub is gone (sessions do not rotate).
 
+- **A `ui-tester` role: user-facing work is verified in a real browser, with
+  evidence — and the role brings its own browser flag.** Eight first-class roles
+  now. It takes tasks titled `UI: …` from the review pool and runs their
+  acceptance steps in whatever browser tooling the window has, in order: Claude
+  in Chrome (the window is launched with `--chrome`), the Chrome DevTools MCP,
+  a Playwright MCP; it checks which of them answer before starting; it
+  measures — screenshots, computed sizes, console errors, network responses —
+  and never passes a visual requirement by reading code. `task done` carries
+  the evidence; `task reopen` carries a screenshot. With no browser tool it runs
+  the non-browser checks and reopens the task as "UI not browser-verified in
+  this window", never done. Its verdict names the branch or commit and the URL
+  it verified — it gets no worktree, so a task that names neither is reopened as
+  underspecified rather than measured against whatever the root holds. **Asked**
+  to be read-only, not made read-only: the briefing says never edit and never
+  push, and nothing in this checkout enforces it (a PreToolUse allowlist would;
+  `--restricted` would not — it removes the Bash its own `task done`/`task
+  reopen` need). Ladder `sonnet → opus`, like the other verifiers.
+  - **The flag is the role's, not the operator's.** The operator who set this
+    up passed `--chrome` in a personal alias; the next operator will not.
+    `RoleProfile.default_args` now exists and `harness.role_defaults` applies it
+    wherever the role starts — `aisquare launch`, `team spawn`'s printed and
+    exec'd command, and therefore every fleet window, which runs `launch` inside
+    tmux — only for the default `claude` binary (another agent would reject
+    Claude Code's flag), never twice, and never over an explicit `--no-chrome`
+    on a binding, a fleet `extra_args`, or the command line, in either spelling
+    (`--no-chrome=1` opts out too). That binary question is now ONE predicate,
+    `harness.is_default_agent`, shared with `--session-id` pinning: it covers
+    the `claude.exe`/`.cmd`/`.ps1` shims and a binding typed with a trailing
+    slash, and a withheld flag prints a note instead of degrading in silence.
+    `aisquare team harness` reports the role's `default_args` in both its JSON
+    row and its text line — the matrix is what an operator reads to find out
+    what a role launches with. A fleet spawn now forwards `--command` for any
+    binary that was CHOSEN (`resolution.source != "default"`), not just an
+    explicit `--bin`: the window re-resolves in the long-lived tmux server's
+    environment, which never carries `AISQUARE_BIN_<ROLE>`.
+    The fleet's `[fleet.roles.ui-tester]` therefore carries no `extra_args`.
+  - **What the machine can and cannot know.** A new `doctor` row, `browser
+    tools`, reads what this home's Claude Code directories declare — the
+    `enabledPlugins` in `settings.json`, and the `mcpServers` in `.claude.json`
+    wherever the layout keeps it (BESIDE the config dir for a default install,
+    inside it for a redirected one), per-project blocks included, plus the
+    project's own `.mcp.json` minus any server the operator declined
+    (`disabledMcpjsonServers`) — and names each tool with the directory that
+    declares it. Recognition is a declared table of providers matched against
+    the server's `command` and `args` as well as its name, not a substring
+    guess on a user-chosen name: `@playwright/mcp` in an `args` array counts,
+    `react-devtools` and `file-browser` do not. It says plainly that the Claude
+    in Chrome extension cannot be detected from a terminal: the role learns at
+    its first tool call. **OK either way**, with the guidance in the detail —
+    nothing here is a defect, the role runs without browser tooling and
+    degrades honestly, and `install.sh` word-splits its amber list, so a row
+    that was amber by design on a healthy machine failed the installer.
+  - **The other roles know it exists.** The planner titles user-facing tasks
+    `UI: …` and writes their acceptance criteria as browser steps (URL, login,
+    action, expected text/pixels/request). The runner leaves `UI:` tasks to a
+    ui-tester that is on the board and NOT marked `(stale)` — presence is not
+    availability, a crashed tester's row lingers (review round 2) — and
+    otherwise runs the non-browser checks and reopens the task as "UI not
+    browser-verified", never done. The manager spawns one for `UI:` tasks in
+    review. The
+    reviewer request-changes a frontend PR whose task carries no ui-tester
+    evidence. The lane rule names the ui-tester among the roles that never edit.
+  - **Upgrading machines are told.** The default roster gains
+    `aisquare-ui-tester`, but a default does not edit an existing
+    `config.toml`; `explainability register` now names any first-class role the
+    RESOLVED roster lacks — `target.roles`, so a per-target `roles` override is
+    read the way registration reads it — and prints the `--role` flags that
+    register it — on the target the gap was measured on (`--target <name>`,
+    review round 2: without it, `register --target prod` on a staging-active
+    machine suggested a command that registered them in staging). On all three
+    surfaces: the CLI's note, an
+    `unregistered_roles` field in its `--json` payload, and the fleet UI's
+    register button.
+  - `tests/test_ui_tester_role.py` (49 tests): wired into every list that
+    enumerates roles; the briefing's tools, order, measuring, honest degrade,
+    which-build rule, reach past the head of the review pool, and unenforced
+    read-only; the other roles' mentions, the runner's named verdict and the
+    manager's branch/URL prompt; `role_defaults` on binary (including the
+    Windows shims, a trailing slash and a wrapper named `claude`), dedupe,
+    `--flag=` spellings, the generated opt-out, the withheld-flag note, and the
+    one predicate shared with `accepts_session_id`; `launch` argv for ui-tester,
+    coder, `--no-chrome`, `--chrome --resume`, another binary, and the identity
+    planner seeing the role's own args; `team spawn`'s printed command and the
+    harness matrix row; the doctor row across two config dirs with the
+    directory named per tool, a default install's `.claude.json` beside the
+    directory and a redirected one's inside it, the project `.mcp.json` through
+    the real CLI, a declined project server, the name-only false positives, a
+    plugin's marketplace half, a provider in `args`, exactly one `hook_sites`
+    scan per doctor run, unconnected directories excluded, nothing declared,
+    malformed files, and its place in the row order. Plus the roster-gap hint on
+    all three register surfaces, and a `tests/test_fleet_docs_are_true.py` gate
+    that counts the roles table against `FLEET_ROLES`.
 - **`project forget <id|name|codename|path>` and `project prune`** (#83), so a
   store with hundreds of dead registrations can be cleaned. Measured on the
   owner's box: 305 registered projects, most of them throwaway git worktrees,
@@ -400,6 +492,215 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variable alone, so a child is neither briefed on nor able to claim its
   parent's task. `fleet spawn --task` refuses a task that is already `done` or
   `dropped`.
+- **The wheel goes to the program that can use it — Claude Code's fullscreen
+  TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
+  + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate
+  screen (`?1049`) and mouse reporting (`?1000` + `?1006`) and scrolls its own
+  transcript on the wheel; the agent pane spent every notch on tmux's history
+  — which the alternate screen does not have — so nothing moved and the program
+  never saw the wheel. The pane now reads tmux's `mouse_any_flag` /
+  `mouse_sgr_flag` / `alternate_on` / `pane_in_mode` with every frame and
+  routes each notch: a program tracking the mouse gets the notches as the SGR
+  (or, as raw bytes via `send-keys -H`, X10) events it asked for, at the
+  pointer's pane cell, coalesced into one tmux call per frame; a fullscreen
+  program that does not track the mouse is left alone and the user told once
+  (arrow keys would land in its prompt); a view already scrolled into history
+  always comes back with the wheel; a pane in tmux copy mode stays tmux's;
+  everything else scrolls tmux history as before. A pane that dies under the
+  wheel reports `(pane gone)` like every other path.
+- **Agent panes scroll from the keyboard, and show that they are scrolled.**
+  Reported from WSL2 + Windows Terminal (2026-09-08): "scroll not working". The
+  wheel was the only way into a pane's history, and a scrolled pane looked
+  identical to a quiet live one. Now shift+PgUp / shift+PgDn — or alt+PgUp /
+  alt+PgDn, since many terminals keep shift's for their own scrollback — scroll
+  a screen at a time, shift+Home and shift+End go to the top and back to live,
+  through the same owner decision as the wheel: on a Claude Code pane they
+  scroll Claude's transcript rather than pulling stale shell lines over it. A
+  `[↑k/history]` marker sits in the top-right corner while the view is in tmux
+  history, tracking history that grows under a frozen view, and leaves with
+  the offset. None of the keys reach the agent; any other key still returns
+  the view to live.
+- **One session is ONE Run again — the launcher owns the Run's trace id.**
+  Measured against a production workspace on 2026-09-09: one
+  `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the
+  model traffic (157,756 tokens) under `aisquare-coder`; `6fb49942…` held the
+  same session's client lane — the prompt, the board events — with zero
+  tokens, same agent name, twenty seconds later. `docs/explainability-tracing-boundary.md`
+  had this exact merge down as **[unverified]**; this is the measurement, and it
+  came out false.
+  - **Why.** The gateway materialises a Run per OTel `trace_id`
+    (`trace_states.trace_id` *is* the dashboard's `run_id`). `X-Pipeline-Id`,
+    the value both lanes shared, is `agent.run_id` — an attribute on a span,
+    searchable, not the key. The proxy mints a random trace per pipeline
+    session (`_open_pipeline_session`); `ship_once` opened `AgentRunTracer`,
+    which starts a new trace unconditionally (`INVALID_SPAN` context). Two
+    writers, two trace ids, two Runs — every time, by construction.
+  - **The fix.** The pipeline id is now the SOURCE of the trace id:
+    `trace_identity(pipeline_id)` is SHA-256 of it, first 16 bytes the trace
+    id, next 8 the root span id. `wire_session` posts the Run's root span with
+    those ids to `/v1/traces/ingest` **before** the agent starts
+    (`explainability_ops.open_run_root`, 3 s budget, fail-open), and hands the
+    proxy a `traceparent: 00-<trace>-<root>-01` — the proxy's tier-2 path,
+    which parents every model span under that root. A launch whose root was
+    accepted OWNS its Run, and `ship_once` attaches that session's client
+    lane as a segment under the same remote root (`_ClientLaneSegment`). One
+    trace, one Run, both lanes.
+  - **Ownership, not the run key, decides the client lane.** The shipper takes
+    the segment path only for records that carry the OWNED trace id, which
+    `insights` now spools as `run_trace_id` beside `run_key` (marker
+    `AISQUARE_RUN_TRACE_ID`, exported only when the root was posted; no
+    session-id fallback, unlike the run key). The run key is no evidence of a
+    root: it falls back to the board session id, so every plain session has
+    one, and an earlier cut of this fix read that as "launched" and parented a
+    whole drain under a root nobody had posted — the gateway then elected the
+    orphaned segment as a pseudo-root, and the plain session that had always
+    produced a well-formed Run produced a rootless one. Now a plain session
+    and every fail-open launch open `AgentRunTracer` exactly as before: a Run
+    of their own, with a root. Two Runs for a fail-open session is the old,
+    known cost; one Run with no root is worse than the bug it was fixing.
+  - **`traceparent` REPLACES `X-Pipeline-Id` on the wire.** The proxy resolves a
+    request in tiers and `X-Pipeline-Id` is tier 1: present, it opens its own
+    session and never reads the `traceparent` beside it, so sending both would
+    change nothing. The pipeline id still travels as `agent.run_id` on the root
+    and as the `AISQUARE_PIPELINE_ID` marker, so `by-agent-run-id` lookups and
+    the board join are unchanged.
+  - **Fail-open, in one direction.** No gateway URL, no key, or a root that was
+    not accepted with 202 → the pre-fix wiring, byte for byte: `X-Pipeline-Id`,
+    the proxy keys the Run, no `AISQUARE_RUN_TRACE_ID` is exported, and the
+    launch line says so (`the proxy keys the run — root not posted: …`).
+    Tracing still never costs a launch. A plain session with no proxy lane
+    still ships through `AgentRunTracer` as before — it has nothing to join.
+  - **`aisquare explainability env` writes nothing to the gateway by default;
+    the printed `team spawn` command opts in with `--post-root`.** `env` is a
+    print-only command, and it used to post a Run root like a launch does —
+    with a gateway URL configured, every invocation minted a dashboard Run of
+    one 0 ms span and zero tokens, named after the role, for a session that
+    might never start (a fresh pipeline id per call without `--session-id`:
+    a second terminal, a shell rc, a `--json` reader), after up to 3 s of WAN
+    I/O behind a print. `wire_session` gains `post_root=False` and `env`
+    passes it by default: the probe, the guards and the header pair still
+    run, the root is not posted, and the delta is the proxy-keyed form —
+    `X-Pipeline-Id`, no `traceparent`, no `AISQUARE_RUN_TRACE_ID`; the other
+    exports are unchanged. That justification — no agent may ever start on
+    the id a print minted — is true of a bare `env` and false of the line
+    `team spawn` prints, where the agent starts on the very next command in
+    the same shell; an earlier cut of this fix collapsed the two and put the
+    default paste path, the one the CLI tells the operator to run, back on
+    the two-Runs fallback. So `env` gains `--post-root` and the printed
+    command evals `aisquare explainability env <role> --post-root`: the root
+    is posted first exactly as `launch` and `team spawn --exec` do, the
+    pasted session owns its Run — `traceparent` on the wire,
+    `AISQUARE_RUN_TRACE_ID` exported — and the launch line goes to stderr,
+    where an eval leaves it for the human. Same fail-open in the same
+    direction: a refused root falls back to `X-Pipeline-Id` with no run key
+    exported, a dead proxy to untraced, and neither costs the paste. A bare
+    `aisquare explainability env <role>` still makes zero gateway calls. The
+    flag is visible in `--help` rather than hidden, because the line that
+    carries it is printed for a human to read and a flag the CLI disowns is
+    a trap; its help text says when adding it by hand is wrong. Not the
+    SessionStart hook: that path may never open a socket, and
+    `tests/test_no_network_on_the_primary_path.py` pins it.
+  - **The `team spawn` prelude clears every trace marker.** The printed
+    command's `unset` list was hand-written and missed `AISQUARE_RUN_TRACE_ID`,
+    so two pastes in one shell could share a Run: paste 1 exported it, paste 2
+    cleared the other four, and if paste 2's own root post was refused the
+    stale id survived and session 2's hook joined session 1's Run. The list is
+    now `core.spawn.IDENTITY_ENV_VARS` — the tuple every stripping seam
+    already removes — so a new marker cannot be missed again.
+  - **The Run is now findable from the board row.** `joins.jsonl` grows a
+    `trace_id` field (the marker `AISQUARE_RUN_TRACE_ID`, copied by the hook;
+    `null` when the proxy keyed the Run rather than a derived id that was never
+    used), and it is exactly the id `GET /v1/workspaces/{ws}/runs/{run_id}`
+    reads back with the workspace key — measured live: the workspace routes
+    accept `X-API-KEY`, only the studio-scoped ones answer 403. The
+    findings-loop page's field table gains the row. The launch line prints it:
+    `traced as aisquare-coder (pipeline <session>, run <trace_id>)`.
+  - **The SDK's inbox stays in `~/.aisquare`.** Its delivery inbox is a SQLite
+    file at a RELATIVE default path, so every drain left
+    `explainability_inbox.db` (+ `-shm`, `-wal`) in whatever directory it ran
+    from — a repo root by hand, `$HOME` from the cron timer step 10 of the guide
+    installs. `_init_sdk` now pins `EXPLAINABILITY_INBOX_PATH` to
+    `~/.aisquare/explainability/inbox.db` unless the operator set it — and
+    creates that directory first (review round 2): the SDK's inbox writer opens
+    SQLite without making parents, so on a fresh home the pin alone left every
+    drain deferred with `unable to open database file`. An operator-supplied
+    path is neither replaced nor created.
+  - **A mistyped gateway URL stays fail-open** (review round 2). A URL with no
+    `http(s)://` scheme made `urllib`'s `Request` constructor raise before the
+    request's own error handling — and one the parser itself rejects
+    (`https://[::1`) raised from `urlsplit` too (review round 3), and `http.client`'s
+    own `InvalidURL` (`:badport`, an unescaped space) and `IncompleteRead` (a body
+    shorter than its Content-Length, on a 202 or inside a 503's error body) escaped
+    the handler as well (round 4), as did a timeout or connection reset while
+    reading a 503's body (round 5) — so tracing stopped the agent from starting;
+    it is now a failed root receipt (`not a usable URL: …`) and the launch falls
+    back to the proxy-keyed Run with the reason on the launch line.
+  - **What the live check did and did not verify.** Re-measured against
+    production after the change, for an owned launch: one Run per session, the
+    model spans and the prompt span under one trace id. It read tokens and
+    node presence, not the Run's `status` or `end_time` — the root is posted
+    already ended, and what the gateway makes of that is an open question,
+    written down as a known limitation in
+    `docs/explainability-tracing-boundary.md`; the fix, if one is needed, is
+    gateway-side and not in this release.
+  - `tests/test_one_run_per_session.py` pins each piece: the derivation, both
+    wiring outcomes and the no-post cases, the root span's shape and the 202
+    rule, the marker and join record, the shipper's lane choice (a launched
+    session with an owned root: a segment under the derived remote parent,
+    `AgentRunTracer` never opened; a plain session and each fail-open cause,
+    driven through the real `insights` spool rather than a hand-built record:
+    `AgentRunTracer`, never a segment; the segment closed and the context
+    detached on failure), the inbox path, one launch through the CLI, the
+    print-only mode (`env` with a gateway and key configured makes zero
+    network calls; `team spawn --exec` still posts the root), the opt-in
+    (`env --post-root` posts the root and exports the run key, and exports
+    none when the root is refused), and the paste path for real: the printed
+    `team spawn` command run through `/bin/sh` against a loopback proxy and
+    gateway posts ONE root and starts a stub agent with `traceparent`, the
+    run key and `--session-id` all naming the same id — and still starts it
+    when the gateway refuses. `tests/test_harness.py` runs the printed spawn
+    prelude through `/bin/sh` with a stale `AISQUARE_RUN_TRACE_ID` set and
+    asserts every marker is gone.
+  - **A turn's `started_at` is the moment the hook was entered.** The prompt is
+    recorded and spooled before CI is consulted, and the stamp was taken after
+    that store work, so `wall_ms` lost however long the store took — and
+    `test_the_row_starts_when_the_turn_did_not_when_the_call_returned` flaked
+    on cold runners (2026-09-09: `main` after #109 on py3.11, then this
+    branch's merge commit on `ambient (proxy-up)`; 112 ms against a 100 ms
+    budget). `capture_prompt` and `session_start_context` now stamp first and
+    pass `began=` into `ci_augment`; a regression test holds the store block
+    for 250 ms and asserts the row still starts at entry.
+- **Every role's briefing now closes with a lane rule: stay in the role, and here is
+  what to do INSTEAD.** Measured 2026-09-10 on a real board: an operator opened
+  `aisquare launch planner`, typed "get it fixed in the same PR, update the body
+  and comment", and the planner edited four files, committed and pushed — while
+  two coder sessions sat on an empty task list. The planner's briefing said its
+  job and "never code"; a standing note loses to a direct instruction for
+  something else unless it names the trigger and the substitute action, and it
+  named none. `role_cycle` now appends `_lane_rule` to every first-class role
+  (a seat is briefed as its role; an unknown role gets none): three lines that
+  name the role's OWN trigger and substitute from `_LANE`, a `(trigger,
+  instead)` pair per role — planner (asked to fix or build): add the tasks and
+  tell the human to prompt each coder tab with "check the board"; coder (asked
+  to verify, review or plan its own work): do the task, verification is the
+  runner's, planning the planner's; runner/tester (asked to edit): `task
+  reopen` with the failure, the coder fixes; reviewer/validator (asked to
+  edit): findings, the coder fixes; manager (asked to code): `fleet spawn
+  coder`. Every substitute is a command that runs as written — `--as <sid>`
+  and the task id are pre-filled exactly as the core cycle pre-fills its own —
+  and no role reads another role's trigger, so adding a role adds one dict
+  entry and rewrites no shared sentence. Reading code to understand a problem
+  stays allowed. The human can still override — say once who owns it and offer
+  the command — so the role is left by decision, never by accident. "Never
+  merge" is added only where the role's own cycle does not already say it, and
+  a role without a lane entry gets no paragraph rather than a `KeyError` the
+  session-start hook would swallow with the whole team block. Pinned by
+  `test_every_first_class_cycle_ends_with_its_own_lane_rule`,
+  `test_the_lane_rules_substitute_commands_run_as_written`,
+  `test_no_role_reads_never_merge_twice` and two role-specific tests; the
+  manager-cycle test asserts its lane; README and `docs/fleet.md` say it in one
+  line each.
+
 - **Self-invocation is no longer shadowed by a project's own `aisquare/`
   package (#81).** The CLI re-runs itself as `python -m aisquare …` — for
   `init`, `doctor` and `project onboard` from the fleet UI, for every fleet
@@ -529,6 +830,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scripts and neither can run without one; a Node that is present but will not
   report a version stays untested. The advice points at nodejs.org or a version
   manager rather than the package manager whose `nodejs` *is* the old one.
+- **`fleet reap --server-down` — the fix `doctor` prescribes now exists.** After
+  a reboot (or `kill-server`) `doctor` reported "N recorded live but the private
+  tmux server 'asq' is not running" and pointed at `aisquare fleet reap`, which
+  reconciled nothing: a server that does not answer is, by design, not evidence
+  that its panes are dead. Measured on one box: 10 rows reported, 0 reaped, the
+  same advice printed again. The flag is the operator's word that the server is
+  genuinely gone — and it acts only where tmux itself says so (`no server running
+  on …` / `error connecting to … (No such file or directory)`), never on a
+  protocol mismatch after an in-place tmux upgrade, a wedged server or a missing
+  binary, all of which hold live agents. One probe per socket per sweep, so a
+  server coming up mid-`reap --all` cannot split the answer. `doctor` decides
+  with the same predicate, names `reap --all` (its scan is machine-wide) and
+  offers the flag only with its condition attached.
 
 ## [0.6.0] - 2026-09-03
 

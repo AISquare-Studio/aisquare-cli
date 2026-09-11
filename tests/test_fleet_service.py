@@ -2236,6 +2236,110 @@ def test_a_tester_spawned_for_a_review_task_is_told_to_verify_it(
     assert picked is not None and picked.id == task.id
 
 
+def test_every_verifying_role_is_known_to_the_assignment(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The set of roles that VERIFY lives here while the cycles live in the
+    harness, so a role added there can go missing here — `ui-tester` did, and its
+    `[review]` assignment read as the coder's rework briefing: edit and re-submit
+    someone else's work, against its own lane rule (review of #116, round 4).
+
+    The harness is the source of truth: any role whose standing cycle pulls from
+    the review pool is a verifier, whatever it is called."""
+    from aisquare.core import harness
+    from aisquare.services.team import _VERIFYING_ROLES
+
+    pulls_review = {
+        role
+        for role in harness.ROLE_PROFILES
+        if "task next --status review" in " ".join(harness.role_cycle(role, "sess-x"))
+    }
+    assert pulls_review <= _VERIFYING_ROLES, (
+        f"roles that pull from the review pool but get the rework briefing: "
+        f"{sorted(pulls_review - _VERIFYING_ROLES)}"
+    )
+    assert set(harness.ROLE_PROFILES) >= _VERIFYING_ROLES, (
+        f"named here but not a role: {sorted(_VERIFYING_ROLES - set(harness.ROLE_PROFILES))}"
+    )
+
+
+def test_a_ui_tester_spawned_for_a_review_task_is_told_to_verify_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`base_role('ui-tester')` is `ui-tester`, and it was not in the verifying
+    set — so the browser verifier was handed "you were spawned for the rework …
+    do not take pool work first" for a task another agent holds."""
+    task = _task(project, "UI: the settings dialog")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-ui-coder", project.root, "startup")
+    team_service.claim_task(task.id, session_ref="sess-ui-coder")
+    team_service.review_task(task.id, session_ref="sess-ui-coder")
+    receipt = fleet_service.spawn(project, "ui-tester", task_id=task.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "ui-tester")
+
+    board = team_service.hook_session_start("sess-ui-tester", project.root, "startup")
+
+    assert f"ASSIGNED TO YOU: {task.id} [review]" in board
+    assert "awaits your verification" in board
+    assert "spawned for the rework" not in board and "Do not take another" not in board
+    # And the line names no verdict command: the validator is a verifier whose
+    # cycle is a one-shot GATE note and never runs `task next --status review`.
+    assert "task next --status review" not in board.split("sessions:")[0]
+
+
+def test_a_compact_is_the_same_session_carrying_on(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child guard used an allowlist of ("clear", "resume"). Claude Code also
+    starts with `compact`, which mints a new id exactly as `/clear` does — so a
+    compacting agent was read as a nested `claude -p`, lost its ASSIGNED TO YOU
+    block and its claim, and the next start told it to stand down (review of
+    #116, round 4). The question is "is this a new process", not "is it on the
+    list", so every source but `startup` is a continuation."""
+    mine = _task(project, "the task this coder is for")
+    receipt = fleet_service.spawn(project, "coder", task_id=mine.id, worktree=False)
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", receipt.agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-k1", project.root, "startup")
+    team_service.claim_task(mine.id, session_ref="sess-k1")
+
+    compacted = team_service.hook_session_start("sess-k2", project.root, "compact")
+
+    assert f"ASSIGNED TO YOU: {mine.id} [doing]" in compacted
+    assert "You are the one working it" in compacted
+    with store_session() as store:
+        held = store.get_task(mine.id)
+        assert held is not None and held.claimed_by == "sess-k2", "the claim follows it"
+    # `startup` is what a new process reports, and that is still refused.
+    child = team_service.hook_session_start("sess-k-child", project.root, "startup")
+    assert "ASSIGNED TO YOU" not in child
+
+
+def test_task_next_survives_a_fleet_row_it_cannot_read(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_assignment` was guarded in round 3 and `task next` reaches the same
+    lookup by another door. A row that will not parse turned "which task comes
+    first" into a hard failure of the core work loop — for plain CLI callers
+    too, which had no such dependency before this PR (review of #116, round 4)."""
+    older = _task(project, "the older task")
+    _task(project, "the task this coder is for")
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start("sess-plain-r4", project.root, "startup")
+
+    def boom(self: SqliteStore, project_id: str, session_id: str) -> FleetAgent | None:
+        raise sqlite3.OperationalError("no such column: worktree")
+
+    monkeypatch.setattr(SqliteStore, "fleet_agent_for_session", boom)
+
+    picked = team_service.next_task(
+        role="coder", claim=True, session_ref="sess-plain-r4", cwd=project.root
+    )
+
+    assert picked is not None and picked.id == older.id, "the pool order still works"
+
+
 def test_spawning_for_a_finished_task_is_refused(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

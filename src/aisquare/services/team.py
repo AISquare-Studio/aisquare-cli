@@ -1852,11 +1852,20 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
     One lookup for both readers (the briefing and ``task next``), so a session
     that never went through the hook — ``task next --as coder-1`` from the
     manager's shell, say — still resolves the same row as the pane itself.
+
+    Fail-open, like the briefing's side: which task comes first is a preference,
+    and an unreadable row must not take ``task next`` down with it. ``_assignment``
+    was guarded in the third round and this path was not, so a ``fleet_agent``
+    row that would not parse raised out of the core work loop — for plain CLI
+    callers too, which had no such dependency before (review of the fourth).
     """
-    named = _fleet_row_named(store, project_id)
-    if named is not None and named.session_id == session_id:
-        return named
-    return store.fleet_agent_for_session(project_id, session_id)
+    try:
+        named = _fleet_row_named(store, project_id)
+        if named is not None and named.session_id == session_id:
+            return named
+        return store.fleet_agent_for_session(project_id, session_id)
+    except Exception:
+        return None
 
 
 class Assignment(NamedTuple):
@@ -1869,6 +1878,21 @@ class Assignment(NamedTuple):
 
     task: TeamTask
     mine: bool
+
+
+def _is_continuation(source: str | None) -> bool:
+    """Whether this start is THIS pane's session carrying on under a new id.
+
+    Claude Code mints a fresh session id for ``resume``, ``clear`` and
+    ``compact`` alike, and the set grows — so the test is "not a new process"
+    rather than a list of the values known today. ``startup`` is what a new
+    process reports, and a nested ``claude -p`` is exactly that; no source at
+    all (the prompt heartbeat) is treated the same way, conservatively. An
+    allowlist of ``("clear", "resume")`` refused ``compact`` outright, so a
+    compacting agent lost both its assignment and the claim that follows it
+    (review of the fourth version).
+    """
+    return source is not None and source != "startup"
 
 
 def _assignment(
@@ -1911,7 +1935,7 @@ def _resolve_assignment(
     previous = agent.session_id
     if previous is not None and previous != session_id:
         holder = store.get_session(previous)
-        if holder is not None and holder.ended_at is None and source not in ("clear", "resume"):
+        if holder is not None and holder.ended_at is None and not _is_continuation(source):
             return None
     if previous != session_id and not store.bind_fleet_agent_session(agent.id, session_id):
         # The row ended between the read above and this UPDATE. They are
@@ -1946,7 +1970,12 @@ def _resolve_assignment(
     return Assignment(task, mine)
 
 
-_VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "validator"})
+#: Roles whose job is to VERIFY a task in review rather than to work it. Pinned
+#: against the harness by ``test_every_verifying_role_is_known_to_the_assignment``:
+#: ``ui-tester`` was missing, so the browser verifier spawned for a ``[review]``
+#: task was told it was there for the rework — to edit and re-submit someone
+#: else's work, against its own lane rule (review of the fourth version).
+_VERIFYING_ROLES = frozenset({"tester", "runner", "reviewer", "validator", "ui-tester"})
 
 
 def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
@@ -1989,10 +2018,16 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
         ]
     if task.status == "review":
         if verifier:
+            # No command for the verdict here: the roles differ on it, and this
+            # block used to name `task next --status review` for all of them —
+            # which the validator's cycle, a one-shot GATE note, never runs
+            # (review of the fourth version). `task show` is common to every
+            # verifier; the standing cycle below carries the verdict.
             return [
                 head,
-                "It awaits your verification — start there: your standing cycle's",
-                f"`aisquare task next --status review --as {sid}` hands you this task first.",
+                "It awaits your verification — start there, not with the pool:",
+                f"`aisquare task show {task.id}` for its acceptance criteria, then the",
+                "verdict your standing cycle below describes.",
             ]
         if mine:
             return [

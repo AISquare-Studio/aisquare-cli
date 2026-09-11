@@ -241,15 +241,22 @@ def _signed_in_session() -> Any:
     # ui` or `serve` runs) is seen on the next call: one small read instead of
     # a parse, and no answer - `None` included - outlives the file that
     # produced it. The path is in the key because two homes that both lack the
-    # file look alike otherwise, and it is the bytes that are hashed rather
-    # than mtime and size because a same-length rewrite within one timestamp
-    # tick (a refresh, on a coarse filesystem) left those unchanged (round 4).
+    # file look alike otherwise - RESOLVED, since `AISQUARE_HOME` is taken
+    # verbatim and a relative value under a chdir, a symlink or a `..` would
+    # otherwise split one file over two entries or share one entry between two
+    # files (round 5) - and it is the bytes that are hashed rather than mtime
+    # and size because a same-length rewrite within one timestamp tick (a
+    # refresh, on a coarse filesystem) left those unchanged (round 4).
     path = paths.credentials_path()
+    try:
+        resolved = str(path.resolve())
+    except OSError:  # a path whose ancestors cannot be resolved is its own name
+        resolved = str(path)
     try:
         digest: str | None = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         digest = None
-    key = (env_token, str(path), digest)
+    key = (env_token, resolved, digest)
     if _SESSION_MEMO.get("key") == key and "session" in _SESSION_MEMO:
         return _SESSION_MEMO["session"]
     try:

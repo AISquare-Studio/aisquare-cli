@@ -13,6 +13,14 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 5, 2026-09-11.** A 404 from `GET /v1/me` is read as "a CI
+> server that predates the route" only when `/ready` answered; otherwise it
+> is a warning about the URL, run exported or not, since a stale host or a
+> proxy that 404s the unknown produces the same status. The no-run warning's
+> fix names only the lines that were printed. The session memo's key is the
+> credentials file's RESOLVED path, so a symlinked home is one entry and a
+> relative `AISQUARE_HOME` under a chdir is not the previous directory's.
+>
 > **Review round 4, 2026-09-11.** `available()` and `forward_recall` take no
 > `cwd` again: an MCP tool call carries none, so the server process's working
 > directory is the resolution for registration and every pull, and the

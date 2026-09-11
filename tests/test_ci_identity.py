@@ -213,8 +213,35 @@ def test_a_server_that_predates_me_is_informational_when_a_run_is_exported(
     identity = checks["ci identity"]
     assert identity.status is CheckStatus.ok
     assert "404" in identity.detail and "run_kernel0001" in identity.detail
+    assert "/ready answers" in identity.detail, "the version reading names its evidence"
     assert not identity.fix
     assert "AISQUARE_CI=0" not in identity.detail
+
+
+def test_a_404_with_ready_down_is_a_warning_about_the_url_not_a_version_reading(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """A 404 carries no version: a stale host, a prefix that no longer routes or
+    a proxy that 404s the unknown all produce it, and round 4 printed a green
+    "this server predates the route" for every one of them on the exported-run
+    branch (round 5). Only a /ready that answers earns that reading; otherwise
+    the line is a warning about the URL, run exported or not."""
+    signed_in(monkeypatch, stub)
+    stub.me_status = 404
+    stub.ready_status = 503
+
+    monkeypatch.setenv(ci_client.RUN_ENV_VAR, "run_kernel0001")
+    exported = ci_checks()["ci identity"]
+    monkeypatch.delenv(ci_client.RUN_ENV_VAR)
+    unexported = ci_checks()
+
+    for identity in (exported, unexported["ci identity"]):
+        assert identity.status is CheckStatus.warn
+        assert "404" in identity.detail and "predates" not in identity.detail
+        assert identity.fix and "AISQUARE_CI_URL" in identity.fix
+        assert "AISQUARE_CI=0" not in identity.fix
+    assert "ci workspace" not in unexported
+    assert unexported["ci test bed"].fix == "See the ci identity line", "names only printed lines"
 
 
 def test_a_server_that_predates_me_warns_with_the_export_as_the_fix_when_no_run_is(
@@ -235,6 +262,9 @@ def test_a_server_that_predates_me_warns_with_the_export_as_the_fix_when_no_run_
     assert "AISQUARE_CI=0" not in identity.fix
     assert checks["ci test bed"].status is CheckStatus.warn
     assert "no run resolved" in checks["ci test bed"].detail
+    # No `ci workspace` line exists on this path, so the fix must not name one.
+    assert "ci workspace" not in checks
+    assert checks["ci test bed"].fix == "See the ci identity line"
 
 
 def test_an_exported_run_still_wins_and_the_identity_is_still_shown(
@@ -657,6 +687,56 @@ def test_two_homes_without_a_credentials_file_are_not_one_memo_entry(
 
     monkeypatch.setenv("AISQUARE_HOME", str(first))
     assert ci_client.api_key_and_source() == ("", ""), "not the second home's session"
+
+
+def test_the_memo_key_is_the_resolved_credentials_path(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`AISQUARE_HOME` is taken verbatim, so two spellings of one home (a
+    symlink) must share an entry and a relative home under a chdir must not
+    carry the previous directory's answer - the round-4 key used the string as
+    given and did neither (round 5)."""
+    import os
+
+    from aisquare.core import credentials
+    from aisquare.services import iam
+
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, stub.url)
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv("AISQUARE_TOKEN", raising=False)
+    real_home = tmp_path / "real"
+    real_home.mkdir()
+    (tmp_path / "link").symlink_to(real_home, target_is_directory=True)
+    reads: list[int] = []
+    real_reader = iam.current_session
+
+    def counting(api_url: str | None = None) -> object:
+        reads.append(1)
+        return real_reader(api_url)
+
+    monkeypatch.setattr(iam, "current_session", counting)
+
+    # One file, two spellings: one memo entry, one read.
+    monkeypatch.setenv("AISQUARE_HOME", str(real_home))
+    ci_client.reset_cache()
+    credentials.store(**{iam.KEY_API_URL: "https://api.test", iam.KEY_TOKEN: TOKEN})
+    assert ci_client.api_key_and_source() == (TOKEN, ci_client.SIGNED_IN_SOURCE)
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "link"))
+    assert ci_client.api_key_and_source() == (TOKEN, ci_client.SIGNED_IN_SOURCE)
+    assert len(reads) == 1, "the symlink is the same file, not a second entry"
+
+    # One relative spelling, two directories: two files, two answers.
+    (tmp_path / "a" / "home").mkdir(parents=True)
+    (tmp_path / "b" / "home").mkdir(parents=True)
+    monkeypatch.setenv("AISQUARE_HOME", "home")
+    monkeypatch.chdir(tmp_path / "a")
+    ci_client.reset_cache()
+    credentials.store(**{iam.KEY_API_URL: "https://api.test", iam.KEY_TOKEN: TOKEN})
+    assert ci_client.api_key_and_source() == (TOKEN, ci_client.SIGNED_IN_SOURCE)
+    monkeypatch.chdir(tmp_path / "b")
+    assert ci_client.api_key_and_source() == ("", ""), "b/home has no session; a/home's is not it"
+    assert os.path.exists(tmp_path / "a" / "home" / "credentials")
 
 
 def test_the_recall_predicate_resolves_the_project_from_the_servers_own_cwd(

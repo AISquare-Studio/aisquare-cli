@@ -1017,6 +1017,12 @@ def _experiment_checks() -> list[DoctorCheck]:
     # fixture workspace's membership; the source is for display only.
     checks: list[DoctorCheck] = []
     identity: list[DoctorCheck] = []
+    # Probed first, printed in its usual place: the identity line reads a 404
+    # from GET /v1/me differently depending on whether /ready answered, and
+    # that is the only evidence that tells "an older CI server" from "a URL
+    # that reaches something else" (the round-5 review).
+    endpoint = _check_ci_endpoint(base, shown)
+    server_reached = endpoint.status is CheckStatus.ok
     if not key:
         problem, problem_fix = ci_client.bearer_problem()
         checks.append(
@@ -1053,7 +1059,9 @@ def _experiment_checks() -> list[DoctorCheck]:
         # published in the bound workspace - for a signed-in developer AND for
         # a harness token, whose fixture membership the server reports the same
         # way. The identity lines below carry the reasons.
-        identity, resolved = _identity_checks(base, key, key_source, exported_run=None)
+        identity, resolved = _identity_checks(
+            base, key, key_source, exported_run=None, server_reached=server_reached
+        )
         run = resolved or ""
         if run:
             checks.append(
@@ -1063,12 +1071,16 @@ def _experiment_checks() -> list[DoctorCheck]:
                 )
             )
         else:
+            # Named from the lines actually produced: on the 401 and 404 paths
+            # there is no `ci workspace` line, and a fix that pointed at one
+            # sent the reader looking for it (the round-5 review).
+            printed = " and ".join(f"{line.name}" for line in identity) or "ci identity"
             checks.append(
                 _warn(
                     name,
                     f"enabled for {shown}, but no run resolved for this bearer — "
                     "every prompt records no_run",
-                    "See the ci identity and ci workspace lines",
+                    f"See the {printed} line{'s' if len(identity) > 1 else ''}",
                 )
             )
     else:
@@ -1081,9 +1093,11 @@ def _experiment_checks() -> list[DoctorCheck]:
         # bearer to is still worth a line, for every kind of bearer. A server
         # that does not serve GET /v1/me yet is named as such on this branch,
         # not treated as down: the hooks never ask it here.
-        identity, _resolved = _identity_checks(base, key, key_source, exported_run=run)
+        identity, _resolved = _identity_checks(
+            base, key, key_source, exported_run=run, server_reached=server_reached
+        )
     checks.extend(identity)
-    checks.append(_check_ci_endpoint(base, shown))
+    checks.append(endpoint)
     descriptor: DeliveryDescriptor | None = None
     if key and run:
         descriptor_check, descriptor = _check_ci_descriptor(base, key, run)
@@ -1129,16 +1143,19 @@ the transport's wall-clock deadline is what bounds each probe."""
 
 
 def _identity_checks(
-    base: str, key: str, key_source: str, *, exported_run: str | None
+    base: str, key: str, key_source: str, *, exported_run: str | None, server_reached: bool
 ) -> tuple[list[DoctorCheck], str | None]:
     """The identity lines: who CI resolves the bearer to, and where it asks.
 
     ``ci identity`` answers "who does CI think I am" from ``GET /v1/me``, fetched
     without caching (a diagnostic must not create state) and bounded like every
     other probe here - for ANY bearer, since the server answers for harness
-    tokens too. A 404 is a server that predates the route: informational when a
-    run is exported (the hooks never ask it then), a warning with the export as
-    the fix when none is. ``ci workspace`` applies the same routing the hooks apply —
+    tokens too. A 404 carries no version: it is read as "a CI server that
+    predates the route" only when ``/ready`` answered (``server_reached``) -
+    informational then with a run exported, since the hooks never ask it, and a
+    warning with the export as the fix when none is - and as "this URL reaches
+    something else" otherwise, which is a warning about the endpoint on both
+    branches. ``ci workspace`` applies the same routing the hooks apply —
     ``ci_me.run_for`` over this project's ``[experiment].bindings`` entry — so
     the run it prints is the run a session would use, and the fix for each way
     that can fail names the command that fixes it. When a run is exported the
@@ -1162,25 +1179,40 @@ def _identity_checks(
                 )
             ], None
         if answer.status == 404:
-            # This server predates the route (it ships with aisquare-ci #141,
-            # and the CLI releases on its own). With a run exported the hooks
-            # never ask it, so there is nothing to warn about - the round-4
-            # review found a harness operator whose delivery worked being told
-            # to consider turning the experiment off. Without one, the hooks
-            # WOULD ask and get nothing, and the fix is the export.
+            if not server_reached:
+                # A 404 from a URL whose /ready did not answer either is not a
+                # version reading; it is most likely the wrong URL (a stale
+                # host, a prefix that no longer routes, a proxy that 404s the
+                # unknown). A green line here would hide exactly that (round 5).
+                return [
+                    _warn(
+                        "ci identity",
+                        "GET /v1/me is not available at this endpoint (http 404), and neither "
+                        "is /ready — this URL may not reach a CI server at all",
+                        f"Check {ci_client.URL_ENV_VAR} (see the ci endpoint line)",
+                    )
+                ], None
+            # /ready answers and /v1/me does not: a CI server that predates the
+            # route (it ships with aisquare-ci #141, and the CLI releases on
+            # its own). With a run exported the hooks never ask it, so there is
+            # nothing to warn about - round 4 found a harness operator whose
+            # delivery worked being told to consider turning the experiment
+            # off. Without one, the hooks WOULD ask and get nothing, and the
+            # fix is the export.
             if exported_run is not None:
                 return [
                     _ok(
                         "ci identity",
-                        "not checked: this server does not serve GET /v1/me yet (http 404); "
-                        f"the exported run {exported_run} is used as-is",
+                        "not checked: /ready answers but GET /v1/me is not served (http 404), so "
+                        f"this CI server predates the route; the exported run {exported_run} "
+                        "is used as-is",
                     )
                 ], None
             return [
                 _warn(
                     "ci identity",
-                    "this server does not serve GET /v1/me yet (http 404), so no run can be "
-                    "resolved for this bearer",
+                    "/ready answers but GET /v1/me is not served (http 404): this CI server "
+                    "predates the route, so no run can be resolved for this bearer",
                     "Export the run the controller published until the server is upgraded: "
                     "export AISQUARE_CI_RUN=run_…",
                 )

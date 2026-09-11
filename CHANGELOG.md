@@ -32,9 +32,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     round trip to be refused. Signing out also forgets the cached `GET /v1/me`
     answer for that token, and that answer is served only for the server it
     came from. `doctor` asks `GET /v1/me` for an experiment token too, so the
-    `ci identity` line always says who the server resolved; a server that does
-    not serve the route yet is named as such (and, with a run exported, is not
-    a warning), never reported as down.
+    `ci identity` line always says who the server resolved; a CI server that
+    answers `/ready` but not the route is named as one that predates it (and,
+    with a run exported, is not a warning), while a URL that answers neither
+    is a warning about the URL rather than a claim about the server.
   - **`doctor` says who CI thinks you are.** The `ci test bed` line names the
     credential in play (experiment token, or signed in as you — never its
     value); signed in, two more lines follow: `ci identity` (the principal the

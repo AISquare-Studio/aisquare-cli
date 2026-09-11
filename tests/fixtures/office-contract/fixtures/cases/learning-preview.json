@@ -1,0 +1,113 @@
+{
+  "id": "learning-preview",
+  "requirement": "A context preview is candidate-only: it carries no run id and no injection claim, and the request rejects a run_id parameter.",
+  "why_it_matters": "backend-v1.4.md §5.4. A preview shows what WOULD be assembled. If it could carry the current session's run id, the same payload would be indistinguishable from a record of context actually served to that run — and the adapter would be one careless field away from forging an injection audit trail. The defence is doubled: the request refuses run_id, and the response model has no place to put one.",
+  "contract_revision": "1.4",
+  "documents": [
+    {
+      "name": "the candidate preview",
+      "schema": "praxis.json",
+      "pointer": "/$defs/PreviewResult",
+      "value": {
+        "status": "ok",
+        "data": {
+          "candidate_only": true,
+          "context_text": "Prefer npm test over invoking node --test with a directory; directory mode loads non-test helpers.",
+          "insight_ids": ["ins_7a21", "ins_9c04"],
+          "token_count": 38,
+          "studio_id": "std_office",
+          "stable_agent_id": "sa_nova"
+        },
+        "stale": false,
+        "observed_at": "2026-09-11T08:41:03+00:00",
+        "last_success_at": "2026-09-11T08:41:03+00:00",
+        "error": null
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/data/candidate_only", "value": true, "note": "required and const: there is no preview that is not a candidate" },
+        { "op": "absent", "pointer": "/data/run_id", "note": "the whole rule — no run is named" },
+        { "op": "absent", "pointer": "/data/injection_id" },
+        { "op": "absent", "pointer": "/data/served_at", "note": "nothing was served, so there is no serve time" },
+        { "op": "length", "pointer": "/data/insight_ids", "value": 2 },
+        { "op": "equal", "pointer": "/data/token_count", "value": 38 }
+      ]
+    },
+    {
+      "name": "a real injection record, by contrast, names its run and when it was served",
+      "schema": "praxis.json",
+      "pointer": "/$defs/InjectionRecord",
+      "value": {
+        "run_id": "run_8fc21a",
+        "studio_id": "std_office",
+        "stable_agent_id": "sa_nova",
+        "bundle_id": "bnd_1102",
+        "insight_ids": ["ins_7a21"],
+        "served_at": "2026-09-11T08:12:44+00:00"
+      },
+      "assert": [
+        { "op": "present", "pointer": "/run_id", "note": "an injection DID happen, against a specific run" },
+        { "op": "present", "pointer": "/served_at" },
+        { "op": "absent", "pointer": "/consumed", "note": "serving is observable; a model consuming it is not" },
+        { "op": "absent", "pointer": "/applied" }
+      ]
+    },
+    {
+      "name": "the request carrying run_id is refused",
+      "schema": "error.json",
+      "value": {
+        "error": "invalid",
+        "detail": "run_id: the learning preview is candidate-only and does not accept a run; drop the parameter."
+      },
+      "assert": [{ "op": "equal", "pointer": "/error", "value": "invalid" }]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "a preview that forwarded the session's run",
+      "schema": "praxis.json",
+      "pointer": "/$defs/ContextPreview",
+      "value": {
+        "candidate_only": true,
+        "context_text": "Prefer npm test over invoking node --test with a directory.",
+        "insight_ids": ["ins_7a21"],
+        "token_count": 38,
+        "studio_id": "std_office",
+        "stable_agent_id": "sa_nova",
+        "run_id": "run_8fc21a"
+      },
+      "errors": ["/run_id: unexpected property"],
+      "why": "Exactly the accident the rule exists to prevent: an adapter that had the current run in hand and passed it through. The payload would now look like a record of context served to run_8fc21a, in a shape that creates no audit entry — an injection claim with nothing behind it."
+    },
+    {
+      "name": "a preview that dropped its candidate flag",
+      "schema": "praxis.json",
+      "pointer": "/$defs/ContextPreview",
+      "value": {
+        "candidate_only": false,
+        "context_text": "…",
+        "insight_ids": [],
+        "token_count": null,
+        "studio_id": "std_office",
+        "stable_agent_id": null
+      },
+      "errors": ["/candidate_only: expected true, got false"],
+      "why": "candidate_only is const true. A preview that says it is not a candidate is asserting the context was really assembled and delivered, which this route never does."
+    },
+    {
+      "name": "an injection record claiming the model used the context",
+      "schema": "praxis.json",
+      "pointer": "/$defs/InjectionRecord",
+      "value": {
+        "run_id": "run_8fc21a",
+        "studio_id": "std_office",
+        "stable_agent_id": "sa_nova",
+        "bundle_id": "bnd_1102",
+        "insight_ids": ["ins_7a21"],
+        "served_at": "2026-09-11T08:12:44+00:00",
+        "consumed_by_model": true
+      },
+      "errors": ["/consumed_by_model: unexpected property"],
+      "why": "The platform can observe that it served context. It cannot observe that a model read or acted on it. A UI showing 'the agent used this lesson' on that basis would be reporting an inference as a measurement."
+    }
+  ]
+}

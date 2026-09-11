@@ -72,6 +72,37 @@ explainability = [
   # join the proxy's Run instead of fragmenting into one Run per drain.
   "aisquare[explainability]>=1.1",
 ]
+office = [
+  # `asq office` only -- the local HTTP/SSE/WebSocket server. Nothing else in
+  # this package may import any of these. The hook path and every ordinary
+  # command run in a BASE install, and the Office foundation
+  # (office/models.py, config.py, ports.py) is deliberately buildable there
+  # too: it is pydantic and stdlib, so P02-P14 can import the typed seam
+  # without the serving stack. tests/office/test_foundation_imports.py pins
+  # that by importing the CLI and the foundation with every name below made
+  # unimportable, which is the only form of the check that stays true in a
+  # developer env that happens to have them installed.
+  #
+  # starlette: the ASGI application the routes mount on. >=0.48 is what mcp 2.x
+  # already requires on Python 3.14, so `[office]` and `[serve]` resolve to one
+  # starlette in one environment instead of fighting over it. <2 because the
+  # next major is the next rename, and the failure mode of resolving into it is
+  # an ImportError at startup rather than anything pip would have warned about.
+  "starlette>=0.48,<2",
+  # uvicorn: the server that runs it, with the same upper-bound reasoning.
+  "uvicorn>=0.31,<1",
+  # websockets: uvicorn speaks the ASGI websocket protocol THROUGH this, and it
+  # is not bundled. Without it /ws/term/{id} does not fail at install or at
+  # start-up -- the HTTP routes answer normally and only the upgrade is
+  # refused, which presents as a terminal pane that will not attach and sends
+  # the reader looking at tmux rather than at a missing dependency.
+  "websockets>=15,<18",
+  # httpx2: the bounded HTTP client the platform transport reads through. The
+  # DISTRIBUTION is `httpx2` and the import name is `httpx2` -- not `httpx`,
+  # which is a different distribution on this machine. mcp 2.x pins this same
+  # one, so this adds no second HTTP stack to an env that already has [serve].
+  "httpx2>=2.5,<3",
+]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
   # was the documented way to get the board TUI before textual became core.

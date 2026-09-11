@@ -1,0 +1,99 @@
+{
+  "id": "uncertain-partial-input",
+  "requirement": "Input that was partly delivered answers 202 with an Operation whose status is outcome_unknown, carrying no Receipt — never a fabricated success.",
+  "why_it_matters": "backend-v1.4.md §3.4. Typing into a live terminal can fail halfway: three of five keys land, then the pane dies. The back-end knows something happened and cannot say what. Reporting 200 with a Receipt would claim a delivery nobody observed; reporting failure would claim nothing happened. outcome_unknown is the only honest answer, and it is never retried automatically.",
+  "contract_revision": "1.4",
+  "documents": [
+    {
+      "name": "the request: an ask with two tabs to submit",
+      "schema": "request.json",
+      "pointer": "/$defs/ResolveRequest",
+      "value": {
+        "prompt_id": "pmt_01hq9g3r",
+        "selections": [[0], [1, 2]],
+        "other": { "0": "" }
+      },
+      "assert": [{ "op": "equal", "pointer": "/prompt_id", "value": "pmt_01hq9g3r" }]
+    },
+    {
+      "name": "202 — outcome_unknown, no receipt",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9g8t",
+        "kind": "prompt.resolve",
+        "target": { "agent_id": "agt_quill" },
+        "status": "outcome_unknown",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:05+00:00",
+        "receipt": null,
+        "error": {
+          "code": "outcome_unknown",
+          "detail": "3 of 6 keys were sent before the pane stopped responding; the dialog was not observed to close.",
+          "retryable": false
+        }
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/status", "value": "outcome_unknown" },
+        { "op": "equal", "pointer": "/receipt", "value": null, "note": "no Receipt: a receipt would assert a delivery that was not observed" },
+        { "op": "equal", "pointer": "/error/code", "value": "outcome_unknown" },
+        { "op": "equal", "pointer": "/error/retryable", "value": false, "note": "automatic replay could type the tail of the plan into whatever is on the pane now" }
+      ]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "a fabricated success receipt on an unknown outcome",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9g8t",
+        "kind": "prompt.resolve",
+        "target": { "agent_id": "agt_quill" },
+        "status": "outcome_unknown",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:05+00:00",
+        "receipt": {
+          "delivered": "typed",
+          "detail": "typed Down, Space, Tab, Down, Down, Enter into pane %16",
+          "keys": ["Down", "Space", "Tab", "Down", "Down", "Enter"],
+          "at": "2026-09-11T08:41:05+00:00",
+          "closed": true
+        },
+        "error": null
+      },
+      "fails_assertion": { "op": "equal", "pointer": "/receipt", "value": null },
+      "why": "The status admits the outcome is unknown while the receipt claims all six keys landed and the dialog closed. Both cannot be true. The UI would show the prompt as answered and the user would never revisit it."
+    },
+    {
+      "name": "marking the uncertain outcome retryable",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9g8t",
+        "kind": "prompt.resolve",
+        "target": { "agent_id": "agt_quill" },
+        "status": "outcome_unknown",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:05+00:00",
+        "receipt": null,
+        "error": { "code": "outcome_unknown", "detail": "partial delivery", "retryable": true }
+      },
+      "fails_assertion": { "op": "equal", "pointer": "/error/retryable", "value": false },
+      "why": "An uncertain mutation is never automatically retryable (SHARED wire decision 5). Replaying a half-sent keystroke plan types its tail into whatever dialog is on the pane now."
+    },
+    {
+      "name": "an outcome_unknown that is not a real status",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9g8t",
+        "kind": "prompt.resolve",
+        "target": { "agent_id": "agt_quill" },
+        "status": "partial",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:05+00:00",
+        "receipt": null,
+        "error": null
+      },
+      "errors": ["/status: expected one of \"queued\", \"running\", \"succeeded\", \"failed\", \"outcome_unknown\", got \"partial\""],
+      "why": "OperationStatus is closed. \"partial\" belongs to Page and ServiceStatus, and reusing it here would blur a half-delivered keystroke plan with a partly-covered page."
+    }
+  ]
+}

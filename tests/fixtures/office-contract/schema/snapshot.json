@@ -1,0 +1,1248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/snapshot.json",
+  "title": "asq Office snapshot",
+  "description": "The body of GET /api/snapshot and the first message on /api/stream: the whole office at one instant (data-contract.md §3 Snapshot, §10). This file also owns the shared $defs — Project, Agent, Task, Question and every enum from §3 — which event.json and plan.json reference by $id. Objects are strict (additionalProperties: false) on purpose: the schema is the contract, so a new field lands here first. §1's ignore-unknown-fields rule is a runtime courtesy between client and server, not a licence for the tests that use this file.",
+  "type": "object",
+  "required": [
+    "v",
+    "seq",
+    "taken_at",
+    "stale",
+    "projects",
+    "agents",
+    "queue",
+    "tasks"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "const": 1,
+      "description": "Contract major version; bumped on any breaking change."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The board event seq this snapshot was built at; monotonic. Also the SSE id."
+    },
+    "taken_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "stale": {
+      "type": "boolean",
+      "description": "true when the last poll failed and this is the previous frame."
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Project"
+      }
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Agent"
+      },
+      "description": "Live sessions in any project, plus rows that ended within the last 10 minutes (state \"ended\", with ended_at, ended_reason and health dead|gone) so the office can show an agent leaving and offer Respawn. An ended row is never in queue: the queue holds attention and waiting only (§7). At the retention deadline the row is dropped with agent.ended already sent and agent.left following (§6)."
+    },
+    "queue": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      },
+      "description": "Agent ids waiting for the user, front first: attention (longest since_s first), then waiting (longest first)."
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Task"
+      },
+      "description": "Open tasks across projects, for grouping and highlights; the plan modal fetches /api/plan for a whole board."
+    },
+    "cost": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/OfficeCost"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque id, stable for the life of the thing it names."
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 with a timezone, e.g. 2026-09-11T08:41:03.512+00:00 (§1)."
+    },
+    "OfficeOrigin": {
+      "type": "string",
+      "enum": [
+        "fleet",
+        "self"
+      ],
+      "description": "fleet = has a tmux pane; self = the user's own terminal session."
+    },
+    "OfficeState": {
+      "type": "string",
+      "enum": [
+        "working",
+        "waiting",
+        "attention",
+        "idle",
+        "ended",
+        "starting"
+      ],
+      "description": "Derived by the back-end (§7): ended if ended_at; idle after 15 min without a heartbeat; attention from the notification hook; waiting from the stop hook; else working."
+    },
+    "OfficeActivity": {
+      "type": "string",
+      "enum": [
+        "planning",
+        "building",
+        "testing",
+        "reviewing",
+        "idle"
+      ],
+      "description": "The last classified tool call within 90 s (§7)."
+    },
+    "QuestionKind": {
+      "type": "string",
+      "enum": [
+        "permission",
+        "plan",
+        "ask",
+        "form",
+        "continue",
+        "question",
+        "note"
+      ],
+      "description": "What the pane is showing (§7). permission = a tool permission dialog; plan = ExitPlanMode approval, whose options change the agent's MODE and so is not a permission; ask = AskUserQuestion tabs (v1.1 'decision' and 'multi' were folded into this one in v1.3 and are not values); form = an MCP elicitation the GUI cannot answer; continue = a press-Enter line; question = the turn ended on a question; note = the turn ended otherwise, and text is the agent's last message, never the placeholder \"Waiting for your input\"."
+    },
+    "ModelFamily": {
+      "type": "string",
+      "enum": [
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku",
+        "other"
+      ],
+      "description": "Derived by the back-end from model (§7); drives the outfit."
+    },
+    "Role": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Open set: manager | coder | runner | reviewer | pm | designer | unassigned | any other string."
+    },
+    "TaskStatus": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Open set: todo | doing | review | blocked | done | dropped | any other string the board uses."
+    },
+    "Project": {
+      "title": "Project",
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "root"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "Store project id, e.g. prj_ab642772bffff136133c9133."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Basename of root, or the codename if set."
+        },
+        "root": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute path."
+        },
+        "codename": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "e.g. maple-bison."
+        },
+        "frozen": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Question": {
+      "title": "Question",
+      "description": "What an agent is waiting on. Present on an Agent iff its state is waiting or attention.",
+      "type": "object",
+      "required": [
+        "kind",
+        "text",
+        "detected_by"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/QuestionKind"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "tool": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "diff": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          },
+          "description": "OPTIONAL EVERYWHERE, and absent whenever the back-end cannot read the labels. Verbatim option text lives in the pane: the permission hook payload carries only a generic message plus tool_input, so a `permission` prompt has options only where there is a pane to capture — that is, origin \"fleet\". A self session has no pane (pane_id is fleet-only, tty is self-only), so its permission prompt carries tool and summary from the hook and NO options; the GUI must not render answer controls for it and the resolve route answers 409 no_gui_answer, naming the terminal. The exception is `ask`, whose options arrive whole in the AskUserQuestion tool_input and so are hook-reachable for either origin — they live in questions[] tabs, not here. Never synthesise a plausible option list to fill this in: an invented label is a button that types something the user did not read."
+        },
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/AskQuestion"
+          }
+        },
+        "plan_md": {
+          "type": "string"
+        },
+        "plan_path": {
+          "type": "string"
+        },
+        "deny_reason": {
+          "type": "boolean"
+        },
+        "asked_user": {
+          "type": "boolean"
+        },
+        "context": {
+          "type": "string"
+        },
+        "raw": {
+          "type": "string"
+        },
+        "detected_by": {
+          "type": "string",
+          "enum": [
+            "hook",
+            "frame",
+            "both"
+          ]
+        },
+        "prompt_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Contract revision 1.4, additive and optional on the v1.3 read path. Opaque identity of ONE observed prompt lifecycle. The same text appearing again after the pane cleared is a different lifecycle and gets a different prompt_id, so an answer prepared against the old prompt cannot land on the new one. A 1.4 resolve/chip/answer requires it and a stale one is refused with stale_prompt and zero input (backend-v1.4.md §5). A v1.3 client that never reads this field keeps working."
+        }
+      }
+    },
+    "Agent": {
+      "title": "Agent",
+      "description": "One session (§3 Agent). question is present iff state is waiting or attention; pane_id iff origin is fleet; since_s is 0 outside waiting/attention. The four v1.3 fields sub, subagents, permission_mode and health are required because each has a safe default the back-end can always emit — none, 0, \"unknown\" and \"unknown\". That is not the same as claiming provider evidence: permission_mode \"unknown\" says the footer line was never read, and health \"unknown\" is what a self session always reports. Fields that DO depend on evidence — model, cost, worktree, stats, turn, pane_alive, pause — stay optional (§3, §7).",
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "project_id",
+        "project_now",
+        "projects",
+        "role",
+        "origin",
+        "state",
+        "activity",
+        "since_s",
+        "morale",
+        "model_family",
+        "up_s",
+        "output_tail",
+        "last_seen_at",
+        "sub",
+        "subagents",
+        "permission_mode",
+        "health"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id",
+          "description": "The session id the hooks use (claude --session-id), so it joins CLI output."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Fleet label (\"nova\") or the 8-char session-id prefix."
+        },
+        "project_id": {
+          "$ref": "#/$defs/Id",
+          "description": "The project the session registered in."
+        },
+        "project_now": {
+          "$ref": "#/$defs/Id",
+          "description": "The project it is touching right now (may differ from project_id); drives position."
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "minItems": 1,
+          "description": "Every project touched in the last hour, project_now first."
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "origin": {
+          "$ref": "#/$defs/OfficeOrigin"
+        },
+        "state": {
+          "$ref": "#/$defs/OfficeState"
+        },
+        "activity": {
+          "$ref": "#/$defs/OfficeActivity"
+        },
+        "doing": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "One line: the session's focus, else derived from the last tool call. Not HTML."
+        },
+        "question": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Question"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present iff state is waiting or attention."
+        },
+        "since_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds in the current waiting/attention state, else 0. Two derivations, deliberately (§7): for \"attention\" it counts from the transition into attention and a re-notification does NOT reset it; for \"waiting\" it counts from the stop hook that opened the wait. A back-end that derives attention wait from a last-seen column which re-notification bumps reports a 600 s wait as 0, and the queue's longest-wait-first ordering silently becomes time-since-last-re-fire."
+        },
+        "morale": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "50 = neutral; 50 + 10·gifts − 15·whips over 24 h, decaying toward 50 (§7)."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Raw model id as reported, e.g. claude-opus-5."
+        },
+        "model_family": {
+          "$ref": "#/$defs/ModelFamily"
+        },
+        "up_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds since started_at."
+        },
+        "tree": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Branch or worktree name (\"feat/checkout-intent\"), or \"main · 4 dirty\"; null when unknown."
+        },
+        "pane_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^%\\d+$",
+          "description": "tmux pane id (\"%14\") when origin is fleet."
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The task it holds a claim on."
+        },
+        "output_tail": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "description": "Last ≤ 6 non-empty pane lines (ANSI stripped) for fleet, or the session's last board notes for self. For the monitor."
+        },
+        "last_seen_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "pause": {
+          "$ref": "#/$defs/Pause"
+        },
+        "pane_alive": {
+          "type": "boolean"
+        },
+        "exit_status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "turn": {
+          "$ref": "#/$defs/Turn"
+        },
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "worktree": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Worktree"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stats": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "files_changed": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "tests_last": {
+                  "type": "string",
+                  "enum": [
+                    "pass",
+                    "fail",
+                    "none"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Cost"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sub": {
+          "$ref": "#/$defs/SubState"
+        },
+        "sub_detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subagents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "permission_mode": {
+          "$ref": "#/$defs/PermissionMode"
+        },
+        "context_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "limited_until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auto_resume": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "health": {
+          "$ref": "#/$defs/PaneHealth"
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ended_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "exit",
+            "clear",
+            "logout",
+            "crash",
+            "killed",
+            "pruned",
+            "other",
+            null
+          ]
+        },
+        "tty": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Task": {
+      "title": "Task",
+      "type": "object",
+      "required": [
+        "id",
+        "project_id",
+        "title",
+        "status",
+        "needs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "project_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "$ref": "#/$defs/TaskStatus"
+        },
+        "needs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "description": "Task ids this depends on."
+        },
+        "claimed_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Agent id holding the claim (lease as asq task claim)."
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The role the task is meant for."
+        }
+      }
+    },
+    "Pause": {
+      "type": "string",
+      "enum": [
+        "none",
+        "paused",
+        "rate_limited",
+        "compacting"
+      ]
+    },
+    "Turn": {
+      "type": "object",
+      "required": [
+        "n"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "n": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_arg": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 120
+        }
+      }
+    },
+    "Worktree": {
+      "type": "object",
+      "required": [
+        "path",
+        "branch",
+        "dirty",
+        "ahead"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "dirty": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ahead": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "files_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tests_last": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "none"
+          ]
+        }
+      }
+    },
+    "HistoryItem": {
+      "type": "object",
+      "required": [
+        "at",
+        "kind",
+        "text"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "answer",
+            "tool",
+            "note",
+            "feedback",
+            "state",
+            "error"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "by": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "user",
+            "system"
+          ]
+        }
+      }
+    },
+    "Diff": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "base",
+        "files",
+        "truncated"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "base": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "status",
+              "additions",
+              "deletions"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "added",
+                  "modified",
+                  "deleted",
+                  "renamed"
+                ]
+              },
+              "additions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "deletions": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "patch": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TokenCounts": {
+      "type": "object",
+      "required": [
+        "in",
+        "out",
+        "cache_write",
+        "cache_read"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "out": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_write": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "CostFlag": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "concentration"
+            },
+            "detail": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "tool",
+            "tokens"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "oversized_response"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "tokens": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "tool",
+            "avg_ms"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "slow_tool"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "avg_ms": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "tool",
+            "count"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "repeated_call"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 3
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "cache_hit"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "low_cache"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "cache_hit": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "rate_usd_per_min"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "burn"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "rate_usd_per_min": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "Cost": {
+      "type": "object",
+      "required": [
+        "session",
+        "session_usd",
+        "turn",
+        "turn_usd",
+        "calls",
+        "rate_usd_per_min",
+        "cache_hit",
+        "by_tool",
+        "share_today",
+        "price_known",
+        "flags",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/TokenCounts"
+        },
+        "session_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "turn": {
+          "$ref": "#/$defs/TokenCounts"
+        },
+        "turn_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rate_usd_per_min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_hit": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "by_tool": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "required": [
+              "tool",
+              "calls",
+              "resp_tokens"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "calls": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "resp_tokens": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "avg_ms": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "share_today": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "price_known": {
+          "type": "boolean"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CostFlag"
+          }
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      }
+    },
+    "OfficeCost": {
+      "type": "object",
+      "required": [
+        "today_usd",
+        "today",
+        "by_model",
+        "by_project",
+        "by_agent",
+        "rate_usd_per_min",
+        "updated_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "today_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "today": {
+          "$ref": "#/$defs/TokenCounts"
+        },
+        "by_model": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "model",
+              "family",
+              "calls",
+              "usd"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "family": {
+                "$ref": "#/$defs/ModelFamily"
+              },
+              "calls": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "usd": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "by_project": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "project_id",
+              "usd"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "project_id": {
+                "type": "string"
+              },
+              "usd": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "by_agent": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "agent_id",
+              "usd",
+              "share"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "usd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "share": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        },
+        "rate_usd_per_min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      }
+    },
+    "SubState": {
+      "type": "string",
+      "enum": [
+        "none",
+        "tool",
+        "subagents",
+        "compacting",
+        "retrying",
+        "limited",
+        "interrupted",
+        "dialog",
+        "auth"
+      ]
+    },
+    "PermissionMode": {
+      "type": "string",
+      "enum": [
+        "default",
+        "acceptEdits",
+        "plan",
+        "auto",
+        "bypassPermissions",
+        "dontAsk",
+        "unknown"
+      ]
+    },
+    "PaneHealth": {
+      "type": "string",
+      "enum": [
+        "live",
+        "dead",
+        "gone",
+        "unknown"
+      ]
+    },
+    "QuestionOption": {
+      "type": "object",
+      "required": [
+        "key",
+        "label"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "consequence": {
+          "type": "string",
+          "enum": [
+            "none",
+            "remembers",
+            "session",
+            "mode_auto",
+            "mode_bypass",
+            "mode_accept_edits"
+          ]
+        },
+        "default": {
+          "type": "boolean"
+        }
+      }
+    },
+    "AskQuestion": {
+      "type": "object",
+      "required": [
+        "header",
+        "question",
+        "options",
+        "multi"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "header": {
+          "type": "string",
+          "maxLength": 12
+        },
+        "question": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          }
+        },
+        "multi": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

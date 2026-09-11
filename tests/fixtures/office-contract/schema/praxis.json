@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/praxis.json",
+  "title": "asq Office learning views",
+  "description": "Normalised Office models for the deployed Praxis service (backend-v1.4.md §4): insights, the candidate-only context preview, recorded injections and a lesson's provenance. Two invariants have teeth here — a preview is a candidate and carries no run id or injection claim, and an InjectionRecord records what was served, never what a model consumed. This file has no root body; each route names a $defs pointer.",
+  "$defs": {
+    "InsightStatus": {
+      "type": "string",
+      "enum": ["draft", "active", "retired", "unknown"],
+      "description": "Normalised. unknown keeps an upstream status the adapter could not map without inventing a meaning for it."
+    },
+    "InsightSummary": {
+      "title": "InsightSummary",
+      "type": "object",
+      "required": [
+        "insight_id",
+        "studio_id",
+        "stable_agent_id",
+        "status",
+        "text",
+        "summary",
+        "created_at",
+        "updated_at",
+        "source_reference"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "insight_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "studio_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "stable_agent_id": {
+          "type": ["string", "null"],
+          "maxLength": 128,
+          "description": "Null when the platform attributed the insight to no stable agent."
+        },
+        "status": { "$ref": "#/$defs/InsightStatus" },
+        "text": { "type": "string", "maxLength": 8000, "description": "The lesson itself, bounded. Not HTML." },
+        "summary": { "type": ["string", "null"], "maxLength": 1000 },
+        "created_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "updated_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "source_reference": {
+          "type": ["string", "null"],
+          "maxLength": 200,
+          "description": "A bounded opaque reference to where the lesson came from. Never a URL carrying a key, a filesystem path or a raw upstream record."
+        }
+      }
+    },
+    "ContextPreview": {
+      "title": "ContextPreview",
+      "type": "object",
+      "required": ["candidate_only", "context_text", "insight_ids", "token_count", "studio_id", "stable_agent_id"],
+      "additionalProperties": false,
+      "properties": {
+        "candidate_only": {
+          "const": true,
+          "description": "Always true, and required. A preview is what WOULD be assembled; it is not an injection, it creates no audit record, and nothing in this object may be presented as something an agent received."
+        },
+        "context_text": { "type": "string", "maxLength": 32000 },
+        "insight_ids": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "token_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 10000000,
+          "description": "Null when the platform reported none. Zero is a measured zero."
+        },
+        "studio_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "stable_agent_id": { "type": ["string", "null"], "maxLength": 128 }
+      },
+      "description": "No run_id property exists here, and none may be added: the preview request rejects a run_id parameter (backend-v1.4.md §5) precisely so an adapter cannot forward the current session's run and turn a candidate into an apparent injection."
+    },
+    "InjectionRecord": {
+      "title": "InjectionRecord",
+      "type": "object",
+      "required": ["run_id", "studio_id", "stable_agent_id", "bundle_id", "insight_ids", "served_at"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "studio_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "stable_agent_id": { "type": ["string", "null"], "maxLength": 128 },
+        "bundle_id": { "type": ["string", "null"], "maxLength": 128 },
+        "insight_ids": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "served_at": { "$ref": "service.json#/$defs/NullableTimestamp" }
+      },
+      "description": "What the platform served, and when. There is deliberately no consumed/applied/used field: serving context is observable, a model consuming it is not, and the contract will not let a UI claim the second from the first."
+    },
+    "ProvenanceEdge": {
+      "title": "ProvenanceEdge",
+      "type": "object",
+      "required": ["from_ref", "to_ref", "relation"],
+      "additionalProperties": false,
+      "properties": {
+        "from_ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "to_ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "relation": {
+          "type": "string",
+          "enum": ["derived_from", "supersedes", "supports", "contradicts", "references"]
+        }
+      }
+    },
+    "ProvenanceNode": {
+      "title": "ProvenanceNode",
+      "type": "object",
+      "required": ["ref", "kind", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": {
+          "type": "string",
+          "enum": ["insight", "run", "injection", "note"]
+        },
+        "label": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "ProvenanceSummary": {
+      "title": "ProvenanceSummary",
+      "type": "object",
+      "required": ["insight_id", "nodes", "edges", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "insight_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "nodes": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/ProvenanceNode" } },
+        "edges": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/ProvenanceEdge" } },
+        "text": { "type": ["string", "null"], "maxLength": 4000 }
+      },
+      "description": "Bounded typed references and edges, enough to explain the ONE selected lesson. It is not a graph endpoint: the browser cannot ask for a traversal depth, a node set or a query, and the back-end never forwards one."
+    },
+    "TeachIntent": {
+      "type": "string",
+      "enum": ["correction", "preference", "convention", "warning"],
+      "description": "Finite. The browser picks an intent from this list; it never selects the platform actor, the credential, the endpoint or the target scope, all of which the server resolves from the configured binding."
+    },
+    "TeachRequest": {
+      "title": "TeachRequest",
+      "type": "object",
+      "required": ["text", "intent"],
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "intent": { "$ref": "#/$defs/TeachIntent" },
+        "evidence": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/TeachEvidence" },
+          "description": "Optional local references only. Ignored fields are listed in backend-v1.4.md §5; an unknown property is rejected rather than ignored, because a security invariant must never be inferred from one."
+        }
+      }
+    },
+    "TeachEvidence": {
+      "title": "TeachEvidence",
+      "type": "object",
+      "required": ["kind", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["agent", "task", "run", "insight"],
+          "description": "Allowed local evidence references only. There is no path, url, file or raw kind, so the browser cannot make the back-end read or forward something arbitrary."
+        },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "InsightPage": {
+      "title": "Page<InsightSummary>",
+      "type": "object",
+      "required": ["items", "next_cursor", "partial", "coverage"],
+      "additionalProperties": false,
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/InsightSummary" } },
+        "next_cursor": { "$ref": "service.json#/$defs/Cursor" },
+        "partial": { "type": "boolean" },
+        "coverage": { "oneOf": [{ "$ref": "service.json#/$defs/PageCoverage" }, { "type": "null" }] }
+      }
+    },
+    "InjectionPage": {
+      "title": "Page<InjectionRecord>",
+      "type": "object",
+      "required": ["items", "next_cursor", "partial", "coverage"],
+      "additionalProperties": false,
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/InjectionRecord" } },
+        "next_cursor": { "$ref": "service.json#/$defs/Cursor" },
+        "partial": { "type": "boolean" },
+        "coverage": { "oneOf": [{ "$ref": "service.json#/$defs/PageCoverage" }, { "type": "null" }] }
+      }
+    },
+    "InsightsResult": {
+      "title": "ServiceResult<Page<InsightSummary>>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/InsightPage" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "PreviewResult": {
+      "title": "ServiceResult<ContextPreview>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/ContextPreview" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "InjectionsResult": {
+      "title": "ServiceResult<Page<InjectionRecord>>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/InjectionPage" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "ChainResult": {
+      "title": "ServiceResult<ProvenanceSummary>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/ProvenanceSummary" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    }
+  }
+}

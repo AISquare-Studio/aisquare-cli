@@ -1,0 +1,142 @@
+{
+  "id": "self-session-has-no-pane-options",
+  "requirement": "A self-origin permission question carries tool and summary from the hook, detected_by \"hook\", and NO options[] — because verbatim option labels exist only in a pane, and a self session has none. options[] is optional everywhere.",
+  "why_it_matters": "BACKEND-FINDINGS.md §2. The permission hook payload carries a generic message plus tool_input; the real option text (\"Yes, and don't ask again for similar commands in …\") lives in the tmux pane. origin \"fleet\" can capture it; origin \"self\" cannot. A back-end that synthesised a plausible option list would render buttons that type something the user never read. The v1.1 `decision` kind that this finding also names was already REMOVED in v1.3 — folded into `ask` — and stays removed; the surviving half of the fix is that options[] is explicitly optional and evidence-gated.",
+  "contract_revision": "1.3",
+  "documents": [
+    {
+      "name": "self session, permission dialog in the user's own terminal",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/Agent",
+      "value": {
+        "id": "1b070467-2c4d-4f8a-9e11-7a3b5c9d0e42",
+        "label": "1b070467",
+        "project_id": "prj_ab64",
+        "project_now": "prj_ab64",
+        "projects": ["prj_ab64"],
+        "role": "unassigned",
+        "origin": "self",
+        "state": "attention",
+        "activity": "building",
+        "since_s": 42,
+        "morale": 50,
+        "model": "claude-fable-5-1",
+        "model_family": "fable",
+        "up_s": 5200,
+        "tty": "ttys004 (iTerm2 · asq-office)",
+        "output_tail": ["note: office contract v1.3"],
+        "last_seen_at": "2026-09-11T08:40:20+00:00",
+        "sub": "none",
+        "subagents": 0,
+        "permission_mode": "default",
+        "health": "unknown",
+        "question": {
+          "kind": "permission",
+          "text": "Do you want to proceed?",
+          "tool": "Edit",
+          "summary": "src/aisquare/cli/office.py",
+          "detected_by": "hook"
+        }
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/origin", "value": "self" },
+        { "op": "absent", "pointer": "/pane_id", "note": "pane_id is fleet-only — this is why the labels are unreachable" },
+        { "op": "present", "pointer": "/tty", "note": "…and the card names the terminal to answer in instead" },
+        { "op": "equal", "pointer": "/question/detected_by", "value": "hook", "note": "not \"both\": there is no frame to confirm against" },
+        { "op": "absent", "pointer": "/question/options", "note": "the whole point — no pane, no verbatim labels" },
+        { "op": "present", "pointer": "/question/tool", "note": "tool and summary DO come from the hook's tool_input" },
+        { "op": "present", "pointer": "/question/summary" },
+        { "op": "equal", "pointer": "/health", "value": "unknown", "note": "a self session has no pane facts at all" }
+      ]
+    },
+    {
+      "name": "the resolve attempt is refused and names the terminal",
+      "schema": "error.json",
+      "value": {
+        "error": "no_gui_answer",
+        "detail": "1b070467 is your own terminal session; answer the dialog in ttys004 (iTerm2 · asq-office)."
+      },
+      "assert": [{ "op": "equal", "pointer": "/error", "value": "no_gui_answer" }]
+    },
+    {
+      "name": "an ask IS hook-reachable for a self session — its tabs ride in tool_input",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/Question",
+      "value": {
+        "kind": "ask",
+        "text": "Which database should the new service use?",
+        "detected_by": "hook",
+        "questions": [
+          {
+            "header": "Database",
+            "question": "Which database should the new service use?",
+            "multi": false,
+            "options": [
+              { "key": "pg", "label": "PostgreSQL" },
+              { "key": "sqlite", "label": "SQLite" },
+              { "key": "other", "label": "Other" }
+            ]
+          }
+        ]
+      },
+      "assert": [
+        { "op": "absent", "pointer": "/options", "note": "an ask has tabs, never top-level options" },
+        { "op": "length", "pointer": "/questions", "value": 1 },
+        { "op": "equal", "pointer": "/detected_by", "value": "hook", "note": "AskUserQuestion's tool_input carries the whole question, so no pane is needed" }
+      ]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "invented verbatim options on a self session",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/Agent",
+      "value": {
+        "id": "1b070467-2c4d-4f8a-9e11-7a3b5c9d0e42",
+        "label": "1b070467",
+        "project_id": "prj_ab64",
+        "project_now": "prj_ab64",
+        "projects": ["prj_ab64"],
+        "role": "unassigned",
+        "origin": "self",
+        "state": "attention",
+        "activity": "building",
+        "since_s": 42,
+        "morale": 50,
+        "model": "claude-fable-5-1",
+        "model_family": "fable",
+        "up_s": 5200,
+        "tty": "ttys004 (iTerm2 · asq-office)",
+        "output_tail": ["note: office contract v1.3"],
+        "last_seen_at": "2026-09-11T08:40:20+00:00",
+        "sub": "none",
+        "subagents": 0,
+        "permission_mode": "default",
+        "health": "unknown",
+        "question": {
+          "kind": "permission",
+          "text": "Do you want to proceed?",
+          "tool": "Edit",
+          "summary": "src/aisquare/cli/office.py",
+          "deny_reason": true,
+          "detected_by": "both",
+          "options": [
+            { "key": "allow", "label": "Yes", "default": true },
+            { "key": "allow-remember", "label": "Yes, allow all edits during this session", "consequence": "session" },
+            { "key": "deny", "label": "No, and tell Claude what to do differently (esc)" }
+          ]
+        }
+      },
+      "fails_assertion": { "op": "absent", "pointer": "/question/options" },
+      "why": "detected_by claims frame evidence (\"both\") for a session with no pane, and the three labels are therefore guesses. The GUI would render three answer buttons for a dialog it cannot reach, and \"Yes, allow all edits during this session\" is a consequence the user never actually saw offered. The shape is legal, which is why this rule is asserted rather than schema-encoded."
+    },
+    {
+      "name": "an option with no label",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/QuestionOption",
+      "value": { "key": "allow" },
+      "errors": ["/: missing required property \"label\""],
+      "why": "When options[] IS present, every entry must carry the on-screen text. A key without a label is a button with nothing to show the user, which defeats the purpose of reading the labels verbatim."
+    }
+  ]
+}

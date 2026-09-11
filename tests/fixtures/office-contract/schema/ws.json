@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/ws.json",
+  "title": "asq Office terminal WebSocket frames",
+  "description": "The JSON text frames of /ws/term/{id} (data-contract.md §8 for the v1.3 read path, backend-v1.4.md §6 for versioned input). Read-only v1.3 remains supported unchanged: a client that only reads frame/prompt/state/closing needs nothing new. Versioned INPUT is what 1.4 changes — every input frame carries a client-generated request_id, and the server answers that id with a receipt or an operation frame. A reconnect never blindly resends raw input. This file has no root body; each direction names a $defs pointer.",
+  "$defs": {
+    "RequestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+      "description": "Client-generated, unique within the socket. The back-end derives a stable transport-namespaced coordinator key from it, so a WS input reserves an operation exactly the way an HTTP Idempotency-Key does — no mutation reaches the coordinator without a resolved internal key. Reusing a request_id with a different frame body is 409-equivalent: an error frame with code idempotency_conflict."
+    },
+    "ServerFrame": {
+      "title": "ServerFrame",
+      "oneOf": [
+        {
+          "title": "frame",
+          "description": "A full pane capture, ANSI kept; sent only when changed, at most 10/s.",
+          "type": "object",
+          "required": ["type", "rows", "cols", "cursor", "lines"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "frame" },
+            "rows": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "cols": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "cursor": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": { "type": "integer", "minimum": 0 }
+            },
+            "lines": { "type": "array", "maxItems": 1000, "items": { "type": "string" } },
+            "scrollback": { "type": ["integer", "null"], "minimum": 0 },
+            "history_size": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        {
+          "title": "nopane",
+          "description": "origin \"self\": there is nothing to attach to. The connection stays open and sends no frames.",
+          "type": "object",
+          "required": ["type", "detail"],
+          "additionalProperties": false,
+          "properties": { "type": { "const": "nopane" }, "detail": { "type": "string", "maxLength": 400 } }
+        },
+        {
+          "title": "dead",
+          "type": "object",
+          "required": ["type", "detail"],
+          "additionalProperties": false,
+          "properties": { "type": { "const": "dead" }, "detail": { "type": "string", "maxLength": 400 } }
+        },
+        {
+          "title": "error",
+          "description": "1.4 adds the optional code and request_id so a refused input frame can be blamed precisely — stale_prompt, contract_revision_required, idempotency_conflict — instead of only a sentence.",
+          "type": "object",
+          "required": ["type", "detail"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "error" },
+            "detail": { "type": "string", "maxLength": 400 },
+            "code": { "$ref": "error.json#/properties/error" },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        },
+        {
+          "title": "closing",
+          "description": "v1.3 — the server is closing this socket on purpose.",
+          "type": "object",
+          "required": ["type", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "closing" },
+            "reason": { "type": "string", "maxLength": 400 },
+            "resume_hint": { "type": ["string", "null"], "maxLength": 400 }
+          }
+        },
+        {
+          "title": "prompt",
+          "description": "v1.1 — the server's current reading of the prompt on screen, null when none. At 1.4 the Question carries prompt_id, which is the id an answer frame must quote.",
+          "type": "object",
+          "required": ["type", "question"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "prompt" },
+            "question": {
+              "oneOf": [{ "$ref": "snapshot.json#/$defs/Question" }, { "type": "null" }]
+            }
+          }
+        },
+        {
+          "title": "state",
+          "type": "object",
+          "required": ["type", "pause", "pane_alive"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "state" },
+            "pause": { "$ref": "snapshot.json#/$defs/Pause" },
+            "pane_alive": { "type": "boolean" },
+            "sub": { "$ref": "snapshot.json#/$defs/SubState" },
+            "health": { "$ref": "snapshot.json#/$defs/PaneHealth" }
+          }
+        },
+        {
+          "title": "receipt",
+          "description": "The completed answer to one input frame. request_id is required at 1.4 so the client can match it; the work is done and the Receipt says what happened.",
+          "type": "object",
+          "required": ["type", "receipt"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "receipt" },
+            "receipt": { "$ref": "receipt.json" },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        },
+        {
+          "title": "operation",
+          "description": "1.4 — the WS twin of a 202: the input was accepted but its outcome is not settled. The client polls GET /api/operations/{id}. It must not redraw the pane as if the input landed, and must not resend the frame.",
+          "type": "object",
+          "required": ["type", "operation", "request_id"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "operation" },
+            "operation": { "$ref": "operation.json" },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        }
+      ]
+    },
+    "ClientFrame": {
+      "title": "ClientFrame",
+      "description": "Client → server. scroll is read-only and needs no request_id. Every other frame here mutates the pane and requires one at revision 1.4; sent without it, the server answers an error frame with code contract_revision_required and types nothing.",
+      "oneOf": [
+        {
+          "title": "keys",
+          "type": "object",
+          "required": ["type", "keys", "request_id"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "keys" },
+            "keys": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": { "type": "string", "minLength": 1, "maxLength": 32 }
+            },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        },
+        {
+          "title": "literal",
+          "type": "object",
+          "required": ["type", "text", "request_id"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "literal" },
+            "text": { "type": "string", "maxLength": 8000 },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        },
+        {
+          "title": "paste",
+          "type": "object",
+          "required": ["type", "text", "request_id"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "paste" },
+            "text": { "type": "string", "maxLength": 32000 },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        },
+        {
+          "title": "resize",
+          "type": "object",
+          "required": ["type", "cols", "rows"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "resize" },
+            "cols": { "type": "integer", "minimum": 1, "maximum": 1000 },
+            "rows": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          }
+        },
+        {
+          "title": "scroll",
+          "description": "v1.3, read-only: show the screen as it was `before` lines above the live view (0 = live).",
+          "type": "object",
+          "required": ["type", "before"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "scroll" },
+            "before": { "type": "integer", "minimum": 0, "maximum": 100000 }
+          }
+        },
+        {
+          "title": "chip",
+          "description": "A named key chip. At 1.4 it also carries prompt_id when the chip answers a prompt, so a chip cannot land on a prompt that already left the pane.",
+          "type": "object",
+          "required": ["type", "name", "request_id"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "chip" },
+            "name": {
+              "type": "string",
+              "enum": ["Escape", "Enter", "C-c", "BTab", "Up", "Down", "C-o", "C-t", "C-b", "C-x C-k"]
+            },
+            "prompt_id": { "$ref": "request.json#/$defs/PromptId" },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        },
+        {
+          "title": "answer",
+          "description": "The structured resolve, over the socket. The body is the same ResolveRequest the HTTP route takes, so there is one normative answer shape and not a second WS-only vocabulary.",
+          "type": "object",
+          "required": ["type", "answer", "request_id"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "answer" },
+            "answer": { "$ref": "request.json#/$defs/ResolveRequest" },
+            "request_id": { "$ref": "#/$defs/RequestId" }
+          }
+        }
+      ]
+    }
+  }
+}

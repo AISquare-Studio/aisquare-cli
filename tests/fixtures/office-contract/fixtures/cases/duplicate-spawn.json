@@ -1,0 +1,106 @@
+{
+  "id": "duplicate-spawn",
+  "requirement": "The same Idempotency-Key with the same fingerprint returns the one existing operation and hires nobody twice; the same key with a changed body is 409 idempotency_conflict.",
+  "why_it_matters": "backend-v1.4.md §5.2. A retried spawn is the most expensive duplicate in the product: it starts a second agent, in a second pane, holding the same task. Uniqueness is (auth-session scope, key) — deliberately not including kind or target, so reusing one key for a different action is detected rather than slipping past.",
+  "contract_revision": "1.4",
+  "documents": [
+    {
+      "name": "the request body, sent twice with Idempotency-Key spawn-checkout-1",
+      "schema": "request.json",
+      "pointer": "/$defs/SpawnRequest",
+      "value": { "role": "coder", "label": "wren", "task_id": "tsk_02be", "prompt": "Start with the failing test." },
+      "assert": [{ "op": "equal", "pointer": "/role", "value": "coder" }]
+    },
+    {
+      "name": "first call — 202, a new operation",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9e4m",
+        "kind": "agent.spawn",
+        "target": { "project_id": "prj_9c1f" },
+        "status": "running",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:03+00:00",
+        "receipt": null,
+        "error": null
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/operation_id", "value": "op_01hq9e4m" },
+        { "op": "equal", "pointer": "/kind", "value": "agent.spawn" },
+        { "op": "absent", "pointer": "/target/agent_id", "note": "the agent does not exist yet; the target names only what the caller already knew" }
+      ]
+    },
+    {
+      "name": "replay — same key, same fingerprint: the SAME operation, not a second hire",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9e4m",
+        "kind": "agent.spawn",
+        "target": { "project_id": "prj_9c1f", "agent_id": "agt_wren" },
+        "status": "succeeded",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:11+00:00",
+        "receipt": {
+          "delivered": "spawned",
+          "detail": "spawned wren (coder) in feat/checkout-intent",
+          "agent_id": "agt_wren",
+          "at": "2026-09-11T08:41:11+00:00"
+        },
+        "error": null
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/operation_id", "value": "op_01hq9e4m", "note": "same identity as the first call — this is the whole point" },
+        { "op": "equal", "pointer": "/status", "value": "succeeded" },
+        { "op": "equal", "pointer": "/receipt/agent_id", "value": "agt_wren", "note": "one agent, named once" }
+      ]
+    },
+    {
+      "name": "same key, changed body — refused",
+      "schema": "error.json",
+      "value": {
+        "error": "idempotency_conflict",
+        "detail": "Idempotency-Key spawn-checkout-1 was used for agent.spawn with a different body (role reviewer, was coder). Nothing was spawned."
+      },
+      "assert": [{ "op": "equal", "pointer": "/error", "value": "idempotency_conflict" }]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "the replay started a second agent",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9f7p",
+        "kind": "agent.spawn",
+        "target": { "project_id": "prj_9c1f", "agent_id": "agt_wren2" },
+        "status": "succeeded",
+        "submitted_at": "2026-09-11T08:41:12+00:00",
+        "updated_at": "2026-09-11T08:41:19+00:00",
+        "receipt": {
+          "delivered": "spawned",
+          "detail": "spawned wren (coder) in feat/checkout-intent",
+          "agent_id": "agt_wren2",
+          "at": "2026-09-11T08:41:19+00:00"
+        },
+        "error": null
+      },
+      "fails_assertion": { "op": "equal", "pointer": "/operation_id", "value": "op_01hq9e4m" },
+      "why": "A fresh operation_id for the same key and body means the reservation was not honoured: two agents now hold the same task in two panes. The shape is valid, so only the idempotency rule catches it."
+    },
+    {
+      "name": "an operation whose target leaks the resolved pane",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9e4m",
+        "kind": "agent.spawn",
+        "target": { "project_id": "prj_9c1f", "pane_id": "%14" },
+        "status": "running",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:03+00:00",
+        "receipt": null,
+        "error": null
+      },
+      "errors": ["/target/pane_id: unexpected property"],
+      "why": "OperationTarget carries only local ids the caller already named. A pane id is a server-resolved tmux target; echoing it back would hand the browser an argument it must never be able to supply (SHARED wire decision 8)."
+    }
+  ]
+}

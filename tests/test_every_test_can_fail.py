@@ -131,9 +131,18 @@ def _test_functions() -> list[tuple[str, ast.FunctionDef]]:
     IMMEDIATE: a name this file prints in a failure could not be pasted into
     `pytest` to run the offending test. A guard whose output you have to
     translate by hand is one people stop reading.
+
+    RECURSIVE, since the Office packets put tests in `tests/office/`. A plain
+    `glob` reads only `tests/*.py`, so every test in a subdirectory was
+    collected by pytest and audited by nobody — exactly the narrow-universe
+    defect `test_the_sweep_sees_exactly_what_pytest_runs` exists to catch, and
+    it caught it: 75 unseen tests the first time a subdirectory appeared. The
+    identity stays `path.name`, which assumes basenames are unique across the
+    tree; measured zero collisions today, and the sweep's own phantom check
+    fails loudly if that ever stops being true.
     """
     found: list[tuple[str, ast.FunctionDef]] = []
-    for path in sorted(TESTS.glob("test_*.py")):
+    for path in sorted(TESTS.rglob("test_*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):

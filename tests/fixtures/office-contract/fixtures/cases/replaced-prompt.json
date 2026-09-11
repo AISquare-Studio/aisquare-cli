@@ -1,0 +1,90 @@
+{
+  "id": "replaced-prompt",
+  "requirement": "An answer carrying the prompt_id of a prompt that has been replaced is refused with 409 stale_prompt, and zero keystrokes are sent.",
+  "why_it_matters": "backend-v1.4.md §5.1. The same text can appear twice — a second `rm -rf` permission looks identical to the first. Without a lifecycle id, an answer written for the first dialog lands on the second one, approving something the user never read. 'Zero input' is literal: not best-effort, not partial.",
+  "contract_revision": "1.4",
+  "documents": [
+    {
+      "name": "the prompt the user read",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/Question",
+      "value": {
+        "kind": "permission",
+        "text": "Do you want to proceed?",
+        "tool": "Bash",
+        "summary": "rm -rf build/",
+        "deny_reason": true,
+        "detected_by": "both",
+        "prompt_id": "pmt_01hq9c8f",
+        "options": [
+          { "key": "allow", "label": "Yes", "default": true },
+          { "key": "allow-remember", "label": "Yes, and don't ask again for similar commands in ~/code/aisquare-cli", "consequence": "remembers" },
+          { "key": "deny", "label": "No, and tell Claude what to do differently (esc)" }
+        ]
+      },
+      "assert": [{ "op": "equal", "pointer": "/prompt_id", "value": "pmt_01hq9c8f" }]
+    },
+    {
+      "name": "the prompt now on the pane — same text, new lifecycle",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/Question",
+      "value": {
+        "kind": "permission",
+        "text": "Do you want to proceed?",
+        "tool": "Bash",
+        "summary": "rm -rf build/",
+        "deny_reason": true,
+        "detected_by": "both",
+        "prompt_id": "pmt_01hq9d2k",
+        "options": [
+          { "key": "allow", "label": "Yes", "default": true },
+          { "key": "allow-remember", "label": "Yes, and don't ask again for similar commands in ~/code/aisquare-cli", "consequence": "remembers" },
+          { "key": "deny", "label": "No, and tell Claude what to do differently (esc)" }
+        ]
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/prompt_id", "value": "pmt_01hq9d2k" },
+        { "op": "not_equal", "pointer": "/text", "value": null, "note": "identical text to the first prompt; only the id distinguishes them" }
+      ]
+    },
+    {
+      "name": "the request, answering the prompt that is gone",
+      "schema": "request.json",
+      "pointer": "/$defs/ResolveRequest",
+      "value": { "prompt_id": "pmt_01hq9c8f", "option": "allow" },
+      "assert": [{ "op": "equal", "pointer": "/prompt_id", "value": "pmt_01hq9c8f" }]
+    },
+    {
+      "name": "409 stale_prompt — nothing was typed",
+      "schema": "error.json",
+      "value": {
+        "error": "stale_prompt",
+        "detail": "prompt pmt_01hq9c8f is no longer on the pane; the agent is now showing pmt_01hq9d2k. No keys were sent."
+      },
+      "assert": [{ "op": "equal", "pointer": "/error", "value": "stale_prompt" }]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "the back-end typed anyway and reported success",
+      "schema": "receipt.json",
+      "value": {
+        "delivered": "typed",
+        "detail": "typed Enter into pane %14",
+        "keys": ["Enter"],
+        "at": "2026-09-11T08:41:09+00:00",
+        "closed": true
+      },
+      "fails_assertion": { "op": "length", "pointer": "/keys", "value": 0 },
+      "why": "A Receipt exists at all, and it carries a keystroke. The answer the user wrote for the first `rm -rf` prompt was pressed into the second one. The required outcome is the 409 above and an empty key plan — this document is what must never be produced."
+    },
+    {
+      "name": "a 1.4 resolve with no prompt_id",
+      "schema": "request.json",
+      "pointer": "/$defs/ResolveRequest",
+      "value": { "option": "allow" },
+      "errors": ["/: missing required property \"prompt_id\""],
+      "why": "prompt_id is required at 1.4 precisely so an answer cannot be written without naming which prompt it answers. A body without one is rejected before any pane is touched."
+    }
+  ]
+}

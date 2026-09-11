@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/output.json",
+  "title": "asq Office agent output",
+  "description": "The body of GET /api/agents/{id}/output?lines=N (data-contract.md §4): up to 200 ANSI-stripped lines from the agent's tmux pane (fleet) or its board notes (self).",
+  "type": "object",
+  "required": ["lines", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "lines": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 200,
+      "description": "Oldest first; ANSI stripped; not HTML."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["pane", "board"],
+      "description": "pane = tmux capture-pane of a fleet agent; board = the notes a self session filed."
+    }
+  }
+}

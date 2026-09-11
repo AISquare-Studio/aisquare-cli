@@ -1,0 +1,319 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/agent-cost.json",
+  "title": "Agent cost",
+  "description": "GET /api/agents/{id}/cost — one agent's token meter plus its recent API calls (contract v1.2 §4).",
+  "type": "object",
+  "required": [
+    "session",
+    "session_usd",
+    "turn",
+    "turn_usd",
+    "calls",
+    "rate_usd_per_min",
+    "cache_hit",
+    "by_tool",
+    "share_today",
+    "price_known",
+    "flags",
+    "updated_at",
+    "calls_recent"
+  ],
+  "properties": {
+    "session": {
+      "$ref": "#/$defs/TokenCounts"
+    },
+    "session_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "turn": {
+      "$ref": "#/$defs/TokenCounts"
+    },
+    "turn_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "rate_usd_per_min": {
+      "type": "number",
+      "minimum": 0
+    },
+    "cache_hit": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "by_tool": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": [
+          "tool",
+          "calls",
+          "resp_tokens"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "calls": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "resp_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "avg_ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "share_today": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "price_known": {
+      "type": "boolean"
+    },
+    "flags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CostFlag"
+      }
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "calls_recent": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": [
+          "at",
+          "model",
+          "in",
+          "out",
+          "cache_write",
+          "cache_read",
+          "usd"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "in": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "out": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cache_write": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cache_read": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "usd": {
+            "type": "number",
+            "minimum": 0
+          },
+          "tool": {
+            "type": "string"
+          },
+          "ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "TokenCounts": {
+      "type": "object",
+      "required": [
+        "in",
+        "out",
+        "cache_write",
+        "cache_read"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "out": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_write": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "CostFlag": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "concentration"
+            },
+            "detail": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "tool",
+            "tokens"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "oversized_response"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "tokens": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "tool",
+            "avg_ms"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "slow_tool"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "avg_ms": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "tool",
+            "count"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "repeated_call"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 3
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "cache_hit"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "low_cache"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "cache_hit": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "detail",
+            "rate_usd_per_min"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "burn"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "rate_usd_per_min": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    }
+  }
+}

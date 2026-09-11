@@ -1,0 +1,157 @@
+{
+  "id": "run-data",
+  "requirement": "A run page carries verified and unjoined rows side by side, a still-processing detail state, a null platform USD next to a measured zero, and coverage that admits a scope failed.",
+  "why_it_matters": "backend-v1.4.md §3.3 and Task 4. Four different kinds of 'no value' collapse into one lie if the model is sloppy: a run the back-end could not prove belongs to a local agent, a detail that has not finished computing, a cost the platform never reported, and a page missing a scope. Each has to survive the adapter intact.",
+  "contract_revision": "1.4",
+  "documents": [
+    {
+      "name": "a page of runs: one verified, one unjoined, partial coverage",
+      "schema": "explainability.json",
+      "pointer": "/$defs/RunsResult",
+      "value": {
+        "status": "partial",
+        "data": {
+          "items": [
+            {
+              "run_id": "run_8fc21a",
+              "workspace_id": "ws_main",
+              "studio_id": "std_office",
+              "stable_agent_id": "sa_nova",
+              "local_agent_id": "agt_nova",
+              "join": "verified",
+              "state": "completed",
+              "upstream_state_label": "SUCCEEDED",
+              "started_at": "2026-09-11T08:10:00+00:00",
+              "updated_at": "2026-09-11T08:22:41+00:00",
+              "platform_usd": 0,
+              "duration_s": 761
+            },
+            {
+              "run_id": "run_44de07",
+              "workspace_id": "ws_main",
+              "studio_id": null,
+              "stable_agent_id": null,
+              "local_agent_id": null,
+              "join": "unjoined",
+              "state": "running",
+              "upstream_state_label": "IN_PROGRESS",
+              "started_at": "2026-09-11T08:30:00+00:00",
+              "updated_at": null,
+              "platform_usd": null,
+              "duration_s": null
+            }
+          ],
+          "next_cursor": null,
+          "partial": true,
+          "coverage": {
+            "reported_total": null,
+            "total_is_exact": null,
+            "reachable_scope_count": 1,
+            "failed_scope_count": 1,
+            "omitted_scope_count": 0
+          }
+        },
+        "stale": false,
+        "observed_at": "2026-09-11T08:41:03+00:00",
+        "last_success_at": "2026-09-11T08:41:03+00:00",
+        "error": null
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/data/items/0/join", "value": "verified" },
+        { "op": "equal", "pointer": "/data/items/0/local_agent_id", "value": "agt_nova", "note": "a local id appears only on a verified join" },
+        { "op": "equal", "pointer": "/data/items/0/platform_usd", "value": 0, "note": "MEASURED zero — the platform said this run cost nothing" },
+        { "op": "equal", "pointer": "/data/items/1/join", "value": "unjoined" },
+        { "op": "equal", "pointer": "/data/items/1/local_agent_id", "value": null, "note": "unjoined means no local id, not a guessed one" },
+        { "op": "equal", "pointer": "/data/items/1/stable_agent_id", "value": null, "note": "the platform returned none; the schema does not force one" },
+        { "op": "equal", "pointer": "/data/items/1/platform_usd", "value": null, "note": "UNKNOWN cost — a different fact from the zero above" },
+        { "op": "equal", "pointer": "/data/partial", "value": true },
+        { "op": "equal", "pointer": "/data/coverage/failed_scope_count", "value": 1 },
+        { "op": "equal", "pointer": "/data/coverage/reported_total", "value": null, "note": "the upstream established no total, so none is invented" },
+        { "op": "equal", "pointer": "/status", "value": "partial" }
+      ]
+    },
+    {
+      "name": "policies are still processing — a domain state, not an unavailable service",
+      "schema": "explainability.json",
+      "pointer": "/$defs/PolicyResult",
+      "value": {
+        "status": "ok",
+        "data": { "state": "processing", "rows": [] },
+        "stale": false,
+        "observed_at": "2026-09-11T08:41:03+00:00",
+        "last_success_at": "2026-09-11T08:41:03+00:00",
+        "error": null
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/status", "value": "ok", "note": "the READ succeeded" },
+        { "op": "equal", "pointer": "/data/state", "value": "processing", "note": "…the run just has not finished" },
+        { "op": "length", "pointer": "/data/rows", "value": 0 },
+        { "op": "equal", "pointer": "/error", "value": null }
+      ]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "processing modelled as an availability status",
+      "schema": "explainability.json",
+      "pointer": "/$defs/PolicyResult",
+      "value": {
+        "status": "processing",
+        "data": null,
+        "stale": false,
+        "observed_at": "2026-09-11T08:41:03+00:00",
+        "last_success_at": "2026-09-11T08:41:03+00:00",
+        "error": null
+      },
+      "errors": ["/status: expected one of \"ok\", \"unconfigured\", \"unauthorized\", \"forbidden\", \"unsupported\", \"unavailable\", \"partial\", got \"processing\""],
+      "why": "ServiceStatus describes whether the SERVICE answered. A run whose policies are still computing answered perfectly well. Widening the enum here would make 'the platform is down' and 'the analysis is not ready' indistinguishable to the UI."
+    },
+    {
+      "name": "an invented total to fill in coverage",
+      "schema": "explainability.json",
+      "pointer": "/$defs/RunsResult",
+      "value": {
+        "status": "partial",
+        "data": {
+          "items": [],
+          "next_cursor": null,
+          "partial": true,
+          "coverage": {
+            "reported_total": 2,
+            "total_is_exact": true,
+            "reachable_scope_count": 1,
+            "failed_scope_count": 1,
+            "omitted_scope_count": 0
+          }
+        },
+        "stale": false,
+        "observed_at": "2026-09-11T08:41:03+00:00",
+        "last_success_at": "2026-09-11T08:41:03+00:00",
+        "error": null
+      },
+      "fails_assertion": { "op": "equal", "pointer": "/data/coverage/total_is_exact", "value": null },
+      "why": "A scope failed, so the count of what happened to come back cannot be an exact total — but it is reported as one. The UI prints '2 runs' with confidence while an entire workspace is missing. When the upstream establishes no total, both fields stay null."
+    },
+    {
+      "name": "an unjoined run given a local agent id anyway",
+      "schema": "explainability.json",
+      "pointer": "/$defs/RunSummary",
+      "value": {
+        "run_id": "run_44de07",
+        "workspace_id": "ws_main",
+        "studio_id": null,
+        "stable_agent_id": null,
+        "local_agent_id": "agt_nova",
+        "join": "unjoined",
+        "state": "running",
+        "upstream_state_label": "IN_PROGRESS",
+        "started_at": "2026-09-11T08:30:00+00:00",
+        "updated_at": null,
+        "platform_usd": null,
+        "duration_s": null
+      },
+      "fails_assertion": { "op": "equal", "pointer": "/local_agent_id", "value": null },
+      "why": "The join is unproven, yet the row names a local agent — attributing a platform run to a session on this machine on the strength of a name or timestamp match. Verified correlation is the only thing that may populate this field."
+    }
+  ]
+}

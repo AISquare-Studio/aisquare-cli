@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/operation.json",
+  "title": "asq Office operation",
+  "description": "The 202 body of every changed 1.4 mutation and the 200 body of GET /api/operations/{id} (backend-v1.4.md §4, §6). A 200 on a mutation is a Receipt — the work finished and receipt.json describes what happened. A 202 is this: the work is owned by the back-end beyond the request, and the client polls. A v1.3 client cannot receive one, because every route that can answer 202 requires the X-Office-Contract: 1.4 handshake first.",
+  "type": "object",
+  "required": ["operation_id", "kind", "target", "status", "submitted_at", "updated_at", "receipt", "error"],
+  "additionalProperties": false,
+  "properties": {
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Opaque, server-generated, stable for the life of the operation. Never the Idempotency-Key: the key is the client's, this is the back-end's."
+    },
+    "kind": { "$ref": "#/$defs/OperationKind" },
+    "target": { "$ref": "#/$defs/OperationTarget" },
+    "status": { "$ref": "#/$defs/OperationStatus" },
+    "submitted_at": { "$ref": "service.json#/$defs/Timestamp" },
+    "updated_at": { "$ref": "service.json#/$defs/Timestamp" },
+    "receipt": {
+      "oneOf": [{ "$ref": "receipt.json" }, { "type": "null" }],
+      "description": "The Receipt the work produced, once it produced one. Null for every status but succeeded — in particular outcome_unknown never carries a receipt, because inventing one would claim delivery the back-end did not observe."
+    },
+    "error": {
+      "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }],
+      "description": "Null unless status is failed or outcome_unknown. A local 4xx/5xx that never became an operation is error.json instead; backend-v1.4.md §7 documents the translation."
+    }
+  },
+  "$defs": {
+    "OperationStatus": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "outcome_unknown"],
+      "description": "outcome_unknown is not success and is not failure: the back-end delivered something it could not confirm, so it will not be retried automatically and the client must not present it as done. Only succeeded carries a receipt."
+    },
+    "OperationKind": {
+      "type": "string",
+      "enum": [
+        "prompt.resolve",
+        "prompt.resolve_all",
+        "terminal.keys",
+        "terminal.input",
+        "agent.tell",
+        "agent.interrupt",
+        "agent.stop",
+        "agent.spawn",
+        "agent.respawn",
+        "learning.teach"
+      ],
+      "description": "Finite: exactly the changed 1.4 mutations of backend-v1.4.md §4. A retained legacy mutation never produces an Operation, so no kind exists for one."
+    },
+    "OperationTarget": {
+      "title": "OperationTarget",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": { "$ref": "snapshot.json#/$defs/Id" },
+        "agent_id": { "$ref": "snapshot.json#/$defs/Id" }
+      },
+      "description": "Only local identifiers the server resolved itself. Never a pane id, a tmux target, a filesystem path, a workspace key, a credential reference or any part of the validated body — the browser learns nothing from a target it did not already name."
+    }
+  }
+}

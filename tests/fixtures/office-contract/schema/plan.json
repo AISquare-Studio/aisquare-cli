@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/plan.json",
+  "title": "asq Office project plan",
+  "description": "The body of GET /api/plan?project=<id> (data-contract.md §3 Plan, §4): the whole board for one project, todo/doing first, plus the latest manager note whose kind is plan. 404 no_such_project otherwise (error.json).",
+  "type": "object",
+  "required": ["project_id", "tasks"],
+  "additionalProperties": false,
+  "properties": {
+    "project_id": { "$ref": "snapshot.json#/$defs/Id" },
+    "tasks": {
+      "type": "array",
+      "items": { "$ref": "snapshot.json#/$defs/Task" },
+      "description": "Every task on that project's board, todo/doing first."
+    },
+    "note": {
+      "type": ["string", "null"],
+      "description": "The latest manager note of kind plan; markdown-ish text, not HTML."
+    }
+  }
+}

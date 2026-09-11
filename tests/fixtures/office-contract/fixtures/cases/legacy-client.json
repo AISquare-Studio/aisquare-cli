@@ -1,0 +1,179 @@
+{
+  "id": "legacy-client",
+  "requirement": "A v1.3 client's reads keep working unchanged; its call to a changed 1.4 mutation is refused with 409 contract_revision_required before any side effect.",
+  "why_it_matters": "backend-v1.4.md §2. The danger is not that an old client breaks — it is that it half-works: sending a v1 resolve body and reading a 202 Operation as if it were a success Receipt. The handshake makes that impossible by refusing the call outright, and the refusal happens before a single keystroke is sent.",
+  "contract_revision": "1.4",
+  "documents": [
+    {
+      "name": "the v1.3 read path is untouched — no prompt_id, no new fields required",
+      "schema": "snapshot.json",
+      "value": {
+        "v": 1,
+        "seq": 4471,
+        "taken_at": "2026-09-11T08:41:03+00:00",
+        "stale": false,
+        "projects": [
+          { "id": "prj_ab64", "name": "aisquare-cli", "root": "/Users/arbind/code/aisquare-cli", "frozen": false }
+        ],
+        "agents": [
+          {
+            "id": "agt_ember",
+            "label": "ember",
+            "project_id": "prj_ab64",
+            "project_now": "prj_ab64",
+            "projects": ["prj_ab64"],
+            "role": "coder",
+            "origin": "fleet",
+            "state": "attention",
+            "activity": "building",
+            "since_s": 75,
+            "morale": 50,
+            "model": "claude-opus-5",
+            "model_family": "opus",
+            "up_s": 1380,
+            "pane_id": "%14",
+            "output_tail": ["› bash make check"],
+            "last_seen_at": "2026-09-11T08:41:01+00:00",
+            "sub": "none",
+            "subagents": 0,
+            "permission_mode": "default",
+            "health": "live",
+            "question": {
+              "kind": "permission",
+              "text": "Do you want to proceed?",
+              "tool": "Bash",
+              "summary": "make check",
+              "deny_reason": true,
+              "detected_by": "both",
+              "options": [
+                { "key": "allow", "label": "Yes", "default": true },
+                { "key": "allow-remember", "label": "Yes, and don't ask again for similar commands in ~/code/aisquare-cli", "consequence": "remembers" },
+                { "key": "deny", "label": "No, and tell Claude what to do differently (esc)" }
+              ]
+            }
+          }
+        ],
+        "queue": ["agt_ember"],
+        "tasks": []
+      },
+      "assert": [
+        { "op": "absent", "pointer": "/agents/0/question/prompt_id", "note": "a v1.3 payload carries none, and still validates — 1.4 is additive" },
+        { "op": "equal", "pointer": "/queue/0", "value": "agt_ember" }
+      ]
+    },
+    {
+      "name": "the same snapshot at 1.4, with prompt_id added",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/Question",
+      "value": {
+        "kind": "permission",
+        "text": "Do you want to proceed?",
+        "tool": "Bash",
+        "summary": "make check",
+        "deny_reason": true,
+        "detected_by": "both",
+        "prompt_id": "pmt_01hq9k1x",
+        "options": [
+          { "key": "allow", "label": "Yes", "default": true },
+          { "key": "allow-remember", "label": "Yes, and don't ask again for similar commands in ~/code/aisquare-cli", "consequence": "remembers" },
+          { "key": "deny", "label": "No, and tell Claude what to do differently (esc)" }
+        ]
+      },
+      "assert": [{ "op": "present", "pointer": "/prompt_id", "note": "a v1.3 client ignores the field it does not know" }]
+    },
+    {
+      "name": "the legacy mutation is refused, before anything happens",
+      "schema": "error.json",
+      "value": {
+        "error": "contract_revision_required",
+        "detail": "POST /api/queue/{id}/resolve needs X-Office-Contract: 1.4. No keys were sent and no operation was created."
+      },
+      "assert": [{ "op": "equal", "pointer": "/error", "value": "contract_revision_required" }]
+    },
+    {
+      "name": "capabilities tells the client what it may send, before it tries",
+      "schema": "capabilities.json",
+      "value": {
+        "contract_revision": "1.4",
+        "supported_contract_revisions": ["1.3", "1.4"],
+        "artifact_revision": null,
+        "features": [
+          { "id": "local.read", "enabled": true, "reason": null },
+          { "id": "local.actions", "enabled": true, "reason": null },
+          { "id": "terminal.read", "enabled": true, "reason": null },
+          { "id": "terminal.input", "enabled": true, "reason": null },
+          { "id": "prompt.resolve", "enabled": true, "reason": null },
+          { "id": "operations", "enabled": true, "reason": null },
+          { "id": "team_os.views", "enabled": false, "reason": "no Team OS peer is configured" },
+          { "id": "platform.runs", "enabled": true, "reason": null },
+          { "id": "platform.reasoning", "enabled": true, "reason": null },
+          { "id": "platform.learning", "enabled": true, "reason": null },
+          { "id": "platform.teach", "enabled": false, "reason": "the configured workspace does not expose the teach workflow" }
+        ],
+        "providers": [
+          { "id": "claude", "observation": "hooks_and_pane", "structured_input": true, "reason": null }
+        ],
+        "services": [
+          { "id": "cli", "status": "ok", "detail": null, "checked_at": "2026-09-11T08:41:03+00:00" },
+          { "id": "team_os", "status": "unconfigured", "detail": "no endpoint configured", "checked_at": null },
+          { "id": "explainability", "status": "ok", "detail": null, "checked_at": "2026-09-11T08:41:00+00:00" },
+          { "id": "praxis", "status": "partial", "detail": "reads answer; the teach workflow is unavailable", "checked_at": "2026-09-11T08:41:00+00:00" }
+        ]
+      },
+      "assert": [
+        { "op": "contains", "pointer": "/supported_contract_revisions", "value": "1.3", "note": "the v1.3 read path is still served" },
+        { "op": "length", "pointer": "/features", "value": 11, "note": "every feature is reported, disabled ones included" },
+        { "op": "length", "pointer": "/services", "value": 4 },
+        { "op": "equal", "pointer": "/features/10/enabled", "value": false },
+        { "op": "present", "pointer": "/features/10/reason", "note": "a disabled feature always says why" }
+      ]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "a disabled feature reported by omission",
+      "schema": "capabilities.json",
+      "value": {
+        "contract_revision": "1.4",
+        "supported_contract_revisions": ["1.3", "1.4"],
+        "artifact_revision": null,
+        "features": [
+          { "id": "local.read", "enabled": true, "reason": null },
+          { "id": "local.actions", "enabled": true, "reason": null },
+          { "id": "terminal.read", "enabled": true, "reason": null },
+          { "id": "terminal.input", "enabled": true, "reason": null },
+          { "id": "prompt.resolve", "enabled": true, "reason": null },
+          { "id": "operations", "enabled": true, "reason": null },
+          { "id": "platform.runs", "enabled": true, "reason": null },
+          { "id": "platform.reasoning", "enabled": true, "reason": null },
+          { "id": "platform.learning", "enabled": true, "reason": null }
+        ],
+        "providers": [{ "id": "claude", "observation": "hooks_and_pane", "structured_input": true, "reason": null }],
+        "services": [
+          { "id": "cli", "status": "ok", "detail": null, "checked_at": "2026-09-11T08:41:03+00:00" },
+          { "id": "team_os", "status": "unconfigured", "detail": null, "checked_at": null },
+          { "id": "explainability", "status": "ok", "detail": null, "checked_at": "2026-09-11T08:41:00+00:00" },
+          { "id": "praxis", "status": "ok", "detail": null, "checked_at": "2026-09-11T08:41:00+00:00" }
+        ]
+      },
+      "errors": ["/features: fewer than 11 items"],
+      "why": "team_os.views and platform.teach were left out instead of reported as disabled. A client cannot tell 'this back-end cannot do it' from 'this back-end is older than the feature', so it either hides a working control or offers a dead one."
+    },
+    {
+      "name": "a 202 Operation handed to a client that never sent the handshake",
+      "schema": "operation.json",
+      "value": {
+        "operation_id": "op_01hq9m2v",
+        "kind": "prompt.resolve",
+        "target": { "agent_id": "agt_ember" },
+        "status": "queued",
+        "submitted_at": "2026-09-11T08:41:03+00:00",
+        "updated_at": "2026-09-11T08:41:03+00:00",
+        "receipt": null,
+        "error": null
+      },
+      "fails_assertion": { "op": "present", "pointer": "/receipt" },
+      "why": "This document is well-formed and would be returned with 202. A v1.3 client has no notion of 202-versus-200 and reads the body as a Receipt: `delivered` is absent, `detail` is absent, and the UI prints an empty confirmation under the button for work that has not happened. The handshake exists so this body can never reach that client."
+    }
+  ]
+}

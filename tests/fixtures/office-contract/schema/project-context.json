@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/project-context.json",
+  "title": "asq Office project context",
+  "description": "Normalised body behind GET /api/projects/{id}/context (backend-v1.4.md §4): the project context the CLI already holds, plus — only when one is explicitly associated — a Team OS view. The two are separately labelled sources and are never merged into one blob: a peer view can be missing or stale without changing anything the CLI reported. This file has no root body; the route names a $defs pointer.",
+  "$defs": {
+    "CliContext": {
+      "title": "CliContext",
+      "type": "object",
+      "required": ["source", "project_id", "sections"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "cli",
+          "description": "Labels this half as local CLI data."
+        },
+        "project_id": { "$ref": "snapshot.json#/$defs/Id" },
+        "sections": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/ContextSection" }
+        }
+      }
+    },
+    "ContextSection": {
+      "title": "ContextSection",
+      "type": "object",
+      "required": ["title", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "text": { "type": "string", "maxLength": 8000, "description": "Plain text, not HTML." }
+      }
+    },
+    "ProjectContext": {
+      "title": "ProjectContext",
+      "type": "object",
+      "required": ["project_id", "cli", "team_os"],
+      "additionalProperties": false,
+      "properties": {
+        "project_id": { "$ref": "snapshot.json#/$defs/Id" },
+        "cli": { "$ref": "#/$defs/CliContext" },
+        "team_os": {
+          "oneOf": [{ "$ref": "team-os.json#/$defs/TeamOSView" }, { "type": "null" }],
+          "description": "The explicitly associated Team OS view, or null when none is associated or the peer did not answer. Null here never removes or alters anything under cli."
+        }
+      }
+    },
+    "ContextResult": {
+      "title": "ServiceResult<ProjectContext>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/ProjectContext" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    }
+  }
+}

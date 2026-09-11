@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/history.json",
+  "title": "Agent history",
+  "type": "object",
+  "required": [
+    "items"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "snapshot.json#/$defs/HistoryItem"
+      }
+    }
+  },
+  "description": "GET /api/agents/{id}/history — an agent's recent prompts, answers, tools, notes and state changes, newest last (contract v1.1 §4)."
+}

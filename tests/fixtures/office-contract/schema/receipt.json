@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/receipt.json",
+  "title": "asq Office action receipt",
+  "description": "The 200 body of every POST action — tell, note, stop, pause, resume, whip, gift, resolve, assign, spawn (data-contract.md §3 Receipt, §4). The client shows detail verbatim under the button.",
+  "type": "object",
+  "required": [
+    "delivered",
+    "detail"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "delivered": {
+      "type": "string",
+      "enum": [
+        "typed",
+        "board",
+        "spawned",
+        "none"
+      ],
+      "description": "typed = sent into a live tmux pane; board = filed as a board note; spawned = a new fleet agent started; none = nothing to deliver to (e.g. a stop that found no pane)."
+    },
+    "detail": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One human sentence: \"typed y + Enter into pane %14\" / \"filed as a board note to role coder\"."
+    },
+    "agent_id": {
+      "anyOf": [
+        {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "For spawn: the new agent's id (its label is in detail)."
+    },
+    "keys": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string"
+      },
+      "description": "v1.1 — exactly the tmux key names that were sent, in order, e.g. [\"Down\",\"Enter\"]. This is the plan the back-end owns (§7); it is never [\"y\",\"Enter\"] for a permission dialog, because the dialog is a radio list."
+    },
+    "at": {
+      "$ref": "snapshot.json#/$defs/Timestamp",
+      "description": "v1.1 — server time the action was applied."
+    },
+    "closed": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "v1.3, optional. Whether the dialog was OBSERVED to leave the pane within 1 s of the keys being sent. true = observed gone; false = observed still there; null = not observed either way, which is the honest answer for a board delivery, a self session or a capture that did not come back in time. It is a statement about the pane, never a claim that the agent accepted the answer (§3 Receipt, §7)."
+    }
+  }
+}

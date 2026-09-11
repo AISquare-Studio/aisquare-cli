@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/diff.json",
+  "title": "Agent diff",
+  "$ref": "snapshot.json#/$defs/Diff",
+  "description": "GET /api/agents/{id}/diff — what a fleet agent changed in its worktree since its base ref (contract v1.1 §4)."
+}

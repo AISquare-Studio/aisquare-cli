@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/request.json",
+  "title": "asq Office 1.4 request bodies",
+  "description": "The validated request bodies of the changed contract-revision-1.4 mutations (backend-v1.4.md §4, §5). Every one of these routes requires the X-Office-Contract: 1.4 handshake and an Idempotency-Key header, and rejects a v1.3-shaped call with 409 contract_revision_required BEFORE any side effect. Requests are strict: an undocumented property is rejected rather than ignored, because a security or semantic invariant must never be inferred from an unknown field. The fields a request MAY carry and the back-end ignores are listed explicitly in backend-v1.4.md §5. This file has no root body; each route names a $defs pointer.",
+  "$defs": {
+    "PromptId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "The prompt_id the client read from the Question it is answering (snapshot.json#/$defs/Question). It fences the answer to one observed prompt lifecycle: if the pane moved on, the back-end refuses with 409 stale_prompt and sends zero keystrokes."
+    },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9_.:-]{1,255}$",
+      "description": "Documented here for one definition, but carried as the Idempotency-Key HEADER, never in a body. Uniqueness is reserved on (local auth-session scope, key). The compared fingerprint is operation kind + resolved target + validated body; deliberately NOT the uniqueness key, so reusing one key for a different kind or target is detected as 409 idempotency_conflict instead of quietly succeeding."
+    },
+    "ResolveRequest": {
+      "title": "ResolveRequest",
+      "type": "object",
+      "required": ["prompt_id"],
+      "additionalProperties": false,
+      "properties": {
+        "prompt_id": { "$ref": "#/$defs/PromptId" },
+        "option": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "One of question.options[].key, for kind permission | plan | continue. The back-end owns the keystroke plan for that option and echoes it in receipt.keys."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "For the deny path: typed into the \"tell Claude what to do differently\" field."
+        },
+        "comment": { "type": "string", "maxLength": 2000, "description": "Tab-comment text." },
+        "selections": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "array",
+            "maxItems": 5,
+            "items": { "type": "integer", "minimum": 0, "maximum": 4 }
+          },
+          "description": "kind ask: selections[i] holds the chosen option indexes of tab i, in the tabs' on-screen order."
+        },
+        "other": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 2000 },
+          "description": "kind ask: free text for the auto-added \"Other\" choice, keyed by the tab index as a decimal string (\"0\", \"1\", …). The validator cannot constrain key shape, so the back-end rejects a key that is not a decimal index within range with 400 invalid."
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8000,
+          "description": "kind question | note: the literal text to type, sent as a bracketed paste followed by Enter."
+        },
+        "confirm": {
+          "type": "boolean",
+          "description": "Required true when the chosen option would switch the agent into auto or bypass mode; without it the back-end answers 409 mode_change and sends nothing (§5)."
+        }
+      },
+      "description": "POST /api/queue/{id}/resolve at revision 1.4. This is the ONE normative structured resolve body. The v1 {answer} body is historical: backend-v1.4.md §7 records it, and a 1.4 call carrying it is 409 contract_revision_required, not a second interpretation."
+    },
+    "ResolveAllRequest": {
+      "title": "ResolveAllRequest",
+      "type": "object",
+      "required": ["kind", "option", "prompt_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "permission",
+          "description": "Bulk answering is permission-only. A plan changes the agent's mode and an ask has tabs; neither may be swept."
+        },
+        "option": {
+          "type": "string",
+          "enum": ["allow", "deny"],
+          "description": "Never allow-remember: a bulk action must not leave a durable rule behind."
+        },
+        "project_id": { "$ref": "snapshot.json#/$defs/Id" },
+        "prompt_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/PromptId" },
+          "description": "Exactly the prompts the client saw. Any id that is no longer the agent's current prompt is skipped and reported, and the rest still proceed; the back-end never widens the sweep to a prompt the client did not name."
+        }
+      }
+    },
+    "TellRequest": {
+      "title": "TellRequest",
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 8000 } }
+    },
+    "KeysRequest": {
+      "title": "KeysRequest",
+      "type": "object",
+      "required": ["keys"],
+      "additionalProperties": false,
+      "properties": {
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "description": "tmux key names (Enter, Escape, Up, C-c, BTab…). The server resolves which pane they reach from the agent id; the browser never names a pane or a tmux target."
+        }
+      }
+    },
+    "InterruptRequest": {
+      "title": "InterruptRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hard": {
+          "type": "boolean",
+          "description": "Absent or false: the supported soft interrupt, Escape — Claude keeps the work and asks what to do instead. true: C-c, which ends the current tool or turn. One operation, two explicit strengths (§4)."
+        }
+      }
+    },
+    "StopRequest": {
+      "title": "StopRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "SpawnRequest": {
+      "title": "SpawnRequest",
+      "type": "object",
+      "required": ["role"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "$ref": "snapshot.json#/$defs/Role" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "task_id": { "$ref": "snapshot.json#/$defs/Id" },
+        "prompt": { "type": "string", "maxLength": 8000 }
+      }
+    },
+    "RespawnRequest": {
+      "title": "RespawnRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "prompt": { "type": "string", "maxLength": 8000 } }
+    }
+  }
+}

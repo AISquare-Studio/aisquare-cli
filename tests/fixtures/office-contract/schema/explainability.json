@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/explainability.json",
+  "title": "asq Office Explainability views",
+  "description": "Normalised Office models for the deployed Explainability service (backend-v1.4.md §4): run summaries, one run's detail, its policy results and its reasoning. These are Office models, not upstream bodies — no raw platform object, no trace tree, no credential and no catch-all dictionary survives the adapter. This file has no root body; each route names a $defs pointer.",
+  "$defs": {
+    "Join": {
+      "type": "string",
+      "enum": ["verified", "unjoined"],
+      "description": "Whether this run was joined to a local agent through the verified correlation the sidecar recorded. unjoined means the back-end could not prove the link — it is never upgraded by a name match, a timestamp guess or a shared prefix."
+    },
+    "RunState": {
+      "type": "string",
+      "enum": ["queued", "running", "completed", "failed", "cancelled", "unknown"],
+      "description": "Normalised. unknown means the upstream label mapped to none of these, and upstream_state_label keeps what it actually said."
+    },
+    "RunSummary": {
+      "title": "RunSummary",
+      "type": "object",
+      "required": [
+        "run_id",
+        "workspace_id",
+        "studio_id",
+        "stable_agent_id",
+        "local_agent_id",
+        "join",
+        "state",
+        "upstream_state_label",
+        "started_at",
+        "updated_at",
+        "platform_usd",
+        "duration_s"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "studio_id": { "type": ["string", "null"], "maxLength": 128 },
+        "stable_agent_id": {
+          "type": ["string", "null"],
+          "maxLength": 128,
+          "description": "Nullable on purpose: the platform does not always return one, and the schema must not force an adapter to invent it (P00 Task 4)."
+        },
+        "local_agent_id": {
+          "anyOf": [{ "$ref": "snapshot.json#/$defs/Id" }, { "type": "null" }],
+          "description": "The Office session id, present only when join is verified."
+        },
+        "join": { "$ref": "#/$defs/Join" },
+        "state": { "$ref": "#/$defs/RunState" },
+        "upstream_state_label": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "What the platform called this state, bounded and shown as-is next to the normalised state. Null when it named none."
+        },
+        "started_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "updated_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "platform_usd": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "USD the platform itself attributed to this run. Null (not priced / not reported) and 0 (measured as zero) are different values and must stay different — see data-contract.md §7 on local cost, which is a separate source and is never summed with this one."
+        },
+        "duration_s": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 31536000,
+          "description": "Null when the run has not finished or the platform reported none."
+        }
+      }
+    },
+    "RunDetail": {
+      "title": "RunDetail",
+      "type": "object",
+      "required": ["run", "summary_text", "available_details"],
+      "additionalProperties": false,
+      "properties": {
+        "run": { "$ref": "#/$defs/RunSummary" },
+        "summary_text": {
+          "type": ["string", "null"],
+          "maxLength": 4000,
+          "description": "The bounded human summary the platform offers for this run, or null. Never a serialised trace."
+        },
+        "available_details": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "enum": ["policies", "reasoning"]
+          },
+          "description": "Which detail views this run actually has, so the UI does not offer a tab that will answer not_available. No raw trace tree is ever exposed and none is listed here."
+        }
+      }
+    },
+    "DetailState": {
+      "type": "string",
+      "enum": ["processing", "ready", "not_available"],
+      "description": "A domain state, deliberately inside the data model rather than in ServiceStatus: a run whose policies are still processing is a successful read of a run that is not finished, not an unavailable service."
+    },
+    "PolicyRow": {
+      "title": "PolicyRow",
+      "type": "object",
+      "required": ["policy_id", "status", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "policy_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": {
+          "type": "string",
+          "enum": ["passed", "failed", "skipped", "error", "unknown"]
+        },
+        "summary": { "type": ["string", "null"], "maxLength": 1000 }
+      }
+    },
+    "PolicySummary": {
+      "title": "PolicySummary",
+      "type": "object",
+      "required": ["state", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "$ref": "#/$defs/DetailState" },
+        "rows": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/PolicyRow" },
+          "description": "Empty unless state is ready."
+        }
+      }
+    },
+    "ReasoningSection": {
+      "title": "ReasoningSection",
+      "type": "object",
+      "required": ["title", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "text": { "type": "string", "maxLength": 8000 }
+      }
+    },
+    "ReasoningSummary": {
+      "title": "ReasoningSummary",
+      "type": "object",
+      "required": ["state", "summary", "sections"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "$ref": "#/$defs/DetailState" },
+        "summary": { "type": ["string", "null"], "maxLength": 4000 },
+        "sections": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/ReasoningSection" },
+          "description": "Bounded titled plain-text sections. Empty unless state is ready."
+        }
+      }
+    },
+    "RunPage": {
+      "title": "Page<RunSummary>",
+      "type": "object",
+      "required": ["items", "next_cursor", "partial", "coverage"],
+      "additionalProperties": false,
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/RunSummary" } },
+        "next_cursor": { "$ref": "service.json#/$defs/Cursor" },
+        "partial": { "type": "boolean" },
+        "coverage": { "oneOf": [{ "$ref": "service.json#/$defs/PageCoverage" }, { "type": "null" }] }
+      }
+    },
+    "RunsResult": {
+      "title": "ServiceResult<Page<RunSummary>>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/RunPage" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "RunDetailResult": {
+      "title": "ServiceResult<RunDetail>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/RunDetail" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "PolicyResult": {
+      "title": "ServiceResult<PolicySummary>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/PolicySummary" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "ReasoningResult": {
+      "title": "ServiceResult<ReasoningSummary>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/ReasoningSummary" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    }
+  }
+}

@@ -1,0 +1,185 @@
+{
+  "id": "attention-wait-accumulates",
+  "requirement": "For an attention agent, since_s counts from the transition into attention; a re-notification while the agent is parked does not reset it. A waiting agent uses the other derivation.",
+  "why_it_matters": "Confirmed by measurement against the real store (BACKEND-FINDINGS.md §1). The attention path bumps its last-seen column on EVERY re-notification with no state predicate, so deriving the wait from that column reports a true 600 s wait as 0 — and the queue's longest-wait-first ordering (§7) silently degenerates into time-since-last-re-fire, which is near-uniform across parked agents. The freshness bump itself must stay: over 900 s of silence is what makes an agent idle, so removing it drops live prompts out of the queue. Freshness and wait duration are two uses of one clock and are separated on the read side.",
+  "contract_revision": "1.3",
+  "documents": [
+    {
+      "name": "parked 600 s, re-notified at t+60, t+120, t+300 and t+600",
+      "schema": "snapshot.json",
+      "value": {
+        "v": 1,
+        "seq": 5120,
+        "taken_at": "2026-09-11T10:10:00+00:00",
+        "stale": false,
+        "projects": [
+          { "id": "prj_ab64", "name": "aisquare-cli", "root": "/Users/arbind/code/aisquare-cli", "frozen": false }
+        ],
+        "agents": [
+          {
+            "id": "agt_parked",
+            "label": "parked",
+            "project_id": "prj_ab64",
+            "project_now": "prj_ab64",
+            "projects": ["prj_ab64"],
+            "role": "coder",
+            "origin": "fleet",
+            "state": "attention",
+            "activity": "building",
+            "since_s": 600,
+            "morale": 50,
+            "model": "claude-opus-5",
+            "model_family": "opus",
+            "up_s": 4000,
+            "pane_id": "%21",
+            "output_tail": ["› bash git push --force"],
+            "last_seen_at": "2026-09-11T10:10:00+00:00",
+            "sub": "none",
+            "subagents": 0,
+            "permission_mode": "default",
+            "health": "live",
+            "question": {
+              "kind": "permission",
+              "text": "Do you want to proceed?",
+              "tool": "Bash",
+              "summary": "git push --force",
+              "deny_reason": true,
+              "detected_by": "both",
+              "options": [
+                { "key": "allow", "label": "Yes", "default": true },
+                { "key": "allow-remember", "label": "Yes, and don't ask again for similar commands in ~/code/aisquare-cli", "consequence": "remembers" },
+                { "key": "deny", "label": "No, and tell Claude what to do differently (esc)" }
+              ]
+            }
+          },
+          {
+            "id": "agt_quill",
+            "label": "quill",
+            "project_id": "prj_ab64",
+            "project_now": "prj_ab64",
+            "projects": ["prj_ab64"],
+            "role": "reviewer",
+            "origin": "fleet",
+            "state": "waiting",
+            "activity": "reviewing",
+            "since_s": 190,
+            "morale": 50,
+            "model": "claude-sonnet-5",
+            "model_family": "sonnet",
+            "up_s": 4000,
+            "pane_id": "%22",
+            "output_tail": ["I have finished the review."],
+            "last_seen_at": "2026-09-11T10:06:50+00:00",
+            "sub": "none",
+            "subagents": 0,
+            "permission_mode": "default",
+            "health": "live",
+            "question": {
+              "kind": "note",
+              "text": "I have finished the review; the two findings are in the handoff note.",
+              "detected_by": "hook"
+            }
+          }
+        ],
+        "queue": ["agt_parked", "agt_quill"],
+        "tasks": []
+      },
+      "assert": [
+        { "op": "equal", "pointer": "/agents/0/since_s", "value": 600, "note": "the true wait, measured from the transition — NOT 0, which is what the last re-notification would give" },
+        { "op": "equal", "pointer": "/agents/0/last_seen_at", "value": "2026-09-11T10:10:00+00:00", "note": "freshness IS bumped by the re-notification; that is what keeps the prompt out of idle" },
+        { "op": "equal", "pointer": "/agents/1/since_s", "value": 190, "note": "waiting: from the stop hook, which fires once per turn" },
+        { "op": "equal", "pointer": "/queue/0", "value": "agt_parked", "note": "attention outranks waiting, so ordering is meaningful only if the wait is real" }
+      ]
+    }
+  ],
+  "counterexamples": [
+    {
+      "name": "since_s derived from the re-notified last-seen column",
+      "schema": "snapshot.json",
+      "value": {
+        "v": 1,
+        "seq": 5120,
+        "taken_at": "2026-09-11T10:10:00+00:00",
+        "stale": false,
+        "projects": [
+          { "id": "prj_ab64", "name": "aisquare-cli", "root": "/Users/arbind/code/aisquare-cli", "frozen": false }
+        ],
+        "agents": [
+          {
+            "id": "agt_parked",
+            "label": "parked",
+            "project_id": "prj_ab64",
+            "project_now": "prj_ab64",
+            "projects": ["prj_ab64"],
+            "role": "coder",
+            "origin": "fleet",
+            "state": "attention",
+            "activity": "building",
+            "since_s": 0,
+            "morale": 50,
+            "model": "claude-opus-5",
+            "model_family": "opus",
+            "up_s": 4000,
+            "pane_id": "%21",
+            "output_tail": ["› bash git push --force"],
+            "last_seen_at": "2026-09-11T10:10:00+00:00",
+            "sub": "none",
+            "subagents": 0,
+            "permission_mode": "default",
+            "health": "live",
+            "question": {
+              "kind": "permission",
+              "text": "Do you want to proceed?",
+              "tool": "Bash",
+              "summary": "git push --force",
+              "deny_reason": true,
+              "detected_by": "both",
+              "options": [
+                { "key": "allow", "label": "Yes", "default": true },
+                { "key": "allow-remember", "label": "Yes, and don't ask again for similar commands in ~/code/aisquare-cli", "consequence": "remembers" },
+                { "key": "deny", "label": "No, and tell Claude what to do differently (esc)" }
+              ]
+            }
+          }
+        ],
+        "queue": ["agt_parked"],
+        "tasks": []
+      },
+      "fails_assertion": { "op": "gte", "pointer": "/agents/0/since_s", "value": 600 },
+      "why": "The agent has been blocked for ten minutes and reports a zero-second wait, because the re-notification at t+600 bumped the column the derivation read. It sorts to the BACK of the attention queue behind agents that have waited seconds. The shape is valid, so only this rule catches it — which is exactly how the defect shipped green in an earlier plan's test."
+    },
+    {
+      "name": "a waiting agent whose since_s was reset by an unrelated bump",
+      "schema": "snapshot.json",
+      "pointer": "/$defs/Agent",
+      "value": {
+        "id": "agt_quill",
+        "label": "quill",
+        "project_id": "prj_ab64",
+        "project_now": "prj_ab64",
+        "projects": ["prj_ab64"],
+        "role": "reviewer",
+        "origin": "fleet",
+        "state": "waiting",
+        "activity": "reviewing",
+        "since_s": 0,
+        "morale": 50,
+        "model_family": "sonnet",
+        "up_s": 4000,
+        "output_tail": [],
+        "last_seen_at": "2026-09-11T10:10:00+00:00",
+        "sub": "none",
+        "subagents": 0,
+        "permission_mode": "default",
+        "health": "live",
+        "question": {
+          "kind": "note",
+          "text": "I have finished the review; the two findings are in the handoff note.",
+          "detected_by": "hook"
+        }
+      },
+      "fails_assertion": { "op": "gt", "pointer": "/since_s", "value": 0 },
+      "why": "A queued agent always has a positive wait: since_s is 0 only outside waiting/attention. Reporting a queued agent at 0 means the derivation is reading a column something else bumped."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/services.json",
+  "title": "asq Office service inventory",
+  "description": "The body of GET /api/services (backend-v1.4.md §4): the same four service entries capabilities.json carries, probed fresh. It exists separately so a client can re-check availability without re-reading the whole capability document, and so a service going down is one small read rather than a reason to re-negotiate features.",
+  "type": "object",
+  "required": ["services", "checked_at"],
+  "additionalProperties": false,
+  "properties": {
+    "services": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "$ref": "capabilities.json#/$defs/Service" },
+      "description": "Exactly the four ids of capabilities.json#/$defs/ServiceId, each once."
+    },
+    "checked_at": {
+      "$ref": "service.json#/$defs/Timestamp",
+      "description": "When this inventory was assembled. Individual entries keep their own checked_at, which may be older when a probe was skipped."
+    }
+  }
+}

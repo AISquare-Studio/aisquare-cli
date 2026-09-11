@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/cost.json",
+  "title": "Office cost",
+  "description": "GET /api/cost — the office-wide token meter (contract v1.2 §4).",
+  "$ref": "snapshot.json#/$defs/OfficeCost"
+}

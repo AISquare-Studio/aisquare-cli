@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/team-os.json",
+  "title": "asq Office Team OS views",
+  "description": "Normalised Office models for the local Team OS peer (backend-v1.4.md §4): meta, roster and the allow-listed named read views. Team OS is a separate local HTTP peer, so everything here is a ServiceResult — the peer being stopped is an ordinary state, never a reason for a fleet agent to disappear from the snapshot. This file has no root body; each route names a $defs pointer.",
+  "$defs": {
+    "Source": {
+      "const": "team_os",
+      "description": "Every object here is labelled with where it came from, so a Team OS row can never be mistaken for local CLI fleet data."
+    },
+    "PeerLocalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "An id that is stable inside the Team OS peer. It is NEVER an Office fleet agent id or a session id; the two namespaces are not joined and no adapter may pretend they are."
+    },
+    "ViewName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "A name from the back-end's allow-list. The browser can only ask for a name the peer already advertised in TeamOSMeta.views; an arbitrary name is invalid (400), never a path or a query passed through."
+    },
+    "TeamOSMeta": {
+      "title": "TeamOSMeta",
+      "type": "object",
+      "required": ["source", "available", "views", "display_name", "peer_revision"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/Source" },
+        "available": {
+          "type": "boolean",
+          "description": "Whether the peer answered. False with status unavailable is the normal stopped-peer case."
+        },
+        "views": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/ViewName" },
+          "description": "The read views this peer supports and this back-end allows. Empty when the peer is down — an empty allow-list, not an error."
+        },
+        "display_name": {
+          "type": ["string", "null"],
+          "maxLength": 120,
+          "description": "Bounded label for the UI. Null when the peer named none."
+        },
+        "peer_revision": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "The peer's own version string, bounded. Null when it reported none. Never an endpoint, a port or a path."
+        }
+      }
+    },
+    "TeamOSRosterEntry": {
+      "title": "TeamOSRosterEntry",
+      "type": "object",
+      "required": ["source", "peer_local_id", "label", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/Source" },
+        "peer_local_id": { "$ref": "#/$defs/PeerLocalId" },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Display label as the peer gives it. Not HTML; the client escapes it."
+        },
+        "summary": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "One bounded line, or null."
+        }
+      }
+    },
+    "TeamOSViewSection": {
+      "title": "TeamOSViewSection",
+      "type": "object",
+      "required": ["title", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "text": {
+          "type": "string",
+          "maxLength": 8000,
+          "description": "Plain text. Never HTML, never a filesystem read, never a rendered template the peer supplied for the browser to execute."
+        }
+      }
+    },
+    "TeamOSView": {
+      "title": "TeamOSView",
+      "type": "object",
+      "required": ["source", "name", "title", "sections"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/Source" },
+        "name": { "$ref": "#/$defs/ViewName" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "sections": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/TeamOSViewSection" }
+        }
+      }
+    },
+    "RosterPage": {
+      "title": "Page<TeamOSRosterEntry>",
+      "type": "object",
+      "required": ["items", "next_cursor", "partial", "coverage"],
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/TeamOSRosterEntry" }
+        },
+        "next_cursor": { "$ref": "service.json#/$defs/Cursor" },
+        "partial": { "type": "boolean" },
+        "coverage": {
+          "oneOf": [{ "$ref": "service.json#/$defs/PageCoverage" }, { "type": "null" }]
+        }
+      }
+    },
+    "MetaResult": {
+      "title": "ServiceResult<TeamOSMeta>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/TeamOSMeta" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "RosterResult": {
+      "title": "ServiceResult<Page<TeamOSRosterEntry>>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/RosterPage" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    },
+    "ViewResult": {
+      "title": "ServiceResult<TeamOSView>",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "service.json#/$defs/ServiceStatus" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/TeamOSView" }, { "type": "null" }] },
+        "stale": { "type": "boolean" },
+        "observed_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "last_success_at": { "$ref": "service.json#/$defs/NullableTimestamp" },
+        "error": { "oneOf": [{ "$ref": "service.json#/$defs/ServiceError" }, { "type": "null" }] }
+      }
+    }
+  }
+}

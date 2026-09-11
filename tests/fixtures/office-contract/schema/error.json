@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/error.json",
+  "title": "asq Office API error",
+  "description": "The body of every non-2xx /api response (data-contract.md §3 ApiError, §5, and backend-v1.4.md §7 for the 1.4 additions). error is one of the finite codes below; detail says more — for invalid, which field was bad. This is the LOCAL error shape and stays distinct from service.json#/$defs/ServiceError, which describes why a remote read produced no data inside a 200 ServiceResult. backend-v1.4.md §7 documents the translation between them; nothing may mix the two.",
+  "type": "object",
+  "required": [
+    "error"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "type": "string",
+      "enum": [
+        "unauthorized",
+        "no_such_agent",
+        "no_such_project",
+        "no_such_task",
+        "not_fleet",
+        "no_pane",
+        "not_waiting",
+        "fleet_unavailable",
+        "team_disabled",
+        "invalid",
+        "timeout",
+        "internal",
+        "wrong_kind",
+        "not_working",
+        "too_large",
+        "not_ended",
+        "no_gui_answer",
+        "mode_change",
+        "contract_revision_required",
+        "stale_prompt",
+        "idempotency_conflict",
+        "operation_not_found",
+        "unsupported_capability",
+        "target_not_assignable",
+        "binding_required",
+        "service_unconfigured",
+        "service_unavailable",
+        "outcome_unknown"
+      ],
+      "description": "v1: unauthorized 401 · no_such_agent/no_such_project/no_such_task 404 · not_fleet/no_pane/not_waiting/fleet_unavailable/team_disabled 409 · invalid 400 · timeout 504 · internal 500. v1.1: wrong_kind/not_working 409 · too_large 413. v1.3: not_ended/no_gui_answer/mode_change 409. 1.4: contract_revision_required/stale_prompt/idempotency_conflict/unsupported_capability/target_not_assignable/binding_required/service_unconfigured 409 · operation_not_found 404 · service_unavailable 503 · outcome_unknown 409, used only when a caller demands a definitive result the back-end does not have; the ordinary way to report an unconfirmed mutation is 202 with an Operation whose status is outcome_unknown."
+    },
+    "detail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

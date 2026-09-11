@@ -1,0 +1,753 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/event.json",
+  "title": "asq Office stream event",
+  "description": "One `event:` message on GET /api/stream, and one line of fixtures/events.jsonl (data-contract.md §3 Event, §6). A oneOf over the 27 supported kinds — 11 from v1, 7 from v1.1, 3 from v1.2 and 6 from v1.3 — with `kind` as the discriminator; every variant is spelled out in full and titled, so this file is the inventory of what the stream may carry. Agent, Question, Task and the enums are the shared $defs in snapshot.json. Ordering (§6): agent.entered comes before any other event for that id; agent.ended then agent.left are the last two, in that order, with agent.left sent when the 10-minute ended-row retention expires; queue.changed follows any agent.state or prompt.changed that changed the queue.",
+  "type": "object",
+  "required": [
+    "kind"
+  ],
+  "oneOf": [
+    {
+      "title": "agent.entered",
+      "description": "A session appeared. Carries the full Agent; always the first event for that id.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.entered"
+        },
+        "agent": {
+          "$ref": "snapshot.json#/$defs/Agent"
+        }
+      }
+    },
+    {
+      "title": "agent.left",
+      "description": "A session is gone; always the last event for that id. ended = it finished; pruned = the back-end dropped a stale row.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.left"
+        },
+        "agent_id": {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "ended",
+            "pruned"
+          ]
+        }
+      }
+    },
+    {
+      "title": "agent.state",
+      "description": "The agent's state changed. question comes along when the new state is waiting or attention; since_s restarts at 0.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "state",
+        "since_s"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.state"
+        },
+        "agent_id": {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        "state": {
+          "$ref": "snapshot.json#/$defs/OfficeState"
+        },
+        "question": {
+          "anyOf": [
+            {
+              "$ref": "snapshot.json#/$defs/Question"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present iff state is waiting or attention."
+        },
+        "since_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds already spent in the new state (normally 0)."
+        }
+      }
+    },
+    {
+      "title": "agent.activity",
+      "description": "The classified activity (and usually the one-line `doing`) changed.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "activity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.activity"
+        },
+        "agent_id": {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        "activity": {
+          "$ref": "snapshot.json#/$defs/OfficeActivity"
+        },
+        "doing": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "One line: the session's focus, else derived from the last tool call. Not HTML."
+        }
+      }
+    },
+    {
+      "title": "agent.project",
+      "description": "The agent is now touching a different project (cross-repo walk). projects has project_now first.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "project_now",
+        "projects"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.project"
+        },
+        "agent_id": {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        "project_now": {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "snapshot.json#/$defs/Id"
+          },
+          "minItems": 1
+        }
+      }
+    },
+    {
+      "title": "agent.morale",
+      "description": "Morale moved: +10 for a gift, −15 for a whip, ±1 for hourly decay toward 50. morale is the new absolute value, so replaying the event is idempotent.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "morale",
+        "delta"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.morale"
+        },
+        "agent_id": {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        "morale": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "delta": {
+          "type": "integer",
+          "description": "Signed change that produced morale."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The feedback text, e.g. \"gift: …\" / \"whip: …\"."
+        }
+      }
+    },
+    {
+      "title": "agent.output",
+      "description": "The monitor tail changed: the last ≤ 6 pane lines (fleet) or board notes (self).",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "output_tail"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.output"
+        },
+        "agent_id": {
+          "$ref": "snapshot.json#/$defs/Id"
+        },
+        "output_tail": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6
+        }
+      }
+    },
+    {
+      "title": "queue.changed",
+      "description": "The whole queue, front first (attention first, then longest waiting). Follows any agent.state that changed it.",
+      "type": "object",
+      "required": [
+        "kind",
+        "queue"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "queue.changed"
+        },
+        "queue": {
+          "type": "array",
+          "items": {
+            "$ref": "snapshot.json#/$defs/Id"
+          }
+        }
+      }
+    },
+    {
+      "title": "task.changed",
+      "description": "A task was created, claimed, moved or closed. Carries the whole Task.",
+      "type": "object",
+      "required": [
+        "kind",
+        "task"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "task.changed"
+        },
+        "task": {
+          "$ref": "snapshot.json#/$defs/Task"
+        }
+      }
+    },
+    {
+      "title": "event.note",
+      "description": "A board event worth showing (a note, a handoff, feedback). seq is the board event seq; agent_id is the author when a session wrote it; to_role is the addressee.",
+      "type": "object",
+      "required": [
+        "kind",
+        "seq",
+        "text",
+        "note_kind",
+        "at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "event.note"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_id": {
+          "anyOf": [
+            {
+              "$ref": "snapshot.json#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "to_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Not HTML; the client escapes it."
+        },
+        "note_kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The board event kind: plan | handoff | feedback | status | …"
+        },
+        "at": {
+          "$ref": "snapshot.json#/$defs/Timestamp"
+        }
+      }
+    },
+    {
+      "title": "office.stale",
+      "description": "The back-end's poll failed (stale: true, with detail) or recovered (stale: false).",
+      "type": "object",
+      "required": [
+        "kind",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "office.stale"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    {
+      "title": "agent.pause",
+      "description": "v1.1, DEPRECATED in v1.3. Mirrors the project-level hiring freeze for compatibility: pause \"paused\" means the agent's PROJECT is frozen so the manager may not spawn. It never means the process was suspended. New clients read project.frozen and Project.frozen instead.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "pause"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.pause"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "pause": {
+          "$ref": "snapshot.json#/$defs/Pause"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "title": "agent.turn",
+      "description": "v1.1 — where the agent is inside its current turn: the turn counter, when it started, and the tool call in flight. Cleared at Stop.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "turn"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.turn"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "turn": {
+          "$ref": "snapshot.json#/$defs/Turn"
+        }
+      }
+    },
+    {
+      "title": "agent.error",
+      "description": "v1.1 — the last error line the pane printed this turn (at most 200 chars). Cleared at the next turn.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "last_error"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.error"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "last_error": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "title": "agent.pane",
+      "description": "v1.1 — fleet only: the tmux pane exited. exit_status is the code when tmux knew it. The v1.3 agent.health event carries the fuller live | dead | gone reading.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "pane_alive"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.pane"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "pane_alive": {
+          "type": "boolean"
+        },
+        "exit_status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    {
+      "title": "agent.stats",
+      "description": "v1.1 — best-effort worktree statistics, or null. Null means not known and is never guessed (§7).",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "stats"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.stats"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "stats": {
+          "oneOf": [
+            {
+              "$ref": "snapshot.json#/$defs/Stats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "title": "agent.history",
+      "description": "v1.1 — one new history row; the client appends it to the History tab.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "item"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.history"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "item": {
+          "$ref": "snapshot.json#/$defs/HistoryItem"
+        }
+      }
+    },
+    {
+      "title": "queue.answered",
+      "description": "v1.1 — the user answered somewhere, so the GUI clears its prompt UI even when the answer came from the terminal app. by \"terminal\" precedes the prompt.changed null that follows the dialog leaving the pane (§6).",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "by"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "queue.answered"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "by": {
+          "type": "string",
+          "enum": [
+            "gui",
+            "terminal"
+          ]
+        },
+        "answer": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "title": "agent.cost",
+      "description": "v1.2 — one agent's token meter after an API call the transcript recorded; coalesced to at most one per second per agent.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "cost"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.cost"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "cost": {
+          "$ref": "snapshot.json#/$defs/Cost"
+        }
+      }
+    },
+    {
+      "title": "office.cost",
+      "description": "v1.2 — the office-wide token meter; at most one every 5 s.",
+      "type": "object",
+      "required": [
+        "kind",
+        "cost"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "office.cost"
+        },
+        "cost": {
+          "$ref": "snapshot.json#/$defs/OfficeCost"
+        }
+      }
+    },
+    {
+      "title": "cost.flag",
+      "description": "v1.2 — a NEW cost outlier became true. Emitted once when it first holds; it is dropped from Cost.flags when it stops holding, without a second event.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "flag"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "cost.flag"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "flag": {
+          "$ref": "snapshot.json#/$defs/CostFlag"
+        }
+      }
+    },
+    {
+      "title": "agent.sub",
+      "description": "v1.3 — what the pane shows INSIDE the state: a tool running, subagents, compacting, retrying, a usage limit, an interrupt, an overlay dialog or an auth screen. This is the event that most often fires while the board sequence is unchanged, because it comes from pane facts rather than from the store.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "sub",
+        "subagents"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.sub"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "sub": {
+          "$ref": "snapshot.json#/$defs/SubState"
+        },
+        "sub_detail": {
+          "type": "string"
+        },
+        "subagents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_pct": {
+          "type": "number"
+        },
+        "limited_until": {
+          "type": "string"
+        },
+        "auto_resume": {
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "title": "agent.mode",
+      "description": "v1.3 — the permission mode from the hook input or the footer line. It explains why an agent never asks (bypassPermissions, dontAsk) or asks constantly (default).",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "permission_mode"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.mode"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "permission_mode": {
+          "$ref": "snapshot.json#/$defs/PermissionMode"
+        }
+      }
+    },
+    {
+      "title": "agent.health",
+      "description": "v1.3 — the tmux pane reading: live, dead (exited, exit_status known), gone (window missing) or unknown (self sessions). agent.health dead precedes agent.ended.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "health"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.health"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "health": {
+          "$ref": "snapshot.json#/$defs/PaneHealth"
+        },
+        "exit_status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    {
+      "title": "agent.ended",
+      "description": "v1.3 — the session ended. It replaces agent.left for the retention window: the row stays in Snapshot.agents for 10 minutes with state \"ended\", ended_at and ended_reason, so the office can show it leaving and offer Respawn. An ended row is never in the queue. agent.left follows when the deadline passes and the row is dropped.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "ended_reason",
+        "output_tail"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "agent.ended"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "ended_reason": {
+          "type": "string",
+          "enum": [
+            "exit",
+            "clear",
+            "logout",
+            "crash",
+            "killed",
+            "pruned",
+            "other"
+          ]
+        },
+        "exit_status": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_tail": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "title": "project.frozen",
+      "description": "v1.3 — the project-level hiring freeze went on or off (asq fleet pause / resume). The manager may not spawn while it is on; agents already working keep working. This is not process suspension.",
+      "type": "object",
+      "required": [
+        "kind",
+        "project_id",
+        "frozen"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "project.frozen"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "frozen": {
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "title": "prompt.changed",
+      "description": "v1.3 — the pane's prompt appeared, changed or went away; question is null when it went away. Sent on the SSE stream as well as the WS, within one poll of the pane changing, so the GUI's answer controls are never stale for more than about a second. At revision 1.4 the Question carries prompt_id, and the same text in a new lifecycle gets a new id.",
+      "type": "object",
+      "required": [
+        "kind",
+        "agent_id",
+        "question"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "prompt.changed"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "question": {
+          "oneOf": [
+            {
+              "$ref": "snapshot.json#/$defs/Question"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

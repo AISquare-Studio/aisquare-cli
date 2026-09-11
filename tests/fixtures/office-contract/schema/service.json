@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aisquare.studio/office/schema/service.json",
+  "title": "asq Office service envelopes",
+  "description": "Contract revision 1.4 shared building blocks for every read that leaves the local process: ServiceStatus, ServiceError, the ServiceResult envelope and the Page/PageCoverage pair (backend-v1.4.md §3). This file owns no route of its own; the domain schemas (team-os.json, explainability.json, praxis.json, project-context.json) spell the envelope out again around their own typed data, and tools/test/contract-v14.test.mjs asserts every one of them repeats it field for field. Nothing here is ever the body of a local v1.3 read: §5 of data-contract.md keeps owning local errors, and backend-v1.4.md §7 documents the translation between the two.",
+  "$defs": {
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "UTC RFC3339 with an offset, as in data-contract.md §1. Time that is not established is null — never an empty string and never zero."
+    },
+    "NullableTimestamp": {
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "A Timestamp or null. Null means the back-end never established the time, not that it is zero or unknown-but-recent."
+    },
+    "ServiceStatus": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "unconfigured",
+        "unauthorized",
+        "forbidden",
+        "unsupported",
+        "unavailable",
+        "partial"
+      ],
+      "description": "Availability of the service that answered, and nothing else. Domain states — a run still processing, an agent not joined to a workspace, an insight with no recorded injection — are fields of the typed data model, never new members here (SHARED.md, new response models)."
+    },
+    "ServiceErrorCode": {
+      "type": "string",
+      "enum": [
+        "service_unconfigured",
+        "service_unavailable",
+        "unauthorized",
+        "forbidden",
+        "unsupported_capability",
+        "binding_required",
+        "upstream_error",
+        "upstream_invalid",
+        "timeout",
+        "rate_limited",
+        "outcome_unknown",
+        "internal"
+      ],
+      "description": "Finite. A ServiceError never carries an upstream code verbatim; the adapter maps to one of these and puts the bounded human sentence in detail."
+    },
+    "ServiceError": {
+      "title": "ServiceError",
+      "type": "object",
+      "required": ["code", "detail", "retryable"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "$ref": "#/$defs/ServiceErrorCode" },
+        "detail": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "One sanitised, bounded sentence safe to show. Never a stack trace, a credential, a filesystem path, a raw upstream body or a URL carrying a key."
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "Whether an identical read may be repeated. An uncertain mutation outcome is never retryable here; see operation.json."
+        }
+      },
+      "description": "Why a service read did not produce data. Distinct from error.json, which stays the body of a non-2xx local /api response."
+    },
+    "PageCoverage": {
+      "title": "PageCoverage",
+      "type": "object",
+      "required": [
+        "reported_total",
+        "total_is_exact",
+        "reachable_scope_count",
+        "failed_scope_count",
+        "omitted_scope_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "reported_total": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "What the upstream itself reported as the total. Null when it reported none — the back-end never counts a total the source did not establish."
+        },
+        "total_is_exact": {
+          "type": ["boolean", "null"],
+          "description": "Whether reported_total is exact rather than an estimate or a lower bound. Null when reported_total is null."
+        },
+        "reachable_scope_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "Scopes (workspaces, studios, peers) that answered."
+        },
+        "failed_scope_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "Scopes that were asked and failed. Greater than zero is what makes Page.partial true."
+        },
+        "omitted_scope_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "Scopes deliberately not asked (unconfigured, out of the resolved profile). Not a failure."
+        }
+      },
+      "description": "The fixed coverage object. Every field is nullable because an upstream that establishes none of them must not be made to look precise; no adapter may add a field here."
+    },
+    "Cursor": {
+      "type": ["string", "null"],
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9_-]{1,512}$",
+      "description": "Opaque, bound to the query, profile and workspace that produced it. A cursor can only continue the page it came from: it never widens or changes scope, and one presented against a different query/profile/workspace is rejected with invalid (400)."
+    },
+    "Page": {
+      "title": "Page",
+      "type": "object",
+      "required": ["items", "next_cursor", "partial", "coverage"],
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 200,
+          "description": "The typed rows. Each concrete Page repeats this envelope with its own items schema; this generic form is documentation, not a body any route returns."
+        },
+        "next_cursor": { "$ref": "#/$defs/Cursor" },
+        "partial": {
+          "type": "boolean",
+          "description": "True when at least one scope failed, so the page is known to be incomplete. Not the same as having a next_cursor, which only means more rows follow."
+        },
+        "coverage": {
+          "oneOf": [{ "$ref": "#/$defs/PageCoverage" }, { "type": "null" }],
+          "description": "Null when the upstream establishes no coverage at all."
+        }
+      },
+      "description": "Page<T> from SHARED.md. Bounded pagination defaults and maxima are in backend-v1.4.md §5."
+    },
+    "ServiceResult": {
+      "title": "ServiceResult",
+      "type": "object",
+      "required": ["status", "data", "stale", "observed_at", "last_success_at", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "#/$defs/ServiceStatus" },
+        "data": {
+          "description": "The typed payload, or null. Null is explicit and always present as a key. Each concrete result repeats this envelope with its own data schema."
+        },
+        "stale": {
+          "type": "boolean",
+          "description": "True when data is a previously observed value rather than one read now. Only status ok or partial may carry stale data."
+        },
+        "observed_at": {
+          "$ref": "#/$defs/NullableTimestamp",
+          "description": "When the data in this envelope was observed. Null when data is null."
+        },
+        "last_success_at": {
+          "$ref": "#/$defs/NullableTimestamp",
+          "description": "The last time this service answered successfully at all, even if this read did not. Null when it never has."
+        },
+        "error": {
+          "oneOf": [{ "$ref": "#/$defs/ServiceError" }, { "type": "null" }],
+          "description": "Null exactly when status is ok."
+        }
+      },
+      "description": "ServiceResult<T> from SHARED.md. Two invariants the schema cannot express and tools/test/contract-v14.test.mjs enforces instead: status ok has a non-null data and a null error, and unauthorized/forbidden/unconfigured always carry data null with stale false — losing authorisation must drop the cached body, never display a previously authorised one."
+    }
+  }
+}

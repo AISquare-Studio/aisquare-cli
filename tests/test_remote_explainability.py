@@ -164,11 +164,11 @@ def runtime(isolated_home: Path) -> Runtime:
 def _sources(explainability: Any) -> Sources:
     return Sources(
         projects=lambda: [],
-        fleet=lambda: {},
+        fleet=lambda project: {},
         board=lambda: {},
         tasks=lambda: [],
         memory=lambda: [],
-        panes=lambda agent: {"rows": [], "width": 0, "height": 0},
+        panes=lambda agent, project: {"rows": [], "width": 0, "height": 0},
         explainability=explainability,
     )
 

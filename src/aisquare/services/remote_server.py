@@ -8,8 +8,15 @@ in — and every path lives under ``/r/<token>/``:
 * ``/r/<token>/``                 the built ``aisquare-remote`` page (SPA fallback)
 * ``POST /r/<token>/api/unlock``  ``{password}`` → ``Set-Cookie: asq_remote=<sid>``
 * ``GET  /r/<token>/api/...``     ``projects fleet board tasks memory panes/<agent>
-                                  explainability/<agent> devices remote`` — the read-only JSON
-* ``WS   /r/<token>/ws``          frames ``{type, agent?, payload, ts}`` every second
+                                  explainability/<agent> devices remote`` — the read-only JSON.
+                                  ``fleet`` and ``panes/<agent>`` take an optional
+                                  ``?project=<id|name|codename>`` (default: the
+                                  CURRENT project, unchanged); an unknown project
+                                  is a 404 shaped exactly like an unknown agent.
+* ``WS   /r/<token>/ws``          frames ``{type, agent?, payload, ts}`` every second;
+                                  a ``{subscribe_fleet:"<project>"}`` text frame
+                                  switches which project's ``fleet`` frames arrive
+                                  (empty string/``null`` returns to the current one)
 * ``POST /r/<token>/api/...``     the write endpoints: 403 unless ``allow_write``
 
 Three gates, in this order. A wrong or missing token is a **404** on everything,
@@ -64,7 +71,7 @@ from aisquare.core.paths import (
     remote_state_path,
 )
 from aisquare.core.version import __version__
-from aisquare.models import FleetAgent, TeamSession, TurnMetric
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TurnMetric
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -136,6 +143,33 @@ class RequestError(Exception):
 
 class NoSuchAgent(LookupError):
     """``panes/<agent>`` or ``send-keys`` named an agent the project does not have."""
+
+
+class NoSuchProject(LookupError):
+    """A ``?project=`` query or a write body's ``project`` field matches no project.
+
+    ``fleet_service.resolve_project`` raises its own ``NoSuchProject`` (not a
+    ``LookupError``) for both "no match" and "ambiguous" — folded into this one
+    ``LookupError`` shape by :func:`_resolve_project` so every existing
+    ``except LookupError`` (the GET routes, the write dispatcher, the WS tick)
+    turns it into the SAME 404 shape an unknown agent gets — no new branch.
+    """
+
+
+def _resolve_project(ref: str | None) -> ProjectInfo:
+    """The named project (id prefix, name or codename), or the CURRENT one for ``None``.
+
+    Every read and write endpoint that used to hard-code
+    ``fleet_service.resolve_project(None)`` — and so could only ever see the
+    project the server started in — now threads an optional ``project`` through
+    this one place.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        return fleet_service.resolve_project(ref)
+    except fleet_service.NoSuchProject as exc:
+        raise NoSuchProject(str(exc)) from exc
 
 
 def _now() -> datetime:
@@ -502,7 +536,11 @@ class Runtime:
 
 
 Snapshot = Callable[[], object]
-PaneSource = Callable[[str], dict[str, object]]
+FleetSource = Callable[[str | None], object]
+"""An optional project (id/name/codename) → that project's ``fleet ls --json`` payload.
+``None`` is the CURRENT project — byte-identical to today. Raises :class:`NoSuchProject`."""
+PaneSource = Callable[[str, str | None], dict[str, object]]
+"""Agent label, optional project → one pane capture. Raises :class:`NoSuchAgent`/`NoSuchProject`."""
 ExplainabilitySource = Callable[[str], dict[str, object]]
 """Agent label → the §4-I card payload. Raises :class:`NoSuchAgent` only; never anything else."""
 WriteHandler = Callable[[dict[str, Any]], tuple[dict[str, object], str]]
@@ -514,7 +552,7 @@ class Sources:
     """The read-only JSON — by default the very functions ``asq --json`` prints."""
 
     projects: Snapshot
-    fleet: Snapshot
+    fleet: FleetSource
     board: Snapshot
     tasks: Snapshot
     memory: Snapshot
@@ -529,15 +567,15 @@ class Writes:
     handlers: dict[str, WriteHandler]
 
 
-def _live_panes(label: str) -> dict[str, object]:
+def _live_panes(label: str, project: str | None = None) -> dict[str, object]:
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
 
-    project = fleet_service.resolve_project(None)
+    target = _resolve_project(project)
     with store_session() as store:
-        agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
     if agent is None:
-        raise NoSuchAgent(f"no live agent {label!r} in {project.root.name or project.id}")
+        raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
     capture = fleet_service.server_for(agent.tmux_socket).capture(agent.pane_id)
     return {
         "rows": capture.lines,
@@ -547,21 +585,47 @@ def _live_panes(label: str) -> dict[str, object]:
     }
 
 
+def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
+    """The Projects screen's per-project summary — one call's worth of ``fleet ls``, counted.
+
+    PLAN §4-K: a flat object, the five CLI wire words always present, zeros
+    included. The words are the CLI's own (§4-B keeps ``asq --json`` vocabulary
+    verbatim) — the FE maps ``attention`` to "NEEDS YOU" for display; that
+    spelling is never invented here.
+
+    ``unknown`` is the sixth state a derived row can carry and §4-K does not name
+    it, so it is appended ONLY when an agent is actually in it: dropping those
+    rows would make the counts under-report a project's fleet, which on the
+    Projects screen reads as "no agents" and is worse than an extra key the FE
+    can ignore. Every agent is counted exactly once.
+    """
+    counts = {"working": 0, "waiting": 0, "attention": 0, "exited": 0, "lost": 0}
+    for status in agents:
+        counts[status.state] = counts.get(status.state, 0) + 1
+    return counts
+
+
 def live_sources() -> Sources:
     """The real thing: the ``--json`` builders over the live store and tmux."""
 
     def projects() -> object:
         from aisquare.cli.common import projects_json
+        from aisquare.services import fleet as fleet_service
         from aisquare.services import project as project_service
 
-        return projects_json(project_service.list_projects())
+        all_projects = project_service.list_projects()
+        rows = projects_json(all_projects)
+        for row, one in zip(rows, all_projects, strict=True):
+            agents = fleet_service.list_agents(one, live_only=True)
+            row["agents"] = _agent_state_counts(agents)
+        return rows
 
-    def fleet() -> object:
+    def fleet(project: str | None = None) -> object:
         from aisquare.cli.fleet import agents_json
         from aisquare.services import fleet as fleet_service
 
-        project = fleet_service.resolve_project(None)
-        return agents_json(project, fleet_service.list_agents(project, live_only=True))
+        target = _resolve_project(project)
+        return agents_json(target, fleet_service.list_agents(target, live_only=True))
 
     def board() -> object:
         from aisquare.cli.team import board_json
@@ -816,11 +880,11 @@ def live_writes() -> Writes:
         enter = bool(body.get("enter", False))
         if text is None and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
-        project = fleet_service.resolve_project(None)
+        target = _resolve_project(_optional(body, "project"))
         with store_session() as store:
-            agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+            agent = store.fleet_agent_by_label(target.id, label, live_only=True)
         if agent is None:
-            raise NoSuchAgent(f"no live agent {label!r}")
+            raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
         server = fleet_service.server_for(agent.tmux_socket)
         if text:
             server.send_literal(agent.pane_id, text)
@@ -828,8 +892,10 @@ def live_writes() -> Writes:
             server.send_keys(agent.pane_id, *keys)
         if enter:
             server.send_keys(agent.pane_id, "Enter")
-        summary = f"{label} text={len(text or '')}ch keys={len(keys or [])} enter={enter}"
-        return {"agent": label, "sent": True}, summary
+        summary = (
+            f"{label}@{target.id} text={len(text or '')}ch keys={len(keys or [])} enter={enter}"
+        )
+        return {"agent": label, "project": target.id, "sent": True}, summary
 
     return Writes(
         {
@@ -1056,12 +1122,28 @@ def build_app(
         runtime.audit(device.sid, "devices/revoke", sid)
         return JSONResponse({"ok": True, "sid": sid})
 
+    async def fleet_endpoint(request: Request) -> Response:
+        if device_of(request) is None:
+            return _json_error(401, "unauthorized")
+        project = request.query_params.get("project") or None
+        try:
+            payload = await asyncio.to_thread(
+                cache.get, f"fleet:{project or ''}", lambda: reads.fleet(project)
+            )
+        except LookupError as exc:
+            return _json_error(404, "not_found", str(exc))
+        except Exception as exc:
+            log.warning("remote: fleet snapshot failed: %s", exc)
+            return _json_error(503, "unavailable", str(exc))
+        return JSONResponse(payload)
+
     async def panes(request: Request) -> Response:
         if device_of(request) is None:
             return _json_error(401, "unauthorized")
         agent = request.path_params["agent"]
+        project = request.query_params.get("project") or None
         try:
-            payload = await asyncio.to_thread(reads.panes, agent)
+            payload = await asyncio.to_thread(reads.panes, agent, project)
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:
@@ -1141,6 +1223,12 @@ def build_app(
         sid = device.sid
         loop = asyncio.get_running_loop()
         subscribed: set[str] = set()
+        fleet_project: str | None = None
+        """``None`` = the CURRENT project (today's behaviour, unchanged); set by
+        a ``{subscribe_fleet: "<project>"}`` text frame to receive that project's
+        fleet frames instead — one active target per socket, like ``subscribe``
+        for panes. §4-D: the frame shape is unchanged, ``{type:"fleet", payload,
+        ts}``; only WHICH project's ``fleet ls`` payload fills it moves."""
         last: dict[str, str] = {}
 
         async def close_unauthorized() -> None:
@@ -1163,17 +1251,23 @@ def build_app(
                 await send_frame(kind, payload, agent)
 
         async def tick_once() -> None:
-            for kind, compute in (("board", reads.board), ("fleet", reads.fleet)):
-                try:
-                    payload = await snapshot(kind, compute)
-                except Exception as exc:
-                    log.debug("remote: %s frame skipped: %s", kind, exc)
-                    continue
-                await push_if_changed(kind, kind, payload, None)
+            try:
+                payload = await snapshot("board", reads.board)
+                await push_if_changed("board", "board", payload, None)
+            except Exception as exc:
+                log.debug("remote: board frame skipped: %s", exc)
+            fleet_key = f"fleet:{fleet_project or ''}"
+            try:
+                fleet_payload = await asyncio.to_thread(
+                    cache.get, fleet_key, lambda: reads.fleet(fleet_project)
+                )
+                await push_if_changed(fleet_key, "fleet", fleet_payload, None)
+            except Exception as exc:
+                log.debug("remote: fleet frame skipped: %s", exc)
             await push_if_changed("remote", "remote", runtime.remote_json(), None)
             for agent in sorted(subscribed):
                 try:
-                    payload = await asyncio.to_thread(reads.panes, agent)
+                    payload = await asyncio.to_thread(reads.panes, agent, None)
                 except Exception as exc:
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
                 await push_if_changed(f"pane:{agent}", "pane", payload, agent)
@@ -1194,6 +1288,11 @@ def build_app(
                 target = message.get("unsubscribe")
                 if isinstance(target, str):
                     subscribed.discard(target)
+                target = message.get("subscribe_fleet")
+                if isinstance(target, str):
+                    nonlocal fleet_project
+                    fleet_project = target or None
+                    last.pop(f"fleet:{fleet_project or ''}", None)
 
         runtime.register_socket(sid, closer)
         reading = asyncio.ensure_future(reader())
@@ -1218,7 +1317,7 @@ def build_app(
         Route("/api/unlock", unlock, methods=["POST"]),
         Route("/api/remote", remote, methods=["GET"]),
         Route("/api/projects", guarded(reads.projects, "projects"), methods=["GET"]),
-        Route("/api/fleet", guarded(reads.fleet, "fleet"), methods=["GET"]),
+        Route("/api/fleet", fleet_endpoint, methods=["GET"]),
         Route("/api/board", guarded(reads.board, "board"), methods=["GET"]),
         Route("/api/tasks", guarded(reads.tasks, "tasks"), methods=["GET"]),
         Route("/api/memory", guarded(reads.memory, "memory"), methods=["GET"]),
@@ -1464,6 +1563,7 @@ __all__ = [
     "DoctorVerdict",
     "NoRemotePage",
     "NoSuchAgent",
+    "NoSuchProject",
     "RemoteError",
     "RemoteInfo",
     "RemoteUnavailable",

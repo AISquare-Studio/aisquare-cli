@@ -1,0 +1,542 @@
+"""Fleet, panes and send-keys work for ANY project, not just the server's own cwd.
+
+``fleet()``, ``panes/<agent>`` and ``send-keys`` all used to call
+``fleet_service.resolve_project(None)``, so the remote page could only ever see
+the project the server was started in — picking another project in the UI
+silently showed the wrong fleet. These pin the threading of an optional
+``project`` through all three, the 404 an unknown one gets, the per-state agent
+counts on ``GET /api/projects``, and the ``{subscribe_fleet}`` WS option.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+from starlette.testclient import TestClient
+from typer.testing import CliRunner
+
+from aisquare.cli.app import app as cli
+from aisquare.core.paths import remote_audit_path, remote_state_path
+from aisquare.core.store import store_session
+from aisquare.core.workspace import find_project_root, project_id_for
+from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, ProjectInfo
+from aisquare.services import fleet as fleet_service
+from aisquare.services.remote_server import (
+    COOKIE,
+    NoSuchAgent,
+    NoSuchProject,
+    Runtime,
+    Sources,
+    _agent_state_counts,
+    _resolve_project,
+    build_app,
+    live_sources,
+    live_writes,
+)
+
+PASSWORD = "Test1234"
+T0 = datetime(2026, 9, 12, 10, 0, tzinfo=UTC)
+
+
+def _status(label: str, state: FleetAgentState) -> FleetAgentStatus:
+    agent = FleetAgent(
+        id=f"agt_{label}",
+        project_id="prj_x",
+        label=label,
+        role="coder",
+        pane_id="%1",
+        cwd=Path("/tmp/x"),
+        created_at=T0,
+    )
+    return FleetAgentStatus(agent=agent, state=state)
+
+
+# --- the counts themselves (§ the Projects screen summarises without N calls) ----------
+
+
+def test_the_five_wire_words_are_always_present_even_for_an_empty_fleet() -> None:
+    """§4-K: a flat object, all five CLI words, zeros included."""
+    assert _agent_state_counts([]) == {
+        "working": 0,
+        "waiting": 0,
+        "attention": 0,
+        "exited": 0,
+        "lost": 0,
+    }
+
+
+def test_the_wire_word_is_attention_never_needs_you() -> None:
+    """§4-K/§4-B: `asq --json` vocabulary verbatim; the FE maps it to "NEEDS YOU"."""
+    counts = _agent_state_counts([_status("a", "attention"), _status("b", "attention")])
+    assert counts["attention"] == 2
+    assert "needs_you" not in counts
+
+
+def test_a_mixed_fleet_is_counted_per_state() -> None:
+    agents = [
+        _status("a", "working"),
+        _status("b", "working"),
+        _status("c", "waiting"),
+        _status("d", "attention"),
+        _status("e", "exited"),
+    ]
+    assert _agent_state_counts(agents) == {
+        "working": 2,
+        "waiting": 1,
+        "attention": 1,
+        "exited": 1,
+        "lost": 0,
+    }
+
+
+def test_lost_is_always_present_and_unknown_only_when_an_agent_is_in_it() -> None:
+    """``unknown`` is the one state §4-K does not name — never dropped, so the
+    counts cannot under-report a fleet, but never conjured either."""
+    quiet = _agent_state_counts([_status("a", "working")])
+    assert quiet["lost"] == 0, "one of the five, always present"
+    assert "unknown" not in quiet
+    noisy = _agent_state_counts([_status("a", "working"), _status("b", "unknown")])
+    assert noisy["unknown"] == 1
+    assert sum(noisy.values()) == 2, "every agent is counted exactly once"
+
+
+# --- two real projects in one store ----------------------------------------------------
+
+
+@pytest.fixture
+def two_projects(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, str]:
+    """``(current, other)`` — one project pinned active by ``init``, one merely registered.
+
+    The second is what the remote page can now reach and never could before.
+    """
+    current_dir = tmp_path / "current"
+    current_dir.mkdir()
+    monkeypatch.chdir(current_dir)
+    runner = CliRunner()
+    assert runner.invoke(cli, ["init", "--local", "--no-onboard", "--yes"]).exit_code == 0
+    current = fleet_service.resolve_project(None)
+
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other = ProjectInfo(
+        id=project_id_for(find_project_root(other_dir)), root=other_dir, linked_repos=[]
+    )
+    with store_session() as store:
+        store.ensure_project(other)
+    assert other.id != current.id
+    return current.id, other.id
+
+
+def _seed_agent(project_id: str, label: str, pane_id: str = "%9") -> None:
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{project_id[-6:]}_{label}",
+                project_id=project_id,
+                label=label,
+                role="coder",
+                pane_id=pane_id,
+                cwd=Path("/tmp/x"),
+                created_at=T0,
+            )
+        )
+
+
+class _FakeFacts:
+    cursor_x = 0
+    cursor_y = 0
+    width = 80
+    height = 24
+
+
+class _FakeCapture:
+    def __init__(self, pane_id: str) -> None:
+        self.lines = [f"pane {pane_id}"]
+        self.facts = _FakeFacts()
+
+
+class _FakeTmux:
+    """Enough tmux for ``panes`` and ``send-keys``; the real one needs a live server."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, tuple[str, ...]]] = []
+
+    def capture(self, pane_id: str, **kwargs: Any) -> _FakeCapture:
+        return _FakeCapture(pane_id)
+
+    def send_literal(self, pane_id: str, text: str) -> None:
+        self.sent.append(("literal", (pane_id, text)))
+
+    def send_keys(self, pane_id: str, *keys: str) -> None:
+        self.sent.append(("keys", (pane_id, *keys)))
+
+
+@pytest.fixture
+def fake_tmux(monkeypatch: pytest.MonkeyPatch) -> _FakeTmux:
+    server = _FakeTmux()
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: server)
+    return server
+
+
+# --- _resolve_project, the one place the threading lands -------------------------------
+
+
+def test_no_project_is_still_the_current_one(two_projects: tuple[str, str]) -> None:
+    current, _other = two_projects
+    assert _resolve_project(None).id == current
+
+
+def test_a_named_project_resolves_to_that_project(two_projects: tuple[str, str]) -> None:
+    _current, other = two_projects
+    assert _resolve_project(other).id == other
+
+
+def test_an_unknown_project_raises_a_lookup_error(two_projects: tuple[str, str]) -> None:
+    """A ``LookupError``, so every existing ``except LookupError`` → 404 covers it."""
+    with pytest.raises(NoSuchProject) as raised:
+        _resolve_project("no-such-project")
+    assert isinstance(raised.value, LookupError)
+    assert "no-such-project" in str(raised.value)
+
+
+# --- fleet ------------------------------------------------------------------------------
+
+
+def test_fleet_without_a_project_is_the_current_project(two_projects: tuple[str, str]) -> None:
+    current, other = two_projects
+    _seed_agent(current, "coder-1")
+    _seed_agent(other, "coder-2")
+    payload = live_sources().fleet(None)
+    assert isinstance(payload, dict)
+    assert payload["project"]["id"] == current
+    assert [row["agent"]["label"] for row in payload["agents"]] == ["coder-1"]
+
+
+def test_fleet_with_a_project_returns_that_projects_agents(
+    two_projects: tuple[str, str],
+) -> None:
+    current, other = two_projects
+    _seed_agent(current, "coder-1")
+    _seed_agent(other, "coder-2")
+    reads = live_sources()
+    scoped = reads.fleet(other)
+    assert isinstance(scoped, dict)
+    assert scoped["project"]["id"] == other
+    assert [row["agent"]["label"] for row in scoped["agents"]] == ["coder-2"]
+    assert scoped != reads.fleet(None), "the two projects must not answer alike"
+
+
+def test_fleet_payload_is_what_the_json_command_builds(two_projects: tuple[str, str]) -> None:
+    """§4-B: the shape stays ``asq --json fleet ls``, whichever project is asked for."""
+    from aisquare.cli.fleet import agents_json
+
+    _current, other = two_projects
+    _seed_agent(other, "coder-2")
+    target = fleet_service.resolve_project(other)
+    expected = agents_json(target, fleet_service.list_agents(target, live_only=True))
+    assert live_sources().fleet(other) == expected
+    assert set(expected) == {"project", "name", "codename", "tmux_session", "agents"}
+
+
+def test_fleet_with_an_unknown_project_raises(two_projects: tuple[str, str]) -> None:
+    with pytest.raises(NoSuchProject):
+        live_sources().fleet("no-such-project")
+
+
+# --- panes ------------------------------------------------------------------------------
+
+
+def test_panes_without_a_project_reads_the_current_projects_agent(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    current, other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    _seed_agent(other, "coder-1", "%2")  # SAME label, other project — scoping, not luck
+    assert live_sources().panes("coder-1", None)["rows"] == ["pane %1"]
+
+
+def test_panes_with_a_project_reads_that_projects_agent(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    current, other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    _seed_agent(other, "coder-1", "%2")
+    assert live_sources().panes("coder-1", other)["rows"] == ["pane %2"]
+
+
+def test_panes_for_an_agent_the_named_project_does_not_have(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    current, other = two_projects
+    _seed_agent(current, "only-here")
+    with pytest.raises(NoSuchAgent):
+        live_sources().panes("only-here", other)
+
+
+def test_panes_with_an_unknown_project_raises(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    with pytest.raises(NoSuchProject):
+        live_sources().panes("coder-1", "no-such-project")
+
+
+# --- send-keys (still a §4-E write: 403 unless allow_write) -----------------------------
+
+
+def test_send_keys_without_a_project_targets_the_current_one(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    current, other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    _seed_agent(other, "coder-1", "%2")
+    result, summary = live_writes().handlers["send-keys"]({"agent": "coder-1", "enter": True})
+    assert result == {"agent": "coder-1", "project": current, "sent": True}
+    assert fake_tmux.sent == [("keys", ("%1", "Enter"))]
+    assert current in summary, "the audit line names the project it reached"
+
+
+def test_send_keys_with_a_project_targets_that_one(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    current, other = two_projects
+    _seed_agent(current, "coder-1", "%1")
+    _seed_agent(other, "coder-1", "%2")
+    result, _summary = live_writes().handlers["send-keys"](
+        {"agent": "coder-1", "project": other, "text": "hi"}
+    )
+    assert result == {"agent": "coder-1", "project": other, "sent": True}
+    assert fake_tmux.sent == [("literal", ("%2", "hi"))]
+
+
+def test_send_keys_with_an_unknown_project_raises(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    with pytest.raises(NoSuchProject):
+        live_writes().handlers["send-keys"](
+            {"agent": "coder-1", "project": "no-such-project", "enter": True}
+        )
+
+
+def test_send_keys_with_an_unknown_agent_in_a_real_project_still_says_so(
+    two_projects: tuple[str, str], fake_tmux: _FakeTmux
+) -> None:
+    _current, other = two_projects
+    with pytest.raises(NoSuchAgent):
+        live_writes().handlers["send-keys"]({"agent": "ghost", "project": other, "enter": True})
+
+
+# --- GET /api/projects carries the counts ------------------------------------------------
+
+
+def test_projects_rows_carry_agent_state_counts(
+    two_projects: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current, other = two_projects
+
+    def fake_list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        assert live_only is True, "the counts come from the same live_only listing"
+        if project.id == current:
+            return [_status("a", "working"), _status("b", "attention")]
+        return [_status("c", "exited")]
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake_list_agents)
+    rows = live_sources().projects()
+    assert isinstance(rows, list)
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[current]["agents"] == {
+        "working": 1,
+        "waiting": 0,
+        "attention": 1,
+        "exited": 0,
+        "lost": 0,
+    }
+    assert by_id[other]["agents"] == {
+        "working": 0,
+        "waiting": 0,
+        "attention": 0,
+        "exited": 1,
+        "lost": 0,
+    }
+
+
+def test_projects_rows_keep_every_field_the_json_command_prints(
+    two_projects: tuple[str, str],
+) -> None:
+    from aisquare.cli.common import projects_json
+    from aisquare.services import project as project_service
+
+    rows = live_sources().projects()
+    assert isinstance(rows, list)
+    plain = projects_json(project_service.list_projects())
+    assert [{k: v for k, v in row.items() if k != "agents"} for row in rows] == plain
+
+
+# --- the endpoints, over HTTP ------------------------------------------------------------
+
+
+@pytest.fixture
+def runtime(isolated_home: Path) -> Runtime:
+    rt = Runtime(remote_state_path(), remote_audit_path())
+    rt._state.password = PASSWORD
+    rt._save()
+    return rt
+
+
+def _sources(fleets: dict[str | None, dict[str, object]]) -> Sources:
+    def fleet(project: str | None) -> object:
+        if project not in fleets:
+            raise NoSuchProject(f"no project matches {project!r}")
+        return fleets[project]
+
+    def panes(agent: str, project: str | None) -> dict[str, object]:
+        if project is not None and project not in fleets:
+            raise NoSuchProject(f"no project matches {project!r}")
+        return {"rows": [f"{project}:{agent}"], "width": 1, "height": 1}
+
+    return Sources(
+        projects=lambda: [],
+        fleet=fleet,
+        board=lambda: {},
+        tasks=lambda: [],
+        memory=lambda: [],
+        panes=panes,
+        explainability=lambda agent: {"available": False},
+    )
+
+
+def _client(runtime: Runtime, sources: Sources, tmp_path: Path, tick: float = 1.0) -> TestClient:
+    client = TestClient(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=tick))
+    unlocked = client.post(f"/r/{runtime.token}/api/unlock", json={"password": PASSWORD})
+    assert unlocked.status_code == 200
+    return client
+
+
+FLEETS: dict[str | None, dict[str, object]] = {
+    None: {"name": "current", "agents": []},
+    "prj_other": {"name": "other", "agents": []},
+}
+
+
+def test_get_fleet_without_a_query_param_is_unchanged(runtime: Runtime, tmp_path: Path) -> None:
+    client = _client(runtime, _sources(FLEETS), tmp_path)
+    response = client.get(f"/r/{runtime.token}/api/fleet")
+    assert response.status_code == 200
+    assert response.json() == {"name": "current", "agents": []}
+
+
+def test_get_fleet_with_a_project_query_param(runtime: Runtime, tmp_path: Path) -> None:
+    client = _client(runtime, _sources(FLEETS), tmp_path)
+    response = client.get(f"/r/{runtime.token}/api/fleet", params={"project": "prj_other"})
+    assert response.status_code == 200
+    assert response.json() == {"name": "other", "agents": []}
+
+
+def test_get_fleet_with_an_unknown_project_is_404(runtime: Runtime, tmp_path: Path) -> None:
+    client = _client(runtime, _sources(FLEETS), tmp_path)
+    response = client.get(f"/r/{runtime.token}/api/fleet", params={"project": "nope"})
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_found"
+    assert "nope" in response.json()["message"]
+
+
+def test_get_panes_forwards_the_project_query_param(runtime: Runtime, tmp_path: Path) -> None:
+    client = _client(runtime, _sources(FLEETS), tmp_path)
+    scoped = client.get(f"/r/{runtime.token}/api/panes/coder-1", params={"project": "prj_other"})
+    assert scoped.json()["rows"] == ["prj_other:coder-1"]
+    assert client.get(f"/r/{runtime.token}/api/panes/coder-1").json()["rows"] == ["None:coder-1"]
+
+
+def test_get_panes_with_an_unknown_project_is_404(runtime: Runtime, tmp_path: Path) -> None:
+    client = _client(runtime, _sources(FLEETS), tmp_path)
+    response = client.get(f"/r/{runtime.token}/api/panes/coder-1", params={"project": "nope"})
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_found"
+
+
+def test_the_project_query_param_still_needs_the_cookie(runtime: Runtime, tmp_path: Path) -> None:
+    app = build_app(runtime, sources=_sources(FLEETS), dist_dir=tmp_path)
+    anonymous = TestClient(app)
+    for path in ("api/fleet", "api/panes/coder-1"):
+        response = anonymous.get(f"/r/{runtime.token}/{path}", params={"project": "prj_other"})
+        assert response.status_code == 401, path
+
+
+# --- the WS fleet frame (§4-D) -------------------------------------------------------------
+
+
+def _frame(ws: Any, kind: str, *, limit: int = 20) -> dict[str, Any]:
+    for _ in range(limit):
+        frame: dict[str, Any] = json.loads(ws.receive_text())
+        if frame["type"] == kind:
+            return frame
+    raise AssertionError(f"no {kind} frame in {limit} frames")
+
+
+def test_ws_fleet_frames_follow_subscribe_fleet(runtime: Runtime, tmp_path: Path) -> None:
+    client = _client(runtime, _sources(FLEETS), tmp_path, tick=0.02)
+    with client.websocket_connect(f"/r/{runtime.token}/ws") as ws:
+        first = _frame(ws, "fleet")
+        assert first["payload"] == {"name": "current", "agents": []}
+        assert set(first) == {"type", "payload", "ts"}, "§4-D shape is unchanged"
+
+        ws.send_text(json.dumps({"subscribe_fleet": "prj_other"}))
+        switched = _frame(ws, "fleet")
+        assert switched["payload"] == {"name": "other", "agents": []}
+
+        ws.send_text(json.dumps({"subscribe_fleet": ""}))
+        assert _frame(ws, "fleet")["payload"] == {"name": "current", "agents": []}
+
+
+def test_ws_survives_a_subscribe_fleet_for_a_project_that_is_gone(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """A bad name costs that frame, not the socket — board and remote keep arriving."""
+    client = _client(runtime, _sources(FLEETS), tmp_path, tick=0.02)
+    with client.websocket_connect(f"/r/{runtime.token}/ws") as ws:
+        _frame(ws, "fleet")
+        ws.send_text(json.dumps({"subscribe_fleet": "nope"}))
+        assert _frame(ws, "remote")["payload"]["allow_write"] is False
+        ws.send_text(json.dumps({"subscribe_fleet": "prj_other"}))
+        assert _frame(ws, "fleet")["payload"] == {"name": "other", "agents": []}
+
+
+def test_ws_still_needs_the_cookie(runtime: Runtime, tmp_path: Path) -> None:
+    from starlette.testclient import WebSocketDenialResponse
+
+    app = build_app(runtime, sources=_sources(FLEETS), dist_dir=tmp_path, tick=0.02)
+    anonymous = TestClient(app)
+    with (
+        pytest.raises(WebSocketDenialResponse) as denied,
+        anonymous.websocket_connect(f"/r/{runtime.token}/ws"),
+    ):
+        pass
+    assert denied.value.status_code == 401
+
+
+def test_send_keys_over_http_is_still_403_until_allow_write(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    """Project scoping does not open a write path (§4-E boundary)."""
+    client = _client(runtime, _sources(FLEETS), tmp_path)
+    response = client.post(
+        f"/r/{runtime.token}/api/send-keys",
+        json={"agent": "coder-1", "project": "prj_other", "enter": True},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"] == "read_only"
+    assert not remote_audit_path().exists()
+
+
+def test_devices_and_unlock_are_untouched_by_the_query_param(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    client = _client(runtime, _sources(FLEETS), tmp_path)
+    rows = client.get(f"/r/{runtime.token}/api/devices").json()
+    assert [row["current"] for row in rows] == [True]
+    assert client.cookies[COOKIE] == rows[0]["sid"]

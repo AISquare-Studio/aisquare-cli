@@ -41,12 +41,17 @@ class Fake:
     def __init__(self) -> None:
         self.board: dict[str, object] = {"project": {"id": "p1"}, "tasks": [], "events": []}
         self.fleet: dict[str, object] = {"name": "demo", "agents": []}
-        self.pane_calls: list[str] = []
+        self.pane_calls: list[tuple[str, str | None]] = []
+        self.fleet_calls: list[str | None] = []
         self.written: list[tuple[str, dict[str, Any]]] = []
 
     def sources(self) -> Sources:
-        def panes(agent: str) -> dict[str, object]:
-            self.pane_calls.append(agent)
+        def fleet(project: str | None = None) -> object:
+            self.fleet_calls.append(project)
+            return self.fleet
+
+        def panes(agent: str, project: str | None = None) -> dict[str, object]:
+            self.pane_calls.append((agent, project))
             if agent == "ghost":
                 raise NoSuchAgent("no live agent 'ghost'")
             return {
@@ -58,7 +63,7 @@ class Fake:
 
         return Sources(
             projects=lambda: [{"id": "p1", "name": "demo"}],
-            fleet=lambda: self.fleet,
+            fleet=fleet,
             board=lambda: self.board,
             tasks=lambda: [{"id": "t1", "title": "ship it"}],
             memory=lambda: [{"id": "m1", "text": "remember"}],
@@ -457,7 +462,7 @@ def test_pane_frames_only_for_subscribed_agents(
         assert pane["agent"] == "coder-1"
         assert set(pane) == {"type", "agent", "payload", "ts"}
         assert pane["payload"]["rows"] == ["\x1b[32mcoder-1\x1b[0m $ "]
-        assert set(fake.pane_calls) == {"coder-1"}
+        assert set(fake.pane_calls) == {("coder-1", None)}
         ws.send_text(json.dumps({"subscribe": "ghost"}))
         ghost = _frames_until(ws, "pane")[-1]
         assert ghost["agent"] == "ghost" and ghost["payload"]["rows"] == []
@@ -503,7 +508,17 @@ def test_live_sources_match_the_json_commands(
     assert runner.invoke(cli, ["context", "add", "--project", "tabs not spaces"]).exit_code == 0
 
     live = remote_server.live_sources()
-    assert live.projects() == _json_of(runner, "project", "list")
+    live_projects = live.projects()
+    cli_projects = _json_of(runner, "project", "list")
+    assert isinstance(live_projects, list)
+    # §4-B carve-out for THIS task: the remote payload adds a per-project
+    # "agents" summary the plain `--json` command does not print; everything
+    # else stays byte-identical.
+    assert [{k: v for k, v in row.items() if k != "agents"} for row in live_projects] == (
+        cli_projects
+    )
+    for row in live_projects:
+        assert set(row["agents"]) >= {"working", "waiting", "attention", "exited", "lost"}
     assert live.tasks() == _json_of(runner, "task", "list")
     assert live.memory() == _json_of(runner, "context", "list")
     board = live.board()
@@ -512,7 +527,7 @@ def test_live_sources_match_the_json_commands(
     assert isinstance(board, dict) and set(board) == {"project", "sessions", "tasks", "events"}
     fleet = runner.invoke(cli, ["--json", "fleet", "ls"])
     if fleet.exit_code == 0:
-        assert live.fleet() == json.loads(fleet.stdout.strip().splitlines()[-1])
+        assert live.fleet(None) == json.loads(fleet.stdout.strip().splitlines()[-1])
 
 
 # --- module API (§4-F) over a real socket -----------------------------------------------
@@ -618,9 +633,12 @@ def test_cli_serve_without_the_extra_fails_with_the_hint(monkeypatch: pytest.Mon
 
 
 def test_cli_serve_prints_link_and_password_then_serves(
-    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_home: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(remote_server, "_runtime", None)
+    # `serve` refuses a machine with no page installed (tests/test_remote_install_page.py),
+    # and this test is about the banner — so install one first.
+    remote_server.install_page(dist)
     served: list[tuple[Path | None, int]] = []
     monkeypatch.setattr(
         remote_server, "run_foreground", lambda dist, port: served.append((dist, port))

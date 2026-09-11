@@ -36,11 +36,11 @@ def runtime(isolated_home: Path) -> Runtime:
 def client(runtime: Runtime, tmp_path: Path) -> TestClient:
     sources = Sources(
         projects=lambda: [],
-        fleet=lambda: {"agents": []},
+        fleet=lambda project: {"agents": []},
         board=lambda: {"tasks": []},
         tasks=lambda: [],
         memory=lambda: [],
-        panes=lambda agent: {"rows": [], "width": 0, "height": 0},
+        panes=lambda agent, project: {"rows": [], "width": 0, "height": 0},
         explainability=lambda agent: {"available": False},
     )
     client = TestClient(build_app(runtime, sources=sources, dist_dir=tmp_path, tick=0.02))

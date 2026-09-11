@@ -19,6 +19,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core import workspace as workspace_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
@@ -1013,7 +1014,7 @@ def _experiment_checks() -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     identity: list[DoctorCheck] = []
     if not key:
-        problem = ci_client.api_key_problem()
+        problem, problem_fix = ci_client.bearer_problem()
         checks.append(
             _warn(
                 name,
@@ -1022,7 +1023,9 @@ def _experiment_checks() -> list[DoctorCheck]:
                 if problem
                 else f"enabled for {shown}, but no bearer token — the server will reject every "
                 "request",
-                "Re-export the token on one line: export AISQUARE_CI_KEY=…"
+                # The fix travels with the problem that found it (a multi-line
+                # key, a withheld login token), never re-derived from its words.
+                problem_fix
                 if problem
                 # Two ways in now, and the fix names both rather than assuming
                 # the operator is running the harness: a developer who has
@@ -1131,7 +1134,7 @@ def _identity_checks(base: str, key: str) -> tuple[list[DoctorCheck], str | None
     ``ci identity`` answers "who does CI think I am" from ``GET /v1/me``, fetched
     without caching (a diagnostic must not create state) and bounded like every
     other probe here. ``ci workspace`` applies the same routing the hooks apply
-    — ``ci_me.run_for`` over the bound ``experiment.workspace`` — so the run it
+    — ``ci_me.run_for`` over this project's ``[experiment].bindings`` entry — so the run it
     prints is the run a session would use, and the fix for each way that can
     fail names the command that fixes it. Returns the lines and the run.
     """
@@ -1163,14 +1166,16 @@ def _identity_checks(base: str, key: str) -> tuple[list[DoctorCheck], str | None
             f"{count} workspace{plural}",
         )
     ]
-    bound = ci_client.workspace_id() or None
+    # The same binding the hooks read: this checkout's (or the pinned project's).
+    project_id = workspace_core.pinned_project_id() or workspace_core.current_project().id
+    bound = ci_client.workspace_id(project_id) or None
     run, detail = ci_me.run_for(me, bound)
     member = me.membership(bound)
     if run and member is not None:
         lines.append(_ok("ci workspace", f"{member.workspace_id} ({member.role}), run {run}"))
         return lines, run
     if "none is bound" in detail:
-        fix = "Bind this project to one: aisquare ci bind-workspace <ws_…>"
+        fix = "Bind this project to one: aisquare ci bind-workspace <ws_…> (run it in the checkout)"
     elif "not a member" in detail:
         fix = "Bind this project to a workspace you are in: aisquare ci bind-workspace"
     elif "no run published" in detail:

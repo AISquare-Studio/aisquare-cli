@@ -13,8 +13,9 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail
+from aisquare.core import workspace as workspace_core
+from aisquare.core.config import load_config, save_config
 from aisquare.services import ci_client, ci_me
-from aisquare.services import settings as settings_service
 
 app = typer.Typer(
     help="Collective Intelligence test bed.",
@@ -22,11 +23,12 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-WORKSPACE_KEY = "experiment.workspace"
-"""The one config key this module writes. A selector, never authority: the
-server refuses a run in a workspace the user is not a member of whatever this
-says (ADR 0008 decision 4), so a wrong value here yields a refusal and never a
-widening."""
+
+def _project_id() -> str:
+    """The project this checkout is: the pinned one when `project switch` set one,
+    else the one containing the current directory — the same resolution the hooks
+    use, so what is bound here is what a session reads."""
+    return workspace_core.pinned_project_id() or workspace_core.current_project().id
 
 
 @app.command("bind-workspace")
@@ -39,21 +41,31 @@ def bind_workspace(
         ),
     ] = None,
     clear: Annotated[
-        bool, typer.Option("--clear", help="Forget the binding; a single workspace needs none.")
+        bool,
+        typer.Option(
+            "--clear", help="Forget this project's binding; a single workspace needs none."
+        ),
     ] = False,
 ) -> None:
-    """Bind this project to one of the signed-in user's workspaces.
+    """Bind THIS project to one of the signed-in user's workspaces.
 
     The run the hooks ask against is the one the controller published in the
     bound workspace, so a developer in several workspaces has to pick; one in a
-    single workspace needs nothing. Asks GET /v1/me for the list, uncached, and
-    refuses an id that is not on it.
+    single workspace needs nothing. The binding is stored per project
+    (``[experiment].bindings`` in config.toml, keyed by the project id), so
+    binding one checkout never re-tenants another on the same machine. Asks
+    GET /v1/me for the list, uncached, and refuses an id that is not on it.
     """
+    project_id = _project_id()
     if clear:
+        config = load_config()
+        was = config.experiment.bindings.pop(project_id, None)
         with expected_config_write_errors():
-            settings_service.set_value(WORKSPACE_KEY, "")
+            save_config(config)
         ci_client.reset_cache()
-        typer.echo(f"cleared {WORKSPACE_KEY}")
+        typer.echo(
+            f"cleared this project's binding ({was})" if was else "this project had no binding"
+        )
         return
     if not ci_client.enabled():
         fail("the CI test bed is off (AISQUARE_CI=1 enables it)", error="ci_disabled")
@@ -65,8 +77,11 @@ def bind_workspace(
         )
     key = ci_client.api_key()
     if not key:
+        problem, fix = ci_client.bearer_problem()
         fail(
-            "no bearer — sign in with `aisquare login`, or export AISQUARE_CI_KEY",
+            f"{problem} — {fix}"
+            if problem
+            else "no bearer — sign in with `aisquare login`, or export AISQUARE_CI_KEY",
             error="not_authenticated",
         )
     answer = ci_me.fetch(base=base, key=key, cache=False)
@@ -99,8 +114,12 @@ def bind_workspace(
             error="not_a_member",
             ref=workspace,
         )
+    config = load_config()
+    config.experiment.bindings[project_id] = member.workspace_id
     with expected_config_write_errors():
-        stored = settings_service.set_value(WORKSPACE_KEY, member.workspace_id)
+        save_config(config)
     ci_client.reset_cache()
     run = member.active_run_id or "none published yet"
-    typer.echo(f"bound this project to {stored} ({member.role}), run {run}")
+    typer.echo(
+        f"bound this project ({project_id}) to {member.workspace_id} ({member.role}), run {run}"
+    )

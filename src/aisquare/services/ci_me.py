@@ -21,15 +21,19 @@ against is why it does.
 harness, the joint smoke and every ``CITEST_*`` identity depend on being able to
 say "this run" from one shell variable, and it keeps precedence. Otherwise the
 ``active_run_id`` of the workspace this project is bound to
-(``[experiment].workspace``). Otherwise, when the developer belongs to exactly
+(``[experiment].bindings``, keyed by project id). Otherwise, when the developer belongs to exactly
 one workspace, that one. Otherwise nothing, and the turn records ``no_run`` with
 a reason ``doctor`` can print — guessing between several workspaces would bind a
 project to whichever the server happened to list first.
 
-**Cached per bearer, not per user.** The cache file is keyed by a hash of the
-token, so signing out and in as somebody else cannot serve the previous
-identity's routing, and a re-issued token starts cold. The hash is truncated
-because a filename is not a secret store; the token itself is never written.
+**Cached per bearer, not per user, and answered per server.** The cache file
+is keyed by a hash of the token, so signing out and in as somebody else cannot
+serve the previous identity's routing, and a re-issued token starts cold. The
+hash is truncated because a filename is not a secret store; the token itself is
+never written. The file also records which server answered, and is not served
+for any other: repointing ``AISQUARE_CI_URL`` within the TTL would otherwise
+route every hook to the previous server's ``active_run_id`` — the same rule the
+refusal cache already followed, applied to the document it protects.
 """
 
 from __future__ import annotations
@@ -92,7 +96,7 @@ def current(*, base: str, key: str, now: datetime | None = None) -> MeResult:
     never stored).
     """
     moment = now or datetime.now(tz=UTC)
-    cached = _read_cache(key, moment)
+    cached = _read_cache(key, moment, base)
     if cached is not None:
         return MeResult(cached, "cached", from_cache=True)
     refused = _read_refusal(key, moment, base)
@@ -132,7 +136,7 @@ def fetch(
     if me is None:
         return MeResult(None, detail)
     if cache:
-        _write_cache(key, result.body)
+        _write_cache(key, result.body, base)
     else:
         _clear_refusal(key)
     return MeResult(me, "fetched")
@@ -171,7 +175,7 @@ def run_for(me: MeDocument, workspace_id: str | None) -> tuple[str | None, str]:
         listed = ", ".join(m.workspace_id for m in me.workspaces)
         return None, (
             f"a member of {len(me.workspaces)} workspaces ({listed}) and none is bound — "
-            "set experiment.workspace"
+            "run aisquare ci bind-workspace in this checkout"
         )
     if member.active_run_id is None:
         return None, f"no run published in {member.workspace_id}"
@@ -204,24 +208,35 @@ def _refusal_path(key: str) -> Path:
     return _cache_path(key).with_suffix(".refused.json")
 
 
-def _read_cache(key: str, now: datetime) -> MeDocument | None:
-    """A fresh cached document for this bearer, or ``None`` for any other state."""
+def _read_cache(key: str, now: datetime, base: str) -> MeDocument | None:
+    """A fresh cached document for this bearer FROM THIS SERVER, or ``None``.
+
+    Every comparison sits inside the ``try``: a file whose ``until`` parses to a
+    naive datetime would otherwise raise ``TypeError`` out of the comparison, on
+    the synchronous hook path, from a function documented never to raise. The
+    writer always stores an aware timestamp, so this covers a hand-edited or
+    partially written file — exactly the population the guarantee exists for.
+    """
     try:
         raw = json.loads(_cache_path(key).read_text(encoding="utf-8"))
         until = datetime.fromisoformat(raw["until"])
         body = raw["body"]
+        scope = raw.get("endpoint")
+        if not isinstance(body, str) or now >= until or scope != base.rstrip("/"):
+            return None
     except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if not isinstance(body, str) or now >= until:
         return None
     me, _ = parse_me(body)
     return me
 
 
-def _write_cache(key: str, body: str) -> None:
-    """Store the answer with its own expiry. Never raises."""
+def _write_cache(key: str, body: str, base: str) -> None:
+    """Store the answer with its own expiry and the server it came from. Never raises."""
     until = (datetime.now(tz=UTC) + timedelta(seconds=CACHE_TTL_SECONDS)).isoformat()
-    _replace(_cache_path(key), json.dumps({"body": body, "until": until}))
+    _replace(
+        _cache_path(key),
+        json.dumps({"body": body, "until": until, "endpoint": base.rstrip("/")}),
+    )
     _clear_refusal(key)
 
 
@@ -232,9 +247,11 @@ def _read_refusal(key: str, now: datetime, base: str) -> str | None:
         until = datetime.fromisoformat(raw["until"])
         detail = raw["detail"]
         scope = raw.get("endpoint")
+        # Inside the try for the reason _read_cache gives: a naive `until`
+        # must be a miss, not a TypeError on the hook path.
+        if not isinstance(detail, str) or now >= until:
+            return None
     except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if not isinstance(detail, str) or now >= until:
         return None
     if scope != base.rstrip("/"):
         # A refusal from one server must not answer for the next: repointing

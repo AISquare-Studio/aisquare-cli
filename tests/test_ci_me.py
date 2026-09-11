@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import paths
+from aisquare.core import workspace as workspace_core
 from aisquare.core.config import AppConfig, save_config
 from aisquare.models import ClientReason
 from aisquare.services import ci_augment, ci_client, ci_me
@@ -36,11 +37,15 @@ def _me(stub: StubCI, key: str = KEY) -> ci_me.MeResult:
     return ci_me.current(base=stub.url, key=key)
 
 
+def _project() -> str:
+    return workspace_core.current_project().id
+
+
 def _bind(workspace: str) -> None:
-    """Bind this project to a workspace, the way `[experiment].workspace` does."""
+    """Bind THIS checkout to a workspace, the way `aisquare ci bind-workspace` does."""
     config = AppConfig()
     config.experiment.enabled = True
-    config.experiment.workspace = workspace
+    config.experiment.bindings[_project()] = workspace
     save_config(config)
     ci_client.reset_cache()
 
@@ -221,7 +226,7 @@ def test_several_workspaces_and_none_bound_refuses_to_guess() -> None:
     run, detail = ci_me.run_for(_doc(), None)
 
     assert run is None
-    assert "none is bound" in detail and "experiment.workspace" in detail
+    assert "none is bound" in detail and "bind-workspace" in detail
 
 
 def test_a_single_workspace_needs_no_binding() -> None:
@@ -272,7 +277,7 @@ def test_with_no_exported_run_the_gate_asks_who_it_is(
     monkeypatch.delenv(ci_client.RUN_ENV_VAR, raising=False)
     _bind("ws_kernel01")
 
-    opened = ci_augment.gate()
+    opened = ci_augment.gate(_project())
 
     assert stub.me_fetches == 1
     assert opened.run_id == "run_kernel0001"
@@ -316,3 +321,59 @@ def test_the_answer_is_a_valid_me_v1_by_the_servers_own_schema(
 
     assert_valid("me.v1", json.loads(stub.me_body))
     assert _me(stub).me is not None
+
+
+# --- the cache answers for one server only ----------------------------------
+
+
+def test_a_document_from_one_server_is_not_served_for_another(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    """Repointing AISQUARE_CI_URL within the TTL must not route every hook to the
+    previous server's run: the refusal cache already refused to cross servers,
+    and the document it protects carries the ids that routing depends on."""
+    assert _me(stub).me is not None
+    other = stub.url.replace("127.0.0.1", "localhost")
+
+    result = ci_me.current(base=other, key=KEY)
+
+    assert result.me is not None and not result.from_cache
+    assert stub.me_fetches == 2, "the other server must be asked, not answered from A's cache"
+
+
+def test_a_cache_file_with_a_naive_expiry_is_a_miss_not_a_crash(
+    stub: StubCI, isolated_home: Path
+) -> None:
+    """`fromisoformat` accepts an offset-less stamp and returns a naive datetime;
+    comparing it with an aware `now` raises TypeError. That comparison used to
+    sit outside the try, on the synchronous hook path, in a function documented
+    never to raise."""
+    assert _me(stub).me is not None
+    path = ci_me._cache_path(KEY)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["until"] = "2999-01-01T00:00:00"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert _me(stub).me is not None
+    assert stub.me_fetches == 2
+
+    refusal = ci_me._refusal_path(KEY)
+    refusal.write_text(
+        json.dumps({"detail": "x", "until": "2999-01-01T00:00:00", "endpoint": stub.url}),
+        encoding="utf-8",
+    )
+    assert ci_me._read_refusal(KEY, datetime.now(tz=UTC), stub.url) is None
+
+
+def test_bindings_are_per_project_not_per_machine(isolated_home: Path, tmp_path: Path) -> None:
+    """Binding repo A must leave repo B alone: the docstring's own promise."""
+    a = workspace_core.current_project(tmp_path / "a").id
+    b = workspace_core.current_project(tmp_path / "b").id
+    config = AppConfig()
+    config.experiment.bindings[a] = "ws_team"
+    save_config(config)
+    ci_client.reset_cache()
+
+    assert ci_client.workspace_id(a) == "ws_team"
+    assert ci_client.workspace_id(b) == ""
+    assert ci_client.workspace_id(None) == ""

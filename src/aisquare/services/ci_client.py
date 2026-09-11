@@ -49,6 +49,7 @@ import urllib.error
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aisquare.core.config import ExperimentSettings, load_config
@@ -126,6 +127,34 @@ EXPERIMENT_TOKEN_SOURCE = KEY_ENV_VAR
 SIGNED_IN_SOURCE = "aisquare login"
 """What ``doctor`` calls the bearer when it came from the signed-in user."""
 
+SIGNED_IN_WITHHELD_SOURCE = "signed-in token withheld"
+"""What ``doctor`` calls the bearer when a signed-in token exists but this build
+refuses to send it — see :func:`signed_in_allowed`."""
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def signed_in_allowed(base: str) -> bool:
+    """Whether the signed-in user's token may be sent to ``base``.
+
+    ``https://`` anywhere; ``http://`` only to this machine. The experiment token
+    keeps its old latitude — it is purpose-minted for the test bed and set on
+    purpose — but the signed-in fallback is a 90-day OAuth access token carrying
+    the user's whole Studio account, and ``endpoint()`` accepts any URL with a
+    scheme. A stale ``experiment.url`` or an ``AISQUARE_CI_URL=http://…`` left in
+    a shell profile would otherwise put that credential on the wire in cleartext.
+    Loopback is exempt because nothing but this machine can read it, and it is
+    how the server is run locally. An empty ``base`` is allowed: with no
+    endpoint nothing is sent, and the missing URL is the line ``doctor`` should
+    lead with.
+    """
+    if not base:
+        return True
+    parts = urlsplit(base)
+    if parts.scheme.lower() == "https":
+        return True
+    return (parts.hostname or "").lower() in _LOOPBACK_HOSTS
+
 
 def api_key() -> str:
     """The bearer token this build sends, or ``""``.
@@ -164,6 +193,8 @@ def api_key_and_source() -> tuple[str, str]:
         return (configured if _single_line(configured) else ""), EXPERIMENT_TOKEN_SOURCE
     token = _signed_in_token()
     if token:
+        if not signed_in_allowed(endpoint()):
+            return "", SIGNED_IN_WITHHELD_SOURCE
         return (token if _single_line(token) else ""), SIGNED_IN_SOURCE
     return "", ""
 
@@ -188,14 +219,44 @@ def _signed_in_token() -> str:
 
 def api_key_problem() -> str:
     """Why the bearer cannot be used, or ``""``. Never the value."""
+    return bearer_problem()[0]
+
+
+def api_key_fix() -> str:
+    """What to do about :func:`api_key_problem`, or ``""``."""
+    return bearer_problem()[1]
+
+
+def bearer_problem() -> tuple[str, str]:
+    """``(problem, fix)`` for a bearer this build will not send, else ``("", "")``.
+
+    One function for both halves, so the fix ``doctor`` prints is chosen by the
+    code that found the problem rather than by matching words in the problem's
+    text. Never the token's value.
+    """
     configured = _raw_api_key()
     if configured and not _single_line(configured):
-        return f"{KEY_ENV_VAR} spans more than one line"
+        return (
+            f"{KEY_ENV_VAR} spans more than one line",
+            f"Re-export the token on one line: export {KEY_ENV_VAR}=…",
+        )
     if not configured:
         signed_in = _signed_in_token()
+        base = endpoint()
+        if signed_in and not signed_in_allowed(base):
+            host = urlsplit(base).hostname or "the server"
+            return (
+                f"the signed-in token is withheld: {URL_ENV_VAR} is plain http:// to {host}, "
+                "and a login token travels only over https:// (loopback excepted)",
+                f"Point {URL_ENV_VAR} at https://…, or export an experiment token for a "
+                f"plain-http server: export {KEY_ENV_VAR}=…",
+            )
         if signed_in and not _single_line(signed_in):
-            return "the signed-in token spans more than one line; run aisquare login again"
-    return ""
+            return (
+                "the signed-in token spans more than one line; run aisquare login again",
+                "Sign in again: aisquare login",
+            )
+    return "", ""
 
 
 def _raw_api_key() -> str:
@@ -231,15 +292,16 @@ def raw_run_id() -> str:
     return from_env or _settings().run.strip()
 
 
-def workspace_id() -> str:
-    """Which workspace this project asks in, or "".
+def workspace_id(project_id: str | None) -> str:
+    """The workspace ``project_id`` is bound to, or ``""``.
 
-    Config only, deliberately: it is a property of the checkout rather than of
-    the shell, and a per-shell override would silently re-tenant a project
-    between terminals. A selector and never authority — the server refuses a run
-    in a workspace the user is not a member of whatever this says.
+    Per project (``[experiment].bindings``), never per shell — see the field's
+    docstring in :mod:`aisquare.core.config`. ``None`` is a caller with no
+    project, and a caller with no project has no binding.
     """
-    return _settings().workspace.strip()
+    if not project_id:
+        return ""
+    return _settings().bindings.get(project_id, "").strip()
 
 
 def run_id() -> str:

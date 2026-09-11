@@ -20,8 +20,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     workspace needs nothing; one in several binds the project with the hidden
     `aisquare ci bind-workspace [ws_…]` (`--clear` forgets it), which lists
     the workspaces `GET /v1/me` returns and refuses one the user is not in.
-    The binding is `[experiment].workspace` in `config.toml` — a selector the
-    server checks, never authority.
+    The binding is per project — `[experiment].bindings` in `config.toml`,
+    keyed by the project id — so binding one checkout leaves every other
+    alone; a selector the server checks, never authority.
+  - **The signed-in token travels only over `https://`** (or to this machine).
+    `AISQUARE_CI_URL` accepts any URL, and the fallback bearer is the user's
+    own 90-day account token, so a stale `http://` value would have put it on
+    the wire in cleartext; it is withheld instead and `doctor` says why. The
+    experiment token keeps its old latitude. Signing out also forgets the
+    cached `GET /v1/me` answer for that token, and that answer is served only
+    for the server it came from.
   - **`doctor` says who CI thinks you are.** The `ci test bed` line names the
     credential in play (experiment token, or signed in as you — never its
     value); signed in, two more lines follow: `ci identity` (the principal the

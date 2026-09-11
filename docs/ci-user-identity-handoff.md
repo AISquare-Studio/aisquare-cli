@@ -85,14 +85,18 @@ pasted, so `test_documented_commands.py` leaves it alone.
 > something it planned. The cache is keyed by a hash of the bearer, so signing
 > in as somebody else cannot serve the previous identity's routing.
 >
-> **C2a (workspace binding) is done.** `[experiment].workspace` binds a
-> project to one workspace; a developer in a single workspace needs nothing.
-> Several workspaces and none bound **refuses to guess** and names the choice.
-> The hidden `aisquare ci bind-workspace [ws_…]` sets it from the list
-> `GET /v1/me` returns (uncached), refuses a workspace the user is not in, binds
-> the only one without being told, and `--clear` forgets it. It is the one
-> config write on the CI surface, and it lives in `cli/ci.py` where the
-> call-graph guard can see it.
+> **C2a (workspace binding) is done.** `[experiment].bindings` maps each
+> PROJECT (the CLI's `prj_…` id, the same one every metrics row carries) to one
+> workspace, so binding repo A never re-tenants repo B on the same machine —
+> the review caught that the first draft was a single machine-wide field, which
+> contradicted its own "a property of the checkout" argument. A developer in a
+> single workspace needs nothing. Several workspaces and none bound **refuses to
+> guess** and names the choice. The hidden `aisquare ci bind-workspace [ws_…]`
+> sets this checkout's entry from the list `GET /v1/me` returns (uncached),
+> refuses a workspace the user is not in, binds the only one without being told,
+> and `--clear` forgets this project's entry alone. It is the one config write on
+> the CI surface, and it lives in `cli/ci.py` where the call-graph guard can see
+> it.
 >
 > **C5 (retire the override) is unchanged and still waiting on server item S10.**
 >

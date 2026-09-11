@@ -229,7 +229,7 @@ class Gate:
         return self.reason is ClientReason.none
 
 
-def _resolve_run(base: str, key: str) -> tuple[str, str]:
+def _resolve_run(base: str, key: str, project_id: str | None) -> tuple[str, str]:
     """The run this session delivers against, and why — never raises.
 
     ``AISQUARE_CI_RUN`` (or ``experiment.run``) first and unchanged: the harness,
@@ -249,11 +249,11 @@ def _resolve_run(base: str, key: str) -> tuple[str, str]:
     answer = ci_me.current(base=base, key=key)
     if answer.me is None:
         return "", f"no AISQUARE_CI_RUN, and GET /v1/me: {answer.detail}"
-    run, detail = ci_me.run_for(answer.me, ci_client.workspace_id())
+    run, detail = ci_me.run_for(answer.me, ci_client.workspace_id(project_id) or None)
     return (run or ""), detail
 
 
-def gate() -> Gate:
+def gate(project_id: str | None = None) -> Gate:
     """Master switch → usable URL → run id → descriptor, in that order.
 
     Each refusal is its own baseline or failure reason, so a machine that is
@@ -275,7 +275,7 @@ def gate() -> Gate:
     if not base:
         return Gate(ClientReason.not_configured, "no usable AISQUARE_CI_URL")
     key = ci_client.api_key()
-    run, run_detail = _resolve_run(base, key)
+    run, run_detail = _resolve_run(base, key, project_id)
     if not run:
         return Gate(ClientReason.no_run, run_detail, base=base)
     result = ci_descriptor.current(run, base=base, key=key)
@@ -354,7 +354,9 @@ def _gated_event(
     cwd: Path | None,
 ) -> Augmentation:
     trace_id = new_trace_id()
-    opened = gate()
+    # The project's own binding decides which workspace's run is asked for
+    # (config `[experiment].bindings`, keyed by this id).
+    opened = gate(project.id)
     if not opened.open:
         return Augmentation(
             trigger,

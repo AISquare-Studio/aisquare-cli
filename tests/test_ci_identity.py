@@ -10,16 +10,19 @@ no credentials file is read and nothing here depends on a real sign-in.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner, Result
 
 from aisquare.cli.app import app
 from aisquare.core import paths
+from aisquare.core import workspace as workspace_core
 from aisquare.core.config import AppConfig, load_config, save_config
-from aisquare.models import CheckStatus, DoctorCheck
+from aisquare.models import CheckStatus, ClientReason, DoctorCheck
 from aisquare.services import ci_client
 from aisquare.services.diagnostics import doctor
 from tests.ci_schemas import fixture
@@ -47,10 +50,14 @@ def signed_in(monkeypatch: pytest.MonkeyPatch, stub: StubCI) -> None:
     monkeypatch.setenv("AISQUARE_TOKEN", TOKEN)
 
 
+def project_id() -> str:
+    return workspace_core.current_project().id
+
+
 def bind(workspace: str) -> None:
     config = AppConfig()
     config.experiment.enabled = True
-    config.experiment.workspace = workspace
+    config.experiment.bindings[project_id()] = workspace
     save_config(config)
     ci_client.reset_cache()
 
@@ -248,8 +255,8 @@ def test_binding_a_workspace_you_are_in_is_written_to_config(
     result = _run(runner, TEAM)
 
     assert result.exit_code == 0, _text(result)
-    assert f"bound this project to {TEAM} (developer), run run_kernel0001" in result.output
-    assert load_config().experiment.workspace == TEAM
+    assert f"to {TEAM} (developer), run run_kernel0001" in result.output
+    assert load_config().experiment.bindings == {project_id(): TEAM}
     assert stub.me_fetches == 1
 
 
@@ -262,7 +269,7 @@ def test_the_only_workspace_is_bound_without_being_named(
     result = _run(runner)
 
     assert result.exit_code == 0, _text(result)
-    assert load_config().experiment.workspace == TEAM
+    assert load_config().experiment.bindings == {project_id(): TEAM}
 
 
 def test_several_workspaces_and_no_argument_lists_them_and_refuses(
@@ -275,7 +282,7 @@ def test_several_workspaces_and_no_argument_lists_them_and_refuses(
     assert result.exit_code == 1
     text = _text(result)
     assert TEAM in text and QUIET in text
-    assert load_config().experiment.workspace == ""
+    assert load_config().experiment.bindings == {}
 
 
 def test_a_workspace_you_are_not_in_is_refused(
@@ -289,7 +296,7 @@ def test_a_workspace_you_are_not_in_is_refused(
 
     assert result.exit_code == 1
     assert "not one of your workspaces" in _text(result)
-    assert load_config().experiment.workspace == ""
+    assert load_config().experiment.bindings == {}
 
 
 def test_clear_forgets_the_binding(
@@ -301,8 +308,23 @@ def test_clear_forgets_the_binding(
     result = _run(runner, "--clear")
 
     assert result.exit_code == 0, _text(result)
-    assert load_config().experiment.workspace == ""
+    assert load_config().experiment.bindings == {}
     assert stub.me_fetches == 0, "clearing asks the server nothing"
+
+
+def test_clear_forgets_only_this_projects_binding(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path, runner: CliRunner
+) -> None:
+    """Another checkout's binding is not this command's to touch."""
+    signed_in(monkeypatch, stub)
+    bind(TEAM)
+    config = load_config()
+    config.experiment.bindings["prj_someone_else"] = "ws_other"
+    save_config(config)
+
+    _run(runner, "--clear")
+
+    assert load_config().experiment.bindings == {"prj_someone_else": "ws_other"}
 
 
 def test_a_rejected_token_points_at_login(
@@ -337,3 +359,100 @@ def test_the_command_leaves_no_me_cache_behind(
     _run(runner, TEAM)
 
     assert not paths.ci_cache_dir().exists()
+
+
+# --- the signed-in token only travels over https ------------------------------
+
+
+def test_the_signed_in_token_is_withheld_from_a_plain_http_server(
+    monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """The fallback bearer is a 90-day OAuth token for the user's whole account,
+    and AISQUARE_CI_URL accepts any URL: a stale http:// value must not put it
+    on the wire in cleartext. The experiment token keeps its old latitude."""
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, "http://ci.internal:8100")
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.setenv("AISQUARE_TOKEN", TOKEN)
+
+    assert ci_client.api_key_and_source() == ("", ci_client.SIGNED_IN_WITHHELD_SOURCE)
+    problem, fix = ci_client.bearer_problem()
+    assert "https://" in problem and "ci.internal" in problem and TOKEN not in problem
+    assert "AISQUARE_CI_URL" in fix and "AISQUARE_CI_KEY" in fix
+
+    monkeypatch.setenv(ci_client.KEY_ENV_VAR, "experiment-token")
+    assert ci_client.api_key_and_source() == (
+        "experiment-token",
+        ci_client.EXPERIMENT_TOKEN_SOURCE,
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://ci.aisquare.studio",
+        "http://127.0.0.1:8100",
+        "http://localhost:8100",
+        "http://[::1]:8100",
+    ],
+)
+def test_https_anywhere_and_http_to_this_machine_are_allowed(
+    monkeypatch: pytest.MonkeyPatch, isolated_home: Path, url: str
+) -> None:
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, url)
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.setenv("AISQUARE_TOKEN", TOKEN)
+
+    assert ci_client.signed_in_allowed(url)
+    assert ci_client.api_key_and_source() == (TOKEN, ci_client.SIGNED_IN_SOURCE)
+
+
+def test_doctor_names_the_withheld_token_and_the_fix(
+    monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, "http://ci.internal:8100")
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv(ci_client.RUN_ENV_VAR, raising=False)
+    monkeypatch.setenv("AISQUARE_TOKEN", TOKEN)
+    # The public /ready probe may still run; a bearer-carrying request may not.
+    sent: list[dict[str, str]] = []
+
+    def exchange(url: str, **kwargs: Any) -> ci_client.Exchange:
+        sent.append(kwargs.get("headers") or {})
+        return ci_client._failed(time.monotonic(), ClientReason.transport_error, "stubbed")
+
+    monkeypatch.setattr(ci_client, "exchange", exchange)
+
+    checks = ci_checks()
+
+    assert not any("Authorization" in headers for headers in sent), "the token left the machine"
+    bed = checks["ci test bed"]
+    assert bed.status is CheckStatus.warn
+    assert "withheld" in bed.detail and "https://" in bed.detail
+    assert bed.fix and "AISQUARE_CI_URL" in bed.fix
+    assert TOKEN not in bed.detail and TOKEN not in bed.fix
+    assert "ci identity" not in checks, "nothing is sent, so nothing is asked"
+
+
+# --- signing out forgets who CI resolved you to --------------------------------
+
+
+def test_sign_out_forgets_the_resolved_identity(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """The token goes at sign-out; the identity it resolved to must go with it —
+    the cache file holds the principal id, the subject and every workspace, and
+    the TTL only stops it being served."""
+    from aisquare.services import auth as auth_service
+    from aisquare.services import ci_me, iam
+
+    ci_me.fetch(base=stub.url, key=TOKEN)
+    assert ci_me._cache_path(TOKEN).exists()
+    session = iam.Session(api_url="http://127.0.0.1:9", token=TOKEN, source="file")
+
+    auth_service.sign_out(session)
+
+    assert not ci_me._cache_path(TOKEN).exists()
+    assert not ci_me._refusal_path(TOKEN).exists()

@@ -146,8 +146,8 @@ class ExperimentSettings(BaseModel):
     enabled: bool = False
     url: str = ""
     run: str = ""
-    workspace: str = ""
-    """Which of the signed-in user's workspaces this project asks in.
+    bindings: dict[str, str] = Field(default_factory=dict)
+    """Which of the signed-in user's workspaces each PROJECT asks in, by project id.
 
     Only consulted when ``run`` (and ``AISQUARE_CI_RUN``) is unset, which is the
     signed-in path: ``GET /v1/me`` lists every workspace the developer belongs
@@ -157,12 +157,19 @@ class ExperimentSettings(BaseModel):
     bind a project to whichever the server happened to list first and every row
     afterwards would name the wrong tenant.
 
+    Keyed by the CLI's project id (``prj_…``, the same id every metrics row and
+    context pool carries), so the binding is a property of the CHECKOUT: binding
+    repo A to a team workspace leaves repo B untouched on the same machine. The
+    first draft was a single ``workspace`` field in this file, which contradicted
+    exactly that sentence — one value per machine re-tenants every other project
+    the moment one is bound — and the review caught it. There is deliberately no
+    environment override for the same reason: a per-shell value would silently
+    re-tenant a project between terminals. Written by the hidden
+    ``aisquare ci bind-workspace``, read by ``ci_client.workspace_id``.
+
     A SELECTOR and never authority: the server refuses a run in a workspace the
     user is not a member of whatever this says (ADR 0008 decision 4), so a wrong
-    value here produces a refusal and never a widening. It is also why this is
-    the one experiment setting with no environment override — it is a property
-    of the checkout, not of the shell, and a per-shell value would silently
-    re-tenant a project between terminals.
+    value here produces a refusal and never a widening.
     """
 
 

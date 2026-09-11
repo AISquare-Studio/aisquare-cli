@@ -2972,7 +2972,7 @@ def test_shutdown_returns_the_report_when_the_pause_lookup_store_is_locked(
     coder = _coder(project)
     fleet_service.pause(project)
     boom = {"on": False}
-    real_store_session = fleet_service.store_session
+    real_store_session = store_session  # the module-level import is the same object
     real_late = fleet_service._record_late_rows
 
     @contextmanager

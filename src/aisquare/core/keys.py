@@ -241,8 +241,8 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
     typed ``[`` never goes through the name table at all — and neither does a
     shifted symbol, whose meaning only the keyboard layout knows.
 
-    EXCEPT alt/meta on a letter or digit. Textual's parser reads ``ESC p`` as
-    ``Key("alt+p", character="p")`` — the character is always set for an
+    EXCEPT alt/meta on an ASCII letter or digit. Textual's parser reads ``ESC p``
+    as ``Key("alt+p", character="p")`` — the character is always set for an
     alt+letter chord, and it is printable — so "the text wins" here typed a
     bare ``p`` into the agent and Claude Code's alt+p (switch model) never
     fired. Reported 2026-09-02 and 2026-09-10 from the fleet UI. With alt held
@@ -250,7 +250,17 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
     Alt on PUNCTUATION stays text: through the name table it would be dropped
     (``;`` is tmux's separator) or worse — ``M-[`` is ``ESC [``, the CSI
     introducer, and a program reading raw bytes would mis-parse everything
-    typed after it — where before it simply received the character.
+    typed after it — where before it simply received the character. ASCII,
+    because every name this module can emit was measured against a real tmux
+    (see the module docstring) and ``M-é`` / ``M-ф`` were never in that sweep:
+    ``str.isalnum`` is Unicode-aware and an AltGr or accented layout reaches
+    here, so the gate says so explicitly rather than by accident.
+
+    And a modifier tmux has no spelling for — ``super``/``hyper``, which is how
+    macOS Cmd and the kitty protocol's own extras arrive — drops the key rather
+    than falling through to its character: Cmd+V is not a request to type a
+    ``v``. That is the printable rule giving way to the modifier gate below,
+    which is deliberate and pinned by a test (review of the second version).
 
     Known limits, recorded rather than hidden: a terminal speaking the kitty
     protocol reports the text alongside the chord and Textual then drops the
@@ -263,10 +273,13 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
         return None
     *modifiers, base = key.split("+")
     if any(modifier not in MODIFIERS for modifier in modifiers):
+        # A modifier tmux cannot spell: super/hyper, reported by kitty-protocol
+        # terminals and by macOS Cmd. Ahead of the printable rule on purpose —
+        # sending the bare character would type a ``v`` for Cmd+V.
         return None
     ctrl = "ctrl" in modifiers
     alt = "alt" in modifiers or "meta" in modifiers
-    if printable and character and not (alt and character.isalnum()):
+    if printable and character and not (alt and character.isascii() and character.isalnum()):
         return Translation("literal", character)
     if key in CHORDS:
         return Translation("key", CHORDS[key])

@@ -582,17 +582,29 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`). Printable characters travel as typed — except a letter or digit
-with alt held, which travels as the chord (`M-p`), so Claude Code's alt+p
+hatch (`F12`). Printable characters travel as typed — except an ASCII letter or
+digit with alt held, which travels as the chord (`M-p`), so Claude Code's alt+p
 switches the model; special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
-`BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
+`BTab`, …). A chord tmux has no spelling for — Cmd (super) or hyper on a
+printable key — is dropped rather than typed, so Cmd+V does not insert a `v`.
+Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel scrolls a pane's history; any key returns to live. Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+The alt chord has two limits, both in Textual's key parser rather than in this
+UI, and the kitty protocol is the *worse* case for this one rather than the
+better one. A terminal speaking it reports the typed text alongside the chord,
+and the parser then drops the `alt` token from the key name — so under kitty,
+ghostty, wezterm and foot, and on macOS where Option produces a character,
+alt+p still types a `p` and does not switch the model. And Escape is what the
+parser has to tell an alt chord from: a letter arriving within ~100 ms of a
+lone Escape is read as that chord, so pressing Esc and immediately typing `p`
+switches the model instead of typing the letter.
 
 ---
 

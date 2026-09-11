@@ -148,7 +148,7 @@ def test_keys_tmux_would_mistype_are_dropped(textual: str) -> None:
     assert translate(textual, None, printable=False) is None
 
 
-def test_printable_input_is_always_literal_even_with_modifiers() -> None:
+def test_printable_input_is_literal_under_the_modifiers_tmux_can_carry() -> None:
     assert translate("a", "a", printable=True) == literal("a")
     assert translate("left_square_bracket", "[", printable=True) == literal("[")
     assert translate("é", "é", printable=True) == literal("é")
@@ -156,6 +156,30 @@ def test_printable_input_is_always_literal_even_with_modifiers() -> None:
     # A terminal that reports the character alongside a shift/ctrl chord: the text wins.
     assert translate("shift+a", "A", printable=True) == literal("A")
     assert translate("ctrl+a", "a", printable=True) == literal("a")
+
+
+def test_a_modifier_tmux_cannot_spell_drops_the_key_rather_than_typing_it() -> None:
+    """``super``/``hyper`` is how macOS Cmd and the kitty protocol's extras
+    arrive. There is no tmux name for the chord, and the character alone is not
+    what was asked for — Cmd+V is not a request to type a ``v``. Moving the
+    printable rule below the modifier gate made this so; the review asked for it
+    to be deliberate and pinned rather than a side effect of the ordering."""
+    assert translate("super+a", "a", printable=True) is None
+    assert translate("hyper+a", "a", printable=True) is None
+    assert translate("super+c", "c", printable=True) is None
+    assert translate("super+f5", None, printable=False) is None
+
+
+def test_alt_only_claims_the_ascii_letters_and_digits_that_were_measured() -> None:
+    """``str.isalnum`` is Unicode-aware, so an AltGr or accented layout — or
+    Escape typed just before the character — put ``M-é`` and ``M-ф`` on the wire.
+    Every name this module emits was measured against a real tmux and those
+    never were, so they stay the text they have always been (review)."""
+    assert translate("alt+é", "é", printable=True) == literal("é")
+    assert translate("alt+ф", "ф", printable=True) == literal("ф")
+    assert translate("alt+٣", "٣", printable=True) == literal("٣")
+    assert translate("alt+³", "³", printable=True) == literal("³")
+    assert translate("alt+p", "p", printable=True) == key("M-p")
 
 
 def test_alt_chords_keep_their_modifier_even_when_the_character_is_reported() -> None:

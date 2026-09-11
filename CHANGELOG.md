@@ -51,6 +51,76 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `aisq_` token shape. Contract: `docs/plans/aisquare-login.md`; guide:
   `docs/signing-in.md`. The `auth rotate` stub is gone (sessions do not rotate).
 
+- **`aisquare fleet shutdown`: the fleet's off switch, and the end of rows stuck
+  at "unknown (tmux unavailable)".** Measured 2026-09-10: the only way to stop a
+  whole fleet was `tmux -L asq kill-server` by hand. After it, every manager row
+  kept reading `unknown (tmux unavailable)`, the UI showed dead managers with
+  `(pane gone)`, and `fleet reap` reaped 0 — correctly: reap and stop refuse to
+  end a row on a server they cannot reach, because an unreachable server is not
+  proof a pane died (an earlier release lost live agents' worktrees to exactly
+  that inference). Nothing in the CLI could say "yes, I stopped it". Now
+  `shutdown` can, because the operator is saying it — and it is scoped,
+  confirmable and specific about what it did. **This project by default, `--all`
+  for every project** (the shape `fleet reap` already had), and it prints what it
+  would end and asks first at a terminal, is a dry run off one without `--yes`,
+  and under `--json` without `--yes` prints the plan (`dry_run: true`) and
+  changes nothing. Agents on an answering server are stopped as `fleet stop`
+  stops one (graceful `/exit` unless `--force`; `agent_exited` is now emitted by
+  `stop` itself, so every stop path produces the event, not only `reap`), and
+  **the ended rows' claims are released** (`release_claims=True`) instead of
+  waiting out the four-hour claim orphan window. Rows whose socket had no server
+  are ended as lost and counted apart (`recorded`, never "stopped"), each
+  carrying the reason the service actually had — the CLI no longer asserts "its
+  server was not running" over a row whose server answered. An agent that exited
+  on its own between the snapshot and its turn is read back from the store and
+  counted as stopped with the status it recorded, rather than reported as left
+  live over an already-ended row. What is killed is the fleet's own
+  `asq-<codename>` **sessions**, never the server: `kill-server`
+  would take down a hand-made session, one a failed `rename` left under an old
+  name, or the operator's personal server if `[fleet] tmux_socket` names it, and
+  a server with nothing left on it exits by itself. A `fleet-paused` signal is
+  cleared for each project the run CONFIRMED down (and said in the output), so
+  the next manager does not come up staffing nothing — and KEPT, named as
+  `paused_kept`, for a project with a row left live, a session left up or a
+  listing that failed (review round 2). Round 2 also closed three safety holes:
+  a row spawned mid-run whose pane cannot be QUERIED is left live and said so
+  (a timeout is not a dead pane); the spare-this-session rule follows the pane
+  to the session it actually lives in, so an `asq-*` session left under an old
+  name is no longer prefix-swept over a row marked LEFT LIVE; and a socket
+  whose `list-sessions` fails after a good probe is reported as a failed kill
+  (`<socket>:*`), so the command exits 1 instead of printing a clean shutdown
+  over a surviving session. `incomplete_projects` in the `--json` report is the
+  set every one of those rules reads. The final pass asks reachability with a
+  probe that RAISES on an unavailable client (`TmuxServer.reachable()`, rounds
+  4-5) — a tmux that left PATH, or a shim whose interpreter is gone, after the
+  initial guard is "could not ask", so a late agent on that socket is left live
+  and its project stays paused rather than recorded lost. `reachable()` reads
+  tmux's own words, not the exit code: `No such file or directory` / `no server
+  running on` is absence, anything else (`Permission denied` on a live socket) is
+  a `TmuxError` — never a row ended (round 7). Round 7 also: the inside-server
+  guard parses `$TMUX` from the right (`rsplit(",", 2)`), so a comma in the
+  socket path cannot slip past it; a final row scan the store refused is
+  `late_scan_failed` in the report (PARTLY, exit 1, every snapshot project keeps
+  its pause); and a forgotten registration's pause is skipped, not read, so
+  `shutdown --all` no longer clears the tombstone `project forget` wrote. **Exit status is recorded only where
+  tmux exposes one**: `--force` kills a live pane and records none. It refuses
+  rather than guess — no usable tmux, a socket that cannot be *asked* whether a
+  server is there (a wedged server's 30 s timeout used to escape as a traceback
+  with no `--json` output), or a call from INSIDE the fleet's own tmux server,
+  where the kill would take down the process printing the report. A row whose
+  `stop` refused because its pane was seen ALIVE is left live, reported with that
+  reason, its session spared, and the command exits 1. Board notes and tasks are
+  kept. Doctor's fleet row now decides "the server is gone" with `answers()`
+  rather than an empty `list-sessions` (which cannot tell an empty server from an
+  absent one) and *appends* a scoped `fleet shutdown --project <codename>` to the
+  reap advice instead of replacing it. Twenty service tests and eight CLI
+  tests, including every refusal, the mixed one-gone-one-healthy socket state, a
+  row spawned mid-shutdown, and a forgotten registration's live rows — plus the
+  fake tmux made faithful where those paths live (a kill that fails with no
+  server up, an `answers()` that can raise, the `running` gate on every write,
+  and a per-socket fake) and `fleet shutdown` added to the no-traceback sweeps'
+  `UNINVOKED` list, which it was missing: a plain `make test` ran it against the
+  developer's real `asq` socket and killed their live fleet.
 - **A `ui-tester` role: user-facing work is verified in a real browser, with
   evidence — and the role brings its own browser flag.** Eight first-class roles
   now. It takes tasks titled `UI: …` from the review pool and runs their

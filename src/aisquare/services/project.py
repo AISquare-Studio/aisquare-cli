@@ -109,10 +109,16 @@ class ProjectBusyError(Exception):
 
     def __init__(self, project: ProjectInfo, agents: list[FleetAgent]) -> None:
         labels = ", ".join(agent.label for agent in agents)
+        # `reap` is named for rows whose SERVER still answers — it refuses to end a
+        # row on a server it cannot reach, and an operator following that advice
+        # after a hand-run `tmux kill-server` reaped nothing, twice. The scoped
+        # `fleet shutdown` is the command that can, on their word.
+        scope = project.codename or display_name(project)
         super().__init__(
             f"{display_name(project)} has {len(agents)} live fleet agent(s): {labels} — "
-            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap "
-            "if they are already gone"
+            "stop them first (aisquare fleet stop <label>), or run aisquare fleet reap if "
+            f"they are already gone; if their tmux server is gone too, aisquare fleet "
+            f"shutdown --project {scope} records them"
         )
         self.project = project
         self.agents = agents

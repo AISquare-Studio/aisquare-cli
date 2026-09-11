@@ -878,8 +878,10 @@ CENSUS = {
     "docs/signing-in.md": (8, 0),
     # Measured 2026-08-28 the same way, on the day the document was written: 29
     # fenced commands (the reference plus troubleshooting) and one classified
-    # mention (the `aisquare-cli[tui]` pip requirement). Re-measure when it grows.
-    "docs/fleet.md": (29, 1),
+    # mention (the `aisquare-cli[tui]` pip requirement). Re-measured 2026-09-10 at
+    # 33 when `fleet shutdown` added its reference section and replaced the
+    # troubleshooting `tmux kill-server` block with two scoped invocations.
+    "docs/fleet.md": (33, 1),
     # Two commands in the smoke block; the export line is upper-case and is not a
     # mention this audit sees.
     "docs/ci-contract.md": (2, 0),

@@ -242,6 +242,61 @@ tmux answers again, or `fleet reap` after the server comes back. If the server i
 genuinely gone — a reboot, `kill-server` — `fleet reap --all --server-down` marks
 the rows on it lost; it acts only where tmux itself reports no server behind the
 socket, never on a server that is merely not answering.
+To take a whole project's fleet down and record every row in one go, use
+`fleet shutdown`.
+
+### `fleet shutdown`
+
+```sh
+aisquare fleet shutdown
+aisquare fleet shutdown --all --yes
+```
+
+The fleet's off switch — **this** project's by default, `--all` for every
+project's, like `fleet reap`. Every agent on an answering server is stopped the
+way `fleet stop` stops one (`/exit`, grace, kill), then the fleet's own tmux
+**sessions** are killed and **every row is recorded**: stopped rows with their
+exit status where tmux exposed one, and rows whose socket had no server as
+*lost*, each with the reason the service gave.
+
+It ends running work, so it asks first: it prints what it would end and
+confirms at a terminal (default **no**), and off a terminal it is a dry run
+unless `--yes`. Under `--json` without `--yes` it prints the plan
+(`dry_run: true`) and changes nothing.
+
+`--force` skips the `/exit` and kills a live pane, which means **no exit status
+is recorded for it** — a status is only ever read from a pane that already reads
+dead — and no `SessionEnd` hook runs.
+
+What it kills is the fleet's own `asq-<codename>` sessions, never the server:
+`tmux kill-server` would take down every session on that socket, and the fleet's
+claim is only ever to its own (a hand-made session, or one a failed `rename`
+left under an old name, is not the fleet's to destroy — and `[fleet]
+tmux_socket` may point anywhere). A server with nothing left on it exits by
+itself, so the next `asq` or `fleet spawn` starts a fresh one on whichever
+account that shell carries.
+
+Board notes and tasks are kept, but the ended rows' **claims are released**: a
+task left `doing` by a session that no longer exists is not untouched, it is
+stuck for four hours. A `fleet-paused` signal is cleared for each project this
+run CONFIRMED down, and the output says so — the fleet it paused is gone. A
+project with a row left live, a session left up or a listing that failed keeps
+its signal (`paused_kept` in the report): the manager's "spawn nothing while
+paused" is exactly the standing order wanted while you are trying to stop it.
+
+It refuses rather than guess. With no usable tmux (`fleet_unavailable`), on a
+socket that cannot be ASKED whether a server is there (a wedged server's 30 s
+timeout), or when run from INSIDE the fleet's own tmux server — a `fleet attach`
+pane included, where the kill would take down the process printing the report —
+nothing is touched and the message says why. A row whose `stop` refused because
+its pane was seen ALIVE is left live, reported, and its session is spared; the
+command then exits 1, because the fleet is not down.
+
+Why this exists rather than `tmux -L asq kill-server` by hand: `stop` and
+`reap` refuse to end a row on a server they cannot reach, because an unreachable
+server is not proof a pane died. A hand-run kill leaves every row saying
+`unknown (tmux unavailable)` and `reap` reaping nothing — correctly. `shutdown`
+is the operator saying so, which is the one thing that resolves it.
 
 ### `fleet attach`
 
@@ -677,10 +732,19 @@ aisquare fleet reap --all --server-down
 
 To stop everything the fleet ever started, on every project, kill the private
 server — this ends every agent at once, so prefer `fleet stop` per agent:
+**The server was stopped outside the CLI.** Rows read `unknown (tmux
+unavailable)` and `reap` reaps nothing — correctly: it cannot ask. `shutdown`
+records them as lost on your word, scoped to one project or over all of them:
 
 ```sh
-tmux -L asq kill-server
+aisquare fleet shutdown --project amber-otter --yes
+aisquare fleet shutdown --all --yes
 ```
+
+That is also how to stop everything the fleet ever started: it ends every agent
+at once (so prefer `fleet stop` per agent), and it reports what it ended.
+Running `tmux -L asq kill-server` by hand is what leaves the rows above wrong,
+and it takes any other session on that socket with it.
 
 **An agent is stuck on a permission prompt.** Its row shows **🔔 NEEDS YOU**
 and the terminal rings. Nothing nudges it and nothing answers for it: click the

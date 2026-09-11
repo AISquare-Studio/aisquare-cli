@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Collection, Iterator, Mapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -93,6 +93,35 @@ class FakeTmux(TmuxServer):
         tmux 3.4 (its own -vv server log): one poll can see ``dead=1`` while
         ``pane_dead_status`` expands to ``''``; the status lands a beat later."""
         self.fail_input = False
+        self.running = True
+        """Whether a server is listening on the socket. False = the shape a hand-run
+        `tmux kill-server` leaves: binary present, every question answered empty —
+        and every command that WRITES failing, which is why the gate below is
+        applied to `_input`, `kill_window`, `kill_session` and `rename_session`
+        too. Without that, `send_literal(pane, '/exit')` succeeded on a server
+        that was not running and `honours_exit` marked the pane dead with status
+        0: the fake simulated an agent gracefully obeying `/exit` on a dead
+        server, so a regression that typed into an unreachable server read as a
+        clean exit."""
+        self.answers_raises: str | None = None
+        self.exec_unavailable = False
+        self.socket_denied = False
+        """The socket is THERE but this user may not open it: tmux exits 1 with
+        `(Permission denied)` — the same exit code as an absent server. `reachable()`
+        raises `TmuxError`; `answers()` returns False (its never-raises contract)."""
+        """`which` finds the client but running it fails (`FileNotFoundError` from
+        `subprocess.run` — a shim whose interpreter is gone): `binary()` succeeds,
+        `reachable()` raises `TmuxUnavailable`, `answers()` returns False."""
+        """Set to make `answers()` RAISE `TmuxError` — the real one does not catch
+        that (only `TmuxUnavailable`), and a 30 s `_COMMAND_TIMEOUT` on a wedged
+        server is exactly this shape. The wedged server is the case `shutdown`
+        exists for, so it has to be reachable from a test."""
+        self.server_killed = False
+        self.killed_sessions: list[str] = []
+        self.per_socket: dict[str, TmuxServer] = {}
+        """Sockets that answer with a DIFFERENT server than this fake (see the
+        `tmux` fixture): one gone, one healthy, which is the state `shutdown` and
+        the doctor decide per socket and nothing could otherwise reproduce."""
         self.sessions: dict[str, list[WindowInfo]] = {}
         self.facts: dict[str, PaneFacts] = {}
         self.output_at: dict[str, datetime] = {}
@@ -126,6 +155,8 @@ class FakeTmux(TmuxServer):
         self.binary()
         if list(args) != ["list-panes", "-a", "-F", fleet_service._ACTIVITY_FORMAT]:
             raise AssertionError(f"the fake tmux was asked to really run: {list(args)}")
+        if not self.running:
+            return ""
         return "".join(
             f"{pane_id}{fleet_service._SEP}{int(when.timestamp())}\n"
             for pane_id, when in self.output_at.items()
@@ -134,27 +165,65 @@ class FakeTmux(TmuxServer):
 
     # -- sessions and windows --
     def answers(self) -> bool:
-        """Reachable while tmux is installed — the real one asks tmux its version.
+        """Whether a server is listening — ``running``, as the real one asks tmux.
 
         Faithful to :meth:`aisquare.core.tmux.TmuxServer.answers`: an
         unavailable BINARY is not a server that answered (it returns False
-        rather than raising), and everything else here is a server that is
-        there. A test that wants "the socket has no server" scripts the runner
-        instead (see the unreachable-server test).
+        rather than raising), a server that is up answers True, and a socket
+        with no server answers False — ``running = False`` is that state, the
+        shape a hand-run ``tmux kill-server`` leaves. ``answers_raises`` covers
+        the third case the real one has and its docstring's "never raises" does
+        not: a bare ``TmuxError`` from a timeout.
+
+        ``_unreachable_server()`` (below) remains the sharper instrument for the
+        unreachable-server paths — it drives the REAL ``TmuxServer`` over a
+        refusing runner, so every swallow of a non-zero exit is exercised and a
+        new ``TmuxServer`` method is covered automatically.
         """
         try:
-            self.binary()
-        except TmuxUnavailable:
+            return self.reachable()
+        except TmuxError:
             return False
-        return True
+
+    def reachable(self) -> bool:
+        """The raising probe: an unavailable client — missing (`installed`) or
+        failing at EXECUTION (`exec_unavailable`: the binary is found but its
+        interpreter is gone) — is `TmuxUnavailable`; a socket that is there but
+        refuses this user (`socket_denied`) is a `TmuxError`; only "no server" is
+        False."""
+        self.binary()
+        if self.exec_unavailable:
+            raise TmuxUnavailable("tmux is not runnable: bad interpreter (fake)")
+        if self.answers_raises is not None:
+            raise TmuxError(self.answers_raises)
+        if self.socket_denied:
+            raise TmuxError(f"error connecting to /fake/tmux-0/{self.socket} (Permission denied)")
+        return self.running
+
+    def kill_server(self) -> None:
+        """As the real one: ``run("kill-server")``, which FAILS with no server up.
+
+        Measured in ``test_live_kill_session_then_kill_server``: a second
+        ``kill_server()`` raises ``no server running``. Faithfulness matters here
+        because a fleet whose last window was killed has already lost its server
+        (``BUNDLED_CONF`` does not set ``exit-empty off``), so the failing kill is
+        the ORDINARY path, not the exotic one.
+        """
+        self.binary()
+        if not self.running:
+            raise TmuxError(f"no server running on /fake/tmux-0/{self.socket}")
+        self.server_killed = True
+        self.running = False
+        self.sessions.clear()
+        self.facts.clear()
 
     def list_sessions(self) -> list[str]:
         self.binary()
-        return list(self.sessions)
+        return list(self.sessions) if self.running else []
 
     def has_session(self, name: str) -> bool:
         self.binary()
-        return name in self.sessions
+        return self.running and name in self.sessions
 
     def spawn_window(
         self,
@@ -168,6 +237,11 @@ class FakeTmux(TmuxServer):
         height: int = 50,
     ) -> WindowInfo:
         self.binary()
+        # The real one runs `new-session -d`, which STARTS a server when none is
+        # listening and exits 0 — so "the next asq / fleet spawn starts a fresh
+        # server", stated in the command's docstring and in docs/fleet.md, is
+        # exercisable rather than merely claimed.
+        self.running = True
         self._counter += 1
         pane_id = f"%{self._counter}"
         window = WindowInfo(
@@ -195,6 +269,8 @@ class FakeTmux(TmuxServer):
 
     def list_windows(self, session: str) -> list[WindowInfo]:
         self.binary()
+        if not self.running:
+            return []
         return [self._current(window) for window in self.sessions.get(session, [])]
 
     def _current(self, window: WindowInfo) -> WindowInfo:
@@ -215,26 +291,73 @@ class FakeTmux(TmuxServer):
 
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.binary()
-        return self.facts.get(pane_id)
+        return self.facts.get(pane_id) if self.running else None
+
+    # The strict twins the shutdown paths use: each is the lenient answer UNLESS
+    # the server could not be asked, and that single distinction is `reachable()`
+    # already — it raises for a denied socket (`socket_denied`), a wedged one
+    # (`answers_raises`) and an unrunnable client (`exec_unavailable`), and is
+    # False (never raises) for a server that is simply not running. Deriving all
+    # four from it keeps the fake from drifting from the real contract.
+    def sessions_or_raise(self) -> list[str]:
+        self.reachable()
+        return self.list_sessions()
+
+    def has_session_or_raise(self, name: str) -> bool:
+        self.reachable()
+        return self.has_session(name)
+
+    def windows_or_raise(self, session: str) -> list[WindowInfo]:
+        self.reachable()
+        return self.list_windows(session)
+
+    def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
+        self.reachable()
+        return self.pane_facts(pane_id)
 
     def kill_window(self, pane_id: str) -> None:
         self.binary()
+        self._require_server()
         if pane_id not in self.facts:
             raise TmuxError(f"can't find pane: {pane_id}")
         self.vanish(pane_id)
         self.killed.append(pane_id)
+        # As tmux does: a session whose last window is killed goes with it (and,
+        # without `exit-empty off`, the server follows when it held nothing else).
+        for name, windows in list(self.sessions.items()):
+            if not windows:
+                del self.sessions[name]
+        if not self.sessions:
+            self.running = False
 
     def kill_session(self, session: str) -> None:
         self.binary()
+        self._require_server()
+        if session not in self.sessions:
+            raise TmuxError(f"can't find session: {session}")
         for window in self.sessions.pop(session, []):
             self.facts.pop(window.pane_id, None)
+        self.killed_sessions.append(session)
+        if not self.sessions:
+            self.running = False
 
     def rename_session(self, old: str, new: str) -> None:
         self.binary()
+        self._require_server()
         if old not in self.sessions:
             raise TmuxError(f"can't find session: {old}")
         self.sessions[new] = self.sessions.pop(old)
         self.renamed.append((old, new))
+
+    def _require_server(self) -> None:
+        """What every WRITE hits when no server is listening: a non-zero exit.
+
+        The real ``kill_window`` / ``kill_session`` / ``rename_session`` /
+        ``send_keys`` all route through ``run()``, which raises on a non-zero
+        exit, and tmux answers ``error connecting to …`` for each of them.
+        """
+        if not self.running:
+            raise TmuxError(f"error connecting to /fake/tmux-0/{self.socket}")
 
     def attach_argv(self, session: str) -> list[str]:
         return [self.binary(), "-L", self.socket, "attach-session", "-t", f"={session}"]
@@ -253,6 +376,7 @@ class FakeTmux(TmuxServer):
 
     def _input(self, pane_id: str, kind: str, text: str) -> None:
         self.binary()
+        self._require_server()
         if self.fail_input:
             raise TmuxError("send-keys failed (fake)")
         if pane_id not in self.facts:
@@ -293,8 +417,22 @@ class FakeClock:
 
 @pytest.fixture
 def tmux(monkeypatch: pytest.MonkeyPatch) -> FakeTmux:
+    """The fake every socket answers with — unless a test registers another.
+
+    ``fleet_service.server`` is the one factory the service uses for every
+    socket (``server_for`` routes through it), so one fake covers a
+    single-socket fleet. It also USED to mean no service test could produce a
+    mixed state across sockets — one gone, one healthy — which is the state
+    ``shutdown`` and the doctor decide per socket. A test that needs it puts a
+    second server in ``tmux.per_socket["asq-old"]``.
+    """
     fake = FakeTmux()
-    monkeypatch.setattr(fleet_service, "server", lambda config=None: fake)
+
+    def factory(config: FleetSettings | None = None) -> TmuxServer:
+        socket = (config or fleet_service.settings()).tmux_socket
+        return fake.per_socket.get(socket, fake)
+
+    monkeypatch.setattr(fleet_service, "server", factory)
     return fake
 
 
@@ -1892,6 +2030,1029 @@ def test_stop_leaves_the_row_live_when_tmux_cannot_confirm_the_agent_stopped(
 
 
 # --- reap ----------------------------------------------------------------------------
+
+
+# --- shutdown: the operator's off switch, and the one path that may end unconfirmed rows ---
+
+
+def _session_of(project: ProjectInfo, socket: str | None = None) -> str:
+    """The qualified ``<socket>:<session>`` the report names for this project."""
+    return f"{socket or fleet_service.settings().tmux_socket}:asq-{_codename(project)}"
+
+
+def test_shutdown_stops_every_agent_records_each_row_and_takes_its_session_down(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    manager = fleet_service.spawn(project, "manager").agent
+    coder = _coder(project)
+
+    report = fleet_service.shutdown(project)
+
+    assert [a.label for a in report.stopped] == ["manager", "coder-1"], (
+        "the manager goes first: it is the one agent that spawns others mid-shutdown"
+    )
+    assert [a.exit_status for a in report.stopped] == [0, 0], "the graceful path has a status"
+    assert report.recorded == [] and report.failed == []
+    assert sorted(tmux.killed) == sorted([manager.pane_id, coder.pane_id]), "each window killed"
+    assert report.sessions_absent == [_session_of(project)] and report.sessions_killed == []
+    assert not tmux.running, "killing the last window took the session, and so the server"
+    assert not tmux.server_killed, "the SERVER is never killed — only the fleet's sessions"
+    assert sorted(_events(project, "agent_exited")) == ["coder-1 exited (0)", "manager exited (0)"]
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+    assert fleet_service.list_agents(project) == [], "no live agent is left to list"
+
+
+def test_shutdown_force_records_no_exit_status_and_still_releases_the_claims(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``--force`` skips the ``/exit``, so there is no ``SessionEnd`` hook to release
+    the agent's claims and no exit status to record — a status is only ever read from
+    a pane that already reads dead. Both were claimed as facts by the first draft."""
+    coder = _coder(project)
+    _board_session(coder, "working")
+    task = _add_task(project, "wire the auth callback")
+    assert coder.session_id is not None
+    with store_session() as store:
+        lease = datetime.now(tz=UTC) + timedelta(hours=1)
+        assert store.claim_task(task.id, coder.session_id, lease)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert tmux.typed == [], "no /exit was typed"
+    assert [a.exit_status for a in report.stopped] == [None], "force kills a live pane: no status"
+    assert report.claims_released == [task.id]
+    with store_session() as store:
+        held = store.get_task(task.id)
+        session = store.get_session(coder.session_id)
+    assert held is not None and held.status == "todo" and held.claimed_by is None
+    assert session is not None and session.ended_at is not None, "the board session is retired"
+
+
+def test_shutdown_records_rows_lost_with_a_reason_when_the_server_was_killed_by_hand(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Measured 2026-09-10: after a hand-run `tmux -L asq kill-server` the rows read
+    `unknown (tmux unavailable)` and `reap` reaped 0 — correctly, it could not ask.
+    The operator's `shutdown` is the word that resolves it."""
+    coder = _coder(project)
+    tmux.running = False  # the shape kill-server leaves: binary present, server gone
+    assert fleet_service.status_of(coder).state == "unknown", "the control: reap may not guess"
+    before = fleet_service.reap(project)
+    assert before.lost == [] and before.ended == []
+
+    report = fleet_service.shutdown(project)
+
+    assert [row.agent.id for row in report.recorded] == [coder.id]
+    assert "no server answered on socket" in report.recorded[0].reason
+    assert report.stopped == [], "nothing answered, so nothing was 'stopped'"
+    assert report.servers_absent == [coder.tmux_socket]
+    assert report.sessions_killed == [] and report.sessions_absent == []
+    assert report.recorded[0].agent.ended_at is not None
+    assert report.recorded[0].agent.exit_status is None
+    assert _events(project, "agent_exited") == [], "lost is recorded, not announced as an exit"
+    assert fleet_service.status_of(report.recorded[0].agent).state == "exited", "the row says so"
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+
+
+def test_shutdown_records_rows_lost_over_the_real_tmux_wrapper(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same absent-socket path against the REAL ``TmuxServer`` over a refusing
+    runner (``_unreachable_server``), not the fake: every swallow of a non-zero exit
+    is exercised, so ``answers()`` reading False here is tmux's own behaviour rather
+    than the fake's ``running`` flag agreeing with the service."""
+    coder = _coder(project)
+    dead = _unreachable_server()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: dead)
+
+    report = fleet_service.shutdown(project)
+
+    assert [row.agent.id for row in report.recorded] == [coder.id]
+    assert report.stopped == [] and report.failed == []
+    assert report.servers_absent == [coder.tmux_socket]
+    assert report.sessions_killed == [] and report.sessions_absent == []
+
+
+def test_shutdown_defaults_to_one_project_and_all_reaches_every_project(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, plain_project: ProjectInfo
+) -> None:
+    """Scope is ``reap``'s: an operator with two projects running who means "take
+    THIS project's fleet down" must not lose the other project's agents."""
+    here = _coder(project)
+    there = fleet_service.spawn(plain_project, "coder", worktree=False).agent
+
+    scoped = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in scoped.stopped] == [here.id]
+    assert [s.agent.id for s in fleet_service.list_agents(plain_project)] == [there.id]
+    assert f"asq-{_codename(plain_project)}" in tmux.sessions, "the other session is untouched"
+
+    every = fleet_service.shutdown(force=True)
+
+    assert [a.id for a in every.stopped] == [there.id]
+    assert fleet_service.list_agents(plain_project) == []
+
+
+def test_shutdown_counts_an_agent_that_exited_on_its_own_as_stopped(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third falsehood in the same family: an agent that exits between the
+    snapshot and its turn makes ``stop`` raise ``NoSuchAgent``. Reporting that as
+    LEFT LIVE is false in every part — the row IS ended, nothing needs stopping —
+    and would make a clean shutdown exit 1; recording it lost would drop the exit
+    status the row already has."""
+    coder = _coder(project)
+    real_stop = fleet_service.stop
+
+    def exit_first(*args: object, **kwargs: object) -> FleetAgent:
+        with store_session() as store:  # its own SessionEnd hook got there first
+            store.end_fleet_agent(coder.id, exit_status=7)
+        return real_stop(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fleet_service, "stop", exit_first)
+
+    report = fleet_service.shutdown(project)
+
+    assert [(a.label, a.exit_status) for a in report.stopped] == [("coder-1", 7)]
+    assert report.failed == [] and report.recorded == []
+
+
+def test_shutdown_reaches_a_forgotten_projects_live_rows(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A tombstoned registration can still hold live rows (``forget`` reads liveness
+    and writes the tombstone in separate statements, and a concurrent ``spawn``
+    revives the row). Hidden from the scan, that agent's pane went down with the
+    session while its row stayed live — and NOTHING could reconcile it afterwards."""
+    coder = _coder(project)
+    with store_session() as store:
+        store.forget_project(project.id)
+        assert [p.id for p in store.list_projects()] == [], "hidden from every ordinary read"
+
+    report = fleet_service.shutdown(force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+
+
+def test_shutdown_refuses_when_tmux_is_not_usable_and_touches_no_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``answers()`` is False for "no usable tmux" as well as "no server", and a tmux
+    that left `PATH` leaves every agent RUNNING. Ending those rows as lost hid live
+    agents from every listing and handed their worktrees to the next reap."""
+    coder = _coder(project)
+    tmux.installed = False
+
+    with pytest.raises(FleetUnavailable, match="tmux is not installed"):
+        fleet_service.shutdown(project)
+
+    tmux.installed = True
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+    assert tmux.killed == [] and tmux.killed_sessions == []
+
+
+def test_shutdown_refuses_when_the_socket_cannot_be_asked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A 30 s command timeout on a wedged server raises a bare ``TmuxError`` from
+    ``answers()``, which is not a ``FleetError``: unguarded it escaped as a traceback
+    (and `--json` printed nothing) in exactly the case this command exists for.
+    "The socket did not answer" and "we could not ask" are different facts."""
+    coder = _coder(project)
+    tmux.answers_raises = "display-message timed out after 30.0s"
+
+    with pytest.raises(FleetError, match="could not be asked whether a server is running"):
+        fleet_service.shutdown(project)
+
+    tmux.answers_raises = None
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+    assert tmux.killed == [] and tmux.killed_sessions == []
+
+
+def test_shutdown_refuses_from_inside_the_fleets_own_server(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fleet attach`` is the documented escape hatch and every fleet window runs
+    ``aisquare`` inside that same server, so this is ordinary use. The kill SIGHUPs the
+    pane running the command: the store writes have happened, and none of the report
+    prints — losing the one thing this command offers over `tmux kill-server`."""
+    coder = _coder(project)
+    socket_path = fleet_service.server().socket_path()
+    monkeypatch.setenv("TMUX", f"{socket_path},4242,0")
+
+    with pytest.raises(FleetError, match="INSIDE the fleet's own tmux server"):
+        fleet_service.shutdown(project)
+    with pytest.raises(FleetError, match="detach"):
+        fleet_service.shutdown_plan(project)
+
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+    assert tmux.killed == [] and tmux.killed_sessions == []
+    monkeypatch.setenv("TMUX", "/tmp/tmux-0/somebody-elses,4242,0")
+    assert fleet_service.shutdown(project, force=True).stopped, "another socket is not this one"
+
+
+def test_shutdown_keeps_a_row_live_when_its_pane_was_seen_alive_and_spares_its_session(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``_verify_gone``'s refusal is a POSITIVE observation — the pane is still alive —
+    and the first draft swallowed it with `except FleetError: pass` and ended the row
+    anyway. Killing the session would be the same mistake by another route: the agent
+    would die and its live row would sit on a dead pane."""
+    coder = _coder(project)
+    tmux.fail_input = True  # the server answers, but /exit does not go through
+
+    report = fleet_service.shutdown(project)
+
+    assert report.stopped == [] and report.recorded == []
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    assert "its pane is still alive" in report.failed[0].reason
+    assert report.sessions_left_up == [_session_of(project)]
+    assert report.sessions_killed == [] and tmux.killed_sessions == []
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id], "still live"
+
+
+def test_shutdown_records_a_row_spawned_during_the_run(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot is taken before the first stop and each stop can cost the whole
+    grace, so the window is real: the manager, a second terminal or the UI can spawn
+    into it. Without this pass that row was neither stopped nor recorded and its pane
+    went down with the session — a live row reading `unknown (tmux unavailable)`."""
+    manager = fleet_service.spawn(project, "manager").agent
+    late: list[FleetAgent] = []
+    real_stop = fleet_service.stop
+
+    def stop_and_spawn(*args: object, **kwargs: object) -> FleetAgent:
+        if not late:  # the spawn lands while the manager is being stopped
+            late.append(_coder(project))
+        return real_stop(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fleet_service, "stop", stop_and_spawn)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [manager.id], "the only row in the snapshot"
+    assert [row.agent.id for row in report.recorded] == [late[0].id]
+    assert "spawned during the shutdown" in report.recorded[0].reason
+    assert report.sessions_killed == [_session_of(project)], "the late row's session was killed"
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=True) == []
+
+
+def test_shutdown_leaves_a_row_live_when_the_late_spawn_is_still_running(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spawn that lands AFTER the kill phase brought a session of its own back up,
+    and that agent is running. The re-read asks its pane before ending anything."""
+    coder = _coder(project)
+    spawned: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_spawn(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        spawned.append(_coder(project))
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_spawn)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.recorded == [], "a running pane is never recorded lost"
+    assert [row.agent.id for row in report.failed] == [spawned[0].id]
+    assert "still alive" in report.failed[0].reason
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [spawned[0].id]
+
+
+def test_shutdown_leaves_a_late_row_live_when_its_pane_cannot_be_asked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 2 (P1): a `pane_facts()` timeout on a row spawned during
+    the run left `facts=None`, which fell through to `_record_lost` — a running
+    agent's row ended, its claims released, and the report saying its session was
+    killed. "Could not ask" is not "dead"."""
+    coder = _coder(project)
+    spawned: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+    real_facts = tmux.pane_facts
+
+    def kill_then_spawn(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        spawned.append(_coder(project))
+
+    def facts_or_timeout(pane_id: str) -> PaneFacts | None:
+        if spawned and pane_id == spawned[0].pane_id:
+            raise TmuxError("timed out after 30 s (fake)")
+        return real_facts(pane_id)
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_spawn)
+    monkeypatch.setattr(tmux, "pane_facts", facts_or_timeout)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.recorded == [], "an unqueryable pane is never recorded lost"
+    assert [row.agent.id for row in report.failed] == [spawned[0].id]
+    assert "could not be asked" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [spawned[0].id], "live"
+
+
+def test_shutdown_spares_the_old_name_session_that_hosts_a_left_live_pane(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #121, round 2: under `--all` the prefix sweep killed an `asq-*`
+    session left under an OLD name even though the row inside it had just been
+    marked LEFT LIVE — the spare rule only knew the project's CURRENT session name.
+    It now follows the pane."""
+    coder = _coder(project)
+    current = _session_of(project).split(":", 1)[1]
+    tmux.sessions["asq-old-name"] = tmux.sessions.pop(current)  # a failed rename
+    tmux.fail_input = True  # the server answers, but /exit does not go through
+
+    report = fleet_service.shutdown()  # every project: the prefix sweep runs
+
+    assert [row.agent.id for row in report.failed] == [coder.id]
+    socket = fleet_service.settings().tmux_socket
+    assert f"{socket}:asq-old-name" in report.sessions_left_up
+    assert "asq-old-name" not in tmux.killed_sessions
+    assert coder.pane_id in tmux.facts, "the pane is untouched"
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+    assert report.incomplete_projects == [project.id]
+
+
+def test_shutdown_reports_a_failed_session_listing_as_a_partial_shutdown(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 2: a socket that answered the probe but whose
+    `list-sessions` then raised was skipped in silence — an EMPTY report over a
+    surviving session, which the CLI printed as `✓ fleet shut down`, exit 0."""
+    tmux.spawn_window("asq-stale-otter", name="manager", cwd=project.root, command=["cat"])
+
+    def listing_times_out() -> list[str]:
+        raise TmuxError("timed out after 30 s (fake)")
+
+    monkeypatch.setattr(tmux, "list_sessions", listing_times_out)
+
+    report = fleet_service.shutdown()
+
+    assert report.sessions_killed == [] and "asq-stale-otter" in tmux.sessions
+    socket = fleet_service.settings().tmux_socket
+    assert any(
+        s.startswith(f"{socket}:*") and "could not list sessions" in s
+        for s in report.sessions_failed
+    ), report.sessions_failed
+    # `sessions_failed` is what the CLI reads as PARTIAL (⚠ + exit 1), so the
+    # surviving session can no longer hide behind a clean report.
+
+
+def test_shutdown_keeps_a_surviving_project_paused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #121, round 2: when the paused manager could not be stopped, the
+    row stayed live and its session was spared — but the cleanup still called
+    `resume()`, removing "spawn nothing while fleet-paused" precisely while the
+    operator was trying to shut it down."""
+    _coder(project)
+    fleet_service.pause(project)
+    tmux.fail_input = True  # the server answers, but /exit does not go through
+
+    report = fleet_service.shutdown(project)
+
+    assert report.failed and report.sessions_left_up
+    assert fleet_service.is_paused(project), "a surviving fleet keeps its standing order"
+    assert report.paused_cleared == [] and report.paused_kept == [project.root.name]
+
+
+def test_shutdown_spared_panes_are_scoped_to_their_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 3: pane ids are unique only within one tmux server
+    (every server starts at %0). A failed `%1` on the old socket must not spare an
+    unrelated `asq-*` session holding `%1` on the current socket."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    stale = _coder(project)  # %1 on asq-old
+    old.fail_input = True  # its /exit does not go through: the row will be LEFT LIVE
+    _settings(monkeypatch, tmux_socket="asq")
+    tmux.spawn_window("asq-other", name="manager", cwd=project.root, command=["cat"])  # %1 on asq
+    assert stale.pane_id == "%1" and tmux.sessions["asq-other"][0].pane_id == "%1"
+
+    report = fleet_service.shutdown()  # every project: both sockets, the prefix sweep runs
+
+    assert [row.agent.id for row in report.failed] == [stale.id]
+    assert f"asq-old:{_session_of(project).split(':', 1)[1]}" in report.sessions_left_up
+    assert "asq:asq-other" in report.sessions_killed, "an unrelated %1 elsewhere is not spared"
+    assert "asq-other" not in tmux.sessions
+
+
+def test_shutdown_reconciles_a_late_row_on_an_initially_absent_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 3: the initial reachability snapshot is stale by the
+    final pass. A replacement manager started by another terminal on a socket the
+    probe found ABSENT was skipped — its live row unreported, the project "down",
+    its pause cleared, exit 0."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    stale = _coder(project)
+    old.running = False  # killed outside the CLI before the shutdown started
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_replacement(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))  # spawn_window brings the old socket's server back up
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_replacement)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [row.agent.id for row in report.recorded] == [stale.id]
+    assert [row.agent.id for row in report.failed] == [late[0].id]
+    assert "still alive" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    assert fleet_service.is_paused(project), "a surviving replacement keeps the standing order"
+    assert report.paused_kept == [project.root.name] and report.paused_cleared == []
+
+
+def test_shutdown_keeps_a_late_row_live_when_tmux_left_path_before_the_final_pass(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 4 (P1): `answers()` returns False for an unavailable
+    BINARY as well as for an absent server, so the round-3 fresh probe read "tmux
+    left PATH after the initial guard" as "no server" and recorded a still-running
+    late agent lost — session ended, claim released, pause cleared."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_spawn_then_lose_tmux(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))
+        tmux.installed = False  # the client vanishes; the server and the pane are still up
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_spawn_then_lose_tmux)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.recorded == [], "an unaskable socket is never proof of a dead pane"
+    assert [row.agent.id for row in report.failed] == [late[0].id]
+    assert "could not be asked" in report.failed[0].reason
+    assert report.incomplete_projects == [project.id]
+    tmux.installed = True
+    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
+
+
+def test_shutdown_keeps_a_late_row_live_when_the_client_fails_at_execution(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 5 (P1): `binary()` succeeding does not stop `answers()`
+    from swallowing an execution-time `TmuxUnavailable` (an executable whose
+    interpreter is missing) into False — so the round-4 guard still recorded a
+    live late agent lost. `reachable()` propagates it: unknown, row kept."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_spawn_then_break_the_client(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))
+        tmux.exec_unavailable = True  # `which` still finds it; running it fails
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_spawn_then_break_the_client)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.recorded == [], "a client that cannot run is never proof of a dead pane"
+    assert [row.agent.id for row in report.failed] == [late[0].id]
+    assert "could not be asked" in report.failed[0].reason
+    tmux.exec_unavailable = False
+    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
+
+
+@pytest.mark.parametrize("how", ["missing", "not_runnable", "denied"])
+def test_shutdown_refuses_when_the_client_goes_away_between_the_guard_and_the_probe(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    how: str,
+) -> None:
+    """Review of #121, round 6 (P1): the initial socket map came from `answers()`,
+    which swallows an unavailable client into False — so a client that vanished or
+    failed at execution AFTER `_require_usable_tmux` read as "no server", and every
+    row on that socket was recorded lost before a single stop was attempted, panes
+    alive, claims released, pause cleared. The strict probe refuses instead."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    real_targets = fleet_service._shutdown_targets
+
+    def targets_then_lose_the_client(*args: object, **kwargs: object) -> object:
+        result = real_targets(*args, **kwargs)  # type: ignore[arg-type]
+        if how == "missing":
+            tmux.installed = False
+        elif how == "not_runnable":
+            tmux.exec_unavailable = True
+        else:
+            tmux.socket_denied = True  # round 7: exit 1 with (Permission denied), server alive
+        return result
+
+    monkeypatch.setattr(fleet_service, "_shutdown_targets", targets_then_lose_the_client)
+
+    with pytest.raises(fleet_service.FleetError, match="could not be asked"):
+        fleet_service.shutdown(project, force=True)
+
+    tmux.installed, tmux.exec_unavailable, tmux.socket_denied = True, False, False
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id], "untouched"
+    assert coder.pane_id in tmux.facts, "the pane was never touched either"
+    assert fleet_service.is_paused(project), "and the standing order stands"
+
+
+def test_reachable_tells_an_absent_server_from_a_denied_socket() -> None:
+    """Review of #121, round 7 (P1): tmux exits 1 for BOTH a server that is not there
+    (`No such file or directory`) and a live socket this user may not open
+    (`Permission denied`). Only the first is "no server"; the exit code alone must
+    never decide, or a denied live fleet is recorded lost."""
+
+    def scripted(stderr: str, code: int = 1) -> TmuxServer:
+        return _real_server(lambda argv, stdin: Completed(code, "", stderr))
+
+    assert scripted(_UNREACHABLE).reachable() is False
+    assert scripted("no server running on /tmp/tmux-1000/asq").reachable() is False
+    assert scripted("", code=0).reachable() is True
+    with pytest.raises(TmuxError, match="Permission denied"):
+        scripted("error connecting to /tmp/tmux-1000/asq (Permission denied)").reachable()
+    with pytest.raises(TmuxError, match="exited 1"):
+        scripted("").reachable()  # an unexplained refusal is still not an absence
+    # answers() keeps its never-raises contract: a denied socket is "not an answer"
+    assert scripted("error connecting to /tmp/tmux-1000/asq (Permission denied)").answers() is False
+
+
+def test_shutdown_leaves_a_late_row_live_when_its_socket_is_denied(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final pass with a socket that is there but refuses this user: `TmuxError`,
+    so the late row is unknown — live, claim kept, pause kept — not lost."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_spawn_then_deny(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))
+        tmux.socket_denied = True
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_spawn_then_deny)
+    report = fleet_service.shutdown(project, force=True)
+    tmux.socket_denied = False
+
+    assert [a.id for a in report.stopped] == [coder.id] and report.recorded == []
+    assert [row.agent.id for row in report.failed] == [late[0].id]
+    assert "could not be asked" in report.failed[0].reason
+    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+
+
+def test_shutdown_inside_guard_keeps_commas_in_the_socket_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #121, round 7: a socket name (or TMUX_TMPDIR) may contain commas,
+    which tmux preserves in `$TMUX`; `split(",")[0]` truncated the path and let the
+    guard accept the very pane it was about to kill. The two trailing fields are the
+    numbers — everything before them is the path."""
+    srv = TmuxServer("asq,shared")  # the REAL path derivation, no tmux run
+    socket_path = srv.socket_path()
+    assert "," in str(socket_path)
+    monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: srv)
+    config = FleetSettings(tmux_socket="asq,shared")
+
+    monkeypatch.setenv("TMUX", f"{socket_path},4242,0")
+    with pytest.raises(FleetError, match="INSIDE the fleet's own tmux server"):
+        fleet_service._refuse_from_inside(["asq,shared"], config)
+
+    # the truncation the old parse produced is NOT this socket — and a different
+    # comma-free socket is not either
+    monkeypatch.setenv("TMUX", f"{str(socket_path).split(',')[0]},4242,0")
+    fleet_service._refuse_from_inside(["asq,shared"], config)
+    monkeypatch.setenv("TMUX", "/tmp/tmux-0/somebody-elses,4242,0")
+    fleet_service._refuse_from_inside(["asq,shared"], config)
+
+
+def test_shutdown_reports_a_failed_final_scan_and_keeps_the_pause(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 7: a store that refused the final re-read returned
+    silently — a late-spawned agent unreported, its project "down", its pause
+    cleared, exit 0. A scan that did not run cannot vouch for anything."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+    real_targets = fleet_service._shutdown_targets
+    calls = {"n": 0}
+
+    def kill_then_spawn(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        late.append(_coder(project))
+
+    def targets_failing_the_second_time(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("database is locked (fake)")
+        return real_targets(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_spawn)
+    monkeypatch.setattr(fleet_service, "_shutdown_targets", targets_failing_the_second_time)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.late_scan_failed is not None and "database is locked" in report.late_scan_failed
+    assert report.incomplete_projects == [project.id]
+    assert fleet_service.is_paused(project) and report.paused_kept == [project.root.name]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [late[0].id], "still live"
+
+
+def test_shutdown_does_not_revive_a_forgotten_project_while_checking_its_pause(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #121, round 7: `is_paused()` resolves the board through
+    `ensure_project`, which clears a tombstone — so `shutdown --all` undid
+    `project forget` on a registration with no agents, no session and no signal."""
+    from aisquare.services import project as project_service
+
+    with store_session() as store:
+        assert any(p.id == project.id for p in store.list_projects())
+    project_service.forget(project.id)
+    with store_session() as store:
+        assert not any(p.id == project.id for p in store.list_projects()), "tombstoned"
+
+    report = fleet_service.shutdown()  # every project: reads past tombstones on purpose
+
+    assert report.paused_cleared == [] and report.paused_kept == []
+    with store_session() as store:
+        assert not any(p.id == project.id for p in store.list_projects()), "still forgotten"
+
+
+def test_shutdown_kills_only_the_fleets_own_sessions(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``tmux kill-server`` is server-scoped; the fleet's claim is only ever to
+    ``asq-<codename>`` sessions. Reproduced against the first draft: a socket holding
+    one hand-made session and no fleet rows reported destroying nothing and destroyed
+    it — and `[fleet] tmux_socket` is a free-form string with no validator, so it can
+    be pointed at the operator's personal server."""
+    coder = _coder(project)
+    tmux.spawn_window("by-hand", name="notes", cwd=project.root, command=["cat"])
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert "by-hand" in tmux.sessions, "a session the fleet does not own survives"
+    assert not tmux.server_killed and tmux.running, "and so does the server holding it"
+    assert report.sessions_absent == [_session_of(project)], "the fleet's own went with its window"
+
+
+def test_shutdown_sweeps_a_session_left_under_an_old_name_only_with_all(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``rename`` fails open when tmux is unreachable and says a session can be left
+    under the OLD name; ``attach`` and ``reap`` both know that shape exists. It is the
+    fleet's session, so an every-project shutdown sweeps it — a scoped one does not,
+    because nothing attributes it to a project."""
+    tmux.spawn_window("asq-stale-otter", name="manager", cwd=project.root, command=["cat"])
+
+    scoped = fleet_service.shutdown(project)
+    assert scoped.sessions_killed == [], "not this project's session"
+    assert "asq-stale-otter" in tmux.sessions
+
+    every = fleet_service.shutdown()
+
+    assert every.sessions_killed == [f"{fleet_service.settings().tmux_socket}:asq-stale-otter"]
+    assert "asq-stale-otter" not in tmux.sessions
+
+
+def test_shutdown_reports_a_session_it_could_not_kill_as_failed_not_killed(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kill that raised must never be reported as a kill. The first draft appended to
+    ``servers_killed`` outside the ``suppress``, so a wedged server that timed out was
+    reported killed — over panes that were still alive with their rows already ended."""
+    coder = _coder(project)
+    tmux.spawn_window(f"asq-{_codename(project)}", name="by-hand", cwd=project.root, command=["c"])
+
+    def wedged(session: str) -> None:
+        raise TmuxError("kill-session timed out after 30.0s")
+
+    monkeypatch.setattr(tmux, "kill_session", wedged)
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [coder.id]
+    assert report.sessions_failed == [_session_of(project)] and report.sessions_killed == []
+
+
+def test_shutdown_decides_reachability_per_socket(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One socket gone and one healthy is the state this command decides row by row —
+    and the state no service test could produce while one fake answered for every
+    socket. A row on the gone socket is recorded lost; the healthy socket's agent is
+    stopped, and its server is not touched on the strength of the other's absence."""
+    old = FakeTmux()
+    tmux.per_socket["asq-old"] = old
+    _settings(monkeypatch, tmux_socket="asq-old")
+    stale = _coder(project)
+    old.running = False  # and then that server was killed outside the CLI
+    _settings(monkeypatch, tmux_socket="asq")
+    fresh = _coder(project)
+    assert (stale.tmux_socket, fresh.tmux_socket) == ("asq-old", "asq")
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert [a.id for a in report.stopped] == [fresh.id]
+    assert [row.agent.id for row in report.recorded] == [stale.id]
+    assert "asq-old" in report.recorded[0].reason
+    assert report.servers_absent == ["asq-old"]
+    assert tmux.killed == [fresh.pane_id] and old.killed == []
+
+
+def test_shutdown_clears_the_fleet_paused_signal(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """`pause` then `shutdown` used to leave the signal set, so the next
+    `fleet spawn manager` came up staffing nothing (the manager's instructions say to
+    spawn nothing while it is set) with no output from either command naming it."""
+    _coder(project)
+    fleet_service.pause(project)
+    assert fleet_service.is_paused(project)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert not fleet_service.is_paused(project)
+    assert report.paused_cleared == [project.root.name]
+    # A shutdown does not put a fleet-paused row on a board that had none.
+    assert fleet_service.shutdown(project).paused_cleared == []
+
+
+# --- round 8: the tmux wrapper must never read "could not ask" as "not there" ---
+
+
+def _scripted(stderr: str, stdout: str = "", code: int = 1) -> TmuxServer:
+    """The REAL wrapper over a runner that answers one fixed way — the sharp
+    instrument for the absence/could-not-ask boundary (as in
+    ``test_reachable_tells_an_absent_server_from_a_denied_socket``)."""
+    return _real_server(lambda argv, stdin: Completed(code, stdout, stderr))
+
+
+def test_reachable_raises_for_a_loader_failure_instead_of_reading_it_as_absent() -> None:
+    """Review of #121, round 8 (P1): the absence regex matched a bare ``No such
+    file or directory``, so the dynamic loader's exit-127 ``cannot open shared
+    object file: No such file or directory`` (a shared library gone) read as an
+    ABSENT SERVER — ``reachable()`` False while the fleet's panes were alive, and
+    shutdown retired their rows. Absence is now only tmux's own socket
+    diagnostics; a loader failure is "could not ask" and raises."""
+    loader = (
+        "aisquare: error while loading shared libraries: libevent-core.so: "
+        "cannot open shared object file: No such file or directory"
+    )
+    with pytest.raises(TmuxError, match="cannot open shared object file"):
+        _scripted(loader, code=127).reachable()
+    assert _scripted(loader, code=127).server_absent() is False, "not an absent server"
+    # tmux's real absence diagnostics still read as absent
+    assert _scripted(_UNREACHABLE).reachable() is False
+    assert _scripted("no server running on /tmp/tmux-1000/asq").reachable() is False
+
+
+def test_strict_session_queries_raise_only_when_the_server_could_not_be_asked() -> None:
+    """Review of #121, round 8 (P2): the lenient ``list_sessions``/``has_session``/
+    ``list_windows`` turn EVERY non-zero exit into ``[]``/``False``/``[]``, so a
+    denied socket reads as "nothing here". The strict twins the shutdown paths use
+    return the empty answer ONLY for a confirmed absence — the server gone, or a
+    live server with no such session/window — and raise for anything else."""
+    denied = "error connecting to /tmp/tmux-1000/asq (Permission denied)"
+
+    assert _scripted(_UNREACHABLE).sessions_or_raise() == []
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted(denied).sessions_or_raise()
+
+    assert _scripted(_UNREACHABLE).has_session_or_raise("asq-x") is False
+    assert _scripted("can't find session: asq-x").has_session_or_raise("asq-x") is False
+    assert _scripted("", code=0).has_session_or_raise("asq-x") is True
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted(denied).has_session_or_raise("asq-x")
+
+    assert _scripted(_UNREACHABLE).windows_or_raise("asq-x") == []
+    assert _scripted("can't find window: asq-x").windows_or_raise("asq-x") == []
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted(denied).windows_or_raise("asq-x")
+
+
+def test_pane_facts_or_raise_keeps_a_denied_probe_from_reading_as_a_dead_pane() -> None:
+    """Review of #121, round 8 (P1): the final pane query returned ``None`` for a
+    non-zero exit such as ``(Permission denied)``, so a late agent still running was
+    recorded lost and its claim released. ``None`` now means only what tmux
+    confirmed — an empty answer, or an absent server — and a denied probe raises."""
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted("error connecting to /tmp/tmux-1000/asq (Permission denied)").pane_facts_or_raise(
+            "%1"
+        )
+    assert _scripted(_UNREACHABLE).pane_facts_or_raise("%1") is None  # server gone -> pane gone
+
+
+def test_shutdown_does_not_kill_a_spared_old_name_session_it_could_not_enumerate(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): the old-name session holds a LEFT LIVE agent,
+    but a transient ``list-panes`` failure became ``[]`` in the lenient wrapper — an
+    empty ``hosted`` set that did NOT match the spared pane, so the session was
+    killed and the live agent's pane went with it. The strict enumeration raises, so
+    the session is reported failed and left standing."""
+    coder = _coder(project)
+    current = _session_of(project).split(":", 1)[1]
+    tmux.sessions["asq-old-name"] = tmux.sessions.pop(current)  # a failed rename
+    tmux.fail_input = True  # /exit does not go through: the row is LEFT LIVE
+
+    real_windows = tmux.windows_or_raise
+
+    def deny_old_name(session: str) -> list[WindowInfo]:
+        if session == "asq-old-name":
+            raise TmuxError("error connecting to /fake (Permission denied)")
+        return real_windows(session)
+
+    monkeypatch.setattr(tmux, "windows_or_raise", deny_old_name)
+
+    report = fleet_service.shutdown()  # every project: the prefix sweep runs
+
+    assert "asq-old-name" not in tmux.killed_sessions
+    assert "asq-old-name" in tmux.sessions, "the session with the live pane still stands"
+    assert coder.pane_id in tmux.facts, "the left-live pane is untouched"
+    assert any(
+        "asq-old-name" in s and "could not list its panes" in s for s in report.sessions_failed
+    ), report.sessions_failed
+    assert project.id in report.incomplete_projects
+
+
+def test_shutdown_reports_a_denied_session_check_as_failed_not_absent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): with the socket denied AFTER a session was
+    listed, the lenient ``has_session`` returned False for the failed command and
+    the session was reported ABSENT — a survivor read as already gone, success
+    reported, pause cleared. The strict check raises, so it is reported failed and
+    left standing."""
+    tmux.spawn_window("asq-stray-otter", name="manager", cwd=project.root, command=["cat"])
+    real_has = tmux.has_session_or_raise
+
+    def deny(name: str) -> bool:
+        if name == "asq-stray-otter":
+            raise TmuxError("error connecting to /fake (Permission denied)")
+        return real_has(name)
+
+    monkeypatch.setattr(tmux, "has_session_or_raise", deny)
+
+    report = fleet_service.shutdown()  # --all sweep reaches the stray session
+
+    socket = fleet_service.settings().tmux_socket
+    assert "asq-stray-otter" not in tmux.killed_sessions
+    assert "asq-stray-otter" in tmux.sessions, "a survivor is not read as absent"
+    assert f"{socket}:asq-stray-otter" in report.sessions_failed
+    assert f"{socket}:asq-stray-otter" not in report.sessions_absent
+
+
+def test_shutdown_keeps_a_late_dead_panes_observed_exit_status(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): a row spawned AFTER the kill phase that then
+    exited on its own leaves tmux holding its pane DEAD with a real status. It was
+    recorded lost with ``exit_status=None`` and "its session was killed under it" —
+    a kill that never targeted it, an observed 42 discarded. It now joins
+    ``stopped`` with the status tmux kept, the way every other self-exit is."""
+    coder = _coder(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_late_exit(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        agent = _coder(project)
+        tmux.die(agent.pane_id, 42)  # it came up, then exited on its own
+        late.append(agent)
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_late_exit)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert coder.id in {a.id for a in report.stopped}
+    late_rows = [a for a in report.stopped if a.id == late[0].id]
+    assert late_rows and late_rows[0].exit_status == 42, "the observed status is kept"
+    assert all(row.agent.id != late[0].id for row in report.recorded), "not recorded lost"
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [], "its row is ended"
+
+
+def test_shutdown_returns_the_report_when_the_pause_lookup_store_is_locked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): after the final scan, ``_clear_pause`` opened
+    the store UNGUARDED to list visible projects; a store still locked raised
+    straight through the finished report — empty stdout under ``--json`` after
+    agents were already stopped. The lookup is guarded now: the partial report is
+    returned and every pause is kept."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    boom = {"on": False}
+    real_store_session = store_session  # the module-level import is the same object
+    real_late = fleet_service._record_late_rows
+
+    @contextmanager
+    def maybe_locked():  # type: ignore[no-untyped-def]
+        if boom["on"]:
+            raise sqlite3.OperationalError("database is locked (fake)")
+        with real_store_session() as store:
+            yield store
+
+    def late_then_lock(*args: object, **kwargs: object) -> None:
+        real_late(*args, **kwargs)  # type: ignore[arg-type]
+        boom["on"] = True
+
+    monkeypatch.setattr(fleet_service, "_record_late_rows", late_then_lock)
+    monkeypatch.setattr(fleet_service, "store_session", maybe_locked)
+
+    report = fleet_service.shutdown(project, force=True)  # must NOT raise
+    boom["on"] = False
+
+    assert coder.id in {a.id for a in report.stopped}
+    assert report.paused_cleared == [], "no pause is cleared blind"
+    assert fleet_service.is_paused(project), "every pause is kept"
+    assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed
+    assert report.late_scan_failed is None, "the scan itself ran; only the pause lookup failed"
+
+
+def test_shutdown_clears_the_pause_by_the_target_id_not_a_redirected_board(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): with ``AISQUARE_TEAM_HUB`` pointing at project
+    A, shutting down explicit project B resolved its pause through cwd and cleared
+    A's signal instead — B reported in ``paused_cleared`` while A's agent kept its
+    standing order removed. The pause is read and written by the target project's
+    ID, so the hub cannot redirect it."""
+    hub_root = project.root.parent / "hub-project"
+    hub_root.mkdir()
+    hub = team_project(hub_root)
+    with store_session() as store:
+        store.ensure_project(hub)
+    fleet_service.pause(hub)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
+
+    _coder(project)
+    fleet_service.pause(project)
+    assert fleet_service.is_paused(project) and fleet_service.is_paused(hub)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert report.paused_cleared == [project.root.name], "B, not the hub"
+    assert not fleet_service.is_paused(project), "B's own signal is cleared"
+    assert fleet_service.is_paused(hub), "the hub's pause is untouched"
+
+
+def test_shutdown_with_no_agents_takes_the_fleets_session_down_and_reports_nothing_else(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    report = fleet_service.shutdown(project)
+    assert report.stopped == [] and report.recorded == [] and report.failed == []
+    assert report.sessions_killed == [] and report.sessions_absent == []
+    assert not tmux.server_killed
+
+
+def test_shutdown_plan_reads_without_touching_anything(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """What the CLI prints before it asks. ``fleet shutdown`` ends running work, so it
+    is confirmable the way ``project prune`` is for stale registrations."""
+    coder = _coder(project)
+
+    plan = fleet_service.shutdown_plan(project)
+
+    assert [a.id for a in plan.agents] == [coder.id]
+    assert [p.id for p in plan.projects] == [project.id]
+    assert plan.sessions == [_session_of(project)] and plan.absent_sockets == []
+    assert tmux.killed == [] and tmux.killed_sessions == []
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [coder.id]
+
+    tmux.running = False  # nothing to stop on a socket with no server: recorded, not stopped
+    absent = fleet_service.shutdown_plan(project)
+    assert absent.absent_sockets == [coder.tmux_socket] and absent.sessions == []
 
 
 def test_reap_ends_dead_panes_and_tells_the_board(

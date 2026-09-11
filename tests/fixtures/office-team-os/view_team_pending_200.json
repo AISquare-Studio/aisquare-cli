@@ -1,0 +1,21 @@
+{
+  "view": "team-pending",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "stats": { "open": 2, "blocked": 0, "overdue": 1, "owners": 2 },
+  "items": [
+    {
+      "id": "EX-001",
+      "owner": "Example Person One",
+      "item": "Example open loop summary text",
+      "source": "board",
+      "kind": "example-kind",
+      "status": "open",
+      "since": "2026-01-01",
+      "due": "2026-02-01",
+      "notes": "Example free-text note",
+      "age": 31,
+      "overdue": true,
+      "account": "example-account"
+    }
+  ]
+}

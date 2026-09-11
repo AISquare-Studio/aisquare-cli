@@ -1,0 +1,4 @@
+{
+  "error": "unknown view: example-unknown",
+  "detail": "no snapshot builder for \"example-unknown\""
+}

@@ -1,0 +1,14 @@
+{
+  "roster": [
+    {
+      "name": "Example Person One",
+      "email": "person-one@example.invalid",
+      "slack_id": "U000000001"
+    },
+    {
+      "name": "Example Person Two",
+      "email": "person-two@example.invalid",
+      "slack_id": "U000000002"
+    }
+  ]
+}

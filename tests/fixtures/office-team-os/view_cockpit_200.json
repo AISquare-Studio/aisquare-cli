@@ -1,0 +1,37 @@
+{
+  "view": "cockpit",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "stats": { "myOpen": 1, "myOverdue": 1, "iOwe": 1, "waitingOn": 1 },
+  "overdue": [
+    {
+      "id": "EX-001",
+      "owner": "Example Person One",
+      "item": "Example open loop summary text",
+      "source": "board",
+      "kind": "example-kind",
+      "status": "open",
+      "since": "2026-01-01",
+      "due": "2026-02-01",
+      "notes": "Example free-text note",
+      "age": 31,
+      "overdue": true,
+      "account": "example-account"
+    }
+  ],
+  "owe": [
+    {
+      "item": "Example commitment",
+      "to": "Example Person Two",
+      "by": "2026-02-01",
+      "status": "open"
+    }
+  ],
+  "waiting": [
+    {
+      "item": "Example awaited thing",
+      "by": "Example Person Two",
+      "status": "open",
+      "nudge": true
+    }
+  ]
+}

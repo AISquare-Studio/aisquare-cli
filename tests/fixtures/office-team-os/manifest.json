@@ -1,0 +1,129 @@
+{
+  "packet": "P11",
+  "peer": "team-os",
+  "peer_revision": "83ed1a2",
+  "peer_entry_point": "app/server.js",
+  "derived_from": "AISquare-Office docs/research/teamos-fixtures/ on branch prep/teamos-fixtures",
+  "observed_on_the_wire": false,
+  "observed_on_the_wire_note": "The peer was stopped and starting it was not authorised. No network call of any kind, loopback included, produced any file here. Keys, types, nullability and status codes come from the peer's source; every value is synthetic.",
+  "allowed_routes": ["GET /api/meta", "GET /api/roster", "GET /api/views/{name}"],
+  "entries": [
+    {
+      "file": "meta_200.json",
+      "route": "GET /api/meta",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/git.js:28-40 assembles the object; app/server.js:101-104 adds engine.",
+      "note": "syncedAt is hardcoded null on this route (git.js:39) and is never a freshness signal."
+    },
+    {
+      "file": "meta_200_degenerate.json",
+      "route": "GET /api/meta",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/git.js:34-38",
+      "note": "A non-repository root. commit, lastCommitDate and branch are empty strings and version falls back to 0.1.0. Empty strings are data, not absence."
+    },
+    {
+      "file": "roster_200.json",
+      "route": "GET /api/roster",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/server.js:216 wraps app/engine/identity.js:41 rows in a {roster: [...]} envelope.",
+      "note": "Rows are exactly {name, email, slack_id} and carry no stable identifier of any kind."
+    },
+    {
+      "file": "roster_200_empty.json",
+      "route": "GET /api/roster",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/identity.js:73 catches every error and returns [].",
+      "note": "A missing CLAUDE.md and a CLAUDE.md with no roster table both land here. An empty roster is valid data; an unavailable roster is not an empty roster."
+    },
+    {
+      "file": "roster_200_missing_slack.json",
+      "route": "GET /api/roster",
+      "status": 200,
+      "evidence": "inferred",
+      "basis": "cells[2] is undefined when a qualifying row has no third cell, and JSON.stringify omits undefined-valued keys rather than emitting null (app/engine/identity.js:41).",
+      "note": "The key is absent, not null. A strict all-required decoder would reject an otherwise valid roster."
+    },
+    {
+      "file": "view_board_200.json",
+      "route": "GET /api/views/board",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/snapshots.js:138-151, rows at 78-83.",
+      "note": "items[].age is a nullable integer (snapshots.js:76) and items[].account is an empty string when unresolved, never null (snapshots.js:56)."
+    },
+    {
+      "file": "view_team_pending_200.json",
+      "route": "GET /api/views/team-pending",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/snapshots.js:138 — `name === 'team-pending' || name === 'board'`.",
+      "note": "One builder, two names. Only the echoed view field differs, and the adapter must not canonicalise one to the other."
+    },
+    {
+      "file": "view_roadmap_200.json",
+      "route": "GET /api/views/roadmap",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/snapshots.js:153-155, 95-110.",
+      "note": "All four bucket keys are always present, initialised to empty arrays before parsing."
+    },
+    {
+      "file": "view_customers_200.json",
+      "route": "GET /api/views/customers",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/snapshots.js:157-162, 113-133.",
+      "note": "Row object keys are the Markdown table headers lowercased verbatim, so the key set is dynamic and changes if anyone edits the header row."
+    },
+    {
+      "file": "view_calendar_200.json",
+      "route": "GET /api/views/calendar",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/snapshots.js:188-203.",
+      "note": "year, monthIndex and month are hardcoded constants, not a live calendar position. The trailing release event carries no status key."
+    },
+    {
+      "file": "view_cockpit_200.json",
+      "route": "GET /api/views/cockpit",
+      "status": 200,
+      "evidence": "literal",
+      "source": "app/engine/snapshots.js:164-186.",
+      "note": "Off the default allow-list: the builder reads open-loops.md and waiting-on.md, which app/engine/git.js:21 names in PRIVATE_PATHS. Recorded so the decoder is tested if an operator enables it explicitly."
+    },
+    {
+      "file": "error_401.json",
+      "route": "any allowed route",
+      "status": 401,
+      "evidence": "literal",
+      "source": "app/server.js:64-67, 211.",
+      "note": "Missing and wrong tokens are indistinguishable and no WWW-Authenticate header is sent. The peer regenerates its token on every boot when TEAMOS_TOKEN is unset (app/server.js:31), so this is also what a peer restart looks like."
+    },
+    {
+      "file": "error_403.json",
+      "route": "any allowed route",
+      "status": 403,
+      "evidence": "literal",
+      "source": "app/server.js:57-63, 210.",
+      "note": "The origin/host gate runs before the token gate, so a bad Host with no token yields 403 and not 401. It is an Office client-configuration bug, never a permissions problem."
+    },
+    {
+      "file": "error_404_unknown_view.json",
+      "route": "GET /api/views/{name}",
+      "status": 404,
+      "evidence": "literal",
+      "source": "app/server.js:124-126.",
+      "note": "Both fields echo the caller's input verbatim, which is one reason peer error text is never forwarded into a ServiceError."
+    }
+  ],
+  "deliberately_absent": {
+    "peer_down": "A stopped peer produces no HTTP exchange: the loopback TCP connect is refused and there is no status code and no body, so there is nothing to record as a file. The fake transport models it by raising. Loopback refusal is immediate, so the unavailable result returns in milliseconds and not at the total budget.",
+    "malformed_request_body": "Not applicable by construction. All three allowed routes are GET and the peer never reads their body (app/server.js:214, 216, 220), so no 400 path exists to record.",
+    "forbidden_routes": "No body from /api/commands, /api/run, /api/chat, /api/setup, /api/propose, /api/sync, /api/file, /api/account, /api/graph or /api/identity appears here. Recording one would be the first step towards calling it."
+  }
+}

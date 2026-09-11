@@ -1,0 +1,10 @@
+{
+  "view": "roadmap",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "buckets": {
+    "now": ["Example in-flight item"],
+    "next": ["Example queued item"],
+    "later": ["Example bet"],
+    "shipped": ["Example shipped item"]
+  }
+}

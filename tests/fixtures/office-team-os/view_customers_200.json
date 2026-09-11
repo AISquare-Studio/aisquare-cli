@@ -1,0 +1,20 @@
+{
+  "view": "customers",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "directory": [
+    {
+      "account": "Example Account",
+      "domain(s)": "example.invalid",
+      "stage": "example-stage",
+      "known contacts": "Example Contact",
+      "notes": "Example note"
+    }
+  ],
+  "pipeline": [
+    {
+      "account": "Example Account",
+      "stage": "example-stage",
+      "detail": "Example detail"
+    }
+  ]
+}

@@ -8,7 +8,7 @@ in — and every path lives under ``/r/<token>/``:
 * ``/r/<token>/``                 the built ``aisquare-remote`` page (SPA fallback)
 * ``POST /r/<token>/api/unlock``  ``{password}`` → ``Set-Cookie: asq_remote=<sid>``
 * ``GET  /r/<token>/api/...``     ``projects fleet board tasks memory panes/<agent>
-                                  devices remote`` — the read-only JSON
+                                  explainability/<agent> devices remote`` — the read-only JSON
 * ``WS   /r/<token>/ws``          frames ``{type, agent?, payload, ts}`` every second
 * ``POST /r/<token>/api/...``     the write endpoints: 403 unless ``allow_write``
 
@@ -45,7 +45,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,6 +58,7 @@ from aisquare.core.paths import (
     remote_state_path,
 )
 from aisquare.core.version import __version__
+from aisquare.models import FleetAgent, TeamSession, TurnMetric
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -399,6 +400,8 @@ class Runtime:
 
 Snapshot = Callable[[], object]
 PaneSource = Callable[[str], dict[str, object]]
+ExplainabilitySource = Callable[[str], dict[str, object]]
+"""Agent label → the §4-I card payload. Raises :class:`NoSuchAgent` only; never anything else."""
 WriteHandler = Callable[[dict[str, Any]], tuple[dict[str, object], str]]
 """Body in → ``(result, audit summary)``; raise :class:`RequestError` to refuse."""
 
@@ -413,6 +416,7 @@ class Sources:
     tasks: Snapshot
     memory: Snapshot
     panes: PaneSource
+    explainability: ExplainabilitySource = field(default=lambda label: _live_explainability(label))
 
 
 @dataclass(frozen=True)
@@ -472,7 +476,146 @@ def live_sources() -> Sources:
 
         return [entry.model_dump(mode="json") for entry in context_service.list_entries()]
 
-    return Sources(projects, fleet, board, tasks, memory, _live_panes)
+    return Sources(projects, fleet, board, tasks, memory, _live_panes, _live_explainability)
+
+
+# --- explainability card (§4-I) --------------------------------------------------------
+
+DOCTOR_TTL_SECONDS = 30.0
+"""How long one doctor verdict is reused: its proxy probe dials a socket."""
+
+
+@dataclass(frozen=True)
+class DoctorVerdict:
+    """What the explainability doctor says, reduced to what the card needs."""
+
+    sdk_present: bool
+    red: list[str]
+    """One line per failing check: ``name: detail``."""
+    install_hint: str | None = None
+
+
+def explainability_payload(
+    *,
+    agent: FleetAgent,
+    session: TeamSession | None,
+    turns: Sequence[TurnMetric],
+    verdict: DoctorVerdict,
+    policy: dict[str, object] | None,
+) -> dict[str, object]:
+    """The §4-I card, assembled from facts already in hand — never raises.
+
+    ``available`` is true only when the SDK is present AND no doctor check is
+    RED; otherwise ``reason`` says which. Model and tokens come from the board
+    session and the recorded turns regardless, so the card still shows what the
+    fleet knows on a machine where the SDK is missing. ``cost_estimate_usd`` is
+    only ever set by the SDK lane — the CLI carries no price table, and a
+    guessed figure on a demo card is worse than none.
+    """
+    payload: dict[str, object] = {"available": verdict.sdk_present and not verdict.red}
+    if not verdict.sdk_present:
+        hint = f" ({verdict.install_hint})" if verdict.install_hint else ""
+        payload["reason"] = f"explainability SDK not installed{hint}"
+    elif verdict.red:
+        payload["reason"] = "doctor is RED: " + "; ".join(verdict.red)
+    model = session.model if session is not None and session.model else None
+    if model:
+        payload["model"] = model
+    tokens_in = [t.tokens_in for t in turns if t.tokens_in is not None]
+    tokens_out = [t.tokens_out for t in turns if t.tokens_out is not None]
+    if tokens_in:
+        payload["tokens_in"] = sum(tokens_in)
+    if tokens_out:
+        payload["tokens_out"] = sum(tokens_out)
+    if policy:
+        payload["policy"] = policy
+    stamps: list[datetime] = []
+    if session is not None:
+        stamps.append(session.last_seen_at)
+    stamps.extend(t.ended_at or t.started_at for t in turns)
+    stamps.append(agent.created_at)
+    latest = max(stamps)
+    payload["updated_at"] = latest.isoformat(timespec="seconds")
+    return payload
+
+
+_doctor_cache: tuple[float, DoctorVerdict] | None = None
+_doctor_lock = threading.Lock()
+
+
+def _doctor_verdict() -> DoctorVerdict:
+    """The doctor's word on explainability, cached for :data:`DOCTOR_TTL_SECONDS`."""
+    global _doctor_cache
+    with _doctor_lock:
+        if _doctor_cache is not None and time.monotonic() - _doctor_cache[0] < DOCTOR_TTL_SECONDS:
+            return _doctor_cache[1]
+        from aisquare.models import CheckStatus
+        from aisquare.services import explainability as explainability_service
+        from aisquare.services import explainability_ops as ops
+
+        try:
+            present = ops.sdk_presence().present
+        except Exception:  # the doctor's own failure is a RED line, not a 500
+            present = False
+        try:
+            red = [
+                f"{check.name}: {check.detail}"
+                for check in ops.checks()
+                if check.status is CheckStatus.fail
+            ]
+        except Exception as exc:
+            red = [f"doctor: {exc}"]
+        hint = None if present else explainability_service.install_hint()
+        verdict = DoctorVerdict(sdk_present=present, red=red, install_hint=hint)
+        _doctor_cache = (time.monotonic(), verdict)
+        return verdict
+
+
+def _explainability_policy() -> dict[str, object] | None:
+    """The policy applied to this machine's model traffic, from the config."""
+    from aisquare.core.config import load_config
+    from aisquare.services import explainability_ops as ops
+
+    try:
+        config = load_config()
+        settings = config.explainability
+        target = ops.resolve_target(settings, None)
+    except Exception:
+        return None
+    return {
+        "tracing": settings.enabled,
+        "shipping": settings.ship,
+        "target": target.name,
+        "gateway": target.gateway_url or None,
+        "redaction": ops.redaction_summary(config.redaction.level),
+    }
+
+
+def _live_explainability(label: str) -> dict[str, object]:
+    """The card for one live agent; only an unknown label raises (→ 404)."""
+    from aisquare.core.store import store_session
+    from aisquare.services import fleet as fleet_service
+    from aisquare.services import metrics as metrics_service
+
+    project = fleet_service.resolve_project(None)
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(project.id, label, live_only=True)
+        if agent is None:
+            raise NoSuchAgent(f"no live agent {label!r} in {project.root.name or project.id}")
+        session = store.get_session(agent.session_id) if agent.session_id else None
+    turns: list[TurnMetric] = []
+    if agent.session_id:
+        try:
+            turns = metrics_service.recent(project_id=project.id, session_id=agent.session_id)
+        except Exception as exc:
+            log.debug("remote: turn metrics for %s unavailable: %s", label, exc)
+    return explainability_payload(
+        agent=agent,
+        session=session,
+        turns=turns,
+        verdict=_doctor_verdict(),
+        policy=_explainability_policy(),
+    )
 
 
 def _required(body: dict[str, Any], key: str) -> str:
@@ -804,6 +947,19 @@ def build_app(
             return _json_error(503, "unavailable", str(exc))
         return JSONResponse(payload)
 
+    async def explainability(request: Request) -> Response:
+        if device_of(request) is None:
+            return _json_error(401, "unauthorized")
+        agent = request.path_params["agent"]
+        try:
+            payload = await asyncio.to_thread(reads.explainability, agent)
+        except LookupError as exc:
+            return _json_error(404, "not_found", str(exc))
+        except Exception as exc:  # §4-I: never raises, never blocks the other endpoints
+            log.warning("remote: explainability for %s failed: %s", agent, exc)
+            payload = {"available": False, "reason": f"explainability lookup failed: {exc}"}
+        return JSONResponse(payload)
+
     async def write(request: Request) -> Response:
         device = device_of(request)
         if device is None:
@@ -947,6 +1103,7 @@ def build_app(
         Route("/api/devices", devices, methods=["GET"]),
         Route("/api/devices/{sid}", revoke_device, methods=["DELETE"]),
         Route("/api/panes/{agent}", panes, methods=["GET"]),
+        Route("/api/explainability/{agent}", explainability, methods=["GET"]),
         Route("/api/{name:path}", write, methods=["POST"]),
         Route("/api/{rest:path}", api_missing),
         WebSocketRoute("/ws", stream),
@@ -1127,6 +1284,7 @@ __all__ = [
     "WRITE_ENDPOINTS",
     "WS_CLOSE_UNAUTHORIZED",
     "Device",
+    "DoctorVerdict",
     "NoSuchAgent",
     "RemoteError",
     "RemoteInfo",
@@ -1137,6 +1295,7 @@ __all__ = [
     "Writes",
     "build_app",
     "build_local_url",
+    "explainability_payload",
     "live_sources",
     "live_writes",
     "regenerate_password",

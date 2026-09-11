@@ -29,6 +29,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regenerate_password` for the fleet UI's Remote modal. New optional extra
   `remote`: starlette + uvicorn (already resolved by `serve`) and `websockets`,
   the one new package.
+- **`GET api/explainability/<agent>`** on the Remote Control server, for Saturday's
+  card: `{available, reason?, model?, tokens_in?, tokens_out?, cost_estimate_usd?,
+  policy?, updated_at?}`. `available` is true only when the explainability SDK is
+  present and no doctor check is RED; otherwise `reason` says which, while model
+  (board session), tokens (recorded turns) and the config's policy still come
+  through. The doctor verdict is cached for 30 s; the endpoint never raises — a
+  failing lookup is `available:false` with the error as the reason, and an
+  unknown agent is a 404 like `panes/<agent>`.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

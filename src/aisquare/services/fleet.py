@@ -232,6 +232,12 @@ class ShutdownReport:
     A scan that did not run cannot vouch for anything, so every project in the
     run's snapshot is marked not confirmed down and keeps its pause; the CLI
     reports PARTLY and exits 1 (review of #121, round 7)."""
+    pause_scan_failed: str | None = None
+    """Why the pause signals could not be reconciled (a store that refused the
+    visible-projects lookup AFTER agents were already stopped). Every pause is
+    then KEPT — a forgotten project's pause is not ours to touch, and this could
+    not tell one from a live project — and the CLI reports PARTLY and exits 1,
+    rather than discarding the whole report (review of #121, round 8)."""
 
 
 @dataclass(frozen=True)
@@ -1690,7 +1696,7 @@ def _fleet_sessions(
     }
     sessions: list[tuple[str, str | None]] = list(named.items())
     if every:
-        listed = [name for name in srv.list_sessions() if name.startswith(SESSION_PREFIX)]
+        listed = [name for name in srv.sessions_or_raise() if name.startswith(SESSION_PREFIX)]
         sessions += [(name, None) for name in sorted(listed) if name not in named]
     return sessions
 
@@ -1762,7 +1768,7 @@ def _kill_fleet_sessions(
                 continue
             if any(spared_socket == socket for spared_socket, _ in spared_panes):
                 try:
-                    hosted = {(socket, window.pane_id) for window in srv.list_windows(name)}
+                    hosted = {(socket, window.pane_id) for window in srv.windows_or_raise(name)}
                 except TmuxError as exc:
                     # Cannot tell whether a left-live pane lives here: not killed,
                     # and said so — never a kill on a guess.
@@ -1774,7 +1780,7 @@ def _kill_fleet_sessions(
                     _not_down(report, project_id)
                     continue
             try:
-                if not srv.has_session(name):
+                if not srv.has_session_or_raise(name):
                     report.sessions_absent.append(qualified)
                     continue
                 srv.kill_session(name)
@@ -1824,6 +1830,31 @@ def _record_lost(agent: FleetAgent, reason: str, report: ShutdownReport) -> None
         _not_down(report, agent.project_id)
         return
     report.recorded.append(ShutdownRow(ended, reason))
+    _release_session(ended, report)
+
+
+def _record_self_exit(agent: FleetAgent, dead_status: int | None, report: ShutdownReport) -> None:
+    """End a late row whose pane tmux still holds DEAD, keeping the status tmux kept.
+
+    A spawn that landed AFTER the kill phase brought a session of its own up and
+    then EXITED on its own before this reconciliation; ``remain-on-exit`` keeps
+    its pane with the real exit status. Ending it through :func:`_record_lost`
+    discarded that status (``exit_status=None``) and told the operator "its
+    session was killed under it" — a kill that never targeted this late session
+    (review of #121, round 8). So it is ended the way every other self-exit is
+    (``reap``, :func:`_row_that_went_away`): the observed status is recorded,
+    ``agent_exited`` is emitted, and the row joins ``stopped`` — whose contract
+    already covers "exited on its OWN … keeps the exit status it recorded".
+    """
+    try:
+        with store_session() as store:
+            ended = store.end_fleet_agent(agent.id, exit_status=dead_status)
+            _emit_exit(store, ended)
+    except Exception as exc:  # a vanished row (KeyError), a locked store
+        report.failed.append(ShutdownRow(agent, f"its row could not be ended ({exc})"))
+        _not_down(report, agent.project_id)
+        return
+    report.stopped.append(ended)
     _release_session(ended, report)
 
 
@@ -1972,7 +2003,7 @@ def _record_late_rows(
                 )
                 continue
             try:
-                facts = server_for(agent.tmux_socket, config).pane_facts(agent.pane_id)
+                facts = server_for(agent.tmux_socket, config).pane_facts_or_raise(agent.pane_id)
             except TmuxError as exc:
                 # "Could not query" is not "dead" (review of #121, round 2): a
                 # timeout on the pane of an agent another terminal just spawned
@@ -1997,6 +2028,15 @@ def _record_late_rows(
                     )
                 )
                 _not_down(report, agent.project_id)
+                continue
+            if facts is not None and facts.dead:
+                # A late spawn that came up and then EXITED on its own before
+                # this pass: tmux (remain-on-exit) still holds its pane with the
+                # real status. Recording it lost discarded that status and
+                # claimed a kill that never targeted this late session (review
+                # of #121, round 8). `_record_lost` below is now reserved for a
+                # pane that is genuinely GONE (`facts is None`).
+                _record_self_exit(agent, facts.dead_status, report)
                 continue
             _record_lost(
                 agent, "it was spawned during the shutdown; its session was killed under it", report
@@ -2023,8 +2063,19 @@ def _clear_pause(
     # on purpose (a forgotten project can hold live rows), so touching the pause
     # of one would silently undo `project forget` (review of #121, round 7). A
     # forgotten project's pause is nobody's standing order: skipped, not read.
-    with store_session() as store:
-        visible = {p.id for p in store.list_projects()}
+    try:
+        with store_session() as store:
+            visible = {p.id for p in store.list_projects()}
+    except Exception as exc:
+        # The store `_record_late_rows` already found locked is still locked (or
+        # a fresh failure). The report is owed to the caller regardless, and this
+        # lookup used to raise straight through it — empty stdout under `--json`
+        # after agents were already stopped (review of #121, round 8). Without
+        # the project list a forgotten project (whose pause is not ours to touch)
+        # cannot be told from a live one, so every pause is KEPT, said so, and
+        # the partial report is returned.
+        report.pause_scan_failed = f"{type(exc).__name__}: {exc}"
+        return
     for project, _ in targets:
         if project.id not in visible:
             continue
@@ -2301,7 +2352,7 @@ def resume(project: ProjectInfo, *, session_ref: str | None = None) -> None:
 def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> None:
     team = _team()
     try:
-        team.set_signal(PAUSE_SIGNAL, value, session_ref=session_ref, cwd=project.root)
+        team.set_signal(PAUSE_SIGNAL, value, session_ref=session_ref, project_id=project.id)
     except team.TeamDisabledError as exc:
         raise FleetError(f"cannot set the pause signal: {exc}") from exc
     except KeyError as exc:
@@ -2311,7 +2362,7 @@ def _set_pause(project: ProjectInfo, value: str, session_ref: str | None) -> Non
 def is_paused(project: ProjectInfo) -> bool:
     team = _team()
     try:
-        state = team.read_signal(PAUSE_SIGNAL, cwd=project.root)
+        state = team.read_signal(PAUSE_SIGNAL, project_id=project.id)
     except team.TeamDisabledError:
         return False  # a disabled board holds no signals: nothing can be paused
     return state is not None and state.value == "on"

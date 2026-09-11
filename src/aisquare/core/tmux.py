@@ -201,12 +201,12 @@ class TmuxUnavailable(TmuxError):
     """No usable tmux: missing from PATH, or older than :data:`MIN_VERSION`."""
 
 
-#: How tmux says "there is no server on this socket" — and ONLY that. Measured
-#: on 3.7c: ``error connecting to /tmp/tmux-<uid>/<socket> (No such file or
-#: directory)``; older/other commands say ``no server running on <path>``. A
-#: refusal of a socket that IS there reads ``(Permission denied)`` instead, with
-#: the same exit code, which is why the exit code alone must never decide.
-_ABSENT_SERVER = re.compile(r"No such file or directory|no server running on", re.IGNORECASE)
+#: How tmux says a LIVE server has no such session/window/pane — a benign
+#: "not there", distinct from the server being GONE (:data:`_ABSENT`) and from a
+#: socket that refused the probe. Measured on 3.7c: ``can't find session: NAME``
+#: (``has-session``) and ``can't find window: NAME`` (``list-panes``); a refusal
+#: reads ``(Permission denied)`` and matches neither, so a strict query raises.
+_NO_TARGET = re.compile(r"can't find ")
 
 
 @dataclass(frozen=True)
@@ -584,9 +584,44 @@ class TmuxServer:
             return []
         return [line for line in completed.stdout.splitlines() if line]
 
+    def sessions_or_raise(self) -> list[str]:
+        """:meth:`list_sessions`, except a server that could not be ASKED raises.
+
+        The lenient twin returns ``[]`` for EVERY non-zero exit, so its caller
+        cannot tell an empty or absent server from one it failed to reach — the
+        class of bug the review kept finding at one more shutdown call site
+        (review of #121, round 8). Here ``[]`` means only what tmux confirmed: a
+        server that is gone (:data:`_ABSENT`) holds no sessions. Anything else
+        non-zero is a :class:`TmuxError` carrying tmux's own words, so the
+        ``--all`` sweep cannot read a denied socket as "no sessions to kill".
+        """
+        completed = self._runner(self.argv("list-sessions", "-F", "#{session_name}"), None)
+        if completed.returncode == 0:
+            return [line for line in completed.stdout.splitlines() if line]
+        if _ABSENT.search(completed.stderr):
+            return []
+        raise TmuxError(completed.stderr.strip() or "tmux list-sessions could not be reached")
+
     def has_session(self, name: str) -> bool:
         completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
         return completed.returncode == 0
+
+    def has_session_or_raise(self, name: str) -> bool:
+        """:meth:`has_session`, except a server that could not be ASKED raises.
+
+        ``False`` is the answer for a session tmux SAYS is not there — its server
+        gone (:data:`_ABSENT`), or a live server that holds no such session
+        (:data:`_NO_TARGET`) — never for a probe that could not run. The lenient
+        twin returns ``False`` on ANY non-zero exit, which let a denied socket
+        report an existing session as absent and clear its pause while the
+        session survived (review of #121, round 8).
+        """
+        completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
+        if completed.returncode == 0:
+            return True
+        if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
+            return False
+        raise TmuxError(completed.stderr.strip() or "tmux has-session could not be reached")
 
     def answers(self) -> bool:
         """Whether a server is listening on this socket at all — not what it holds.
@@ -633,7 +668,7 @@ class TmuxServer:
         if completed.returncode == 0:
             return True
         detail = completed.stderr.strip()
-        if _ABSENT_SERVER.search(detail):
+        if _ABSENT.search(detail):
             return False
         raise TmuxError(detail or f"tmux display-message exited {completed.returncode}")
 
@@ -726,15 +761,9 @@ class TmuxServer:
             activity=False,
         )
 
-    def list_windows(self, session: str) -> list[WindowInfo]:
-        """Every window (one pane each) of ``session``; empty when it does not exist."""
-        completed = self._runner(
-            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
-        )
-        if completed.returncode != 0:
-            return []
+    def _parse_windows(self, session: str, stdout: str) -> list[WindowInfo]:
         windows: list[WindowInfo] = []
-        for line in completed.stdout.splitlines():
+        for line in stdout.splitlines():
             fields = line.split(_SEP)
             if len(fields) != len(_WINDOW_FIELDS):
                 continue
@@ -753,6 +782,35 @@ class TmuxServer:
             )
         return windows
 
+    def list_windows(self, session: str) -> list[WindowInfo]:
+        """Every window (one pane each) of ``session``; empty when it does not exist."""
+        completed = self._runner(
+            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+        )
+        if completed.returncode != 0:
+            return []
+        return self._parse_windows(session, completed.stdout)
+
+    def windows_or_raise(self, session: str) -> list[WindowInfo]:
+        """:meth:`list_windows`, except a server that could not be ASKED raises.
+
+        ``[]`` is the answer only for a session tmux CONFIRMS is not there — its
+        server gone (:data:`_ABSENT`) or the session itself (:data:`_NO_TARGET`).
+        The lenient twin's ``[]`` on any non-zero exit let a transient socket
+        failure read as "this session holds no left-live pane", and a session
+        whose agent was verified alive was killed anyway (review of #121, round
+        8). So the spare rule fails closed: it never kills on an enumeration
+        that did not answer.
+        """
+        completed = self._runner(
+            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+        )
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
+                return []
+            raise TmuxError(completed.stderr.strip() or "tmux list-panes could not be reached")
+        return self._parse_windows(session, completed.stdout)
+
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         """The pane's facts, or ``None`` when the pane is gone.
 
@@ -767,6 +825,29 @@ class TmuxServer:
         )
         if completed.returncode != 0:
             return None
+        facts = _facts(completed.stdout.rstrip("\n"))
+        if not facts.pane_id or (pane_id.startswith("%") and facts.pane_id != pane_id):
+            return None
+        return facts
+
+    def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
+        """:meth:`pane_facts`, except a server that could not be ASKED raises.
+
+        ``None`` means the pane is gone as tmux CONFIRMED it: an empty answer
+        from a live server (``display-message`` may miss its target and still
+        exit 0) or a server that is gone (:data:`_ABSENT`). A non-zero exit that
+        is neither — ``Permission denied`` on a live socket — is a
+        :class:`TmuxError`, not a dead pane. The lenient twin's ``None`` there
+        ended a still-running late agent's row and released its claims (review
+        of #121, round 8).
+        """
+        completed = self._runner(
+            self.argv("display-message", "-p", "-t", pane_id, _FACTS_FORMAT), None
+        )
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr):
+                return None
+            raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
         facts = _facts(completed.stdout.rstrip("\n"))
         if not facts.pane_id or (pane_id.startswith("%") and facts.pane_id != pane_id):
             return None

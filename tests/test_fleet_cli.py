@@ -820,6 +820,7 @@ def test_shutdown_json_carries_every_group_and_the_reasons(
         "paused_kept",
         "incomplete_projects",
         "late_scan_failed",
+        "pause_scan_failed",
     }
     assert payload["stopped"][0]["label"] == "coder-auth"
     assert payload["recorded"] == [

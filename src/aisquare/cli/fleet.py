@@ -369,12 +369,18 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
                     "paused_kept": report.paused_kept,
                     "incomplete_projects": report.incomplete_projects,
                     "late_scan_failed": report.late_scan_failed,
+                    "pause_scan_failed": report.pause_scan_failed,
                 }
             )
         )
         return
     console = stdout_console()
-    partial = bool(report.failed or report.sessions_failed or report.late_scan_failed)
+    partial = bool(
+        report.failed
+        or report.sessions_failed
+        or report.late_scan_failed
+        or report.pause_scan_failed
+    )
     console.print(
         f"{'⚠' if partial else '✓'} fleet {'PARTLY ' if partial else ''}shut down: "
         f"{len(report.stopped)} stopped, {len(report.recorded)} recorded lost, "
@@ -409,6 +415,11 @@ def _emit_shutdown(report: fleet_service.ShutdownReport) -> None:
             f"  ⚠ the final scan for rows spawned during the shutdown did not run "
             f"({report.late_scan_failed}) — nothing below is confirmed down; re-run once the "
             "store answers"
+        )
+    if report.pause_scan_failed:
+        console.print(
+            f"  ⚠ the fleet-paused signals could not be reconciled "
+            f"({report.pause_scan_failed}) — every pause is kept; re-run once the store answers"
         )
     if partial:
         console.print(
@@ -473,7 +484,12 @@ def shutdown(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     _emit_shutdown(report)
-    if report.failed or report.sessions_failed or report.late_scan_failed:
+    if (
+        report.failed
+        or report.sessions_failed
+        or report.late_scan_failed
+        or report.pause_scan_failed
+    ):
         # The fleet is not down. Said in the report AND in the exit code, so a
         # script that only reads the code cannot mistake a partial run for one.
         raise typer.Exit(code=1)

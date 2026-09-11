@@ -668,7 +668,12 @@ def _signal_state(name: str, blob: str) -> SignalState:
 
 
 def set_signal(
-    name: str, value: str, *, session_ref: str | None = None, cwd: Path | None = None
+    name: str,
+    value: str,
+    *,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> tuple[SignalState, str | None]:
     """Set a named board state (``team signal NAME VALUE``); returns (state, prev).
 
@@ -690,7 +695,14 @@ def set_signal(
         raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        # A caller that names the project by ID resolves the board id-addressed,
+        # never through cwd — `AISQUARE_TEAM_HUB` redirects cwd resolution to one
+        # hub project, so `fleet shutdown -P b` cleared project A's pause and
+        # reported B (review of #121, round 8). `_board_of` also skips
+        # `ensure_project`, so a forgotten project's tombstone is not revived.
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
         key = _signal_key(board.id, name)
         prior = store.get_meta(key)
         prev = _signal_state(name, prior).value if prior is not None else None
@@ -724,13 +736,19 @@ def set_signal(
 
 
 def read_signal(
-    name: str, *, session_ref: str | None = None, cwd: Path | None = None
+    name: str,
+    *,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> SignalState | None:
     """The current value of one named board state (``team signal NAME``)."""
     _require_enabled()
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
         blob = store.get_meta(_signal_key(board.id, name))
         return _signal_state(name, blob) if blob is not None else None
 

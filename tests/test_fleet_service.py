@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Collection, Iterator, Mapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -292,6 +292,28 @@ class FakeTmux(TmuxServer):
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
         self.binary()
         return self.facts.get(pane_id) if self.running else None
+
+    # The strict twins the shutdown paths use: each is the lenient answer UNLESS
+    # the server could not be asked, and that single distinction is `reachable()`
+    # already — it raises for a denied socket (`socket_denied`), a wedged one
+    # (`answers_raises`) and an unrunnable client (`exec_unavailable`), and is
+    # False (never raises) for a server that is simply not running. Deriving all
+    # four from it keeps the fake from drifting from the real contract.
+    def sessions_or_raise(self) -> list[str]:
+        self.reachable()
+        return self.list_sessions()
+
+    def has_session_or_raise(self, name: str) -> bool:
+        self.reachable()
+        return self.has_session(name)
+
+    def windows_or_raise(self, session: str) -> list[WindowInfo]:
+        self.reachable()
+        return self.list_windows(session)
+
+    def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
+        self.reachable()
+        return self.pane_facts(pane_id)
 
     def kill_window(self, pane_id: str) -> None:
         self.binary()
@@ -2783,6 +2805,225 @@ def test_shutdown_clears_the_fleet_paused_signal(
     assert report.paused_cleared == [project.root.name]
     # A shutdown does not put a fleet-paused row on a board that had none.
     assert fleet_service.shutdown(project).paused_cleared == []
+
+
+# --- round 8: the tmux wrapper must never read "could not ask" as "not there" ---
+
+
+def _scripted(stderr: str, stdout: str = "", code: int = 1) -> TmuxServer:
+    """The REAL wrapper over a runner that answers one fixed way — the sharp
+    instrument for the absence/could-not-ask boundary (as in
+    ``test_reachable_tells_an_absent_server_from_a_denied_socket``)."""
+    return _real_server(lambda argv, stdin: Completed(code, stdout, stderr))
+
+
+def test_reachable_raises_for_a_loader_failure_instead_of_reading_it_as_absent() -> None:
+    """Review of #121, round 8 (P1): the absence regex matched a bare ``No such
+    file or directory``, so the dynamic loader's exit-127 ``cannot open shared
+    object file: No such file or directory`` (a shared library gone) read as an
+    ABSENT SERVER — ``reachable()`` False while the fleet's panes were alive, and
+    shutdown retired their rows. Absence is now only tmux's own socket
+    diagnostics; a loader failure is "could not ask" and raises."""
+    loader = (
+        "aisquare: error while loading shared libraries: libevent-core.so: "
+        "cannot open shared object file: No such file or directory"
+    )
+    with pytest.raises(TmuxError, match="cannot open shared object file"):
+        _scripted(loader, code=127).reachable()
+    assert _scripted(loader, code=127).server_absent() is False, "not an absent server"
+    # tmux's real absence diagnostics still read as absent
+    assert _scripted(_UNREACHABLE).reachable() is False
+    assert _scripted("no server running on /tmp/tmux-1000/asq").reachable() is False
+
+
+def test_strict_session_queries_raise_only_when_the_server_could_not_be_asked() -> None:
+    """Review of #121, round 8 (P2): the lenient ``list_sessions``/``has_session``/
+    ``list_windows`` turn EVERY non-zero exit into ``[]``/``False``/``[]``, so a
+    denied socket reads as "nothing here". The strict twins the shutdown paths use
+    return the empty answer ONLY for a confirmed absence — the server gone, or a
+    live server with no such session/window — and raise for anything else."""
+    denied = "error connecting to /tmp/tmux-1000/asq (Permission denied)"
+
+    assert _scripted(_UNREACHABLE).sessions_or_raise() == []
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted(denied).sessions_or_raise()
+
+    assert _scripted(_UNREACHABLE).has_session_or_raise("asq-x") is False
+    assert _scripted("can't find session: asq-x").has_session_or_raise("asq-x") is False
+    assert _scripted("", code=0).has_session_or_raise("asq-x") is True
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted(denied).has_session_or_raise("asq-x")
+
+    assert _scripted(_UNREACHABLE).windows_or_raise("asq-x") == []
+    assert _scripted("can't find window: asq-x").windows_or_raise("asq-x") == []
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted(denied).windows_or_raise("asq-x")
+
+
+def test_pane_facts_or_raise_keeps_a_denied_probe_from_reading_as_a_dead_pane() -> None:
+    """Review of #121, round 8 (P1): the final pane query returned ``None`` for a
+    non-zero exit such as ``(Permission denied)``, so a late agent still running was
+    recorded lost and its claim released. ``None`` now means only what tmux
+    confirmed — an empty answer, or an absent server — and a denied probe raises."""
+    with pytest.raises(TmuxError, match="Permission denied"):
+        _scripted("error connecting to /tmp/tmux-1000/asq (Permission denied)").pane_facts_or_raise(
+            "%1"
+        )
+    assert _scripted(_UNREACHABLE).pane_facts_or_raise("%1") is None  # server gone -> pane gone
+
+
+def test_shutdown_does_not_kill_a_spared_old_name_session_it_could_not_enumerate(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): the old-name session holds a LEFT LIVE agent,
+    but a transient ``list-panes`` failure became ``[]`` in the lenient wrapper — an
+    empty ``hosted`` set that did NOT match the spared pane, so the session was
+    killed and the live agent's pane went with it. The strict enumeration raises, so
+    the session is reported failed and left standing."""
+    coder = _coder(project)
+    current = _session_of(project).split(":", 1)[1]
+    tmux.sessions["asq-old-name"] = tmux.sessions.pop(current)  # a failed rename
+    tmux.fail_input = True  # /exit does not go through: the row is LEFT LIVE
+
+    real_windows = tmux.windows_or_raise
+
+    def deny_old_name(session: str) -> list[WindowInfo]:
+        if session == "asq-old-name":
+            raise TmuxError("error connecting to /fake (Permission denied)")
+        return real_windows(session)
+
+    monkeypatch.setattr(tmux, "windows_or_raise", deny_old_name)
+
+    report = fleet_service.shutdown()  # every project: the prefix sweep runs
+
+    assert "asq-old-name" not in tmux.killed_sessions
+    assert "asq-old-name" in tmux.sessions, "the session with the live pane still stands"
+    assert coder.pane_id in tmux.facts, "the left-live pane is untouched"
+    assert any(
+        "asq-old-name" in s and "could not list its panes" in s for s in report.sessions_failed
+    ), report.sessions_failed
+    assert project.id in report.incomplete_projects
+
+
+def test_shutdown_reports_a_denied_session_check_as_failed_not_absent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): with the socket denied AFTER a session was
+    listed, the lenient ``has_session`` returned False for the failed command and
+    the session was reported ABSENT — a survivor read as already gone, success
+    reported, pause cleared. The strict check raises, so it is reported failed and
+    left standing."""
+    tmux.spawn_window("asq-stray-otter", name="manager", cwd=project.root, command=["cat"])
+    real_has = tmux.has_session_or_raise
+
+    def deny(name: str) -> bool:
+        if name == "asq-stray-otter":
+            raise TmuxError("error connecting to /fake (Permission denied)")
+        return real_has(name)
+
+    monkeypatch.setattr(tmux, "has_session_or_raise", deny)
+
+    report = fleet_service.shutdown()  # --all sweep reaches the stray session
+
+    socket = fleet_service.settings().tmux_socket
+    assert "asq-stray-otter" not in tmux.killed_sessions
+    assert "asq-stray-otter" in tmux.sessions, "a survivor is not read as absent"
+    assert f"{socket}:asq-stray-otter" in report.sessions_failed
+    assert f"{socket}:asq-stray-otter" not in report.sessions_absent
+
+
+def test_shutdown_keeps_a_late_dead_panes_observed_exit_status(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): a row spawned AFTER the kill phase that then
+    exited on its own leaves tmux holding its pane DEAD with a real status. It was
+    recorded lost with ``exit_status=None`` and "its session was killed under it" —
+    a kill that never targeted it, an observed 42 discarded. It now joins
+    ``stopped`` with the status tmux kept, the way every other self-exit is."""
+    coder = _coder(project)
+    late: list[FleetAgent] = []
+    real_kill = fleet_service._kill_fleet_sessions
+
+    def kill_then_late_exit(*args: object, **kwargs: object) -> None:
+        real_kill(*args, **kwargs)  # type: ignore[arg-type]
+        agent = _coder(project)
+        tmux.die(agent.pane_id, 42)  # it came up, then exited on its own
+        late.append(agent)
+
+    monkeypatch.setattr(fleet_service, "_kill_fleet_sessions", kill_then_late_exit)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert coder.id in {a.id for a in report.stopped}
+    late_rows = [a for a in report.stopped if a.id == late[0].id]
+    assert late_rows and late_rows[0].exit_status == 42, "the observed status is kept"
+    assert all(row.agent.id != late[0].id for row in report.recorded), "not recorded lost"
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [], "its row is ended"
+
+
+def test_shutdown_returns_the_report_when_the_pause_lookup_store_is_locked(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): after the final scan, ``_clear_pause`` opened
+    the store UNGUARDED to list visible projects; a store still locked raised
+    straight through the finished report — empty stdout under ``--json`` after
+    agents were already stopped. The lookup is guarded now: the partial report is
+    returned and every pause is kept."""
+    coder = _coder(project)
+    fleet_service.pause(project)
+    boom = {"on": False}
+    real_store_session = fleet_service.store_session
+    real_late = fleet_service._record_late_rows
+
+    @contextmanager
+    def maybe_locked():  # type: ignore[no-untyped-def]
+        if boom["on"]:
+            raise sqlite3.OperationalError("database is locked (fake)")
+        with real_store_session() as store:
+            yield store
+
+    def late_then_lock(*args: object, **kwargs: object) -> None:
+        real_late(*args, **kwargs)  # type: ignore[arg-type]
+        boom["on"] = True
+
+    monkeypatch.setattr(fleet_service, "_record_late_rows", late_then_lock)
+    monkeypatch.setattr(fleet_service, "store_session", maybe_locked)
+
+    report = fleet_service.shutdown(project, force=True)  # must NOT raise
+    boom["on"] = False
+
+    assert coder.id in {a.id for a in report.stopped}
+    assert report.paused_cleared == [], "no pause is cleared blind"
+    assert fleet_service.is_paused(project), "every pause is kept"
+    assert report.pause_scan_failed is not None and "locked" in report.pause_scan_failed
+    assert report.late_scan_failed is None, "the scan itself ran; only the pause lookup failed"
+
+
+def test_shutdown_clears_the_pause_by_the_target_id_not_a_redirected_board(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #121, round 8 (P2): with ``AISQUARE_TEAM_HUB`` pointing at project
+    A, shutting down explicit project B resolved its pause through cwd and cleared
+    A's signal instead — B reported in ``paused_cleared`` while A's agent kept its
+    standing order removed. The pause is read and written by the target project's
+    ID, so the hub cannot redirect it."""
+    hub_root = project.root.parent / "hub-project"
+    hub_root.mkdir()
+    hub = team_project(hub_root)
+    with store_session() as store:
+        store.ensure_project(hub)
+    fleet_service.pause(hub)
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub_root))  # cwd resolution now points at A
+
+    _coder(project)
+    fleet_service.pause(project)
+    assert fleet_service.is_paused(project) and fleet_service.is_paused(hub)
+
+    report = fleet_service.shutdown(project, force=True)
+
+    assert report.paused_cleared == [project.root.name], "B, not the hub"
+    assert not fleet_service.is_paused(project), "B's own signal is cleared"
+    assert fleet_service.is_paused(hub), "the hub's pause is untouched"
 
 
 def test_shutdown_with_no_agents_takes_the_fleets_session_down_and_reports_nothing_else(

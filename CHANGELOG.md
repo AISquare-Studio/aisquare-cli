@@ -469,6 +469,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
+  model) did nothing from a fleet pane — reported 2026-09-02 and again
+  2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",
+  character="p")` and the key table's "printable input is literal" rule sent the
+  bare letter. With alt or meta held the chord is the meaning; the character is
+  only how the terminal spelt it, and `translate` now says `M-p`. ASCII letters
+  and digits, plus the keys the special-key table already names — alt+space
+  reaches the agent as `M-Space`, which the table could spell all along and
+  never got the chance to. Alt on punctuation stays the character, since through the
+  name table it was dropped (`;`) or became `ESC [`, the control-sequence
+  introducer, and every name this module emits was measured against a real tmux
+  — `M-é` never was. Shift and ctrl keep the existing rule. A modifier tmux
+  cannot spell — `super`/`hyper`, which is how macOS Cmd arrives — now drops the
+  key instead of falling through to its character, so Cmd+V no longer types a
+  `v`. A digit chord tmux has no name for (`ctrl+alt+1`, `alt+shift+1` — the
+  shifted key is layout-specific) falls back to the character the terminal
+  reported, so it still types what it always typed. Two limits are the parser's
+  and are documented in `docs/fleet.md`: a
+  kitty-protocol terminal reports the text and Textual then drops the `alt`
+  token (so kitty, ghostty, wezterm, foot and macOS Option are the *worse* case
+  here, not the better one), and Escape typed within ~100 ms before a letter
+  reads as that chord.
 - **A spawned agent is told the task it was spawned for.** `fleet spawn --task`
   recorded the task on the agent's row and named the label and branch after it
   — and stopped there: the session inside received the generic board and its

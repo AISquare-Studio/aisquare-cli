@@ -605,9 +605,17 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`) and the scroll keys below. Printable characters travel as typed; special keys are
+hatch (`F12`) and the scroll keys below. Printable characters travel as typed —
+except with alt held, where the chord is the meaning: an ASCII letter or digit
+(`M-p`, so Claude Code's alt+p switches the model) or a key tmux has a name for
+(alt+space is `M-Space`). Special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
-`BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
+`BTab`, …). Where there is no safe name the character still travels: `ctrl+alt+1`
+types a `1`, and so does a chord your tmux is too old to carry (below 3.5,
+`ctrl+alt+space` inserts a space rather than doing nothing). The one exception is
+a modifier tmux cannot spell at all — Cmd (super) or hyper — which is dropped
+rather than typed, because Cmd+V is a command and not a request for a `v`.
+Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and
 scrolls its transcript; a fullscreen program that does not is left alone (its own
@@ -625,6 +633,16 @@ keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+The alt chord has two limits, both in Textual's key parser rather than in this
+UI, and the kitty protocol is the *worse* case for this one rather than the
+better one. A terminal speaking it reports the typed text alongside the chord,
+and the parser then drops the `alt` token from the key name — so under kitty,
+ghostty, wezterm and foot, and on macOS where Option produces a character,
+alt+p still types a `p` and does not switch the model. And Escape is what the
+parser has to tell an alt chord from: a letter arriving within ~100 ms of a
+lone Escape is read as that chord, so pressing Esc and immediately typing `p`
+switches the model instead of typing the letter.
 
 ---
 

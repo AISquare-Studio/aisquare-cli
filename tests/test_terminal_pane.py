@@ -610,6 +610,27 @@ def test_escape_key_is_configurable(fake: FakeTmux, tmp_path: Path) -> None:
     assert fake.sent() == [("F12",)]  # F12 is just a key once it is not the hatch
 
 
+def test_alt_p_reaches_the_agent_as_meta_p_not_as_the_letter(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Claude Code's alt+p switches the model; in the pane it typed ``p``.
+
+    The event is posted the way Textual's parser builds it for ``ESC p`` —
+    ``Key("alt+p", "p")``, character set — because ``pilot.press`` does not
+    carry the character and would not reproduce the bug."""
+
+    async def drive() -> None:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            host.pane.post_message(events.Key("alt+p", "p"))
+            await pilot.pause()
+
+    run(drive())
+    assert fake.sent() == [("M-p",)], fake.sent()
+
+
 def test_keys_are_forwarded_in_tmux_vocabulary(fake: FakeTmux, tmp_path: Path) -> None:
     async def drive() -> None:
         host = Host(fake.server(tmp_path), "%1")

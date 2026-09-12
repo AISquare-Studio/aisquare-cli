@@ -9,12 +9,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Bin-only wrappers retain Claude compatibility when no coding-agent default is selected.
-  With a user, project, or inherited agent default, explicitly bind the wrapper's
+  This works inside AISquare-launched panes too. With a user, project, or
+  operator-exported agent default, explicitly bind the wrapper's
   family using `team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`).
 - Fleet `extra_args` retain their existing Claude ownership. Other agents use
   `agent_args.<agent>`; spawn reports when legacy arguments are skipped.
 - Native hook settings are replaced atomically. Symlink targets are updated;
   other hard links retain their previous contents.
+- Native argument values are validated by their agent and reported with source
+  `native`; explicit effort conflicts and compatibility mappings carry a note.
+- Launch metadata cleanup is rate-limited across processes. Existing metadata
+  gets a full retention period on upgrade; active bindings and durable board
+  history remain available.
 
 ### Added
 - Terminal Codex integration through a shared coding-agent adapter registry:

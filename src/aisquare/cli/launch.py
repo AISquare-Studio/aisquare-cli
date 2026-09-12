@@ -355,7 +355,10 @@ def launch(
         stderr_console().print(native_trace_note, markup=False)
     try:
         model_args = agent_launch.native_model_args(
-            selected, role, [*profile.args, *role_args, *ctx.args]
+            selected,
+            role,
+            [*profile.args, *role_args, *ctx.args],
+            note=lambda message: stderr_console().print(message, markup=False),
         )
     except BadEffortError as exc:
         fail(str(exc), error="bad_effort")

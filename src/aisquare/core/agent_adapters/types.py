@@ -56,6 +56,7 @@ class AgentAdapter(Protocol):
         probe: bool | None,
         refresh: bool,
         effort: str | None,
+        effort_is_native: bool = False,
     ) -> harness.ModelResolution | None: ...
     def context_files(self, home: Path) -> tuple[Path, ...]: ...
     def model_args(self, model: str | None, effort: str | None) -> list[str]: ...
@@ -129,11 +130,13 @@ def model_overrides(agent: str, args: Sequence[str]) -> tuple[str | None, str | 
                 decoded = tomllib.loads("value=" + value)["value"]
             except ValueError:
                 decoded = value  # Codex also accepts bare string overrides.
-            if isinstance(decoded, str):
-                if key.strip() == "model":
-                    model = decoded
-                else:
-                    effort = decoded
+            # Even a value of the wrong TOML type belongs to Codex. Suppress
+            # our defaults and let its native config validation explain it.
+            native = decoded if isinstance(decoded, str) else value
+            if key.strip() == "model":
+                model = native
+            else:
+                effort = native
     models = option_values(args, "--model", "-m")
     if models:
         model = models[-1]

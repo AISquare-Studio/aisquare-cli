@@ -40,11 +40,22 @@ class CodexAdapter:
         probe: bool | None,
         refresh: bool,
         effort: str | None,
+        effort_is_native: bool = False,
     ) -> harness.ModelResolution:
         from aisquare.core.agent_adapters.native_models import resolve_model
 
-        result = resolve_model(self.id, role, env=env, effort=effort)
-        result = result.model_copy(update={"effort": self.reasoning_effort(result.effort) or ""})
+        result = resolve_model(
+            self.id, role, env=env, effort=effort, effort_is_native=effort_is_native
+        )
+        if effort_is_native:
+            return result  # Native -c values are validated by Codex, including future levels.
+        level = self.reasoning_effort(result.effort) or ""
+        notes = (
+            [f"Codex maps {result.effort!r} to native reasoning effort {level!r}."]
+            if result.effort.lower() in {"max", "ultracode"}
+            else []
+        )
+        result = result.model_copy(update={"effort": level, "notes": notes})
         return result
 
     def mcp_args(

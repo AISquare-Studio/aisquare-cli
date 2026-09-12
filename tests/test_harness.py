@@ -1089,23 +1089,18 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     EXPORTS what it minted, so it outlives one paste, and a later spawn in the
     same terminal would otherwise inherit the previous session's identity.
 
-    The unset list is the WHOLE identity — ``core.spawn.IDENTITY_ENV_VARS``,
-    the same tuple every stripping seam removes — so pinning it here is pinning
-    what a reader sees, not a second copy of the list. A name added to the tuple
-    lands in the printed command by construction.
+    The prelude's identity behavior is exercised below and by the native
+    boundary tests, including a fresh fleet shell's bootstrap identity.
     """
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
     result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["command"].startswith(
-        'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset ANTHROPIC_BASE_URL '
-        "ANTHROPIC_CUSTOM_HEADERS AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME "
-        "AISQUARE_RUN_TRACE_ID AISQUARE_LAUNCH_ID AISQUARE_FLEET_AGENT; fi; "
-        "unset AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME AISQUARE_RUN_TRACE_ID "
-        "AISQUARE_LAUNCH_ID AISQUARE_FLEET_AGENT; "
-        'eval "$(aisquare explainability env coder --post-root)"; AISQUARE_ROLE=coder '
+    prelude, eval_command = payload["command"].split('; eval "', 1)
+    assert "unset" in prelude
+    assert eval_command.startswith(
+        '$(aisquare explainability env coder --post-root)"; AISQUARE_ROLE=coder '
     )
     assert "X-Pipeline-Id" not in payload["command"]
 

@@ -37,8 +37,9 @@ class ClaudeCodeAdapter:
         probe: bool | None,
         refresh: bool,
         effort: str | None,
+        effort_is_native: bool = False,
     ) -> harness.ModelResolution | None:
-        if effort is not None and harness.normalize_effort(effort) is None:
+        if not effort_is_native and effort is not None and harness.normalize_effort(effort) is None:
             raise BadEffortError(
                 f"Claude Code does not support effort {effort!r}; use one of: "
                 + ", ".join((*harness.EFFORT_SCALE, harness.ULTRACODE))
@@ -47,7 +48,7 @@ class ClaudeCodeAdapter:
             role,
             probe=probe,
             refresh=refresh,
-            effort=effort,
+            effort=None if effort_is_native else effort,
             context=harness.ProbeContext(binary=binary, env=env),
         )
 

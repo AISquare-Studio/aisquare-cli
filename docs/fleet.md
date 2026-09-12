@@ -481,10 +481,12 @@ the environment. A fleet launch is an `aisquare launch <role>` inside a tmux
 window, so all of it applies unchanged, as does the Explainability wiring.
 For an arbitrary wrapper binary, declare its family with
 `aisquare team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`),
-or pass `--agent` on that launch. User/project defaults and the inherited
-`AISQUARE_CODING_AGENT` choice do not identify wrappers. Existing bin-only configurations with no agent default retain the Claude
-compatibility behavior. When an agent default is selected, declare the wrapper
-family explicitly. This also applies to wrappers selected through `AISQUARE_AGENT_BIN` and `AISQUARE_BIN_<ROLE>`.
+or pass `--agent` on that launch. User/project defaults and an operator-exported
+`AISQUARE_CODING_AGENT` do not identify arbitrary wrappers. Existing bin-only
+configurations without those defaults retain Claude compatibility, including
+inside AISquare-launched panes: a parent's family does not reclassify another
+wrapper. This also applies to wrappers selected through `AISQUARE_AGENT_BIN`
+and `AISQUARE_BIN_<ROLE>`.
 
 Legacy `[fleet.roles.ROLE] extra_args` belong to Claude Code. Agent-specific
 arguments name their owner, for example:

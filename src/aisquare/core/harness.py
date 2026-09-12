@@ -388,6 +388,8 @@ class ModelResolution(BaseModel):
     """Where the effort came from: explicit, pinned, env, inherited, or default."""
     skipped: list[str] = []
     """Ladder rungs that were probed (or cached) unavailable, in order."""
+    notes: list[str] = []
+    """Native argument precedence or compatibility mappings worth reporting."""
 
 
 class ProbeResult(BaseModel):

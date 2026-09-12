@@ -12,6 +12,29 @@ from aisquare.core.orchestrator import lease_minutes
 from aisquare.core.store import ContextStore
 from aisquare.models import TeamSession
 
+NATIVE_METADATA_TTL = 24 * 60 * 60
+METADATA_PRUNE_INTERVAL = 60
+_PRUNED_AT = "native-maintenance:pruned-at"
+
+
+def prune_metadata(store: ContextStore) -> None:
+    """Rate-limit maintenance across hook/receiver processes sharing this store."""
+    now = time.time()
+
+    def due() -> bool:
+        try:
+            last = float(store.get_meta(_PRUNED_AT) or "0")
+        except ValueError:
+            return True
+        return not 0 <= now - last < METADATA_PRUNE_INTERVAL
+
+    if not due():
+        return  # Ordinary hooks need only an indexed read, no writer lock.
+    with store.transaction():
+        if due():
+            store.expire_native_launches(now - NATIVE_METADATA_TTL)
+            store.set_meta(_PRUNED_AT, str(now))
+
 
 def launch_tokens() -> list[tuple[str, str]]:
     return [
@@ -25,11 +48,6 @@ def launch_tokens() -> list[tuple[str, str]]:
 
 
 def bind_launch_session(store: ContextStore, session_id: str, *, started: bool = False) -> None:
-    if started:
-        # A new native session is a natural maintenance boundary even when
-        # model telemetry is disabled. Expiry is disposable, never a hook gate.
-        with suppress(Exception):
-            store.expire_native_launches(time.time() - 86400)
     tokens = launch_tokens()
     if not tokens:
         return
@@ -39,10 +57,18 @@ def bind_launch_session(store: ContextStore, session_id: str, *, started: bool =
         for prefix, token in tokens:
             binding = f"{prefix}-session:{token}"
             if started:
-                if store.set_meta_once(f"{prefix}-seen:{token}:{session_id}", "1"):
+                seen = f"{prefix}-seen:{token}:{session_id}"
+                if store.set_meta_once(seen, "1"):
                     store.set_meta(binding, session_id)
+                else:
+                    store.set_meta(seen, "1")  # Refresh replay history without re-binding.
             else:
                 store.set_meta_once(binding, session_id)
+    if started:
+        # Tokenless native sessions do no launch maintenance. Bind first so a
+        # resumed pane is protected before expiring abandoned identities.
+        with suppress(Exception):
+            prune_metadata(store)
 
 
 def provisional_id(project_id: str, prefix: str, token: str) -> str:
@@ -61,7 +87,7 @@ def adopt_local_session(store: ContextStore, session: TeamSession) -> TeamSessio
         # Most heartbeats have no provisional work. Avoid taking the WAL
         # writer lock; adoption rechecks under its transaction when needed.
         source = store.get_session(provisional)
-        if source is not None and source.ended_at is None:
+        if source is not None and store.get_meta(f"session-alias:{provisional}") is None:
             store.adopt_session(
                 provisional, session.id, datetime.now(UTC) + timedelta(minutes=lease_minutes())
             )

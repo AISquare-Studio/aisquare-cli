@@ -933,10 +933,11 @@ def spawn(
     from aisquare.core.agent_adapters.types import fleet_extra_args
 
     role_args = fleet_extra_args(selected.adapter, role_config.extra_args, role_config.agent_args)
+    model_resolution = None
     # Validate native model pins before creating a worktree/window or live row.
     try:
         if not selected.adapter.capabilities.model_ladders:
-            agent_launch.model_for(
+            model_resolution = agent_launch.model_for(
                 selected,
                 role,
                 probe=False,
@@ -944,7 +945,7 @@ def spawn(
             )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
-    notes: list[str] = []
+    notes: list[str] = list(model_resolution.notes) if model_resolution else []
     if role_config.extra_args and not selected.adapter.capabilities.legacy_fleet_args:
         notes.append(
             f"Legacy fleet extra_args apply only to Claude Code; use "

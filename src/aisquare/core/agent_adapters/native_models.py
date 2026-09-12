@@ -18,6 +18,7 @@ def resolve_model(
     *,
     env: dict[str, str],
     effort: str | None,
+    effort_is_native: bool = False,
 ) -> harness.ModelResolution:
     try:
         config = load_config()
@@ -32,18 +33,22 @@ def resolve_model(
     source = "pinned" if model else "configured"
     model = model or _pin(seat.model if seat else None) or _pin(base.model if base else None)
     model = model or _pin(settings.model if settings else None)
-    if effort is not None and not effort.strip():
+    if not effort_is_native and effort is not None and not effort.strip():
         raise BadEffortError("--effort requires a reasoning level, not an empty value")
     pinned_effort = harness.role_effort_override(role, env)
     level = _pin(effort) or pinned_effort
     level = level or _pin(seat.effort if seat else None) or _pin(base.effort if base else None)
     level = level or _pin(settings.effort if settings else None)
+    if effort_is_native:
+        level = effort
     return harness.ModelResolution(
         role=role,
         model=model or "",
         effort=level or "",
         source=source if model else "native-default",
-        effort_source="explicit"
+        effort_source="native"
+        if effort_is_native
+        else "explicit"
         if effort is not None
         else "pinned"
         if pinned_effort

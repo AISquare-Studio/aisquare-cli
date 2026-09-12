@@ -196,6 +196,7 @@ class FleetApp(App[None], inherit_bindings=False):
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
+        self._accounts_refresh_running = False
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
@@ -332,9 +333,18 @@ class FleetApp(App[None], inherit_bindings=False):
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
-        self.run_worker(self._refresh_accounts(), group="accounts-refresh", exclusive=True)
+        if self._accounts is None or self._accounts_refresh_running:
+            return
+        self._accounts_refresh_running = True
+        self.run_worker(self._refresh_accounts(), group="accounts-refresh")
 
     async def _refresh_accounts(self) -> None:
+        try:
+            await self._read_accounts()
+        finally:
+            self._accounts_refresh_running = False
+
+    async def _read_accounts(self) -> None:
         """Re-read the Claude accounts and the AISquare session; the section and the page follow.
 
         Account files are read in a worker so larger login files cannot block

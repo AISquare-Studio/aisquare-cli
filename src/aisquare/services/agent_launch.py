@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -121,12 +121,21 @@ def resolve(
         preferred = project_default(cwd)
     except Exception:
         preferred = None  # a damaged board must not prevent launching
+    inherited = os.environ.get(ACTIVE_AGENT_ENV)
+    if (
+        chosen_binary.source != "default"
+        and inferred is None
+        and os.environ.get("AISQUARE_LAUNCH_ID")
+    ):
+        # Our parent pane's family identifies its executable, not an unrelated
+        # legacy wrapper. Keep that wrapper's plain-shell compatibility choice.
+        inherited = None
     choices = (
         (agent, "flag"),
         (bound.agent if bound else None, "role"),
         (inferred.id if inferred else None, chosen_binary.source),
         (preferred, "project"),
-        (os.environ.get(ACTIVE_AGENT_ENV), "inherited"),
+        (inherited, "inherited"),
         (config.agents.default, "user"),
         ("claude-code", "default"),
     )
@@ -177,14 +186,37 @@ def model_for(
     effective = {**os.environ, **selected.profile.env}
     if model is not None:
         effective[harness.role_env_key("MODEL", role)] = model
-    return selected.adapter.resolve_model(
+    result = selected.adapter.resolve_model(
         role,
         binary=selected.binary.binary,
         env=effective,
         probe=probe,
         refresh=refresh,
         effort=native_effort if native_effort is not None else effort,
+        effort_is_native=native_effort is not None,
     )
+    if result is None:
+        return None
+    if model is not None:
+        # Native argv is authoritative, but has not been validated by the
+        # native CLI yet. Do not report a dash-prefixed prompt's whitespace-
+        # containing suffix as a known model identifier.
+        result = result.model_copy(
+            update={
+                "model": model if model and not any(c.isspace() for c in model) else "",
+                "source": "native",
+            }
+        )
+    if native_effort is not None:
+        notes = list(result.notes)
+        if effort is not None and effort != native_effort:
+            notes.append(
+                f"Native effort {native_effort!r} takes precedence over --effort {effort!r}."
+            )
+        result = result.model_copy(
+            update={"effort": native_effort, "effort_source": "native", "notes": notes}
+        )
+    return result
 
 
 def mcp_args(selected: ResolvedAgent) -> list[str]:
@@ -218,10 +250,19 @@ def mcp_args(selected: ResolvedAgent) -> list[str]:
     )
 
 
-def native_model_args(selected: ResolvedAgent, role: str, raw_args: list[str]) -> list[str]:
+def native_model_args(
+    selected: ResolvedAgent,
+    role: str,
+    raw_args: list[str],
+    *,
+    note: Callable[[str], None] | None = None,
+) -> list[str]:
     if selected.adapter.capabilities.model_ladders:
         return []  # plain launch leaves Claude model choice to its CLI
     resolution = model_for(selected, role, probe=False, raw_args=raw_args)
+    if note and resolution:
+        for message in resolution.notes:
+            note(message)
     return resolved_model_args(selected, resolution, raw_args)
 
 

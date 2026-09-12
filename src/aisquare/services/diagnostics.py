@@ -118,7 +118,7 @@ def doctor(
             _check_database(),
             _check_repomix(),
             _check_tiktoken(),
-            _check_claude_code(),
+            _check_claude_code(cwd),
             *_check_other_agents(cwd),
             *_claude_accounts_checks(),
             _check_tmux(),
@@ -628,7 +628,7 @@ def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
     return clauses
 
 
-def _check_claude_code() -> DoctorCheck:
+def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     """Claude Code: are our hooks in every config dir, and do they run THIS install?
 
     Graded per directory over recorded sites UNION the ambient dir UNION every
@@ -650,7 +650,8 @@ def _check_claude_code() -> DoctorCheck:
 
     try:
         uses_claude = any(
-            agent_launch.resolve(role).adapter.id == "claude-code" for role in harness.ROLE_PROFILES
+            agent_launch.resolve(role, cwd=cwd).adapter.id == "claude-code"
+            for role in harness.ROLE_PROFILES
         )
     except ValueError:
         uses_claude = True  # the separate configuration check explains this
@@ -1839,7 +1840,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                 checks.append(_ok(adapter.id, f"{adapter.label}: {state} in {directory}"))
             else:
                 if state == "unverified":
-                    fix = "Open /hooks in Codex to review hooks; then start a session"
+                    fix += "; then open /hooks in Codex to review hooks and start a session"
                 checks.append(
                     _warn(
                         adapter.id,

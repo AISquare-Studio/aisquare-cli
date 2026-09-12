@@ -238,6 +238,49 @@ def notice(view: AccountsView) -> str:
 # --- pure helpers --------------------------------------------------------------------------------
 
 
+def test_slow_accounts_refresh_finishes_without_cancelling_or_spawning_more_threads(
+    no_network: dict[str, Any],
+) -> None:
+    no_network["session"] = _session()
+    started, release = threading.Event(), threading.Event()
+    calls = 0
+    first = _overview(_status(1, "slow@example.com"))
+    second = _overview(_status(1, "refreshed@example.com"))
+
+    def accounts() -> AccountsOverview:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("test did not release the account reader")
+            return first
+        return second
+
+    async def run() -> None:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=accounts)
+        async with app.run_test(size=SIZE) as pilot:
+            try:
+                assert await asyncio.to_thread(started.wait, 3)
+                for _ in range(5):
+                    app.refresh_accounts()
+                    await pilot.pause()
+                assert calls == 1
+                release.set()
+                await settle(app)
+                assert app.accounts_overview == first
+                assert "slow@example.com" in shown(
+                    app.query_one(AccountsSection).query_one(".accounts-line", Static)
+                )
+                app.refresh_accounts()
+                await settle(app)
+                assert calls == 2 and app.accounts_overview == second
+            finally:
+                release.set()
+
+    asyncio.run(run())
+
+
 def test_usage_bar_fills_five_cells_and_colours_by_pressure() -> None:
     assert usage_bar(0).plain == "▯▯▯▯▯ 0%"
     assert usage_bar(12).plain == "▮▯▯▯▯ 12%"

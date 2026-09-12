@@ -527,9 +527,12 @@ def test_malformed_native_hook_groups_are_preserved(groups: object, tmp_path: Pa
     assert agents.integration_readiness("codex", tmp_path)[0] == "unreadable"
 
 
-def test_session_start_prunes_orphans_without_model_shipping(tmp_path: Path) -> None:
+def test_session_start_prunes_orphans_without_model_shipping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from aisquare.core.agent_sessions import bind_launch_session
 
+    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "new-launch")
     with store_session() as store:
         store.set_meta("agent-event:orphan:Stop:old:False", '"complete"')
         assert isinstance(store, SqliteStore)

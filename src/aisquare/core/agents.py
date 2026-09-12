@@ -220,7 +220,7 @@ def _read_settings(path: Path, *, strict: bool = False) -> dict[str, Any]:
     import copy
 
     snapshot = _SETTINGS_SNAPSHOT.get()
-    key = path.absolute()
+    key = _dir_key(path)
     if snapshot is not None and key in snapshot:
         return copy.deepcopy(snapshot[key])
     try:
@@ -253,6 +253,23 @@ def _read_settings_file(path: Path, *, strict: bool = False) -> dict[str, Any]:
         return {}
 
 
+def _hook_command_parts(command: str) -> tuple[list[str], dict[str, str]]:
+    """Separate trailing hook options, independent of their order."""
+    tokens = _split_command(command)
+    options: dict[str, str] = {}
+    while len(tokens) >= 2 and tokens[-2] in {"--definition", "--config-dir"}:
+        options.setdefault(tokens[-2], tokens[-1])
+        tokens = tokens[:-2]
+    return tokens, options
+
+
+def _without_hook_definition(command: str) -> str:
+    tokens, options = _hook_command_parts(command)
+    if "--config-dir" in options:
+        tokens += ["--config-dir", options["--config-dir"]]
+    return " ".join(_quote(token) for token in tokens)
+
+
 def _is_aisquare_hook_command(command: str) -> bool:
     """Whether ``command`` is one of aisquare's own hook invocations.
 
@@ -271,13 +288,9 @@ def _is_aisquare_hook_command(command: str) -> bool:
     duplicate, and ``disconnect`` cannot remove them.
     """
     try:
-        tokens = _split_command(command)
+        tokens, _ = _hook_command_parts(command)
     except ValueError:
         return False
-    if len(tokens) >= 2 and tokens[-2] == "--definition":
-        tokens = tokens[:-2]
-    if len(tokens) >= 2 and tokens[-2] == "--config-dir":
-        tokens = tokens[:-2]
     if len(tokens) < 3 or tokens[-2] != "hook":
         return False
     if tokens[-1] not in {
@@ -331,7 +344,7 @@ def _write_settings(path: Path, settings: dict[str, Any]) -> None:
 
     snapshot = _SETTINGS_SNAPSHOT.get()
     if snapshot is not None:
-        snapshot.pop(path.resolve(), None)
+        snapshot.pop(_dir_key(path), None)
     payload = json.dumps(settings, indent=2) + "\n"
     existing = _regular_settings(path)
     # No change means no rewrite: Codex trust refers to the installed definition.
@@ -416,8 +429,7 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
             for group in groups if isinstance(groups, list) else []:
                 for handler in _owned_handlers(group):
                     handler["command"] = (
-                        re.sub(r" --definition [0-9a-f]{64}$", "", handler["command"])
-                        + f" --definition {definition}"
+                        _without_hook_definition(handler["command"]) + f" --definition {definition}"
                     )
     _write_settings(spec.settings_path, settings)
     return True
@@ -760,7 +772,7 @@ def _definition_fingerprint(settings: dict[str, Any]) -> str:
             }
             definition["hooks"] = [
                 {
-                    key: re.sub(r" --definition [0-9a-f]{64}$", "", value)
+                    key: _without_hook_definition(value)
                     if key == "command" and isinstance(value, str)
                     else value
                     for key, value in handler.items()
@@ -956,11 +968,7 @@ def hook_binary(command: str) -> HookBinary | None:
     """The program ``command`` would run, or ``None`` when it is not one of our hooks."""
     if not _is_aisquare_hook_command(command):
         return None
-    tokens = _split_command(command)
-    if len(tokens) >= 2 and tokens[-2] == "--definition":
-        tokens = tokens[:-2]
-    if len(tokens) >= 2 and tokens[-2] == "--config-dir":
-        tokens = tokens[:-2]
+    tokens, _ = _hook_command_parts(command)
     if tokens[-4:-2] == ["-m", "aisquare"]:
         return HookBinary(_resolve_program(tokens[0]), module_form=True)
     return HookBinary(_resolve_program(tokens[0]))

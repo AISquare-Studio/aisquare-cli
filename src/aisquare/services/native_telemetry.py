@@ -25,11 +25,12 @@ from typing import Any
 
 from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
 from aisquare.core.agent_adapters.types import option_values
+from aisquare.core.agent_sessions import METADATA_PRUNE_INTERVAL, prune_metadata
+from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_TTL
 from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
-NATIVE_METADATA_TTL = 24 * 60 * 60
 _config_stamp: tuple[object, ...] | None = None
 
 
@@ -198,7 +199,11 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
     if not insights.shipping_enabled() or not insights.settings().enabled:
         return 0
     count = 0
-    with store_session() as store, store.transaction():
+    # Spool files are durable outside SQLite. Commit each successful enqueue's
+    # dedup marker before processing the next event, so a failed batch can be
+    # retried without replaying its completed prefix. Never hold the board's
+    # writer lock across filesystem writes.
+    with store_session() as store:
         session_id = store.get_meta(f"launch-session:{launch_id}")
         session = store.get_session(session_id) if session_id else None
         marker_key = f"native-launch:{launch_id}"
@@ -249,10 +254,11 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
                 "text": "",
                 "native": clean,
             }
-            if outbox.enqueue(record) is not None:
-                store.set_meta(dedup_key, "1")
-                dedup[dedup_key] = "1"
-                count += 1
+            if outbox.enqueue(record) is None:
+                raise OSError("Native event could not be queued; retry the export")
+            store.set_meta(dedup_key, "1")
+            dedup[dedup_key] = "1"
+            count += 1
     return count
 
 
@@ -277,9 +283,15 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload, dict):
                     raise ValueError("OTLP request must be an object")
-                capture(payload, launch_id)
             except Exception:
                 self.send_error(400)
+                return
+            try:
+                capture(payload, launch_id)
+            except Exception:
+                # Native exporters retry transient receiver/spool failures.
+                # A 400 would acknowledge them as permanent request errors.
+                self.send_error(503)
                 return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -298,9 +310,9 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
         last_pruned = 0.0
         try:
             while True:
-                if time.monotonic() - last_pruned >= 60:
+                if time.monotonic() - last_pruned >= METADATA_PRUNE_INTERVAL:
                     with suppress(Exception), store_session() as store:
-                        store.expire_native_launches(time.time() - NATIVE_METADATA_TTL)
+                        prune_metadata(store)
                     last_pruned = time.monotonic()
                 server.handle_request()
                 try:

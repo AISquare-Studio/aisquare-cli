@@ -510,6 +510,12 @@ CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
 END;
 """
 
+# Existing metadata has no historical write time. Give it one full retention
+# period on upgrade, also repairing stores that already ran the v16 migration.
+_SCHEMA_V17 = """
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE updated_at = 0;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -528,6 +534,7 @@ _MIGRATIONS = (
     _SCHEMA_V14,
     _SCHEMA_V15,
     _SCHEMA_V16,
+    _SCHEMA_V17,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 

@@ -22,11 +22,20 @@ class NativeForwardingCommand(TyperCommand):
             if isinstance(param, TyperOption) and not param.is_flag
             for option in param.opts
         }
+        positionals = sum(not isinstance(param, TyperOption) for param in self.get_params(ctx))
         tokens = iter(args)
         for token in tokens:
             if token == "--":
                 rewritten.extend([token, *tokens])
                 break
+            if not token.startswith("-"):
+                if positionals:
+                    positionals -= 1
+                else:
+                    # After the native command/prompt starts, every remaining
+                    # option belongs to it, including collisions such as -l.
+                    rewritten.extend(["--", token, *tokens])
+                    break
             if token == "-c" and "-c" in valued:
                 value = next(tokens, None)
                 if value is not None and re.match(r"^[A-Za-z_][\w.-]*=", value):
@@ -45,7 +54,7 @@ class NativeForwardingCommand(TyperCommand):
                 token.startswith("-")
                 and not token.startswith("--")
                 and len(token) > 2
-                and (token[:2] not in valued or any(c.isspace() for c in token[2:]))
+                and token[:2] not in valued
             ):
                 # Click otherwise parses known letters *inside* an unknown
                 # short option: -mexample used to become --env xample.

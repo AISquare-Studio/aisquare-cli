@@ -40,13 +40,15 @@ a trust-bypass flag.
 Connect validates and installs hooks before importing global memories. Malformed,
 unreadable or non-regular native settings produce a file repair diagnostic;
 existing settings and memories are preserved on that failure. Updates retain
-the file's permissions and symlink target. A change to a file with multiple
-hard links is refused; use one file or symlinks before retrying.
+the file's permissions and symlink target. Replacing a hard-linked file updates
+that path while leaving the other hard links' contents untouched.
 
 Status distinguishes configured hooks from observed execution. `unverified`
 means the file is installed but this definition has not been observed running.
 `observed` means a callback ran; a session's own trust and permission policy
-still applies. Doctor reports missing hooks, stale AISquare executables,
+still applies. Evidence identifies the definition that actually ran, so an older
+open session cannot verify newly installed hooks. Reconnect after upgrading,
+then review the updated hooks in Codex. Doctor reports missing hooks, stale AISquare executables,
 short context timeouts and the review step, including account homes discovered
 on disk. End and interrupt handlers are local and use Codex's three-second
 timeout. Reconnect preserves extra headroom for the two context hooks and
@@ -56,11 +58,12 @@ Selection order is explicit `--agent`, role binding, an exact known binary
 override (legacy shorthand), project preference, inherited session selection,
 user default, then Claude Code. An arbitrary wrapper declares its family with
 `team bind ROLE --agent NAME --bin PATH` or `--agent` at launch (`NAME` is
-`claude-code` or `codex`). User/project defaults and the inherited
-`AISQUARE_CODING_AGENT` choice do not identify a wrapper's family. An unknown
-wrapper requires a per-role or per-launch declaration before it receives
-native flags, account configuration or model probes. Conflicting known
-binaries and families are rejected.
+`claude-code` or `codex`). Without an operator-selected agent default, legacy
+bin-only wrappers retain Claude compatibility, including inside an AISquare
+pane: the parent's exported family does not reclassify another wrapper.
+User/project defaults and an operator-exported `AISQUARE_CODING_AGENT` do not
+identify an arbitrary wrapper; with those defaults, declare its family explicitly.
+Conflicting known binaries and families are rejected.
 Changing a default affects future launches.
 
 Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
@@ -114,7 +117,9 @@ agent_args = { codex = ["--no-alt-screen"] }
 
 `AISQUARE_MODEL_<ROLE>` and `AISQUARE_EFFORT_<ROLE>` remain explicit role pins.
 Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`. Shared effort
-names `max` and `ultracode` map to Codex's `xhigh`. Values are trimmed and effort
+names `max` and `ultracode` map to Codex's `xhigh`, with a note identifying the
+mapping. This selects a native reasoning level, without Claude workflow
+orchestration. AISquare-configured values are trimmed and effort
 names ignore case; blank environment/config pins fall through to native defaults.
 An explicitly empty `--effort` is a usage error. Native model availability is left to
 Codex, without paid discovery probes. `--probe`, `--no-probe` and `--refresh`
@@ -139,6 +144,21 @@ Use `--` to explicitly separate native options from AISquare options. Codex
 `-c KEY=VALUE` and `-cKEY=VALUE` also work before the separator, as do attached
 model options such as `-mMODEL`. Legacy `-c BINARY` selects an executable;
 `--command BINARY` is unambiguous, including for a path containing `=`.
+Attached AISquare options retain their values, including spaces in executable
+paths or environment assignments. Once a native subcommand or prompt begins,
+the remaining tokens belong to the agent; put AISquare options before it.
+The first `--` belongs to AISquare. To pass a literal dash-prefixed prompt, include
+the native separator too:
+
+```sh
+asq launch coder --agent codex -- -- '-migrate the schema'
+```
+
+Explicit native model/effort options override AISquare defaults without injecting
+a second value. Codex validates its own `-c` values, including future reasoning
+levels. `team harness` and `team spawn` report these choices with source `native`;
+a value containing whitespace is not reported as a known model identifier.
+When native effort overrides AISquare's `--effort`, spawn reports the precedence.
 Native sandbox and approval policies stay separate.
 Reviewers, including numbered seats such as `reviewer2`, default to read-only;
 other Codex fleet roles use workspace-write. Numbered seats inherit the base
@@ -162,6 +182,11 @@ decisions. Generated continuations have their own prompt source.
 Failed callbacks release their owned pending claim immediately so retries can
 recover. Pending claims expire after 180 seconds using a monotonic clock.
 An unavailable observation cache costs readiness evidence, not lifecycle processing.
+Launch bindings and retry records expire after 24 hours without session activity.
+Active sessions retain their bindings and replay history. Metadata without a
+historical timestamp gets a full retention period on upgrade. Cleanup runs on
+managed session starts and receiver maintenance, at most once per minute across
+processes sharing the store; plain native sessions without launch tokens skip it.
 
 Initial fleet tasks use Codex's positional prompt. Subsequent automated input
 requires a linked waiting session; otherwise `fleet tell` files a board note.
@@ -178,7 +203,8 @@ hook-bound session for the requested project when available. Until hooks join
 (including while awaiting native trust), local clients use a provisional
 identity unique to the project and launch token (or fleet token when there is
 no launch token). The native join adopts its claims, history and focus, renews
-its leases, and retires the provisional presence. Late tool calls resolve to
+its leases, and retires the provisional presence, including after an idle sweep
+ended that provisional row. Late tool calls resolve to
 the native row. External clients retain their project-scoped virtual identity.
 
 With both `explainability.enabled` and `explainability.ship` enabled, Codex
@@ -199,6 +225,10 @@ Codex [ignores `otel` in project-local config](https://learn.chatgpt.com/docs/co
 so AISquare does not search ancestor projects or other account homes for
 exporters. Usage is counted from native logs once, with the observed provider
 name; duplicate exports and the parallel native span stream do not add usage again.
+Each queued event's dedup marker commits before the next event is processed,
+so a failed batch retains its completed prefix on retry. Spool file writes do
+not hold the board's database writer lock. A temporary spool failure returns
+a retryable receiver response instead of acknowledging the incomplete batch.
 Per-launch deduplication/provider metadata is removed when the receiver exits.
 Receivers also prune metadata idle for 24 hours and caches from older releases;
 project purge removes that project's native metadata, including unjoined launches.
@@ -249,24 +279,3 @@ Native contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
 [configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
 [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).
-
-The first `--` separates AISquare options from native options. To pass a literal
-prompt starting with a dash, include the native separator too:
-
-```sh
-asq launch coder --agent codex -- -- '-migrate the schema'
-```
-
-An attached native option such as `-mMODEL` retains Codex's usual meaning.
-Explicit `--model`/`-m` and `-c model=…` or `-c model_reasoning_effort=…`
-override AISquare defaults without injecting a second value for that setting.
-
-Hook readiness is tied to the definition carried by the command that actually
-ran. An older open session cannot verify a newly installed definition. Reconnect
-after upgrading, then review the updated hooks in Codex. Atomic settings writes
-follow symlinks; replacing a hard-linked file updates that path while leaving
-the other hard links' contents untouched.
-
-Launch bindings and turn retry records expire after 24 hours without session
-activity. Active sessions keep their bindings; durable board history and queued
-insights are retained.

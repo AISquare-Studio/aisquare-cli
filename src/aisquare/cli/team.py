@@ -91,9 +91,10 @@ _SESSION_ID_SUBSTITUTION = (
 #: to iterate. That asymmetry is the point — a name missing from an emitter
 #: costs a record, a name missing from a remover corrupts the next session's.
 _CLEAR_PREVIOUS_TRACE = (
+    'if [ -n "${AISQUARE_LAUNCH_ID:-}" ]; then unset AISQUARE_FLEET_AGENT; fi; '
     f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
-    f"unset {' '.join(IDENTITY_ENV_VARS)}; fi; "
-    f"unset {' '.join(MARKER_ENV_VARS)}"
+    f"unset {' '.join(key for key in IDENTITY_ENV_VARS if key != 'AISQUARE_FLEET_AGENT')}; fi; "
+    f"unset {' '.join(key for key in MARKER_ENV_VARS if key != 'AISQUARE_FLEET_AGENT')}"
 )
 
 
@@ -388,6 +389,8 @@ def spawn(
         fail(str(exc), error="bad_effort")
     except ValueError as exc:
         fail(str(exc), error="agent_configuration")
+    for note in resolution.notes if resolution else []:
+        typer.echo(note, err=True)
     if not selected.adapter.capabilities.model_ladders and (probe is not None or refresh):
         typer.echo(
             f"{selected.adapter.label} uses native model selection; --probe/--no-probe and "
@@ -545,6 +548,7 @@ def spawn(
                     "source": resolution.source if resolution else "untiered",
                     "effort_source": resolution.effort_source if resolution else None,
                     "skipped": resolution.skipped if resolution else [],
+                    "notes": resolution.notes if resolution else [],
                     "binary": binary.binary,
                     "agent": selected.adapter.id,
                     "agent_source": selected.source,
@@ -662,7 +666,9 @@ def harness_status() -> None:
     for name, profile in harness.ROLE_PROFILES.items():
         try:
             selected = agent_launch.resolve(name)
-            resolution = agent_launch.model_for(selected, name, probe=False)
+            resolution = agent_launch.model_for(
+                selected, name, probe=False, raw_args=selected.profile.args
+            )
         except ValueError as exc:
             rows.append(
                 {
@@ -688,6 +694,7 @@ def harness_status() -> None:
                 "effort_source": resolution.effort_source if resolution else "native-default",
                 "resolves_to": resolution.model if resolution else "",
                 "source": resolution.source if resolution else "native-default",
+                "notes": resolution.notes if resolution else [],
                 "mission": profile.mission,
                 "binary": selected.binary.binary,
                 "binary_source": selected.binary.source,
@@ -737,6 +744,8 @@ def harness_status() -> None:
             f"bin={row['binary']} [{row['binary_source']}]{env_note}{role_note}",
             markup=False,
         )
+        for note in row["notes"]:
+            console.print(f"  {note}", markup=False)
     if interference:
         console.print(f"⚠ env overrides model selection: {', '.join(interference)}", markup=False)
     console.print(

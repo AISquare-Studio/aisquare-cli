@@ -1251,7 +1251,10 @@ def test_live_kill_session_then_kill_server(live: TmuxServer) -> None:
 @requires_tmux
 def test_live_socket_path_is_where_tmux_put_it_and_outlives_the_server(live: TmuxServer) -> None:
     _spawn(live, "asq-test-fox", "w0", CAT)
-    assert live.run("display-message", "-p", "#{socket_path}").strip() == str(live.socket_path())
+    reported = Path(live.run("display-message", "-p", "#{socket_path}").strip())
+    # macOS tmux reports /private/tmp while /tmp names the same directory.
+    # Compare the socket itself, not two valid spellings of its parent path.
+    assert reported.samefile(live.socket_path())
     assert live.socket_path().is_socket()
     live.kill_server()
     assert live.list_sessions() == []

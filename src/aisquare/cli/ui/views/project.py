@@ -40,6 +40,7 @@ from textual.widgets import Button, Static, TabbedContent, TabPane
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
+from aisquare.cli.ui.persona_activity import PersonaActivity
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
@@ -146,6 +147,7 @@ class ManagerTab(Vertical):
         yield Static(id="manager-header")
         yield Button("Start manager", id="start-manager", variant="primary")
         yield TerminalPane(None, escape_key=self.escape_key, id="manager-pane")
+        yield PersonaActivity(self.project)
 
     def on_mount(self) -> None:
         self.refresh_from_service()

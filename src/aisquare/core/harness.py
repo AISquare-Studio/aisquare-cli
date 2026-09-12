@@ -994,6 +994,76 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
     return []
 
 
+WORK_RULES_VERSION = "native-1"
+
+
+def working_rules(role: str) -> list[str]:
+    """Our native working habits, separate from presentation-only personas."""
+    role = base_role(role)
+    common = [
+        "Native work rules: the latest user correction takes priority over an older brief.",
+        "Read the linked requirements before work; ask about actual contradictions instead",
+        "of guessing. A task claimed/done is a board state, not evidence that it works.",
+        "Use `asq exec -- git status` and `asq exec -- pytest ...` for those supported checks;",
+        "the wrapper preserves originals. Read saved detail with `asq reports show ID --raw`.",
+        "Never omit the FULL required checks, errors or warnings to save tokens.",
+        "Use `asq context focus 'task keywords'` as an optional file-path shortlist,",
+        "not evidence. Read originals and use ordinary search for missing or newly added files.",
+    ]
+    roles = {
+        "manager": [
+            'Create a short shared brief: `asq brief create "goal" -r "outcome"` (repeat -r).',
+            "Keep executable checks with `asq brief update ID --check 'R1=check'`; link",
+            "existing board tasks with `asq brief link ID TASK -r R1`. No second task list.",
+            "Check existing tasks and workers before spawning. A planner is optional, not a",
+            "mandatory handoff. Supply --task to workers and verify the intended task was claimed.",
+            "Update user corrections in the brief. Before READY, require `asq brief check ID`",
+            "to pass AND the existing validator gate. Repeated blocked work needs human input.",
+        ],
+        "planner": [
+            "Turn intent into concise requirements with `asq brief create` and executable",
+            "checks via `asq brief update --check R1=...`; link existing board tasks, avoid",
+            "duplicate requirements/assignments, and resolve conflicting assumptions explicitly.",
+        ],
+        "coder": [
+            "Inspect the affected flow first. Reuse suitable project code and conventions;",
+            "add dependencies only when justified. Make the smallest correct maintainable change.",
+            "After source edits, update the linked brief with `asq brief update ID",
+            "--source-revision BUILD --affected R1` (omit --affected to invalidate all).",
+            "Keep safeguards and tests; self-check does not replace independent verification.",
+        ],
+        "runner": [
+            "Run every required check on the changed source; preserve failures and originals.",
+            "Use Docker only if the project setup requires it. Record what was and was not tested.",
+            "Record each check: `asq brief evidence ID R1 --task TASK --verdict pass|fail|blocked",
+            "--summary 'actual result' --report REPORT_ID`. Capture with exec --project PROJECT.",
+            "Manual screenshots use --artifact and require independent validator review.",
+        ],
+        "ui-tester": [
+            "Check the actual changed application in a real browser at requested device sizes",
+            "including failure cases. Record screenshot/report evidence for each UI requirement",
+            "with `asq brief evidence`; stale screenshots cannot verify a changed build.",
+            "Failures: `asq brief finding ID R1 --summary 'repro' --artifact /path/to/proof`.",
+        ],
+        "reviewer": [
+            "Read the relevant actual diff and originals. Report concrete evidence-backed",
+            "findings, including unsuitable duplication or unnecessary complexity. Keep read-only",
+            "review boundaries. Link findings with `asq brief finding` so corrections reuse tasks.",
+        ],
+        "validator": [
+            "Compare every requested outcome with fresh evidence from the current source.",
+            "Run `asq brief check ID`; this checks each recorded checkout, not an assembled merge.",
+            "For one assembled deliverable use `asq brief check ID --source-root PATH`;",
+            "multi-repository delivery also needs explicit integration checks across repositories.",
+            "Missing task coverage, stale proof or blocked work fails",
+            "the gate. Review the artifacts yourself: recorded pass claims are not self-proving.",
+            "Use `asq brief finding` for precise corrections; after repeated failure request",
+            "re-planning instead of generating an endless succession of tasks.",
+        ],
+    }
+    return common + roles.get("runner" if role == "tester" else role, [])
+
+
 # ─── Which BINARY runs a role's agent ────────────────────────────────────────
 #
 # Orthogonal to the model ladder above: that decides WHAT the agent runs on,

@@ -488,6 +488,17 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
 _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
+# v15: native work contracts; task links/evidence live in a versioned document.
+# CAS revision and the board event commit together, never a second task queue.
+_SCHEMA_V15 = """
+CREATE TABLE work_brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX work_brief_project ON work_brief(project_id);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -504,6 +515,7 @@ _MIGRATIONS = (
     _SCHEMA_V12,
     _SCHEMA_V13,
     _SCHEMA_V14,
+    _SCHEMA_V15,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -636,6 +648,7 @@ class ContextStore(Protocol):
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool: ...
     def renew_leases(self, session_id: str, lease_until: datetime) -> None: ...
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask: ...
+    def finish_verified_task(self, task_id: str, brief_revisions: dict[str, int]) -> TeamTask: ...
     def release_task(self, task_id: str) -> TeamTask: ...
     def reopen_task(self, task_id: str) -> TeamTask: ...
     def next_task(
@@ -682,6 +695,18 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def get_work_brief(self, ref: str, project_id: str) -> str | None: ...
+    def work_briefs(self, project_id: str) -> list[str]: ...
+    def save_work_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        revision: int,
+        data: str,
+        expected: int | None,
+        event: TeamEvent,
+        task_statuses: dict[str, str],
+    ) -> None: ...
     def close(self) -> None: ...
 
 
@@ -911,6 +936,96 @@ class SqliteStore:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
 
+    def get_work_brief(self, ref: str, project_id: str) -> str | None:
+        rows = self._conn.execute(
+            f"SELECT id, data FROM work_brief WHERE project_id = ? "
+            f"AND project_id IN {_VISIBLE_PROJECTS} AND (id = ? OR substr(id, 1, ?) = ?)",
+            (project_id, ref, len(ref), ref),
+        ).fetchall()
+        exact = next((row for row in rows if row["id"] == ref), None)
+        if exact is not None:
+            return str(exact["data"])
+        if len(rows) > 1:
+            raise AmbiguousIdError(ref)
+        return str(rows[0]["data"]) if rows else None
+
+    def work_briefs(self, project_id: str) -> list[str]:
+        return [
+            str(row["data"])
+            for row in self._conn.execute(
+                f"SELECT data FROM work_brief WHERE project_id = ? "
+                f"AND project_id IN {_VISIBLE_PROJECTS} ORDER BY id",
+                (project_id,),
+            ).fetchall()
+        ]
+
+    def save_work_brief(
+        self,
+        brief_id: str,
+        project_id: str,
+        revision: int,
+        data: str,
+        expected: int | None,
+        event: TeamEvent,
+        task_statuses: dict[str, str],
+    ) -> None:
+        """Atomically save contract, finding/reopen effects and factual board event."""
+        with self._conn:
+            if expected is None:
+                self._conn.execute(
+                    "INSERT INTO work_brief(id, project_id, revision, data) VALUES (?, ?, ?, ?)",
+                    (brief_id, project_id, revision, data),
+                )
+            else:
+                changed = self._conn.execute(
+                    "UPDATE work_brief SET revision = ?, data = ? "
+                    "WHERE id = ? AND project_id = ? AND revision = ?",
+                    (revision, data, brief_id, project_id, expected),
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("brief changed concurrently; read the latest brief and retry")
+            for task_id, status in task_statuses.items():
+                if status not in ("todo", "blocked"):
+                    raise ValueError("unsupported brief task transition")
+                # Back to the pool means unowned; blocked keeps its owner, who is the
+                # one that has to see the blocker. A dropped task is never revived.
+                changed = self._conn.execute(
+                    "UPDATE team_task SET status = ?, "
+                    "claimed_by = CASE WHEN ? = 'blocked' THEN claimed_by ELSE NULL END, "
+                    "claim_expires_at = "
+                    "CASE WHEN ? = 'blocked' THEN claim_expires_at ELSE NULL END, "
+                    "updated_at = ? WHERE id = ? AND project_id = ? AND status != 'dropped'",
+                    (status, status, status, _now_iso(), task_id, project_id),
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("linked task disappeared or changed board")
+                self._conn.execute(
+                    "INSERT INTO team_event (id, project_id, kind, text, task_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        f"{event.id}-{task_id}",
+                        project_id,
+                        "task_blocked" if status == "blocked" else "task_reopened",
+                        event.text,
+                        task_id,
+                        event.created_at.isoformat(),
+                    ),
+                )
+            self._conn.execute(
+                "INSERT INTO team_event (id, project_id, session_id, kind, text, task_id, "
+                "to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.id,
+                    event.project_id,
+                    event.session_id,
+                    event.kind,
+                    event.text,
+                    event.task_id,
+                    event.to_role,
+                    event.created_at.isoformat(),
+                ),
+            )
+
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
             f"INSERT INTO entry ({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1107,6 +1222,7 @@ class SqliteStore:
                 "team_session",
                 "fleet_agent",
                 "metric",
+                "work_brief",
             ):
                 cursor = self._conn.execute(
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
@@ -1126,10 +1242,21 @@ class SqliteStore:
         :data:`_META_BATCH` sessions each (two terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
-        removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
-            (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+        work_removed = self._conn.execute(
+            "DELETE FROM team_meta WHERE key = ?", (f"work_mode/{project_id}",)
         ).rowcount
+        for sid in sessions:
+            work_removed += self._conn.execute(
+                "DELETE FROM team_meta WHERE key IN (?, ?, ?)",
+                (f"work_rules/{sid}", f"work_rules_text/{sid}", f"work_rules_role/{sid}"),
+            ).rowcount
+        removed = (
+            work_removed
+            + self._conn.execute(
+                "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
+                (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+            ).rowcount
+        )
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
             keys = [f"nudge:{sid}" for sid in batch]
@@ -1499,6 +1626,38 @@ class SqliteStore:
             (lease_until.isoformat(), session_id),
         )
         self._conn.commit()
+
+    def finish_verified_task(self, task_id: str, brief_revisions: dict[str, int]) -> TeamTask:
+        """Complete only if contracts have not changed since the evidence check.
+
+        The immediate transaction also catches newly-created briefs or links.
+        A later correction owns the same write lock and atomically reopens done tasks.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            task = self.get_task(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            current = {
+                str(row["id"]): int(row["revision"])
+                for row in self._conn.execute(
+                    "SELECT id, revision FROM work_brief WHERE project_id = ?",
+                    (task.project_id,),
+                ).fetchall()
+            }
+            if current != brief_revisions:
+                raise ValueError(
+                    "requirements changed during verification; read the brief and retry"
+                )
+            self._conn.execute(
+                "UPDATE team_task SET status = 'done', claimed_by = NULL, "
+                "claim_expires_at = NULL, updated_at = ? "
+                "WHERE id = ?",
+                (_now_iso(), task_id),
+            )
+        updated = self.get_task(task_id)
+        assert updated is not None
+        return updated
 
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask:
         task = self.get_task(task_id)

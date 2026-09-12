@@ -212,6 +212,27 @@ SEAMS: dict[str, Seam] = {
         "runs; no model process",
     ),
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
+    "aisquare/core/source_revision.py::source_fingerprint": Seam(
+        EXCLUDED,
+        "local git inventory/HEAD reads to invalidate evidence when source changes; no model",
+    ),
+    "aisquare/core/source_revision.py::source_root_for": Seam(
+        EXCLUDED, "local git checkout path lookup for command/evidence provenance; no model"
+    ),
+    "aisquare/core/source_revision.py::_gitlink": Seam(
+        EXCLUDED, "`git ls-files -s` for the commit a submodule entry records; no model"
+    ),
+    "aisquare/cli/persona.py::_edit_pack": Seam(
+        EXCLUDED,
+        "the user's local text editor for a persona draft, with no shell or model invocation; "
+        "receives only a temporary pack file, outside the agent conversation",
+    ),
+    "aisquare/services/command_reports.py::run_command": Seam(
+        EXCLUDED,
+        "the user's explicit command, with its original environment and semantics; "
+        "records output under the caller's existing session rather than "
+        "minting a new agent identity",
+    ),
     "aisquare/core/snapshot.py::node_version": Seam(
         EXCLUDED, "`node --version`, a string — the floor repomix declares"
     ),

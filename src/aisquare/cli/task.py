@@ -259,6 +259,8 @@ def done(
     """Mark a task done (optionally sharing the outcome)."""
     try:
         task = team_service.finish_task(ref, note=note, session_ref=as_session)
+    except ValueError as exc:
+        fail(str(exc), error="unverified_requirements", ref=ref)
     except STORE_ERRORS as exc:
         _fail_team(exc, ref)
     _emit_task(task, verb="done")

@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "id": "mission-control",
+  "version": "1.0.0",
+  "name": "Mission Control",
+  "description": "Original role voices for recorded team activity (side-panel captions only; not a response style).",
+  "author": "AI Square contributors",
+  "license": "MIT",
+  "generic": {
+    "default": [
+      "Mission log: a team update is available."
+    ],
+    "task_claimed": [
+      "This task has a working station."
+    ],
+    "task_done": [
+      "Task marked done; recorded evidence remains the authority."
+    ],
+    "task_review": [
+      "This task is queued for inspection."
+    ],
+    "task_blocked": [
+      "Mission hold: this task is blocked."
+    ],
+    "task_dropped": [
+      "This task has left the active mission."
+    ],
+    "attention": [
+      "Attention signal: inspect the original message."
+    ],
+    "agent_exited": [
+      "A worker station closed; inspect its recorded result."
+    ],
+    "task_added": [
+      "A new task is on the mission board."
+    ],
+    "task_released": [
+      "This task has returned to the mission pool."
+    ],
+    "task_reopened": [
+      "Task reopened; the flight log records the reason."
+    ],
+    "result": [
+      "Result logged; the evidence is in the original record."
+    ],
+    "question": [
+      "A crew member is asking a question."
+    ],
+    "activate": [
+      "Mission board is live for this project."
+    ],
+    "focus": [
+      "Mission focus has changed."
+    ],
+    "brief_created": [
+      "Mission objectives are on record."
+    ],
+    "brief_updated": [
+      "Mission objectives changed; earlier proof may be stale."
+    ],
+    "brief_linked": [
+      "A task is now tied to its objectives."
+    ],
+    "brief_evidence": [
+      "A check was logged against an objective; see its verdict."
+    ]
+  },
+  "roles": {
+    "manager": {
+      "note": [
+        "Coordination desk: team update recorded."
+      ]
+    },
+    "planner": {
+      "note": [
+        "Navigation desk: planning update recorded."
+      ]
+    },
+    "coder": {
+      "note": [
+        "Engineering bench: work update recorded."
+      ],
+      "task_claimed": [
+        "This task is on my engineering bench."
+      ]
+    },
+    "runner": {
+      "note": [
+        "Operations desk: check update recorded."
+      ]
+    },
+    "tester": {
+      "note": [
+        "Test station: check update recorded."
+      ]
+    },
+    "reviewer": {
+      "note": [
+        "Inspection desk: review update recorded."
+      ],
+      "task_claimed": [
+        "This task is on the inspection desk."
+      ]
+    },
+    "validator": {
+      "note": [
+        "Verification desk: outcome update recorded."
+      ]
+    },
+    "ui-tester": {
+      "note": [
+        "Browser station: interface update recorded."
+      ]
+    }
+  }
+}

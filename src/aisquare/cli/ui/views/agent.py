@@ -17,6 +17,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
+from aisquare.cli.ui.persona_activity import PersonaActivity
 from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.core.tmux import TmuxServer
@@ -80,6 +81,11 @@ class AgentView(Vertical):
             server=self.server,
             escape_key=self.escape_key,
             id="agent-pane",
+        )
+        yield PersonaActivity(
+            project_id=self.status.agent.project_id,
+            role=self.status.agent.role,
+            session_id=self.status.agent.session_id,
         )
 
     @property

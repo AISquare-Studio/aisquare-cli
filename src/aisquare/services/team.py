@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,7 +26,7 @@ from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
-from aisquare.core.store import ContextStore, store_session, unmet_needs
+from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
 from aisquare.models import ProjectInfo, TaskStatus, TeamEvent, TeamSession, TeamTask
 from aisquare.services import distill as distill_service
 
@@ -1011,7 +1012,13 @@ def _finish_task(
         if task is None:
             raise KeyError(ref)
         session = _resolve_session(store, session_ref)
-        updated = store.set_task_status(task.id, status)
+        if status == "done":
+            from aisquare.services.work_briefs import task_gate
+
+            revision_snapshot = task_gate(store, task)
+            updated = store.finish_verified_task(task.id, revision_snapshot)
+        else:
+            updated = store.set_task_status(task.id, status)
         text = updated.title if note is None else f"{updated.title} — {note}"
         event = _emit(
             store,
@@ -1287,13 +1294,116 @@ def hook_session_start(
             session = store.update_session(session.id, role=role)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return collision + _render_board(
+        board_context = collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
         )
+        from aisquare.services.work_briefs import session_context
+
+        return (
+            board_context
+            + _startup_task_assignment(store, project, session)
+            + session_context(store, project.id, session.id, session.role)
+            + _style_trailer(store, project.id, session.role)
+        )
+
+
+def _startup_task_assignment(
+    store: ContextStore, project: ProjectInfo, session: TeamSession
+) -> str:
+    """The explicit launch task wins over generic work-pool instructions.
+
+    A fleet row may not have been persisted yet when the child starts. Its
+    absence is not an error; if present its identity must match this assignment.
+    Claims remain the existing atomic task command, never an implicit startup write.
+    """
+    ref = os.environ.get("AISQUARE_TASK_ID")
+    if not ref:
+        return ""
+    stop = "STOP and report; do not pick another."
+    try:
+        task = store.get_task(ref)
+    except AmbiguousIdError:
+        # A hand-exported prefix; the board, cycle and rules above still stand.
+        return f"\nAssigned task {ref!r} is ambiguous on this board. {stop}"
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        return f"\nAssigned task {ref!r} could not be read ({exc}). {stop}"
+    if task is None or task.project_id != project.id:
+        return f"\nAssigned task unavailable on this board. {stop}"
+    for agent in store.fleet_agents(project.id, live_only=True):
+        if agent.session_id == session.id and agent.task_id != task.id:
+            return f"\nFleet/startup assignment mismatch. {stop}"
+    # The instruction follows the task's ACTUAL state. This block is re-injected on
+    # every resume, so "claim it" must not be said to a session that already holds
+    # it, nor about work another live session owns or that is already finished.
+    holder = task.claimed_by
+    expiry = task.claim_expires_at
+    lapsed = holder is not None and expiry is not None and expiry <= _now()
+    owned = holder is not None and task.status == "doing" and not lapsed
+    state = f"[{task.status}" + (f" @{short_id(holder)}" if owned and holder else "") + "]"
+    lines = [
+        "\n<aisquare-assignment>",
+        "This explicit assignment overrides generic 'task next' instructions above.",
+        f"Task {task.id} {state}: {task.title}",
+        f"Contract: {task.detail or 'Missing; request clarification before work.'}",
+        f"Dependencies: {', '.join(task.needs) or 'none'}",
+    ]
+    if task.status in ("review", "done", "dropped"):
+        lines.append(
+            f"This task is {task.status}. Do not claim or edit it; inspect its evidence, "
+            "report and stop."
+        )
+    elif task.status == "blocked":
+        lines.append(
+            "This task is blocked. Do not claim it; report what would unblock it, and stop."
+        )
+    elif owned and holder == session.id:
+        lines.append(
+            "This task is already yours; do not claim it again. Continue the work and "
+            "report the result on it."
+        )
+    elif owned and holder is not None:
+        owner = store.get_session(holder)
+        who = f"{short_id(holder)} ({owner.role if owner else 'unknown role'})"
+        lines.append(f"This task is owned by {who}. Do not claim it; report and stop.")
+    else:
+        if lapsed and holder is not None:
+            lines.append(f"Its claim by {short_id(holder)} lapsed; it is claimable again.")
+        else:
+            lines.append("This task is unclaimed.")
+        if base_role(session.role) == "coder":
+            lines += [
+                f"Claim THIS task: `asq task claim {task.id} --as {short_id(session.id)}`.",
+                "If dependencies are unmet or the claim is refused, report and stop.",
+            ]
+        else:
+            lines.append("Inspect THIS task and its evidence. Preserve its existing ownership.")
+    lines += [
+        "Do not silently choose another task. Report the result on this task.",
+        "</aisquare-assignment>",
+    ]
+    return "\n".join(lines)
+
+
+def _style_trailer(store: ContextStore, project_id: str, role: str) -> str:
+    """The active response-style block for this agent, or '' (fail-open).
+
+    Imported lazily so persona code never loads through team.py's module import
+    (keeps the agent-context isolation guarantee) and a style error never
+    swallows the board banner or teammate delta this hook owes the session.
+    """
+    try:
+        from aisquare.services import personas
+
+        project = store.get_project(project_id)
+        return personas.style_trailer(project, role) if project is not None else ""
+    except Exception:
+        # Fail-open by contract: a style bug must never break the hook the session
+        # depends on, so ANY error yields no style rather than no board update.
+        return ""
 
 
 def hook_prompt_heartbeat(
@@ -1334,12 +1444,18 @@ def hook_prompt_heartbeat(
                     effort=harness.clean_effort(effort),
                 )
             )
-            return _render_board(
-                project,
-                store.team_sessions(project.id),
-                store.team_tasks(project.id),
-                store.recent_events(project.id, limit=_BOARD_EVENTS),
-                me=session,
+            from aisquare.services.work_briefs import session_context
+
+            return (
+                _render_board(
+                    project,
+                    store.team_sessions(project.id),
+                    store.team_tasks(project.id),
+                    store.recent_events(project.id, limit=_BOARD_EVENTS),
+                    me=session,
+                )
+                + _startup_task_assignment(store, project, session)
+                + session_context(store, project.id, session.id, session.role)
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -1360,12 +1476,13 @@ def hook_prompt_heartbeat(
         if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
-            return collision
+            return collision + _style_trailer(store, session.project_id, session.role)
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
-        return collision + _render_delta(shown, roles, truncated=truncated)
+        style = _style_trailer(store, session.project_id, session.role)
+        return collision + _render_delta(shown, roles, truncated=truncated) + style
 
 
 def hook_stop(

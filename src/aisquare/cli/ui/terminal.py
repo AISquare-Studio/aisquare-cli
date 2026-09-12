@@ -118,6 +118,12 @@ def _extract(selection: Selection, rows: list[str]) -> str:
         end_row, end_col = last, len(rows[last])
     else:
         end_row, end_col = min(selection.end.y, last), selection.end.x
+    if (start_row, start_col) > (end_row, end_col):
+        # Ordered, like every other index here is clamped. Textual hands us a
+        # normalised selection today, so this is unreachable through the UI —
+        # but it is an unguarded ValueError in a mouse handler otherwise, the
+        # same class as the IndexError that took the app down in round 1.
+        start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
     if start_row == end_row:
         return rows[start_row][start_col:end_col]
     first, *middle, final = rows[start_row : end_row + 1]
@@ -219,8 +225,8 @@ class TerminalPane(Widget, can_focus=True):
         """``(scrollback, history)`` the corner marker last showed, or ``None``."""
         self._selection_bg: Style | None = None
         """The selection tint, resolved once per selection rather than per row."""
-        self._drag_from: Offset | None = None
-        """Where the left button went down, while it is still down."""
+        self._drag_button: int | None = None
+        """Which button this pane saw go down, until the gesture it began ends."""
         self._painted_span: Selection | None = None
         """The selection the rows on screen were last painted for."""
 
@@ -277,7 +283,7 @@ class TerminalPane(Widget, can_focus=True):
         self._resize_retry = self.RESIZE_RETRY
         self._reported_gone = False
         self._marker = None
-        self._drag_from = None
+        self._drag_button = None
         if self.is_mounted and self.text_selection is not None:
             self.screen.clear_selection()  # agent A's highlight must not sit on agent B
         self._wheel_queue = []
@@ -671,7 +677,6 @@ class TerminalPane(Widget, can_focus=True):
         """
         if selection is None:
             self._selection_bg = None
-            self._drag_from = None
         self._repaint_selection(selection)
 
     def _repaint_selection(self, selection: Selection | None) -> None:
@@ -877,21 +882,30 @@ class TerminalPane(Widget, can_focus=True):
     # --- selection and copy ------------------------------------------------------------
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        """Remember where a left-button drag began, so its release can copy."""
-        self._drag_from = event.offset if event.button == 1 else None
+        """Note which button began a gesture HERE, for a release we may not see."""
+        self._drag_button = event.button
 
-    def on_mouse_up(self, event: events.MouseUp) -> None:
-        """Copy on release — the drag itself is the request to copy.
+    def selection_gesture_ended(self) -> None:
+        """A selection gesture finished anywhere on screen: copy what it left here.
 
-        Only the release of the drag that MADE the selection copies. Copying on
-        any release while a selection stood meant a triple click, or a right
-        click over a highlight left by a double click, copied it a second time
-        and raised a "copied N characters" toast for a gesture that selected
-        nothing new (review). A click that moves nothing has its selection
-        cleared by Textual before this runs.
+        Called from the app's ``TextSelected`` handler, because that is the only
+        place the fact arrives. Textual's Screen posts it on EVERY MouseUp, but
+        it is posted ON the screen and bubbles to the app — a widget below never
+        sees it (measured). Copying from this pane's own ``on_mouse_up`` instead
+        made the same gesture behave differently depending on the neighbour: an
+        ``Input`` calls ``capture_mouse`` so the release never arrived, while the
+        ``Static`` header this pane actually sits under does not, so it did —
+        and a leftover press offset decided which (review of the sixth version).
+
+        A gesture this pane did not see the press of is a drag that began in
+        another widget and crossed in; that is a copy. One it did see must have
+        been the LEFT button — a right-button drag across a standing highlight
+        replaced the clipboard with whatever it crossed (review of the third).
+        A click that moves nothing has its selection cleared by Textual before
+        this runs, so there is nothing to copy for one.
         """
-        start, self._drag_from = self._drag_from, None
-        if start is None or event.offset == start:
+        button, self._drag_button = self._drag_button, None
+        if button is not None and button != 1:
             return
         if self.text_selection is not None:
             self._copy_selection()

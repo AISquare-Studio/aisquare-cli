@@ -508,9 +508,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out of the handler), and paints the span itself — as cells, so a row with wide
   glyphs highlights what is copied, and tinting behind the text rather than over
   it, since the theme's selection style resolves with foreground equal to
-  background. The text is copied on release from the rows frozen when the drag
-  began; ctrl+c copies again while a selection stands and is the agent's
-  interrupt otherwise; cmd+c is only ever the copy, and types nothing when
+  background. The text is copied when the gesture ends, wherever on screen it
+  ends — the app hears that from the screen and tells the panes, so a drag that
+  crosses the pane's edge copies like any other instead of depending on whether
+  the neighbouring widget happens to capture the mouse; ctrl+c copies again
+  while a selection stands and is the agent's interrupt otherwise; cmd+c is only ever the copy, and types nothing when
   there is no selection; double-click selects a word and a triple click nothing
   (Textual's defaults would select the whole pane, and the next ctrl+c would
   copy it instead of interrupting the agent). Only the left-button drag that

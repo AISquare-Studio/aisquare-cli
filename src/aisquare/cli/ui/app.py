@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -54,7 +55,7 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar
+from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
@@ -284,6 +285,20 @@ class FleetApp(App[None], inherit_bindings=False):
             parent(theme_name)
         if self._theme_restored:
             remember_theme(theme_name)
+
+    def on_text_selected(self, event: events.TextSelected) -> None:
+        """A selection gesture ended anywhere on screen — tell the panes.
+
+        The Screen posts this on every MouseUp and it bubbles to the app, so
+        this is the only place the END of a gesture is observable: a widget
+        below the screen never receives it (measured). Routing it is what makes
+        a pane's copy independent of who its neighbour is — a drag that starts
+        on the agent header and crosses into the pane reaches the pane's own
+        ``on_mouse_up`` only because ``Static`` does not capture the mouse,
+        where an ``Input`` would have swallowed it (review of #120, round 6).
+        """
+        for pane in self.query(TerminalPane):
+            pane.selection_gesture_ended()
 
     # --- help / refresh ---------------------------------------------------------------
 

@@ -68,6 +68,7 @@ then ever fewer).
 from __future__ import annotations
 
 import contextlib
+import weakref
 from bisect import bisect_left, bisect_right
 from typing import Any, ClassVar
 
@@ -131,7 +132,17 @@ def _extract(selection: Selection, rows: list[str]) -> str:
             continue
         start, end = span
         pieces.append(row[start:] if end == -1 else row[start:end])
-    return "\n".join(pieces)
+    # Trailing newlines dropped, as Textual's own ``get_selected_text`` does. A
+    # zero-width span is not ``None`` — the paint leaves that row untinted while
+    # the join still gave it a newline — and a drag ending in the blank area
+    # below the output, which is how this PR's reporter grabs a command, put a
+    # run of Enters on the clipboard for a shell outside bracketed paste to
+    # execute (review of the tenth version).
+    return "\n".join(pieces).rstrip("\n")
+
+
+_MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
+"""Every mounted pane, so the end of a gesture reaches them without a DOM walk."""
 
 
 def route_selection_gesture(app: App[Any], button: int | None) -> None:
@@ -149,18 +160,26 @@ def route_selection_gesture(app: App[Any], button: int | None) -> None:
     reset, so skipping the call to save the walk left ``_touched`` set and made
     the NEXT unrelated release read as that pane's own (review of the ninth).
 
-    Logged, never swallowed silently, and guarded around the walk as well as the
-    call: resolving a screen and querying a tree mid-teardown is the part that
-    raises, and this PR's history is an unguarded exception in a mouse handler
-    taking the app down.
+    Read off the panes' own register rather than by querying the DOM. This runs
+    on EVERY mouse release in the app — a click, a drag, a scrollbar grab, a
+    button press — and ``query`` walks and filters the whole active screen to
+    reach at most a handful of panes. The register is what makes "every pane is
+    told, always" affordable; an early return bought the same saving at the cost
+    of the reset (reviews of the eighth and tenth versions).
+
+    Logged, never swallowed silently: resolving the screen, and anything a pane
+    does with the news, are both places this PR's history says an unguarded
+    exception in a mouse handler takes the app down.
     """
     try:
-        panes = list(app.screen.query(TerminalPane))
-    except Exception as error:  # a screen or a tree mid-teardown
-        app.log.error("selection gesture: no panes to tell", error)
+        screen = app.screen
+    except Exception as error:  # no screen on the stack
+        app.log.error("selection gesture: no screen to tell", error)
         return
-    for pane in panes:
+    for pane in list(_MOUNTED_PANES):
         try:
+            if not pane.is_mounted or pane.screen is not screen:
+                continue
             pane.selection_gesture_ended(button)
         except Exception as error:
             app.log.error("selection gesture failed for a pane", error)
@@ -349,10 +368,12 @@ class TerminalPane(Widget, can_focus=True):
         self.refresh()
 
     def on_mount(self) -> None:
+        _MOUNTED_PANES.add(self)
         self.refresh_frame()
         self._schedule(self.FAST_INTERVAL)
 
     def on_unmount(self) -> None:
+        _MOUNTED_PANES.discard(self)
         if self._timer is not None:
             self._timer.stop()
         if self._wheel_timer is not None:
@@ -697,18 +718,21 @@ class TerminalPane(Widget, can_focus=True):
     def selected_text(self) -> str | None:
         """What a drag has selected in this pane, or ``None`` when nothing is.
 
-        A span over rows the agent has never printed on is not a copy request.
-        Those rows extract as newlines, ``"\n\n"`` is truthy, and the copy then
-        reported success — so the toast claimed a copy of empty space and ctrl+c
-        stopped reaching the agent, which is the most natural place to drag in a
-        mostly-quiet pane (review of the ninth version).
+        A span over rows the agent has never printed on is not a copy request:
+        those rows extract as nothing at all now that ``_extract`` drops the
+        trailing newlines, so plain emptiness is the whole test. It was
+        ``.strip()`` for one round, which also refused whitespace the user
+        really had selected — a column gap in ``ls -l``, an indent, a diff
+        gutter — leaving the highlight painted, no toast, and the follow-up
+        ctrl+c killing the agent instead of copying (reviews of the ninth and
+        tenth versions).
         """
         selection = self.text_selection
         if selection is None:
             return None
         extracted = self.get_selection(selection)
         text = extracted[0] if extracted else ""
-        return text if text.strip() else None
+        return text or None
 
     def selection_updated(self, selection: Selection | None) -> None:
         """Repaint for a selection change; nothing about the rows is remembered.
@@ -736,7 +760,13 @@ class TerminalPane(Widget, can_focus=True):
             # delivered, so counting it as participation would make the next
             # release anywhere on screen copy the word again (measured).
             self._own_word = False
-        else:
+        elif selection != self._painted_span:
+            # CHANGED, not merely notified. Textual tells the union of the old
+            # and new selection owners, so a pane whose own span is untouched
+            # hears about every gesture elsewhere — and reading that as taking
+            # part let an unrelated release re-copy a standing selection and
+            # toast for it, which is the round-seven finding by another door
+            # (review of the tenth version).
             self._touched = True
         self._repaint_selection(selection)
 
@@ -962,19 +992,12 @@ class TerminalPane(Widget, can_focus=True):
         end = index
         while end < len(text) and not text[end].isspace():
             end += 1
-        self._own_word = True
-        # This widget's entry, and only this one. Replacing the dict is the same
-        # harm ``_clear_own_selection`` exists to avoid, by another route: the
-        # app keeps a view per opened agent mounted, so a double click here
-        # dropped the highlight in every other pane (review of the ninth).
-        self.screen.selections = {
-            **{
-                widget: span
-                for widget, span in self.screen.selections.items()
-                if widget is not self
-            },
-            self: Selection(Offset(start, y), Offset(end, y)),
-        }
+        word = Selection(Offset(start, y), Offset(end, y))
+        # Armed only when the selection actually changes: an unchanged one fires
+        # no watcher, and the flag would then sit waiting to swallow the next
+        # real gesture's participation instead.
+        self._own_word = self.text_selection != word
+        self._set_own_selection(word)
         self._copy_selection()
 
     # --- selection and copy ------------------------------------------------------------
@@ -983,19 +1006,28 @@ class TerminalPane(Widget, can_focus=True):
         """Note which button began a gesture HERE, for a release we may not see."""
         self._drag_button = event.button
 
-    def _clear_own_selection(self) -> None:
-        """Drop THIS widget's selection, leaving every other widget's alone.
+    def _set_own_selection(self, selection: Selection | None) -> None:
+        """Write THIS widget's entry on the screen, leaving every other widget's alone.
 
         ``Screen.clear_selection`` is ``selections = {}`` — every widget on the
-        screen. The app keeps a view per opened agent mounted, and a background
-        poll that re-attaches a HIDDEN pane would wipe the highlight the user is
-        dragging in the visible one (review of the eighth version).
+        screen — and replacing the dict with one entry is the same harm by the
+        other route. The app keeps a view per opened agent mounted, so either
+        one wipes the highlight the user has in another pane (reviews of the
+        eighth and ninth versions). Both writers go through here, so the rule
+        lives in one place.
         """
         if not self.is_mounted:
             return
-        self.screen.selections = {
+        selections = {
             widget: span for widget, span in self.screen.selections.items() if widget is not self
         }
+        if selection is not None:
+            selections[self] = selection
+        self.screen.selections = selections
+
+    def _clear_own_selection(self) -> None:
+        """Drop this widget's selection and nobody else's."""
+        self._set_own_selection(None)
 
     def selection_gesture_ended(self, button: int | None = None) -> None:
         """A selection gesture finished anywhere on screen: copy what it left here.
@@ -1027,9 +1059,6 @@ class TerminalPane(Widget, can_focus=True):
         """
         touched, self._touched = self._touched, False
         pressed, self._drag_button = self._drag_button, None
-        # A word-select whose watcher never fired (the same word twice) would
-        # otherwise swallow the next gesture's participation.
-        self._own_word = False
         if not touched or self.text_selection is None:
             return
         if (button if button is not None else pressed) != 1:

@@ -29,6 +29,7 @@ from typing import TypeVar
 
 import pytest
 from textual import Logger, events
+from textual.app import ScreenStackError
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
@@ -50,7 +51,11 @@ from aisquare.cli.ui.sidebar import (
     ordered_agents,
     short_path,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
+from aisquare.cli.ui.terminal import (
+    EscapeToSidebar,
+    TerminalPane,
+    route_selection_gesture,
+)
 from aisquare.cli.ui.theme import ThemePicker
 from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views.agent import AgentView
@@ -677,6 +682,46 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
     assert any("mid-teardown" in line for line in recorded), (
         f"the failure must leave a trace, not be swallowed: {recorded}"
     )
+
+
+def test_a_screen_that_cannot_be_queried_is_logged_not_a_crash(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the fan-out guard. Resolving the screen is what raises
+    when a stack is being torn down, and nothing exercised it — the guard and
+    its log line were both mutation-green (review of the tenth version)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+    logged: list[str] = []
+    original_call = Logger.__call__
+
+    def record(self: Logger, *args: object, **kwargs: object) -> None:
+        logged.append(" ".join(str(a) for a in args))
+        original_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(Logger, "__call__", record)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], bool]:
+        app = fleet_app(pilot)
+        await _agent_pane(pilot)
+
+        def no_screen(self: FleetApp) -> object:
+            raise ScreenStackError("the screen stack is empty")
+
+        monkeypatch.setattr(type(app), "screen", property(no_screen))
+        logged.clear()
+        route_selection_gesture(app, 1)
+        return list(logged), app.is_running
+
+    recorded, alive = drive(go)
+    assert alive, "the app survives a screen it cannot resolve"
+    assert any("no screen to tell" in line for line in recorded), recorded
 
 
 def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) -> None:

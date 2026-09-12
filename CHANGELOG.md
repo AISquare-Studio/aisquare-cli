@@ -469,6 +469,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **A spawned agent is told the task it was spawned for.** `fleet spawn --task`
+  recorded the task on the agent's row and named the label and branch after it
+  — and stopped there: the session inside received the generic board and its
+  role's standing cycle, whose `task next` hands out the *oldest* ready task. A
+  coder spawned for task B took task A; two spawned together raced for the same
+  one while their own sat idle; the manager ended up posting "you are coder-x,
+  run task show …" notes by hand (observed 2026-09-10). `fleet spawn` already
+  set `AISQUARE_FLEET_AGENT` on the window; the session-start hook now reads it,
+  joins the session to its row, and puts an **ASSIGNED TO YOU** block at the top
+  of the briefing saying what that task's state asks of *this* role — claim it,
+  verify it, do the rework it came back from review for, clear what blocks it,
+  or leave it with the verifier when it is the agent's own work already in
+  review. Every role whose cycle pulls from the review pool counts as a
+  verifier — `ui-tester` included, which was being told to rework the very
+  work it was spawned to check. The one branch that tells an agent to stand down and ask the manager
+  is the one that earns it: a teammate live on the task right now. An agent
+  meeting its OWN claimed task after a `/clear` or resume carries on — the claim
+  moves with the agent onto its new session id, for every status that keeps one
+  (`review` and `blocked` as well as `doing`), so the board names a session that
+  exists and a second `/clear` still recognises the work. `task next` puts the caller's
+  assigned task first through the same query as every other candidate, so
+  parallel spawns stop racing. `AISQUARE_FLEET_AGENT` is inherited by every
+  process the agent starts, so a nested `claude -p` reaches both the hook and
+  `task next`: identity is the session id recorded on the row, never the
+  variable alone, so a child is neither briefed on nor able to claim its
+  parent's task. `fleet spawn --task` refuses a task that is already `done` or
+  `dropped`. The whole lookup is fail-open on BOTH doors — the briefing's and
+  `task next`'s — as its docstring always claimed: a damaged or locked store
+  costs the assignment line, never the board and never the work loop. And a
+  session that comes back under a new id is recognised by not being a new
+  process rather than by a list of the harness's source strings, so `compact`
+  keeps its assignment exactly as `/clear` and `resume` do.
 - **The wheel goes to the program that can use it — Claude Code's fullscreen
   TUI first.** The root of "scroll not working" (reported 2026-09-08 from WSL2
   + Windows Terminal). Claude Code's fullscreen TUI turns on the alternate

@@ -676,3 +676,113 @@ def test_password_is_a_phone_typeable_passphrase_without_lookalikes() -> None:
         assert all(word in remote_server._PASSPHRASE_WORDS for word in words)
         assert password == password.lower() and not set(password) & set("0123456789")
         time.sleep(0)
+
+
+# --- caching and the SPA fallback (the stale-build faults) ---------------------------------
+#
+# Measured against the human's own tunnel, two faults that compound: index.html
+# went out with NO Cache-Control, so a browser could heuristically cache it and
+# a reload kept a STALE index naming a previous build's hashed chunk; and the
+# SPA fallback then answered that dead chunk with 200 + the HTML document, so
+# the browser refused to run HTML as JavaScript and the app failed to boot with
+# no honest error. Hours of bug reports against a healthy server.
+
+
+@pytest.fixture
+def built(tmp_path: Path) -> Path:
+    """A dist shaped like a real Vite build: an index and content-hashed chunks."""
+    root = tmp_path / "built"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text(
+        '<!doctype html><script type="module" src="/assets/index-NEWHASH1.js"></script>'
+    )
+    (root / "assets" / "index-NEWHASH1.js").write_text("console.log('current build')")
+    (root / "assets" / "logo.svg").write_text("<svg/>")
+    return root
+
+
+@pytest.fixture
+def site(runtime: Runtime, fake: Fake, built: Path) -> TestClient:
+    client = TestClient(build_app(runtime, sources=fake.sources(), dist_dir=built))
+    return client
+
+
+def test_index_is_always_revalidated(site: TestClient, runtime: Runtime) -> None:
+    """No directive at all is what let a reload keep a stale document."""
+    for path in ("/", "/fleet", "/unlock"):
+        response = site.get(f"{base(runtime)}{path}")
+        assert response.status_code == 200, path
+        assert response.headers["cache-control"] == remote_server.INDEX_CACHE_CONTROL, path
+        assert "no-cache" in response.headers["cache-control"]
+
+
+def test_a_content_hashed_chunk_is_cached_hard(site: TestClient, runtime: Runtime) -> None:
+    """The hash IS the version, so the file may be kept for a year."""
+    response = site.get(f"{base(runtime)}/assets/index-NEWHASH1.js")
+    assert response.status_code == 200
+    assert response.text == "console.log('current build')"
+    assert response.headers["cache-control"] == remote_server.ASSET_CACHE_CONTROL
+    assert "immutable" in response.headers["cache-control"]
+
+
+def test_an_unhashed_asset_is_not_frozen_for_a_year(site: TestClient, runtime: Runtime) -> None:
+    """Marking it immutable would recreate this very bug, one build later."""
+    response = site.get(f"{base(runtime)}/assets/logo.svg")
+    assert response.status_code == 200
+    assert "immutable" not in response.headers["cache-control"]
+    assert "no-cache" in response.headers["cache-control"]
+
+
+def test_a_dead_chunk_is_a_404_and_never_html(site: TestClient, runtime: Runtime) -> None:
+    """THE reported fault: a stale index asks for a chunk that no longer exists."""
+    response = site.get(f"{base(runtime)}/assets/index-DfFvQnFu.js")
+    assert response.status_code == 404
+    assert "text/html" not in response.headers["content-type"]
+    assert not response.text.lstrip().startswith("<")
+    assert response.json()["error"] == "not_found"
+
+
+def test_a_missing_file_with_an_extension_is_a_404_not_the_document(
+    site: TestClient, runtime: Runtime
+) -> None:
+    for path in ("/assets/gone.css", "/favicon.ico", "/nope.js"):
+        response = site.get(f"{base(runtime)}{path}")
+        assert response.status_code == 404, path
+        assert "text/html" not in response.headers["content-type"], path
+
+
+def test_a_navigation_route_still_gets_the_app(site: TestClient, runtime: Runtime) -> None:
+    """The fallback still exists — it is the reason deep links work at all."""
+    for path in ("/", "/unlock", "/fleet/coder-1", "/projects/prj_x/agent"):
+        response = site.get(f"{base(runtime)}{path}")
+        assert response.status_code == 200, path
+        assert response.text.startswith("<!doctype html>"), path
+
+
+def test_a_browser_asking_for_a_document_still_gets_one(site: TestClient, runtime: Runtime) -> None:
+    """Accept decides for a path that has an extension but is not an asset."""
+    response = site.get(
+        f"{base(runtime)}/some.route",
+        headers={"Accept": "text/html,application/xhtml+xml"},
+    )
+    assert response.status_code == 200
+    assert response.text.startswith("<!doctype html>")
+
+
+def test_a_dead_chunk_stays_a_404_even_when_the_client_accepts_html(
+    site: TestClient, runtime: Runtime
+) -> None:
+    """assets/ is content-addressed: a miss is a miss, whatever Accept says."""
+    response = site.get(
+        f"{base(runtime)}/assets/index-OLDHASH.js", headers={"Accept": "text/html,*/*"}
+    )
+    assert response.status_code == 404
+
+
+def test_traversal_is_still_defeated(site: TestClient, runtime: Runtime) -> None:
+    """The fallback narrowed; it must not have opened a way out of the dist."""
+    for path in ("/%2e%2e/%2e%2e/etc/passwd", "/../../etc/passwd", "/assets/%2e%2e/index.html"):
+        response = site.get(f"{base(runtime)}{path}")
+        assert response.status_code in (200, 404), path
+        assert "root:" not in response.text, path
+        assert "PATH" not in response.text, path

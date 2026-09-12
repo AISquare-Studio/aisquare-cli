@@ -69,7 +69,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from aisquare.core.paths import (
@@ -110,6 +110,37 @@ WRITE_ENDPOINTS = (
     "send-keys",
 )
 """PLAN §4-E, verbatim. Saturday's page wires exactly this list."""
+
+INDEX_CACHE_CONTROL = "no-cache"
+"""``index.html`` must be revalidated on every load, never heuristically cached.
+
+With NO directive a browser is free to invent its own freshness lifetime from
+``last-modified``, so a reload can keep a STALE index that names a PREVIOUS
+build's hashed chunk — and every rebuild changes that hash, so the chunk it asks
+for no longer exists. Measured against the human's own tunnel; it cost hours of
+bug reports against a server that was perfectly healthy. ``no-cache`` does not
+forbid storing, only using a stored copy without asking first.
+
+MEASURED, so nobody assumes otherwise: starlette's ``FileResponse`` (1.6.0) sets
+``etag`` and ``last-modified`` but does NOT honour ``If-None-Match``, so each
+revalidation re-sends the document rather than answering 304. That is the whole
+cost of this directive and it is a few KB per navigation, paid only on the index
+— the hashed chunks beside it are never re-fetched at all. Correctness over a
+saved kilobyte: a stale document is indistinguishable from broken code.
+"""
+
+ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+"""A YEAR, for content-addressed files only — the hash in the name IS the version."""
+
+MUTABLE_CACHE_CONTROL = "no-cache"
+"""Anything under ``assets/`` whose name carries no hash: revalidate it.
+
+Marking an unhashed file immutable for a year would create exactly the bug this
+fixes, one build later and with no way to flush it.
+"""
+
+_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}$")
+"""Vite's content hash — ``index-DfFvQnFu.js`` — matched on the stem."""
 
 HISTORY_CAP = 5000
 """Most scrollback lines one ``?history=`` request may return (PLAN §4-L).
@@ -1138,6 +1169,35 @@ def _limit_param(raw: str | None) -> int:
     return value
 
 
+def _is_navigation(rel: str, accept: str) -> bool:
+    """Whether this is a page navigation, which is the ONLY thing the SPA fallback serves.
+
+    A missing file must not come back as the document. ``GET /assets/index-<old
+    hash>.js`` used to return 200 with the body of ``index.html``; the browser
+    then refuses to execute HTML as JavaScript and the app fails to boot with no
+    honest error anywhere — the server having answered 200 to everything.
+
+    ``assets/`` is excluded outright: those names are content-addressed, so a
+    miss is a genuine miss and never a route. Otherwise a path with no file
+    extension is a route (``/fleet/coder-1``, ``/unlock``), and a path that has
+    one is a file request unless the client actually asked for a document.
+    """
+    if rel.startswith("assets/") or rel.startswith("/assets/"):
+        return False
+    if not PurePosixPath(rel).suffix:
+        return True
+    return "text/html" in accept
+
+
+def _cache_control(rel: str) -> str:
+    """How long the browser may keep this file without asking again."""
+    name = PurePosixPath(rel).name
+    if not rel.startswith("assets/"):
+        return INDEX_CACHE_CONTROL
+    stem = PurePosixPath(name).stem
+    return ASSET_CACHE_CONTROL if _HASHED_ASSET.search(stem) else MUTABLE_CACHE_CONTROL
+
+
 def _json_error(status: int, error: str, message: str | None = None) -> Response:
     from starlette.responses import JSONResponse
 
@@ -1381,10 +1441,15 @@ def build_app(
         if rel:
             candidate = (dist / rel).resolve()
             if candidate.is_relative_to(dist) and candidate.is_file():
-                return FileResponse(candidate)
+                return FileResponse(candidate, headers={"cache-control": _cache_control(rel)})
+        if rel and not _is_navigation(rel, request.headers.get("accept", "")):
+            # A file was asked for and there is no such file. Saying so is the
+            # whole point: the SPA document under a .js name is a boot failure
+            # with no error, and the 200 hides which build is actually installed.
+            return _json_error(404, "not_found", f"no such file in the built page: {rel}")
         index = dist / "index.html"
         if index.is_file():
-            return FileResponse(index)
+            return FileResponse(index, headers={"cache-control": INDEX_CACHE_CONTROL})
         return _json_error(
             404,
             "no_dist",
@@ -1736,10 +1801,12 @@ def run_foreground(dist_dir: Path | None = None, port: int = DEFAULT_PORT) -> No
 
 
 __all__ = [
+    "ASSET_CACHE_CONTROL",
     "BIND",
     "COOKIE",
     "DEFAULT_PORT",
     "HISTORY_CAP",
+    "INDEX_CACHE_CONTROL",
     "NO_PAGE_HINT",
     "READ_ONLY_REASON",
     "WRITE_ENDPOINTS",

@@ -196,43 +196,42 @@ def test_alt_chords_keep_their_modifier_even_when_the_character_is_reported() ->
     assert translate("alt+p", None, printable=False) == key("M-p")
 
 
-def test_a_digit_chord_tmux_cannot_take_still_types_its_character() -> None:
-    """Widening the alt exception to digits sent ``ctrl+alt+1`` into the digit
-    branch, which refuses ctrl/shift because the shifted key is layout-specific
-    — so a keystroke that used to reach the agent as ``1`` started being
-    dropped. The chord is unspellable; the text still travels (review)."""
-    assert translate("ctrl+alt+1", "1", printable=True) == literal("1")
-    assert translate("alt+shift+1", "1", printable=True) == literal("1")
-    assert translate("ctrl+meta+9", "9", printable=True) == literal("9")
-    # The chord alone still is one, and without a character there is nothing
-    # to fall back to — that is the case the branch was written for.
-    assert translate("alt+1", "1", printable=True) == key("M-1")
-    assert translate("ctrl+alt+1", None, printable=False) is None
-    assert translate("alt+shift+1", None, printable=False) is None
+#: Names that are not names: an empty base, an empty modifier token, or both.
+#: Each round of review re-ordered the prologue that reads them and broke a
+#: different one — `ctrl++` and `+` in round 4, `alt+` and `+a` in round 5 —
+#: because the tests pinned the spellings that already worked. The whole shape
+#: is here, asserted in both directions, so the next re-order cannot pick one off.
+MALFORMED = ["", "+", "+a", "+left_square_bracket", "ctrl+", "ctrl++", "alt+", "meta+"]
 
 
-def test_a_malformed_key_name_still_types_the_character_it_reported() -> None:
-    """Only the unspellable modifier jumps the printable rule. The
-    malformed-name guard sits behind it, where it always did: a name ending in
-    ``+`` types its character rather than warning "dropped" (review).
+@pytest.mark.parametrize("key", MALFORMED)
+def test_a_malformed_key_name_types_its_character_and_names_nothing(key: str) -> None:
+    assert translate(key, "x", printable=True) == literal("x")
+    assert translate(key, None, printable=False) is None
 
-    ``"ctrl++"`` and ``"+"`` are the cases that matter, and the first version of
-    this test missed them: they split to an EMPTY modifier token, which the
-    unknown-modifier gate read as an unspellable modifier and dropped, while
-    ``"ctrl+"`` and ``""`` split to a well-formed modifier list plus an empty
-    base and reached the printable rule anyway (review of the fourth version).
-    """
-    assert translate("ctrl++", "+", printable=True) == literal("+")
-    assert translate("+", "+", printable=True) == literal("+")
-    assert translate("ctrl+", "c", printable=True) == literal("c")
-    assert translate("", "x", printable=True) == literal("x")
-    # Without a character there is no text to fall back to, and no name either.
-    assert translate("ctrl++", None, printable=False) is None
-    assert translate("+", None, printable=False) is None
-    assert translate("ctrl+", None, printable=False) is None
-    assert translate("", None, printable=False) is None
-    # And a real unspellable modifier is still dropped, character or not.
-    assert translate("super+a", "a", printable=True) is None
+
+#: Chords the table deliberately refuses a name for, with the character the
+#: terminal reported alongside them. A refusal is not a reason to swallow the
+#: keystroke: what travels is the text, which is what this module did before any
+#: chord exception existed. ``extended_keys=False`` is the tmux 3.2 floor, where
+#: the capability gate is the thing refusing.
+NO_SAFE_NAME = [
+    ("ctrl+alt+1", "1", True),  # the shifted digit is layout-specific
+    ("alt+shift+1", "1", True),
+    ("ctrl+alt+space", " ", False),  # C-M-Space needs tmux >= 3.5
+    ("alt+shift+space", " ", False),
+    ("alt+shift+minus", "_", False),  # shifted punctuation, same gate
+    ("alt+semicolon", ";", True),  # tmux's own argv separator
+]
+
+
+@pytest.mark.parametrize(("key", "character", "extended"), NO_SAFE_NAME)
+def test_a_chord_with_no_safe_name_still_types_its_character(
+    key: str, character: str, extended: bool
+) -> None:
+    assert translate(key, character, printable=True, extended_keys=extended) == literal(character)
+    # Without a character there is nothing to fall back to, and nothing is sent.
+    assert translate(key, None, printable=False, extended_keys=extended) is None
 
 
 def test_alt_space_travels_as_the_chord_the_table_already_had_a_name_for() -> None:

@@ -220,7 +220,21 @@ def translate(
     (the pane reads its version once): on an older server the extended-only
     chords are dropped here, because tmux would otherwise type their NAMES into
     the agent — the exact mistyping this module exists to prevent.
+
+    TWO ANSWERS WHEN THERE IS NO NAME, and the difference is the user's intent.
+    A modifier tmux cannot spell — ``super``/``hyper``, which is how macOS Cmd
+    and the kitty protocol's extras arrive — means a COMMAND was pressed: Cmd+V
+    is not a request to type a ``v``, so it is dropped and never falls back.
+    Anything else with no name is a chord whose text the terminal already
+    decided: ctrl or shift on a digit, ctrl+alt on Space, a chord this server is
+    too old to carry. There the reported character still travels, which is what
+    this module did before any chord exception existed. Each round of review
+    found one more branch that had grown its own answer to that question
+    (digits in round 3, ``SPECIAL`` in round 5); it is asked once, here.
     """
+    *modifiers, _base = key.split("+")
+    if any(modifier and modifier not in MODIFIERS for modifier in modifiers):
+        return None
     translation = _translate(key, character, printable=printable)
     if (
         translation is not None
@@ -228,7 +242,9 @@ def translate(
         and not extended_keys
         and needs_extended_keys(translation.value)
     ):
-        return None
+        translation = None
+    if translation is None and printable and character:
+        return Translation("literal", character)
     return translation
 
 
@@ -272,16 +288,13 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
     as that alt chord — both are the parser's, not this table's.
     """
     *modifiers, base = key.split("+")
-    if any(modifier and modifier not in MODIFIERS for modifier in modifiers):
-        # A modifier tmux cannot spell: super/hyper, reported by kitty-protocol
-        # terminals and by macOS Cmd. This ONE test goes ahead of the printable
-        # rule — sending the bare character would type a ``v`` for Cmd+V. The
-        # malformed-name guard below stays behind it, where it has always been:
-        # a name ending in ``+`` still types its reported character rather than
-        # being dropped (review of the third version). An EMPTY token is such a
-        # name, not an unknown modifier — ``"ctrl++"`` splits to
-        # ``['ctrl', '', '']`` — so it is skipped here and dropped below, which
-        # is what the printable rule did before it moved (review of the fourth).
+    if not base or not all(modifiers):
+        # A malformed name — ``""``, ``"+"``, ``"+a"``, ``"ctrl+"``, ``"ctrl++"``,
+        # ``"alt+"``. There is nothing to look up, and no modifier to read: an
+        # empty token is a broken NAME, never a modifier that happens to be
+        # unspellable. ``translate`` types the reported character for these, as
+        # it did before any of this existed (reviews of the third to fifth
+        # versions, which each broke a different one of these spellings).
         return None
     ctrl = "ctrl" in modifiers
     alt = "alt" in modifiers or "meta" in modifiers
@@ -333,11 +346,8 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
         if ctrl or shift:
             # ``C-1`` reaches the agent as ``1``; ``shift+1`` is ``!`` on one
             # layout and ``+`` on another — without the character we cannot know.
-            # With the character we do: a kitty-protocol terminal reports it for
-            # ``ctrl+alt+1``, which used to type a ``1`` and started being
-            # dropped when alt+digit joined the exception (review of the third
-            # version). The chord is unspellable; the text still travels.
-            return Translation("literal", character) if printable and character else None
+            # No name: ``translate`` types the character when there is one.
+            return None
         return Translation("key", prefix + char)
     # Punctuation with a modifier.
     if char == ARGV_SEPARATOR:

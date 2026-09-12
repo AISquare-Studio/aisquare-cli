@@ -604,11 +604,15 @@ tmux -L asq list-sessions
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
 hatch (`F12`) and the scroll keys below. Printable characters travel as typed —
-except an ASCII letter or digit with alt held, which travels as the chord
-(`M-p`), so Claude Code's alt+p switches the model; special keys are
+except with alt held, where the chord is the meaning: an ASCII letter or digit
+(`M-p`, so Claude Code's alt+p switches the model) or a key tmux has a name for
+(alt+space is `M-Space`). Special keys are
 translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
-`BTab`, …). A chord tmux has no spelling for — Cmd (super) or hyper on a
-printable key — is dropped rather than typed, so Cmd+V does not insert a `v`.
+`BTab`, …). Where there is no safe name the character still travels: `ctrl+alt+1`
+types a `1`, and so does a chord your tmux is too old to carry (below 3.5,
+`ctrl+alt+space` inserts a space rather than doing nothing). The one exception is
+a modifier tmux cannot spell at all — Cmd (super) or hyper — which is dropped
+rather than typed, because Cmd+V is a command and not a request for a `v`.
 Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and

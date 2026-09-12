@@ -270,6 +270,31 @@ def _write_cache(key: str, body: str, base: str) -> None:
         json.dumps({"body": body, "until": until, "endpoint": base.rstrip("/")}),
     )
     _clear_refusal(key)
+    _sweep()
+
+
+def _sweep() -> None:
+    """Drop every cached document and refusal whose own expiry has passed. Never raises.
+
+    ``forget`` deletes the one token being signed out of, so before this every
+    token refresh or re-issue left its predecessor's identity document behind -
+    a readable list of the developer's workspaces per token, for the life of the
+    machine, past the TTL that only stopped it being SERVED (the review of #78).
+    Called where a file is being written anyway, so the directory is bounded to
+    roughly the tokens live inside one TTL; the server half of this feature
+    sweeps its map the same way. Every comparison sits inside the guard, for the
+    reason ``_read_cache`` gives.
+    """
+    now = datetime.now(tz=UTC)
+    try:
+        candidates = list(_cache_path("").parent.glob("*.json"))
+    except OSError:
+        return
+    for path in candidates:
+        with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if now >= datetime.fromisoformat(raw["until"]):
+                path.unlink()
 
 
 def _read_refusal(key: str, now: datetime, base: str) -> str | None:

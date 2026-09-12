@@ -1121,21 +1121,18 @@ def _bearer_note(source: str) -> str:
 
     The signed-in case names the email, which is what ``aisquare whoami`` prints
     and is not a secret; the token itself never appears in either branch. The
-    email is read through the ``iam`` module rather than the credentials file,
-    because that module is the one reader of the ``iam_*`` keys.
+    email comes from ``ci_client.signed_in_display()``, the memoised read that
+    chose the bearer, which in turn reads through the ``iam`` module - the one
+    reader of the ``iam_*`` keys.
     """
     if source == ci_client.EXPERIMENT_TOKEN_SOURCE:
         return f"experiment token from {ci_client.EXPERIMENT_TOKEN_SOURCE}"
     if source in (ci_client.SIGNED_IN_WITHHELD_SOURCE, ci_client.SIGNED_IN_EXPIRED_SOURCE):
         return source
     if source == ci_client.SIGNED_IN_SOURCE:
-        try:
-            from aisquare.services import iam
-
-            session = iam.current_session()
-        except Exception:
-            session = None
-        who = session.email or session.sub if session is not None else ""
+        # From the memoised read that chose the bearer, never a second parse
+        # of the credentials file that could describe another snapshot.
+        who, _origin = ci_client.signed_in_display()
         return f"signed in as {who} (aisquare login)" if who else "signed in (aisquare login)"
     return "no bearer"
 
@@ -1319,16 +1316,12 @@ def _bound_project_id() -> str:
 
 def _signed_in_as(auth_subject: str) -> str:
     """ "signed in as <email>" when the session knows one, else the server's own
-    issuer-qualified subject — never the token, in either branch."""
-    try:
-        from aisquare.services import iam
-
-        session = iam.current_session()
-    except Exception:
-        session = None
-    if session is not None and session.email:
-        return f"signed in as {session.email}"
-    if session is not None and session.source == "env":
+    issuer-qualified subject — never the token, in either branch. Read through
+    ``ci_client``'s memo, the same read that chose the bearer."""
+    who, origin = ci_client.signed_in_display()
+    if who and "@" in who:
+        return f"signed in as {who}"
+    if origin == "env":
         return f"signed in via AISQUARE_TOKEN ({auth_subject})"
     return f"signed in ({auth_subject})"
 

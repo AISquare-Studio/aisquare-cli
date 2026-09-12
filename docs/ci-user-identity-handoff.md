@@ -13,6 +13,13 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 7, 2026-09-12.** Writing a `GET /v1/me` document sweeps every
+> cached document and refusal whose own expiry has passed, so a token refresh
+> no longer leaves its predecessor's identity document behind for the life of
+> the machine; and `doctor`'s "signed in as" note is built from the memoised
+> session read that chose the bearer (`ci_client.signed_in_display`), never a
+> second parse of the credentials file.
+>
 > **Review round 6, 2026-09-12.** When `GET /v1/me` is a 404 and `/ready` did
 > not answer either, the `ci identity` line states the one conclusion - this
 > endpoint is not answering as a CI server - with `AISQUARE_CI_URL` and its

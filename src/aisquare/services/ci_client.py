@@ -204,6 +204,24 @@ def api_key_and_source() -> tuple[str, str]:
     return (token if _single_line(token) else ""), SIGNED_IN_SOURCE
 
 
+def signed_in_display() -> tuple[str, str]:
+    """``(who, source)`` for the signed-in session, from the memoised read. Never raises.
+
+    ``who`` is the email when the session knows one, else its subject, else
+    ``""``; ``source`` is ``"env"`` for a session read from ``AISQUARE_TOKEN``.
+    ``doctor`` names the credential from this rather than from its own
+    ``iam.current_session()`` call, so the note it prints comes from the same
+    read that chose the bearer and cannot describe a different snapshot of the
+    credentials file (the review of #78); this module stays a caller of
+    ``iam``, not a second reader of the ``iam_*`` keys.
+    """
+    session = _signed_in_session()
+    if session is None:
+        return "", ""
+    who = getattr(session, "email", "") or getattr(session, "sub", "") or ""
+    return str(who), str(getattr(session, "source", "") or "")
+
+
 def _signed_in_token() -> str:
     """The signed-in user's access token, or ``""``. Never raises.
 

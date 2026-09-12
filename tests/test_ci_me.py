@@ -370,6 +370,36 @@ def test_a_cache_file_with_a_naive_expiry_is_a_miss_not_a_crash(
     assert ci_me._read_refusal(KEY, datetime.now(tz=UTC), stub.url) is None
 
 
+def test_writing_a_document_sweeps_the_expired_ones(stub: StubCI, isolated_home: Path) -> None:
+    """`forget` deletes the one token being signed out of, so every refresh or
+    re-issue left its predecessor's identity document behind, readable past the
+    TTL that only stopped it being served (the review of #78). A write sweeps
+    every document and refusal whose own expiry has passed - and only those."""
+    import json
+
+    ci_me.fetch(base=stub.url, key="aisq_old-token-000000000000000000000000000000")
+    ci_me.fetch(base=stub.url, key="aisq_fresh-token-0000000000000000000000000000")
+    stale = ci_me._cache_path("aisq_old-token-000000000000000000000000000000")
+    raw = json.loads(stale.read_text(encoding="utf-8"))
+    raw["until"] = "2000-01-01T00:00:00+00:00"
+    stale.write_text(json.dumps(raw), encoding="utf-8")
+    stale_refusal = ci_me._refusal_path("aisq_dead-token-00000000000000000000000000000")
+    stale_refusal.write_text(
+        json.dumps({"detail": "x", "until": "2000-01-01T00:00:00+00:00", "endpoint": stub.url}),
+        encoding="utf-8",
+    )
+    damaged = stale.parent / "me-damaged.json"
+    damaged.write_text("not json", encoding="utf-8")
+
+    ci_me.fetch(base=stub.url, key="aisq_new-token-000000000000000000000000000000")
+
+    assert not stale.exists(), "expired documents go, not merely stop being served"
+    assert not stale_refusal.exists()
+    assert ci_me._cache_path("aisq_fresh-token-0000000000000000000000000000").exists()
+    assert ci_me._cache_path("aisq_new-token-000000000000000000000000000000").exists()
+    assert damaged.exists(), "a file that cannot be read is left alone, never a raise"
+
+
 def test_bindings_are_per_project_not_per_machine(isolated_home: Path, tmp_path: Path) -> None:
     """Binding repo A must leave repo B alone: the docstring's own promise."""
     a = workspace_core.current_project(tmp_path / "a").id

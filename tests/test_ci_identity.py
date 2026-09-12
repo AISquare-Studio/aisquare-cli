@@ -618,10 +618,17 @@ def test_the_credentials_file_is_read_once_per_process(
     monkeypatch.setattr(iam, "current_session", counting)
     ci_client.reset_cache()
 
+    from aisquare.services import diagnostics
+
     for _ in range(3):
         ci_client.api_key_and_source()
         ci_client.bearer_problem()
         ci_client.scrub_secret("nothing here")
+        # The doctor note and the identity line read the same memo, so they
+        # cannot describe a snapshot of the file other than the one that chose
+        # the bearer (the review of #78).
+        assert diagnostics._bearer_note(ci_client.SIGNED_IN_SOURCE).startswith("signed in")
+        assert diagnostics._signed_in_as("aisquare-idp:x").startswith("signed in")
     assert len(reads) == 1
 
     monkeypatch.setenv("AISQUARE_TOKEN", "aisq_another-token-00000000000000000000000000")

@@ -231,7 +231,7 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 17  # v17 backfills metadata retention timestamps
+    assert version == SCHEMA_VERSION == 16  # v16 timestamps metadata for retention
 
 
 def test_v14_upgrades_native_identity_without_guessing_legacy_agents() -> None:
@@ -251,7 +251,7 @@ def test_v14_upgrades_native_identity_without_guessing_legacy_agents() -> None:
             )
     open_store().close()
     with sqlite3.connect(str(db)) as raw:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 16
         assert raw.execute(
             "SELECT id, agent, native_session_id FROM team_session ORDER BY id"
         ).fetchall() == [

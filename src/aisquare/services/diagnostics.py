@@ -1840,7 +1840,15 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                 checks.append(_ok(adapter.id, f"{adapter.label}: {state} in {directory}"))
             else:
                 if state == "unverified":
-                    fix += "; then open /hooks in Codex to review hooks and start a session"
+                    detail = ". ".join(
+                        filter(
+                            None,
+                            [
+                                detail,
+                                "After reconnecting, review /hooks in Codex and start a session",
+                            ],
+                        )
+                    )
                 checks.append(
                     _warn(
                         adapter.id,

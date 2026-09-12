@@ -286,6 +286,23 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                     fleet.session_name(fleet.ensure_codename(project).codename or "")
                 ):
                     srv.run("kill-server")
+            # Native argv has no English-word heuristic: -migrate is -m igrate.
+            # A literal leading dash requires Codex's own -- separator.
+            for args, expected in (
+                (["-migrate", "fixture"], "igrate"),
+                (["-migrate the schema", "fixture"], "igrate the schema"),
+                (["--", "-migrate the schema"], "local-fixture"),
+            ):
+                result = subprocess.run(
+                    [*base, "--skip-git-repo-check", "--json", *args],
+                    cwd=workspace,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                )
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert requests[-1]["model"] == expected
         finally:
             server.shutdown()
             thread.join(timeout=2)

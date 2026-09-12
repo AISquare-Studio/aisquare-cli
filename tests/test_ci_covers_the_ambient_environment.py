@@ -169,6 +169,7 @@ def test_parent_agent_variables_reach_later_steps_and_the_codex_home_is_populate
     for variable in (
         "CODEX_HOME",
         "AISQUARE_CODING_AGENT",
+        "AISQUARE_LAUNCH_AGENT",
         "AISQUARE_LAUNCH_ID",
         "AISQUARE_FLEET_AGENT",
     ):

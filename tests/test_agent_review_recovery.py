@@ -85,7 +85,7 @@ def test_native_windows_shims_launch_and_report_their_family(
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/agent")
     result = runner.invoke(app, ["launch", "coder"])
     assert result.exit_code == 0, result.output
-    assert execution.call_args.args[2]["AISQUARE_CODING_AGENT"] == family
+    assert execution.call_args.args[2]["AISQUARE_LAUNCH_AGENT"] == family
     result = runner.invoke(app, ["--json", "team", "harness"])
     row = next(row for row in json.loads(result.stdout)["roles"] if row["role"] == "coder")
     assert row["agent"] == family and row["binary"] == binary
@@ -142,7 +142,12 @@ def test_blank_native_pins_fall_through_and_values_are_trimmed(
     )
     config.agents.models["codex"] = AgentModelSettings(model=" ", effort=" ")
     save_config(config)
-    assert agent_launch.native_model_args(selected, "coder", []) == []
+    assert (
+        agent_launch.resolved_model_args(
+            selected, agent_launch.launch_model_for(selected, "coder", []), []
+        )
+        == []
+    )
     monkeypatch.setenv("AISQUARE_MODEL_CODER", " chosen ")
     model = agent_launch.model_for(selected, "coder", probe=False)
     assert model and model.model == "chosen" and model.source == "pinned"
@@ -184,7 +189,10 @@ def test_unused_codex_home_is_advisory_but_selected_or_connected_homes_are_check
     agents.set_connected("codex", True, home)
     checks = [check for check in diagnostics._check_other_agents(tmp_path) if check.name == "codex"]
     assert any(
-        check.status == CheckStatus.warn and "/hooks" in (check.fix or "") for check in checks
+        check.status == CheckStatus.warn
+        and "/hooks" in check.detail
+        and "agents connect codex" in (check.fix or "")
+        for check in checks
     )
 
 

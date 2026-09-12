@@ -37,6 +37,7 @@ from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.accounts import (
     SIGN_IN_WORKER,
     AccountRow,
+    AccountsChanged,
     AccountsView,
     account_line_text,
     aisquare_status_text,
@@ -238,8 +239,10 @@ def notice(view: AccountsView) -> str:
 # --- pure helpers --------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("changed", [False, True])
 def test_slow_accounts_refresh_finishes_without_cancelling_or_spawning_more_threads(
     no_network: dict[str, Any],
+    changed: bool,
 ) -> None:
     no_network["session"] = _session()
     started, release = threading.Event(), threading.Event()
@@ -266,8 +269,19 @@ def test_slow_accounts_refresh_finishes_without_cancelling_or_spawning_more_thre
                     app.refresh_accounts()
                     await pilot.pause()
                 assert calls == 1
+                if changed:
+                    app.on_accounts_changed(AccountsChanged())
+                    app.on_accounts_changed(AccountsChanged())
                 release.set()
                 await settle(app)
+                await pilot.pause()
+                await settle(app)
+                if changed:
+                    assert calls == 2 and app.accounts_overview == second
+                    assert "refreshed@example.com" in shown(
+                        app.query_one(AccountsSection).query_one(".accounts-line", Static)
+                    )
+                    return
                 assert app.accounts_overview == first
                 assert "slow@example.com" in shown(
                     app.query_one(AccountsSection).query_one(".accounts-line", Static)

@@ -148,6 +148,7 @@ jobs:
             echo "CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config"
             echo "CODEX_HOME=$RUNNER_TEMP/codex-config"
             echo "AISQUARE_CODING_AGENT=codex"
+            echo "AISQUARE_LAUNCH_AGENT=codex"
             echo "AISQUARE_LAUNCH_ID=ci-parent-launch"
             echo "AISQUARE_FLEET_AGENT=ci-parent-fleet"
           } >> "$GITHUB_ENV"

@@ -112,6 +112,13 @@ def launch(
         ),
     ] = None,
     agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    bound_args: Annotated[
+        bool,
+        typer.Option(
+            "--bound-args/--no-bound-args",
+            help="Use the role's saved native arguments (disable to supply a complete command).",
+        ),
+    ] = True,
     env_pairs: Annotated[
         list[str] | None,
         typer.Option(
@@ -210,7 +217,7 @@ def launch(
     # The role's bound spec plus this launch's overrides, carried verbatim.
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.
-    profile = selected.profile
+    profile = selected.profile if bound_args else selected.profile.model_copy(update={"args": []})
     if profile.notice is not None:
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
@@ -354,12 +361,12 @@ def launch(
     if native_trace_note:
         stderr_console().print(native_trace_note, markup=False)
     try:
-        model_args = agent_launch.native_model_args(
-            selected,
-            role,
-            [*profile.args, *role_args, *ctx.args],
-            note=lambda message: stderr_console().print(message, markup=False),
-        )
+        raw_args = [*profile.args, *role_args, *ctx.args]
+        native_model = agent_launch.launch_model_for(selected, role, raw_args)
+        for message in native_model.notes if native_model else []:
+            stderr_console().print(message, markup=False)
+        model_args = agent_launch.resolved_model_args(selected, native_model, raw_args)
+        native_args = selected.adapter.native_args(raw_args)
     except BadEffortError as exc:
         fail(str(exc), error="bad_effort")
     except ValueError as exc:
@@ -369,9 +376,7 @@ def launch(
         *model_args,
         *native_trace_args,
         *agent_launch.mcp_args(selected),
-        *profile.args,
-        *role_args,
-        *ctx.args,
+        *native_args,
         *pinned_id,
     ]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that

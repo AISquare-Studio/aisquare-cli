@@ -12,12 +12,13 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
 from aisquare.core.agent_adapters.types import option_values
 from aisquare.core.agent_sessions import METADATA_PRUNE_INTERVAL, prune_metadata
 from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_TTL
-from aisquare.core.store import store_session
+from aisquare.core.store import is_locked_error, store_session
 
 MAX_BYTES = 2_000_000
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
@@ -134,11 +135,25 @@ _FIELDS = frozenset(
 )
 
 
+class InvalidPayload(ValueError):
+    """Malformed OTLP JSON cannot succeed on retry."""
+
+
+def _object(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise InvalidPayload("OTLP object expected")
+    return value
+
+
+def _objects(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise InvalidPayload("OTLP array of objects expected")
+    return value
+
+
 def _attributes(items: list[dict[str, Any]]) -> dict[str, object]:
     result: dict[str, object] = {}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+    for item in _objects(items):
         key = item.get("key")
         value = item.get("value", {})
         if not isinstance(key, str) or key not in _FIELDS or not isinstance(value, dict):
@@ -160,10 +175,10 @@ def events(payload: dict[str, Any]) -> Iterator[dict[str, object]]:
     and set only the observed timestamp. Preserve that identity on retries
     without collapsing distinct calls that happen to have identical usage.
     """
-    for resource in payload.get("resourceLogs", []):
-        base = _attributes(resource.get("resource", {}).get("attributes", []))
-        for scope in resource.get("scopeLogs", []):
-            for log in scope.get("logRecords", []):
+    for resource in _objects(_object(payload).get("resourceLogs", [])):
+        base = _attributes(_object(resource.get("resource", {})).get("attributes", []))
+        for scope in _objects(resource.get("scopeLogs", [])):
+            for log in _objects(scope.get("logRecords", [])):
                 record = {**base, **_attributes(log.get("attributes", []))}
                 record["event.name"] = (
                     record.get("event.name") or log.get("eventName") or "codex.event"
@@ -195,14 +210,13 @@ def _refresh_settings() -> None:
 
 
 def capture(payload: dict[str, Any], launch_id: str) -> int:
+    observations = list(events(payload))  # Validate the entire batch before writing anything.
     _refresh_settings()
     if not insights.shipping_enabled() or not insights.settings().enabled:
         return 0
     count = 0
-    # Spool files are durable outside SQLite. Commit each successful enqueue's
-    # dedup marker before processing the next event, so a failed batch can be
-    # retried without replaying its completed prefix. Never hold the board's
-    # writer lock across filesystem writes.
+    # Queue without holding SQLite's writer lock. Checkpoint the completed
+    # prefix once, including on partial failure, before asking for a retry.
     with store_session() as store:
         session_id = store.get_meta(f"launch-session:{launch_id}")
         session = store.get_session(session_id) if session_id else None
@@ -217,52 +231,66 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
             else (marker.get("project_id") if isinstance(marker, dict) else None)
         )
         project_id = project_id or orchestrator.team_project().id
-        store.set_meta(marker_key, json.dumps({"seen_at": time.time(), "project_id": project_id}))
-        observations = list(events(payload))
+        updates = {marker_key: json.dumps({"seen_at": time.time(), "project_id": project_id})}
         dedup = store.list_meta(f"native-event:{launch_id}:")
         providers = store.list_meta(f"native-provider:{launch_id}:")
-        for native in observations:
-            if native.get("provider_name") and native.get("conversation.id"):
-                provider_key = f"native-provider:{launch_id}:{native['conversation.id']}"
-                providers[provider_key] = insights._outbound(str(native["provider_name"]))
-                store.set_meta(provider_key, providers[provider_key])
-        for native in observations:
-            # Redact before writing anything destined for the gateway. No raw
-            # body, prompt, tool parameters, authorization or exporter headers.
-            clean = {
-                key: insights._outbound(value) if isinstance(value, str) else value
-                for key, value in native.items()
-            }
-            digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
-            dedup_key = f"native-event:{launch_id}:{digest}"
-            if dedup_key in dedup:
-                continue
-            # Provider is reported at conversation start, not on each SSE
-            # usage event. Enrich after hashing so a late startup observation
-            # cannot make a retried usage record count twice.
-            provider = providers.get(f"native-provider:{launch_id}:{native.get('conversation.id')}")
-            if provider:
-                clean.setdefault("provider_name", provider)
-            record: dict[str, object] = {
-                "v": insights.RECORD_VERSION,
-                "kind": "native_event",
-                "agent": "codex",
-                "at": datetime.now(UTC).isoformat(),
-                "run_key": launch_id,
-                "session_id": session_id,
-                "project_id": project_id,
-                "text": "",
-                "native": clean,
-            }
-            if outbox.enqueue(record) is None:
-                raise OSError("Native event could not be queued; retry the export")
-            store.set_meta(dedup_key, "1")
-            dedup[dedup_key] = "1"
-            count += 1
+        try:
+            for native in observations:
+                if native.get("provider_name") and native.get("conversation.id"):
+                    provider_key = f"native-provider:{launch_id}:{native['conversation.id']}"
+                    provider = insights._outbound(str(native["provider_name"]))
+                    if providers.get(provider_key) != provider:
+                        providers[provider_key] = provider
+                        updates[provider_key] = provider
+            for native in observations:
+                # Redact before writing anything destined for the gateway. No raw
+                # body, prompt, tool parameters, authorization or exporter headers.
+                clean = {
+                    key: insights._outbound(value) if isinstance(value, str) else value
+                    for key, value in native.items()
+                }
+                digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
+                dedup_key = f"native-event:{launch_id}:{digest}"
+                if dedup_key in dedup:
+                    continue
+                # Provider is reported at conversation start, not on each SSE
+                # usage event. Enrich after hashing so a late startup observation
+                # cannot make a retried usage record count twice.
+                known_provider = providers.get(
+                    f"native-provider:{launch_id}:{native.get('conversation.id')}"
+                )
+                if known_provider:
+                    clean.setdefault("provider_name", known_provider)
+                record: dict[str, object] = {
+                    "v": insights.RECORD_VERSION,
+                    "kind": "native_event",
+                    "agent": "codex",
+                    "at": datetime.now(UTC).isoformat(),
+                    "run_key": launch_id,
+                    "session_id": session_id,
+                    "project_id": project_id,
+                    "text": "",
+                    "native": clean,
+                }
+                if outbox.enqueue_retryable(record) is None:
+                    continue  # Permanent spool failure: this observer must fail open.
+                updates[dedup_key] = "1"
+                dedup[dedup_key] = "1"
+                count += 1
+        finally:
+            with store.transaction():
+                for key, value in updates.items():
+                    store.set_meta(key, value)
     return count
 
 
-def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
+def serve(
+    ready: Path,
+    owner_pid: int,
+    launch_id: str,
+    *,
+    owner_alive: Callable[[], bool] | None = None,
+) -> None:
     import secrets
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -288,11 +316,19 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
                 return
             try:
                 capture(payload, launch_id)
-            except Exception:
-                # Native exporters retry transient receiver/spool failures.
-                # A 400 would acknowledge them as permanent request errors.
-                self.send_error(503)
+            except InvalidPayload:
+                self.send_error(400)
                 return
+            except OSError as exc:
+                if outbox.temporary_write_error(exc):
+                    self.send_error(503)
+                    return
+            except sqlite3.OperationalError as exc:
+                if is_locked_error(exc) or "disk is full" in str(exc).lower():
+                    self.send_error(503)
+                    return
+            except Exception:
+                pass  # An unrecoverable observer failure costs a trace, never a launch.
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -309,16 +345,19 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
         staging.replace(ready)
         last_pruned = 0.0
         try:
-            while True:
+            while owner_alive is None or owner_alive():
+                # Avoid opening the board on each socket timeout. The store's
+                # own gate coordinates maintenance with other hook processes.
                 if time.monotonic() - last_pruned >= METADATA_PRUNE_INTERVAL:
                     with suppress(Exception), store_session() as store:
                         prune_metadata(store)
                     last_pruned = time.monotonic()
                 server.handle_request()
-                try:
-                    os.kill(owner_pid, 0)
-                except ProcessLookupError:
-                    break
+                if owner_alive is None:
+                    try:
+                        os.kill(owner_pid, 0)
+                    except ProcessLookupError:
+                        break
         finally:
             with suppress(Exception), store_session() as store:
                 store.clear_native_launch(launch_id)

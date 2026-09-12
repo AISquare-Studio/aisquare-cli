@@ -16,7 +16,7 @@ unlinking it, and given up on by moving it to ``dead/`` — all single atomic
 syscalls, all safe against a sweeper being killed mid-drain, and the queue
 depth is a directory listing rather than a bookkeeping problem.
 
-Every public function here fails open and returns instead of raising. A
+Primary-path functions here fail open and return instead of raising. A
 spool that cannot be written is a lost trace; a spool that raises is a lost
 prompt.
 """
@@ -24,6 +24,7 @@ prompt.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import time
@@ -80,6 +81,34 @@ def enqueue(record: dict[str, object]) -> Path | None:
     to ignore the return value entirely.
     """
     try:
+        return enqueue_retryable(record)
+    except Exception:  # an observer may not break its subject
+        return None
+
+
+def temporary_write_error(exc: OSError) -> bool:
+    """Only a retry can recover these local spool failures."""
+    return exc.errno in {
+        None,
+        errno.ENOSPC,
+        errno.EDQUOT,
+        errno.EAGAIN,
+        errno.EBUSY,
+        errno.EINTR,
+        errno.EIO,
+        errno.EMFILE,
+        errno.ENFILE,
+    }
+
+
+def enqueue_retryable(record: dict[str, object]) -> Path | None:
+    """Receiver variant: raise temporary I/O failures, drop permanent failures.
+
+    Primary-path observers use enqueue, which always fails open. A native
+    exporter can retry disk pressure, but cannot repair permissions or input.
+    """
+    staging: Path | None = None
+    try:
         directory = queue_dir()
         directory.mkdir(parents=True, exist_ok=True)
         # Time-ordered name so a drain delivers roughly in the order the user
@@ -93,8 +122,16 @@ def enqueue(record: dict[str, object]) -> Path | None:
         staging.write_text(payload, encoding="utf-8")
         staging.replace(target)
         return target
-    except Exception:  # an observer may not break its subject
+    except OSError as exc:
+        if temporary_write_error(exc):
+            raise
         return None
+    except (TypeError, ValueError, OverflowError):
+        return None
+    finally:
+        if staging is not None:
+            with contextlib.suppress(OSError):
+                staging.unlink(missing_ok=True)
 
 
 def pending(limit: int | None = None) -> list[Path]:

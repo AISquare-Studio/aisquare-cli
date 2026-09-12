@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -11,10 +11,17 @@ from pathlib import Path
 
 from aisquare.core import agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter, config_home, model_overrides
+from aisquare.core.agent_adapters.types import (
+    AgentAdapter,
+    BadEffortError,
+    config_home,
+    model_overrides,
+)
 from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
+from aisquare.core.spawn import LAUNCH_AGENT_ENV as LAUNCH_AGENT_ENV
 from aisquare.core.store import store_session
 
+# Operator preference; launches export their own family under LAUNCH_AGENT_ENV.
 ACTIVE_AGENT_ENV = "AISQUARE_CODING_AGENT"
 _PROJECT_CHOICE: ContextVar[tuple[Path, str | None] | None] = ContextVar(
     "project_agent_choice", default=None
@@ -78,7 +85,7 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
     if fleet:
         env["AISQUARE_FLEET_AGENT"] = fleet
     env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
-    env[ACTIVE_AGENT_ENV] = selected.adapter.id
+    env[LAUNCH_AGENT_ENV] = selected.adapter.id
     if selected.adapter.id != "claude-code" or selected.adapter.home_env in env:
         env[selected.adapter.home_env] = str(selected.config_dir)
     if hub is not None:
@@ -122,20 +129,16 @@ def resolve(
     except Exception:
         preferred = None  # a damaged board must not prevent launching
     inherited = os.environ.get(ACTIVE_AGENT_ENV)
-    if (
-        chosen_binary.source != "default"
-        and inferred is None
-        and os.environ.get("AISQUARE_LAUNCH_ID")
-    ):
-        # Our parent pane's family identifies its executable, not an unrelated
-        # legacy wrapper. Keep that wrapper's plain-shell compatibility choice.
-        inherited = None
+    # Launch identity and operator preference have different lifetimes. A
+    # parent's executable family cannot identify an arbitrary wrapper.
+    owned_family = os.environ.get(LAUNCH_AGENT_ENV) if chosen_binary.source == "default" else None
     choices = (
         (agent, "flag"),
         (bound.agent if bound else None, "role"),
         (inferred.id if inferred else None, chosen_binary.source),
         (preferred, "project"),
         (inherited, "inherited"),
+        (owned_family, "inherited"),
         (config.agents.default, "user"),
         ("claude-code", "default"),
     )
@@ -182,7 +185,13 @@ def model_for(
     effort: str | None = None,
     raw_args: list[str] | None = None,
 ) -> harness.ModelResolution | None:
-    model, native_effort = model_overrides(selected.adapter.id, raw_args or [])
+    if effort is not None:
+        if not effort.strip():
+            raise BadEffortError("--effort requires a reasoning level, not an empty value")
+        selected.adapter.model_args(None, effort)
+    _, original_effort = model_overrides(selected.adapter.id, raw_args or [])
+    normalized_args = selected.adapter.native_args(raw_args or [])
+    model, native_effort = model_overrides(selected.adapter.id, normalized_args)
     effective = {**os.environ, **selected.profile.env}
     if model is not None:
         effective[harness.role_env_key("MODEL", role)] = model
@@ -192,30 +201,29 @@ def model_for(
         env=effective,
         probe=probe,
         refresh=refresh,
-        effort=native_effort if native_effort is not None else effort,
-        effort_is_native=native_effort is not None,
+        effort=effort,
     )
     if result is None:
         return None
     if model is not None:
-        # Native argv is authoritative, but has not been validated by the
-        # native CLI yet. Do not report a dash-prefixed prompt's whitespace-
-        # containing suffix as a known model identifier.
-        result = result.model_copy(
-            update={
-                "model": model if model and not any(c.isspace() for c in model) else "",
-                "source": "native",
-            }
-        )
+        # Report the actual native option value. Literal dash-prefixed prompts
+        # need the native CLI's -- separator; guessing intent changes argv.
+        result = result.model_copy(update={"model": model, "source": "native", "skipped": []})
     if native_effort is not None:
-        notes = list(result.notes)
+        notes: list[str] = []
+        if original_effort is not None and native_effort != original_effort:
+            notes.append(
+                f"{selected.adapter.label} maps {original_effort!r} to native reasoning "
+                f"effort {native_effort!r}."
+            )
         if effort is not None and effort != native_effort:
             notes.append(
                 f"Native effort {native_effort!r} takes precedence over --effort {effort!r}."
             )
         result = result.model_copy(
-            update={"effort": native_effort, "effort_source": "native", "notes": notes}
+            update={"effort": native_effort.strip(), "effort_source": "native", "notes": notes}
         )
+    resolved_model_args(selected, result, normalized_args)  # Validate effective owned defaults.
     return result
 
 
@@ -236,6 +244,7 @@ def mcp_args(selected: ResolvedAgent) -> list[str]:
                 "AISQUARE_TEAM_HUB",
                 "AISQUARE_ROLE",
                 ACTIVE_AGENT_ENV,
+                LAUNCH_AGENT_ENV,
                 "AISQUARE_LAUNCH_ID",
                 "AISQUARE_FLEET_AGENT",
                 "AISQUARE_PIPELINE_ID",
@@ -250,20 +259,14 @@ def mcp_args(selected: ResolvedAgent) -> list[str]:
     )
 
 
-def native_model_args(
-    selected: ResolvedAgent,
-    role: str,
-    raw_args: list[str],
-    *,
-    note: Callable[[str], None] | None = None,
-) -> list[str]:
+def launch_model_for(
+    selected: ResolvedAgent, role: str, raw_args: list[str]
+) -> harness.ModelResolution | None:
+    """Plain launch preserves Claude's native default; Codex honors saved pins."""
     if selected.adapter.capabilities.model_ladders:
-        return []  # plain launch leaves Claude model choice to its CLI
-    resolution = model_for(selected, role, probe=False, raw_args=raw_args)
-    if note and resolution:
-        for message in resolution.notes:
-            note(message)
-    return resolved_model_args(selected, resolution, raw_args)
+        selected.adapter.native_args(raw_args)  # Validate the native flags we own.
+        return None
+    return model_for(selected, role, probe=False, raw_args=raw_args)
 
 
 def resolved_model_args(

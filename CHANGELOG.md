@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Harden coding-agent argument ownership, native effort mapping, and inherited
+  family selection; both printed spawn commands now use the shared launcher.
+- Preserve resumed session bindings, rate-limit cleanup for manually started
+  agents too, and defer account refreshes when a sign-in changes an in-flight read.
+- Batch native telemetry checkpoints, distinguish retryable spool failures from
+  permanent ones, and reject malformed OTLP requests before writing events.
+
+
+
 - Bin-only wrappers retain Claude compatibility when no coding-agent default is selected.
   This works inside AISquare-launched panes too. With a user, project, or
   operator-exported agent default, explicitly bind the wrapper's

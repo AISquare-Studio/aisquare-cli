@@ -277,42 +277,42 @@ def test_the_agent_name_follows_the_role(runner: CliRunner) -> None:
 
 
 def test_the_spawn_template_passes_the_flag_the_parser_looks_for() -> None:
-    """The hop that breaks silently, one level below where I first looked for it.
+    """Shared launch identity emits a flag the same parser recognizes."""
+    from aisquare.services.explainability import plan_session_identity
 
-    The printed spawn line does not carry a literal id — it carries a shell
-    expansion. The VARIABLE half is already safe: the template interpolates
-    ``PIPELINE_ID_ENV_VAR``, so a rename propagates. The FLAG half is not: the
-    template writes ``--session-id`` as a literal while the argv parser matches
-    ``_SESSION_ID_FLAG``. If Claude Code ever renames that flag and only the
-    constant is updated, the launcher keeps emitting the old spelling, the agent
-    rejects or ignores it, and the board row and the Run stop sharing a key —
-    with no error anywhere.
-
-    Both sides are read from the source rather than retyped, because a hardcoded
-    ``"--session-id"`` in this assertion would reproduce the very drift it is
-    supposed to catch.
-    """
-    from aisquare.cli.team import _SESSION_ID_SUBSTITUTION
-    from aisquare.services.explainability import _SESSION_ID_FLAG
-
-    assert _SESSION_ID_FLAG in _SESSION_ID_SUBSTITUTION, (
-        f"the spawn template does not pass {_SESSION_ID_FLAG!r}: {_SESSION_ID_SUBSTITUTION!r}"
-    )
-    assert f"${PIPELINE_ID_ENV_VAR}" in _SESSION_ID_SUBSTITUTION
+    planned = plan_session_identity("claude", [])
+    assert planned.session_id
+    reparsed = plan_session_identity("claude", list(planned.inject_args))
+    assert reparsed.session_id == planned.session_id
+    assert not reparsed.inject_args
 
 
-def test_an_untraced_session_passes_no_session_id_at_all() -> None:
-    """Fail-open, stated as a property of the template rather than of a run.
+def test_an_untraced_session_passes_no_session_id_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Execute a printed launch: tracing off cannot inject an empty native ID."""
+    import json
+    import shlex
+    from importlib import import_module
+    from unittest.mock import Mock
 
-    The substitution collapses to NOTHING when nothing was minted. That matters
-    more than it looks: an empty ``--session-id ''`` would be a broken launch,
-    where no flag at all is a normal one. This is the doctrine's "may cost a
-    trace, never a launch" written into a shell expansion.
-    """
-    from aisquare.cli.team import _SESSION_ID_SUBSTITUTION
+    from typer.testing import CliRunner
 
-    assert _SESSION_ID_SUBSTITUTION.startswith(f"${{{PIPELINE_ID_ENV_VAR}:+")
-    assert _SESSION_ID_SUBSTITUTION.endswith("}")
+    from aisquare.cli.app import app
+    from aisquare.services import agent_launch
+
+    monkeypatch.setenv("AISQUARE_TEAM", "1")
+    monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "claude")
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    runner = CliRunner()
+    printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])
+    assert printed.exit_code == 0, printed.output
+    args = shlex.split(json.loads(printed.stdout)["command"])
+    launched = runner.invoke(app, args[args.index("launch") :])
+    assert launched.exit_code == 0, launched.output
+    assert "--session-id" not in execute.call_args.args[1]
 
 
 #: The claims this file exists to make. Deleting a PLACE now fails, because the

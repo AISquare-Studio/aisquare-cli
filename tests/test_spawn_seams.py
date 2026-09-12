@@ -267,6 +267,7 @@ def test_the_strip_covers_everything_a_traced_launch_exports() -> None:
         explainability.TRACE_AGENT_NAME_ENV_VAR,
         explainability.RUN_TRACE_ID_ENV_VAR,
         "AISQUARE_LAUNCH_ID",
+        "AISQUARE_LAUNCH_AGENT",
         "AISQUARE_FLEET_AGENT",
     )
     assert tuple(IDENTITY_ENV_VARS) == (*TRACING_ENV_VARS, *MARKER_ENV_VARS)

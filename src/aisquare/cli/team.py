@@ -21,7 +21,6 @@ from aisquare.core import harness, orchestrator, selfcli
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
-from aisquare.core.spawn import IDENTITY_ENV_VARS, MARKER_ENV_VARS
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     AmbiguousIdError,
@@ -39,64 +38,6 @@ from aisquare.services import team as team_service
 from aisquare.services.team import DeliveryUnconfirmedError, TeamDisabledError
 
 app = typer.Typer(help="Coordinate parallel agent sessions on this project.", no_args_is_help=True)
-
-#: Appended to a PRINTED spawn command so the session the human pastes starts
-#: on the very id its Run is keyed by. Expands to ``--session-id <uuid>`` when
-#: the ``explainability env`` eval in front of it minted one, and to NOTHING
-#: when that eval refused — which is the whole fail-open premise: an empty
-#: ``--session-id ''`` would be a broken launch, no flag at all is a normal
-#: one. Deliberately unquoted: the value is a UUID, so word splitting produces
-#: exactly the two words intended, and ``sh``/``bash``/``zsh`` agree on it.
-_SESSION_ID_SUBSTITUTION = (
-    f"${{{explainability_service.PIPELINE_ID_ENV_VAR}:+"
-    f"--session-id ${explainability_service.PIPELINE_ID_ENV_VAR}}}"
-)
-
-#: Clears the PREVIOUS paste's tracing out of this shell, and only ever the
-#: previous paste's.
-#:
-#: A terminal keeps what ``eval`` exported, so running a printed spawn command
-#: twice (the up-arrow flow, every time an agent exits) finds ANTHROPIC_* still
-#: set. ``wire_session`` then correctly refuses to clobber what looks like the
-#: user's own routing — and the second agent silently inherits the FIRST one's
-#: ``X-Pipeline-Id`` and merges into its Run. Observed, not theorised: two
-#: pastes, one Run.
-#:
-#: ``AISQUARE_PIPELINE_ID`` is the discriminator, because nothing but our own
-#: wiring sets it. Present ⇒ the ANTHROPIC_* beside it are ours to clear.
-#: Absent ⇒ they are the operator's real gateway and stay untouched, so the
-#: "not overriding your routing" guard keeps working exactly as before. It is
-#: also a sound discriminator for the whole set: ``trace_marker`` emits the run
-#: key unconditionally and the other markers only beside it, so there is no
-#: exported marker this guard can fail to see.
-#:
-#: What it clears is :data:`core.spawn.IDENTITY_ENV_VARS` — the same tuple every
-#: stripping seam removes — and NOT a hand-written list. Hand-writing the names
-#: is how ``AISQUARE_RUN_TRACE_ID`` came to be missed: paste 1 exported it,
-#: paste 2's clear-out took the other four, and if paste 2's own root post was
-#: then refused or timed out its ``trace_marker`` emitted no run trace id of its
-#: own — so paste 1's survived, and session 2's SessionStart hook wrote its join
-#: row against session 1's Run. ``disown_inherited_trace`` could not catch that
-#: either: the clear-out had already removed the run key it keys off, so it
-#: returned early.
-#:
-#: One tuple, one place to add a name — and that is now true of every reader of
-#: the identity, not just this one. :data:`core.spawn.MARKER_ENV_VARS` is where
-#: a marker is declared; this prelude, every stripping seam and
-#: ``services.explainability.disown_inherited_trace`` all read the tuple rather
-#: than naming its members. The one place that still names them one by one is
-#: ``trace_marker``, which EMITS rather than removes: each marker is emitted
-#: under its own condition (the run key always, the role when there is one, the
-#: run trace id only when this launch owns the Run), so there is nothing there
-#: to iterate. That asymmetry is the point — a name missing from an emitter
-#: costs a record, a name missing from a remover corrupts the next session's.
-_CLEAR_PREVIOUS_TRACE = (
-    'if [ -n "${AISQUARE_LAUNCH_ID:-}" ]; then unset AISQUARE_FLEET_AGENT; fi; '
-    f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
-    f"unset {' '.join(key for key in IDENTITY_ENV_VARS if key != 'AISQUARE_FLEET_AGENT')}; fi; "
-    f"unset {' '.join(key for key in MARKER_ENV_VARS if key != 'AISQUARE_FLEET_AGENT')}"
-)
-
 
 SessionRef = Annotated[
     str | None,
@@ -402,11 +343,6 @@ def spawn(
     except Exception as exc:  # fail-open: a broken config costs the trace, never the spawn
         tracing = None
         typer.echo(f"explainability: config unreadable ({exc}) — sessions untraced", err=True)
-    env_assignments = [f"AISQUARE_ROLE={shlex.quote(role_name)}"]
-    if selected.adapter.id != "claude-code":
-        env_assignments.append(
-            f"{agent_launch.ACTIVE_AGENT_ENV}={shlex.quote(selected.adapter.id)}"
-        )
     # WHICH executable, resolved separately from WHICH model — flag > env >
     # config > default (#52). Reported in the banner because a role silently
     # launching on a different install than the operator expects is the same
@@ -425,12 +361,6 @@ def spawn(
             f"role bindings: config unreadable ({launch_profile.notice}) — launching unbound",
             err=True,
         )
-    # Put the profile's vars IN the printed command, not just in --exec's env.
-    # The banner is meant to be pasted, and a printed command that silently
-    # launches with different variables than the one it just reported is worse
-    # than printing nothing.
-    for key, value in launch_profile.env.items():
-        env_assignments.append(f"{key}={shlex.quote(value)}")
     # ONE precedence rule with `cli/launch.py`: the role's own flags
     # (`RoleProfile.default_args`) sit after the binding's args, and an explicit
     # flag or its `--no-` opt-out WINS wherever it appears — not because of
@@ -446,13 +376,13 @@ def spawn(
         # carry and does not is part of what the paste will do.
         typer.echo(f"{role_name}: {note}", err=True)
     if resolution is None:
-        argv = [binary.binary, *launch_profile.args, *role_args]
+        argv = [binary.binary, *selected.adapter.native_args(launch_profile.args), *role_args]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
         argv = [
             binary.binary,
             *agent_launch.resolved_model_args(selected, resolution, launch_profile.args),
-            *launch_profile.args,
+            *selected.adapter.native_args(launch_profile.args),
             *role_args,
         ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
@@ -475,69 +405,32 @@ def spawn(
             for key in sorted(launch_profile.env)
         )
         banner = f"{banner}  ·  env {shown}"
+    # Every paste takes the same identity, environment, and telemetry path as
+    # launch. No eval exports survive in the caller's shell between pastes.
+    # Carry the resolved argv as a whole: replaying a saved native -- before
+    # our model flags would turn those flags into prompt text. Launch must not
+    # prepend the saved arguments again to this complete command.
+    command = shlex.join(
+        selfcli.argv_for(
+            [
+                "launch",
+                role_name,
+                "--agent",
+                selected.adapter.id,
+                "--command",
+                binary.binary,
+                "--no-bound-args",
+                *(
+                    part
+                    for key, value in launch_profile.env.items()
+                    for part in ("--env", f"{key}={value}")
+                ),
+                "--",
+                *argv[1:],
+            ]
+        )
+    )
     argv = [argv[0], *agent_launch.mcp_args(selected), *argv[1:]]
-    command = " ".join([*env_assignments, shlex.join(argv)])
-    if not selected.adapter.capabilities.model_proxy:
-        # A paste must mint its own launch/trace token and native MCP binding.
-        # Forward overrides as launch flags: an env prefix would lose to the
-        # role's configured env when launch resolves it again. Bound args are
-        # already reapplied there; append only this invocation's extra args.
-        command = f"AISQUARE_ROLE={shlex.quote(role_name)} " + shlex.join(
-            selfcli.argv_for(
-                [
-                    "launch",
-                    role_name,
-                    "--agent",
-                    selected.adapter.id,
-                    "--command",
-                    binary.binary,
-                    *(
-                        part
-                        for key, value in launch_profile.env.items()
-                        for part in ("--env", f"{key}={value}")
-                    ),
-                    "--",
-                    *(
-                        agent_launch.resolved_model_args(selected, resolution, launch_profile.args)
-                        if resolution
-                        else []
-                    ),
-                    *(extra_args or []),
-                ]
-            )
-        )
-    if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
-        # Never burn a pipeline id into a printable command: every paste would
-        # reuse the same id and those sessions would merge into one Run. The
-        # eval mints a fresh id per run instead; if tracing is down at run
-        # time, the substitution comes back empty with the reason on stderr
-        # and the session starts untraced — the same fail-open as --exec.
-        #
-        # That same eval also exports the id it minted, so the agent can be
-        # STARTED on it and its board row joins the Run (the correlation
-        # spine). The clear-out leads because what a previous paste exported
-        # outlives it — see _CLEAR_PREVIOUS_TRACE for the merge it prevents.
-        #
-        # `--post-root` is what makes the pasted line OWN its Run. A bare
-        # `explainability env` is print-only: it cannot know whether an agent
-        # will ever start on the id it printed, so it posts nothing and a
-        # session seeded from it runs on the fallback — the proxy keys the
-        # Run, the client lane opens its own, two Runs. Here that unknown is
-        # settled by construction: the agent starts on the very next command
-        # in the same shell. So this line, and only this line, opts in, and
-        # the eval posts the root exactly as `--exec` below and `launch` do —
-        # traceparent on the wire, AISQUARE_RUN_TRACE_ID exported. Same
-        # fail-open: a refused root falls back to X-Pipeline-Id, a dead proxy
-        # to untraced, and neither costs the paste.
-        if explainability_service.accepts_session_id(binary.binary):
-            command = f"{command} {_SESSION_ID_SUBSTITUTION}"
-        command = (
-            f"{_CLEAR_PREVIOUS_TRACE}; "
-            f'eval "$(aisquare explainability env {shlex.quote(role_name)} --post-root)"; '
-            f"{command}"
-        )
-    elif selected.adapter.capabilities.model_proxy:
-        command = f"{_CLEAR_PREVIOUS_TRACE}; {command}"
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -655,6 +548,40 @@ def spawn(
         stdout_console().print(f"  run it in the role's terminal:\n  {command}", markup=False)
 
 
+def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict[str, Any]:
+    """Report fleet's separate argument defaults without attributing them to team spawn."""
+    from aisquare.core.agent_adapters.types import fleet_extra_args, model_overrides
+    from aisquare.services import fleet
+
+    settings = fleet.role_settings(role)
+    args = fleet_extra_args(selected.adapter, settings.extra_args, settings.agent_args)
+    raw = [*selected.profile.args, *args]
+    try:
+        native = selected.adapter.native_args(raw)
+        if selected.adapter.capabilities.model_ladders:
+            # Fleet uses plain launch: Claude keeps its native model default.
+            model, effort = model_overrides(selected.adapter.id, native)
+            return {
+                "agent_args": args,
+                "resolves_to": model or "",
+                "source": "native" if model is not None else "native-default",
+                "effort": effort or "",
+                "effort_source": "native" if effort is not None else "native-default",
+                "notes": [],
+            }
+        resolution = agent_launch.model_for(selected, role, probe=False, raw_args=raw)
+        return {
+            "agent_args": args,
+            "resolves_to": resolution.model if resolution else "",
+            "source": resolution.source if resolution else "native-default",
+            "effort": resolution.effort if resolution else "",
+            "effort_source": resolution.effort_source if resolution else "native-default",
+            "notes": resolution.notes if resolution else [],
+        }
+    except ValueError as exc:
+        return {"agent_args": args, "error": str(exc)}
+
+
 @app.command("harness")
 @agent_launch.selection_snapshot()
 def harness_status() -> None:
@@ -708,6 +635,7 @@ def harness_status() -> None:
                 # `binary`/`binary_source` in this same row say whether the
                 # binary gate (`harness.is_default_agent`) will pass them on.
                 "default_args": profile.default_args,
+                "fleet": _fleet_model_status(selected, name),
             }
         )
     interference = (
@@ -746,6 +674,16 @@ def harness_status() -> None:
         )
         for note in row["notes"]:
             console.print(f"  {note}", markup=False)
+        fleet_row = row["fleet"]
+        if "error" in fleet_row:
+            console.print(f"  fleet: {fleet_row['error']}", markup=False)
+        elif fleet_row["agent_args"]:
+            console.print(
+                f"  fleet: {fleet_row['resolves_to'] or 'native default'} "
+                f"[{fleet_row['source']}] effort={fleet_row['effort'] or 'native'} "
+                f"args={shlex.join(fleet_row['agent_args'])}",
+                markup=False,
+            )
     if interference:
         console.print(f"⚠ env overrides model selection: {', '.join(interference)}", markup=False)
     console.print(

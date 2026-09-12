@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import agent_sessions
 from aisquare.core import credentials as credentials_store
+from aisquare.core.spawn import LAUNCH_AGENT_ENV
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.models import TaskStatus, TeamSession
 from aisquare.services import team as team_service
@@ -150,9 +151,7 @@ def _ensure_virtual_session() -> str:
                 id=bound_id,
                 project_id=project.id,
                 role=_client_role(),
-                agent=os.environ.get("AISQUARE_CODING_AGENT")
-                if agent_sessions.launch_tokens()
-                else None,
+                agent=os.environ.get(LAUNCH_AGENT_ENV) if agent_sessions.launch_tokens() else None,
                 started_at=now,
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),

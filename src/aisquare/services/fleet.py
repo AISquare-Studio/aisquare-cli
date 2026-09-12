@@ -936,6 +936,7 @@ def spawn(
     model_resolution = None
     # Validate native model pins before creating a worktree/window or live row.
     try:
+        selected.adapter.native_args([*selected.profile.args, *role_args, *agent_args])
         if not selected.adapter.capabilities.model_ladders:
             model_resolution = agent_launch.model_for(
                 selected,
@@ -1004,7 +1005,8 @@ def spawn(
         )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
-    extra = list(agent_args)
+    extra = selected.adapter.native_args(list(agent_args))
+    role_args = selected.adapter.native_args(role_args)
     identity = (
         explainability_service.plan_session_identity(
             resolution.binary, [*selected.profile.args, *role_args, *extra]
@@ -1061,7 +1063,7 @@ def spawn(
     env = {
         "AISQUARE_FLEET_AGENT": agent_id,
         "AISQUARE_LAUNCH_ID": "",
-        agent_launch.ACTIVE_AGENT_ENV: selected.adapter.id,
+        agent_launch.LAUNCH_AGENT_ENV: selected.adapter.id,
     }
     if config.disable_native_agent_teams:
         native_args, native_env = selected.adapter.disable_native_teams()

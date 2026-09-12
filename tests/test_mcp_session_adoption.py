@@ -41,7 +41,7 @@ def test_native_join_adopts_claims_history_focus_and_late_writes(
     project = team.activate()
     monkeypatch.setenv("AISQUARE_LAUNCH_ID", "pending-native-launch")
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
-    monkeypatch.setenv("AISQUARE_CODING_AGENT", family)
+    monkeypatch.setenv("AISQUARE_LAUNCH_AGENT", family)
     provisional = mcp_server._ensure_virtual_session()
     task, _ = team.add_task("pre-trust work", session_ref=provisional)
     team.claim_task(task.id, session_ref=provisional)

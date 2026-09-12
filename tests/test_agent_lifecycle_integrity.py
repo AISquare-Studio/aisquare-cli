@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from typer.testing import CliRunner
@@ -272,12 +273,15 @@ def test_untraced_pasted_claude_spawn_cannot_rebind_its_parent(
     result = runner.invoke(app, ["--json", "team", "spawn", "coder", "--no-probe"])
     assert result.exit_code == 0, result.output
     command = json.loads(result.stdout)["command"]
-    # Execute the shell prelude, then inspect the environment the native CLI gets.
-    prelude = command[: command.index("AISQUARE_ROLE=")]
-    child = subprocess.run(["sh", "-c", prelude + "env"], capture_output=True, text=True, timeout=3)
-    assert child.returncode == 0
-    assert "AISQUARE_LAUNCH_ID=" not in child.stdout
-    assert "AISQUARE_FLEET_AGENT=" not in child.stdout
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "claude")
+    argv = shlex.split(command)
+    launched = runner.invoke(app, argv[argv.index("launch") :])
+    assert launched.exit_code == 0, launched.output
+    env = execute.call_args.args[2]
+    assert env["AISQUARE_LAUNCH_ID"] != "parent-launch"
+    assert "AISQUARE_FLEET_AGENT" not in env
 
 
 def test_codex_new_session_rebinds_board_and_mcp_without_late_old_callback(
@@ -507,7 +511,7 @@ def test_fleet_native_prompt_does_not_become_a_label(
     operation = Mock(side_effect=fleet.FleetError("recorded"))
     monkeypatch.setattr(fleet, "spawn", operation)
     result = runner.invoke(
-        app, ["fleet", "spawn", "coder", "--agent", "codex", "exec", "-list every file"]
+        app, ["fleet", "spawn", "coder", "--agent", "codex", "--", "exec", "-list every file"]
     )
     assert result.exit_code != 0
     assert operation.call_count == 1
@@ -532,11 +536,10 @@ def test_session_start_prunes_orphans_without_model_shipping(
 ) -> None:
     from aisquare.core.agent_sessions import bind_launch_session
 
-    monkeypatch.setenv("AISQUARE_LAUNCH_ID", "new-launch")
     with store_session() as store:
         store.set_meta("agent-event:orphan:Stop:old:False", '"complete"')
         assert isinstance(store, SqliteStore)
-        store._conn.execute("UPDATE team_meta SET updated_at = 0")
+        store._conn.execute("UPDATE team_meta SET updated_at = 1")
         store._conn.commit()
         bind_launch_session(store, "new-session", started=True)
         assert store.get_meta("agent-event:orphan:Stop:old:False") is None
@@ -554,7 +557,7 @@ def test_active_pane_keeps_seen_history_for_its_previous_threads(
         bind_launch_session(store, "previous", started=True)
         bind_launch_session(store, "current", started=True)
         assert isinstance(store, SqliteStore)
-        store._conn.execute("UPDATE team_meta SET updated_at = 0")
+        store._conn.execute("UPDATE team_meta SET updated_at = 1")
         store._conn.commit()
         store.expire_native_launches(time.time() - 86400)
         bind_launch_session(store, "previous", started=True)

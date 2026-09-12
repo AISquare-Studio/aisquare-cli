@@ -69,7 +69,7 @@ def test_wrapper_launch_requires_a_declaration_even_with_family_defaults(
     result = runner.invoke(app, args)
     assert result.exit_code == 0, result.output
     binary, argv, env = execute.call_args.args
-    assert binary == wrapper and env["AISQUARE_CODING_AGENT"] == family
+    assert binary == wrapper and env["AISQUARE_LAUNCH_AGENT"] == family
     if family == "codex":
         assert argv[argv.index("--model") + 1] == "fixture-native-model"
     else:

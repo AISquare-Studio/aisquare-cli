@@ -340,10 +340,10 @@ def test_spawn_prints_the_role_flag_in_the_pasteable_command(
     assert "--model sonnet" in result.output
 
     bound = runner.invoke(
-        app, ["team", "spawn", ROLE, "--agent", "claude-code", "--bin", "claude-next"]
+        app, ["--json", "team", "spawn", ROLE, "--agent", "claude-code", "--bin", "claude-next"]
     )
     assert bound.exit_code == 0, bound.output
-    pasted = next(line for line in bound.output.splitlines() if "AISQUARE_ROLE" in line)
+    pasted = json.loads(bound.stdout)["command"]
     assert "--chrome" not in pasted, "Claude Code's flag is not another agent's"
     assert "--chrome withheld" in bound.output, "and the paste says what it is missing"
 

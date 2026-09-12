@@ -160,6 +160,7 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_TEAM",
         "AISQUARE_ROLE",
         "AISQUARE_CODING_AGENT",
+        "AISQUARE_LAUNCH_AGENT",
         "AISQUARE_LAUNCH_ID",
         "AISQUARE_FLEET_AGENT",
         "AISQUARE_TEAM_HUB",

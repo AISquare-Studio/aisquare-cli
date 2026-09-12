@@ -479,7 +479,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
     assert spawned["env"] == {
         "AISQUARE_FLEET_AGENT": agent.id,
         "AISQUARE_LAUNCH_ID": "",
-        "AISQUARE_CODING_AGENT": "claude-code",
+        "AISQUARE_LAUNCH_AGENT": "claude-code",
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
@@ -1182,7 +1182,7 @@ def test_spawn_can_keep_native_agent_teams_on(
     assert env == {
         "AISQUARE_FLEET_AGENT": agent.id,
         "AISQUARE_LAUNCH_ID": "",
-        "AISQUARE_CODING_AGENT": "claude-code",
+        "AISQUARE_LAUNCH_AGENT": "claude-code",
     }
 
 

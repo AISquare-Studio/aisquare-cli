@@ -181,6 +181,7 @@ def test_config_home_normalizes_only_environment_whitespace(
 def test_parent_agent_environment_is_cleared_by_the_shared_fixture() -> None:
     for key in (
         "AISQUARE_CODING_AGENT",
+        "AISQUARE_LAUNCH_AGENT",
         "AISQUARE_LAUNCH_ID",
         "AISQUARE_FLEET_AGENT",
         "CODEX_HOME",
@@ -211,7 +212,12 @@ def test_unknown_wrappers_require_a_family_before_model_flags(
         agent="claude-code", binary="/fixture/claude-work", cwd=tmp_path
     )
     assert selected.adapter.id == "claude-code"
-    assert agent_launch.native_model_args(selected, "coder", []) == []
+    assert (
+        agent_launch.resolved_model_args(
+            selected, agent_launch.launch_model_for(selected, "coder", []), []
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize("source", ["config", "environment", "binary-conflict"])

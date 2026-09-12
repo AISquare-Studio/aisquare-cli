@@ -55,8 +55,8 @@ timeout. Reconnect preserves extra headroom for the two context hooks and
 restores the bounded timeouts for the other lifecycle hooks.
 
 Selection order is explicit `--agent`, role binding, an exact known binary
-override (legacy shorthand), project preference, inherited session selection,
-user default, then Claude Code. An arbitrary wrapper declares its family with
+override (legacy shorthand), project preference, operator `AISQUARE_CODING_AGENT`,
+inherited launch family, user default, then Claude Code. An arbitrary wrapper declares its family with
 `team bind ROLE --agent NAME --bin PATH` or `--agent` at launch (`NAME` is
 `claude-code` or `codex`). Without an operator-selected agent default, legacy
 bin-only wrappers retain Claude compatibility, including inside an AISquare
@@ -64,7 +64,13 @@ pane: the parent's exported family does not reclassify another wrapper.
 User/project defaults and an operator-exported `AISQUARE_CODING_AGENT` do not
 identify an arbitrary wrapper; with those defaults, declare its family explicitly.
 Conflicting known binaries and families are rejected.
-Changing a default affects future launches.
+Changing a default affects future launches. AISquare writes the inherited family
+to `AISQUARE_LAUNCH_AGENT`; it leaves the operator preference unchanged. This
+applies equally to plain shells, fleet windows with an empty launch ID, and
+pasted commands. Printed commands for both agents use `aisquare launch`, which
+creates a fresh identity each time without exporting anything into the parent shell.
+Printed commands carry the resolved native arguments with `--no-bound-args` so
+the launcher does not prepend the saved arguments again.
 
 Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
 Doctor warns about a missing executable when an agent or launch profile has
@@ -145,8 +151,12 @@ Use `--` to explicitly separate native options from AISquare options. Codex
 model options such as `-mMODEL`. Legacy `-c BINARY` selects an executable;
 `--command BINARY` is unambiguous, including for a path containing `=`.
 Attached AISquare options retain their values, including spaces in executable
-paths or environment assignments. Once a native subcommand or prompt begins,
-the remaining tokens belong to the agent; put AISquare options before it.
+paths or environment assignments. AISquare owns its declared options anywhere
+before the separator, including after unknown native options and their values.
+It cannot infer where a native subcommand or prompt begins. For example,
+`-listfiles` is AISquare's attached `-l istfiles` on `fleet spawn`; use
+`asq fleet spawn coder --agent codex -- exec -listfiles` to forward that token.
+The same rule keeps `-c/opt/my wrapper` and `-eGREETING=hello world` working.
 The first `--` belongs to AISquare. To pass a literal dash-prefixed prompt, include
 the native separator too:
 
@@ -156,9 +166,15 @@ asq launch coder --agent codex -- -- '-migrate the schema'
 
 Explicit native model/effort options override AISquare defaults without injecting
 a second value. Codex validates its own `-c` values, including future reasoning
-levels. `team harness` and `team spawn` report these choices with source `native`;
-a value containing whitespace is not reported as a known model identifier.
+levels; the shared aliases `max` and `ultracode` are rewritten to `xhigh` in the
+actual native arguments. Claude effort flags use the same validation whether
+bound with `--arg` or supplied as AISquare options. `team harness` and `team spawn` report these choices with source `native`;
+these are argv overrides, not availability claims. Codex parses `-migrate` as
+`-m igrate`, including a space-containing suffix in a quoted token. To preserve
+a configured model and send that text as a prompt, use the two separators above.
 When native effort overrides AISquare's `--effort`, spawn reports the precedence.
+`team harness` also reports fleet-specific arguments and model choices separately
+from the defaults used by `team spawn`.
 Native sandbox and approval policies stay separate.
 Reviewers, including numbered seats such as `reviewer2`, default to read-only;
 other Codex fleet roles use workspace-write. Numbered seats inherit the base
@@ -184,9 +200,11 @@ recover. Pending claims expire after 180 seconds using a monotonic clock.
 An unavailable observation cache costs readiness evidence, not lifecycle processing.
 Launch bindings and retry records expire after 24 hours without session activity.
 Active sessions retain their bindings and replay history. Metadata without a
-historical timestamp gets a full retention period on upgrade. Cleanup runs on
-managed session starts and receiver maintenance, at most once per minute across
-processes sharing the store; plain native sessions without launch tokens skip it.
+historical timestamp gets a full retention period on upgrade; restored rows with
+an unknown (zero) timestamp are retained. Queued insights are retained too.
+Cleanup runs on all native session starts and receiver maintenance, at most once
+per minute across processes sharing the store. Ordinary starts between cleanup
+runs use an indexed timestamp read.
 
 Initial fleet tasks use Codex's positional prompt. Subsequent automated input
 requires a linked waiting session; otherwise `fleet tell` files a board note.
@@ -230,6 +248,12 @@ so a failed batch retains its completed prefix on retry. Spool file writes do
 not hold the board's database writer lock. A temporary spool failure returns
 a retryable receiver response instead of acknowledging the incomplete batch.
 Per-launch deduplication/provider metadata is removed when the receiver exits.
+Malformed OTLP batches return 400. Temporary spool failures such as a full disk
+return 503 for retry; permanent failures such as a read-only spool fail open with
+200. A partial batch checkpoints its queued prefix in one metadata transaction,
+without holding the board's writer lock across spool writes. Delivery remains
+at least once across receiver crashes or loss of the checkpoint store.
+
 Receivers also prune metadata idle for 24 hours and caches from older releases;
 project purge removes that project's native metadata, including unjoined launches.
 Queued insight records remain available for delivery. Malformed token counts

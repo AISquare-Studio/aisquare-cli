@@ -502,18 +502,13 @@ UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
 
 _SCHEMA_V16 = """
 ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
 CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
  UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
 END;
 CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
  UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
 END;
-"""
-
-# Existing metadata has no historical write time. Give it one full retention
-# period on upgrade, also repairing stores that already ran the v16 migration.
-_SCHEMA_V17 = """
-UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE updated_at = 0;
 """
 
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
@@ -534,7 +529,6 @@ _MIGRATIONS = (
     _SCHEMA_V14,
     _SCHEMA_V15,
     _SCHEMA_V16,
-    _SCHEMA_V17,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -681,6 +675,7 @@ class ContextStore(Protocol):
     ) -> list[TurnMetric]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
+    def touch_meta(self, key: str) -> None: ...
     def set_meta_once(self, key: str, value: str) -> bool: ...
     def compare_meta(self, key: str, expected: str, value: str) -> bool: ...
     def delete_meta(self, key: str, *, expected: str | None = None) -> bool: ...
@@ -1951,6 +1946,15 @@ class SqliteStore:
         ).fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
+    def touch_meta(self, key: str) -> None:
+        """Refresh retention for an existing fact without changing its value."""
+        self._conn.execute(
+            "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+            "WHERE key = ?",
+            (key,),
+        )
+        self._commit()
+
     def set_meta_once(self, key: str, value: str) -> bool:
         """Atomically record the first observation, including before a fleet row exists."""
         cursor = self._conn.execute(
@@ -2023,13 +2027,16 @@ class SqliteStore:
             active_panes = {
                 row["key"].replace("-session:", "-seen:", 1) + ":"
                 for row in self._conn.execute(
-                    "SELECT key, value FROM team_meta WHERE key GLOB 'launch-session:*' "
+                    "SELECT key, value, updated_at FROM team_meta "
+                    "WHERE key GLOB 'launch-session:*' "
                     "OR key GLOB 'fleet-session:*'"
                 )
-                if row["value"] in live
+                # SessionStart can refresh the binding before its session row.
+                # Keep older replay history while that refreshed pane is live.
+                if row["value"] in live or row["updated_at"] == 0 or row["updated_at"] >= before
             }
             rows = self._conn.execute(
-                "SELECT key, value FROM team_meta WHERE updated_at < ? AND ("
+                "SELECT key, value FROM team_meta WHERE updated_at > 0 AND updated_at < ? AND ("
                 "key GLOB 'agent-event:*' OR key GLOB 'launch-session:*' OR "
                 "key GLOB 'launch-seen:*' OR key GLOB 'fleet-session:*' OR "
                 "key GLOB 'fleet-seen:*')",

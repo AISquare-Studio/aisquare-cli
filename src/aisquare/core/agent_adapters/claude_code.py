@@ -37,18 +37,13 @@ class ClaudeCodeAdapter:
         probe: bool | None,
         refresh: bool,
         effort: str | None,
-        effort_is_native: bool = False,
     ) -> harness.ModelResolution | None:
-        if not effort_is_native and effort is not None and harness.normalize_effort(effort) is None:
-            raise BadEffortError(
-                f"Claude Code does not support effort {effort!r}; use one of: "
-                + ", ".join((*harness.EFFORT_SCALE, harness.ULTRACODE))
-            )
+        self.model_args(None, effort)
         return harness.resolve_model(
             role,
             probe=probe,
             refresh=refresh,
-            effort=None if effort_is_native else effort,
+            effort=effort,
             context=harness.ProbeContext(binary=binary, env=env),
         )
 
@@ -68,7 +63,19 @@ class ClaudeCodeAdapter:
     def context_files(self, home: Path) -> tuple[Path, ...]:
         return (home / "CLAUDE.md",)
 
+    def native_args(self, args: list[str]) -> list[str]:
+        from aisquare.core.agent_adapters.types import option_values
+
+        for effort in option_values(args, "--effort"):
+            self.model_args(None, effort)
+        return list(args)
+
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
+        if effort is not None and harness.normalize_effort(effort) is None:
+            raise BadEffortError(
+                f"Claude Code does not support effort {effort!r}; use one of: "
+                + ", ".join((*harness.EFFORT_SCALE, harness.ULTRACODE))
+            )
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
 
     def fleet_args(

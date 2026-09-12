@@ -40,23 +40,35 @@ class CodexAdapter:
         probe: bool | None,
         refresh: bool,
         effort: str | None,
-        effort_is_native: bool = False,
     ) -> harness.ModelResolution:
         from aisquare.core.agent_adapters.native_models import resolve_model
 
-        result = resolve_model(
-            self.id, role, env=env, effort=effort, effort_is_native=effort_is_native
-        )
-        if effort_is_native:
-            return result  # Native -c values are validated by Codex, including future levels.
-        level = self.reasoning_effort(result.effort) or ""
+        # Resolve preferences first; only the effective AISquare-owned value is
+        # validated by model_args after native overrides have been applied.
+        result = resolve_model(self.id, role, env=env, effort=effort)
+        level = self.effort_alias(result.effort)
         notes = (
             [f"Codex maps {result.effort!r} to native reasoning effort {level!r}."]
-            if result.effort.lower() in {"max", "ultracode"}
+            if level != result.effort.strip().lower()
             else []
         )
-        result = result.model_copy(update={"effort": level, "notes": notes})
-        return result
+        return result.model_copy(update={"effort": level, "notes": notes})
+
+    @staticmethod
+    def effort_alias(effort: str) -> str:
+        normalized = effort.strip().lower()
+        return {"max": "xhigh", "ultracode": "xhigh"}.get(normalized, normalized)
+
+    def native_args(self, args: list[str]) -> list[str]:
+        from aisquare.core.agent_adapters.types import model_overrides, rewrite_option_values
+
+        def config(value: str) -> str:
+            _, effort = model_overrides(self.id, ["-c", value])
+            if effort is not None and self.effort_alias(effort) != effort.strip().lower():
+                return value.partition("=")[0] + '="' + self.effort_alias(effort) + '"'
+            return value
+
+        return rewrite_option_values(args, config, "-c", "--config")
 
     def mcp_args(
         self,
@@ -90,8 +102,7 @@ class CodexAdapter:
     def reasoning_effort(effort: str | None) -> str | None:
         if effort is None or not effort.strip():
             return None
-        normalized = effort.strip().lower()
-        normalized = {"max": "xhigh", "ultracode": "xhigh"}.get(normalized, normalized)
+        normalized = CodexAdapter.effort_alias(effort)
         if normalized not in {"minimal", "low", "medium", "high", "xhigh"}:
             raise BadEffortError(f"Codex does not support reasoning effort {effort!r}")
         return normalized

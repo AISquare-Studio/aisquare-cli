@@ -1307,6 +1307,7 @@ def hook_session_start(
             board_context
             + _startup_task_assignment(store, project, session)
             + session_context(store, project.id, session.id, session.role)
+            + _style_trailer(store, project.id, session.role)
         )
 
 
@@ -1387,6 +1388,24 @@ def _startup_task_assignment(
     return "\n".join(lines)
 
 
+def _style_trailer(store: ContextStore, project_id: str, role: str) -> str:
+    """The active response-style block for this agent, or '' (fail-open).
+
+    Imported lazily so persona code never loads through team.py's module import
+    (keeps the agent-context isolation guarantee) and a style error never
+    swallows the board banner or teammate delta this hook owes the session.
+    """
+    try:
+        from aisquare.services import personas
+
+        project = store.get_project(project_id)
+        return personas.style_trailer(project, role) if project is not None else ""
+    except Exception:
+        # Fail-open by contract: a style bug must never break the hook the session
+        # depends on, so ANY error yields no style rather than no board update.
+        return ""
+
+
 def hook_prompt_heartbeat(
     session_id: str,
     cwd: Path | None,
@@ -1457,12 +1476,13 @@ def hook_prompt_heartbeat(
         if not events or not orchestrator.delta_enabled():
             cursor = raw[-1].seq if raw else None
             store.touch_session(session.id, cursor=cursor, state="working")
-            return collision
+            return collision + _style_trailer(store, session.project_id, session.role)
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
-        return collision + _render_delta(shown, roles, truncated=truncated)
+        style = _style_trailer(store, session.project_id, session.role)
+        return collision + _render_delta(shown, roles, truncated=truncated) + style
 
 
 def hook_stop(

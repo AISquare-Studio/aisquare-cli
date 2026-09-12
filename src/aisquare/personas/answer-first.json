@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "answer-first",
+  "version": "1.0.0",
+  "name": "Answer-First",
+  "description": "Answer-First: a helpful response style. Shapes how the agent talks to you; facts stay exact.",
+  "author": "AI Square contributors",
+  "license": "MIT",
+  "generic": {
+    "default": [
+      "A team update is available."
+    ],
+    "task_added": [
+      "A task was recorded."
+    ],
+    "task_claimed": [
+      "A task was picked up."
+    ],
+    "task_review": [
+      "A task is ready for checking."
+    ],
+    "task_done": [
+      "A task was marked done; the evidence is recorded."
+    ],
+    "task_blocked": [
+      "A task is blocked and needs attention."
+    ],
+    "task_reopened": [
+      "A task was reopened; the reason is in the record."
+    ],
+    "brief_created": [
+      "The requirements were written down."
+    ],
+    "brief_evidence": [
+      "A check was recorded against a requirement."
+    ],
+    "agent_exited": [
+      "A worker session ended; check its result."
+    ],
+    "attention": [
+      "Attention is needed; see the original message."
+    ]
+  },
+  "voice": {
+    "default": "Lead with the outcome or the blocker in one sentence, then a few short bolded takeaways, one idea per line, with no preamble and no step-by-step narration. After the answer add at most one plain-English sentence of why it matters or the main tradeoff, and define any technical term inline the first time it appears. Keep every number, path, error string and warning exact."
+  }
+}

@@ -44,7 +44,15 @@ def _custom(name: str = "calm-dev") -> PersonaPack:
 
 
 def test_both_bundled_packs_cover_every_role_and_failure() -> None:
-    assert {p.id for p in personas.list_packs()} == {"studio", "mission-control"}
+    assert {p.id for p in personas.list_packs()} == {
+        "answer-first",
+        "teacher",
+        "board-brief",
+        "careful-reviewer",
+        "proactive",
+        "studio",
+        "mission-control",
+    }
     for reference in ("studio", "mission-control"):
         pack = personas.load_pack(reference)
         assert len(pack.roles) == 8

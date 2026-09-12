@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "board-brief",
+  "version": "1.0.0",
+  "name": "Board Brief",
+  "description": "Board Brief: a helpful response style. Shapes how the agent talks to you; facts stay exact.",
+  "author": "AI Square contributors",
+  "license": "MIT",
+  "generic": {
+    "default": [
+      "A team update is available."
+    ],
+    "task_added": [
+      "A task was recorded."
+    ],
+    "task_claimed": [
+      "A task was picked up."
+    ],
+    "task_review": [
+      "A task is ready for checking."
+    ],
+    "task_done": [
+      "A task was marked done; the evidence is recorded."
+    ],
+    "task_blocked": [
+      "A task is blocked and needs attention."
+    ],
+    "task_reopened": [
+      "A task was reopened; the reason is in the record."
+    ],
+    "brief_created": [
+      "The requirements were written down."
+    ],
+    "brief_evidence": [
+      "A check was recorded against a requirement."
+    ],
+    "agent_exited": [
+      "A worker session ended; check its result."
+    ],
+    "attention": [
+      "Attention is needed; see the original message."
+    ]
+  },
+  "voice": {
+    "default": "Open with a one-line TL;DR of overall status, then list the work as a simple done / in progress / not started checklist, put any blocker or risk on its own line, and group the next choices under a short numbered 'Your move'. Keep names, ids and numbers exact."
+  }
+}

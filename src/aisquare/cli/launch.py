@@ -35,7 +35,6 @@ from aisquare.core import harness
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import AmbiguousIdError, store_session
-from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -89,34 +88,6 @@ def _role_ok(role: str) -> bool:
     written down.
     """
     return role in ROLES or bool(_SEAT.match(role)) or role in _declared_roles()
-
-
-def _voice_args(project: ProjectInfo | None, role: str, binary: str, given: list[str]) -> list[str]:
-    """``--append-system-prompt <voice>`` when the project opted in, else nothing.
-
-    The deliberate exception to "personas never reach an agent": the operator
-    turned it on with `asq persona voice on`, and only Claude Code accepts the
-    flag. A caller who already passed the flag keeps theirs. Any persona failure
-    costs the voice, never the launch.
-    """
-    if project is None or os.path.basename(binary) != "claude":
-        return []
-    if any(
-        arg == "--append-system-prompt" or arg.startswith("--append-system-prompt=")
-        for arg in given
-    ):
-        return []
-    try:
-        from aisquare.services import personas as persona_service
-
-        instruction = persona_service.voice_instruction(project, role)
-    except Exception as exc:  # display-side data must never cost an agent launch
-        stderr_console().print(f"persona voice unavailable ({exc}) — launching plain", style="dim")
-        return []
-    if instruction is None:
-        return []
-    stderr_console().print("persona voice: appended to this agent's system prompt", style="dim")
-    return ["--append-system-prompt", instruction]
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -385,14 +356,7 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    argv = [
-        resolution.binary,
-        *profile.args,
-        *role_args,
-        *ctx.args,
-        *pinned_id,
-        *_voice_args(project, role, resolution.binary, [*profile.args, *role_args, *ctx.args]),
-    ]
+    argv = [resolution.binary, *profile.args, *role_args, *ctx.args, *pinned_id]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

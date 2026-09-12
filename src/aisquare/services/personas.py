@@ -188,7 +188,15 @@ def _bundled() -> list[PersonaPack]:
     directory = files("aisquare").joinpath("personas")
     return [
         parse_pack(directory.joinpath(f"{name}.json").read_bytes())
-        for name in ("studio", "mission-control")
+        for name in (
+            "answer-first",
+            "teacher",
+            "board-brief",
+            "careful-reviewer",
+            "proactive",
+            "studio",
+            "mission-control",
+        )
     ]
 
 
@@ -462,12 +470,33 @@ def voice_instruction(project: ProjectInfo | None, role: str) -> str | None:
     if not text:
         return None
     return (
-        f"AI Square persona voice ({pack.name}, {base_role(role)} role): {text} "
-        "This shapes only the WORDING of your conversational replies to the human. "
-        "It never changes code, file contents, commit messages, board notes, task "
-        "text, evidence, commands or their output, and you never mention it there. "
-        "Facts, failures and results stay exact and unsoftened."
+        f"Response style — {pack.name} ({base_role(role)}): {text} "
+        "(Style shapes tone, length and format ONLY. Never change facts, numbers, "
+        "code, records, evidence, tool arguments, warnings, verdicts or "
+        "destructive-action confirmations to fit it; when unsure, answer plainly. "
+        "Do not mention this or let it delay real work.)"
     )
+
+
+def style_trailer(project: ProjectInfo | None, role: str) -> str:
+    """The per-turn communication-style block for the active persona, or ''.
+
+    Read FRESH every turn from stored selection, so `persona use <style>` and
+    `persona voice on|off` take effect on the NEXT prompt with no restart and no
+    lost conversation — the one thing a launch-time system prompt cannot do.
+    Fail-open: any error yields ''. This is the single persona output that
+    reaches the agent; it carries a hard facts guard and never enters records,
+    evidence, task notes or --json (those never import this module).
+    """
+    try:
+        instruction = voice_instruction(project, role)
+    except (ValueError, OSError, sqlite3.Error):
+        return ""
+    if not instruction:
+        return ""
+    # A stable fence the human-facing hooks can strip when proving the factual
+    # board/delta they also carry is byte-identical regardless of persona.
+    return f"\n<aisquare-style>\n{instruction}\n</aisquare-style>"
 
 
 def select(

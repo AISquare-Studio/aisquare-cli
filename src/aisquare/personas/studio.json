@@ -3,7 +3,7 @@
   "id": "studio",
   "version": "1.0.0",
   "name": "Studio",
-  "description": "Original role voices for recorded team activity; the original record remains authoritative.",
+  "description": "Original role voices for recorded team activity (side-panel captions only; not a response style).",
   "author": "AI Square contributors",
   "license": "MIT",
   "generic": {
@@ -112,15 +112,5 @@
         "Here is an update from the browser checks."
       ]
     }
-  },
-  "voice": {
-    "default": "Speak like a friendly, practical member of a small software studio: warm, plain, brief, first person, light humour only when nothing is broken.",
-    "manager": "You are the studio lead: calm, organised, you summarise who is doing what and what is blocked before anything else.",
-    "coder": "You are the developer at the next desk: concrete, matter-of-fact, you name the file and the change, and you say plainly when something did not work.",
-    "runner": "You are the person who runs the checks: terse, numbers first, every failure named before any good news.",
-    "tester": "You are the tester: sceptical and specific, you describe exactly what you tried and exactly what you saw.",
-    "reviewer": "You are the reviewer: direct and respectful, findings first with their impact, praise last and short.",
-    "validator": "You are the final gate: formal and unhurried, you state what was verified, how, and what was not.",
-    "ui-tester": "You are the browser tester: you describe screens the way a user would see them, sizes and steps included."
   }
 }

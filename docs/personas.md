@@ -40,45 +40,60 @@ and view the activity through the AI Square interface.
 The task keeps running while the dialog is open. Closing the dialog returns
 you to the agent without sending the persona command into its conversation.
 
-## Voice in Claude's own replies (opt-in)
+## Response styles — how the agents talk to you (opt-in)
 
-The panel above narrates *records*. If you also want the agents themselves to
-*talk* in the chosen character, turn the voice on for a project:
+The panel above narrates *records*. Separately, you can give the agents a
+genuinely useful **response style** — a way of communicating that helps you read
+and decide faster. This is the part that changes how the workers themselves talk
+in their own replies.
+
+Five styles ship, each a communication contract, not a costume:
+
+| Style | What it does |
+| --- | --- |
+| **Answer-First** (default) | Bottom line in one sentence, short bolded takeaways, plus one plain-English "why". |
+| **Teacher** | Explains the why and the tradeoff, defines jargon inline, kept short. |
+| **Board Brief** | TL;DR, a done / in-progress / not-started checklist, blockers on their own line. |
+| **Careful Reviewer** | Leads with risks and what was not verified; asks before anything destructive. |
+| **Proactive** | Takes the obvious next step without asking; still stops before anything destructive. |
+
+Turn one on for a project:
 
 ```sh
-asq persona use mission-control
+asq persona use answer-first
 asq persona voice on
 ```
 
-From then on every **new** agent session AI Square launches for that project
-(the manager, and every worker it spawns) receives the selected pack's voice
-instruction for its role through Claude Code's own `--append-system-prompt`
-flag. Sessions already running do not change. `asq persona voice off` stops it
-for the next sessions; project-wide `asq persona off` also silences it.
-
-This is the one persona setting that reaches an agent, and it is off by default
-for a reason: it is text in the prompt, so it costs a few dozen tokens per
-session and, like any style instruction, it can subtly colour how the model
-phrases things. The instruction is framed so it applies only to the wording of
-replies to you and never to code, file contents, commit messages, board notes,
-task text, evidence or commands, and it tells the model to keep facts, failures
-and results exact. Records, evidence, working rules and the narration panel are
-unaffected either way, and a test proves the start-up briefing and every board
-record are byte-identical with voice on or off. A role bound to a binary other
-than `claude` never receives the flag.
-
-Each bundled pack carries a voice per role. A pack you create from a plain
-description uses that description as its voice, so:
+**It changes live.** The style is delivered through AI Square's own per-turn
+hook, which runs before every reply, not through the launch-time system prompt.
+So switching it takes effect on the very **next** message, with no restart and
+no lost conversation:
 
 ```sh
-asq persona add --name calm-dev --text "Calm, friendly developer; brief updates, no jargon."
+asq persona use careful-reviewer   # the running workers switch on their next reply
+asq persona voice off              # back to plain on the next reply
+```
+
+This is the one persona setting that reaches an agent, and it is off by default
+because it costs roughly 150–200 tokens on every turn and, like any style
+instruction, it nudges how the model phrases things. It is framed to shape
+**only** the tone, ordering, length and formatting of replies to you; it can
+never change facts, numbers, code, records, evidence, tool arguments, warnings
+or verdicts, and when unsure the agent is told to answer plainly. A role bound to
+a binary other than `claude` still receives it through the hook the same way.
+
+Make your own style from a plain description — the description becomes the
+contract, no model call needed:
+
+```sh
+asq persona add --name calm-dev --text "Answer first in one line, then one short why; keep every number exact."
 asq persona use calm-dev
 asq persona voice on
 ```
 
-gives you agents that speak that way in their next sessions, with no model call
-needed to set it up. The panel phrases of such a pack start as copies of
-Studio's until you edit them.
+**Studio and Mission Control are decoration only.** They are fun side-panel
+caption packs and carry no response style, so selecting one changes the panel's
+wording but not how the agents talk. Use a style pack above for that.
 
 ## What changes, and what stays factual
 

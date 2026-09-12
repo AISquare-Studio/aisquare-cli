@@ -1,22 +1,21 @@
-"""The opt-in voice: the ONE persona setting allowed to reach an agent, and only how.
+"""The opt-in response STYLE: the one persona setting allowed to reach an agent.
 
-Everything else about personas is display-only and stays that way. Voice is a
-deliberate, per-project opt-in that appends the selected pack's speaking
-instruction to a NEW agent's system prompt through Claude Code's own flag. It
-never touches board records, evidence, working rules or a running session.
+Everything else about personas is display-only. The style is a per-project opt-in
+communication contract (Answer-First, Careful Reviewer, …) injected by the
+PER-TURN hook — not the launch system prompt — so it changes mid-session with no
+restart. It carries a hard facts guard and never enters board records, evidence,
+task notes or --json.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core.personas import parse_pack, voice_text
 from aisquare.services import personas, team
@@ -31,14 +30,16 @@ def board(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def test_both_bundled_packs_carry_a_voice_for_every_role() -> None:
-    for name in ("studio", "mission-control"):
+def test_style_packs_carry_a_contract_and_decoration_packs_do_not() -> None:
+    # The helpful STYLE packs are what reach the agent: each carries a default
+    # communication contract that shapes replies.
+    for name in ("answer-first", "teacher", "board-brief", "careful-reviewer", "proactive"):
         pack = personas.load_pack(name)
-        assert pack.voice["default"]
-        for role in ("manager", "coder", "runner", "tester", "reviewer", "validator", "ui-tester"):
-            assert voice_text(pack, role), (name, role)
-        assert voice_text(pack, "coder2") == pack.voice["coder"], "seats inherit"
-        assert voice_text(pack, "bot7") == pack.voice["default"], "unknown roles get the default"
+        assert voice_text(pack, "coder"), name
+        assert voice_text(pack, "bot7") == pack.voice["default"], "any role gets the default style"
+    # Studio and Mission Control are side-panel DECORATION only: no injected voice.
+    for name in ("studio", "mission-control"):
+        assert personas.load_pack(name).voice == {}, name
 
 
 def test_voice_entries_are_validated_like_every_other_pack_text() -> None:
@@ -67,60 +68,63 @@ def test_a_plain_description_becomes_the_voice_not_a_generated_phrase_set() -> N
     assert draft.generic["task_claimed"] == personas.load_pack("studio").generic["task_claimed"]
 
 
-def test_voice_is_off_by_default_and_on_only_for_the_project_that_asked(board: Path) -> None:
+def test_style_is_off_by_default_and_on_only_for_the_project_that_asked(board: Path) -> None:
     project = team.board_data(cwd=board)[0]
-    personas.select("use", project, reference="studio")
+    personas.select("use", project, reference="answer-first")
     assert personas.voice_instruction(project, "coder") is None
     assert personas.persona_status(project)["voice"] is False
     receipt = personas.set_voice(project, True)
     assert "on for new sessions" in receipt.message
     instruction = personas.voice_instruction(project, "coder")
     assert instruction is not None
-    assert personas.load_pack("studio").voice["coder"] in instruction
-    assert "never changes code" in instruction and "stay exact" in instruction
+    assert personas.load_pack("answer-first").voice["default"] in instruction
+    # The facts guard, in the new communication-contract frame.
+    assert "Never change facts" in instruction and "answer plainly" in instruction
     assert personas.persona_status(project)["voice_roles"]
+    # A decoration pack injects nothing even with the style switch on.
+    personas.select("use", project, reference="studio")
+    assert personas.voice_instruction(project, "coder") is None, "decoration packs never inject"
+    personas.select("use", project, reference="answer-first")
     personas.select("off", project)
     assert personas.voice_instruction(project, "coder") is None, "project Off wins"
-    personas.select("use", project, reference="studio")
-    personas.set_voice(project, False)
-    assert personas.voice_instruction(project, "coder") is None
 
 
-def test_launch_appends_the_flag_only_when_asked_and_only_for_claude(
-    board: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
-) -> None:
+def test_style_reaches_the_agent_per_turn_and_changes_mid_session(board: Path) -> None:
+    """The reframed feature: the style is injected by the per-turn hook (so it can
+    change live), NOT frozen onto the system prompt at launch."""
     project = team.board_data(cwd=board)[0]
-    personas.select("use", project, reference="mission-control")
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/true")
-    monkeypatch.setattr(
-        launch_cli, "_exec", lambda binary, argv, env: captured.update(env=env, argv=argv)
-    )
-    result = runner.invoke(app, ["launch", "coder"])
-    assert result.exit_code == 0, result.output
-    assert "--append-system-prompt" not in captured["argv"], "off by default"
+    with pytest.MonkeyPatch.context() as env:
+        env.setenv("AISQUARE_ROLE", "coder")
+        team.hook_session_start("coder-1", board, "startup")
 
-    personas.set_voice(project, True)
-    result = runner.invoke(app, ["launch", "coder"])
-    assert result.exit_code == 0, result.output
-    argv = captured["argv"]
-    index = argv.index("--append-system-prompt")
-    assert personas.load_pack("mission-control").voice["coder"] in argv[index + 1]
-    assert "persona voice: appended" in result.output
+        def style() -> str | None:
+            beat = team.hook_prompt_heartbeat("coder-1", board)
+            if "<aisquare-style>" not in beat:
+                return None
+            return beat.split("<aisquare-style>")[1].split("</aisquare-style>")[0]
 
-    # A caller's own flag is kept; ours is not added beside it.
-    result = runner.invoke(app, ["launch", "coder", "--append-system-prompt", "mine"])
-    assert result.exit_code == 0, result.output
-    assert captured["argv"].count("--append-system-prompt") == 1
-    assert "mine" in captured["argv"]
-
-    # A role bound to another binary never receives a Claude-only flag.
-    result = runner.invoke(app, ["launch", "coder", "--command", "codex"])
-    assert result.exit_code == 0, result.output
-    assert "--append-system-prompt" not in captured["argv"]
+        assert style() is None, "off by default"
+        personas.select("use", project, reference="answer-first")
+        personas.set_voice(project, True)
+        first = style()
+        assert first is not None and "Answer-First" in first
+        # Switch persona with NO restart — the next heartbeat carries the new style.
+        personas.select("use", project, reference="careful-reviewer")
+        second = style()
+        assert second is not None and "Careful Reviewer" in second
+        assert "Answer-First" not in second, "the change is live, not additive"
+        # Off again silences it on the next turn.
+        personas.set_voice(project, False)
+        assert style() is None
 
 
-def test_voice_on_changes_no_record_and_no_briefing(board: Path, runner: CliRunner) -> None:
+def _strip_style(text: str) -> str:
+    """Drop the <aisquare-style> fence the hook now carries, leaving the factual part."""
+    # The trailer is appended last, as "\n<aisquare-style>...": cut it off there.
+    return text.split("\n<aisquare-style>")[0]
+
+
+def test_style_on_changes_no_record_only_the_per_turn_hook(board: Path, runner: CliRunner) -> None:
     project = team.board_data(cwd=board)[0]
     task, _ = team.add_task("Build login", role="coder", cwd=board)
     with pytest.MonkeyPatch.context() as env:
@@ -128,15 +132,19 @@ def test_voice_on_changes_no_record_and_no_briefing(board: Path, runner: CliRunn
         env.setenv("AISQUARE_TASK_ID", task.id)
         before = team.hook_session_start("s-1", board, "startup")
     board_before = runner.invoke(app, ["--json", "task", "show", task.id]).stdout
-    personas.select("use", project, reference="studio")
+    # A real STYLE pack, switched on.
+    personas.select("use", project, reference="answer-first")
     personas.set_voice(project, True)
     with pytest.MonkeyPatch.context() as env:
         env.setenv("AISQUARE_ROLE", "coder")
         env.setenv("AISQUARE_TASK_ID", task.id)
         after = team.hook_session_start("s-1", board, "resume")
-    assert after == before
+    # The style DOES now reach the agent (that is the point) — but only in the fence,
+    # and the factual part of the context is byte-identical either way.
+    assert "<aisquare-style>" in after and "Answer-First" in after
+    assert _strip_style(after) == _strip_style(before)
+    # The board record and its --json are untouched by the style.
     assert runner.invoke(app, ["--json", "task", "show", task.id]).stdout == board_before
-    assert "persona" not in after.lower()
 
 
 def test_the_voice_command_family(board: Path, runner: CliRunner) -> None:

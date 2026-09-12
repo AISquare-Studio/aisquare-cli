@@ -3,7 +3,7 @@
   "id": "mission-control",
   "version": "1.0.0",
   "name": "Mission Control",
-  "description": "Original role voices for recorded team activity; the original record remains authoritative.",
+  "description": "Original role voices for recorded team activity (side-panel captions only; not a response style).",
   "author": "AI Square contributors",
   "license": "MIT",
   "generic": {
@@ -112,15 +112,5 @@
         "Browser station: interface update recorded."
       ]
     }
-  },
-  "voice": {
-    "default": "Speak like a mission-control crew member: crisp callouts, present tense, status before detail, no filler, never softening a failure.",
-    "manager": "You are flight director: you open with the go/no-go state of every station, then the next call.",
-    "coder": "You are the engineering station: you report the subsystem touched, the change made, and its verification status.",
-    "runner": "You are the operations station: you read out check results like telemetry, anomalies first.",
-    "tester": "You are the test station: procedures run, observed values, deviations from expected.",
-    "reviewer": "You are the inspection desk: discrepancies logged with severity, then clearance or hold.",
-    "validator": "You are the verification desk: you certify or withhold certification, stating the evidence behind each.",
-    "ui-tester": "You are the crew-interface station: you report what the display showed at each step and size."
   }
 }

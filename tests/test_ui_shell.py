@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -475,6 +476,109 @@ def test_clicking_a_project_opens_its_project_view_once(tmp_path: Path, script: 
     assert shown_ids == ["project-prj_b", "project-prj_a", "project-prj_b"]
     assert views == 2  # one view per project, reused on the second visit — not three
     assert selected
+
+
+class PaneScript:
+    """A tmux runner that answers a pane's frames, so a real ``AgentView`` in a
+    real ``FleetApp`` shows real rows.
+
+    ``no_real_tmux`` stubs every command into a failure, which is right for
+    tests about routing and wrong for one about SELECTING text — there is
+    nothing on screen to select. This answers the one call the pane makes per
+    frame (``capture-pane`` + ``display-message`` in a single process) and reads
+    the pane's size back out of the ``resize-window`` that precedes it, exactly
+    as the real server would.
+    """
+
+    def __init__(self, ran: list[tuple[str, ...]], rows: list[str]) -> None:
+        self.ran = ran
+        self.rows = rows
+        self.width, self.height = 40, len(rows)
+
+    def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
+        args = list(argv)
+        self.ran.append(tuple(args))
+        if args[1:] == ["-V"]:
+            return Completed(0, "tmux 3.5a\n", "")
+        command = args[5:]
+        if command and command[0] == "resize-window":
+            self.width = int(command[command.index("-x") + 1])
+            self.height = int(command[command.index("-y") + 1])
+            return Completed(0, "", "")
+        if command and command[0] == "capture-pane":
+            body = [*self.rows, *([""] * (self.height - len(self.rows)))][: self.height]
+            facts = tmux_core._SEP.join(
+                ["%1", str(self.width), str(self.height), "0", "0", "1", "0", "0",
+                 "0", "", "0", "bash", "0", "0", ""]
+            )  # fmt: skip
+            return Completed(0, "\n".join([*body, facts]) + "\n", "")
+        return Completed(0, "", "")
+
+
+async def _agent_pane(pilot: Pilot[None]) -> tuple[TerminalPane, Static]:
+    """Open the scripted agent and wait until its pane has painted a frame."""
+    app = fleet_app(pilot)
+    await pilot.click(row_for(app, "agt_a_coder-auth"))
+    await pilot.pause()
+    view = app.current_view()
+    assert isinstance(view, AgentView)
+    pane = view.query_one(TerminalPane)
+    deadline = time.monotonic() + 3.0
+    while pane.frames < 1 or "second row" not in pane_text(pane):
+        assert time.monotonic() < deadline, "the pane never painted the scripted rows"
+        await pilot.pause()
+    return pane, view.query_one("#agent-header", Static)
+
+
+def pane_text(pane: TerminalPane) -> str:
+    width, height = pane.content_size
+    return "\n".join(strip.text for strip in pane.render_lines(Region(0, 0, width, height)))
+
+
+def test_a_drag_from_the_agent_header_into_the_pane_copies_through_the_app(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app is what turns the end of a selection gesture into a copy.
+
+    ``FleetApp.on_text_selected`` is the only thing that makes a drag crossing
+    the pane's edge copy, and nothing exercised it: replacing its body with
+    ``return`` left the whole suite green, because every test of that gesture
+    re-implemented the handler on its own test ``Host`` (review of #120, round
+    7). This drives the real app, the real ``AgentView``, and the real header.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, str, int]:
+        app = fleet_app(pilot)
+        pane, header = await _agent_pane(pilot)
+        await pilot.mouse_down(header, offset=(1, 0))
+        await pilot.hover(pane, offset=(5, 1))
+        await pilot.mouse_up(pane, offset=(5, 1))
+        await pilot.pause()
+        crossed, toasts = app.clipboard, len(app._notifications)
+        # The negative half: a gesture that touches no row of the pane must
+        # leave both the clipboard and the toast count exactly as they were.
+        app.screen.clear_selection()
+        await pilot.pause()
+        await pilot.mouse_down(header, offset=(1, 0))
+        await pilot.hover(header, offset=(6, 0))
+        await pilot.mouse_up(header, offset=(6, 0))
+        await pilot.pause()
+        return crossed, toasts, app.clipboard, len(app._notifications)
+
+    crossed, toasts, after, toasts_after = drive(go, notifications=True)
+    assert crossed == "red plain\nsecon", crossed
+    assert toasts == 1, "one copy, one toast"
+    assert after == crossed and toasts_after == toasts, (
+        "a gesture over no pane row must not re-copy a standing selection"
+    )
 
 
 def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) -> None:

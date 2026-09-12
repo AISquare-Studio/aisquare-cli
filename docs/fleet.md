@@ -622,9 +622,12 @@ Drag to select text in a pane (double-click selects a word): it is copied to
 your clipboard on release (OSC 52 — your terminal has to accept it; Windows
 Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies again
 while the selection stands. Only a left-button drag is a copy, so a right-click
-over a highlight leaves your clipboard alone; a drag that crosses the pane's
-edge — begun on the agent header, or released outside it — copies like any
-other. What is copied is always what is shown under the
+over a highlight leaves your clipboard alone, and so does a drag somewhere else
+entirely while a highlight stands. A drag that crosses the pane's edge — begun
+on the agent header, or released outside it — copies too, one character short
+of the same gesture made inside the pane: the terminal library reports the
+crossing endpoint without the trailing cell, and the highlight stops there too,
+so what you see is what you get. What is copied is always what is shown under the
 highlight at the moment you copy: cut to the columns the pane actually shows,
 and including the `[↑k/history]` marker and the `(exited 0)` notice where those
 are what the row displays. Under an agent that is still printing that means the

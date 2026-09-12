@@ -28,6 +28,7 @@ all of them must reach it.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -210,6 +211,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
+        self._gesture_button: int | None = None
+        """Which button began the selection gesture now running, if one is."""
 
     # --- layout -------------------------------------------------------------------
 
@@ -286,6 +289,16 @@ class FleetApp(App[None], inherit_bindings=False):
         if self._theme_restored:
             remember_theme(theme_name)
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Remember which button began the gesture now running.
+
+        The screen posts ``TextSelected`` from its MouseUp branch and it carries
+        no button, while the pane only sees a press that lands ON it — so a
+        right-button drag begun on the agent header read as a left one and
+        copied (review of #120, round 7). Here every press is visible.
+        """
+        self._gesture_button = event.button
+
     def on_text_selected(self, event: events.TextSelected) -> None:
         """A selection gesture ended anywhere on screen — tell the panes.
 
@@ -296,9 +309,17 @@ class FleetApp(App[None], inherit_bindings=False):
         on the agent header and crosses into the pane reaches the pane's own
         ``on_mouse_up`` only because ``Static`` does not capture the mouse,
         where an ``Input`` would have swallowed it (review of #120, round 6).
+
+        The ACTIVE screen only, and never at the cost of the other panes: a
+        modal on top has no pane of its own, and a pane torn down mid-gesture
+        must not stop its neighbours being told. This PR's history is an
+        unguarded exception in a mouse handler taking the app down; this loop is
+        where that can be contained (review of #120, round 7).
         """
-        for pane in self.query(TerminalPane):
-            pane.selection_gesture_ended()
+        button, self._gesture_button = self._gesture_button, None
+        for pane in self.screen.query(TerminalPane):
+            with contextlib.suppress(Exception):
+                pane.selection_gesture_ended(button)
 
     # --- help / refresh ---------------------------------------------------------------
 

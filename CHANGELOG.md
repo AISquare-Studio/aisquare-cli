@@ -510,25 +510,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it, since the theme's selection style resolves with foreground equal to
   background. The text is copied when the gesture ends, wherever on screen it
   ends — the app hears that from the screen and tells the panes, so a drag that
-  crosses the pane's edge copies like any other instead of depending on whether
-  the neighbouring widget happens to capture the mouse; ctrl+c copies again
-  while a selection stands and is the agent's interrupt otherwise; cmd+c is only ever the copy, and types nothing when
-  there is no selection; double-click selects a word and a triple click nothing
-  (Textual's defaults would select the whole pane, and the next ctrl+c would
-  copy it instead of interrupting the agent). Only the left-button drag that
-  made a selection copies it — a right-button drag across a standing highlight
-  used to replace the clipboard with whatever it crossed; a drag that begins in
-  another widget and crosses into a pane highlights without copying, since the
-  terminal gives that gesture to the widget it began on, and ctrl+c takes it.
+  crosses the pane's edge copies in either direction instead of depending on
+  whether the neighbouring widget happens to capture the mouse. Only a
+  left-button gesture that actually changed a pane's selection copies: a
+  right-button drag across a standing highlight leaves the clipboard alone, and
+  so does a release with nothing to do with a pane — a drag on the footer, a
+  scrollbar, a button. ctrl+c copies again while a selection stands and is the
+  agent's interrupt otherwise, including when the selection covers nothing;
+  cmd+c is only ever the copy, and types nothing when there is no selection;
+  double-click selects a word and a triple click nothing (Textual's defaults
+  would select the whole pane, and the next ctrl+c would copy it instead of
+  interrupting the agent).
   The `(exited 0)` notice row is tinted by the drag that copies it, like every
   other row, and so is the `[↑k/history]` marker — whatever a row displays is
   what it highlights and what it copies, cut to the columns the pane shows
   rather than to the width of a tmux window that outgrew it. The highlight and
   the clipboard read the same rows at the same moment, so they cannot disagree:
   under an agent that is still printing, a drag copies the text at release and
-  ctrl+c copies what is under the highlight when it is pressed. Switching the pane to another agent drops the selection, and
-  changing the theme drops the highlight's resolved colour so a theme picked
-  mid-drag does not leave the tint in the old palette.
+  ctrl+c copies what is under the highlight when it is pressed. Switching the
+  pane to another agent drops the selection, and changing the theme drops the
+  highlight's resolved colour so a theme picked mid-drag does not leave the
+  tint in the old palette.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**
   Measured against a production workspace on 2026-09-09: one
   `aisquare launch coder -p …` produced TWO dashboard Runs. `5efb96de…` held the

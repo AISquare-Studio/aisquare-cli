@@ -40,7 +40,7 @@ from textual.pilot import Pilot
 from textual.selection import Selection
 from textual.strip import Strip
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Input, Static
+from textual.widgets import ContentSwitcher, Footer, Input, Static
 
 from aisquare.cli.ui.terminal import (
     NO_PANE,
@@ -229,9 +229,12 @@ class Host(App[None]):
     use the header, or it measures a path the app does not have (review of
     #120, round 6, which is exactly how a broken cross-widget copy passed).
 
-    ``on_text_selected`` mirrors ``FleetApp``: the Screen posts it on every
-    MouseUp and it bubbles to the app, never to a widget, so the app is where
-    a pane learns that a selection gesture finished.
+    ``on_mouse_down`` / ``on_text_selected`` mirror ``FleetApp``, and must keep
+    mirroring it: the Screen posts ``TextSelected`` on every MouseUp and it
+    bubbles to the app, never to a widget, so the app is where a pane learns
+    that a gesture finished AND which button began it. Anything this harness
+    does differently from ``FleetApp`` is a test that proves nothing —
+    ``tests/test_ui_shell.py`` drives the real wiring for that reason.
     """
 
     def __init__(
@@ -242,6 +245,7 @@ class Host(App[None]):
         escape_key: str = "f12",
         with_input: bool = False,
         with_header: bool = False,
+        with_footer: bool = False,
     ) -> None:
         super().__init__()
         self._server = server
@@ -249,8 +253,10 @@ class Host(App[None]):
         self._escape_key = escape_key
         self._with_input = with_input
         self._with_header = with_header
+        self._with_footer = with_footer
         self.escapes = 0
         self.notices: list[str] = []
+        self._gesture_button: int | None = None
 
     def compose(self) -> ComposeResult:
         if self._with_input:
@@ -260,10 +266,19 @@ class Host(App[None]):
         yield TerminalPane(
             self._pane_id, server=self._server, escape_key=self._escape_key, id="pane"
         )
+        if self._with_footer:
+            # ``ALLOW_SELECT = False``, so Textual leaves a standing selection
+            # alone when a gesture happens here — the shape of an unrelated
+            # release that used to re-copy it.
+            yield Footer()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._gesture_button = event.button
 
     def on_text_selected(self, event: events.TextSelected) -> None:
-        for pane in self.query(TerminalPane):
-            pane.selection_gesture_ended()
+        button, self._gesture_button = self._gesture_button, None
+        for pane in self.screen.query(TerminalPane):
+            pane.selection_gesture_ended(button)
 
     @property
     def pane(self) -> TerminalPane:
@@ -1595,6 +1610,126 @@ def test_a_backwards_selection_is_ordered_rather_than_raising() -> None:
     assert _extract(Selection(Offset(1, 2), Offset(1, 0)), rows) == "aa\nbbb\nc"
     assert _extract(Selection(Offset(1, 0), Offset(1, 2)), rows) == "aa\nbbb\nc"
     assert _extract(Selection(Offset(2, 1), Offset(1, 1)), rows) == "b"
+
+
+def test_a_selection_left_over_from_a_taller_pane_copies_nothing(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Clamping the rows BEFORE ordering the endpoints mapped both onto the last
+    row with the columns reversed, and the swap then read a span nobody had
+    selected — `rows[last][4:8]`, with nothing highlighted on screen. Worse, a
+    non-empty answer made ``_copy_selection`` report success, so ctrl+c reported
+    a copy and swallowed the agent's interrupt: a runaway agent could not be
+    stopped (review of the seventh version)."""
+
+    # Every row carries text, so the bottom row the stale rows clamp onto has
+    # something to copy — which is the whole point: a blank one hides the bug.
+    fake.panes["%1"].screen = [f"row{n} xxxxxxxxxx" for n in range(6)]
+
+    async def drive() -> tuple[str, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            assert pane._lines[5].startswith("row5"), "the last row has text to take"
+            pane.focus()
+            # A selection left over from a taller pane: both rows are off the
+            # end of this one, and clamp onto the last row with the columns the
+            # wrong way round.
+            pane.screen.selections = {pane: Selection(Offset(8, 8), Offset(4, 9))}
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return host.clipboard, list(fake.sent())
+
+    clipboard, sent = run(drive())
+    assert clipboard == "", "nothing was highlighted, so nothing is copied"
+    assert sent == [("C-c",)], "and ctrl+c stays the agent's interrupt"
+
+
+def test_a_gesture_that_touches_no_pane_row_leaves_the_clipboard_alone(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The app hears every release, including ones with nothing to do with a
+    pane. A drag on the footer — which does not allow selection, so Textual does
+    not clear the standing one either — re-copied it and toasted again for a
+    gesture that selected nothing (review of the seventh version)."""
+
+    async def drive() -> tuple[str, int, str, int]:
+        host = Host(fake.server(tmp_path), "%1", with_footer=True)
+        async with host.run_test(size=(40, 10)) as pilot:
+            pane = host.pane
+            footer = host.query_one(Footer)
+            await wait_until(pilot, lambda: synced(pane))
+            await _drag(pilot, pane, (0, 2), (5, 2))
+            dragged, toasts = host.clipboard, len(host.notices)
+            fake.panes["%1"].screen = ["AAA", "BBB", "CCC"]
+            await wait_until(pilot, lambda: "CCC" in pane._lines)
+            await pilot.mouse_down(footer, offset=(1, 0))
+            await pilot.hover(footer, offset=(6, 0))
+            await pilot.mouse_up(footer, offset=(6, 0))
+            await pilot.pause()
+            return dragged, toasts, host.clipboard, len(host.notices)
+
+    dragged, toasts, after, toasts_after = run(drive())
+    assert dragged == "third " and toasts == 1
+    assert after == dragged, "the standing selection is not re-copied"
+    assert toasts_after == toasts, "and nothing claims a copy that did not happen"
+
+
+def test_a_double_click_does_not_leak_into_the_next_gesture(fake: FakeTmux, tmp_path: Path) -> None:
+    """A double click selects its word AFTER the gesture that caused it ended,
+    so the selection change it makes must not count as taking part in the next
+    one — measured re-copying the word on the following release."""
+
+    async def drive() -> tuple[str, int, str, int]:
+        host = Host(fake.server(tmp_path), "%1", with_footer=True)
+        async with host.run_test(size=(40, 10)) as pilot:
+            pane = host.pane
+            footer = host.query_one(Footer)
+            await wait_until(pilot, lambda: synced(pane))
+            await pilot.click(pane, offset=(8, 1), times=2)
+            await pilot.pause()
+            word, toasts = host.clipboard, len(host.notices)
+            await pilot.mouse_down(footer, offset=(1, 0))
+            await pilot.hover(footer, offset=(6, 0))
+            await pilot.mouse_up(footer, offset=(6, 0))
+            await pilot.pause()
+            return word, toasts, host.clipboard, len(host.notices)
+
+    word, toasts, after, toasts_after = run(drive())
+    assert word == "row" and toasts == 1
+    assert after == word and toasts_after == toasts
+
+
+def test_a_right_button_drag_from_outside_the_pane_does_not_copy(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The pane only sees a press that lands ON it, so a right-button drag begun
+    on the header read as a left one and copied — the same gesture being a copy
+    or not purely on where it began (review of the seventh version). The app
+    sees every press and passes the button down."""
+
+    async def drive() -> tuple[str, int, str, int]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            header = host.query_one("#other", Static)
+            await wait_until(pilot, lambda: synced(pane))
+            await _drag(pilot, pane, (0, 2), (5, 2))
+            dragged, toasts = host.clipboard, len(host.notices)
+            host.screen.clear_selection()
+            await pilot.pause()
+            await pilot.mouse_down(header, offset=(1, 0), button=3)
+            await pilot.hover(pane, offset=(5, 1))
+            await pilot.mouse_up(pane, offset=(5, 1))
+            await pilot.pause()
+            return dragged, toasts, host.clipboard, len(host.notices)
+
+    dragged, toasts, after, toasts_after = run(drive())
+    assert dragged == "third " and toasts == 1
+    assert after == dragged, "a right-button drag is not a copy request, wherever it began"
+    assert toasts_after == toasts
 
 
 def test_a_second_drag_copies_the_screen_it_was_made_on(fake: FakeTmux, tmp_path: Path) -> None:

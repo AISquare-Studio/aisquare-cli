@@ -110,20 +110,18 @@ def _extract(selection: Selection, rows: list[str]) -> str:
     if not rows:
         return ""
     last = len(rows) - 1
-    if selection.start is None:
-        start_row, start_col = 0, 0
-    else:
-        start_row, start_col = min(selection.start.y, last), selection.start.x
-    if selection.end is None:
-        end_row, end_col = last, len(rows[last])
-    else:
-        end_row, end_col = min(selection.end.y, last), selection.end.x
-    if (start_row, start_col) > (end_row, end_col):
-        # Ordered, like every other index here is clamped. Textual hands us a
-        # normalised selection today, so this is unreachable through the UI —
-        # but it is an unguarded ValueError in a mouse handler otherwise, the
-        # same class as the IndexError that took the app down in round 1.
-        start_row, start_col, end_row, end_col = end_row, end_col, start_row, start_col
+    start = (0, 0) if selection.start is None else (selection.start.y, selection.start.x)
+    end = (last, len(rows[last])) if selection.end is None else (selection.end.y, selection.end.x)
+    # Ordered BEFORE the rows are clamped, not after. Clamping first can map two
+    # different rows onto the same one and leave the columns reversed, and
+    # swapping those then reads a span nobody selected: a selection left over
+    # from a taller pane copied `rows[last][4:8]` with nothing highlighted on
+    # screen — and, because that returns text instead of "", ctrl+c reported a
+    # copy and swallowed the agent's interrupt (review of the seventh version).
+    if start > end:
+        start, end = end, start
+    start_row, start_col = min(max(start[0], 0), last), max(start[1], 0)
+    end_row, end_col = min(max(end[0], 0), last), max(end[1], 0)
     if start_row == end_row:
         return rows[start_row][start_col:end_col]
     first, *middle, final = rows[start_row : end_row + 1]
@@ -143,12 +141,13 @@ class TerminalPane(Widget, can_focus=True):
 
     #: Drag-select over the rendered rows (§4.3). Textual's default
     #: ``get_selection`` reads ``render()`` output, which a Line API widget does
-    #: not have, so this widget supplies its own from the rows it showed when
-    #: the drag began and paints the span itself in :meth:`render_line`. Copy is
-    #: on release and on ctrl+c while a selection exists; without one ctrl+c
-    #: reaches the agent. Double-click selects a word; a triple click nothing —
-    #: Textual's defaults would select the whole pane, and ctrl+c would then
-    #: copy 3000 characters instead of interrupting the agent.
+    #: not have, so this widget supplies its own from the rows it is showing —
+    #: the same rows it paints the span on in :meth:`render_line`, so the two
+    #: cannot disagree. Copy is when the gesture ends (the app routes that, see
+    #: :meth:`selection_gesture_ended`) and on ctrl+c while a selection exists;
+    #: without one ctrl+c reaches the agent. Double-click selects a word; a
+    #: triple click nothing — Textual's defaults would select the whole pane,
+    #: and ctrl+c would then copy 3000 characters instead of interrupting.
     ALLOW_SELECT: ClassVar[bool] = True
     FAST_INTERVAL: float = 0.05
     """Seconds between frames while the screen is changing (~20 fps)."""
@@ -227,6 +226,10 @@ class TerminalPane(Widget, can_focus=True):
         """The selection tint, resolved once per selection rather than per row."""
         self._drag_button: int | None = None
         """Which button this pane saw go down, until the gesture it began ends."""
+        self._touched = False
+        """Whether this pane's selection changed during the gesture now running."""
+        self._own_word = False
+        """A word this pane selected and copied itself, awaiting its own watcher."""
         self._painted_span: Selection | None = None
         """The selection the rows on screen were last painted for."""
 
@@ -677,6 +680,14 @@ class TerminalPane(Widget, can_focus=True):
         """
         if selection is None:
             self._selection_bg = None
+        if self._own_word:
+            # A word this pane selected on a double click and has ALREADY
+            # copied. The gesture that caused it ended before the click was
+            # delivered, so counting it as participation would make the next
+            # release anywhere on screen copy the word again (measured).
+            self._own_word = False
+        else:
+            self._touched = True
         self._repaint_selection(selection)
 
     def _repaint_selection(self, selection: Selection | None) -> None:
@@ -876,6 +887,7 @@ class TerminalPane(Widget, can_focus=True):
         end = index
         while end < len(text) and not text[end].isspace():
             end += 1
+        self._own_word = True
         self.screen.selections = {self: Selection(Offset(start, y), Offset(end, y))}
         self._copy_selection()
 
@@ -885,7 +897,7 @@ class TerminalPane(Widget, can_focus=True):
         """Note which button began a gesture HERE, for a release we may not see."""
         self._drag_button = event.button
 
-    def selection_gesture_ended(self) -> None:
+    def selection_gesture_ended(self, button: int | None = None) -> None:
         """A selection gesture finished anywhere on screen: copy what it left here.
 
         Called from the app's ``TextSelected`` handler, because that is the only
@@ -897,18 +909,29 @@ class TerminalPane(Widget, can_focus=True):
         ``Static`` header this pane actually sits under does not, so it did —
         and a leftover press offset decided which (review of the sixth version).
 
-        A gesture this pane did not see the press of is a drag that began in
-        another widget and crossed in; that is a copy. One it did see must have
-        been the LEFT button — a right-button drag across a standing highlight
-        replaced the clipboard with whatever it crossed (review of the third).
-        A click that moves nothing has its selection cleared by Textual before
-        this runs, so there is nothing to copy for one.
+        Only a gesture that actually changed THIS pane's selection copies. The
+        app hears every release, including ones with nothing to do with a pane —
+        a drag on the Footer, a scrollbar, a button — and those leave a standing
+        selection untouched, so re-copying it rewrote the clipboard and toasted
+        again for a gesture that selected nothing (review of the seventh
+        version). ``selection_updated`` firing for this pane is the signal that
+        it did take part.
+
+        Only the LEFT button is a copy: a right-button drag across a standing
+        highlight replaced the clipboard with whatever it crossed (review of the
+        third). ``button`` comes from the app, which sees the press wherever it
+        landed; the pane's own record answers when the app cannot.
         """
-        button, self._drag_button = self._drag_button, None
-        if button is not None and button != 1:
+        touched, self._touched = self._touched, False
+        pressed, self._drag_button = self._drag_button, None
+        # A word-select whose watcher never fired (the same word twice) would
+        # otherwise swallow the next gesture's participation.
+        self._own_word = False
+        if not touched or self.text_selection is None:
             return
-        if self.text_selection is not None:
-            self._copy_selection()
+        if (button if button is not None else pressed) not in (None, 1):
+            return
+        self._copy_selection()
 
     def _copy_selection(self) -> bool:
         """Copy the selected text to the clipboard (OSC 52); False when nothing is selected."""

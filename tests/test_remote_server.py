@@ -41,7 +41,7 @@ class Fake:
     def __init__(self) -> None:
         self.board: dict[str, object] = {"project": {"id": "p1"}, "tasks": [], "events": []}
         self.fleet: dict[str, object] = {"name": "demo", "agents": []}
-        self.pane_calls: list[tuple[str, str | None]] = []
+        self.pane_calls: list[tuple[str, str | None, int]] = []
         self.fleet_calls: list[str | None] = []
         self.written: list[tuple[str, dict[str, Any]]] = []
 
@@ -50,8 +50,8 @@ class Fake:
             self.fleet_calls.append(project)
             return self.fleet
 
-        def panes(agent: str, project: str | None = None) -> dict[str, object]:
-            self.pane_calls.append((agent, project))
+        def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
+            self.pane_calls.append((agent, project, history))
             if agent == "ghost":
                 raise NoSuchAgent("no live agent 'ghost'")
             return {
@@ -462,7 +462,7 @@ def test_pane_frames_only_for_subscribed_agents(
         assert pane["agent"] == "coder-1"
         assert set(pane) == {"type", "agent", "payload", "ts"}
         assert pane["payload"]["rows"] == ["\x1b[32mcoder-1\x1b[0m $ "]
-        assert set(fake.pane_calls) == {("coder-1", None)}
+        assert set(fake.pane_calls) == {("coder-1", None, 0)}
         ws.send_text(json.dumps({"subscribe": "ghost"}))
         ghost = _frames_until(ws, "pane")[-1]
         assert ghost["agent"] == "ghost" and ghost["payload"]["rows"] == []

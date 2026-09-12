@@ -807,6 +807,29 @@ class TmuxServer:
         effective = min(scrollback, facts.history_size)
         return Capture(lines=rows[: facts.height], facts=facts, scrollback=effective)
 
+    def capture_history(self, pane_id: str, *, history: int) -> Capture:
+        """Scrollback PLUS the live screen, oldest row first, in ONE contiguous frame.
+
+        :meth:`capture` answers "what is on this screen now" and so slices to
+        exactly one screen height; this answers "what has this pane said", a
+        different question, and keeping the rows above the screen is the whole
+        point of it.
+
+        Still one process: ``capture-pane -S -<n>`` with no ``-E`` runs from n
+        lines above the screen top to the bottom of the live screen, and tmux
+        clamps n to the history it actually has. The alternative — calling
+        :meth:`capture` once per screenful and stitching — costs a process per
+        ~50 rows AND cannot produce a consistent snapshot, because a live pane
+        moves between the calls, so the seams would duplicate or drop rows.
+
+        ``Capture.scrollback`` is MEASURED here rather than inferred: the frame
+        keeps every row, so the count above the screen is ``len(rows) - height``
+        and does not have to be predicted from ``history_size``.
+        """
+        history = max(0, history)
+        rows, facts = self._frame(pane_id, history, None)
+        return Capture(lines=rows, facts=facts, scrollback=max(0, len(rows) - facts.height))
+
     def _frame(
         self, pane_id: str, scrollback: int, height: int | None
     ) -> tuple[list[str], PaneFacts]:

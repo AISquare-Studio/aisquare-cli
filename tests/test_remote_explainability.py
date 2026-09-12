@@ -168,7 +168,7 @@ def _sources(explainability: Any) -> Sources:
         board=lambda: {},
         tasks=lambda: [],
         memory=lambda: [],
-        panes=lambda agent, project: {"rows": [], "width": 0, "height": 0},
+        panes=lambda agent, project, history: {"rows": [], "width": 0, "height": 0},
         explainability=explainability,
     )
 

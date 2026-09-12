@@ -258,7 +258,7 @@ def test_panes_without_a_project_reads_the_current_projects_agent(
     current, other = two_projects
     _seed_agent(current, "coder-1", "%1")
     _seed_agent(other, "coder-1", "%2")  # SAME label, other project — scoping, not luck
-    assert live_sources().panes("coder-1", None)["rows"] == ["pane %1"]
+    assert live_sources().panes("coder-1", None, 0)["rows"] == ["pane %1"]
 
 
 def test_panes_with_a_project_reads_that_projects_agent(
@@ -267,7 +267,7 @@ def test_panes_with_a_project_reads_that_projects_agent(
     current, other = two_projects
     _seed_agent(current, "coder-1", "%1")
     _seed_agent(other, "coder-1", "%2")
-    assert live_sources().panes("coder-1", other)["rows"] == ["pane %2"]
+    assert live_sources().panes("coder-1", other, 0)["rows"] == ["pane %2"]
 
 
 def test_panes_for_an_agent_the_named_project_does_not_have(
@@ -276,14 +276,14 @@ def test_panes_for_an_agent_the_named_project_does_not_have(
     current, other = two_projects
     _seed_agent(current, "only-here")
     with pytest.raises(NoSuchAgent):
-        live_sources().panes("only-here", other)
+        live_sources().panes("only-here", other, 0)
 
 
 def test_panes_with_an_unknown_project_raises(
     two_projects: tuple[str, str], fake_tmux: _FakeTmux
 ) -> None:
     with pytest.raises(NoSuchProject):
-        live_sources().panes("coder-1", "no-such-project")
+        live_sources().panes("coder-1", "no-such-project", 0)
 
 
 # --- send-keys (still a §4-E write: 403 unless allow_write) -----------------------------
@@ -494,10 +494,10 @@ def _sources(fleets: dict[str | None, dict[str, object]]) -> Sources:
             raise NoSuchProject(f"no project matches {project!r}")
         return fleets[project]
 
-    def panes(agent: str, project: str | None) -> dict[str, object]:
+    def panes(agent: str, project: str | None, history: int) -> dict[str, object]:
         if project is not None and project not in fleets:
             raise NoSuchProject(f"no project matches {project!r}")
-        return {"rows": [f"{project}:{agent}"], "width": 1, "height": 1}
+        return {"rows": [f"{project}:{agent}:h{history}"], "width": 1, "height": 1}
 
     return Sources(
         projects=lambda: [],
@@ -548,8 +548,8 @@ def test_get_fleet_with_an_unknown_project_is_404(runtime: Runtime, tmp_path: Pa
 def test_get_panes_forwards_the_project_query_param(runtime: Runtime, tmp_path: Path) -> None:
     client = _client(runtime, _sources(FLEETS), tmp_path)
     scoped = client.get(f"/r/{runtime.token}/api/panes/coder-1", params={"project": "prj_other"})
-    assert scoped.json()["rows"] == ["prj_other:coder-1"]
-    assert client.get(f"/r/{runtime.token}/api/panes/coder-1").json()["rows"] == ["None:coder-1"]
+    assert scoped.json()["rows"] == ["prj_other:coder-1:h0"]
+    assert client.get(f"/r/{runtime.token}/api/panes/coder-1").json()["rows"] == ["None:coder-1:h0"]
 
 
 def test_get_panes_with_an_unknown_project_is_404(runtime: Runtime, tmp_path: Path) -> None:

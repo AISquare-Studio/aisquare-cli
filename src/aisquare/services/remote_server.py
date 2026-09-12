@@ -13,6 +13,10 @@ in — and every path lives under ``/r/<token>/``:
                                   ``?project=<id|name|codename>`` (default: the
                                   CURRENT project, unchanged); an unknown project
                                   is a 404 shaped exactly like an unknown agent.
+                                  ``panes/<agent>`` also takes ``?history=<n>``
+                                  for n lines of scrollback above the live screen,
+                                  oldest first in one block (§4-L); omitted or 0
+                                  is today's live-only frame, byte for byte.
 * ``WS   /r/<token>/ws``          frames ``{type, agent?, payload, ts}`` every second;
                                   a ``{subscribe_fleet:"<project>"}`` text frame
                                   switches which project's ``fleet`` frames arrive
@@ -79,6 +83,8 @@ if TYPE_CHECKING:
     from starlette.responses import Response
     from starlette.websockets import WebSocket
 
+    from aisquare.core.tmux import Capture
+
 log = logging.getLogger(__name__)
 
 BIND = "127.0.0.1"
@@ -101,6 +107,15 @@ WRITE_ENDPOINTS = (
     "send-keys",
 )
 """PLAN §4-E, verbatim. Saturday's page wires exactly this list."""
+
+HISTORY_CAP = 5000
+"""Most scrollback lines one ``?history=`` request may return (PLAN §4-L).
+
+The fleet's tmux keeps ``history-limit 50000``, and a pane that deep must not be
+able to make one request enormous. A request over this is served at the cap and
+the response SAYS so (``history_capped``) rather than truncating quietly, so a
+short answer is never mistaken for a short pane.
+"""
 
 INSTALL_HINT = "pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli websockets)"
 
@@ -540,8 +555,11 @@ Snapshot = Callable[[], object]
 FleetSource = Callable[[str | None], object]
 """An optional project (id/name/codename) → that project's ``fleet ls --json`` payload.
 ``None`` is the CURRENT project — byte-identical to today. Raises :class:`NoSuchProject`."""
-PaneSource = Callable[[str, str | None], dict[str, object]]
-"""Agent label, optional project → one pane capture. Raises :class:`NoSuchAgent`/`NoSuchProject`."""
+PaneSource = Callable[[str, str | None, int], dict[str, object]]
+"""Agent label, optional project, scrollback lines → one pane capture.
+
+``history`` of 0 is today's live-screen-only frame, byte for byte (§4-L).
+Raises :class:`NoSuchAgent` / :class:`NoSuchProject`."""
 ExplainabilitySource = Callable[[str], dict[str, object]]
 """Agent label → the §4-I card payload. Raises :class:`NoSuchAgent` only; never anything else."""
 WriteHandler = Callable[[dict[str, Any]], tuple[dict[str, object], str]]
@@ -568,7 +586,23 @@ class Writes:
     handlers: dict[str, WriteHandler]
 
 
-def _live_panes(label: str, project: str | None = None) -> dict[str, object]:
+def _pane_payload(capture: Capture) -> dict[str, object]:
+    """The four keys every pane response has carried since day one (§4-D)."""
+    return {
+        "rows": capture.lines,
+        "cursor": [capture.facts.cursor_x, capture.facts.cursor_y],
+        "width": capture.facts.width,
+        "height": capture.facts.height,
+    }
+
+
+def _live_panes(label: str, project: str | None = None, history: int = 0) -> dict[str, object]:
+    """One pane frame: the live screen, or scrollback and the screen together (§4-L).
+
+    ``history`` of 0 takes the SAME call today took and returns the SAME four
+    keys, so the live stream and every existing client are untouched — the
+    history keys appear only when history was asked for.
+    """
     from aisquare.core.store import store_session
     from aisquare.services import fleet as fleet_service
 
@@ -577,13 +611,18 @@ def _live_panes(label: str, project: str | None = None) -> dict[str, object]:
         agent = store.fleet_agent_by_label(target.id, label, live_only=True)
     if agent is None:
         raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
-    capture = fleet_service.server_for(agent.tmux_socket).capture(agent.pane_id)
-    return {
-        "rows": capture.lines,
-        "cursor": [capture.facts.cursor_x, capture.facts.cursor_y],
-        "width": capture.facts.width,
-        "height": capture.facts.height,
-    }
+    server = fleet_service.server_for(agent.tmux_socket)
+    if history <= 0:
+        return _pane_payload(server.capture(agent.pane_id))
+    capture = server.capture_history(agent.pane_id, history=min(history, HISTORY_CAP))
+    payload = _pane_payload(capture)
+    payload["history_size"] = capture.facts.history_size
+    payload["history"] = capture.scrollback
+    if history > HISTORY_CAP:
+        # Said out loud: without this a capped answer is indistinguishable from
+        # a young pane, and the client would conclude there is nothing older.
+        payload["history_capped"] = HISTORY_CAP
+    return payload
 
 
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
@@ -1005,6 +1044,26 @@ def _forwarded_https(request: Request) -> bool:
     return proto.split(",")[0].strip().lower() == "https"
 
 
+def _history_param(raw: str | None) -> int:
+    """``?history=`` as a line count; raises ``ValueError`` for anything else.
+
+    Absent and empty both mean 0 — today's live-only frame. A negative or
+    non-numeric value is refused rather than clamped, because silently reading
+    ``history=-5`` or ``history=lots`` as "no history" would return a live-only
+    frame to a client that believes it asked for scrollback, and the page would
+    render an empty conversation with nothing to say why.
+    """
+    if raw is None or raw == "":
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"'history' must be a whole number of lines, not {raw!r}") from None
+    if value < 0:
+        raise ValueError(f"'history' cannot be negative, got {value}")
+    return value
+
+
 def _json_error(status: int, error: str, message: str | None = None) -> Response:
     from starlette.responses import JSONResponse
 
@@ -1168,7 +1227,11 @@ def build_app(
         agent = request.path_params["agent"]
         project = request.query_params.get("project") or None
         try:
-            payload = await asyncio.to_thread(reads.panes, agent, project)
+            history = _history_param(request.query_params.get("history"))
+        except ValueError as exc:
+            return _json_error(400, "invalid", str(exc))
+        try:
+            payload = await asyncio.to_thread(reads.panes, agent, project, history)
         except LookupError as exc:
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:
@@ -1292,7 +1355,9 @@ def build_app(
             await push_if_changed("remote", "remote", runtime.remote_json(), None)
             for agent in sorted(subscribed):
                 try:
-                    payload = await asyncio.to_thread(reads.panes, agent, None)
+                    # §4-L: history is a FETCH, live stays a stream — 0 keeps
+                    # this frame exactly the §4-D shape it has always had.
+                    payload = await asyncio.to_thread(reads.panes, agent, None, 0)
                 except Exception as exc:
                     payload = {"rows": [], "width": 0, "height": 0, "error": str(exc)}
                 await push_if_changed(f"pane:{agent}", "pane", payload, agent)
@@ -1580,6 +1645,7 @@ __all__ = [
     "BIND",
     "COOKIE",
     "DEFAULT_PORT",
+    "HISTORY_CAP",
     "NO_PAGE_HINT",
     "READ_ONLY_REASON",
     "WRITE_ENDPOINTS",

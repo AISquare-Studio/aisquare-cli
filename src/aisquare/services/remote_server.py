@@ -13,6 +13,9 @@ in — and every path lives under ``/r/<token>/``:
                                   ``?project=<id|name|codename>`` (default: the
                                   CURRENT project, unchanged); an unknown project
                                   is a 404 shaped exactly like an unknown agent.
+                                  ``transcript/<agent>`` pages the agent's own
+                                  conversation (``?limit=``, ``?before=``, §4-M) —
+                                  the pane cannot, being alternate-screen.
                                   ``panes/<agent>`` also takes ``?history=<n>``
                                   for n lines of scrollback above the live screen,
                                   oldest first in one block (§4-L); omitted or 0
@@ -560,6 +563,11 @@ PaneSource = Callable[[str, str | None, int], dict[str, object]]
 
 ``history`` of 0 is today's live-screen-only frame, byte for byte (§4-L).
 Raises :class:`NoSuchAgent` / :class:`NoSuchProject`."""
+TranscriptSource = Callable[[str, str | None, int, str | None], dict[str, object]]
+"""Agent, optional project, limit, ``before`` cursor → one page of conversation (§4-M).
+
+A missing or unreadable transcript is an EMPTY page, never an error: an agent
+that has not written one yet must still open in the page."""
 ExplainabilitySource = Callable[[str], dict[str, object]]
 """Agent label → the §4-I card payload. Raises :class:`NoSuchAgent` only; never anything else."""
 WriteHandler = Callable[[dict[str, Any]], tuple[dict[str, object], str]]
@@ -576,6 +584,11 @@ class Sources:
     tasks: Snapshot
     memory: Snapshot
     panes: PaneSource
+    transcript: TranscriptSource = field(
+        default=lambda label, project, limit, before: _live_transcript(
+            label, project, limit, before
+        )
+    )
     explainability: ExplainabilitySource = field(default=lambda label: _live_explainability(label))
 
 
@@ -623,6 +636,48 @@ def _live_panes(label: str, project: str | None = None, history: int = 0) -> dic
         # a young pane, and the client would conclude there is nothing older.
         payload["history_capped"] = HISTORY_CAP
     return payload
+
+
+def _live_transcript(
+    label: str, project: str | None = None, limit: int = 0, before: str | None = None
+) -> dict[str, object]:
+    """One page of the agent's own conversation, from the board's transcript (§4-M).
+
+    The pane cannot answer this: agent panes are alternate-screen and tmux keeps
+    no scrollback for them. The board already records where the transcript is.
+    """
+    from aisquare.core.store import store_session
+    from aisquare.services import transcript as transcript_service
+
+    target = _resolve_project(project)
+    with store_session() as store:
+        agent = store.fleet_agent_by_label(target.id, label, live_only=True)
+        if agent is None:
+            raise NoSuchAgent(f"no live agent {label!r} in {target.root.name or target.id}")
+        session = store.get_session(agent.session_id) if agent.session_id else None
+    path = session.transcript_path if session is not None else None
+    page = transcript_service.read_page(
+        path,
+        limit=limit or transcript_service.DEFAULT_LIMIT,
+        before=before,
+        width=_pane_width(agent),
+    )
+    return page.as_json()
+
+
+def _pane_width(agent: FleetAgent) -> int:
+    """The agent's own pane width, so wrapped lines match the terminal they land in.
+
+    Best effort by design: a dead pane, or a tmux that will not answer, costs a
+    sensible 80 columns and never the page itself — the conversation is on disk
+    and does not depend on the pane still being there.
+    """
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        return fleet_service.server_for(agent.tmux_socket).capture(agent.pane_id).facts.width
+    except Exception:
+        return 80
 
 
 def _agent_state_counts(agents: list[FleetAgentStatus]) -> dict[str, int]:
@@ -683,7 +738,9 @@ def live_sources() -> Sources:
 
         return [entry.model_dump(mode="json") for entry in context_service.list_entries()]
 
-    return Sources(projects, fleet, board, tasks, memory, _live_panes, _live_explainability)
+    return Sources(
+        projects, fleet, board, tasks, memory, _live_panes, _live_transcript, _live_explainability
+    )
 
 
 # --- explainability card (§4-I) --------------------------------------------------------
@@ -1064,6 +1121,23 @@ def _history_param(raw: str | None) -> int:
     return value
 
 
+def _limit_param(raw: str | None) -> int:
+    """``?limit=`` as a turn count; 0 means "the default". Refuses nonsense.
+
+    Capped in :mod:`aisquare.services.transcript`, not here — the cap belongs
+    with the reader that has to honour it.
+    """
+    if raw is None or raw == "":
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"'limit' must be a whole number of turns, not {raw!r}") from None
+    if value < 0:
+        raise ValueError(f"'limit' cannot be negative, got {value}")
+    return value
+
+
 def _json_error(status: int, error: str, message: str | None = None) -> Response:
     from starlette.responses import JSONResponse
 
@@ -1236,6 +1310,25 @@ def build_app(
             return _json_error(404, "not_found", str(exc))
         except Exception as exc:
             log.warning("remote: pane capture for %s failed: %s", agent, exc)
+            return _json_error(503, "unavailable", str(exc))
+        return JSONResponse(payload)
+
+    async def transcript(request: Request) -> Response:
+        if device_of(request) is None:
+            return _json_error(401, "unauthorized")
+        agent = request.path_params["agent"]
+        project = request.query_params.get("project") or None
+        before = request.query_params.get("before") or None
+        try:
+            limit = _limit_param(request.query_params.get("limit"))
+        except ValueError as exc:
+            return _json_error(400, "invalid", str(exc))
+        try:
+            payload = await asyncio.to_thread(reads.transcript, agent, project, limit, before)
+        except LookupError as exc:
+            return _json_error(404, "not_found", str(exc))
+        except Exception as exc:
+            log.warning("remote: transcript for %s failed: %s", agent, exc)
             return _json_error(503, "unavailable", str(exc))
         return JSONResponse(payload)
 
@@ -1414,6 +1507,7 @@ def build_app(
         Route("/api/devices", devices_endpoint, methods=["GET"]),
         Route("/api/devices/{sid}", revoke_device, methods=["DELETE"]),
         Route("/api/panes/{agent}", panes, methods=["GET"]),
+        Route("/api/transcript/{agent}", transcript, methods=["GET"]),
         Route("/api/explainability/{agent}", explainability, methods=["GET"]),
         Route("/api/{name:path}", write, methods=["POST"]),
         Route("/api/{rest:path}", api_missing),

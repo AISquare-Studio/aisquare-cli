@@ -945,8 +945,29 @@ def _audit_keys(keys: list[str] | None) -> str:
 
 
 def _optional(body: dict[str, Any], key: str) -> str | None:
+    """An optional NAME or reference — blank and whitespace-only both mean absent.
+
+    Correct for a project ref, a note's task or a role. WRONG for literal text a
+    human typed: see :func:`_literal`.
+    """
     value = body.get(key)
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _literal(body: dict[str, Any], key: str) -> str | None:
+    """Text to deliver verbatim — whitespace is CONTENT here, not emptiness.
+
+    ``_optional`` answers "did they name something", and a name that is all
+    spaces is no name. A keystroke that is all spaces is a keystroke. Reading
+    typed text with ``_optional`` is what silently ate the space bar: a flush of
+    ``" "`` became ``None``, so a write carrying only a space delivered nothing
+    while the endpoint answered 200 ``sent: true``, and the audit line recorded
+    ``text=0ch`` — the trail honestly reporting that no text was sent, the loss
+    having happened before it. Absent or non-string is still absent; ``""`` is
+    still nothing to send.
+    """
+    value = body.get(key)
+    return value if isinstance(value, str) else None
 
 
 def live_writes() -> Writes:
@@ -1023,14 +1044,14 @@ def live_writes() -> Writes:
         from aisquare.services import fleet as fleet_service
 
         label = _required(body, "agent")
-        text = _optional(body, "text")
+        text = _literal(body, "text")
         keys = body.get("keys")
         if keys is not None and not (
             isinstance(keys, list) and all(isinstance(key, str) for key in keys)
         ):
             raise RequestError(400, "invalid", "'keys' must be a list of tmux key names")
         enter = bool(body.get("enter", False))
-        if text is None and not keys and not enter:
+        if not text and not keys and not enter:
             raise RequestError(400, "invalid", "give 'text', 'keys' or 'enter'")
         target = _resolve_project(_optional(body, "project"))
         with store_session() as store:

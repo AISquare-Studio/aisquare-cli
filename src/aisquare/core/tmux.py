@@ -190,6 +190,9 @@ _UNTARGETABLE = frozenset(".:")
 #: with ``kill-server`` in place of ``set`` the private server (every agent on
 #: it) dies. So every argument that carries CALLER data is passed through
 #: :func:`_data_arg` first.
+_HEX_CHUNK = 1024
+"""Bytes per ``send-keys -H`` call — one argv element each, so keep argv small."""
+
 _ARGV_SEPARATOR = ";"
 
 
@@ -849,15 +852,22 @@ class TmuxServer:
             self.run("send-keys", "-t", pane_id, *keys)
 
     def send_literal(self, pane_id: str, text: str) -> None:
-        """Literal text, exactly as typed (``-l``), even when it starts with ``-``.
+        """Literal text, byte for byte, through the hex path — nothing parses it.
 
-        A TRAILING ``;`` is tmux's command separator even after ``-l`` — measured
-        on 3.7c: ``send-keys -l -- ';'`` sends nothing and ``'a;'`` sends ``a``,
-        while ``'a\\;'`` arrives as ``a;``. So the last ``;`` is escaped
-        (:func:`_data_arg`, the same escape :meth:`spawn_window` applies).
+        This used to go through ``send-keys -l -- <arg>``, where tmux's own
+        argument handling reads the string before the pane does: measured on
+        3.7c, ``-l -- ';'`` sends NOTHING and ``'a;'`` sends ``a``, which is why
+        :func:`_data_arg` exists to escape a trailing separator. That workaround
+        is one known quirk of a parser whose behaviour varies by version, and
+        every character typed from the remote page crosses it.
+
+        ``-H`` takes the bytes as hex pairs, so there is no string for any
+        version of any parser to interpret — a space, a trailing space, a tab, a
+        lone ``;`` and a multi-byte character all arrive exactly as sent. The
+        cost is argv length, which :meth:`send_bytes` bounds.
         """
         if text:
-            self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
+            self.send_bytes(pane_id, text.encode("utf-8"))
 
     def send_bytes(self, pane_id: str, data: bytes) -> None:
         """Raw bytes, one hex pair per argument (``-H``).
@@ -866,9 +876,15 @@ class TmuxServer:
         a string and tmux re-emits it as UTF-8, so ``chr(0x98)`` arrives as
         ``C2 98`` — measured on 3.7c, the X10 mouse encoding's column byte for
         any cell past 95 split in two, with the row byte then read as text.
+
+        Sent in chunks of :data:`_HEX_CHUNK` bytes because ``-H`` costs one argv
+        element PER BYTE: a pasted paragraph would otherwise build a command line
+        long enough to fail with E2BIG. Chunks go in order down one synchronous
+        path, so the pane sees one uninterrupted stream; a typed run is one call.
         """
-        if data:
-            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in data))
+        for start in range(0, len(data), _HEX_CHUNK):
+            chunk = data[start : start + _HEX_CHUNK]
+            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in chunk))
 
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line.

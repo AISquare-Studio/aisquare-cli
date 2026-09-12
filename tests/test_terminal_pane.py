@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from rich.cells import cell_len
 from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
@@ -49,6 +50,7 @@ from aisquare.cli.ui.terminal import (
     EscapeToSidebar,
     TerminalPane,
     _extract,
+    route_selection_gesture,
 )
 from aisquare.cli.ui.views.agent import AgentView, header_text
 from aisquare.core.tmux import BUNDLED_CONF, Completed, TmuxError, TmuxServer
@@ -229,12 +231,11 @@ class Host(App[None]):
     use the header, or it measures a path the app does not have (review of
     #120, round 6, which is exactly how a broken cross-widget copy passed).
 
-    ``on_mouse_down`` / ``on_text_selected`` mirror ``FleetApp``, and must keep
-    mirroring it: the Screen posts ``TextSelected`` on every MouseUp and it
-    bubbles to the app, never to a widget, so the app is where a pane learns
-    that a gesture finished AND which button began it. Anything this harness
-    does differently from ``FleetApp`` is a test that proves nothing —
-    ``tests/test_ui_shell.py`` drives the real wiring for that reason.
+    ``on_text_selected`` calls ``route_selection_gesture``, the same function
+    ``FleetApp`` calls, so the two cannot drift: this harness once mirrored it by
+    hand and fell behind, leaving twenty gesture tests exercising an end-of-
+    gesture path production did not have (review of the ninth version).
+    ``tests/test_ui_shell.py`` still drives the real app end to end.
     """
 
     def __init__(
@@ -277,8 +278,7 @@ class Host(App[None]):
 
     def on_text_selected(self, event: events.TextSelected) -> None:
         button, self._gesture_button = self._gesture_button, None
-        for pane in self.screen.query(TerminalPane):
-            pane.selection_gesture_ended(button)
+        route_selection_gesture(self, button)
 
     @property
     def pane(self) -> TerminalPane:
@@ -1159,6 +1159,59 @@ def test_ctrl_c_copies_a_selection_and_interrupts_the_agent_otherwise(
     assert after == [("C-c",)], "without a selection it reaches the agent as before"
 
 
+def test_a_drag_over_rows_with_nothing_printed_is_not_a_copy(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Several blank rows, not one. One row extracts as ``""`` and the guard
+    holds for free; two extract as ``"\n"``, which is truthy — so the copy
+    reported success over empty space and ctrl+c stopped reaching the agent
+    (review of the ninth version). The interrupt is the property, not just the
+    clipboard."""
+
+    async def drive() -> tuple[bool, str, int, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await _drag(pilot, pane, (2, 4), (6, 6))  # three rows nothing printed on
+            highlighted = pane.text_selection is not None
+            pane.focus()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return highlighted, host.clipboard, len(host.notices), list(fake.sent())
+
+    highlighted, clipboard, toasts, sent = run(drive())
+    assert highlighted, "the premise: a highlight stands over the blank rows"
+    assert clipboard == "" and toasts == 0, "rows with nothing printed are not a copy"
+    assert sent == [("C-c",)], "and ctrl+c is still the agent's interrupt"
+
+
+def test_the_scroll_marker_is_measured_in_cells_not_characters(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cut`` and ``gap`` are cell counts, fed to ``Strip.crop`` and to the
+    text composition. Measuring the marker in characters agreed by luck — ``↑``
+    is one cell — and would overflow the corner on any marker whose two measures
+    differ, splitting the paint from the copy on row 0 (review of the ninth)."""
+    monkeypatch.setattr(TerminalPane, "SCROLL_MARKER_TEMPLATE", "[日本{scrollback}/{history}]")
+    pane_fake = fake.panes["%1"]
+    pane_fake.history = [f"old {n}" for n in range(5)]
+
+    async def drive() -> tuple[int, str]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            widget.focus()
+            await wait_until(pilot, lambda: synced(widget))
+            widget.post_message(scroll_event(widget, up=True))
+            await wait_until(pilot, lambda: widget.scrollback > 0)
+            return rows(widget)[0].cell_length, widget._row_text(0)
+
+    painted_cells, text = run(drive())
+    assert painted_cells == 40, "the row still fills the pane exactly"
+    assert cell_len(text) == 40, f"and the text lines up cell for cell: {text!r}"
+
+
 def test_a_drag_below_the_output_neither_crashes_nor_selects_everything(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
@@ -1605,16 +1658,44 @@ def test_a_right_button_drag_across_a_highlight_still_leaves_the_clipboard_alone
     assert new_toasts == 0
 
 
-def test_a_backwards_selection_is_ordered_rather_than_raising() -> None:
-    """Every other index in ``_extract`` is clamped; this one unpacked a slice
-    that could be empty. Textual hands the widget a normalised selection today,
-    so it is unreachable through the UI — but it is an unguarded ValueError in a
-    mouse handler otherwise, the same class as the IndexError that took the app
-    down in round 1 (review)."""
+def test_a_backwards_selection_copies_nothing_because_nothing_is_painted() -> None:
+    """``Selection.get_span`` reorders nothing: for ``start.y > end.y`` it
+    returns ``None`` on every row, so the paint covers nothing and the copy must
+    be empty too. Textual normalises through ``Selection.from_offsets``, so the
+    shape is unreachable through the UI — pinned so the next reader inherits the
+    fact rather than re-deriving it, and so ``_extract`` cannot quietly start
+    answering for a highlight that does not exist (review of the ninth)."""
     rows = ["aaa", "bbb", "ccc"]
-    assert _extract(Selection(Offset(1, 2), Offset(1, 0)), rows) == "aa\nbbb\nc"
-    assert _extract(Selection(Offset(1, 0), Offset(1, 2)), rows) == "aa\nbbb\nc"
-    assert _extract(Selection(Offset(2, 1), Offset(1, 1)), rows) == "b"
+    backwards = Selection(Offset(1, 2), Offset(1, 0))
+    assert all(backwards.get_span(y) is None for y in range(len(rows))), "the premise"
+    assert _extract(backwards, rows) == ""
+    # The negative half: ordered, it is the span the paint does cover.
+    forwards = Selection(Offset(1, 0), Offset(1, 2))
+    assert [forwards.get_span(y) for y in range(3)] == [(1, -1), (0, -1), (0, 1)]
+    assert _extract(forwards, rows) == "aa\nbbb\nc"
+
+
+def test_what_is_copied_is_exactly_what_the_span_paints() -> None:
+    """The property the hand-clamped versions kept breaking, asserted directly
+    rather than through the geometries that happened to break it: a row the
+    paint leaves alone contributes nothing to the copy, for every selection
+    Textual can build over every shape of pane (review of the ninth)."""
+    rowsets = [[], [""], ["", ""], ["aaa", "bbb", "ccc"], [f"r{n} yyyy" for n in range(6)]]
+    offsets = [Offset(x, y) for x in (0, 1, 4, 9) for y in (-2, 0, 1, 3, 5, 9)]
+    selections = [Selection.from_offsets(a, b) for a in offsets for b in offsets]
+    selections += [Selection(a, None) for a in offsets]
+    selections += [Selection(None, b) for b in offsets]
+    for rows in rowsets:
+        for selection in selections:
+            painted = [selection.get_span(y) for y in range(len(rows))]
+            expected = "\n".join(
+                row[span[0] :] if span[1] == -1 else row[span[0] : span[1]]
+                for row, span in zip(rows, painted, strict=True)
+                if span is not None
+            )
+            assert _extract(selection, rows) == expected, (rows, selection)
+            if all(span is None for span in painted):
+                assert _extract(selection, rows) == "", (rows, selection)
 
 
 @pytest.mark.parametrize(
@@ -1875,6 +1956,79 @@ def test_attaching_another_agent_leaves_other_panes_selections_alone(
     still_there, dropped = run(drive())
     assert still_there == Selection(Offset(0, 1), Offset(5, 1)), "the visible pane keeps its own"
     assert dropped is None, "and the re-attached one drops only its own"
+
+
+def test_a_double_click_leaves_other_panes_selections_alone(fake: FakeTmux, tmp_path: Path) -> None:
+    """``_select_word`` is the other place this file writes ``screen.selections``,
+    and it replaced the whole dict — the same harm ``_clear_own_selection`` was
+    added to stop, by another route (review of the ninth version).
+
+    Driven at the method, not through a click: Textual clears the WHOLE screen's
+    selection on a release that moved nothing, which a double click is, so an
+    end-to-end gesture wipes the neighbour before this line runs. That upstream
+    clear is not ours to fix; writing only our own entry is.
+    """
+
+    class TwoPanes(App[None]):
+        def compose(self) -> ComposeResult:
+            server = fake.server(tmp_path)
+            yield TerminalPane("%1", server=server, escape_key="f12", id="pane")
+            yield TerminalPane("%1", server=server, escape_key="f12", id="other")
+
+    async def drive() -> tuple[Selection | None, str | None]:
+        host = TwoPanes()
+        async with host.run_test(size=(40, 8)) as pilot:
+            clicked = host.query_one("#pane", TerminalPane)
+            neighbour = host.query_one("#other", TerminalPane)
+            await wait_until(pilot, lambda: synced(clicked) and synced(neighbour))
+            host.screen.selections = {neighbour: Selection(Offset(0, 0), Offset(5, 0))}
+            await pilot.pause()
+            clicked._select_word(8, 1)
+            await pilot.pause()
+            return neighbour.text_selection, clicked.selected_text()
+
+    neighbours, word = run(drive())
+    assert word == "row", "the double click selected its own word"
+    assert neighbours == Selection(Offset(0, 0), Offset(5, 0)), "and left the other pane alone"
+
+
+def test_a_stale_selection_never_refreshes_a_row_the_pane_does_not_have(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rows a selection names are not the rows this widget has. A stale
+    highlight over rows 8-10 of a now-5-row pane handed ``refresh`` Regions
+    outside the widget — the shape ``refresh_frame`` documents as measured harm
+    for the cursor, and which its own test pins there (review of the ninth)."""
+    regions: list[Region] = []
+
+    async def drive() -> tuple[list[Region], list[Region]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 5)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            original = TerminalPane.refresh
+
+            def record(self: TerminalPane, *args: object, **kwargs: object) -> TerminalPane:
+                regions.extend(a for a in args if isinstance(a, Region))
+                return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(TerminalPane, "refresh", record)
+            pane.screen.selections = {pane: Selection(Offset(0, 8), Offset(4, 10))}
+            await pilot.pause()
+            stale = list(regions)
+            regions.clear()
+            # The negative half: a selection that IS on screen repaints its own
+            # rows, so the clamp has not simply turned the repaint off.
+            pane.screen.selections = {pane: Selection(Offset(0, 1), Offset(4, 2))}
+            await pilot.pause()
+            return stale, list(regions)
+
+    stale, live = run(drive())
+    height = 5
+    assert all(0 <= region.y < height for region in stale), stale
+    assert live, "a selection on screen still repaints"
+    assert all(0 <= region.y < height for region in live), live
+    assert {region.y for region in live} >= {1, 2}, live
 
 
 def test_a_second_drag_copies_the_screen_it_was_made_on(fake: FakeTmux, tmp_path: Path) -> None:

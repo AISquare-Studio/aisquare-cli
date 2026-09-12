@@ -69,13 +69,14 @@ from __future__ import annotations
 
 import contextlib
 from bisect import bisect_left, bisect_right
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.cells import cell_len
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual import events
+from textual.app import App
 from textual.geometry import Offset, Region
 from textual.message import Message
 from textual.selection import Selection
@@ -105,36 +106,64 @@ TMUX_UNAVAILABLE = "(tmux unavailable)"
 
 
 def _extract(selection: Selection, rows: list[str]) -> str:
-    """The text ``selection`` covers in ``rows`` — character offsets as the
-    compositor reports them, and the SAME rows ``Selection.get_span`` paints.
+    """The text ``selection`` covers in ``rows`` — read off the SAME spans
+    :meth:`Selection.get_span` hands :meth:`TerminalPane._render_row` to paint.
 
-    A row outside ``0..last`` contributes nothing, exactly as ``get_span``
-    returns ``None`` for it. Folding it onto an edge row instead invented a
-    selection: after a resize left a stale highlight, a span covering rows 8-10
-    of a now-5-row pane painted nothing at all and copied text out of the last
-    row — and because that answer is not empty, ``_copy_selection`` reported
-    success and ctrl+c stopped reaching the agent, so a runaway agent could not
-    be interrupted. Clamping the ends the other way — a span that STARTS on a
-    real row and runs off the bottom — copied that last row part-way while the
-    paint covered it whole (reviews of the seventh and eighth versions).
+    Derived, not re-clamped. Every earlier version computed its own start and
+    end from the endpoints, and each review found one more geometry the last
+    clamp had not anticipated: a stale span over a shrunken pane, the same span
+    with its columns reversed, one running off the bottom, one whose rows are
+    reversed (``get_span`` reorders nothing, so it paints no row at all). A row
+    ``get_span`` returns ``None`` for contributes nothing, by construction — so
+    "nothing is highlighted" and "nothing is copied" cannot come apart, and a
+    non-empty answer can no longer make ``_copy_selection`` report success and
+    swallow the agent's ctrl+c (reviews of the seventh to ninth versions).
+
+    Measured before replacing the hand-clamped body: over 149 000 combinations
+    of row-sets and selections the two agree everywhere except where the old
+    body disagreed with the PAINT — reversed rows, and a reversed column pair on
+    one row — which it answered with text nobody had highlighted.
     """
-    if not rows:
-        return ""
-    last = len(rows) - 1
-    start = (0, 0) if selection.start is None else (selection.start.y, selection.start.x)
-    end = (last, len(rows[last])) if selection.end is None else (selection.end.y, selection.end.x)
-    if start > end:
-        start, end = end, start
-    if start[0] > last or end[0] < 0:
-        return ""  # every row of it is off the rows this widget has
-    start_row = max(start[0], 0)
-    start_col = max(start[1], 0) if start[0] >= 0 else 0
-    end_row = min(end[0], last)
-    end_col = max(end[1], 0) if end[0] <= last else len(rows[last])
-    if start_row == end_row:
-        return rows[start_row][start_col:end_col]
-    first, *middle, final = rows[start_row : end_row + 1]
-    return "\n".join([first[start_col:], *middle, final[:end_col]])
+    pieces: list[str] = []
+    for y, row in enumerate(rows):
+        span = selection.get_span(y)
+        if span is None:
+            continue
+        start, end = span
+        pieces.append(row[start:] if end == -1 else row[start:end])
+    return "\n".join(pieces)
+
+
+def route_selection_gesture(app: App[Any], button: int | None) -> None:
+    """Tell every pane on ``app``'s active screen that a selection gesture ended.
+
+    ONE routing, called by the app and by every test host, so the two cannot
+    drift: a harness that ends a gesture differently from production is a test
+    that proves nothing, which is how a broken cross-widget copy passed review
+    twice (reviews of the sixth and ninth versions).
+
+    The screen posts ``TextSelected`` on every MouseUp and it bubbles to the
+    app, so this is the only place the end of a gesture is observable — a widget
+    below the screen never receives it (measured). Every pane is told, always:
+    ``selection_gesture_ended`` is the only place a pane's per-gesture state is
+    reset, so skipping the call to save the walk left ``_touched`` set and made
+    the NEXT unrelated release read as that pane's own (review of the ninth).
+
+    Logged, never swallowed silently, and guarded around the walk as well as the
+    call: resolving a screen and querying a tree mid-teardown is the part that
+    raises, and this PR's history is an unguarded exception in a mouse handler
+    taking the app down.
+    """
+    try:
+        panes = list(app.screen.query(TerminalPane))
+    except Exception as error:  # a screen or a tree mid-teardown
+        app.log.error("selection gesture: no panes to tell", error)
+        return
+    for pane in panes:
+        try:
+            pane.selection_gesture_ended(button)
+        except Exception as error:
+            app.log.error("selection gesture failed for a pane", error)
 
 
 class EscapeToSidebar(Message):
@@ -666,12 +695,20 @@ class TerminalPane(Widget, can_focus=True):
         return _extract(selection, self._row_texts()), "\n"
 
     def selected_text(self) -> str | None:
-        """What a drag has selected in this pane, or ``None`` when nothing is."""
+        """What a drag has selected in this pane, or ``None`` when nothing is.
+
+        A span over rows the agent has never printed on is not a copy request.
+        Those rows extract as newlines, ``"\n\n"`` is truthy, and the copy then
+        reported success — so the toast claimed a copy of empty space and ctrl+c
+        stopped reaching the agent, which is the most natural place to drag in a
+        mostly-quiet pane (review of the ninth version).
+        """
         selection = self.text_selection
         if selection is None:
             return None
         extracted = self.get_selection(selection)
-        return extracted[0] if extracted and extracted[0] else None
+        text = extracted[0] if extracted else ""
+        return text if text.strip() else None
 
     def selection_updated(self, selection: Selection | None) -> None:
         """Repaint for a selection change; nothing about the rows is remembered.
@@ -755,13 +792,26 @@ class TerminalPane(Widget, can_focus=True):
             ]
         )
 
+    SCROLL_MARKER_TEMPLATE: ClassVar[str] = "[↑{scrollback}/{history}]"
+    """The corner marker's text. A class attribute so the cell-vs-character rule
+    below can be exercised with a marker whose two measures differ — ``↑`` is
+    East-Asian Ambiguous and resolves to one cell, so the shipped marker cannot
+    tell the two apart (review of the ninth version)."""
+
     def _marker_layout(self, text: str, width: int) -> tuple[int, int, str] | None:
         """``(cut, gap, marker)`` in cells — one answer for the strip and the text."""
-        marker = f"[↑{self.scrollback}/{self.history_size}]"
-        if len(marker) >= width:
+        marker = self.SCROLL_MARKER_TEMPLATE.format(
+            scrollback=self.scrollback, history=self.history_size
+        )
+        # CELLS, like `cut`, `gap` and every crop they feed. `↑` is East-Asian
+        # Ambiguous and resolves to one cell today, so a character count agreed
+        # by luck — and a row where they diverge puts the marker over its corner
+        # and splits the paint from the copy (review of the ninth version).
+        marker_cells = cell_len(marker)
+        if marker_cells >= width:
             return None
-        cut, _ = self._snap(text, width - len(marker), width - len(marker))
-        return cut, width - len(marker) - cut, marker
+        cut, _ = self._snap(text, width - marker_cells, width - marker_cells)
+        return cut, width - marker_cells - cut, marker
 
     def _strip_for(self, line: str) -> Strip:
         strip = self._strip_cache.get(line)
@@ -913,7 +963,18 @@ class TerminalPane(Widget, can_focus=True):
         while end < len(text) and not text[end].isspace():
             end += 1
         self._own_word = True
-        self.screen.selections = {self: Selection(Offset(start, y), Offset(end, y))}
+        # This widget's entry, and only this one. Replacing the dict is the same
+        # harm ``_clear_own_selection`` exists to avoid, by another route: the
+        # app keeps a view per opened agent mounted, so a double click here
+        # dropped the highlight in every other pane (review of the ninth).
+        self.screen.selections = {
+            **{
+                widget: span
+                for widget, span in self.screen.selections.items()
+                if widget is not self
+            },
+            self: Selection(Offset(start, y), Offset(end, y)),
+        }
         self._copy_selection()
 
     # --- selection and copy ------------------------------------------------------------

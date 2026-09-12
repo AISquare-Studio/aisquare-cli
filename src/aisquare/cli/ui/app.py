@@ -55,7 +55,7 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
+from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
@@ -301,40 +301,12 @@ class FleetApp(App[None], inherit_bindings=False):
     def on_text_selected(self, event: events.TextSelected) -> None:
         """A selection gesture ended anywhere on screen — tell the panes.
 
-        The Screen posts this on every MouseUp and it bubbles to the app, so
-        this is the only place the END of a gesture is observable: a widget
-        below the screen never receives it (measured). Routing it is what makes
-        a pane's copy independent of who its neighbour is — a drag that starts
-        on the agent header and crosses into the pane reaches the pane's own
-        ``on_mouse_up`` only because ``Static`` does not capture the mouse,
-        where an ``Input`` would have swallowed it (review of #120, round 6).
-
-        The ACTIVE screen only, and never at the cost of the other panes: a
-        modal on top has no pane of its own, and a pane torn down mid-gesture
-        must not stop its neighbours being told. This PR's history is an
-        unguarded exception in a mouse handler taking the app down; this is
-        where that can be contained (review of #120, round 7) — and it is
-        contained around the WALK as well as the call, since resolving the
-        screen and querying a tree being torn down is the part that raises.
-        Logged, never swallowed silently: a real bug in the copy path would
-        otherwise stop copy working with no trace anywhere (round 8).
+        One line, because the routing itself lives beside the widget it serves
+        and every test host calls the same function: a harness that ends a
+        gesture differently from this is a test that proves nothing.
         """
         button, self._gesture_button = self._gesture_button, None
-        # Nothing can have been selected without a press somewhere or a
-        # selection already standing — and TextSelected arrives on every mouse
-        # release in the app, so the walk is worth skipping (round 8).
-        try:
-            if button is None and not self.screen.selections:
-                return
-            panes = list(self.screen.query(TerminalPane))
-        except Exception as error:  # a screen or a tree mid-teardown
-            self.log.error("selection gesture: no panes to tell", error)
-            return
-        for pane in panes:
-            try:
-                pane.selection_gesture_ended(button)
-            except Exception as error:
-                self.log.error("selection gesture failed for a pane", error)
+        route_selection_gesture(self, button)
 
     # --- help / refresh ---------------------------------------------------------------
 

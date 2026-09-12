@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import pytest
-from textual import events
+from textual import Logger, events
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
@@ -630,28 +630,53 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
         tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
     )
 
-    async def go(pilot: Pilot[None]) -> tuple[int, str, int]:
+    logged: list[str] = []
+    original_call = Logger.__call__
+
+    def record(self: Logger, *args: object, **kwargs: object) -> None:
+        logged.append(" ".join(str(a) for a in args))
+        original_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(Logger, "__call__", record)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, str, int, list[str], list[str]]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, "agt_a_coder-two"))
         await pilot.pause()
         pane, header = await _agent_pane(pilot)  # opens coder-auth, leaves both mounted
         panes = list(app.screen.query(TerminalPane))
+        assert len(panes) >= 2, "the app keeps a view per opened agent mounted"
+
+        async def cross() -> None:
+            await pilot.mouse_down(header, offset=(1, 0))
+            await pilot.hover(pane, offset=(5, 1))
+            await pilot.mouse_up(pane, offset=(5, 1))
+            await pilot.pause()
+
+        # The negative half first, while every pane still works.
+        logged.clear()
+        await cross()
+        quiet = list(logged)
+        app.screen.selections = {}
+        await pilot.pause()
 
         def boom(button: int | None = None) -> None:
             raise RuntimeError("this pane is mid-teardown")
 
         broken = next(other for other in panes if other is not pane)
         monkeypatch.setattr(broken, "selection_gesture_ended", boom)
-        await pilot.mouse_down(header, offset=(1, 0))
-        await pilot.hover(pane, offset=(5, 1))
-        await pilot.mouse_up(pane, offset=(5, 1))
-        await pilot.pause()
-        return len(panes), app.clipboard, len(app._notifications)
+        logged.clear()
+        await cross()
+        return len(panes), app.clipboard, len(app._notifications), quiet, list(logged)
 
-    panes, clipboard, toasts = drive(go, notifications=True)
-    assert panes >= 2, "the app keeps a view per opened agent mounted"
+    panes, clipboard, toasts, quiet, recorded = drive(go, notifications=True)
+    assert panes >= 2
     assert clipboard == "red plain\nsecon", "the working pane still copied"
-    assert toasts == 1
+    assert toasts == 2, "one toast per crossing gesture, the failing pane notwithstanding"
+    assert not [line for line in quiet if "selection gesture" in line], quiet
+    assert any("mid-teardown" in line for line in recorded), (
+        f"the failure must leave a trace, not be swallowed: {recorded}"
+    )
 
 
 def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) -> None:

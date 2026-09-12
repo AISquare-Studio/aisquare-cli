@@ -581,6 +581,79 @@ def test_a_drag_from_the_agent_header_into_the_pane_copies_through_the_app(
     )
 
 
+def test_a_right_button_drag_from_the_agent_header_copies_nothing_through_the_app(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``FleetApp.on_mouse_down`` is the whole of the button fix: a pane only
+    sees a press that lands ON it, so without the app a right-button drag begun
+    on the header reads as a left one and copies. Nothing reached that handler —
+    replacing its body left the suite green (review of #120, round 8)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, bool]:
+        app = fleet_app(pilot)
+        pane, header = await _agent_pane(pilot)
+        await pilot.mouse_down(header, offset=(1, 0), button=3)
+        await pilot.hover(pane, offset=(5, 1))
+        await pilot.mouse_up(pane, offset=(5, 1))
+        await pilot.pause()
+        return app.clipboard, len(app._notifications), pane.text_selection is not None
+
+    clipboard, toasts, highlighted = drive(go, notifications=True)
+    assert highlighted, "the premise: the gesture did select text in the pane"
+    assert clipboard == "" and toasts == 0, "a right-button drag is not a copy request"
+
+
+def test_one_panes_failure_does_not_stop_the_others_being_told(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard around the fan-out, both halves: a pane that raises is logged
+    rather than swallowed silently, and its neighbours still hear the gesture.
+    This PR's history is an unguarded exception in a mouse handler taking the
+    app down (review of #120, round 8)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        status("prj_a", "coder-auth", "coder", "working"),
+        status("prj_a", "coder-two", "coder", "working", minute=1),
+    ]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[int, str, int]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-two"))
+        await pilot.pause()
+        pane, header = await _agent_pane(pilot)  # opens coder-auth, leaves both mounted
+        panes = list(app.screen.query(TerminalPane))
+
+        def boom(button: int | None = None) -> None:
+            raise RuntimeError("this pane is mid-teardown")
+
+        broken = next(other for other in panes if other is not pane)
+        monkeypatch.setattr(broken, "selection_gesture_ended", boom)
+        await pilot.mouse_down(header, offset=(1, 0))
+        await pilot.hover(pane, offset=(5, 1))
+        await pilot.mouse_up(pane, offset=(5, 1))
+        await pilot.pause()
+        return len(panes), app.clipboard, len(app._notifications)
+
+    panes, clipboard, toasts = drive(go, notifications=True)
+    assert panes >= 2, "the app keeps a view per opened agent mounted"
+    assert clipboard == "red plain\nsecon", "the working pane still copied"
+    assert toasts == 1
+
+
 def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [

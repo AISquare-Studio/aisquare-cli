@@ -28,7 +28,6 @@ all of them must reach it.
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -313,13 +312,29 @@ class FleetApp(App[None], inherit_bindings=False):
         The ACTIVE screen only, and never at the cost of the other panes: a
         modal on top has no pane of its own, and a pane torn down mid-gesture
         must not stop its neighbours being told. This PR's history is an
-        unguarded exception in a mouse handler taking the app down; this loop is
-        where that can be contained (review of #120, round 7).
+        unguarded exception in a mouse handler taking the app down; this is
+        where that can be contained (review of #120, round 7) — and it is
+        contained around the WALK as well as the call, since resolving the
+        screen and querying a tree being torn down is the part that raises.
+        Logged, never swallowed silently: a real bug in the copy path would
+        otherwise stop copy working with no trace anywhere (round 8).
         """
         button, self._gesture_button = self._gesture_button, None
-        for pane in self.screen.query(TerminalPane):
-            with contextlib.suppress(Exception):
+        # Nothing can have been selected without a press somewhere or a
+        # selection already standing — and TextSelected arrives on every mouse
+        # release in the app, so the walk is worth skipping (round 8).
+        try:
+            if button is None and not self.screen.selections:
+                return
+            panes = list(self.screen.query(TerminalPane))
+        except Exception as error:  # a screen or a tree mid-teardown
+            self.log.error("selection gesture: no panes to tell", error)
+            return
+        for pane in panes:
+            try:
                 pane.selection_gesture_ended(button)
+            except Exception as error:
+                self.log.error("selection gesture failed for a pane", error)
 
     # --- help / refresh ---------------------------------------------------------------
 

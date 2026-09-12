@@ -105,23 +105,32 @@ TMUX_UNAVAILABLE = "(tmux unavailable)"
 
 
 def _extract(selection: Selection, rows: list[str]) -> str:
-    """The text ``selection`` covers in ``rows`` — one entry per rendered row,
-    indices clamped, character offsets as the compositor reports them."""
+    """The text ``selection`` covers in ``rows`` — character offsets as the
+    compositor reports them, and the SAME rows ``Selection.get_span`` paints.
+
+    A row outside ``0..last`` contributes nothing, exactly as ``get_span``
+    returns ``None`` for it. Folding it onto an edge row instead invented a
+    selection: after a resize left a stale highlight, a span covering rows 8-10
+    of a now-5-row pane painted nothing at all and copied text out of the last
+    row — and because that answer is not empty, ``_copy_selection`` reported
+    success and ctrl+c stopped reaching the agent, so a runaway agent could not
+    be interrupted. Clamping the ends the other way — a span that STARTS on a
+    real row and runs off the bottom — copied that last row part-way while the
+    paint covered it whole (reviews of the seventh and eighth versions).
+    """
     if not rows:
         return ""
     last = len(rows) - 1
     start = (0, 0) if selection.start is None else (selection.start.y, selection.start.x)
     end = (last, len(rows[last])) if selection.end is None else (selection.end.y, selection.end.x)
-    # Ordered BEFORE the rows are clamped, not after. Clamping first can map two
-    # different rows onto the same one and leave the columns reversed, and
-    # swapping those then reads a span nobody selected: a selection left over
-    # from a taller pane copied `rows[last][4:8]` with nothing highlighted on
-    # screen — and, because that returns text instead of "", ctrl+c reported a
-    # copy and swallowed the agent's interrupt (review of the seventh version).
     if start > end:
         start, end = end, start
-    start_row, start_col = min(max(start[0], 0), last), max(start[1], 0)
-    end_row, end_col = min(max(end[0], 0), last), max(end[1], 0)
+    if start[0] > last or end[0] < 0:
+        return ""  # every row of it is off the rows this widget has
+    start_row = max(start[0], 0)
+    start_col = max(start[1], 0) if start[0] >= 0 else 0
+    end_row = min(end[0], last)
+    end_col = max(end[1], 0) if end[0] <= last else len(rows[last])
     if start_row == end_row:
         return rows[start_row][start_col:end_col]
     first, *middle, final = rows[start_row : end_row + 1]
@@ -287,8 +296,11 @@ class TerminalPane(Widget, can_focus=True):
         self._reported_gone = False
         self._marker = None
         self._drag_button = None
+        self._touched = False
+        self._own_word = False
+        self._painted_span = None
         if self.is_mounted and self.text_selection is not None:
-            self.screen.clear_selection()  # agent A's highlight must not sit on agent B
+            self._clear_own_selection()  # agent A's highlight must not sit on agent B
         self._wheel_queue = []
         if self._wheel_timer is not None:
             self._wheel_timer.stop()
@@ -631,13 +643,14 @@ class TerminalPane(Widget, can_focus=True):
         return head + " " * (cut - cell_len(head) + gap) + marker
 
     def _row_texts(self) -> list[str]:
-        # As many rows as the widget RENDERS, not as many as the last frame
-        # filled: ``render_line`` stamps offsets up to ``content_size.height``,
-        # while ``_lines`` is only re-padded to that height by the next
-        # successful frame. Between a grow-resize (or a ``_fail`` that returns
-        # early) and that frame, ``_extract``'s clamp folded a drag on the new
-        # bottom rows onto the LAST row's text and copied that (review).
-        return [self._row_text(y) for y in range(max(len(self._lines), self.content_size.height))]
+        # Exactly the rows the widget RENDERS. ``render_line`` stamps offsets up
+        # to ``content_size.height``, and rows past the end of a short ``_lines``
+        # already read as empty — so the height alone covers the grow-resize this
+        # once used ``max()`` for. Taking the longer of the two instead copied
+        # rows that are not on screen: a pane whose captures are failing keeps
+        # the taller frame, and a crossing drag then put seven unrendered rows on
+        # the clipboard (review of the eighth version).
+        return [self._row_text(y) for y in range(self.content_size.height)]
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The plain text under ``selection``, from the rows this widget shows.
@@ -705,12 +718,19 @@ class TerminalPane(Widget, can_focus=True):
             self._repaint_rows(rows)
 
     def _selection_row_span(self, selection: Selection | None) -> set[int]:
+        """The rows of this widget a selection covers — never rows it does not have.
+
+        A stale selection names rows a shrunken pane no longer renders, and
+        handing those to ``refresh`` is the Region-outside-the-widget shape
+        ``refresh_frame`` documents as measured harm (review of the eighth).
+        """
         if selection is None:
             return set()
+        height = self.content_size.height
         start, end = selection.start, selection.end
         if start is None or end is None:
-            return set(range(self.content_size.height))
-        return set(range(min(start.y, end.y), max(start.y, end.y) + 1))
+            return set(range(height))
+        return set(range(max(min(start.y, end.y), 0), min(max(start.y, end.y) + 1, height)))
 
     def _with_scroll_marker(self, strip: Strip, width: int, text: str) -> Strip:
         """``[↑k/history]`` in the top-right corner while the view is in history.
@@ -784,17 +804,17 @@ class TerminalPane(Widget, can_focus=True):
             # interrupt. Called as a statement, not as a boolean operand:
             # `_copy_selection` writes the clipboard and raises a toast, which
             # is not what a predicate in an `and` chain reads as (review).
-            copied = self._copy_selection()
+            copied = self._copy_selection(standing=False)
             if copied:
-                self.screen.clear_selection()
+                self._clear_own_selection()
                 return
         if event.key == "super+c":
             # macOS Cmd+C is copy and nothing else. It must not fall through to
             # the key table either: ``super`` is not a modifier tmux can spell,
             # the event carries a printable ``c``, and the pane typed a bare
             # ``c`` into the agent for a copy gesture (review).
-            if self._copy_selection():
-                self.screen.clear_selection()
+            if self._copy_selection(standing=False):
+                self._clear_own_selection()
             return
         translation = translate(
             event.key,
@@ -868,7 +888,12 @@ class TerminalPane(Widget, can_focus=True):
         self.focus()
         if event.widget is self and event.chain >= 2:
             event.prevent_default()
-            if event.chain == 2:
+            if event.chain == 2 and event.button == 1:
+                # The LEFT button, like every other copy. All the button work
+                # went into the drag path and none into this one, so a right- or
+                # middle-button double click selected a word and wrote the
+                # clipboard — on a terminal where the right button is paste or a
+                # context menu (review of the eighth version).
                 self._select_word(event.x, event.y)
             await self.broker_event("click", event)
 
@@ -897,6 +922,20 @@ class TerminalPane(Widget, can_focus=True):
         """Note which button began a gesture HERE, for a release we may not see."""
         self._drag_button = event.button
 
+    def _clear_own_selection(self) -> None:
+        """Drop THIS widget's selection, leaving every other widget's alone.
+
+        ``Screen.clear_selection`` is ``selections = {}`` — every widget on the
+        screen. The app keeps a view per opened agent mounted, and a background
+        poll that re-attaches a HIDDEN pane would wipe the highlight the user is
+        dragging in the visible one (review of the eighth version).
+        """
+        if not self.is_mounted:
+            return
+        self.screen.selections = {
+            widget: span for widget, span in self.screen.selections.items() if widget is not self
+        }
+
     def selection_gesture_ended(self, button: int | None = None) -> None:
         """A selection gesture finished anywhere on screen: copy what it left here.
 
@@ -920,7 +959,10 @@ class TerminalPane(Widget, can_focus=True):
         Only the LEFT button is a copy: a right-button drag across a standing
         highlight replaced the clipboard with whatever it crossed (review of the
         third). ``button`` comes from the app, which sees the press wherever it
-        landed; the pane's own record answers when the app cannot.
+        landed; the pane's own record answers when the app cannot. An UNKNOWN
+        button is not a copy — reading "no press was seen anywhere" as "left"
+        is the assumption that produced that finding, and a widget which stops
+        the press (a scrollbar does) leaves it unknown (review of the eighth).
         """
         touched, self._touched = self._touched, False
         pressed, self._drag_button = self._drag_button, None
@@ -929,20 +971,26 @@ class TerminalPane(Widget, can_focus=True):
         self._own_word = False
         if not touched or self.text_selection is None:
             return
-        if (button if button is not None else pressed) not in (None, 1):
+        if (button if button is not None else pressed) != 1:
             return
         self._copy_selection()
 
-    def _copy_selection(self) -> bool:
-        """Copy the selected text to the clipboard (OSC 52); False when nothing is selected."""
+    def _copy_selection(self, *, standing: bool = True) -> bool:
+        """Copy the selected text to the clipboard (OSC 52); False when nothing is selected.
+
+        ``standing`` is whether the highlight survives this copy. The key paths
+        clear it immediately afterwards, so telling the user there that "ctrl+c
+        copies again while the selection stands" was false as they read it — the
+        next ctrl+c is the agent's interrupt (review of the eighth version).
+        """
         text = self.selected_text()
         if text is None:
             return False
         self.app.copy_to_clipboard(text)
         count = len(text)
+        again = " — ctrl+c copies again while the selection stands" if standing else ""
         self.notify(
-            f"copied {count} character{'s' if count != 1 else ''} — ctrl+c copies again "
-            "while the selection stands",
+            f"copied {count} character{'s' if count != 1 else ''}{again}",
             markup=False,
         )
         return True

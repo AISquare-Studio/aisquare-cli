@@ -606,7 +606,8 @@ tmux -L asq list-sessions
 hatch (`F12`), the scroll keys below, ctrl+c while text is selected (it copies)
 and cmd+c, which is only ever the copy. Printable characters travel as typed;
 special keys are translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`
-when nothing is selected, shift+tab → `BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
+when nothing is selected, shift+tab → `BTab`, …). Paste is bracketed, so
+Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and
 scrolls its transcript; a fullscreen program that does not is left alone (its own

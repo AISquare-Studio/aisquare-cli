@@ -117,6 +117,8 @@ DOCUMENTED = (
     # every `aisquare fleet …` line there is a step the reader types, so a flag
     # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
     "docs/fleet.md",
+    "docs/coding-agents.md",
+    "docs/plans/coding-agent-support.md",
     # The CI test bed's smoke: `aisquare doctor` and `aisquare metrics list`
     # against the stub server, meant to be typed.
     "docs/ci-contract.md",
@@ -222,7 +224,7 @@ _SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
 #: `exec` is how a wrapper hands the process over. `aisquare-runner` and
 #: `.../aisquare/file.env` do not match: the name must be followed by a space
 #: or the end of the segment.
-_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?aisquare(?=\s|$)")
+_INVOCATION_HEAD = re.compile(r"^(?:exec\s+)?(\S*/)?(?:aisquare|asq)(?=\s|$)")
 
 
 def _as_invocation(segment: str) -> str | None:
@@ -822,6 +824,8 @@ def test_typer_is_the_instrument_not_the_help_renderer() -> None:
 #: quietly — a silent skip makes this file read as covering everything while
 #: covering less, which is worse than not having it.
 _NOT_AN_INVOCATION = (
+    ("a tmux command whose socket is named asq", re.compile(r"^\s*tmux\s+-L\s+asq\b")),
+    ("a tree of CLI commands, not a shell invocation", re.compile(r"^\s*[├└]──")),
     # `…/aisquare` with a WORD after it is an invocation by absolute path, not a
     # path. Without the lookahead this reason silently swallowed a cron
     # wrapper's `exec /usr/local/bin/aisquare explainability ship --strict`.
@@ -867,6 +871,8 @@ _NOT_AN_INVOCATION = (
 #: raising each entry to an absurd value and reading the counts out of the
 #: failure message, which is the only way this file reports them.
 CENSUS = {
+    "docs/coding-agents.md": (12, 0),
+    "docs/plans/coding-agent-support.md": (6, 0),
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
     # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
@@ -915,7 +921,7 @@ def test_every_aisquare_mention_is_classified(document: str) -> None:
     unexplained: list[str] = []
     classified = 0
     for number, line in _shell_lines(text):
-        if "aisquare" not in line or number in extracted:
+        if not re.search(r"aisquare|\basq\b", line) or number in extracted:
             continue
         if any(pattern.search(line) for _reason, pattern in _NOT_AN_INVOCATION):
             classified += 1
@@ -1295,3 +1301,13 @@ def _leaf_chains() -> list[list[str]]:
 
     walk(_root(), [])
     return found
+
+
+@pytest.mark.parametrize("binary", ["aisquare", "asq", "/usr/local/bin/asq"])
+def test_agent_document_aliases_reach_command_validation(binary: str) -> None:
+    lines = _from_text("fixture.md", f"```sh\n{binary} definitelynotacommand\n```\n")
+    assert len(lines) == 1
+    assert lines[0].text == "aisquare definitelynotacommand"
+    assert _unknown_commands(lines)
+    valid = _from_text("fixture.md", f"```sh\n{binary} agents list\n```\n")
+    assert valid and not _unknown_commands(valid)

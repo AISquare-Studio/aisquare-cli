@@ -164,7 +164,7 @@ def _session_lines(sessions: list[TeamSession]) -> Text:
             text.append(f"  {label}", style="cyan dim")
         if session.model:
             text.append(f"  {session.model}", style="dim cyan")
-            if harness.model_mismatch(session.role, session.model):
+            if harness.model_mismatch(session.role, session.model, agent=session.agent):
                 text.append("  ⚠ off-ladder", style="bold yellow")
         text.append(f"  {minutes}m", style="dim")
         if minutes > 30:

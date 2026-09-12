@@ -436,31 +436,37 @@ max_continuations_per_hour = 30           # cap on the manager's Stop-hook conti
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag
 worktree = false
 extra_args = []
+agent_args = {}
 
 [fleet.roles.coder]
 permission_mode = "auto"
 worktree = true                           # one worktree per coder: parallel coders never share a tree
 extra_args = []
+agent_args = {}
 
 [fleet.roles.tester]                      # `runner` is accepted as an alias
 permission_mode = "auto"
 worktree = false                          # runs in the repo root; point it at the branch yourself
 extra_args = []
+agent_args = {}
 
 [fleet.roles.reviewer]
 permission_mode = "auto"
 worktree = true
 extra_args = ["--restricted"]             # read-only by construction
+agent_args = {}
 
 [fleet.roles.ui-tester]
 permission_mode = "auto"
 worktree = false                          # tests the running app, not a tree of its own
 extra_args = []                           # --chrome is the role's own default; put "--no-chrome" here to drop it
+agent_args = {}
 
 [fleet.roles.validator]
 permission_mode = "auto"
 worktree = false
 extra_args = []
+agent_args = {}
 ```
 
 A role the file omits gets the built-in shape (`auto`, no worktree, no extra
@@ -476,8 +482,9 @@ window, so all of it applies unchanged, as does the Explainability wiring.
 For an arbitrary wrapper binary, declare its family with
 `aisquare team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`),
 or pass `--agent` on that launch. User/project defaults and the inherited
-`AISQUARE_CODING_AGENT` choice do not identify wrappers. This also applies to
-wrappers selected through `AISQUARE_AGENT_BIN` and `AISQUARE_BIN_<ROLE>`.
+`AISQUARE_CODING_AGENT` choice do not identify wrappers. Existing bin-only configurations with no agent default retain the Claude
+compatibility behavior. When an agent default is selected, declare the wrapper
+family explicitly. This also applies to wrappers selected through `AISQUARE_AGENT_BIN` and `AISQUARE_BIN_<ROLE>`.
 
 Legacy `[fleet.roles.ROLE] extra_args` belong to Claude Code. Agent-specific
 arguments name their owner, for example:

@@ -26,10 +26,9 @@ from typing import Annotated
 
 import typer
 from rich.text import Text
-from typer._click.core import Context
-from typer.core import TyperCommand, TyperOption
 
 from aisquare.cli.common import fail
+from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness
 from aisquare.core.agent_adapters.types import BadEffortError
@@ -64,61 +63,6 @@ ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manag
 _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
-
-
-class LaunchCommand(TyperCommand):
-    def parse_args(self, ctx: Context, args: list[str]) -> list[str]:
-        """Keep legacy -c BINARY while allowing Codex's -c KEY=VALUE overrides.
-
-        Normalize the native alias to its long spelling before Click sees it;
-        otherwise it is consumed as --command (or split as a short-option cluster).
-        Known AISquare option values and everything after -- remain untouched.
-        """
-        rewritten: list[str] = []
-        protected: dict[str, str] = {}
-        valued = {
-            option
-            for param in self.get_params(ctx)
-            if isinstance(param, TyperOption) and not param.is_flag
-            for option in param.opts
-        }
-        tokens = iter(args)
-        for token in tokens:
-            if token == "--":
-                rewritten.extend([token, *tokens])
-                break
-            if token == "-c":
-                value = next(tokens, None)
-                if value is not None and "=" in value:
-                    rewritten.append("--config=" + value)
-                else:
-                    rewritten.append(token)
-                    if value is not None:
-                        rewritten.append(value)
-            elif token.startswith("-c") and "=" in token[2:]:
-                rewritten.append("--config=" + token[2:])
-            elif (
-                token.startswith("-")
-                and not token.startswith("--")
-                and len(token) > 2
-                and token[:2] not in valued
-            ):
-                # Click otherwise parses known letters *inside* an unknown
-                # short option: -mexample used to become --env xample.
-                marker = f"--__aisquare_native_arg_{len(protected)}={token}"
-                while marker in args:
-                    marker = "-" + marker
-                protected[marker] = token
-                rewritten.append(marker)
-            else:
-                rewritten.append(token)
-                if token in valued:
-                    value = next(tokens, None)
-                    if value is not None:
-                        rewritten.append(value)
-        remaining = super().parse_args(ctx, rewritten)
-        remaining[:] = [protected.get(token, token) for token in remaining]
-        return remaining
 
 
 def _declared_roles() -> set[str]:
@@ -163,7 +107,7 @@ def launch(
             "-c",
             help="Agent command to launch (-c BINARY; Codex -c KEY=VALUE is forwarded). "
             "Overrides the role's bound `bin`; "
-            f"defaults to that, then to `{DEFAULT_AGENT}`.",
+            "defaults to that, then to the selected coding agent.",
             metavar="CMD",
         ),
     ] = None,
@@ -275,16 +219,7 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
-    import uuid
-
-    env[agent_launch.ACTIVE_AGENT_ENV] = selected.adapter.id
-    if os.environ.get("AISQUARE_LAUNCH_ID"):
-        env.pop("AISQUARE_FLEET_AGENT", None)
-    env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
-    if project is not None:
-        env.setdefault("AISQUARE_TEAM_HUB", str(project.root))
-    if selected.adapter.id != "claude-code":
-        env[selected.adapter.home_env] = str(selected.config_dir)
+    parent_run = agent_launch.launch_identity(env, selected, project.root if project else None)
     if account is not None:
         # The account wins over the binding: the flag names an account this
         # launch is FOR, and the binding is the role's standing shape. For the
@@ -344,7 +279,6 @@ def launch(
         # is disowned and the child wires its own. A gateway the operator set
         # up has no marker beside it, is not ours, and still makes us stand
         # down at the reserved-var guard exactly as before.
-        parent_run = explainability_service.disown_inherited_trace(env)
         if parent_run:
             stderr_console().print(
                 f"explainability: launched from a session traced as {parent_run} — "

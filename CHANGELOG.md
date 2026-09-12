@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Bin-only wrappers retain Claude compatibility when no coding-agent default is selected.
+  With a user, project, or inherited agent default, explicitly bind the wrapper's
+  family using `team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`).
+- Fleet `extra_args` retain their existing Claude ownership. Other agents use
+  `agent_args.<agent>`; spawn reports when legacy arguments are skipped.
+- Native hook settings are replaced atomically. Symlink targets are updated;
+  other hard links retain their previous contents.
+
 ### Added
 - Terminal Codex integration through a shared coding-agent adapter registry:
   native hooks, memory, board identity, fleet launches, permissions, optional

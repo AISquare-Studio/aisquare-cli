@@ -18,11 +18,13 @@ import tempfile
 import time
 import tomllib
 from collections.abc import Iterator
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
+from aisquare.core.agent_adapters.types import option_values
 from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
@@ -33,23 +35,6 @@ _config_stamp: tuple[object, ...] | None = None
 
 class NativeConfigError(ValueError):
     """A config layer could contain operator settings we cannot safely inspect."""
-
-
-def _option_values(args: list[str], short: str, long: str) -> Iterator[str]:
-    tokens = iter(args)
-    for arg in tokens:
-        if arg == "--":
-            break
-        if arg in {short, long}:
-            value = next(tokens, None)
-            if value is not None:
-                yield value
-        elif arg.startswith(long + "="):
-            yield arg.partition("=")[2]
-        elif arg.startswith(short) and len(arg) > len(short):
-            value = arg[len(short) :].removeprefix("=")
-            if value and not value.startswith("-"):
-                yield value
 
 
 def _read_config(path: Path, layer: str) -> dict[str, Any]:
@@ -74,7 +59,7 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
     unselected profile files are not layers of this launch either.
     """
     overrides: list[dict[str, Any]] = []
-    for value in _option_values(args, "-c", "--config"):
+    for value in option_values(args, "-c", "--config"):
         key, separator, raw = value.partition("=")
         if not separator:
             continue
@@ -97,7 +82,7 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
         *overrides,
     ]
     profile = next((config["profile"] for config in reversed(configs) if "profile" in config), None)
-    for value in _option_values(args, "-p", "--profile"):
+    for value in option_values(args, "-p", "--profile"):
         profile = value
     if (
         not isinstance(profile, str)
@@ -213,7 +198,7 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
     if not insights.shipping_enabled() or not insights.settings().enabled:
         return 0
     count = 0
-    with store_session() as store:
+    with store_session() as store, store.transaction():
         session_id = store.get_meta(f"launch-session:{launch_id}")
         session = store.get_session(session_id) if session_id else None
         marker_key = f"native-launch:{launch_id}"
@@ -229,12 +214,13 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
         project_id = project_id or orchestrator.team_project().id
         store.set_meta(marker_key, json.dumps({"seen_at": time.time(), "project_id": project_id}))
         observations = list(events(payload))
+        dedup = store.list_meta(f"native-event:{launch_id}:")
+        providers = store.list_meta(f"native-provider:{launch_id}:")
         for native in observations:
             if native.get("provider_name") and native.get("conversation.id"):
-                store.set_meta(
-                    f"native-provider:{launch_id}:{native['conversation.id']}",
-                    insights._outbound(str(native["provider_name"])),
-                )
+                provider_key = f"native-provider:{launch_id}:{native['conversation.id']}"
+                providers[provider_key] = insights._outbound(str(native["provider_name"]))
+                store.set_meta(provider_key, providers[provider_key])
         for native in observations:
             # Redact before writing anything destined for the gateway. No raw
             # body, prompt, tool parameters, authorization or exporter headers.
@@ -244,14 +230,12 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
             }
             digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
             dedup_key = f"native-event:{launch_id}:{digest}"
-            if store.get_meta(dedup_key):
+            if dedup_key in dedup:
                 continue
             # Provider is reported at conversation start, not on each SSE
             # usage event. Enrich after hashing so a late startup observation
             # cannot make a retried usage record count twice.
-            provider = store.get_meta(
-                f"native-provider:{launch_id}:{native.get('conversation.id')}"
-            )
+            provider = providers.get(f"native-provider:{launch_id}:{native.get('conversation.id')}")
             if provider:
                 clean.setdefault("provider_name", provider)
             record: dict[str, object] = {
@@ -267,6 +251,7 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
             }
             if outbox.enqueue(record) is not None:
                 store.set_meta(dedup_key, "1")
+                dedup[dedup_key] = "1"
                 count += 1
     return count
 
@@ -278,6 +263,8 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
     token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = 0.5
+
         def do_POST(self) -> None:
             if not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {token}"):
                 self.send_error(403)
@@ -312,7 +299,7 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
         try:
             while True:
                 if time.monotonic() - last_pruned >= 60:
-                    with store_session() as store:
+                    with suppress(Exception), store_session() as store:
                         store.expire_native_launches(time.time() - NATIVE_METADATA_TTL)
                     last_pruned = time.monotonic()
                 server.handle_request()
@@ -321,11 +308,11 @@ def serve(ready: Path, owner_pid: int, launch_id: str) -> None:
                 except ProcessLookupError:
                     break
         finally:
-            try:
-                with store_session() as store:
-                    store.clear_native_launch(launch_id)
-            finally:
+            with suppress(Exception), store_session() as store:
+                store.clear_native_launch(launch_id)
+            with suppress(OSError):
                 ready.unlink(missing_ok=True)
+            with suppress(OSError):
                 ready.parent.rmdir()
 
 

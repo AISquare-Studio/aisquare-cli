@@ -1775,11 +1775,7 @@ def _render_board(
                 parts.append(f"[{session.model}]")
                 # base_role: a seat rides its role's ladder, so `coder1` on a
                 # model outside the coder ladder is flagged like `coder` is.
-                mismatch = (
-                    harness.model_mismatch(base_role(session.role), session.model)
-                    if session.agent in (None, "claude-code")
-                    else None
-                )
+                mismatch = harness.model_mismatch(session.role, session.model, agent=session.agent)
                 if mismatch:
                     parts.append("⚠ off-ladder")
             if session.focus:

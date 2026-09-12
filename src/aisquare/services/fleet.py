@@ -936,10 +936,20 @@ def spawn(
     # Validate native model pins before creating a worktree/window or live row.
     try:
         if not selected.adapter.capabilities.model_ladders:
-            agent_launch.model_for(selected, role, probe=False)
+            agent_launch.model_for(
+                selected,
+                role,
+                probe=False,
+                raw_args=[*selected.profile.args, *role_args, *agent_args],
+            )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     notes: list[str] = []
+    if role_config.extra_args and not selected.adapter.capabilities.legacy_fleet_args:
+        notes.append(
+            f"Legacy fleet extra_args apply only to Claude Code; use "
+            f"fleet.roles.{role}.agent_args.{selected.adapter.id} for native arguments"
+        )
     with store_session() as store:
         project = ensure_codename(project, store)
         codename = project.codename or codenames.codename_for(project.id)
@@ -1021,8 +1031,9 @@ def spawn(
         # nothing printed. `docs/fleet.md` promises `AISQUARE_BIN_<ROLE>` works
         # for a fleet launch; this is what makes that true.
         flags += ["--command", resolution.binary]
-    if agent is not None or selected.adapter.id != "claude-code":
-        flags += ["--agent", selected.adapter.id]
+    # The parent already resolved this family. Carry that decision through
+    # tmux so a legacy wrapper is not reclassified against inherited defaults.
+    flags += ["--agent", selected.adapter.id]
     native_mode = mode if selected.adapter.id == "claude-code" else permission_mode
     native_sandbox = (
         role_config.sandbox if selected.adapter.capabilities.sandbox_permissions else None
@@ -1031,7 +1042,7 @@ def spawn(
         role_config.approval_policy if selected.adapter.capabilities.sandbox_permissions else None
     )
     try:
-        flags += selected.adapter.fleet_args(
+        native = selected.adapter.fleet_args(
             role,
             picked,
             native_mode,
@@ -1040,25 +1051,22 @@ def spawn(
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
-    flags += list(identity.inject_args)
+    native += list(identity.inject_args)
     if account is not None:
         # Carried to `launch`, which resolves the slot and sets the account's
         # variables inside the window; a slot that does not exist fails there
         # with `unknown_account`, exactly as a hand-typed launch would.
         flags += ["--account", account]
     env = {
-        **selected.profile.env,
         "AISQUARE_FLEET_AGENT": agent_id,
         "AISQUARE_LAUNCH_ID": "",
         agent_launch.ACTIVE_AGENT_ENV: selected.adapter.id,
     }
     if config.disable_native_agent_teams:
         native_args, native_env = selected.adapter.disable_native_teams()
-        flags += native_args
+        native += native_args
         env.update(native_env)
-    if selected.adapter.id != "claude-code":
-        flags.insert(flags.index("--agent") + 2, "--")
-    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
+    command = selfcli.argv_for(["launch", role, *flags, "--", *native, *role_args, *extra])
     if prompt and selected.adapter.capabilities.positional_prompt:
         command += ["--", prompt]
     if account is not None:

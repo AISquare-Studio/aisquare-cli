@@ -28,7 +28,7 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -500,6 +500,16 @@ UPDATE team_session SET agent = 'claude-code', native_session_id = id
 UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
 """
 
+_SCHEMA_V16 = """
+ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -517,6 +527,7 @@ _MIGRATIONS = (
     _SCHEMA_V13,
     _SCHEMA_V14,
     _SCHEMA_V15,
+    _SCHEMA_V16,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -597,6 +608,7 @@ class AmbiguousIdError(LookupError):
 class ContextStore(Protocol):
     """Everything the service layer needs from persistent context storage."""
 
+    def transaction(self) -> AbstractContextManager[None]: ...
     def add(self, entry: ContextEntry) -> ContextEntry: ...
     def get(self, ref: str) -> ContextEntry | None: ...
     def entries(
@@ -938,8 +950,7 @@ def _session_write(
 
     @wraps(method)
     def write(self: SqliteStore, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
+        with self.transaction():
             return method(self, *args, **kwargs)
 
     return write
@@ -950,6 +961,34 @@ class SqliteStore:
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
+        self._transaction_depth = 0
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Own the outer commit, including all nested writes and read-backs."""
+        outer = self._transaction_depth == 0
+        savepoint = f"aisquare_write_{self._transaction_depth}"
+        self._conn.execute("BEGIN IMMEDIATE" if outer else f"SAVEPOINT {savepoint}")
+        self._transaction_depth += 1
+        try:
+            yield
+            if outer:
+                self._conn.commit()
+            else:
+                self._conn.execute(f"RELEASE {savepoint}")
+        except BaseException:
+            if outer:
+                self._conn.rollback()
+            else:
+                self._conn.execute(f"ROLLBACK TO {savepoint}")
+                self._conn.execute(f"RELEASE {savepoint}")
+            raise
+        finally:
+            self._transaction_depth -= 1
+
+    def _commit(self) -> None:
+        if not self._transaction_depth:
+            self._conn.commit()
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -966,7 +1005,7 @@ class SqliteStore:
                 entry.deleted_at.isoformat() if entry.deleted_at else None,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return entry
 
     def get(self, ref: str) -> ContextEntry | None:
@@ -1024,7 +1063,7 @@ class SqliteStore:
                 entry.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         updated = self.get(entry.id)
         assert updated is not None  # just updated, not deleted
         return updated
@@ -1034,7 +1073,7 @@ class SqliteStore:
         if entry is None:
             raise KeyError(entry_id)
         self._conn.execute("UPDATE entry SET deleted_at = ? WHERE id = ?", (_now_iso(), entry.id))
-        self._conn.commit()
+        self._commit()
 
     def promote(self, entry_id: str) -> ContextEntry:
         entry = self.get(entry_id)
@@ -1048,7 +1087,7 @@ class SqliteStore:
             "UPDATE entry SET pool = 'user', project_id = NULL, updated_at = ? WHERE id = ?",
             (_now_iso(), entry.id),
         )
-        self._conn.commit()
+        self._commit()
         promoted = self.get(entry.id)
         assert promoted is not None  # just updated, not deleted
         return promoted
@@ -1073,7 +1112,7 @@ class SqliteStore:
                 _now_iso(),
             ),
         )
-        self._conn.commit()
+        self._commit()
 
     def list_projects(self) -> list[ProjectInfo]:
         rows = self._conn.execute(
@@ -1110,7 +1149,7 @@ class SqliteStore:
             "UPDATE project SET forgotten_at = ? WHERE id = ? AND forgotten_at IS NULL",
             (_now_iso(), project_id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise KeyError(project_id)
 
@@ -1138,7 +1177,7 @@ class SqliteStore:
             ).fetchall()
         ]
         removed: dict[str, int] = {}
-        with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+        with self.transaction():  # one BEGIN…COMMIT: a purge is whole or it is nothing
             removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             for table in (
                 "entry",
@@ -1173,11 +1212,6 @@ class SqliteStore:
                 f"coding-agent:{project_id}",
                 f"signal/{_glob_prefix(project_id)[:-1]}/*",
             ),
-        ).rowcount
-        removed += self._conn.execute(
-            "DELETE FROM team_meta WHERE key IN "
-            "(SELECT 'fleet-pending:' || id FROM fleet_agent WHERE project_id = ?)",
-            (project_id,),
         ).rowcount
         for key, raw in self.list_meta("native-launch:").items():
             try:
@@ -1259,7 +1293,7 @@ class SqliteStore:
                 "UPDATE project SET linked_repos = ? WHERE id = ?",
                 (json.dumps([*project.linked_repos, repo]), project_id),
             )
-            self._conn.commit()
+            self._commit()
         updated = self.get_project(project_id)
         assert updated is not None  # just confirmed it exists
         return updated
@@ -1284,7 +1318,7 @@ class SqliteStore:
                 record.created_at.isoformat(),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return record
 
     def recent_prompts(
@@ -1410,7 +1444,7 @@ class SqliteStore:
                 session.native_session_id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         stored = self.get_session(session.id)
         assert stored is not None  # just upserted
         return stored
@@ -1460,7 +1494,7 @@ class SqliteStore:
                 session.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         updated = self.get_session(session.id)
         assert updated is not None  # just updated
         return updated
@@ -1496,7 +1530,7 @@ class SqliteStore:
             f"UPDATE team_session SET {', '.join(sets)} WHERE id = ?",
             (*params, session_id),
         )
-        self._conn.commit()
+        self._commit()
 
     @_session_write
     def mark_attention(self, session_id: str) -> bool:
@@ -1522,7 +1556,7 @@ class SqliteStore:
             "UPDATE team_session SET last_seen_at = ?, ended_at = NULL WHERE id = ?",
             (_now_iso(), session_id),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     @_session_write
@@ -1557,7 +1591,7 @@ class SqliteStore:
             "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
             (now, now, session_id),
         )
-        self._conn.commit()
+        self._commit()
         return released
 
     @_session_write
@@ -1588,7 +1622,7 @@ class SqliteStore:
             ),
         )
         created = cursor.rowcount == 1
-        self._conn.commit()
+        self._commit()
         row = self._conn.execute(
             f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? AND key = ?",
             (task.project_id, task.key),
@@ -1654,7 +1688,7 @@ class SqliteStore:
                 _now_iso(),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     @_session_write
@@ -1664,7 +1698,7 @@ class SqliteStore:
             "UPDATE team_task SET claim_expires_at = ? WHERE claimed_by = ? AND status = 'doing'",
             (lease_until.isoformat(), self._canonical_session_id(session_id)),
         )
-        self._conn.commit()
+        self._commit()
 
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask:
         task = self.get_task(task_id)
@@ -1683,7 +1717,7 @@ class SqliteStore:
                 "UPDATE team_task SET status = ?, updated_at = ? WHERE id = ?",
                 (status, _now_iso(), task.id),
             )
-        self._conn.commit()
+        self._commit()
         updated = self.get_task(task.id)
         assert updated is not None  # just updated
         return updated
@@ -1702,7 +1736,7 @@ class SqliteStore:
             "claim_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'doing'",
             (_now_iso(), task.id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise ValueError(f"task {task.id} is {task.status}, not doing — nothing to release")
         updated = self.get_task(task.id)
@@ -1725,7 +1759,7 @@ class SqliteStore:
             "WHERE id = ? AND status IN ('doing', 'review', 'blocked', 'done')",
             (_now_iso(), task.id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise ValueError(
                 f"task {task.id} is {task.status} — reopen a doing/review/blocked/done task"
@@ -1822,7 +1856,7 @@ class SqliteStore:
         self._conn.execute(
             f"INSERT INTO metric ({_METRIC_COLUMNS}) VALUES ({placeholders})", values
         )
-        self._conn.commit()
+        self._commit()
         return metric
 
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None:
@@ -1859,7 +1893,7 @@ class SqliteStore:
             "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ? AND ended_at IS NULL",
             (ended_at.isoformat(), wall_ms, row["trace_id"]),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount == 0:
             return None
         closed = self._conn.execute(
@@ -1900,7 +1934,7 @@ class SqliteStore:
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        self._conn.commit()
+        self._commit()
 
     def list_meta(self, prefix: str) -> dict[str, str]:
         """Every ``team_meta`` entry under ``prefix``, key → value."""
@@ -1916,21 +1950,21 @@ class SqliteStore:
             "INSERT INTO team_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
             (key, value),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     def compare_meta(self, key: str, expected: str, value: str) -> bool:
         cursor = self._conn.execute(
             "UPDATE team_meta SET value = ? WHERE key = ? AND value = ?", (value, key, expected)
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     def delete_meta(self, key: str, *, expected: str | None = None) -> bool:
         clause = " AND value = ?" if expected is not None else ""
         args = (key, expected) if expected is not None else (key,)
         cursor = self._conn.execute("DELETE FROM team_meta WHERE key = ?" + clause, args)
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
     def _clear_native_launch(self, launch_id: str) -> int:
@@ -1945,13 +1979,13 @@ class SqliteStore:
 
     def clear_native_launch(self, launch_id: str) -> int:
         """Drop transient native dedup/provider facts when their receiver exits."""
-        with self._conn:
+        with self.transaction():
             return self._clear_native_launch(launch_id)
 
     def expire_native_launches(self, before: float) -> int:
         """Reap crashed receivers and metadata from releases without lifecycle markers."""
         removed = 0
-        with self._conn:
+        with self.transaction():
             for key, raw in self.list_meta("native-launch:").items():
                 try:
                     marker = json.loads(raw)
@@ -1969,9 +2003,43 @@ class SqliteStore:
                 "'native-launch:' || substr(substr(team_meta.key, instr(team_meta.key, ':') + 1), "
                 "1, instr(substr(team_meta.key, instr(team_meta.key, ':') + 1), ':') - 1))"
             ).rowcount
-            removed += self._conn.execute(
-                "DELETE FROM team_meta WHERE key GLOB 'fleet-pending:*'"
-            ).rowcount
+            # Active sessions retain exact MCP/fleet joins even on long runs.
+            # Ended or abandoned sessions retain replay protection for the TTL.
+            cutoff = datetime.fromtimestamp(before, UTC).isoformat()
+            live = {
+                row["id"]
+                for row in self._conn.execute(
+                    "SELECT id FROM team_session WHERE ended_at IS NULL AND last_seen_at >= ?",
+                    (cutoff,),
+                )
+            }
+            active_panes = {
+                row["key"].replace("-session:", "-seen:", 1) + ":"
+                for row in self._conn.execute(
+                    "SELECT key, value FROM team_meta WHERE key GLOB 'launch-session:*' "
+                    "OR key GLOB 'fleet-session:*'"
+                )
+                if row["value"] in live
+            }
+            rows = self._conn.execute(
+                "SELECT key, value FROM team_meta WHERE updated_at < ? AND ("
+                "key GLOB 'agent-event:*' OR key GLOB 'launch-session:*' OR "
+                "key GLOB 'launch-seen:*' OR key GLOB 'fleet-session:*' OR "
+                "key GLOB 'fleet-seen:*')",
+                (before,),
+            ).fetchall()
+            for row in rows:
+                key = row["key"]
+                if key.startswith("agent-event:"):
+                    active = any(key.startswith(f"agent-event:{session}:") for session in live)
+                elif "-seen:" in key:
+                    active = any(key.startswith(prefix) for prefix in active_panes)
+                else:
+                    active = row["value"] in live
+                if not active:
+                    removed += self._conn.execute(
+                        "DELETE FROM team_meta WHERE key = ?", (key,)
+                    ).rowcount
         return removed
 
     @_session_write
@@ -1991,27 +2059,26 @@ class SqliteStore:
                 update={"session_id": self._canonical_session_id(event.session_id)}
             )
             meta_value = {**meta_value, "session_id": event.session_id}
-        with self._conn:  # one BEGIN…COMMIT for both statements
-            cursor = self._conn.execute(
-                "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-                "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event.id,
-                    event.project_id,
-                    event.session_id,
-                    event.kind,
-                    event.text,
-                    event.task_id,
-                    event.to_role,
-                    event.created_at.isoformat(),
-                ),
-            )
-            stamped = {**meta_value, "seq": cursor.lastrowid}
-            self._conn.execute(
-                "INSERT INTO team_meta (key, value) VALUES (?, ?) "
-                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                (meta_key, json.dumps(stamped)),
-            )
+        cursor = self._conn.execute(
+            "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.id,
+                event.project_id,
+                event.session_id,
+                event.kind,
+                event.text,
+                event.task_id,
+                event.to_role,
+                event.created_at.isoformat(),
+            ),
+        )
+        stamped = {**meta_value, "seq": cursor.lastrowid}
+        self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (meta_key, json.dumps(stamped)),
+        )
         return event.model_copy(update={"seq": cursor.lastrowid})
 
     @_session_write
@@ -2034,7 +2101,7 @@ class SqliteStore:
                 event.created_at.isoformat(),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
 
     def get_event(self, event_id: str) -> TeamEvent | None:
@@ -2146,7 +2213,7 @@ class SqliteStore:
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
         """Give a project its fleet codename (unique: the index raises on a clash)."""
         self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
-        self._conn.commit()
+        self._commit()
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
@@ -2160,7 +2227,8 @@ class SqliteStore:
 
     def _bound_fleet_agent(self, row: sqlite3.Row) -> FleetAgent:
         agent = _row_to_fleet_agent(row)
-        bound = self.get_meta(f"fleet-session:{agent.id}")
+        key = f"fleet-session:{agent.id}"
+        bound = self.get_meta(key)
         return agent.model_copy(update={"session_id": bound}) if bound else agent
 
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent:
@@ -2196,7 +2264,7 @@ class SqliteStore:
                 agent.agent,
             ),
         )
-        self._conn.commit()
+        self._commit()
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
@@ -2212,13 +2280,20 @@ class SqliteStore:
         return self._bound_fleet_agent(rows[0]) if rows else None
 
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
-        clause = " AND ended_at IS NULL" if live_only else ""
+        clause = " AND f.ended_at IS NULL" if live_only else ""
+        columns = ", ".join("f." + column for column in _FLEET_AGENT_COLUMNS.split(", "))
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
-            f"WHERE project_id = ?{clause} ORDER BY created_at, id",
+            f"SELECT {columns}, m.value AS bound_session_id FROM fleet_agent AS f "
+            "LEFT JOIN team_meta AS m ON m.key = 'fleet-session:' || f.id "
+            f"WHERE f.project_id = ?{clause} ORDER BY f.created_at, f.id",
             (project_id,),
         ).fetchall()
-        return [self._bound_fleet_agent(row) for row in rows]
+        return [
+            _row_to_fleet_agent(row).model_copy(update={"session_id": row["bound_session_id"]})
+            if row["bound_session_id"]
+            else _row_to_fleet_agent(row)
+            for row in rows
+        ]
 
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
@@ -2238,7 +2313,7 @@ class SqliteStore:
             "WHERE id = ? AND ended_at IS NULL",
             (_now_iso(), exit_status, agent_id),
         )
-        self._conn.commit()
+        self._commit()
         agent = self.get_fleet_agent(agent_id)
         if agent is None:
             raise KeyError(agent_id)

@@ -2,8 +2,8 @@
 
 docs/plans/fleet-tui.md §4.2: what this is, ``+`` to add a project, and an
 inline presence check for the tools the fleet leans on, with install hints for
-the ones that are missing. It reads nothing from the store; the sidebar is the
-project list.
+the ones that are missing. Discovery reads the project's agent preference in a
+worker; the sidebar owns the project list.
 """
 
 from __future__ import annotations

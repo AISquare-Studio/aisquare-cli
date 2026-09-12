@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -12,7 +11,7 @@ from pathlib import Path
 
 from aisquare.core import agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter, config_home
+from aisquare.core.agent_adapters.types import AgentAdapter, config_home, model_overrides
 from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
 from aisquare.core.store import store_session
 
@@ -32,7 +31,7 @@ def selection_snapshot(cwd: Path | None = None) -> Iterator[None]:
         choice = None
     token = _PROJECT_CHOICE.set((root, choice))
     try:
-        with config_snapshot():
+        with config_snapshot(), harness.probe_snapshot():
             yield
     finally:
         _PROJECT_CHOICE.reset(token)
@@ -42,10 +41,15 @@ class UnknownWrapperError(ValueError):
     """A default names an agent, but does not identify an arbitrary executable."""
 
     def __init__(self, binary: str, role: str) -> None:
-        self.fix = f"aisquare team bind {role} --agent AGENT --bin PATH"
+        import shlex
+
+        self.fix = shlex.join(
+            ["aisquare", "team", "bind", role, "--agent", "claude-code", "--bin", binary]
+        )
         super().__init__(
-            f"The agent family of {binary!r} is unknown. Bind this wrapper with {self.fix}, "
-            "or pass --agent AGENT for this launch (AGENT: claude-code or codex). "
+            f"The agent family of {binary!r} is unknown. For a Claude wrapper, run: {self.fix}. "
+            "For a Codex wrapper use --agent codex instead; for a Claude wrapper use "
+            "--agent claude-code. "
             "User, project and inherited defaults do not identify a wrapper's family."
         )
 
@@ -60,10 +64,26 @@ class ResolvedAgent:
 
 
 def executable(selected: ResolvedAgent) -> str | None:
-    effective_path = selected.profile.env.get("PATH", os.environ.get("PATH"))
-    if effective_path == os.environ.get("PATH"):
-        return shutil.which(selected.binary.binary)
-    return shutil.which(selected.binary.binary, path=effective_path)
+    return harness.executable_path(selected.binary.binary, {**os.environ, **selected.profile.env})
+
+
+def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | None) -> str | None:
+    """Disown an inherited pane before giving this launch its own identity."""
+    import uuid
+
+    from aisquare.services import explainability
+
+    fleet = env.get("AISQUARE_FLEET_AGENT") if not env.get("AISQUARE_LAUNCH_ID") else None
+    parent_run = explainability.disown_inherited_trace(env)
+    if fleet:
+        env["AISQUARE_FLEET_AGENT"] = fleet
+    env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
+    env[ACTIVE_AGENT_ENV] = selected.adapter.id
+    if selected.adapter.id != "claude-code" or selected.adapter.home_env in env:
+        env[selected.adapter.home_env] = str(selected.config_dir)
+    if hub is not None:
+        env.setdefault("AISQUARE_TEAM_HUB", str(hub))
+    return parent_run
 
 
 def project_default(cwd: Path | None = None) -> str | None:
@@ -118,7 +138,7 @@ def resolve(
         raise ValueError(
             f"{chosen_binary.binary!r} runs {inferred.id}, but {adapter.id} was selected"
         )
-    elif inferred is None and source not in {"flag", "role"}:
+    elif inferred is None and source not in {"flag", "role", "default"}:
         raise UnknownWrapperError(chosen_binary.binary, role)
     effective_env = {**os.environ, **profile.env}
     return ResolvedAgent(
@@ -151,14 +171,19 @@ def model_for(
     probe: bool | None = None,
     refresh: bool = False,
     effort: str | None = None,
+    raw_args: list[str] | None = None,
 ) -> harness.ModelResolution | None:
+    model, native_effort = model_overrides(selected.adapter.id, raw_args or [])
+    effective = {**os.environ, **selected.profile.env}
+    if model is not None:
+        effective[harness.role_env_key("MODEL", role)] = model
     return selected.adapter.resolve_model(
         role,
         binary=selected.binary.binary,
-        env={**os.environ, **selected.profile.env},
+        env=effective,
         probe=probe,
         refresh=refresh,
-        effort=effort,
+        effort=native_effort if native_effort is not None else effort,
     )
 
 
@@ -194,15 +219,22 @@ def mcp_args(selected: ResolvedAgent) -> list[str]:
 
 
 def native_model_args(selected: ResolvedAgent, role: str, raw_args: list[str]) -> list[str]:
-    from aisquare.core.agent_adapters.types import has_option
-
     if selected.adapter.capabilities.model_ladders:
-        return []  # plain launch has always left Claude model choice to its CLI
-    resolution = model_for(selected, role, probe=False)
+        return []  # plain launch leaves Claude model choice to its CLI
+    resolution = model_for(selected, role, probe=False, raw_args=raw_args)
+    return resolved_model_args(selected, resolution, raw_args)
+
+
+def resolved_model_args(
+    selected: ResolvedAgent, resolution: harness.ModelResolution | None, raw_args: list[str]
+) -> list[str]:
     if resolution is None:
         return []
-    model = None if has_option(raw_args, "--model", "-m") else resolution.model or None
-    return selected.adapter.model_args(model, resolution.effort or None)
+    model, effort = model_overrides(selected.adapter.id, raw_args)
+    return selected.adapter.model_args(
+        None if model is not None else resolution.model or None,
+        None if effort is not None else resolution.effort or None,
+    )
 
 
 def telemetry_args(
@@ -210,12 +242,6 @@ def telemetry_args(
     env: dict[str, str],
     raw_args: list[str] | None = None,
 ) -> tuple[list[str], str]:
-    from aisquare.services import explainability
-
-    # A child must never keep a Claude parent's model/run identity, even when
-    # its own telemetry is disabled or its config cannot be read.
-    if not selected.adapter.capabilities.model_proxy:
-        explainability.disown_inherited_trace(env)
     if selected.adapter.id != "codex":
         return [], ""
     from aisquare.services import native_telemetry

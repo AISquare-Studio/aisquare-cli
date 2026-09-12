@@ -323,15 +323,15 @@ def disown_inherited_trace(env: MutableMapping[str, str]) -> str | None:
     name needs no pass at all.
     """
     parent_run = (env.get(PIPELINE_ID_ENV_VAR) or "").strip()
-    if not parent_run or not any(env.get(name) for name in RESERVED_ENV_VARS):
-        return None
+    owns_routing = bool(parent_run and any(env.get(name) for name in RESERVED_ENV_VARS))
     # Read off the module, not bound at import, so the derivation is testable:
     # `tests/test_spawn_seams.py` adds a name to the tuple and asserts this
     # pops it. A `from … import` here would coincidentally match the tuple
     # today and silently stop following it tomorrow.
     for name in spawn.IDENTITY_ENV_VARS:
-        env.pop(name, None)
-    return parent_run
+        if owns_routing or name in spawn.MARKER_ENV_VARS:
+            env.pop(name, None)
+    return parent_run if owns_routing else None
 
 
 def trace_marker(wiring: SessionWiring) -> dict[str, str]:

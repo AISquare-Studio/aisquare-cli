@@ -39,7 +39,10 @@ class ClaudeCodeAdapter:
         effort: str | None,
     ) -> harness.ModelResolution | None:
         if effort is not None and harness.normalize_effort(effort) is None:
-            raise BadEffortError(f"Claude Code does not support effort {effort!r}")
+            raise BadEffortError(
+                f"Claude Code does not support effort {effort!r}; use one of: "
+                + ", ".join((*harness.EFFORT_SCALE, harness.ULTRACODE))
+            )
         return harness.resolve_model(
             role,
             probe=probe,

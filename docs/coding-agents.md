@@ -112,7 +112,7 @@ approval_policy = "on-request"
 agent_args = { codex = ["--no-alt-screen"] }
 ```
 
-`AISQUARE_MODEL_ROLE` and `AISQUARE_EFFORT_ROLE` remain explicit role pins.
+`AISQUARE_MODEL_<ROLE>` and `AISQUARE_EFFORT_<ROLE>` remain explicit role pins.
 Codex accepts `minimal`, `low`, `medium`, `high`, and `xhigh`. Shared effort
 names `max` and `ultracode` map to Codex's `xhigh`. Values are trimmed and effort
 names ignore case; blank environment/config pins fall through to native defaults.
@@ -249,3 +249,24 @@ Native contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
 [configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
 [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).
+
+The first `--` separates AISquare options from native options. To pass a literal
+prompt starting with a dash, include the native separator too:
+
+```sh
+asq launch coder --agent codex -- -- '-migrate the schema'
+```
+
+An attached native option such as `-mMODEL` retains Codex's usual meaning.
+Explicit `--model`/`-m` and `-c model=…` or `-c model_reasoning_effort=…`
+override AISquare defaults without injecting a second value for that setting.
+
+Hook readiness is tied to the definition carried by the command that actually
+ran. An older open session cannot verify a newly installed definition. Reconnect
+after upgrading, then review the updated hooks in Codex. Atomic settings writes
+follow symlinks; replacing a hard-linked file updates that path while leaving
+the other hard links' contents untouched.
+
+Launch bindings and turn retry records expire after 24 hours without session
+activity. Active sessions keep their bindings; durable board history and queued
+insights are retained.

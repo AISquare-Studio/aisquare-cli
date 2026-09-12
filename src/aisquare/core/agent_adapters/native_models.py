@@ -26,17 +26,17 @@ def resolve_model(
         # explicit environment pins must still let the agent start.
         config = AppConfig()
     settings = config.agents.models.get(agent)
-    role_settings = settings.roles.get(harness.base_role(role)) if settings else None
-    suffix = "".join(c if c.isalnum() else "_" for c in role.upper())
-    model = _pin(env.get(f"AISQUARE_MODEL_{suffix}"))
+    seat = settings.roles.get(role) if settings else None
+    base = settings.roles.get(harness.base_role(role)) if settings else None
+    model = harness.role_model_override(role, env)
     source = "pinned" if model else "configured"
-    model = model or _pin(role_settings.model if role_settings else None)
+    model = model or _pin(seat.model if seat else None) or _pin(base.model if base else None)
     model = model or _pin(settings.model if settings else None)
     if effort is not None and not effort.strip():
         raise BadEffortError("--effort requires a reasoning level, not an empty value")
-    pinned_effort = _pin(env.get(f"AISQUARE_EFFORT_{suffix}"))
+    pinned_effort = harness.role_effort_override(role, env)
     level = _pin(effort) or pinned_effort
-    level = level or _pin(role_settings.effort if role_settings else None)
+    level = level or _pin(seat.effort if seat else None) or _pin(base.effort if base else None)
     level = level or _pin(settings.effort if settings else None)
     return harness.ModelResolution(
         role=role,

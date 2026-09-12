@@ -279,9 +279,7 @@ def test_spawn_exec_survives_a_base_url_the_agent_could_not_parse(
     _tracing_on("$http://127.0.0.1:9190")
     seen: dict[str, Any] = {}
 
-    monkeypatch.setattr(
-        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
-    )
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(
         "aisquare.cli.team.os.execvpe",
         lambda file, argv, env: seen.update(argv=argv, env=env),

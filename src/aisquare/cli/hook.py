@@ -214,7 +214,10 @@ def notification() -> None:
 
 
 @app.command("codex")
-def codex(config_dir: str | None = typer.Option(None, "--config-dir")) -> None:
+def codex(
+    config_dir: str | None = typer.Option(None, "--config-dir"),
+    definition: str | None = typer.Option(None, "--definition"),
+) -> None:
     """Decode Codex native hooks and run the shared lifecycle services."""
     import os
 
@@ -230,7 +233,7 @@ def codex(config_dir: str | None = typer.Option(None, "--config-dir")) -> None:
             os.environ,
             Path(config_dir) if config_dir else None,
         )
-        output = handle_codex(_payload(), directory)
+        output = handle_codex(_payload(), directory, definition=definition)
         if output:
             typer.echo(output)
     except ManagerWakeupError as exc:

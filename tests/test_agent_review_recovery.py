@@ -152,6 +152,7 @@ def test_blank_native_pins_fall_through_and_values_are_trimmed(
 def test_harness_keeps_healthy_rows_beside_a_bad_role(
     mode: list[str], runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    agent_launch.use("codex")
     monkeypatch.setenv("AISQUARE_BIN_CODER", "unbound-wrapper")
     result = runner.invoke(app, [*mode, "team", "harness"])
     assert result.exit_code == 0, result.output
@@ -230,7 +231,7 @@ def test_native_config_alias_and_attached_model_survive_launch(
     argv = execution.call_args.args[1]
     assert "configured-model" not in argv and "-mexplicit-model" in argv
     assert (
-        list(native_telemetry._option_values(argv, "-c", "--config"))[-1]
+        list(agent_adapters.types.option_values(argv, "-c", "--config"))[-1]
         == "model_reasoning_effort=high"
     )
 
@@ -293,17 +294,18 @@ def test_observation_reuses_unchanged_settings_but_detects_an_edit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     agents.install_hooks("codex", tmp_path)
+    definition = agents.hook_fingerprint("codex", tmp_path)
     fingerprint = Mock(wraps=agents.hook_fingerprint)
     monkeypatch.setattr(agents, "hook_fingerprint", fingerprint)
-    agents.observe_hooks("codex", tmp_path)
-    agents.observe_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path, definition)
+    agents.observe_hooks("codex", tmp_path, definition)
     assert fingerprint.call_count == 1
     path = tmp_path / "hooks.json"
     settings = json.loads(path.read_text())
     settings["hooks"]["Stop"][0]["matcher"] = "changed"
     path.write_text(json.dumps(settings))
     assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
-    agents.observe_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     assert agents.integration_readiness("codex", tmp_path)[0] == "observed"
 
 
@@ -389,7 +391,7 @@ def test_connect_rejects_special_settings_files_without_blocking(kind: str, tmp_
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX filesystem semantics")
-def test_hook_writes_preserve_mode_and_refuse_to_break_hard_links(tmp_path: Path) -> None:
+def test_hook_writes_preserve_mode_and_other_hard_links(tmp_path: Path) -> None:
     settings = tmp_path / "hooks.json"
     settings.write_text("{}")
     settings.chmod(0o644)
@@ -398,10 +400,10 @@ def test_hook_writes_preserve_mode_and_refuse_to_break_hard_links(tmp_path: Path
     sibling = tmp_path / "shared.json"
     os.link(settings, sibling)
     original = settings.read_bytes()
-    with pytest.raises(agents.AgentSettingsError, match="hard links"):
-        agents.remove_hooks("codex", tmp_path)
-    assert settings.read_bytes() == sibling.read_bytes() == original
-    assert settings.stat().st_ino == sibling.stat().st_ino
+    assert agents.remove_hooks("codex", tmp_path)
+    assert sibling.read_bytes() == original
+    assert settings.read_bytes() != original
+    assert settings.stat().st_ino != sibling.stat().st_ino
 
 
 def test_failed_stop_releases_claim_and_cli_reports_the_actual_cost(
@@ -510,12 +512,11 @@ def test_native_metadata_expires_without_removing_active_launches_or_the_outbox(
         for launch in ("old", "active", "legacy"):
             store.set_meta(f"native-event:{launch}:event", "1")
             store.set_meta(f"native-provider:{launch}:thread", "provider")
-        store.set_meta("fleet-pending:unused", "1")
         store.set_meta("unrelated", "keep")
         assert outbox.enqueue(
             {"v": insights.RECORD_VERSION, "kind": "native_event", "run_key": "old"}
         )
-        assert store.expire_native_launches(time.time() - native_telemetry.NATIVE_METADATA_TTL) == 6
+        assert store.expire_native_launches(time.time() - native_telemetry.NATIVE_METADATA_TTL) == 5
         assert len(store.list_meta("native-")) == 3
         assert store.get_meta("native-event:active:event") == "1"
         assert store.clear_native_launch("active") == 3

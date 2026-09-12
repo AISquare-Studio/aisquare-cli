@@ -138,7 +138,13 @@ TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 #: default) filed its insights and its join under whoever started the server,
 #: which ``trace_marker``'s own docstring calls "worse than no record because it
 #: reads as evidence".
-MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME", "AISQUARE_RUN_TRACE_ID")
+MARKER_ENV_VARS = (
+    "AISQUARE_PIPELINE_ID",
+    "AISQUARE_TRACE_AGENT_NAME",
+    "AISQUARE_RUN_TRACE_ID",
+    "AISQUARE_LAUNCH_ID",
+    "AISQUARE_FLEET_AGENT",
+)
 
 #: Everything :func:`untraced_env` removes: the whole identity, header and
 #: marker. Separate from :data:`TRACING_ENV_VARS` because that tuple has a
@@ -282,8 +288,4 @@ def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     to is not a failure worth reporting.
     """
     source = os.environ if base is None else base
-    return {
-        key: value
-        for key, value in source.items()
-        if key not in (*IDENTITY_ENV_VARS, "AISQUARE_LAUNCH_ID", "AISQUARE_FLEET_AGENT")
-    }
+    return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +27,9 @@ def _text(payload: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def handle_codex(payload: dict[str, Any], config_dir: Path) -> str | None:
+def handle_codex(
+    payload: dict[str, Any], config_dir: Path, *, definition: str | None = None
+) -> str | None:
     """Codex's command hook protocol. Output is context, a Stop decision, or empty."""
     native = _text(payload, "session_id")
     event = _text(payload, "hook_event_name")
@@ -53,17 +54,13 @@ def handle_codex(payload: dict[str, Any], config_dir: Path) -> str | None:
     cwd = Path(cwd_text) if cwd_text else None
     model = _text(payload, "model")
     turn = _text(payload, "turn_id")
-    agents.observe_hooks("codex", config_dir)
+    agents.observe_hooks("codex", config_dir, definition)
     # These are exact launch tokens supplied by AISquare, never a search for
     # the newest transcript. Metadata may precede the fleet row without a race.
     with store_session() as store:
-        for env_key, prefix in (
-            ("AISQUARE_FLEET_AGENT", "fleet"),
-            ("AISQUARE_LAUNCH_ID", "launch"),
-        ):
-            token = os.environ.get(env_key)
-            if token:
-                store.set_meta_once(f"{prefix}-session:{token}", session_id)
+        from aisquare.core.agent_sessions import bind_launch_session
+
+        bind_launch_session(store, session_id)
         cached_key = (
             f"agent-event:{session_id}:{event}:{turn}:{bool(payload.get('stop_hook_active'))}"
         )
@@ -105,13 +102,20 @@ def handle_codex(payload: dict[str, Any], config_dir: Path) -> str | None:
 def _pending_fresh(value: object) -> bool:
     if not isinstance(value, dict):
         return False
+    wall = value.get("pending_at")
     monotonic = value.get("monotonic_at")
-    stamp = monotonic if monotonic is not None else value.get("pending_at")
-    if not isinstance(stamp, (int, float)):
+    if not isinstance(wall, (int, float)) or isinstance(wall, bool):
         return False
-    age = (time.monotonic() if monotonic is not None else time.time()) - stamp
-    # Negative ages indicate a reboot or a legacy wall-clock step backwards.
-    return 0 <= age < 180
+    wall_age = time.time() - wall
+    if monotonic is None:
+        return 0 <= wall_age < 180
+    if not isinstance(monotonic, (int, float)) or isinstance(monotonic, bool):
+        return False
+    age = time.monotonic() - monotonic
+    # Monotonic is shared between processes on supported platforms, but may
+    # pause during suspend. Wall time also bounds a claim across sleep; a
+    # backwards wall adjustment alone does not steal an active owner's claim.
+    return 0 <= age < 180 and wall_age < 180
 
 
 def _dispatch_codex(

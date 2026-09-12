@@ -21,7 +21,7 @@ from aisquare.core import harness, orchestrator, selfcli
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
 from aisquare.core.console import stdout_console
-from aisquare.core.spawn import IDENTITY_ENV_VARS
+from aisquare.core.spawn import IDENTITY_ENV_VARS, MARKER_ENV_VARS
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     AmbiguousIdError,
@@ -92,8 +92,10 @@ _SESSION_ID_SUBSTITUTION = (
 #: costs a record, a name missing from a remover corrupts the next session's.
 _CLEAR_PREVIOUS_TRACE = (
     f'if [ -n "${{{explainability_service.PIPELINE_ID_ENV_VAR}:-}}" ]; then '
-    f"unset {' '.join(IDENTITY_ENV_VARS)}; fi"
+    f"unset {' '.join(IDENTITY_ENV_VARS)}; fi; "
+    f"unset {' '.join(MARKER_ENV_VARS)}"
 )
+
 
 SessionRef = Annotated[
     str | None,
@@ -369,13 +371,19 @@ def spawn(
             env_overrides=_parse_env(env_pairs or []),
             extra_args=extra_args or [],
         )
-        if selected.adapter.capabilities.model_ladders and (
-            (probe is None and harness.probing_enabled()) or probe
+        with harness.probe_notice(
+            lambda: typer.echo(
+                "probing model availability (cached 24h; --no-probe skips)…", err=True
+            )
         ):
-            typer.echo("probing model availability (cached 24h; --no-probe skips)…", err=True)
-        resolution = agent_launch.model_for(
-            selected, role_name, probe=probe, refresh=refresh, effort=effort
-        )
+            resolution = agent_launch.model_for(
+                selected,
+                role_name,
+                probe=probe,
+                refresh=refresh,
+                effort=effort,
+                raw_args=selected.profile.args,
+            )
     except BadEffortError as exc:
         fail(str(exc), error="bad_effort")
     except ValueError as exc:
@@ -440,7 +448,7 @@ def spawn(
     else:
         argv = [
             binary.binary,
-            *selected.adapter.model_args(resolution.model or None, resolution.effort or None),
+            *agent_launch.resolved_model_args(selected, resolution, launch_profile.args),
             *launch_profile.args,
             *role_args,
         ]
@@ -487,9 +495,7 @@ def spawn(
                     ),
                     "--",
                     *(
-                        selected.adapter.model_args(
-                            resolution.model or None, resolution.effort or None
-                        )
+                        agent_launch.resolved_model_args(selected, resolution, launch_profile.args)
                         if resolution
                         else []
                     ),
@@ -527,6 +533,8 @@ def spawn(
             f'eval "$(aisquare explainability env {shlex.quote(role_name)} --post-root)"; '
             f"{command}"
         )
+    elif selected.adapter.capabilities.model_proxy:
+        command = f"{_CLEAR_PREVIOUS_TRACE}; {command}"
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -580,12 +588,7 @@ def spawn(
         # ones name a directory that ought to exist is exactly the coupling
         # this design removes.
         env.update(launch_profile.env)
-        import uuid
-
-        env[agent_launch.ACTIVE_AGENT_ENV] = selected.adapter.id
-        env.pop("AISQUARE_FLEET_AGENT", None)
-        env["AISQUARE_LAUNCH_ID"] = str(uuid.uuid4())
-        env.setdefault("AISQUARE_TEAM_HUB", str(orchestrator.team_project().root))
+        parent_run = agent_launch.launch_identity(env, selected, orchestrator.team_project().root)
         if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
             # Same seam as ``aisquare launch``: wire_session fails open, so a
             # dead or wrong proxy costs the trace, never the spawn. The id is
@@ -597,7 +600,6 @@ def spawn(
             # would otherwise inherit that session's Run, or be stood down and
             # launch untraced. The operator's own gateway carries no marker,
             # so it survives this untouched.
-            parent_run = explainability_service.disown_inherited_trace(env)
             if parent_run:
                 typer.echo(
                     f"explainability: spawned from a session traced as {parent_run} — "
@@ -701,7 +703,9 @@ def harness_status() -> None:
                 "default_args": profile.default_args,
             }
         )
-    interference = harness.interfering_env()
+    interference = (
+        harness.interfering_env() if any(row.get("agent") == "claude-code" for row in rows) else []
+    )
     if get_state().json_output:
         typer.echo(
             json.dumps(

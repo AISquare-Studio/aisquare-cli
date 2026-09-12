@@ -45,7 +45,6 @@ class CodexAdapter:
 
         result = resolve_model(self.id, role, env=env, effort=effort)
         result = result.model_copy(update={"effort": self.reasoning_effort(result.effort) or ""})
-        self.model_args(result.model or None, result.effort or None)
         return result
 
     def mcp_args(

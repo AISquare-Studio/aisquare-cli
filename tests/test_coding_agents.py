@@ -171,7 +171,7 @@ def test_codex_hook_health_finds_all_events_and_module_form(
     assert any(site.config_dir == directory and site.hooks_installed for site in sites)
     # Even a previously observed definition needs repair if its executable
     # disappeared or points at an older AISquare install.
-    agents.observe_hooks("codex", directory)
+    agents.observe_hooks("codex", directory, agents.hook_fingerprint("codex", directory))
     monkeypatch.setattr(
         agents, "classify_hook_binary", lambda binary: (agents.HOOK_BINARY_STALE, "0.0.1")
     )
@@ -256,7 +256,7 @@ def test_connect_respects_override_and_reports_native_trust(tmp_path: Path) -> N
     assert "/hooks" in receipt.detail
     with store_session() as store:
         assert [entry.text for entry in store.entries("user")] == ["effective global instructions"]
-    agents.observe_hooks("codex", directory)
+    agents.observe_hooks("codex", directory, agents.hook_fingerprint("codex", directory))
     assert agents.integration_readiness("codex", directory)[0] == "observed"
     path = directory / "hooks.json"
     data = json.loads(path.read_text())

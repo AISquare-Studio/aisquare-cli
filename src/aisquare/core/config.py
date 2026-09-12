@@ -399,7 +399,9 @@ def load_config(path: Path | None = None) -> AppConfig:
             snapshot[target] = exc
     value = snapshot[target]
     if isinstance(value, Exception):
-        raise value
+        import copy
+
+        raise copy.copy(value).with_traceback(None)
     return value.model_copy(deep=True)
 
 

@@ -199,8 +199,14 @@ def test_unknown_wrappers_require_a_family_before_model_flags(
     elif source == "inherited":
         monkeypatch.setenv("AISQUARE_CODING_AGENT", "codex")
     monkeypatch.setenv("AISQUARE_MODEL_CODER", "fixture-codex-model")
-    with pytest.raises(ValueError, match="pass --agent"):
-        agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
+    if source == "default":
+        assert (
+            agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path).adapter.id
+            == "claude-code"
+        )
+    else:
+        with pytest.raises(ValueError, match="--agent codex"):
+            agent_launch.resolve(binary="/fixture/claude-work", cwd=tmp_path)
     selected = agent_launch.resolve(
         agent="claude-code", binary="/fixture/claude-work", cwd=tmp_path
     )
@@ -334,7 +340,7 @@ def test_refresh_clears_this_scope_and_expired_scopes_but_keeps_other_accounts()
 
 def test_reconnect_preserves_context_headroom_and_bounds_other_hooks(tmp_path: Path) -> None:
     agents.install_hooks("codex", tmp_path)
-    agents.observe_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     path = tmp_path / "hooks.json"
     payload = json.loads(path.read_text())
     for groups in payload["hooks"].values():
@@ -350,7 +356,7 @@ def test_reconnect_preserves_context_headroom_and_bounds_other_hooks(tmp_path: P
     # Reconciliation preserves the edited context definition, which needs a
     # fresh native observation; only an unchanged reconnect preserves it.
     assert agents.integration_readiness("codex", tmp_path)[0] == "unverified"
-    agents.observe_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     before, stamp = path.read_bytes(), path.stat().st_mtime_ns
     agents.install_hooks("codex", tmp_path)
     assert path.read_bytes() == before and path.stat().st_mtime_ns == stamp
@@ -360,7 +366,7 @@ def test_reconnect_preserves_context_headroom_and_bounds_other_hooks(tmp_path: P
 @pytest.mark.parametrize("mixed", [False, True])
 def test_other_handlers_do_not_reset_aisquare_readiness(tmp_path: Path, mixed: bool) -> None:
     agents.install_hooks("codex", tmp_path)
-    agents.observe_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     path = tmp_path / "hooks.json"
     payload = json.loads(path.read_text())
     foreign = {"type": "command", "command": "my-own-notifier"}

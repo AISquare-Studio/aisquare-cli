@@ -742,7 +742,7 @@ def test_tui_session_line_renders_model_and_mismatch() -> None:
 def test_spawn_exec_requires_claude_on_path(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("aisquare.services.agent_launch.shutil.which", lambda _name: None)
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: None)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "planner", "--exec"])  # type: ignore[arg-type]
     assert result.exit_code != 0
@@ -759,9 +759,7 @@ def test_spawn_exec_replaces_the_process(
         calls["argv"] = argv
         calls["role"] = env.get("AISQUARE_ROLE")
 
-    monkeypatch.setattr(
-        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
-    )
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -802,16 +800,17 @@ def test_doctor_harness_check_reports_fable_fallback(
     work.mkdir()
     monkeypatch.chdir(work)
     team_service.activate(work)
-    harness._save_cache(
-        {
-            "fable": harness.ProbeResult(
-                alias="fable",
-                available=False,
-                reason="not entitled",
-                checked_at=datetime.now(tz=UTC),
-            )
-        }
-    )
+    with harness.probe_context(harness.ProbeContext(binary="claude", env=dict(os.environ))):
+        harness._save_cache(
+            {
+                "fable": harness.ProbeResult(
+                    alias="fable",
+                    available=False,
+                    reason="not entitled",
+                    checked_at=datetime.now(tz=UTC),
+                )
+            }
+        )
     check = diagnostics._check_harness()
     assert check.status is CheckStatus.warn
     assert "fable" in check.detail
@@ -1078,7 +1077,7 @@ def test_spawn_print_default_config_is_unchanged(isolated_home: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert "explainability" not in payload["command"]
-    assert payload["command"].startswith("AISQUARE_ROLE=coder ")
+    assert "; AISQUARE_ROLE=coder " in payload["command"]
 
 
 def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
@@ -1103,7 +1102,9 @@ def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
     assert payload["command"].startswith(
         'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset ANTHROPIC_BASE_URL '
         "ANTHROPIC_CUSTOM_HEADERS AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME "
-        "AISQUARE_RUN_TRACE_ID; fi; "
+        "AISQUARE_RUN_TRACE_ID AISQUARE_LAUNCH_ID AISQUARE_FLEET_AGENT; fi; "
+        "unset AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME AISQUARE_RUN_TRACE_ID "
+        "AISQUARE_LAUNCH_ID AISQUARE_FLEET_AGENT; "
         'eval "$(aisquare explainability env coder --post-root)"; AISQUARE_ROLE=coder '
     )
     assert "X-Pipeline-Id" not in payload["command"]
@@ -1221,9 +1222,7 @@ def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
         calls["argv"] = argv
         calls["env"] = env
 
-    monkeypatch.setattr(
-        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
-    )
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     with healthy_proxy() as proxy_url:
@@ -1267,9 +1266,7 @@ def test_spawn_exec_untraced_argv_is_never_pinned(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["argv"] = argv
 
-    monkeypatch.setattr(
-        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
-    )
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1305,9 +1302,7 @@ def test_spawn_exec_enabled_wires_the_traced_env(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["env"] = env
 
-    monkeypatch.setattr(
-        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
-    )
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1332,9 +1327,7 @@ def test_spawn_exec_dead_proxy_fails_open(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["env"] = env
 
-    monkeypatch.setattr(
-        "aisquare.services.agent_launch.shutil.which", lambda _name: "/usr/bin/claude"
-    )
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]

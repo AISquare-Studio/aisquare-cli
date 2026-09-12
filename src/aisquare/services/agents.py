@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
@@ -42,8 +43,13 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     info = agent_core.detect(name, config_dir)
     if info is None:
         raise KeyError(name)
-    if not info.detected and not (name == "codex" and shutil.which("codex")):
-        raise ValueError(f"{name} is not installed on this machine")
+    if not info.detected:
+        try:
+            binary = get_adapter(name).binary
+        except ValueError:
+            binary = name
+        if not shutil.which(binary):
+            raise ValueError(f"{name} is not installed on this machine")
 
     documents, notes = agent_core.read_context(name, config_dir)
     sections = [section for content in documents.values() for section in _split_sections(content)]

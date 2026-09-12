@@ -28,6 +28,7 @@ all of them must reach it.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -331,23 +332,25 @@ class FleetApp(App[None], inherit_bindings=False):
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
+        self.run_worker(self._refresh_accounts(), group="accounts-refresh", exclusive=True)
+
+    async def _refresh_accounts(self) -> None:
         """Re-read the Claude accounts and the AISquare session; the section and the page follow.
 
-        Files only — a few small JSON reads — which is why it rides the same
-        two-second tick as the store. The usage numbers are the view's own,
-        slower business (``AccountsView.refresh_usage``).
+        Account files are read in a worker so larger login files cannot block
+        typing in an agent pane. Usage has its own slower refresh cadence.
         """
         if self._accounts is None:
             return
         sidebar = self.sidebar
         try:
-            overview: AccountsOverview | None = self._accounts()
+            overview: AccountsOverview | None = await asyncio.to_thread(self._accounts)
         except Exception:  # a directory we cannot read costs the line, never the frame
             overview = None
         self.accounts_overview = overview
         session_known = True
         try:
-            session = read_session()
+            session = await asyncio.to_thread(read_session)
         except Exception:  # read_session never raises; belt to its braces
             session, session_known = None, False
         summary = summarise(overview, session, session_known=session_known)

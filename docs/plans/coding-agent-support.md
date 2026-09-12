@@ -183,8 +183,10 @@ configure reasoning via `model_reasoning_effort` and sandbox/approval settings
 using the supported configuration surface. Native subagent suppression also
 needs its Codex-specific setting. See [Codex configuration
 reference](https://learn.chatgpt.com/docs/config-file/config-reference).
-Validate combinations for the supported version; do not reinterpret Claude
-`auto` or `ultracode` as a supposedly equivalent Codex mode.
+Validate combinations for the supported version. Claude permission `auto` has
+no Codex equivalent. For compatibility, the effort aliases `max` and `ultracode`
+select Codex `xhigh` and status reports that native level; this does not provide
+Claude ultracode workflow orchestration or an additional reasoning tier.
 
 **Models and role behavior.** Separate role mission/depth from native model
 ladders. Give each adapter its own configurable role defaults, model/effort

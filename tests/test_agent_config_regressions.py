@@ -9,6 +9,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -62,8 +63,7 @@ def test_wrapper_launch_requires_a_declaration_even_with_family_defaults(
     result = runner.invoke(app, args)
     assert result.exit_code != 0, result.output
     execute.assert_not_called()
-    assert "--agent AGENT" in result.output
-    assert "claude-code or codex" in result.output
+    assert "--agent claude-code" in result.output and "--agent codex" in result.output
     declared = runner.invoke(app, ["team", "bind", "coder", "--agent", family, "--bin", wrapper])
     assert declared.exit_code == 0, declared.output
     result = runner.invoke(app, args)
@@ -124,14 +124,14 @@ def test_unreadable_instructions_leave_a_note_and_still_install_hooks(
 ) -> None:
     unreadable = tmp_path / filename
     unreadable.touch()
-    read = Path.read_text
+    read = Path.open
 
-    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+    def read_text(path: Path, *args: Any, **kwargs: Any) -> Any:
         if path == unreadable:
             raise PermissionError("fixture: permission denied")
-        return read(path, *args, **kwargs)  # type: ignore[arg-type]
+        return read(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "open", read_text)
     result = runner.invoke(
         app, ["--json", "agents", "connect", family, "--config-dir", str(tmp_path)]
     )
@@ -164,7 +164,7 @@ def test_claude_hooks_without_a_spec_timeout_keep_the_native_default(
 
 def test_group_annotations_do_not_reset_readiness_but_execution_matchers_do(tmp_path: Path) -> None:
     agents.install_hooks("codex", tmp_path)
-    agents.observe_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     path = tmp_path / "hooks.json"
     payload = json.loads(path.read_text())
     for key in ("description", "note", "comment"):
@@ -415,14 +415,14 @@ def test_sign_in_installs_hooks_into_a_fresh_home_despite_unreadable_instruction
     account = claude_accounts.default_account({"CLAUDE_CONFIG_DIR": str(tmp_path)})
     instruction = tmp_path / "CLAUDE.md"
     instruction.touch()
-    read = Path.read_text
+    read = Path.open
 
-    def read_text(path: Path, *args: object, **kwargs: object) -> str:
+    def read_text(path: Path, *args: Any, **kwargs: Any) -> Any:
         if path == instruction:
             raise PermissionError("fixture: unreadable instructions")
-        return read(path, *args, **kwargs)  # type: ignore[arg-type]
+        return read(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "open", read_text)
     assert not accounts_service.describe(account).hooks_installed
     assert not (tmp_path / "settings.json").exists()
     completed = accounts_service.complete_sign_in(account)
@@ -486,6 +486,7 @@ def test_context_inspection_never_opens_special_files(kind: str, tmp_path: Path)
     code = """
 import json, sys
 from pathlib import Path
+from typing import Any
 from aisquare.core import agents
 from aisquare.services.agents import connect
 home = Path(sys.argv[1])
@@ -529,7 +530,7 @@ def test_hook_execution_changes_invalidate_observed_readiness(
     tmp_path: Path,
 ) -> None:
     agents.install_hooks("codex", tmp_path)
-    agents.observe_hooks("codex", tmp_path)
+    agents.observe_hooks("codex", tmp_path, agents.hook_fingerprint("codex", tmp_path))
     path = tmp_path / "hooks.json"
     payload = json.loads(path.read_text())
     group = payload["hooks"]["Stop"][0]

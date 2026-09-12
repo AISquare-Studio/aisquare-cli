@@ -24,6 +24,7 @@ from typing import Annotated, NoReturn
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.cli.native_args import NativeForwardingCommand
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -126,6 +127,7 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
 
 @app.command(
     "spawn",
+    cls=NativeForwardingCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def spawn(

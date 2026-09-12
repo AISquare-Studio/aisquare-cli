@@ -79,25 +79,69 @@ def config_home(
 ) -> Path:
     """Resolve against the environment the selected executable will actually use."""
     raw = explicit or env.get(adapter.home_env, "").strip() or home / adapter.home_name
-    return Path(raw).expanduser().absolute()
+    return Path(raw).expanduser().resolve()
+
+
+def option_values(args: Sequence[str], *options: str) -> list[str]:
+    """Read native option values up to the native CLI's own ``--`` boundary.
+
+    The outer AISquare separator has already been consumed. Like the native
+    CLI, ``-mfoo`` is a model; a literal dash-prefixed prompt needs native ``--``.
+    """
+    values: list[str] = []
+    tokens = iter(args)
+    for arg in tokens:
+        if arg == "--":
+            break
+        if arg in options:
+            value = next(tokens, None)
+            if value is not None and value != "--":
+                values.append(value)
+            elif value == "--":
+                break
+        else:
+            for option in options:
+                if arg.startswith(option + "="):
+                    values.append(arg[len(option) + 1 :])
+                    break
+                if len(option) == 2 and arg.startswith(option) and len(arg) > 2:
+                    values.append(arg[2:])
+                    break
+    return values
 
 
 def has_option(args: Sequence[str], *options: str) -> bool:
-    """Only inspect agent options, never a prompt after the option terminator."""
-    for arg in args:
-        if arg == "--":
-            break
-        if arg.split("=", 1)[0] in options:
-            return True
-        if any(
-            len(option) == 2
-            and option.startswith("-")
-            and arg.startswith(option)
-            and len(arg) > len(option)
-            for option in options
-        ):
-            return True
-    return False
+    return bool(option_values(args, *options))
+
+
+def model_overrides(agent: str, args: Sequence[str]) -> tuple[str | None, str | None]:
+    """Explicit native model/effort wins over AISquare's configured defaults."""
+    import tomllib
+
+    model: str | None = None
+    effort: str | None = None
+    if agent == "codex":
+        for assignment in option_values(args, "-c", "--config"):
+            key, sep, value = assignment.partition("=")
+            if not sep or key.strip() not in {"model", "model_reasoning_effort"}:
+                continue
+            try:
+                decoded = tomllib.loads("value=" + value)["value"]
+            except ValueError:
+                decoded = value  # Codex also accepts bare string overrides.
+            if isinstance(decoded, str):
+                if key.strip() == "model":
+                    model = decoded
+                else:
+                    effort = decoded
+    models = option_values(args, "--model", "-m")
+    if models:
+        model = models[-1]
+    if agent == "claude-code":
+        efforts = option_values(args, "--effort")
+        if efforts:
+            effort = efforts[-1]
+    return model, effort
 
 
 def executable_name(binary: str) -> str:

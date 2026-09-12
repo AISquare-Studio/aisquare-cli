@@ -85,13 +85,9 @@ def session_start_context(
     record_trace_join(session_id)
     if session_id:
         with store_session() as store:
-            for env_key, prefix in (
-                ("AISQUARE_LAUNCH_ID", "launch"),
-                ("AISQUARE_FLEET_AGENT", "fleet"),
-            ):
-                token = os.environ.get(env_key)
-                if token and store.set_meta_once(f"{prefix}-seen:{token}:{session_id}", "1"):
-                    store.set_meta(f"{prefix}-session:{token}", session_id)
+            from aisquare.core.agent_sessions import bind_launch_session
+
+            bind_launch_session(store, session_id, started=True)
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)

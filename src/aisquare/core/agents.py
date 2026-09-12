@@ -16,8 +16,9 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -197,8 +198,43 @@ def _aisquare_command() -> str:
     return " ".join(_quote(part) for part in selfcli.argv_for([]))
 
 
+_SETTINGS_SNAPSHOT: ContextVar[dict[Path, dict[str, Any]] | None] = ContextVar(
+    "agent_settings_snapshot", default=None
+)
+
+
+@contextmanager
+def inspection_snapshot() -> Iterator[None]:
+    if _SETTINGS_SNAPSHOT.get() is not None:
+        yield
+        return
+    token = _SETTINGS_SNAPSHOT.set({})
+    try:
+        yield
+    finally:
+        _SETTINGS_SNAPSHOT.reset(token)
+
+
 def _read_settings(path: Path, *, strict: bool = False) -> dict[str, Any]:
     """Optional caches fail open; hook inspection must distinguish unreadable files."""
+    import copy
+
+    snapshot = _SETTINGS_SNAPSHOT.get()
+    key = path.absolute()
+    if snapshot is not None and key in snapshot:
+        return copy.deepcopy(snapshot[key])
+    try:
+        result = _read_settings_file(path, strict=True)
+    except AgentSettingsError:
+        if strict:
+            raise
+        return {}
+    if snapshot is not None:
+        snapshot[key] = copy.deepcopy(result)
+    return result
+
+
+def _read_settings_file(path: Path, *, strict: bool = False) -> dict[str, Any]:
     try:
         _regular_settings(path)
         content = path.read_text(encoding="utf-8")
@@ -238,6 +274,8 @@ def _is_aisquare_hook_command(command: str) -> bool:
         tokens = _split_command(command)
     except ValueError:
         return False
+    if len(tokens) >= 2 and tokens[-2] == "--definition":
+        tokens = tokens[:-2]
     if len(tokens) >= 2 and tokens[-2] == "--config-dir":
         tokens = tokens[:-2]
     if len(tokens) < 3 or tokens[-2] != "hook":
@@ -279,6 +317,9 @@ def _without_owned(groups: Any) -> list[Any]:
             kept.append(group)
             continue
         owned = _owned_handlers(group)
+        if not owned:
+            kept.append(group)
+            continue
         handlers = [item for item in group["hooks"] if item not in owned]
         if handlers:
             kept.append({**group, "hooks": handlers})
@@ -288,16 +329,16 @@ def _without_owned(groups: Any) -> list[Any]:
 def _write_settings(path: Path, settings: dict[str, Any]) -> None:
     import tempfile
 
+    snapshot = _SETTINGS_SNAPSHOT.get()
+    if snapshot is not None:
+        snapshot.pop(path.resolve(), None)
     payload = json.dumps(settings, indent=2) + "\n"
     existing = _regular_settings(path)
     # No change means no rewrite: Codex trust refers to the installed definition.
     if path.exists() and path.read_text(encoding="utf-8") == payload:
         return
-    if existing is not None and existing.st_nlink > 1:
-        raise AgentSettingsError(
-            f"Cannot update {path}: settings have multiple hard links. Existing settings "
-            "preserved; use a single file or symlinks before retrying."
-        )
+    # Atomic replacement updates this directory entry; other hard links keep
+    # their original bytes. Symlinks continue to point to the updated target.
     target = path.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, filename = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
@@ -335,6 +376,12 @@ def _settings_for_write(path: Path) -> dict[str, Any]:
             f"{path}: hooks must be an object; existing settings preserved. "
             "Repair the file and retry agents connect/disconnect."
         )
+    for event, groups in value.get("hooks", {}).items():
+        if not isinstance(groups, list):
+            raise AgentSettingsError(
+                f"{path}: hooks.{event} must be an array; existing settings preserved. "
+                "Repair the file and retry agents connect/disconnect."
+            )
     return value
 
 
@@ -363,6 +410,15 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         kept.append(group)
         hooks[hook.event] = kept
     settings["hooks"] = hooks
+    if get_adapter(name).capabilities.requires_hook_trust:
+        definition = _definition_fingerprint(settings)
+        for groups in hooks.values():
+            for group in groups if isinstance(groups, list) else []:
+                for handler in _owned_handlers(group):
+                    handler["command"] = (
+                        re.sub(r" --definition [0-9a-f]{64}$", "", handler["command"])
+                        + f" --definition {definition}"
+                    )
     _write_settings(spec.settings_path, settings)
     return True
 
@@ -578,7 +634,7 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
 
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
-    context = inspect_context(spec.name, spec.home)
+    context = inspect_context(spec.name, spec.home, read_documents=False)
     sites = [
         AgentHookSite(
             config_dir=directory,
@@ -633,7 +689,9 @@ class ContextInspection:
     notes: list[str]
 
 
-def inspect_context(name: str, config_dir: Path | None = None) -> ContextInspection:
+def inspect_context(
+    name: str, config_dir: Path | None = None, *, read_documents: bool = True
+) -> ContextInspection:
     """Keep failed candidates visible, while ingesting only effective regular files."""
     spec = _spec(name, config_dir)
     result = ContextInspection([], {}, [])
@@ -645,7 +703,19 @@ def inspect_context(name: str, config_dir: Path | None = None) -> ContextInspect
                 result.paths.append(path)
                 result.notes.append(f"Skipped context file {path}: not a regular file")
                 continue
-            content = path.read_text(encoding="utf-8", errors="replace")
+            if read_documents:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            else:
+                # Codex uses the first nonblank file. Stream only until a
+                # nonblank chunk, never load large context into a status row.
+                content = ""
+                with path.open(encoding="utf-8", errors="replace") as handle:
+                    if not spec.first_context_file_only:
+                        content = "present"
+                    while spec.first_context_file_only and (chunk := handle.read(4096)):
+                        if chunk.strip():
+                            content = "present"
+                            break
         except FileNotFoundError:
             continue
         except OSError as exc:
@@ -662,12 +732,15 @@ def inspect_context(name: str, config_dir: Path | None = None) -> ContextInspect
 
 
 def hook_fingerprint(name: str, config_dir: Path) -> str:
-    import hashlib
-
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return ""
-    settings = _settings_for_write(spec.settings_path)
+    return _definition_fingerprint(_settings_for_write(spec.settings_path))
+
+
+def _definition_fingerprint(settings: dict[str, Any]) -> str:
+    import hashlib
+
     owned: dict[str, list[dict[str, Any]]] = {}
     hooks = settings.get("hooks", {})
     for event, groups in hooks.items() if isinstance(hooks, dict) else []:
@@ -686,7 +759,13 @@ def hook_fingerprint(name: str, config_dir: Path) -> str:
                 if key not in annotations and key != "hooks"
             }
             definition["hooks"] = [
-                {key: value for key, value in handler.items() if key not in annotations}
+                {
+                    key: re.sub(r" --definition [0-9a-f]{64}$", "", value)
+                    if key == "command" and isinstance(value, str)
+                    else value
+                    for key, value in handler.items()
+                    if key not in annotations
+                }
                 for handler in handlers
             ]
             owned.setdefault(event, []).append(definition)
@@ -697,11 +776,13 @@ def _observation_path(name: str, config_dir: Path) -> Path:
     import hashlib
 
     key = hashlib.sha256(f"{name}:{config_dir.resolve()}".encode()).hexdigest()[:24]
-    return paths.aisquare_home() / "cache" / f"agent-hooks-{key}.json"
+    return paths.cache_dir() / f"agent-hooks-{key}.json"
 
 
-def observe_hooks(name: str, config_dir: Path) -> None:
+def observe_hooks(name: str, config_dir: Path, definition: str | None = None) -> None:
     """Evidence that the current native hook definition actually executed."""
+    if not definition:
+        return  # Legacy commands carry no evidence about the definition they ran.
     # Disposable evidence cannot block context/board/Stop processing.
     # Without a successful write, readiness remains unverified.
     with suppress(OSError, UnicodeError, AgentSettingsError):
@@ -713,24 +794,27 @@ def observe_hooks(name: str, config_dir: Path) -> None:
             return
         stamp = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
         observation = _observation_path(name, config_dir)
-        if _read_settings(observation).get("settings_stamp") == stamp:
+        previous = _read_settings(observation)
+        if previous.get("settings_stamp") == stamp and previous.get("fingerprint") == definition:
+            return
+        if hook_fingerprint(name, config_dir) != definition:
             return
         _write_settings(
             observation,
-            {"fingerprint": hook_fingerprint(name, config_dir), "settings_stamp": stamp},
+            {"fingerprint": definition, "settings_stamp": stamp},
         )
 
 
 def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
     try:
+        adapter = get_adapter(name)
+    except ValueError:
+        return "unsupported", "No terminal integration is available"
+    try:
         if not hooks_installed(name, config_dir):
             return "not_configured", ""
     except AgentSettingsError as exc:
         return "unreadable", str(exc)
-    try:
-        adapter = get_adapter(name)
-    except ValueError:
-        return "unsupported", "No terminal integration is available"
     if not adapter.capabilities.requires_hook_trust:
         return "configured", ""
     observed = _read_settings(_observation_path(name, config_dir))
@@ -873,6 +957,8 @@ def hook_binary(command: str) -> HookBinary | None:
     if not _is_aisquare_hook_command(command):
         return None
     tokens = _split_command(command)
+    if len(tokens) >= 2 and tokens[-2] == "--definition":
+        tokens = tokens[:-2]
     if len(tokens) >= 2 and tokens[-2] == "--config-dir":
         tokens = tokens[:-2]
     if tokens[-4:-2] == ["-m", "aisquare"]:
@@ -1018,10 +1104,8 @@ def _agent_dirs_on_disk(name: str) -> list[Path]:
     except ValueError:
         return []
     candidates: list[Path] = []
-    env = os.environ.get(adapter.home_env, "").strip()
-    if env:
-        candidates.append(Path(env).expanduser())
     home = _home()
+    candidates.append(config_home(adapter, home, os.environ))
     candidates.append(home / adapter.home_name)
     if home.is_dir():
         candidates.extend(

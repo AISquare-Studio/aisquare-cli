@@ -41,7 +41,6 @@ from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
-from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
 
 
@@ -106,35 +105,38 @@ def doctor(
     selected project's root here and gets that project's report in-process.
     The machine-wide checks ignore it — they are about this machine.
     """
-    return [
-        _check_python(),
-        _check_install(),
-        _check_provenance(),
-        _check_home(),
-        _check_home_filesystem(),
-        _check_config(),
-        _check_database(),
-        _check_repomix(),
-        _check_tiktoken(),
-        _check_claude_code(),
-        *_check_other_agents(cwd),
-        *_claude_accounts_checks(),
-        _check_tmux(),
-        _check_gh(),
-        _check_snapshot(cwd),
-        _check_brain(cwd),
-        _check_harness(cwd),
-        _check_self_invocation(cwd),
-        _check_fleet(),
-        # After the actionable machine checks on purpose. The fleet UI's sidebar
-        # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
-        # within the warn group), so a row inserted at position 12 evicted one
-        # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-        # act on — from the only doctor surface visible without a click.
-        _check_browser_tools(cwd),
-        *_experiment_checks(),
-        *explainability_ops.checks(live=live, target_name=target),
-    ]
+    from aisquare.services import agent_launch
+
+    with agent_launch.selection_snapshot(cwd), agent_core.inspection_snapshot():
+        return [
+            _check_python(),
+            _check_install(),
+            _check_provenance(),
+            _check_home(),
+            _check_home_filesystem(),
+            _check_config(),
+            _check_database(),
+            _check_repomix(),
+            _check_tiktoken(),
+            _check_claude_code(),
+            *_check_other_agents(cwd),
+            *_claude_accounts_checks(),
+            _check_tmux(),
+            _check_gh(),
+            _check_snapshot(cwd),
+            _check_brain(cwd),
+            _check_harness(cwd),
+            _check_self_invocation(cwd),
+            _check_fleet(),
+            # After the actionable machine checks on purpose. The fleet UI's sidebar
+            # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
+            # within the warn group), so a row inserted at position 12 evicted one
+            # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
+            # act on — from the only doctor surface visible without a click.
+            _check_browser_tools(cwd),
+            *_experiment_checks(),
+            *explainability_ops.checks(live=live, target_name=target),
+        ]
 
 
 def _ok(name: str, detail: str) -> DoctorCheck:
@@ -644,6 +646,20 @@ def _check_claude_code() -> DoctorCheck:
     sites = agent_core.hook_sites("claude-code")
     if info is None or (not info.detected and not sites):
         return _ok("claude-code", "Claude Code not detected on this machine")
+    from aisquare.services import agent_launch
+
+    try:
+        uses_claude = any(
+            agent_launch.resolve(role).adapter.id == "claude-code" for role in harness.ROLE_PROFILES
+        )
+    except ValueError:
+        uses_claude = True  # the separate configuration check explains this
+    if not uses_claude and not os.environ.get("CLAUDE_CONFIG_DIR", "").strip():
+        sites = [
+            site for site in sites if site.recorded or site.hooks_installed or site.binary_state
+        ]
+        if not sites:
+            return _ok("claude-code", "Claude Code detected but not selected")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
     if not sites:
@@ -1514,16 +1530,24 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
             if not store.team_active(project.id):
                 return _ok(name, "not activated for this project")
             live = [s for s in store.team_sessions(project.id) if s.ended_at is None]
-        interference = harness.interfering_env()
+        from aisquare.services import agent_launch
+
+        selected_roles = []
+        for role in harness.ROLE_PROFILES:
+            try:
+                selected = agent_launch.resolve(role, cwd=cwd)
+            except ValueError:
+                continue
+            if selected.adapter.capabilities.model_ladders:
+                selected_roles.append((role, selected))
+        interference = harness.interfering_env() if selected_roles else []
         mismatches: list[str] = []
         for session in live:
-            if session.agent not in (None, "claude-code"):
-                continue
             # `base_role`: a numbered seat (`coder1`, the shape README documents
             # for a parallel crew) rides its role's ladder, so it is judged
             # against it. Keyed on the raw role, `ROLE_PROFILES.get` missed and
             # every seat was silently exempt from the board's only tiering signal.
-            complaint = harness.model_mismatch(team_service.base_role(session.role), session.model)
+            complaint = harness.model_mismatch(session.role, session.model, agent=session.agent)
             if complaint:
                 mismatches.append(f"{session.id[:8]} ({session.role}): {complaint}")
         problems: list[str] = []
@@ -1538,17 +1562,27 @@ def _check_harness(cwd: Path | None = None) -> DoctorCheck:
                 "unset the interfering env vars and relaunch off-ladder roles with "
                 "`aisquare team spawn <role>`",
             )
-        fable = harness.cached_probe("fable")
-        if fable is not None and not fable.available:
-            return _warn(
-                name,
-                f"fable probed unavailable ({fable.reason}) — top-tier roles fall back to opus",
-                "expected on non-enterprise accounts; re-check with "
-                "`aisquare team spawn planner --refresh`",
+        seen_scopes: set[str] = set()
+        detail = "role ladders clean" if selected_roles else "native model selection"
+        for role, selected in selected_roles:
+            context = harness.ProbeContext(
+                binary=selected.binary.binary, env={**os.environ, **selected.profile.env}
             )
-        detail = "role ladders clean"
-        if fable is not None and fable.resolved_id:
-            detail = f"role ladders clean; fable available ({fable.resolved_id})"
+            with harness.probe_context(context):
+                scope = harness.account_scope()
+                if scope in seen_scopes:
+                    continue
+                seen_scopes.add(scope)
+                fable = harness.cached_probe("fable")
+            if fable is not None and not fable.available:
+                return _warn(
+                    name,
+                    f"fable probed unavailable for {role} ({fable.reason}) — "
+                    "top-tier roles fall back to opus",
+                    f"aisquare team spawn {role} --refresh",
+                )
+            if fable is not None and fable.resolved_id:
+                detail = f"role ladders clean; fable available ({fable.resolved_id})"
         return _ok(name, detail)
     except Exception:  # diagnostics must never crash
         return _ok(name, "not evaluated")
@@ -1726,6 +1760,7 @@ def _check_fleet(
         )
 
 
+@agent_core.inspection_snapshot()
 def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
     from aisquare.core.agent_adapters import adapters
     from aisquare.services import agent_launch
@@ -1754,7 +1789,12 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
             ambient = agent_core.ambient_hook_dir(adapter.id)
             if ambient is not None:
                 selected_dirs.add(agent_core._dir_key(ambient))
-        if configured and selected is not None and selected.config_dir not in sites:
+        if (
+            configured
+            and selected is not None
+            and agent_core._dir_key(selected.config_dir)
+            not in {agent_core._dir_key(path) for path in sites}
+        ):
             sites[selected.config_dir] = agent_core.hook_site_health(
                 adapter.id, selected.config_dir, recorded=False
             )
@@ -1808,30 +1848,22 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                         fix,
                     )
                 )
-    try:
-        if selected is None:
-            return checks
-        # Coding agents are optional on a fresh CLI-only install (--no-agent).
-        # A user/project/role/binary choice is a dependency we should diagnose;
-        # the implicit compatibility default is not an installation request.
-        configured = (
-            selected.source != "default"
-            or selected.binary.source != "default"
-            or not selected.profile.is_empty
-        )
-        if configured and agent_launch.executable(selected) is None:
-            checks.append(
-                _warn(
-                    "coding-agent",
-                    f"Selected agent executable {selected.binary.binary!r} is not on PATH",
-                    selected.adapter.install_hint,
-                )
+    if selected is None:
+        return checks
+    # Coding agents are optional on a fresh CLI-only install (--no-agent).
+    # A user/project/role/binary choice is a dependency we should diagnose;
+    # the implicit compatibility default is not an installation request.
+    configured = (
+        selected.source != "default"
+        or selected.binary.source != "default"
+        or not selected.profile.is_empty
+    )
+    if configured and agent_launch.executable(selected) is None:
+        checks.append(
+            _warn(
+                "coding-agent",
+                f"Selected agent executable {selected.binary.binary!r} is not on PATH",
+                selected.adapter.install_hint,
             )
-    except ValueError as exc:
-        fix = (
-            exc.fix
-            if isinstance(exc, agent_launch.UnknownWrapperError)
-            else "aisquare agents use claude-code"
         )
-        checks.append(_warn("coding-agent", str(exc), fix))
     return checks

@@ -149,8 +149,12 @@ def test_effective_role_pins_are_shared(family: str) -> None:
     ],
 )
 def test_native_overrides_survive_invalid_defaults_through_launch_and_spawn(
-    native: list[str], runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    native: list[str], runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # This test intercepts exec; it must not require a local Codex installation.
+    # An empty PATH proves the argument test does not borrow this workstation's binary.
+    monkeypatch.setenv("PATH", str(tmp_path / "no-executables"))
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: selected.binary.binary)
     cfg = load_config()
     cfg.agents.models["codex"] = AgentModelSettings(model="configured", effort="invalid")
     save_config(cfg)

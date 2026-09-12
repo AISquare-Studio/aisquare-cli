@@ -800,11 +800,20 @@ def run_persona_command(text: str, project: ProjectInfo | None = None) -> Person
     if action in {"picker", "status", "use", "off", "reset"}:
         target = None if args.global_scope else resolve_project(project, args.project)
         if action in {"picker", "status"}:
-            return PersonaReceipt(
-                action=action,
-                message="Personality affects display only.",
-                data=persona_status(target),
-            )
+            info = persona_status(target)
+            if info.get("voice"):
+                message = (
+                    "Voice ON: agents word their replies in this style. "
+                    "Facts, board records, evidence and their work stay unchanged."
+                )
+            elif info.get("enabled"):
+                message = (
+                    "Style set for the narration panel only. "
+                    "Turn voice on to also shape the agents' own replies."
+                )
+            else:
+                message = "Personas off: nothing is styled."
+            return PersonaReceipt(action=action, message=message, data=info)
         return select(
             action, target, reference=args.value, role=args.role, reset_roles=args.reset_roles
         )

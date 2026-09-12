@@ -12,7 +12,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import SuggestFromList
-from textual.widgets import Button, Input, Select, Static, TextArea
+from textual.widgets import Button, Input, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from aisquare.core.personas import PersonaPack
@@ -69,11 +69,12 @@ class PersonaScreen(ModalScreen[None]):
 
     CSS = """
     PersonaScreen { align: center middle; }
-    PersonaScreen #persona-box { width: 90%; max-width: 110; height: 90%;
+    PersonaScreen #persona-box { width: 80%; max-width: 92; height: auto; max-height: 90%;
         background: $surface; border: heavy $accent; padding: 1; }
     PersonaScreen .persona-actions { height: auto; }
-    PersonaScreen .persona-actions Button { min-width: 8; width: 1fr; }
-    PersonaScreen #persona-output-wrap { height: 1fr; border: solid $primary; padding: 0 1; }
+    PersonaScreen .persona-actions Button { min-width: 8; }
+    PersonaScreen #persona-output-wrap { height: 1fr; min-height: 6; border: solid $primary;
+        padding: 0 1; }
     PersonaScreen #persona-output { height: auto; }
     PersonaScreen #persona-help { height: auto; color: $text-muted; }
     """
@@ -88,30 +89,25 @@ class PersonaScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="persona-box"):
             name = self.project.root.name if self.project is not None else "global defaults"
-            yield Static(f"AI Square commands · {name}", markup=False)
+            yield Static(f"Persona · {name}", markup=False)
             yield Static(
-                "These controls change role narration only. Your agent keeps working. "
-                "Original conversation and work instructions stay unchanged. "
-                "Press Right at the end of a command to accept its suggestion.",
+                "Type one command and press Enter (or Run). The usual ones:\n"
+                "  /persona list                  the styles you can use\n"
+                "  /persona use answer-first      switch to a style\n"
+                "  /persona voice on              let the agents talk in it  (off = plain)\n"
+                "  /persona off                   stop styling this project\n"
+                "With voice on this changes how the agents WORD replies — never the facts, "
+                "the board records, or their work. Press Right to accept a suggestion.",
                 id="persona-help",
+                markup=False,
             )
-            yield Select[str]([], prompt="Choose a character", id="persona-pack")
             yield Input(
-                self.role or "", placeholder="Role (blank = whole project)", id="persona-role"
-            )
-            with Horizontal(classes="persona-actions"):
-                yield Button("Use", id="persona-use", variant="primary")
-                yield Button("Preview", id="persona-preview")
-                yield Button("Off", id="persona-off")
-                yield Button("Reset role", id="persona-reset")
-                yield Button("Edit", id="persona-edit")
-            yield Input(
-                placeholder="/persona add ./character.json · /persona use studio",
+                self.role or "",
+                placeholder="/persona use answer-first",
                 id="persona-command",
             )
             with Horizontal(classes="persona-actions"):
-                yield Button("Run command", id="persona-run")
-                yield Button("Refresh", id="persona-refresh")
+                yield Button("Run", id="persona-run", variant="primary")
                 yield Button("Close", id="persona-close")
             with VerticalScroll(id="persona-output-wrap"):
                 yield Static("", id="persona-output", markup=False)
@@ -122,12 +118,9 @@ class PersonaScreen(ModalScreen[None]):
         self.query_one("#persona-command", Input).focus()
 
     def refresh_packs(self) -> None:
+        """Rebuild the command box's autocomplete from the packs on disk."""
         try:
             packs = personas.list_packs()
-            picker = self.query_one("#persona-pack", Select)
-            previous = picker.value
-            # Pack names are data from a file someone downloaded: never Rich/Textual markup.
-            picker.set_options([(Text(f"{p.name} ({p.reference})"), p.reference) for p in packs])
             self.query_one("#persona-command", Input).suggester = SuggestFromList(
                 [
                     "/persona status",
@@ -145,11 +138,6 @@ class PersonaScreen(ModalScreen[None]):
                     *[f"/persona export {p.reference} --output " for p in packs],
                 ]
             )
-            choices = {p.reference for p in packs}
-            if previous in choices:
-                picker.value = previous
-            elif packs:
-                picker.value = packs[0].reference
         except (ValueError, OSError) as exc:
             self.show_output(str(exc))
 
@@ -191,33 +179,10 @@ class PersonaScreen(ModalScreen[None]):
     @on(Button.Pressed)
     def pressed(self, event: Button.Pressed) -> None:
         event.stop()
-        action = event.button.id
-        if action == "persona-close":
+        if event.button.id == "persona-close":
             self.action_close()
-            return
-        if action == "persona-refresh":
-            self.refresh_packs()
-            self.dispatch_persona_command("/persona status")
-            return
-        if action == "persona-run":
+        elif event.button.id == "persona-run":
             self.dispatch_persona_command(self.query_one("#persona-command", Input).value)
-            return
-        selected = self.query_one("#persona-pack", Select).value
-        role = self.query_one("#persona-role", Input).value.strip()
-        if action == "persona-reset" and not role:
-            self.show_output(
-                "Enter the role to reset. Use /persona reset explicitly to reset the whole project."
-            )
-            return
-        words = ["/persona", (action or "").removeprefix("persona-")]
-        if action in ("persona-use", "persona-preview", "persona-edit"):
-            if not isinstance(selected, str):
-                self.show_output("Choose a character first.")
-                return
-            words.append(selected)
-        if role and action in ("persona-use", "persona-off", "persona-reset", "persona-preview"):
-            words += ["--role", role]
-        self.dispatch_persona_command(shlex.join(words))
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != "persona-command":

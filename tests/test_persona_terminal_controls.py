@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Select, Static
+from textual.widgets import Input, Static
 
 from aisquare.cli.ui.persona_activity import PersonaActivity
 from aisquare.cli.ui.personas import PersonaScreen
@@ -71,7 +71,9 @@ def test_persona_button_returns_to_terminal_and_keeps_local_commands_out(
     asyncio.run(run())
 
 
-def test_role_preview_reset_and_slash_completion(project: ProjectInfo) -> None:
+def test_role_preview_and_slash_completion(project: ProjectInfo) -> None:
+    """The simplified modal is one command box: per-role preview and completion both
+    run through it, with no picker or role field to fill in first."""
     personas.select("use", project, reference="mission-control")
 
     async def run() -> None:
@@ -80,32 +82,25 @@ def test_role_preview_reset_and_slash_completion(project: ProjectInfo) -> None:
             host.push_screen(PersonaScreen(project))
             await host.workers.wait_for_complete()
             await pilot.pause()
-            role = host.screen.query_one("#persona-role", Input)
-            role.value = "ui-tester"
-            await pilot.click("#persona-preview")
+            field = host.screen.query_one("#persona-command", Input)
+            field.focus()
+            # Per-role preview via the one command box — the role rides on the command.
+            field.value = "/persona preview mission-control --role ui-tester"
+            await pilot.press("enter")
             await host.workers.wait_for_complete()
             await pilot.pause()
             assert '"role": "ui-tester"' in str(
                 host.screen.query_one("#persona-output", Static).render()
             )
-            role.value = ""
-            await pilot.click("#persona-reset")
-            await pilot.pause()
-            assert "Enter the role" in str(
-                host.screen.query_one("#persona-output", Static).render()
-            )
+            # Previewing never disturbs the project's active default.
             assert personas.persona_status(project)["default"] == "mission-control@1.0.0"
-            field = host.screen.query_one("#persona-command", Input)
-            field.focus()
-            await pilot.pause()
+            # Slash completion still works: type a prefix, press Right to accept it.
             field.value = "/persona sta"
             field.cursor_position = len(field.value)
             await host.workers.wait_for_complete()
             await pilot.pause()
             await pilot.press("right")
             assert field.value == "/persona status"
-            # Picker still selects a saved version; no model or agent input is involved.
-            assert isinstance(host.screen.query_one("#persona-pack", Select).value, str)
 
     asyncio.run(run())
 

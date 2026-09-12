@@ -43,12 +43,16 @@ class PersonaActivity(Vertical):
         self._previous = ""
 
     def compose(self) -> ComposeResult:
-        with Collapsible(title="Role narration · original records preserved", collapsed=False):
-            with Horizontal(classes="persona-tools"):
-                yield Button("Persona…", classes="open-persona")
-                yield Button("Copy originals", classes="copy-persona-original")
-            with VerticalScroll(classes="persona-events-wrap"):
-                yield Static("No activity yet.", classes="persona-events", markup=False)
+        with Horizontal(classes="persona-tools"):
+            yield Button("Persona…", classes="open-persona")
+            yield Button("Copy originals", classes="copy-persona-original")
+        # Collapsed by default: the event feed is optional colour, not something a
+        # person must read. The originals are always one expand (or Copy) away.
+        with (
+            Collapsible(title="Role narration (optional) · original records kept", collapsed=True),
+            VerticalScroll(classes="persona-events-wrap"),
+        ):
+            yield Static("No activity yet.", classes="persona-events", markup=False)
 
     def on_mount(self) -> None:
         self.refresh_activity()

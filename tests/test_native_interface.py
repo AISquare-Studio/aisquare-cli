@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Input, Select, Static, TextArea
+from textual.widgets import Input, Static, TextArea
 from typer.testing import CliRunner
 
 from aisquare.cli import launch as launch_cli
@@ -39,7 +39,7 @@ class PersonaHost(App[None]):
             yield PersonaActivity(self.project)
 
 
-def test_local_picker_switches_and_edits_without_touching_agent_input(
+def test_local_command_switches_and_edits_without_touching_agent_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -57,16 +57,15 @@ def test_local_picker_switches_and_edits_without_touching_agent_input(
             await pilot.pause()
             await host.workers.wait_for_complete()
             await pilot.pause()
-            picker = host.screen.query_one("#persona-pack", Select)
-            picker.value = "mission-control@1.0.0"
-            await pilot.click("#persona-use")
+            command = host.screen.query_one("#persona-command", Input)
+            command.focus()
+            command.value = "/persona use mission-control"
+            await pilot.press("enter")
             await host.workers.wait_for_complete()
             await pilot.pause()
             assert personas.persona_status(project)["default"] == "mission-control@1.0.0"
             assert draft.value == "My unfinished task request"
-            command = host.screen.query_one("#persona-command", Input)
             command.value = '/persona add --name calm --text "Friendly and calm"'
-            command.focus()
             await pilot.press("enter")
             await host.workers.wait_for_complete()
             await pilot.pause()
@@ -85,7 +84,7 @@ def test_local_picker_switches_and_edits_without_touching_agent_input(
     asyncio.run(run())
 
 
-def test_global_picker_preview_and_bad_quoting_do_not_crash() -> None:
+def test_global_command_preview_and_bad_quoting_do_not_crash() -> None:
     async def run() -> None:
         host: App[None] = App()
         async with host.run_test(size=(100, 42)) as pilot:
@@ -93,15 +92,16 @@ def test_global_picker_preview_and_bad_quoting_do_not_crash() -> None:
             await pilot.pause()
             await host.workers.wait_for_complete()
             await pilot.pause()
-            await pilot.click("#persona-preview")
+            box = host.screen.query_one("#persona-command", Input)
+            box.focus()
+            box.value = "/persona preview mission-control"
+            await pilot.press("enter")
             await host.workers.wait_for_complete()
             await pilot.pause()
             assert "original_failure" in str(
                 host.screen.query_one("#persona-output", Static).render()
             )
-            box = host.screen.query_one("#persona-command", Input)
             box.value = '/persona add "unterminated'
-            box.focus()
             await pilot.press("enter")
             await pilot.pause()
             assert "quotation" in str(host.screen.query_one("#persona-output", Static).render())

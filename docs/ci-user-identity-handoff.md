@@ -13,6 +13,13 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 6, 2026-09-12.** When `GET /v1/me` is a 404 and `/ready` did
+> not answer either, the `ci identity` line states the one conclusion - this
+> endpoint is not answering as a CI server - with `AISQUARE_CI_URL` and its
+> current value as the fix; the test-bed line points at it and the endpoint
+> line keeps its fact about `/ready` without a competing "turn the test bed
+> off". One cause, one diagnosis, one fix.
+>
 > **Review round 5, 2026-09-11.** A 404 from `GET /v1/me` is read as "a CI
 > server that predates the route" only when `/ready` answered; otherwise it
 > is a warning about the URL, run exported or not, since a stale host or a

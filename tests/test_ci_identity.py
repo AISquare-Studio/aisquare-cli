@@ -238,10 +238,17 @@ def test_a_404_with_ready_down_is_a_warning_about_the_url_not_a_version_reading(
     for identity in (exported, unexported["ci identity"]):
         assert identity.status is CheckStatus.warn
         assert "404" in identity.detail and "predates" not in identity.detail
-        assert identity.fix and "AISQUARE_CI_URL" in identity.fix
+        assert "not answering as a CI server" in identity.detail, "the conclusion, not a pointer"
+        assert identity.fix and "AISQUARE_CI_URL" in identity.fix and stub.url in identity.fix
         assert "AISQUARE_CI=0" not in identity.fix
     assert "ci workspace" not in unexported
     assert unexported["ci test bed"].fix == "See the ci identity line", "names only printed lines"
+    # One cause, one fix (round 6): the endpoint line keeps its fact about
+    # /ready and offers no competing "turn the test bed off".
+    endpoint = unexported["ci endpoint"]
+    assert endpoint.status is CheckStatus.warn and "/ready did not answer" in endpoint.detail
+    assert not endpoint.fix
+    assert sum(1 for line in unexported.values() if line.fix) == 2, "pointer plus one fix"
 
 
 def test_a_server_that_predates_me_warns_with_the_export_as_the_fix_when_no_run_is(

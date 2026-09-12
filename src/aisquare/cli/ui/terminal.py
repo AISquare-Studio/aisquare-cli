@@ -217,15 +217,10 @@ class TerminalPane(Widget, can_focus=True):
         self._wheel_timer: Timer | None = None
         self._marker: tuple[int, int] | None = None
         """``(scrollback, history)`` the corner marker last showed, or ``None``."""
-        self._selection_rows: list[str] | None = None
-        """The rows' plain text frozen when a drag began, so what is copied is what
-        was highlighted — the live buffer moves every 50 ms under a printing agent."""
         self._selection_bg: Style | None = None
         """The selection tint, resolved once per selection rather than per row."""
         self._drag_from: Offset | None = None
         """Where the left button went down, while it is still down."""
-        self._selection_anchor: Offset | None = None
-        """The selection start ``_selection_rows`` was frozen for."""
         self._painted_span: Selection | None = None
         """The selection the rows on screen were last painted for."""
 
@@ -282,7 +277,6 @@ class TerminalPane(Widget, can_focus=True):
         self._resize_retry = self.RESIZE_RETRY
         self._reported_gone = False
         self._marker = None
-        self._selection_rows = None
         self._drag_from = None
         if self.is_mounted and self.text_selection is not None:
             self.screen.clear_selection()  # agent A's highlight must not sit on agent B
@@ -500,18 +494,22 @@ class TerminalPane(Widget, can_focus=True):
         # those boundaries come from. Read only when one of them actually runs:
         # ``Strip.text`` joins every segment, is uncached, and the common row has
         # no cursor, selection or marker on it (review of the third version).
-        raw = self._raw_row_text(y)
+        # ONE join for the row, reused by every overlay below: ``Strip.text`` is
+        # uncached and walks every segment, and the selection branch used to ask
+        # for its own copy through ``_row_text`` (review of the fifth version).
+        text = self._raw_row_text(y)
         if cursor_x is not None:
-            strip = self._with_cursor(strip, cursor_x, raw)
+            strip = self._with_cursor(strip, cursor_x, text)
         if marker:
-            strip = self._with_scroll_marker(strip, width, raw)
+            strip = self._with_scroll_marker(strip, width, text)
+            text = self._with_marker_text(text, y)
         if span is not None:
             # LAST, and against the row's DISPLAYED text — which now includes the
             # marker. Painted before it, the marker rebuilt the tail of row 0 and
             # threw the tint away while `_extract` copied that text anyway; and
             # its replacement changed the row's character count, so the offsets
             # stamped on the tail no longer indexed it (review of the fourth).
-            strip = self._with_selection(strip, span, self._row_text(y), width)
+            strip = self._with_selection(strip, span, text, width)
         return strip
 
     @staticmethod
@@ -601,27 +599,27 @@ class TerminalPane(Widget, can_focus=True):
     def _row_text(self, y: int) -> str:
         """Row ``y`` as the widget DISPLAYS it — the text a drag over it copies.
 
-        The frozen snapshot while a drag stands; otherwise the row's own text
-        plus whatever is composed into it — the notice, and the
+        The row's own text plus whatever is composed into it: the notice, and the
         ``[↑k/history]`` marker on row 0 while the view is scrolled. The marker
         replaces the tail of that row on screen, so a selection there has to be
         measured, painted and copied against the same string.
         """
-        rows = self._selection_rows
-        if rows is not None and y < len(rows):
-            return rows[y]
-        text = self._raw_row_text(y)
-        if y == 0 and self.scrollback:
-            layout = self._marker_layout(text, self.content_size.width)
-            if layout is not None:
-                cut, gap, marker = layout
-                # Padded out to ``cut``, not merely cut to it: the STRIP is the
-                # full-width row, so cropping it to ``cut`` keeps the blanks a
-                # short row was padded with, and the text has to carry them too
-                # or the two stop lining up cell for cell.
-                head = self._clip(text, cut)
-                text = head + " " * (cut - cell_len(head) + gap) + marker
-        return text
+        return self._with_marker_text(self._raw_row_text(y), y)
+
+    def _with_marker_text(self, text: str, y: int) -> str:
+        """``text`` with the corner marker composed in, when row ``y`` carries one."""
+        if y != 0 or not self.scrollback:
+            return text
+        layout = self._marker_layout(text, self.content_size.width)
+        if layout is None:
+            return text
+        cut, gap, marker = layout
+        # Padded out to ``cut``, not merely cut to it: the STRIP is the
+        # full-width row, so cropping it to ``cut`` keeps the blanks a short row
+        # was padded with, and the text has to carry them too or the two stop
+        # lining up cell for cell.
+        head = self._clip(text, cut)
+        return head + " " * (cut - cell_len(head) + gap) + marker
 
     def _row_texts(self) -> list[str]:
         # As many rows as the widget RENDERS, not as many as the last frame
@@ -654,23 +652,26 @@ class TerminalPane(Widget, can_focus=True):
         return extracted[0] if extracted and extracted[0] else None
 
     def selection_updated(self, selection: Selection | None) -> None:
-        """Freeze the rows a gesture is selecting, so the copy matches the paint.
+        """Repaint for a selection change; nothing about the rows is remembered.
 
-        Re-frozen whenever the ANCHOR moves, not only when the selection was
-        cleared. Textual clears a selection only on a release that moved
-        nothing, and its watcher is async, so a second drag begun while the
-        first still stood kept the first drag's snapshot — and under a printing
-        agent that is a screen that no longer exists, so the clipboard got
-        whatever had been at those coordinates (review of the fourth version).
+        There was a snapshot here — the rows frozen when a drag began, so that a
+        copy could not pick up output printed during the gesture. It is gone,
+        and this reverses a first-round decision deliberately. It could not hold
+        the property it was for: the STRIP is always built from the live
+        ``_lines``, so a frozen text made the copy disagree with the paint
+        instead of agreeing with it, and ctrl+c seconds later copied a screen
+        that was no longer under the highlight. Re-freezing it per gesture is
+        not available either — the widget cannot see a press or a release that
+        lands on another widget, so no signal marks a gesture's end (reviews of
+        the fourth and fifth versions found both halves of that). Reading the
+        live rows for BOTH means they always agree, which is the property that
+        was actually wanted; the cost is that a drag over a printing agent
+        copies the text at release rather than at press, which is also what the
+        user has highlighted on screen at release.
         """
         if selection is None:
-            self._selection_rows = None
             self._selection_bg = None
             self._drag_from = None
-            self._selection_anchor = None
-        elif self._selection_rows is None or selection.start != self._selection_anchor:
-            self._selection_rows = self._row_texts()  # freeze what is being selected
-            self._selection_anchor = selection.start
         self._repaint_selection(selection)
 
     def _repaint_selection(self, selection: Selection | None) -> None:
@@ -876,16 +877,8 @@ class TerminalPane(Widget, can_focus=True):
     # --- selection and copy ------------------------------------------------------------
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        """Remember where a left-button drag began, so its release can copy.
-
-        A press also ends whatever gesture came before it, so the frozen rows go
-        with it: a second drag that happens to start at the first one's anchor
-        would otherwise reuse its snapshot, and a double click reads the rows
-        before Textual's async clear has run (review of the fourth version).
-        """
+        """Remember where a left-button drag began, so its release can copy."""
         self._drag_from = event.offset if event.button == 1 else None
-        self._selection_rows = None
-        self._selection_anchor = None
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         """Copy on release — the drag itself is the request to copy.

@@ -521,10 +521,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The `(exited 0)` notice row is tinted by the drag that copies it, like every
   other row, and so is the `[↑k/history]` marker — whatever a row displays is
   what it highlights and what it copies, cut to the columns the pane shows
-  rather than to the width of a tmux window that outgrew it. Each drag reads the
-  screen it was made on: the rows are re-frozen when a gesture starts, so a
-  second drag begun while the first still stands no longer copies the earlier
-  screen. Switching the pane to another agent drops the selection, and
+  rather than to the width of a tmux window that outgrew it. The highlight and
+  the clipboard read the same rows at the same moment, so they cannot disagree:
+  under an agent that is still printing, a drag copies the text at release and
+  ctrl+c copies what is under the highlight when it is pressed. Switching the pane to another agent drops the selection, and
   changing the theme drops the highlight's resolved colour so a theme picked
   mid-drag does not leave the tint in the old palette.
 - **One session is ONE Run again — the launcher owns the Run's trace id.**

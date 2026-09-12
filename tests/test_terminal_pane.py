@@ -1209,13 +1209,20 @@ def test_wide_glyphs_paint_and_copy_the_same_cells(fake: FakeTmux, tmp_path: Pat
     assert painted == [False] * 6 + [True] * 6, painted
 
 
-def test_the_copy_is_what_was_highlighted_not_what_moved_underneath(
-    fake: FakeTmux, tmp_path: Path
-) -> None:
-    """A printing agent replaces the rows every 50 ms; the selection is taken
-    from the rows frozen when the drag began."""
+def test_the_copy_and_the_highlight_always_agree(fake: FakeTmux, tmp_path: Path) -> None:
+    """Round 1 asked for the rows to be frozen when a drag began, so a copy could
+    not pick up output printed during the gesture, and this test pinned that.
 
-    async def drive() -> str:
+    THAT SNAPSHOT IS GONE, deliberately. It could not hold the property it was
+    for: the strip is always built from the live rows, so a frozen text made the
+    copy DISAGREE with the paint rather than agree with it — and ctrl+c seconds
+    later copied a screen that was no longer under the highlight. Re-freezing per
+    gesture is not available either; the widget never sees a press or a release
+    that lands elsewhere, so nothing marks a gesture's end (rounds 4 and 5 found
+    both halves of that). Both sides read the live rows now, so what is copied is
+    what is shown, whenever it is asked for — which is what a terminal does."""
+
+    async def drive() -> tuple[str, str, str]:
         host = Host(fake.server(tmp_path), "%1")
         async with host.run_test(size=(40, 6)) as pilot:
             pane = host.pane
@@ -1227,9 +1234,49 @@ def test_the_copy_is_what_was_highlighted_not_what_moved_underneath(
             await pilot.hover(pane, offset=(5, 1))
             await pilot.mouse_up(pane, offset=(5, 1))
             await pilot.pause()
-            return host.clipboard
+            on_release, painted = host.clipboard, rows(pane)[1].text[:6]
+            # Later, with the highlight still standing and the agent still printing.
+            fake.panes["%1"].screen = ["red plain", "LATER AGAIN", "third row"]
+            await wait_until(pilot, lambda: "LATER" in pane._lines[1])
+            pane.focus()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return on_release, painted, host.clipboard
 
-    assert run(drive()) == "second"
+    on_release, painted, later = run(drive())
+    assert on_release == painted == "MOVED ", "the copy is the row as painted at release"
+    assert later == "LATER ", "and ctrl+c takes what is under the highlight when it is pressed"
+
+
+def test_a_drag_released_outside_the_pane_copies_nothing_but_ctrl_c_takes_it(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The mirror of the drag that STARTS outside. Textual captures a gesture to
+    the widget its press landed on, so a release over another widget never
+    reaches this pane and cannot copy — pinned so the boundary is a decision in
+    both directions, and ctrl+c is the way to take it (review)."""
+
+    async def drive() -> tuple[str, int, str, int]:
+        host = Host(fake.server(tmp_path), "%1", with_input=True)
+        async with host.run_test(size=(40, 8)) as pilot:
+            pane = host.pane
+            other = host.query_one("#other", Input)
+            await wait_until(pilot, lambda: synced(pane))
+            await pilot.mouse_down(pane, offset=(0, 1))
+            await pilot.hover(pane, offset=(5, 1))
+            await pilot.mouse_up(other, offset=(1, 0))
+            await pilot.pause()
+            assert pane.text_selection is not None, "it does highlight"
+            on_release, toasts = host.clipboard, len(host.notices)
+            pane.focus()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return on_release, toasts, host.clipboard, len(host.notices)
+
+    on_release, toasts, after_key, toasts_after = run(drive())
+    assert on_release == "" and toasts == 0, "no release of ours, no copy and no toast"
+    assert after_key != "", "ctrl+c copies what the pane shows as selected"
+    assert toasts_after == 1
 
 
 def test_attach_to_another_pane_drops_the_selection(fake: FakeTmux, tmp_path: Path) -> None:
@@ -1480,16 +1527,21 @@ def test_a_drag_that_starts_outside_the_pane_copies_nothing_but_ctrl_c_takes_it(
 
 
 def test_a_second_drag_copies_the_screen_it_was_made_on(fake: FakeTmux, tmp_path: Path) -> None:
-    """The rows were frozen only when the selection had been cleared, and Textual
-    clears one only on a release that moved nothing — so a second drag made while
-    the first still stood reused the first drag's snapshot. Under a printing
-    agent that is a screen which no longer exists, and the clipboard got whatever
-    had been at those coordinates (review)."""
+    """A second gesture made while the first selection still stands used to reuse
+    the first one's frozen rows — under a printing agent, a screen that no longer
+    exists, so the clipboard got whatever had been at those coordinates.
 
-    async def drive() -> tuple[str, str]:
-        host = Host(fake.server(tmp_path), "%1")
-        async with host.run_test(size=(40, 6)) as pilot:
+    The second half is the shape that survived the first attempt at this: a drag
+    PRESSED OUTSIDE the pane. Textual gives such a drag ``Selection(None, end)``
+    every time, so an anchor test could not see a new gesture, and the widget
+    never saw the press that would otherwise have reset it (review of the fifth
+    version). Both halves now read the live rows, so neither can go stale."""
+
+    async def drive() -> tuple[str, str, str]:
+        host = Host(fake.server(tmp_path), "%1", with_input=True)
+        async with host.run_test(size=(40, 8)) as pilot:
             pane = host.pane
+            other = host.query_one("#other", Input)
             await wait_until(pilot, lambda: synced(pane))
             await _drag(pilot, pane, (0, 1), (5, 1))
             first = host.clipboard
@@ -1497,11 +1549,23 @@ def test_a_second_drag_copies_the_screen_it_was_made_on(fake: FakeTmux, tmp_path
             await wait_until(pilot, lambda: "CCC bottom" in pane._lines)
             # No intervening click: the first selection is still standing.
             await _drag(pilot, pane, (0, 2), (5, 2))
-            return first, host.clipboard
+            second = host.clipboard
+            # And again from outside the pane, which no press of ours precedes.
+            fake.panes["%1"].screen = ["XXX one", "YYY two", "ZZZ three"]
+            await wait_until(pilot, lambda: "ZZZ three" in pane._lines)
+            await pilot.mouse_down(other, offset=(1, 0))
+            await pilot.hover(pane, offset=(4, 2))
+            await pilot.mouse_up(pane, offset=(4, 2))
+            await pilot.pause()
+            pane.focus()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            return first, second, host.clipboard
 
-    first, second = run(drive())
+    first, second, crossed = run(drive())
     assert first == "second"
     assert second == "CCC bo", "the live screen, not the one the first drag froze"
+    assert crossed.startswith("XXX one"), crossed
 
 
 def test_a_row_wider_than_the_pane_copies_only_what_is_shown(

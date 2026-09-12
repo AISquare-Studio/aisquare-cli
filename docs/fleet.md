@@ -623,13 +623,13 @@ your clipboard on release (OSC 52 — your terminal has to accept it; Windows
 Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies again
 while the selection stands. Only the left-button drag that made a selection
 copies it, so a right-click over a highlight leaves your clipboard alone — and a
-drag that starts in another part of the UI and crosses into a pane highlights
-but does not copy on its own, because the terminal hands that whole gesture to
-the widget it began on; ctrl+c takes it. What is copied is what was highlighted
-— the rows as they were when the drag began, even if the agent kept printing
-meanwhile, cut to the columns the pane actually shows, and including the
-`[↑k/history]` marker and the `(exited 0)` notice where those are what the row
-displays.
+drag that crosses the pane's edge in either direction highlights but does not
+copy on its own, because the terminal hands that whole gesture to the widget it
+began on; ctrl+c takes it. What is copied is always what is shown under the
+highlight at the moment you copy: cut to the columns the pane actually shows,
+and including the `[↑k/history]` marker and the `(exited 0)` notice where those
+are what the row displays. Under an agent that is still printing that means the
+text at release, not at the press — the same text you can see highlighted.
 Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in

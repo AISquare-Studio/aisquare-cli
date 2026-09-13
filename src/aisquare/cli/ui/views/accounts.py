@@ -57,7 +57,13 @@ from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.core import browser
 from aisquare.core import claude_accounts as core
 from aisquare.core.tmux import TmuxError, TmuxServer
-from aisquare.models import AccountsOverview, ClaudeAccount, ClaudeAccountStatus, ClaudeUsage
+from aisquare.models import (
+    AccountsOverview,
+    ClaudeAccount,
+    ClaudeAccountStatus,
+    ClaudeUsage,
+    UsageTrend,
+)
 from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import device_flow, iam
@@ -168,7 +174,9 @@ DEFAULT_BADGE = "★"
 """Marks the machine default (#145) — the account a launch picks when nothing more specific says."""
 
 
-def account_line_text(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> Text:
+def account_line_text(
+    status: ClaudeAccountStatus, usage: ClaudeUsage | None, trend: UsageTrend | None = None
+) -> Text:
     """One slot: ``★ 2  work  me@…  max 5x   session ▮▯▯▯▯ 3% · resets 15:29   week 7%``.
 
     The star is the default; a disabled slot says so after its label. The label
@@ -204,6 +212,11 @@ def account_line_text(status: ClaudeAccountStatus, usage: ClaudeUsage | None) ->
             text.append("  session ", style="dim")
             text.append_text(usage_bar(usage.session_percent))
             text.append(_resets(usage.session_resets_at), style="dim")
+            pace = accounts_service.describe_trend(trend)
+            if pace:
+                # Where the window is heading at the current rate (#146), from the
+                # readings this page has taken; dim, because it is a projection.
+                text.append(f" · {pace}", style="dim italic")
         if usage.week_percent is not None:
             text.append("  week ", style="dim")
             text.append_text(usage_bar(usage.week_percent))
@@ -253,6 +266,23 @@ def _host(url: str) -> str:
     return url.split("://", 1)[-1].rstrip("/")
 
 
+def _read_usage(
+    accounts: list[ClaudeAccount],
+) -> dict[int, tuple[ClaudeUsage, UsageTrend | None]]:
+    """Off the UI thread: each account's reading, RECORDED (#146), and the trend it implies.
+
+    ``sample_usage`` rather than ``usage`` so the page's minute tick is what
+    builds the history the trend line reads; ``usage_trend`` reads that history
+    back. Both fail open — a store that cannot be written costs the trend, and
+    the reading still paints.
+    """
+    fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]] = {}
+    for account in accounts:
+        usage = accounts_service.sample_usage(account)
+        fetched[account.slot] = (usage, accounts_service.usage_trend(account.slot, usage))
+    return fetched
+
+
 # --- transient state -------------------------------------------------------------------------
 
 
@@ -292,6 +322,7 @@ class AccountRow(Horizontal):
         super().__init__(id=id)
         self.status = status
         self.usage: ClaudeUsage | None = None
+        self.trend: UsageTrend | None = None
         self.first = True
         self.last = True
 
@@ -318,9 +349,11 @@ class AccountRow(Horizontal):
         *,
         first: bool | None = None,
         last: bool | None = None,
+        trend: UsageTrend | None = None,
     ) -> None:
         self.status = status
         self.usage = usage
+        self.trend = trend
         if first is not None:
             self.first = first
         if last is not None:
@@ -330,7 +363,9 @@ class AccountRow(Horizontal):
 
     def _paint(self) -> None:
         account = self.status.account
-        self.query_one(".account-line", Static).update(account_line_text(self.status, self.usage))
+        self.query_one(".account-line", Static).update(
+            account_line_text(self.status, self.usage, self.trend)
+        )
         self.query_one(f"#account-default-{self.slot}", Button).display = not account.is_default
         self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
         self.query_one(f"#account-down-{self.slot}", Button).disabled = self.last
@@ -379,6 +414,7 @@ class AccountsView(Vertical):
         self.overview: AccountsOverview | None = None
         self.session: iam.Session | None = None
         self.usage: dict[int, ClaudeUsage] = {}
+        self.trends: dict[int, UsageTrend | None] = {}
         self.login: _ClaudeLogin | None = None
         self._login_timer: Timer | None = None
         self._usage_timer: Timer | None = None
@@ -508,13 +544,20 @@ class AccountsView(Vertical):
             if row is None:
                 row = AccountRow(status, id=f"account-row-{slot}")
                 row.usage = self.usage.get(slot)
+                row.trend = self.trends.get(slot)
                 row.first, row.last = first, last
                 if index < len(holder.children):
                     holder.mount(row, before=index)
                 else:
                     holder.mount(row)
             else:
-                row.show(status, self.usage.get(slot), first=first, last=last)
+                row.show(
+                    status,
+                    self.usage.get(slot),
+                    first=first,
+                    last=last,
+                    trend=self.trends.get(slot),
+                )
                 if index < len(holder.children) and holder.children[index] is not row:
                     holder.move_child(row, before=index)
         for stale in existing.values():
@@ -544,7 +587,7 @@ class AccountsView(Vertical):
         if not accounts:
             return
         self.run_worker(
-            lambda: {account.slot: accounts_service.usage(account) for account in accounts},
+            lambda: _read_usage(accounts),
             name=USAGE_WORKER,
             group=USAGE_WORKER,
             exclusive=True,
@@ -552,11 +595,14 @@ class AccountsView(Vertical):
             exit_on_error=False,
         )
 
-    def _show_usage(self, fetched: dict[int, ClaudeUsage]) -> None:
-        self.usage.update(fetched)
+    def _show_usage(self, fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]]) -> None:
+        for slot, (usage, trend) in fetched.items():
+            self.usage[slot] = usage
+            self.trends[slot] = trend
         for row in self.rows():
             if row.slot in fetched:
-                row.show(row.status, fetched[row.slot])
+                usage, trend = fetched[row.slot]
+                row.show(row.status, usage, trend=trend)
 
     # --- AISquare: the device flow as a card ------------------------------------------------------
 

@@ -52,6 +52,7 @@ _STATE_CHIP = {
     "working": "▶ working",
     "waiting": "⏸ waiting",
     "attention": "🔔 NEEDS YOU",
+    "limited": "⏳ limited",
     "exited": "💤 exited",
     "lost": "✗ lost",
     "unknown": "· unknown",
@@ -252,6 +253,80 @@ def status(project: ProjectRef = None) -> None:
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     _emit_agents(target, agents)
+
+
+@app.command("switch")
+def switch(
+    label: Annotated[str, typer.Argument(help="Agent label, e.g. coder-auth.")],
+    to: Annotated[
+        str | None,
+        typer.Option(
+            "--to",
+            help="Account to move it to: a slot, alias or email. Default: the account with "
+            "the most headroom that is not the one it is on.",
+            metavar="ACCOUNT",
+        ),
+    ] = None,
+    fresh: Annotated[
+        bool,
+        typer.Option(
+            "--fresh",
+            help="Start a new session with a hand-off prompt built from the board instead of "
+            "resuming the agent's transcript.",
+        ),
+    ] = False,
+    reason: Annotated[
+        str | None,
+        typer.Option("--reason", help="Why (recorded on the board), e.g. 'session limit'."),
+    ] = None,
+    project: ProjectRef = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Move a running agent to another Claude account — same label, role, task and worktree.
+
+    The agent is stopped as `fleet stop` stops it and started again on the
+    target account. With its transcript on disk the replacement resumes the
+    same session (`claude --resume <transcript>`); otherwise, or with --fresh,
+    it starts new with a hand-off prompt from the board. The manager runs this
+    with `--as <its session>` when an agent shows `⏳ limited`.
+    """
+    target = _project(project)
+    try:
+        receipt = fleet_service.switch(
+            target,
+            label,
+            to=to,
+            fresh=fresh,
+            reason=reason,
+            spawned_by=as_session or "user",
+        )
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "stopped": receipt.stopped.model_dump(mode="json"),
+                    "started": receipt.started.model_dump(mode="json"),
+                    "from_slot": receipt.from_slot,
+                    "to_slot": receipt.to_slot,
+                    "resumed": receipt.resumed,
+                    "tmux_session": receipt.tmux_session,
+                    "notes": receipt.notes,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    origin = f"slot {receipt.from_slot}" if receipt.from_slot is not None else "its shell's claude"
+    how = "resumed its session" if receipt.resumed else "started fresh with a hand-off prompt"
+    console.print(
+        f"✓ {label}: moved from {origin} to slot {receipt.to_slot} — {how} "
+        f"({receipt.started.pane_id} in {receipt.tmux_session})",
+        markup=False,
+    )
+    for note in receipt.notes:
+        console.print(f"  · {note}", markup=False)
 
 
 @app.command("tell")

@@ -40,6 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
+from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import codenames, harness, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
@@ -51,6 +52,7 @@ from aisquare.models import (
     FleetAgentState,
     FleetAgentStatus,
     ProjectInfo,
+    TeamEvent,
     TeamSession,
     TeamTask,
 )
@@ -118,6 +120,7 @@ _BOARD_STATES: dict[str, FleetAgentState] = {
     "working": "working",
     "waiting": "waiting",
     "attention": "attention",
+    "limited": "limited",
 }
 
 
@@ -138,6 +141,36 @@ class NoSuchAgent(FleetError):
 
 
 @dataclass(frozen=True)
+class ResumeSpec:
+    """Start the window on an EXISTING Claude session rather than a fresh one (#146).
+
+    ``claude --resume <absolute transcript path>`` (Claude Code ≥ 2.1.223 finds a
+    session by its ``.jsonl`` wherever it lives) keeps the original session id,
+    so the fleet row is joined to the same board session the agent already had:
+    its claims, its cursor and its notes carry on. ``session_id`` is that id,
+    recorded on the row up front rather than learned from the first hook.
+    """
+
+    session_id: str
+    transcript_path: Path
+
+
+@dataclass
+class SwitchReceipt:
+    """What ``fleet switch`` did: the agent it stopped, the one it started, and how."""
+
+    stopped: FleetAgent
+    started: FleetAgent
+    from_slot: int | None
+    to_slot: int
+    resumed: bool
+    """True when the replacement resumed the old session's transcript; False when it
+    started fresh with a hand-off prompt built from the board."""
+    tmux_session: str
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SpawnReceipt:
     """What ``fleet spawn`` did — including the label it ACTUALLY used."""
 
@@ -789,7 +822,16 @@ def _derive(
     if session is not None and session.ended_at is None:
         fresh = now - session.last_seen_at <= _team()._STALE_AFTER
         board_state = _BOARD_STATES.get(session.state)
-        if fresh and board_state is not None:
+        if board_state == "limited":
+            # A parked agent fires no hook for as long as its limit lasts, which
+            # can be hours; the row is trusted until the reset it named has
+            # passed (plus a little), not for the ordinary stale window — after
+            # that, tmux's facts take over as for any quiet session (#146).
+            until = session.limit_resets_at
+            parked = until is not None and now <= until + _LIMIT_GRACE
+            if fresh or parked:
+                return "limited", _limit_detail(until, now)
+        elif fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:
         # tmux is WHY the state is unknown, and ``detail`` is "why the state is
@@ -799,6 +841,22 @@ def _derive(
         return "unknown", "tmux unavailable" if hooks is None else f"tmux unavailable; {hooks}"
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
+
+
+_LIMIT_GRACE = timedelta(minutes=10)
+"""How long past its named reset a ``limited`` row is still believed (the reset
+is a clock time from an error message; Claude Code's own continue lands shortly
+after it, and a session that continues turns ``working`` on its next prompt)."""
+
+
+def _limit_detail(until: datetime | None, now: datetime) -> str:
+    """``limit resets 12:30`` / ``limit resets Mon 00:00`` / ``usage limit``."""
+    if until is None:
+        return "usage limit"
+    local = until.astimezone()
+    far = until - now > timedelta(hours=24)
+    stamp = local.strftime("%a %H:%M") if far else local.strftime("%H:%M")
+    return f"limit resets {stamp}"
 
 
 def _status(
@@ -879,6 +937,7 @@ def spawn(
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
     account: str | None = None,
+    resume: ResumeSpec | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -986,7 +1045,16 @@ def spawn(
     notes.extend(f"accounts: {note}" for note in choice.notes)
     role_args = list(role_config.extra_args)
     extra = list(agent_args)
-    identity = explainability_service.plan_session_identity(resolution.binary, [*role_args, *extra])
+    if resume is not None:
+        # `--resume <transcript path>` keeps the ORIGINAL session id (#146), so
+        # the row is joined to it here rather than minted or learned later; the
+        # identity planner would otherwise read the path as the id.
+        extra = ["--resume", str(resume.transcript_path), *extra]
+        identity = explainability_service.SessionIdentity(resume.session_id)
+    else:
+        identity = explainability_service.plan_session_identity(
+            resolution.binary, [*role_args, *extra]
+        )
     if identity.session_id is None:
         notes.append(
             f"no board join for this agent ({identity.note}) — its state comes from tmux alone"
@@ -1469,6 +1537,177 @@ def _verify_gone(look: Callable[[], WindowInfo | None], label: str, cause: TmuxE
             "left live; try again, or `--force` once tmux is healthy"
         ) from cause
     return window.dead_status if window is not None else None
+
+
+def switch(
+    project: ProjectInfo,
+    label: str,
+    *,
+    to: str | None = None,
+    fresh: bool = False,
+    reason: str | None = None,
+    spawned_by: str = "user",
+) -> SwitchReceipt:
+    """Move a running agent to another Claude account — the hand-over of #146.
+
+    The target is ``to`` (a slot, alias or email) or, without it, the account
+    with the most headroom among the enabled, signed-in ones that are NOT the
+    one the agent is on (``services.claude_accounts.choose`` with ``spread=True``
+    and the current slot excluded — so a machine with ``pick = "default"`` still
+    switches by headroom, because that is the whole point of switching).
+
+    The agent is stopped the way ``fleet stop`` stops it (``/exit``, a grace,
+    then the kill — its ``SessionEnd`` hook releases its claims) and started
+    again under the same label, role, task and worktree on the target account.
+    When its transcript is on disk and ``fresh`` is not asked, the replacement
+    RESUMES it: ``claude --resume <transcript path>`` keeps the session id, so
+    the board row, its cursor and its notes carry on and the agent picks up its
+    own context; otherwise it starts fresh with a hand-off prompt built from
+    the board — the task, its detail, the session's last notes — and is told
+    to read the board and the working tree before continuing.
+
+    What is deliberately NOT promised: that Claude Code resumes a transcript
+    written under one ``CLAUDE_CONFIG_DIR`` from another. The path form is
+    documented and the id is preserved, but this machine has one login, so the
+    cross-account leg is unverified; a resume that fails leaves a pane whose
+    error is visible, and ``--fresh`` is the documented way around it.
+    """
+    with store_session() as store:
+        agent = _live_agent(store, project, label)
+        session = store.get_session(agent.session_id) if agent.session_id else None
+        task = store.get_task(agent.task_id) if agent.task_id else None
+        recent = [
+            event
+            for event in store.recent_events(project.id, limit=60)
+            if agent.session_id is not None and event.session_id == agent.session_id
+        ]
+    current = _account_slot_of(agent, session)
+    notes: list[str] = []
+    # ONE resolver, as for every launch (tests/test_one_account_resolver.py):
+    # `--to` is the flag rung; without it the headroom rung decides, with the
+    # account the agent is leaving excluded — whatever `[accounts] pick` says,
+    # because moving to the account with room is what a switch is for.
+    try:
+        choice = claude_accounts_service.choose(
+            to,
+            role=agent.role,
+            project=project,
+            exclude=() if current is None else (current,),
+            spread=True,
+        )
+    except claude_accounts_service.NoSuchAccount as exc:
+        raise FleetError(str(exc)) from exc
+    notes.extend(choice.notes)
+    if choice.account is None:
+        raise FleetError(
+            f"no other account with headroom for {label!r}"
+            + (f" (it is on slot {current})" if current is not None else "")
+            + " — add or enable one (`aisquare accounts`), name one with --to, or wait for "
+            "the reset"
+        )
+    target = choice.account
+    if current is not None and target.slot == current:
+        raise FleetError(
+            f"{label!r} already runs on {claude_accounts_core.label(target)} (slot {target.slot})"
+        )
+    transcript = (
+        Path(session.transcript_path) if session is not None and session.transcript_path else None
+    )
+    resume: ResumeSpec | None = None
+    if not fresh and session is not None and transcript is not None and transcript.is_file():
+        resume = ResumeSpec(session.id, transcript)
+    elif not fresh:
+        notes.append(
+            "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
+        )
+    prompt = None if resume is not None else _handoff_prompt(agent, task, recent, reason)
+
+    stopped = stop(project, label)
+    receipt = spawn(
+        project,
+        agent.role,
+        label=label,
+        task_id=agent.task_id,
+        worktree=agent.worktree,
+        prompt=prompt,
+        spawned_by=spawned_by,
+        account=str(target.slot),
+        resume=resume,
+    )
+    notes.extend(receipt.notes)
+    from_name = f"slot {current}" if current is not None else "its shell's claude"
+    how = "resumed its session" if resume is not None else "started fresh with a hand-off prompt"
+    why = f" ({reason})" if reason else ""
+    with store_session() as store, contextlib.suppress(Exception):  # the courtesy, not the record
+        _team()._emit(
+            store,
+            project.id,
+            "switched",
+            f"{label} moved from {from_name} to {claude_accounts_core.label(target)} "
+            f"(slot {target.slot}){why} — {how}",
+            session_id=receipt.agent.session_id,
+        )
+    return SwitchReceipt(
+        stopped=stopped,
+        started=receipt.agent,
+        from_slot=current,
+        to_slot=target.slot,
+        resumed=resume is not None,
+        tmux_session=receipt.tmux_session,
+        notes=notes,
+    )
+
+
+def _account_slot_of(agent: FleetAgent, session: TeamSession | None) -> int | None:
+    """The slot an agent runs on: the row's (#145), else read off the session's config dir.
+
+    Reading where an agent already IS is not deciding where it goes — that is
+    ``choose``'s alone — which is why the config-dir lookup lives in the
+    accounts service rather than here.
+    """
+    if agent.account_slot is not None:
+        return agent.account_slot
+    if session is None or not session.account:
+        return None
+    return claude_accounts_service.slot_of(session.account)
+
+
+_HANDOFF_NOTES = 5
+_HANDOFF_DETAIL = 600
+
+
+def _handoff_prompt(
+    agent: FleetAgent, task: TeamTask | None, recent: list[TeamEvent], reason: str | None
+) -> str:
+    """The first message of a FRESH replacement: who it is, what it inherits, where to look.
+
+    Built from the board rather than the model — the account that just ran out
+    is the one that cannot be asked for a summary (#146's own argument). Kept
+    short on purpose: the board and the working tree are the source of truth,
+    and the prompt points at them instead of retelling them.
+    """
+    lines = [
+        f"You are {agent.label}, taking over from a previous session of this agent that "
+        f"stopped on {reason or 'a usage limit'} under another Claude account.",
+    ]
+    if task is not None:
+        lines.append(f"Your task: {task.title} ({task.id}).")
+        if task.detail:
+            detail = task.detail.strip()
+            if len(detail) > _HANDOFF_DETAIL:
+                detail = detail[:_HANDOFF_DETAIL].rstrip() + " …"
+            lines.append(f"Contract: {detail}")
+    tail = recent[-_HANDOFF_NOTES:]
+    if tail:
+        lines.append("The previous session's last board entries:")
+        lines.extend(f"- {event.kind}: {event.text}" for event in tail)
+    lines.append(
+        "Start by reading `aisquare board`"
+        + (f" and `aisquare task show {task.id}`" if task is not None else "")
+        + ", then `git status` and `git log --oneline -5` in this directory; continue from "
+        "where the previous session left off and do not redo work that is already committed."
+    )
+    return "\n".join(lines)
 
 
 def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> ReapReport:

@@ -207,7 +207,8 @@ def list_(
     if usage:
         for status in overview.accounts:
             if status.signed_in:
-                status.usage = accounts_service.usage(status.account)
+                # `sample_usage`, not `usage`: every reading feeds the trend (#146).
+                status.usage = accounts_service.sample_usage(status.account)
     if get_state().json_output:
         typer.echo(_overview_json(overview))
         return
@@ -227,7 +228,7 @@ def usage_(
     for account in accounts:
         status = accounts_service.describe(account)
         if status.signed_in or slot is not None:
-            status.usage = accounts_service.usage(account)
+            status.usage = accounts_service.sample_usage(account)
         statuses.append(status)
     if get_state().json_output:
         typer.echo(json.dumps([status.model_dump(mode="json") for status in statuses]))

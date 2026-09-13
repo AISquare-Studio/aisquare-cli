@@ -48,6 +48,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "rename",
             "pause",
             "resume",
+            "switch",
         )
     ),
     ("explainability", "status"),
@@ -58,6 +59,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("explainability", "ship"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
+    ("hook", "stop-failure"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),

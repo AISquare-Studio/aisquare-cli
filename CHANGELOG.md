@@ -7,6 +7,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Usage-aware accounts: spawn where there is headroom, and hand an agent over
+  when its limit hits** (#146). A new `[accounts]` section (Settings tab, or
+  `aisquare config set accounts.<key>`): `pick = headroom` makes every launch
+  that nothing names an account for read each enabled, signed-in account's
+  five-hour window and take, in priority order, the first under `switch_at`
+  (85 %) — or the one with the most room when all are over it; usage that
+  cannot be read is skipped with a note, and when none can, the machine
+  default decides as before. Every reading is kept (`claude_usage`, schema
+  v16), so `accounts usage`, `list --usage` and the Accounts page say
+  *≈ 40 min to the limit* at the current pace once two readings of the same
+  window exist. When an agent's turn ends on a usage limit — Claude Code's
+  `StopFailure` hook, now the sixth hook `agents connect` installs, with
+  `error: rate_limit` and `You've hit your session limit · resets 12:30am` — the
+  row shows **⏳ limited** with the reset time, a `limited` board line names
+  `aisquare fleet switch <label>`, and the manager is woken (`limited` and
+  `switched` join its wake kinds); other API errors end the turn as `waiting`
+  with a `turn_failed` line. `aisquare fleet switch <label> [--to A] [--fresh]`
+  stops the agent as `fleet stop` would and starts it again under the same
+  label, task and worktree on the account with the most headroom, **resuming
+  the same session** from its transcript (`claude --resume <path>`) when it is
+  on disk, else with a hand-off prompt built from the board. With
+  `on_limit = switch` the fleet does that by itself when the limit lifts more
+  than `wait_if_reset_within_minutes` (15) away; a hand-over that finds no
+  headroom leaves the agent parked with Claude Code's own wait-and-continue
+  intact. `doctor` lists parked agents (`claude-account-limits`) and, with
+  `--live`, warns when every account is over the line
+  (`claude-account-headroom`). Plan: `docs/plans/claude-accounts.md` §10.
 - **A Claude account can be chosen: a default, a priority order, aliases, and
   disabling — in the CLI and on the Accounts page** (#145). Several accounts
   could be added and seen and none picked: slot 1 was the default by constant,

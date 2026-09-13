@@ -143,6 +143,7 @@ def test_connect_targets_an_alternate_config_dir(runner: CliRunner, fake_home: P
         "SessionEnd",
         "Stop",
         "Notification",
+        "StopFailure",
     }
     assert not (fake_home / ".claude" / "settings.json").exists()
 
@@ -552,6 +553,6 @@ def test_connect_gives_the_context_hooks_room_for_the_ci_ceiling(
     for event in ("SessionStart", "UserPromptSubmit"):
         entry = settings["hooks"][event][0]["hooks"][0]
         assert entry["timeout"] == CONTEXT_HOOK_TIMEOUT_SECONDS, event
-    for event in ("Stop", "SessionEnd", "Notification"):
+    for event in ("Stop", "SessionEnd", "Notification", "StopFailure"):
         assert "timeout" not in settings["hooks"][event][0]["hooks"][0], event
     assert CONTEXT_HOOK_TIMEOUT_SECONDS > 60

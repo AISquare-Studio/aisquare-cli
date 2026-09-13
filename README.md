@@ -603,6 +603,34 @@ default and lists the slots in priority order; `doctor` warns when the default i
 not signed in or is disabled, and when a binding names an account the machine no
 longer has.
 
+**Spending several accounts.** With more than one login the interesting
+questions are *where is there room* and *what happens when one runs out*. Both
+are `[accounts]` settings (on the Settings tab, or `aisquare config set`):
+
+```sh
+aisquare config set accounts.pick headroom   # spawns take, in priority order, the first account
+                                             # under switch_at % of its 5-hour window — or the one
+                                             # with the most room when all are over it
+aisquare config set accounts.switch_at 85    # the line (default 85 %)
+aisquare config set accounts.on_limit switch # when an agent hits its limit, move it (default: wait)
+aisquare fleet switch coder-auth             # move one by hand: same label, task and worktree,
+                                             # on the account with headroom, resuming its session
+aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fresh session with a
+                                             # hand-off prompt built from the board
+```
+
+When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
+`You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
+with the reset time, the manager is woken with the one command that moves it,
+and Claude Code's own wait-and-continue at the reset is left in place. With
+`on_limit = switch` the fleet hands the agent over on its own: it stops the
+agent, starts it again on the account with the most headroom, and resumes the
+same session by its transcript (`claude --resume <path>`), unless the limit
+lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper
+than a cold start). Every usage reading is kept, so `accounts usage` and the
+Accounts page can say *≈ 40 min to the limit* at the current pace, and
+`doctor --live` warns when every account is over the line.
+
 An account is two variables, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR`, set
 for the launch and nothing else. Slot 1 sets neither: it is whatever `claude`
 already is in the shell you launch from. The CLI never writes into Claude
@@ -714,6 +742,7 @@ aisquare
 │                   default [<slot|alias|email>] [--project P] [--role R] [--clear]
 │                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
 │                   disable <slot> · enable <slot>   — the default, the order, the names
+│                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness

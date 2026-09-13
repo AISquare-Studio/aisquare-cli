@@ -48,6 +48,13 @@ _HOOKS = (
     ("SessionEnd", "session-end"),
     ("Stop", "stop"),
     ("Notification", "notification"),
+    # Fires INSTEAD of Stop when the turn ends on an API error — a usage limit
+    # above all (#146). Its output is ignored by Claude Code, so it is pure
+    # bookkeeping: the board learns the session is `limited` and when the limit
+    # lifts. An install from before this event reads as partial, and `doctor`
+    # says to re-run `agents connect`, exactly as it did when Stop and
+    # Notification arrived.
+    ("StopFailure", "stop-failure"),
 )
 
 

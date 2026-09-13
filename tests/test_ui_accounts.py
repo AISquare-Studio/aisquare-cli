@@ -1000,3 +1000,51 @@ def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
     assert ("move", "2", "down") in calls
     assert ("disable", "1", "True") in calls
     assert last.startswith("✗ the accounts registry cannot be written")  # the error, not a crash
+
+
+# --- the pace of the five-hour window (#146) ------------------------------------------------------
+
+
+def test_the_row_says_how_long_the_window_has_at_the_current_pace(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page's minute tick RECORDS each reading; the trend it computes is painted dim."""
+    from aisquare.models import UsageTrend
+
+    usage = ClaudeUsage(
+        available=True,
+        session_percent=60,
+        session_resets_at=NOW + timedelta(hours=3),
+        week_percent=20,
+        week_resets_at=NOW + timedelta(days=3),
+        fetched_at=NOW,
+    )
+    no_network["usage"] = usage
+    recorded: list[int] = []
+    trends: dict[int, UsageTrend | None] = {
+        1: UsageTrend(percent=60, per_hour=30.0, minutes_to_limit=80.0, span_minutes=20.0),
+        2: None,
+    }
+
+    def sample_usage(account: ClaudeAccount, **kwargs: Any) -> ClaudeUsage:
+        recorded.append(account.slot)
+        return accounts_service.usage(account, **kwargs)
+
+    monkeypatch.setattr(accounts_service, "sample_usage", sample_usage)
+    monkeypatch.setattr(
+        accounts_service, "usage_trend", lambda slot, latest, **kwargs: trends.get(slot)
+    )
+    monkeypatch.setattr(accounts_service, "_now", lambda: NOW)
+    overview = _overview(_status(1, "me@example.com"), _status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle(app)
+        await pilot.pause()
+        return line(view, 1), line(view, 2)
+
+    one, two = drive(go, overview=overview)
+    assert sorted(recorded) == [1, 2]  # every signed-in slot was SAMPLED, not merely read
+    assert "session ▮▮▮▯▯ 60%" in one and "≈ 1.3 h to the limit" in one
+    assert "session ▮▮▮▯▯ 60%" in two and "to the limit" not in two  # no trend yet: no claim

@@ -179,11 +179,17 @@ def turn_stopped(
 
 
 def needs_attention(
-    cwd: Path | None, *, session_id: str | None = None, message: str | None = None
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    message: str | None = None,
+    notification_type: str | None = None,
 ) -> None:
-    """Mark the session as needing the user, and put it on the feed."""
+    """Route a Claude Code notification by its TYPE: a bell, a feed line, or nothing (#153)."""
     if session_id is not None:
-        team_service.hook_notification(session_id, cwd, message)
+        team_service.hook_notification(
+            session_id, cwd, message, notification_type=notification_type
+        )
 
 
 def turn_failed(

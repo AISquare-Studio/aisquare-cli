@@ -524,6 +524,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **The sidebar bell rings for a real prompt, not for every notification**
+  (#153). Every Claude Code `Notification` flipped a session to 🔔 `attention`,
+  and 164 of the 183 bells on the reporting machine were the routine idle notice
+  ("Claude is waiting for your input") — nine bells in ten with nothing to
+  answer. The hook now reads `notification_type`: `permission_prompt`,
+  `elicitation_dialog`, `elicitation_url_dialog` and `agent_needs_input` ring
+  the bell; `idle_prompt` (and an elicitation closing) changes nothing — the
+  agent is `waiting`, which the board already says; `auth_success`, the
+  `quota_auto_resume_*` family, a sub-agent finishing and any type this build
+  does not know become a `notice` feed line, never a bell. A payload without
+  the field (an older Claude Code) is routed by its text, so the idle notice is
+  quiet there too and everything else keeps its old behaviour. The bell also
+  clears when the pane produces output after the notice — a permission that was
+  granted, or an action the classifier approved — not only on the next human
+  prompt.
 - **A usage reset now says when, not just what o'clock** (#152). `aisquare
   accounts usage`, `accounts list --usage` and the Accounts page showed a reset
   as a bare `HH:MM`, which for the seven-day window can be six days away and

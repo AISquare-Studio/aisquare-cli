@@ -831,6 +831,24 @@ def _derive(
             parked = until is not None and now <= until + _LIMIT_GRACE
             if fresh or parked:
                 return "limited", _limit_detail(until, now)
+        elif fresh and board_state == "attention":
+            # The bell clears when the pane moves on, not only on the next human
+            # prompt (#153): a permission that was granted — or an action the
+            # classifier approved — produces output after the notification, and
+            # an agent that is working again is not waiting for anyone. Output
+            # BEFORE the notice is the prompt being drawn and does not count —
+            # and since tmux reports activity in whole seconds while the hook
+            # stamped `last_seen_at` with microseconds, "after" means a LATER
+            # second, which keeps the drawing of the prompt (the same second as
+            # the hook) from reading as its answer.
+            answered = (
+                pane is not None
+                and pane.last_output is not None
+                and pane.last_output > session.last_seen_at
+            )
+            if answered:
+                return "working", None
+            return "attention", None
         elif fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:

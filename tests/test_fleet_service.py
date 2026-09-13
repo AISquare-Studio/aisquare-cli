@@ -2922,3 +2922,47 @@ def test_spawn_and_stop_on_a_real_tmux_server(
     finally:
         with suppress(TmuxError):
             real.run("kill-server")
+
+
+def test_spawn_resolves_the_default_account_and_records_the_slot_on_the_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#145: the window gets the RESOLVED `--account <slot>`, the caller's environment travels
+    with it, and the row says which account the agent draws on."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import settings as settings_service
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+
+    # The control: nothing arranged → no flag, no carried environment, no slot on the row.
+    plain = fleet_service.spawn(project, "coder")
+    assert _flag(_command(tmux), "--account") is None
+    assert plain.agent.account_slot is None
+    plain_env = tmux.spawned[-1]["env"]
+    assert isinstance(plain_env, dict) and "AISQUARE_HOME" not in plain_env
+
+    accounts_service.set_default("2")
+    chosen = fleet_service.spawn(project, "tester")
+    command, env = _command(tmux), tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert _flag(command, "--account") == "2"  # the slot, never the alias or the email
+    assert env["AISQUARE_HOME"] == str(Path(os.environ["AISQUARE_HOME"]).absolute())
+    assert chosen.agent.account_slot == 2
+    with store_session() as store:
+        stored = store.get_fleet_agent(chosen.agent.id)
+        assert stored is not None and stored.account_slot == 2
+
+    # A role binding outranks the machine default, and reaches the window the same way.
+    settings_service.bind_role("reviewer", account="1")
+    bound = fleet_service.spawn(project, "reviewer", worktree=False)
+    assert _flag(_command(tmux), "--account") == "1"
+    assert bound.agent.account_slot == 1
+
+    # A binding to an account this machine does not have refuses the spawn with the rung named,
+    # instead of starting a window that dies on its first line.
+    settings_service.bind_role("validator", account="9")
+    with pytest.raises(fleet_service.FleetError, match="role binding for 'validator'"):
+        fleet_service.spawn(project, "validator")

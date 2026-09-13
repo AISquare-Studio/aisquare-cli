@@ -204,6 +204,41 @@ class ClaudeAccount(BaseModel):
     """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
     managed: bool = False
     """True when the CLI created ``config_dir`` (every slot but the default)."""
+    # --- what the REGISTRY says about the slot (``claude_account`` in the store) ---
+    #
+    # The directories stay the record of WHICH accounts exist and who is signed in
+    # (core.claude_accounts). These four fields are the operator's ARRANGEMENT of
+    # them — a name, an order, a choice — which no directory can carry, so they
+    # live in SQLite and are folded onto the account by
+    # ``services.claude_accounts.list_accounts``. A ``ClaudeAccount`` built by the
+    # core alone has the defaults below, which read as "no arrangement": that is
+    # deliberate, so nothing in the core has to open the store.
+    alias: str | None = None
+    """The operator's name for the slot (``work``, ``personal``), unique; ``None`` when unnamed."""
+    position: int | None = None
+    """Its rank in the priority order, 1 first; ``None`` before the registry has seen it."""
+    is_default: bool = False
+    """The machine default — what a launch runs under when nothing more specific says."""
+    disabled: bool = False
+    """Never chosen automatically (default, priority, headroom); still usable by name."""
+
+
+class ClaudeAccountRecord(BaseModel):
+    """One row of the ``claude_account`` registry: the arrangement of a slot, not the slot.
+
+    ``slot`` is the join to the directory; ``config_dir`` is recorded for the
+    launch record's benefit and never used to decide anything — the directory
+    is re-read from disk every time, so a row whose directory has gone is a
+    row to drop, not a directory to trust.
+    """
+
+    slot: int
+    config_dir: Path
+    alias: str | None = None
+    position: int
+    is_default: bool = False
+    disabled: bool = False
+    created_at: datetime
 
 
 class ClaudeIdentity(BaseModel):
@@ -687,6 +722,9 @@ class FleetAgent(BaseModel):
     task_id: str | None = None
     spawned_by: str | None = None
     """``"user"``, or the id of the session (a manager) that asked for it."""
+    account_slot: int | None = None
+    """The Claude account slot the launch was resolved to (flag, binding or default);
+    ``None`` when nothing chose one and the window ran on whatever its shell had."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

@@ -347,6 +347,23 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   (`usage unavailable`, `token expired — open a session to refresh it`) and
   nothing else on the page is affected. On macOS the token lives in the
   Keychain, which the CLI does not read, so the row says so.
+- **Default**, **↑**/**↓** and **Disable** arrange the accounts. The row with
+  the ★ is the **machine default**: what a launch runs on when nothing more
+  specific says. The arrows set the **priority order** — the order the rows are
+  listed in, and the order a headroom-based pick will try them in. *Disable*
+  keeps a slot out of every automatic choice (its row says `disabled`) while
+  `--account <slot>` still reaches it by hand; *Enable* puts it back. An
+  **alias** (`aisquare accounts alias 2 work`) replaces `account 2` wherever
+  the slot is named — the row, the board, the launch line — and is accepted
+  everywhere a slot number is.
+- Which account an agent runs on is decided in one order, for `fleet spawn`,
+  `aisquare launch` and a manager spawning a coder alike: `--account` on the
+  command line, then the role's binding (the **account** select beside each
+  role on the Settings tab, or `aisquare team bind <role> --account`), then the
+  project's default (`aisquare accounts default <slot> --project .`), then the
+  machine default. With none of those set, the agent runs on whatever `claude`
+  the shell already has — exactly what it did before any of this existed. The
+  agent's header and `fleet ls` show the slot it was resolved to.
 
 Nothing on this page writes into Claude Code's own files: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
@@ -364,11 +381,22 @@ aisquare accounts usage                # the windows, per signed-in account
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
+aisquare accounts default 2            # the machine default — what a launch runs on when nothing else says
+aisquare accounts default 3 --project . # this project's default (codename, name, id prefix, or . for here)
+aisquare accounts default 1 --role coder # coders run on the plain claude (= team bind coder --account 1)
+aisquare accounts default              # the three levels, as they stand
+aisquare accounts alias 2 work         # a name: --account work, [work] on the board
+aisquare accounts order work 3         # the priority order; the rest follow as they were
+aisquare accounts move 3 top           # up · down · top · bottom
+aisquare accounts disable 3            # out of automatic selection; enable puts it back
 ```
 
 `add` and `run` hand the terminal to Claude Code, so they have no `--json`
 form and `add` refuses outside an interactive terminal. `aisquare doctor` gains a
-`claude-accounts` line naming any slot that still needs a sign-in. Accounts laid
+`claude-accounts` line naming any slot that still needs a sign-in, a
+`claude-account-default` line when the default is not signed in or is disabled,
+and a `claude-account-bindings` line when a role or project names an account the
+machine no longer has. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
 to a role as a launch profile (`aisquare team bind coder1 --env …`, README
 "Several accounts, one team").

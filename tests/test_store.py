@@ -231,7 +231,8 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 14  # v11 fleet, v12 metric, v13 converges, v14 forgotten_at
+    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry (#145)
+    assert version == SCHEMA_VERSION == 15
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -739,3 +740,69 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
         assert any(t.startswith("metric_v1_orphaned") for t in tables), label
     if shape == "V1ORPHAN":
         assert "metric_v1_orphaned_2" in tables, "a taken orphan name must not wedge the rename"
+
+
+# --- the Claude account registry and per-project settings (v15, #145) ----------------------
+
+
+def test_claude_account_registry_keeps_one_default_unique_aliases_and_a_dense_order(
+    store: ContextStore,
+) -> None:
+    """The two invariants are the schema's: a second default and a reused alias are refused
+    by an index, not by a caller remembering to check."""
+    first = store.upsert_claude_account(1, Path("/h/.claude"))
+    second = store.upsert_claude_account(2, Path("/h/.aisquare/claude-accounts/2"))
+    assert (first.position, second.position) == (1, 2)  # queued at the end, in order
+    assert not first.is_default and not second.is_default and first.alias is None
+
+    store.set_claude_account_default(2)
+    store.set_claude_account_default(1)
+    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # moved, never two
+    with pytest.raises(KeyError):
+        store.set_claude_account_default(9)
+    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # refused, unchanged
+    store.set_claude_account_default(None)
+    assert not any(r.is_default for r in store.claude_accounts())
+
+    store.set_claude_account_alias(2, "work")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.set_claude_account_alias(1, "work")
+    assert [r.alias for r in store.claude_accounts()] == [None, "work"]
+    store.set_claude_account_alias(2, None)
+    store.set_claude_account_alias(1, "work")  # free again once released
+    assert [r.alias for r in store.claude_accounts()] == ["work", None]
+
+    store.set_claude_account_disabled(2, True)
+    assert [r.disabled for r in store.claude_accounts()] == [False, True]
+
+    # An upsert of a known slot refreshes the directory and touches nothing else.
+    refreshed = store.upsert_claude_account(1, Path("/elsewhere/.claude"))
+    assert refreshed.config_dir == Path("/elsewhere/.claude")
+    assert refreshed.alias == "work" and refreshed.position == 1
+
+    store.upsert_claude_account(3, Path("/h/.aisquare/claude-accounts/3"))
+    store.order_claude_accounts([3, 9])  # 9 does not exist and is ignored
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (1, 2), (2, 3)]
+    assert store.delete_claude_account(1) is True
+    assert store.delete_claude_account(1) is False
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (2, 2)]  # dense
+
+
+def test_project_settings_round_trip_per_project_and_clear(store: ContextStore) -> None:
+    other = ProjectInfo(id="prj_other", root=Path("/tmp/other"), linked_repos=[])
+    store.ensure_project(other)
+
+    assert store.project_setting(PROJECT.id, "claude_account") is None
+    store.set_project_setting(PROJECT.id, "claude_account", "2")
+    store.set_project_setting(other.id, "claude_account", "3")
+    store.set_project_setting(PROJECT.id, "claude_account", "4")  # an update, not a second row
+    assert store.project_setting(PROJECT.id, "claude_account") == "4"
+    assert store.project_setting(other.id, "claude_account") == "3"
+    assert store.project_settings("claude_account") == {PROJECT.id: "4", other.id: "3"}
+    assert store.project_setting(PROJECT.id, "something_else") is None
+
+    assert store.clear_project_setting(PROJECT.id, "claude_account") is True
+    assert store.clear_project_setting(PROJECT.id, "claude_account") is False
+    assert store.project_settings("claude_account") == {other.id: "3"}
+    with pytest.raises(sqlite3.IntegrityError):  # a foreign key: no setting for a ghost project
+        store.set_project_setting("prj_ghost", "claude_account", "1")

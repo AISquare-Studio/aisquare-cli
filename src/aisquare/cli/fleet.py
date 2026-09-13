@@ -103,7 +103,10 @@ def _agent_line(status: FleetAgentStatus) -> str:
         chip = f"{chip}({agent.exit_status})"
     extra = f"  {status.detail}" if status.detail else ""
     where = "  (worktree)" if agent.worktree else ""
-    return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{extra}  {agent.pane_id}"
+    # The slot the spawn resolved to (#145), so a row says which limit pool it
+    # draws on; absent when nothing chose and the window ran on its shell's claude.
+    on = f"  account {agent.account_slot}" if agent.account_slot is not None else ""
+    return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{extra}  {agent.pane_id}"
 
 
 def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
@@ -164,9 +167,10 @@ def spawn(
         str | None,
         typer.Option(
             "--account",
-            help="Claude Code account to run under: a slot number or email (see "
-            "`aisquare accounts`).",
-            metavar="SLOT",
+            help="Claude Code account to run under: a slot number, alias or email (see "
+            "`aisquare accounts`); default: the role's binding, the project default, "
+            "then the machine default.",
+            metavar="ACCOUNT",
         ),
     ] = None,
     project: ProjectRef = None,

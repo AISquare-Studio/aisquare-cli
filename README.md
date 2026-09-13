@@ -513,6 +513,30 @@ read-only on the board except for one path: a prompt spoken or typed at a panel
 reaches that session the same way `fleet tell` does, by typing into a waiting
 pane or by filing a board note, and the client is told which happened.
 
+What the client does with that feed: an **ambient ring** of panels drawn from
+one shared texture atlas — one texture per panel is what tanks the frame rate
+at ten of them — and a **focus tier** that pulls a single panel forward on a
+`text-optimized` quad layer to be read, with its transcript streamed for that
+session alone. **Push-to-talk** on the left trigger (or `t` on the desktop)
+captures 16 kHz mono PCM16LE, shows interim text on the focus panel while you
+speak, and routes the final transcript as the prompt — releasing the trigger is
+the commit, so nothing is sent twice. A session entering `needs_you` turns its
+bar the one colour reserved for it and fires a chime **from that panel's own
+position**, so it tells you where to turn rather than only that something
+happened. A dropped server shows in a connection chip in words and reconnects
+on its own, without a page reload — which is what you cannot comfortably do
+while wearing a headset.
+
+`aisquare doctor` carries an `xr` row answering the three preconditions in one
+line: the extra installed, port 8748 free, and the whisper model already in the
+Hugging Face cache — the last being the only one that fails *late*, on the first
+push-to-talk, if it is not.
+
+The runbook is **[`docs/xr-demo.md`](docs/xr-demo.md)**: the nine demo steps,
+the three traps that each cost an hour if you meet them live, the recovery
+drill, and a definition-of-done table that separates what has been verified on
+a desktop from the four lines only a headset can settle.
+
 ### Remote agents over MCP (`aisquare serve`)
 
 The same board, tasks, and notes — exposed as an MCP server so Claude

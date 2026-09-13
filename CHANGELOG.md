@@ -7,7 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **`aisquare xr` — the board as a spatial client (cliXR, M1).** A new command
+- **`aisquare xr` — the board as a spatial client (cliXR, M1–M7).** A new command
   serving a static WebXR client and one websocket on `127.0.0.1:8748`, beside
   `serve` on 8747, from the new `[xr]` extra. It projects live board state:
   one session per panel, with the role bucket, `working` / `waiting` /
@@ -38,6 +38,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
     takes `follow_imports_for_stubs` as well as `follow_imports` — the first
     alone leaves the stub parsed and the run still red.
+  - **The client** (`web/xr/`, plain ES modules, no build step; three.js from a
+    CDN). An ambient ring drawn from one shared texture atlas — one texture per
+    panel is what tanks the frame rate at ten of them, so the atlas is the
+    design and not a later optimization — and a focus tier that pulls one panel
+    forward on a `text-optimized` quad layer, requested as an optional feature
+    and checked before use so a device without `layers` still works. Focus
+    subscribes to that one session's transcript; the ring never carries
+    transcript text. Controller ray, select, rotate, recenter, collapse and
+    summon with pose re-anchoring on summon rather than on session start, which
+    is what survives guardian drift.
+  - **Push-to-talk** (`[xr]` brings faster-whisper). The left trigger — or `t`
+    on the desktop — captures 16 kHz mono PCM16LE in 20 ms frames, with an RMS
+    gate so a held trigger in a quiet room never reaches the model, an interim
+    decode about once a second onto the focus panel, and a final transcript on
+    release that is routed as the prompt. The client sends no `prompt` frame of
+    its own for a voice utterance: releasing the trigger is the commit, and a
+    client that echoed one would deliver the sentence twice. Capture stops
+    itself at 55 s, inside the server's 60 s, closing the utterance rather than
+    abandoning it — the words already spoken are still transcribed.
+  - **Alerts.** A session entering `needs_you` turns its bar `#FF5A4E`, the one
+    token reserved for that state and used nowhere else, and fires a chime at
+    that panel's own world position — the point being to say *where to turn*.
+    It fires once on the transition in, not once per notice, because Claude
+    re-notifies while parked. **B** sweeps focus through the alerting panels in
+    angle order.
+  - **Reconnect.** A connection chip reports the transport in words —
+    `connected`, `reconnecting — attempt N`, `server gone`, `auth failed` — as
+    DOM rather than scene, so it survives a WebGL context loss. Backoff runs
+    500 ms to 8 s; after five failures the wording changes to `server gone`
+    while retries continue, and a restarted server is picked up **without a page
+    reload**, which is what you cannot comfortably do in a headset. `auth
+    failed` is the one state that stops retrying, since the same token will be
+    rejected again.
+  - **`aisquare doctor` grows an `xr` row**, warn-never-fail, answering three
+    preconditions in one line: the extra installed, port 8748 free, and the
+    whisper model cached. The third is the only one that fails late — with no
+    cached model the server starts perfectly and the first push-to-talk goes to
+    the network.
+  - **[`docs/xr-demo.md`](docs/xr-demo.md)** is the runbook: the nine demo
+    steps, the three traps, the recovery drill, the exact command that puts a
+    live session into `needs_you` on demand, and a definition-of-done table
+    that separates what a desktop has verified from the four lines only a
+    headset can settle. Those four are **not** claimed.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

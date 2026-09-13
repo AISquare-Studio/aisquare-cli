@@ -22,7 +22,7 @@ Scope, stated rather than implied:
 
 - Only fenced code blocks are read. Prose is excluded on purpose — "aisquare has
   two halves" is a sentence, and a guard that flags sentences gets switched off.
-- A line is split on `&&`, `||` and `;`, so the second half of the runbook's
+- A line is split on `&&`, `||`, `|` and `;`, so the second half of the runbook's
   `which aisquare && aisquare --version` preflight is parsed. Requiring the LINE
   to start with `aisquare` had silently dropped it.
 - A BLOCKQUOTED fence is a fence. `> ```bash` styles an aside; the fence still
@@ -222,7 +222,19 @@ def _shell_lines(markdown: str) -> list[tuple[int, str]]:
 
 
 #: Shell operators that end one command and begin another on the same line.
-_SEQUENCERS = re.compile(r"\s*(?:&&|\|\||;)\s*")
+#:
+#: A single `|` is in here for the same reason `&&` is: the command after it is
+#: a command. `docs/xr-demo.md`'s alert trigger is
+#: `printf '{…}' | aisquare hook notification` — the payload has to come from
+#: somewhere, a hook reads it on stdin, and that pipeline is the literal line an
+#: operator runs at the moment the whole demo is built around. Without this the
+#: segment starts at `printf`, no `aisquare` head is found, and the most
+#: important command in that document was reported as an unclassified mention.
+#: `||` stays ahead of `|` in the alternation, so it still wins.
+#:
+#: `_walk` already truncated a resolved command at `|`, so nothing downstream
+#: changes: this only lets the extractor SEE the right-hand side.
+_SEQUENCERS = re.compile(r"\s*(?:&&|\|\||\||;)\s*")
 
 #: `aisquare`, or any path ending in it, at the head of a segment. The optional
 #: `exec` is there because a cron wrapper's real line is
@@ -895,12 +907,15 @@ CENSUS = {
     # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
     # `src/aisquare/...`).
     "docs/ci-live-wiring-handoff.md": (8, 2),
-    # Measured 2026-09-12 the same way, on the day the document was written:
-    # five fenced commands (`doctor`, three `launch`, `board` — the preflight and
-    # step 1, the only steps that are live) and no classified mentions. Every
-    # `aisquare xr` in that file is inline on purpose and so is not a shell line
-    # at all; re-measure when the integration task fences them.
-    "docs/xr-demo.md": (5, 0),
+    # Re-measured 2026-09-13 by the integration task (plan §11/M7–M9), which is
+    # what the previous note here asked for. The document was rewritten so every
+    # step is an instruction, and the `aisquare xr` mentions that were inline
+    # because the command did not exist yet are now fenced: eleven fenced
+    # commands — `doctor`, three `launch`, `board`, two `xr`, `xr --show-token`,
+    # `--json board`, and the two `hook` invocations that drive §15 step 7 on
+    # demand. The last two are the right-hand side of a `printf … |` pipeline,
+    # which is why `_SEQUENCERS` learned `|`.
+    "docs/xr-demo.md": (11, 0),
 }
 
 
@@ -1112,11 +1127,16 @@ def test_a_blockquoted_fence_is_still_a_fence() -> None:
 
     found = _from_text("doc.md", markdown)
 
-    # The pipeline stays in the stored text: a single `|` is not a sequencer, so
-    # the segment is the whole line, and `_split` drops the tail later. Asserting
-    # the trimmed form here would be asserting `_split`'s job in `_from_text`'s
-    # test — which is how the first version of this assertion was wrong.
-    expected = "aisquare --json explainability status | jq -c .shipping"
+    # The pipeline does NOT stay in the stored text any more: `|` became a
+    # sequencer when `docs/xr-demo.md` started documenting
+    # `printf '{…}' | aisquare hook notification`, where the command worth
+    # validating is on the RIGHT of the pipe and was invisible before. So the
+    # extractor now ends this segment at the pipe and `jq -c .shipping` becomes
+    # a segment of its own with no `aisquare` head, which is dropped.
+    #
+    # What this test exists for is unchanged and still asserted: a blockquoted
+    # fence is a fence, and the command resolves to `explainability status`.
+    expected = "aisquare --json explainability status"
     assert [invocation.text for invocation in found] == [expected], (
         f"a blockquoted fence was read as prose: {found}"
     )

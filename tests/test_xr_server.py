@@ -12,6 +12,8 @@ from __future__ import annotations
 import contextlib
 import json
 import socket
+import sqlite3
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -79,11 +81,49 @@ def _authed(http: TestClient, token: str) -> Iterator[Any]:
     """An open ``/ws``, authenticated, with the hello + snapshot pair drained."""
     with http.websocket_connect("/ws") as connection:
         connection.send_text(json.dumps({"t": "auth", "token": token}))
-        hello = json.loads(connection.receive_text())
-        snapshot = json.loads(connection.receive_text())
+        hello = json.loads(_text(connection))
+        snapshot = json.loads(_text(connection))
         assert hello["t"] == "hello"
         assert snapshot["t"] == "snapshot"
         yield connection
+
+
+RECEIVE_TIMEOUT_S = 15.0
+"""How long a test waits for a frame before calling it a failure.
+
+Generous — the poll interval here is 20 ms — because this number exists to turn
+a HANG into a failure, not to measure anything. ``receive_text`` blocks on a
+queue with no timeout of its own, so a server that stops sending would otherwise
+wedge the whole run rather than fail one test, and a wedged CI job is the one
+failure mode nobody can read.
+"""
+
+
+def _text(connection: Any) -> str:
+    """The next text frame, or an assertion failure. Never an unbounded wait.
+
+    A bare DAEMON thread, not a ``ThreadPoolExecutor``: the executor's context
+    manager exits through ``shutdown(wait=True)``, which joins the very thread
+    that is stuck in ``receive_text`` — so the timeout fires, the assertion is
+    raised, and the process then hangs anyway on the way out. Measured while
+    proving the busy-store test below could fail: the mutated server sent
+    nothing, and the run wedged instead of reporting. A daemon thread left
+    blocked costs a strand in a test that is failing regardless, and never
+    holds the interpreter.
+    """
+    received: list[str] = []
+
+    def read() -> None:
+        received.append(connection.receive_text())
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(RECEIVE_TIMEOUT_S)
+    if not received:
+        raise AssertionError(
+            f"no frame arrived within {RECEIVE_TIMEOUT_S:.0f}s — the server stopped sending"
+        )
+    return received[0]
 
 
 # --- static assets --------------------------------------------------------------
@@ -122,7 +162,7 @@ def _rejected(http: TestClient, first_frame: str | None) -> dict[str, Any]:
             connection.send_text(first_frame)
         else:
             connection.send_text(json.dumps({"t": "subscribe", "session": None}))
-        return dict(json.loads(connection.receive_text()))
+        return dict(json.loads(_text(connection)))
 
 
 def test_auth_rejects_a_missing_a_wrong_and_a_foreign_token(
@@ -160,8 +200,8 @@ def test_a_valid_token_gets_hello_then_the_board(
     http, project, token = client
     with http.websocket_connect("/ws") as connection:
         connection.send_text(json.dumps({"t": "auth", "token": token}))
-        hello = json.loads(connection.receive_text())
-        snapshot = json.loads(connection.receive_text())
+        hello = json.loads(_text(connection))
+        snapshot = json.loads(_text(connection))
     assert hello == {
         "t": "hello",
         "protocol": 1,
@@ -183,7 +223,7 @@ def test_attention_on_the_board_becomes_a_needs_you_delta(
     with _authed(http, token) as connection:
         with store_session() as store:
             assert store.mark_attention(CODER)
-        delta = json.loads(connection.receive_text())
+        delta = json.loads(_text(connection))
     assert delta["t"] == "delta"
     assert [(s["id"], s["state"]) for s in delta["changed"]] == [(CODER, "needs_you")]
     assert delta["removed"] == []
@@ -205,12 +245,12 @@ def test_a_session_that_ends_is_removed_once(
                     last_seen_at=now,
                 )
             )
-        added = json.loads(connection.receive_text())
+        added = json.loads(_text(connection))
         assert [s["id"] for s in added["changed"]] == [PLANNER]
 
         with store_session() as store:
             store.end_session(PLANNER)
-        removed = json.loads(connection.receive_text())
+        removed = json.loads(_text(connection))
     assert removed["removed"] == [PLANNER]
     assert removed["changed"] == []
 
@@ -250,7 +290,7 @@ def test_subscribe_streams_the_transcript_of_that_session_only(
         _authed(http, token) as connection,
     ):
         connection.send_text(json.dumps({"t": "subscribe", "session": CODER}))
-        backlog = [json.loads(connection.receive_text()) for _ in range(2)]
+        backlog = [json.loads(_text(connection)) for _ in range(2)]
         with transcript.open("a", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
@@ -261,7 +301,7 @@ def test_subscribe_streams_the_transcript_of_that_session_only(
                 )
                 + "\n"
             )
-        fresh = json.loads(connection.receive_text())
+        fresh = json.loads(_text(connection))
 
     assert [frame["text"] for frame in backlog] == ["first", "second"]
     assert all(frame["session"] == CODER and frame["final"] for frame in backlog)
@@ -276,7 +316,7 @@ def test_subscribing_to_a_session_that_is_not_here_is_an_error_not_a_close(
     http, _project, token = client
     with _authed(http, token) as connection:
         connection.send_text(json.dumps({"t": "subscribe", "session": "ses_nope"}))
-        answer = json.loads(connection.receive_text())
+        answer = json.loads(_text(connection))
         # Still alive: a bad ask must not cost the operator their ring.
         connection.send_text(json.dumps({"t": "subscribe", "session": None}))
     assert answer["code"] == "no_such_session"
@@ -372,7 +412,7 @@ def test_a_malformed_frame_is_answered_not_fatal(
 def _until(connection: Any, kind: str) -> str:
     """The next frame of ``kind``, skipping the deltas the poll loop emits."""
     for _ in range(40):
-        raw = connection.receive_text()
+        raw = _text(connection)
         if json.loads(raw).get("t") == kind:
             return str(raw)
     raise AssertionError(f"no {kind} frame arrived")
@@ -429,3 +469,33 @@ def test_xr_and_serve_share_one_token(runner: CliRunner) -> None:
     xr_out = json.loads(runner.invoke(app, ["--json", "xr", "--show-token"]).stdout)
     serve_out = json.loads(runner.invoke(app, ["--json", "serve", "--show-token"]).stdout)
     assert xr_out["token"] == serve_out["token"]
+
+
+def test_a_busy_store_does_not_end_the_ring(
+    client: tuple[TestClient, ProjectInfo, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A locked read is transient; the next tick must still deliver.
+
+    Ten agents on one SQLite file contend, and a connection that gave up on the
+    first ``database is locked`` would be a ring that goes dark under exactly
+    the load it exists for.
+    """
+    from aisquare.services.xr import projector
+
+    real = projector.sessions
+    failures = {"left": 3}
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        if failures["left"] > 0:
+            failures["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args, **kwargs)
+
+    http, _project, token = client
+    with _authed(http, token) as connection:
+        monkeypatch.setattr(projector, "sessions", flaky)
+        with store_session() as store:
+            assert store.mark_attention(CODER)
+        delta = json.loads(_text(connection))
+    assert failures["left"] == 0, "the reads really did fail"
+    assert [s["state"] for s in delta["changed"]] == ["needs_you"]

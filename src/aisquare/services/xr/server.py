@@ -168,7 +168,7 @@ def build_app(project: ProjectInfo, *, token: str) -> Starlette:
             )
 
     async def socket(websocket: WebSocket) -> None:
-        await _Connection(websocket, project=project, token=token).run()
+        await _Connection(websocket, project=project, token=token).serve_client()
 
     return Starlette(
         routes=[
@@ -228,14 +228,17 @@ class _Connection:
 
     # -- lifecycle
 
-    async def run(self) -> None:
-        """Accept, authenticate, then serve until the client goes away."""
+    async def serve_client(self) -> None:
+        """Accept, authenticate, then serve until the client goes away.
+
+        Not ``run`` for the same reason ``_send_frame`` is not ``_send``.
+        """
         await self._ws.accept()
         if not await self._authenticate():
             return
         with _store() as store:
             self._seed_watermarks(store)
-            await self._send(
+            await self._send_frame(
                 Hello(
                     protocol=PROTOCOL_VERSION,
                     hub=self._project.id,
@@ -244,7 +247,7 @@ class _Connection:
             )
             snapshot = projector.snapshot(store, self._project.id, unread_since=self._unread_since)
             self._sent = list(snapshot.sessions)
-            await self._send(snapshot)
+            await self._send_frame(snapshot)
         poller = asyncio.create_task(self._poll())
         try:
             await self._read_loop()
@@ -282,7 +285,7 @@ class _Connection:
 
     async def _reject(self) -> None:
         with contextlib.suppress(Exception):
-            await self._send(
+            await self._send_frame(
                 Error(code="auth_failed", message="the first frame must be a valid auth token")
             )
             await self._ws.close(code=CLOSE_AUTH_FAILED)
@@ -300,15 +303,33 @@ class _Connection:
 
     # -- outbound
 
-    async def _send(self, message: Any) -> None:
+    async def _send_frame(self, message: Any) -> None:
+        """Put one server message on the socket.
+
+        Named ``_send_frame`` rather than ``_send`` on purpose:
+        ``tests/test_config_writes_stay_in_the_cli.py`` builds its call graph by
+        NAME across the whole package, so a generic name here silently merges
+        this connection with every other ``_send`` in the tree — including
+        ``cli/ui/terminal.py``'s, which reaches a config write through doctor's
+        ``--fix``. The guard then reports that every MCP tool can write config.
+        It cannot, and neither can this; the collision was the whole finding.
+        """
         await self._ws.send_text(to_wire(message))
 
     async def _poll(self) -> None:
         """Diff the board on a timer and send what changed.
 
-        Errors are swallowed on purpose: a store that is momentarily locked, or
-        a client that closed between the read and the write, must not take the
-        connection down with a traceback — the next tick simply tries again.
+        The two failures here are not the same failure, so they are not handled
+        the same way. A READ that fails is transient — SQLite is busy, another
+        process holds the write lock — and the next tick simply tries again; a
+        connection that gave up on the first locked store would be a ring that
+        goes dark under exactly the contention a ten-agent fleet produces. A
+        SEND that fails means the client is gone, and there is nothing left to
+        poll for: the loop ends and the read side notices in its own time.
+
+        Neither raises. Non-negotiable #6 is that a dead client affects nothing,
+        and a traceback out of a background task here is how that stops being
+        true.
         """
         interval = poll_interval()
         while True:
@@ -318,10 +339,16 @@ class _Connection:
                     current = projector.sessions(
                         store, self._project.id, unread_since=self._unread_since
                     )
-                change = projector.delta(self._sent, current)
-                self._sent = current
-                if change is not None:
-                    await self._send(change)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+            change = projector.delta(self._sent, current)
+            self._sent = current
+            if change is None:
+                continue
+            try:
+                await self._send_frame(change)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -355,12 +382,12 @@ class _Connection:
             try:
                 message = parse_client(text)
             except (ValidationError, ValueError) as exc:
-                await self._send(Error(code="bad_message", message=_one_line(exc)))
+                await self._send_frame(Error(code="bad_message", message=_one_line(exc)))
                 continue
             try:
                 await self._dispatch(message)
             except Exception as exc:  # a bad request must not kill the socket
-                await self._send(Error(code="internal", message=_one_line(exc)))
+                await self._send_frame(Error(code="internal", message=_one_line(exc)))
 
     async def _dispatch(self, message: Any) -> None:
         if isinstance(message, Subscribe):
@@ -391,14 +418,18 @@ class _Connection:
             return
         with _store() as store:
             row = store.get_session(session_id)
-            self._unread_since[session_id] = store.latest_seq(self._project.id)
+            if row is not None:
+                # Focusing a panel is what marks it read. Only for a session
+                # that exists: a watermark for one that does not would sit in
+                # the map forever, counting nothing.
+                self._unread_since[session_id] = store.latest_seq(self._project.id)
         if row is None or row.project_id != self._project.id:
-            await self._send(
+            await self._send_frame(
                 Error(code="no_such_session", message=f"no session {session_id} on this board")
             )
             return
         if not row.transcript_path:
-            await self._send(
+            await self._send_frame(
                 Error(
                     code="no_transcript",
                     message=f"session {session_id} has no transcript on record",
@@ -436,7 +467,7 @@ class _Connection:
                 backlog = handle.read()
                 offset = size
         except OSError as exc:
-            await self._send(Error(code="no_transcript", message=_one_line(exc)))
+            await self._send_frame(Error(code="no_transcript", message=_one_line(exc)))
             return
         lines = backlog.split(b"\n")
         if start > 0 and lines:
@@ -462,7 +493,7 @@ class _Connection:
         if not text:
             return
         self._transcript_seq += 1
-        await self._send(
+        await self._send_frame(
             Transcript(session=session_id, seq=self._transcript_seq, text=text, final=True)
         )
 
@@ -481,7 +512,7 @@ class _Connection:
         """
         text = message.text.strip()
         if not text:
-            await self._send(
+            await self._send_frame(
                 Ack(session=message.session, ok=False, detail="refusing to send an empty prompt")
             )
             return
@@ -496,14 +527,14 @@ class _Connection:
                 None,
             )
         if row is None or row.project_id != self._project.id:
-            await self._send(
+            await self._send_frame(
                 Ack(session=message.session, ok=False, detail="no such session on this board")
             )
             return
         ok, detail = await asyncio.to_thread(
             _deliver, self._project, row, agent.label if agent is not None else None, text
         )
-        await self._send(Ack(session=message.session, ok=ok, detail=detail))
+        await self._send_frame(Ack(session=message.session, ok=ok, detail=detail))
 
     # -- audio
 
@@ -532,7 +563,7 @@ class _Connection:
         buffered, self._audio = self._audio, None
         hook = TRANSCRIBE
         if hook is None:
-            await self._send(
+            await self._send_frame(
                 Error(
                     code="stt_unavailable",
                     message="speech-to-text is not wired up in this build",
@@ -540,7 +571,7 @@ class _Connection:
             )
             return
         if not buffered:
-            await self._send(
+            await self._send_frame(
                 Error(
                     code="stt_empty",
                     message=f"no audio arrived for the burst addressed to {session_id}",
@@ -550,9 +581,9 @@ class _Connection:
         try:
             text = await asyncio.to_thread(hook, bytes(buffered))
         except Exception as exc:
-            await self._send(Error(code="stt_failed", message=_one_line(exc)))
+            await self._send_frame(Error(code="stt_failed", message=_one_line(exc)))
             return
-        await self._send(Stt(text=text or "", final=True))
+        await self._send_frame(Stt(text=text or "", final=True))
 
 
 # --- helpers --------------------------------------------------------------------

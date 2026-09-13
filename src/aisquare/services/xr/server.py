@@ -221,7 +221,6 @@ class _Connection:
         self._token = token
         self._sent: list[Session] = []
         self._unread_since: dict[str, int] = {}
-        self._subscribed: str | None = None
         self._tail: asyncio.Task[None] | None = None
         self._audio: bytearray | None = None
         self._transcript_seq = 0
@@ -278,7 +277,16 @@ class _Connection:
         # import graph the hook path walks on every prompt.
         import secrets
 
-        if not isinstance(message, Auth) or not secrets.compare_digest(message.token, self._token):
+        if not isinstance(message, Auth):
+            await self._reject()
+            return False
+        # Encoded, for the reason `mcp_server._BearerGuard` already documents:
+        # str-mode compare_digest raises TypeError on a non-ASCII argument, so
+        # a token with one emoji in it would leave this function as an
+        # unhandled exception instead of an `auth_failed` frame. UTF-8 both
+        # sides keeps the comparison constant-time and total.
+        supplied = message.token.encode("utf-8", "surrogatepass")
+        if not secrets.compare_digest(supplied, self._token.encode("utf-8", "surrogatepass")):
             await self._reject()
             return False
         return True
@@ -413,7 +421,6 @@ class _Connection:
         moment the operator focuses it, and counts again from there.
         """
         await self._stop_tail()
-        self._subscribed = session_id
         if session_id is None:
             return
         with _store() as store:
@@ -448,12 +455,35 @@ class _Connection:
         self._tail = None
 
     async def _tail_transcript(self, row: TeamSession) -> None:
+        """:meth:`_stream_transcript`, with a dead client made quiet.
+
+        This runs as a bare task, so an exception escaping it is an
+        ``asyncio`` "Task exception was never retrieved" on someone's terminal
+        — from a headset being taken off, which is not an event anyone needs
+        reported. The read loop notices the same close on its own.
+        """
+        try:
+            await self._stream_transcript(row)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    async def _stream_transcript(self, row: TeamSession) -> None:
         """Replay the tail of a transcript, then follow it as it grows.
 
         Backlog first (:data:`TRANSCRIPT_BACKLOG_BYTES` from the end, whole
         records only), then a poll on the same interval as the board. Polling
         rather than inotify because the file may be on any filesystem and this
         is a text stream a human reads, not a frame budget.
+
+        **Only whole lines are consumed.** A JSONL record here is one turn of a
+        conversation — kilobytes — and a poll that lands mid-write sees a
+        fragment. Splitting what arrived and advancing past all of it would
+        parse that fragment as nothing (correct) and then never see the rest
+        (wrong): the record is dropped, silently, and the panel skips a turn.
+        So the offset rewinds to the last newline and the fragment is re-read
+        next tick, when it is whole.
         """
         path = Path(row.transcript_path or "")
         interval = poll_interval()
@@ -469,10 +499,11 @@ class _Connection:
         except OSError as exc:
             await self._send_frame(Error(code="no_transcript", message=_one_line(exc)))
             return
-        lines = backlog.split(b"\n")
-        if start > 0 and lines:
-            lines = lines[1:]  # the first line is a fragment of a clipped record
-        for line in lines:
+        complete, partial = _whole_lines(backlog)
+        offset -= len(partial)
+        if start > 0 and complete:
+            complete = complete[1:]  # the first line is a fragment of a clipped record
+        for line in complete:
             await self._emit_record(row.id, line)
         while True:
             await asyncio.sleep(interval)
@@ -480,12 +511,13 @@ class _Connection:
                 with path.open("rb") as handle:
                     handle.seek(offset)
                     fresh = handle.read()
-                    offset = handle.tell()
             except OSError:
                 return
             if not fresh:
                 continue
-            for line in fresh.split(b"\n"):
+            complete, partial = _whole_lines(fresh)
+            offset += len(fresh) - len(partial)
+            for line in complete:
                 await self._emit_record(row.id, line)
 
     async def _emit_record(self, session_id: str, line: bytes) -> None:
@@ -608,6 +640,19 @@ def _deliver(
     except Exception as exc:
         return False, _one_line(exc)
     return True, f"filed as board note #{event.seq} to {to_role}"
+
+
+def _whole_lines(chunk: bytes) -> tuple[list[bytes], bytes]:
+    """Split ``chunk`` into complete lines and the unterminated remainder.
+
+    The remainder is what the caller must not consume yet: a writer halfway
+    through a record. Returned rather than dropped so the caller can rewind by
+    exactly its length.
+    """
+    cut = chunk.rfind(b"\n")
+    if cut == -1:
+        return [], chunk
+    return chunk[:cut].split(b"\n"), chunk[cut + 1 :]
 
 
 def _record_text(line: bytes) -> str:

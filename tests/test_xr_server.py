@@ -14,6 +14,7 @@ import json
 import socket
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -188,6 +189,10 @@ def test_auth_rejects_a_missing_a_wrong_and_a_foreign_token(
             json.dumps({"t": "auth", "token": ""}),
             json.dumps({"t": "auth", "token": "not-the-token"}),
             json.dumps({"t": "auth", "token": foreign}),
+            # Non-ASCII: str-mode compare_digest raises TypeError on this, which
+            # would leave _authenticate as an unhandled exception rather than a
+            # refusal. The same trap `mcp_server._BearerGuard` documents.
+            json.dumps({"t": "auth", "token": "tökèn-wíth-ümlauts-🔑"}),
         ):
             answer = _rejected(http, frame)
             assert answer["t"] == "error"
@@ -499,3 +504,49 @@ def test_a_busy_store_does_not_end_the_ring(
         delta = json.loads(_text(connection))
     assert failures["left"] == 0, "the reads really did fail"
     assert [s["state"] for s in delta["changed"]] == ["needs_you"]
+
+
+def test_a_record_written_in_two_writes_is_not_lost(work_dir: Path) -> None:
+    """A poll that lands mid-write must not swallow the record.
+
+    A transcript record is one conversation turn — kilobytes — so a tick
+    landing inside one is ordinary, not exotic. Consuming the fragment and
+    advancing past it parses nothing and then never sees the rest: the panel
+    silently skips a turn, which is the worst kind of missing, because the
+    stream looks healthy.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": "first"}]}})
+        + "\n",
+        encoding="utf-8",
+    )
+    project = _seed(work_dir, transcript=str(transcript))
+    token = mcp_server.serve_token()
+    record = (
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "split turn"}]}}
+        )
+        + "\n"
+    )
+    head, tail = record[: len(record) // 2], record[len(record) // 2 :]
+
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        _authed(http, token) as connection,
+    ):
+        connection.send_text(json.dumps({"t": "subscribe", "session": CODER}))
+        assert json.loads(_text(connection))["text"] == "first"
+
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(head)
+            handle.flush()
+        # Several polls pass over the fragment before the rest lands.
+        time.sleep(xr_server.poll_interval() * 5)
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(tail)
+            handle.flush()
+        frame = json.loads(_text(connection))
+
+    assert frame["text"] == "split turn"
+    assert frame["seq"] == 2, "one record, delivered once"

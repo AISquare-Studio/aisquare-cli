@@ -66,6 +66,10 @@ export function wrap(text, cols) {
   return out;
 }
 
+/** Frames to keep looking for three.js's projection layer before concluding
+ *  the session is on a base layer. ~1.4s at 72Hz, ~1.1s at 90Hz. */
+const LAYER_ATTEMPT_BUDGET = 100;
+
 export class FocusPanel {
   /**
    * @param {object} opts
@@ -119,8 +123,9 @@ export class FocusPanel {
     this.layer = null;
     this.binding = null;
     this.layerTarget = null;
-    /** Set once a layer attempt has failed, so it is not retried every frame. */
+    /** Set once a layer attempt has failed for good, so it is not retried. */
     this.layersUnavailable = false;
+    this.layerAttempts = 0;
 
     // A one-quad orthographic scene, used only to blit the canvas into the
     // compositor's texture. Not part of the main scene graph.
@@ -252,6 +257,7 @@ export class FocusPanel {
   ensureLayer(session, referenceSpace) {
     if (this.layer) return true;
     if (this.layersUnavailable || !session || !referenceSpace) return false;
+    this.layerAttempts += 1;
 
     const reason = (message) => {
       this.layersUnavailable = true;
@@ -270,8 +276,19 @@ export class FocusPanel {
     // three.js only puts the session on the layers path when it can; if it fell
     // back to an XRWebGLLayer base layer then `layers` is empty and mixing the
     // two is illegal, so there is nothing to add a quad layer to.
+    //
+    // But an empty list does not mean that YET. `updateRenderState` is deferred
+    // by spec — "the changes are applied at the beginning of the next animation
+    // frame" — so three.js's own projection layer is invisible here for at
+    // least one frame after the session starts. Giving up on the first frame
+    // would silently cost the headset the entire text-optimized path, which is
+    // the one thing this tier exists for. So: keep looking for about a second,
+    // and only then call it.
     const existing = session.renderState.layers;
-    if (!existing || !existing.length) return reason('session is on a base layer');
+    if (!existing || !existing.length) {
+      if (this.layerAttempts < LAYER_ATTEMPT_BUDGET) return false; // not yet — retried next frame
+      return reason('session is on a base layer');
+    }
     if (typeof this.renderer.setRenderTargetTextures !== 'function') {
       return reason('three.js build cannot wrap an external texture');
     }
@@ -338,9 +355,13 @@ export class FocusPanel {
       if (sub.viewport) {
         target.viewport.set(sub.viewport.x, sub.viewport.y, sub.viewport.width, sub.viewport.height);
       }
+      // Save and restore rather than resetting to null: inside an XR session the
+      // bound target is three.js's own projection-layer target, and handing it
+      // back a null would drop the frame the ring is drawn into.
+      const previous = this.renderer.getRenderTarget();
       this.renderer.setRenderTarget(target);
       this.renderer.render(this.blitScene, this.blitCamera);
-      this.renderer.setRenderTarget(null);
+      this.renderer.setRenderTarget(previous);
     } catch (err) {
       console.warn('[xr] quad layer blit failed; falling back to an in-scene plane', err);
       this.destroyLayer();

@@ -407,6 +407,11 @@ function tick(now, frame) {
   if (frame && !xrState.placed) {
     xrState.placed = true;
     ring.reanchor(viewerCamera());
+  }
+  // Asked every frame until it is settled one way or the other, because the
+  // render state three.js sets is not observable on the frame it sets it.
+  // Returns immediately once a layer exists or the fallback has been chosen.
+  if (frame && !focus.layer && !focus.layersUnavailable) {
     focus.ensureLayer(renderer.xr.getSession(), renderer.xr.getReferenceSpace());
   }
 

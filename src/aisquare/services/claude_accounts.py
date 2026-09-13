@@ -36,14 +36,16 @@ import sqlite3
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import paths
+from aisquare.core.config import AccountsSettings, load_config
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxServer, WindowInfo
@@ -57,6 +59,8 @@ from aisquare.models import (
     ClaudeInstall,
     ClaudeUsage,
     ProjectInfo,
+    UsageSample,
+    UsageTrend,
 )
 from aisquare.services import agents as agents_service
 from aisquare.services import settings as settings_service
@@ -160,7 +164,7 @@ def overview() -> AccountsOverview:
 PROJECT_ACCOUNT_KEY = "claude_account"
 """The ``project_setting`` key holding a project's default account (a slot number)."""
 
-ChoiceSource = Literal["flag", "role binding", "project default", "machine default"]
+ChoiceSource = Literal["flag", "role binding", "project default", "headroom", "machine default"]
 
 
 class AccountsUnreadable(AccountsError):
@@ -289,6 +293,25 @@ def resolve(ref: str | int) -> ClaudeAccount:
     )
 
 
+def slot_of(config_dir: str | Path) -> int | None:
+    """Which slot a Claude config directory IS: a managed slot's number, 1 for the plain
+    claude's directory, ``None`` for a directory the CLI does not own (a hand-made layout).
+
+    A reader, not a decider: ``services.team.session_account`` records the
+    directory a session runs under from its transcript path, and this turns it
+    back into the slot a hand-over (#146) is leaving.
+    """
+    managed = core.managed_slot(config_dir)
+    if managed is not None:
+        return managed
+    try:
+        if Path(config_dir).resolve() == core.default_config_dir().resolve():
+            return core.DEFAULT_SLOT
+    except OSError:
+        return None
+    return None
+
+
 def _role_binding_ref(role: str | None) -> tuple[str | None, str | None]:
     """The account reference ``role``'s binding names, or the reason the config was unreadable."""
     if role is None:
@@ -304,6 +327,9 @@ def choose(
     *,
     role: str | None = None,
     project: ProjectInfo | None = None,
+    exclude: Iterable[int] = (),
+    spread: bool | None = None,
+    fetch: Fetch | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
 
@@ -327,6 +353,12 @@ def choose(
     means "never pick this one for me", and the operator can still name it on
     the flag, which is why the flag rung does not check. A registry or config
     that cannot be read costs its rung and leaves a note, never the launch.
+
+    One rung is optional (#146): with ``[accounts] pick = "headroom"`` — or
+    ``spread=True``, which a hand-over passes — the machine default gives way to
+    :func:`headroom_choice`, the account with room in its five-hour window,
+    ``exclude`` naming the slot a hand-over is leaving. When no account's usage
+    can be read, the machine default decides exactly as before.
     """
     if explicit is not None:
         return AccountChoice(resolve(explicit), "flag")
@@ -362,8 +394,17 @@ def choose(
                 notes.append(f"{core.label(preferred)} (project default) is disabled — skipped")
             else:
                 return AccountChoice(preferred, "project default", notes)
+    by_headroom = spread if spread is not None else accounts_settings().pick == "headroom"
+    if by_headroom:
+        picked, more = headroom_choice(
+            accounts, switch_at=accounts_settings().switch_at, exclude=exclude, fetch=fetch
+        )
+        notes.extend(more)
+        if picked is not None:
+            return AccountChoice(picked, "headroom", notes)
+    skip = set(exclude)
     default = next((a for a in accounts if a.is_default), None)
-    if default is not None:
+    if default is not None and default.slot not in skip:
         if default.disabled:
             notes.append(f"{core.label(default)} (machine default) is disabled — skipped")
         else:
@@ -592,6 +633,191 @@ def usage(
         week_resets_at=week_resets,
         fetched_at=now or _now(),
     )
+
+
+# --- usage over time, and picking by headroom (#146) ---------------------------------------------
+#
+# One reading says how full a window is; two say how fast it is filling. Every
+# fetch made through `sample_usage` leaves a row in `claude_usage` (core.store,
+# v16), and `usage_trend` turns this window's rows into "at this pace, N minutes
+# to the limit". `headroom_choice` is the automatic pick `[accounts] pick =
+# "headroom"` switches on: it reads every enabled, signed-in account ONCE,
+# concurrently, and applies one rule — in priority order, the first account
+# under `switch_at`; failing that, the one with the most room. Best effort at
+# every step, because the endpoint is undocumented (§5): an account that does
+# not answer is skipped with a note, and when none answers the caller's next
+# rung (the machine default) decides exactly as it did before #146.
+
+TREND_WINDOW = timedelta(minutes=60)
+"""How far back `usage_trend` looks for the reading it rates against."""
+TREND_MINIMUM = timedelta(minutes=2)
+"""Two readings closer than this say nothing about a rate — noise, not a trend."""
+HEADROOM_WORKERS = 4
+"""How many usage fetches run at once in a headroom pick (one per account, capped)."""
+
+
+def accounts_settings() -> AccountsSettings:
+    """``[accounts]`` — a default like every other one; an unreadable config costs the knobs."""
+    try:
+        return load_config().accounts
+    except Exception:
+        return AccountsSettings()
+
+
+def sample_usage(
+    account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
+) -> ClaudeUsage:
+    """:func:`usage`, and a row in ``claude_usage`` when it answered.
+
+    The row is the only side effect, and it is best effort: a store that cannot
+    be opened costs the trend line, never the reading the caller asked for.
+    """
+    result = usage(account, now=now, fetch=fetch)
+    if result.available:
+        with contextlib.suppress(sqlite3.Error), store_session() as store:
+            store.add_usage_sample(
+                UsageSample(
+                    slot=account.slot,
+                    fetched_at=result.fetched_at or now or _now(),
+                    session_percent=result.session_percent,
+                    session_resets_at=result.session_resets_at,
+                    week_percent=result.week_percent,
+                    week_resets_at=result.week_resets_at,
+                )
+            )
+    return result
+
+
+def usage_trend(
+    slot: int, latest: ClaudeUsage, *, now: datetime | None = None
+) -> UsageTrend | None:
+    """Where the five-hour window is heading, from this window's readings.
+
+    Rates the latest reading against the OLDEST reading of the same window
+    (same ``resets_at``) within :data:`TREND_WINDOW`. Readings from before the
+    window reset are not a trend — the percentage fell to zero at the reset —
+    so they are excluded by the reset time rather than by age. ``None`` when
+    there is no usable reading at all; a trend with ``per_hour=None`` when
+    there is only the latest one, or the span is under :data:`TREND_MINIMUM`.
+    """
+    if not latest.available or latest.session_percent is None:
+        return None
+    moment = latest.fetched_at or now or _now()
+    try:
+        with store_session() as store:
+            samples = store.usage_samples(slot, since=moment - TREND_WINDOW)
+    except sqlite3.Error:
+        samples = []
+    same_window = [
+        s
+        for s in samples
+        if s.session_percent is not None
+        and s.session_resets_at == latest.session_resets_at
+        and s.fetched_at < moment
+    ]
+    trend = UsageTrend(percent=latest.session_percent, resets_at=latest.session_resets_at)
+    if not same_window:
+        return trend
+    oldest = same_window[0]
+    span = moment - oldest.fetched_at
+    if span < TREND_MINIMUM or oldest.session_percent is None:
+        return trend
+    hours = span.total_seconds() / 3600
+    per_hour = (latest.session_percent - oldest.session_percent) / hours
+    minutes_to_limit: float | None = None
+    if per_hour > 0:
+        minutes_to_limit = (100.0 - latest.session_percent) / per_hour * 60
+    return trend.model_copy(
+        update={
+            "per_hour": per_hour,
+            "minutes_to_limit": minutes_to_limit,
+            "span_minutes": span.total_seconds() / 60,
+        }
+    )
+
+
+def describe_trend(trend: UsageTrend | None) -> str:
+    """``≈ 40 min to the limit`` / ``≈ 2 h to the limit`` / ``flat`` — or ``""``."""
+    if trend is None or trend.per_hour is None:
+        return ""
+    if trend.minutes_to_limit is None:
+        return "flat"
+    minutes = trend.minutes_to_limit
+    if trend.resets_at is not None:
+        # A window that resets before it fills is not going to fill.
+        until_reset = (trend.resets_at - (_now())).total_seconds() / 60
+        if 0 < until_reset < minutes:
+            return "resets before the limit"
+    if minutes < 60:
+        return f"≈ {max(1, round(minutes))} min to the limit"
+    return f"≈ {minutes / 60:.1f} h to the limit"
+
+
+def headroom_choice(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    switch_at: int,
+    exclude: Iterable[int] = (),
+    fetch: Fetch | None = None,
+    now: datetime | None = None,
+) -> tuple[ClaudeAccount | None, list[str]]:
+    """The account with headroom, and the notes that say how it was picked.
+
+    Candidates are the enabled, signed-in accounts in priority order, minus
+    ``exclude`` (the account a hand-over is leaving). Their usage is read
+    concurrently through :func:`sample_usage`, so a pick costs one round trip,
+    not one per account. The rule: the FIRST candidate under ``switch_at``
+    percent of its five-hour window — priority order is the operator's
+    preference, and an account with room keeps it — else the candidate with
+    the lowest usage, because "every account is nearly out" still has a least
+    bad answer. An account whose usage cannot be read is skipped and named;
+    ``None`` when nothing could be measured, so the caller's next rung decides.
+    """
+    skip = set(exclude)
+    candidates = [
+        account
+        for account in accounts
+        if not account.disabled and account.slot not in skip and core.signed_in(account)
+    ]
+    if not candidates:
+        return None, ["headroom: no enabled, signed-in account to pick from"]
+    readings: dict[int, ClaudeUsage] = {}
+    with ThreadPoolExecutor(max_workers=min(HEADROOM_WORKERS, len(candidates))) as pool:
+        futures = {
+            pool.submit(sample_usage, account, now=now, fetch=fetch): account.slot
+            for account in candidates
+        }
+        for future, slot in futures.items():
+            try:
+                readings[slot] = future.result()
+            except Exception as exc:  # one account's failure must not cost the pick
+                readings[slot] = ClaudeUsage(
+                    available=False, reason=f"usage read failed ({type(exc).__name__})"
+                )
+    measured: list[tuple[ClaudeAccount, float]] = []
+    notes: list[str] = []
+    for account in candidates:
+        reading = readings[account.slot]
+        if reading.available and reading.session_percent is not None:
+            measured.append((account, reading.session_percent))
+        else:
+            notes.append(
+                f"headroom: {core.label(account)} skipped — {reading.reason or 'no reading'}"
+            )
+    if not measured:
+        notes.append("headroom: no account's usage could be read — the default decides")
+        return None, notes
+    summary = " · ".join(f"{core.label(a)} {pct:.0f}%" for a, pct in measured)
+    under = next((a for a, pct in measured if pct < switch_at), None)
+    if under is not None:
+        notes.append(f"headroom: {summary} — {core.label(under)} is first under {switch_at}%")
+        return under, notes
+    least, pct = min(measured, key=lambda pair: pair[1])
+    notes.append(
+        f"headroom: {summary} — every account is over {switch_at}%; "
+        f"{core.label(least)} has the most room ({100 - pct:.0f}% left)"
+    )
+    return least, notes
 
 
 # --- signing in -------------------------------------------------------------------------

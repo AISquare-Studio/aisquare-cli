@@ -73,6 +73,7 @@ _STATE_CHIP: dict[str, tuple[str, str]] = {
     "working": ("▶", "green"),
     "waiting": ("⏸", "yellow"),
     "attention": ("🔔 NEEDS YOU", "bold red"),
+    "limited": ("⏳ LIMITED", "magenta"),
     "exited": ("💤", "dim"),
     "lost": ("✗", "red"),
     "unknown": ("·", "dim"),

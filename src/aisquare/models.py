@@ -264,6 +264,36 @@ class ClaudeUsage(BaseModel):
     fetched_at: datetime | None = None
 
 
+class UsageSample(BaseModel):
+    """One reading of an account's two windows, kept so a rate can be computed (#146).
+
+    Written by ``services.claude_accounts.sample_usage`` whenever usage is
+    fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
+    pick — and read back to say how fast the window is filling. Samples are
+    pruned after a week; they are a derived convenience, never the record.
+    """
+
+    slot: int
+    fetched_at: datetime
+    session_percent: float | None = None
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    week_resets_at: datetime | None = None
+
+
+class UsageTrend(BaseModel):
+    """Where an account's five-hour window is heading, from the samples of this window."""
+
+    percent: float
+    resets_at: datetime | None = None
+    per_hour: float | None = None
+    """Percentage points per hour over the sampled span; ``None`` when the span is too short."""
+    minutes_to_limit: float | None = None
+    """At the current rate, how long until 100 %; ``None`` when flat, falling or unknown."""
+    span_minutes: float = 0.0
+    """How long the samples behind the rate cover — the reader's measure of how much to trust it."""
+
+
 class ClaudeAccountStatus(BaseModel):
     """Everything the Accounts page shows about one slot, minus the usage it fetches live."""
 
@@ -517,7 +547,11 @@ class TeamSession(BaseModel):
     cursor: int = 0
     """Highest team-event ``seq`` already shown to this session (delta position)."""
     state: str = "working"
-    """Live activity: working (mid-turn), waiting (wants input) or attention."""
+    """Live activity: working (mid-turn), waiting (wants input), attention, or limited
+    (its turn ended on a usage limit — #146)."""
+    limit_resets_at: datetime | None = None
+    """When the limit that stopped it lifts, as the error named it; meaningful while
+    ``state`` is ``limited``, and ``None`` when the message named no time."""
     transcript_path: str | None = None
     """The session's Claude Code transcript (JSONL), from hook payloads."""
     account: str | None = None
@@ -691,7 +725,7 @@ class AgentConnection(BaseModel):
     imported: int = 0
 
 
-FleetAgentState = Literal["working", "waiting", "attention", "exited", "lost", "unknown"]
+FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``

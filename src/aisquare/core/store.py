@@ -47,6 +47,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
     TurnMetric,
+    UsageSample,
 )
 
 _SCHEMA_V1 = """
@@ -541,6 +542,32 @@ CREATE TABLE project_setting (
 ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;
 """
 
+# v16: usage-aware accounts (#146).
+#
+# ``claude_usage`` keeps the readings of each account's two rate-limit windows
+# so a RATE can be computed — "at this pace the five-hour window is full in 40
+# minutes" — which one reading cannot say. Written whenever usage is fetched
+# (the Accounts page's minute tick, `accounts usage`, a headroom pick); rows
+# older than a week are pruned on write. Derived convenience, never the record:
+# a missing table costs a trend line, nothing else.
+#
+# ``team_session.limit_resets_at`` carries the reset time a usage-limit error
+# named, for the ``limited`` state the StopFailure hook writes; it is read only
+# while ``state = 'limited'`` and a prompt that lifts the session back to
+# ``working`` leaves the stale time behind unread.
+_SCHEMA_V16 = """
+CREATE TABLE claude_usage (
+    slot               INTEGER NOT NULL,
+    fetched_at         TEXT NOT NULL,
+    session_percent    REAL,
+    session_resets_at  TEXT,
+    week_percent       REAL,
+    week_resets_at     TEXT
+);
+CREATE INDEX claude_usage_slot_time ON claude_usage (slot, fetched_at);
+ALTER TABLE team_session ADD COLUMN limit_resets_at TEXT;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -558,6 +585,7 @@ _MIGRATIONS = (
     _SCHEMA_V13,
     _SCHEMA_V14,
     _SCHEMA_V15,
+    _SCHEMA_V16,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -614,8 +642,13 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort"
+    "transcript_path, account, model, effort, limit_resets_at"
 )
+_USAGE_COLUMNS = (
+    "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at"
+)
+#: How long usage readings are kept — long enough for a weekly window's history.
+_USAGE_RETENTION = timedelta(days=7)
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
@@ -682,6 +715,7 @@ class ContextStore(Protocol):
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
     def mark_attention(self, session_id: str) -> bool: ...
+    def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]: ...
     def get_task(self, ref: str) -> TeamTask | None: ...
@@ -755,6 +789,9 @@ class ContextStore(Protocol):
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
+    # Usage readings (v16, #146): the history behind "how fast is this window filling".
+    def add_usage_sample(self, sample: UsageSample) -> None: ...
+    def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
     # Per-project settings (v15): one key, one value, per project.
     def project_setting(self, project_id: str, key: str) -> str | None: ...
     def set_project_setting(self, project_id: str, key: str, value: str) -> None: ...
@@ -900,6 +937,18 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         account=row["account"],
         model=row["model"],
         effort=row["effort"],
+        limit_resets_at=_maybe_dt(row["limit_resets_at"]),
+    )
+
+
+def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
+    return UsageSample(
+        slot=int(row["slot"]),
+        fetched_at=datetime.fromisoformat(row["fetched_at"]),
+        session_percent=row["session_percent"],
+        session_resets_at=_maybe_dt(row["session_resets_at"]),
+        week_percent=row["week_percent"],
+        week_resets_at=_maybe_dt(row["week_resets_at"]),
     )
 
 
@@ -1327,7 +1376,7 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
@@ -1350,6 +1399,7 @@ class SqliteStore:
                 session.account,
                 session.model,
                 session.effort,
+                session.limit_resets_at.isoformat() if session.limit_resets_at else None,
             ),
         )
         self._conn.commit()
@@ -1460,6 +1510,22 @@ class SqliteStore:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    def mark_limited(self, session_id: str, resets_at: datetime | None) -> None:
+        """The session's turn ended on a usage limit (#146): park it as ``limited``.
+
+        Unconditional, unlike :meth:`mark_attention`: a second limit in the same
+        window carries a newer reset time, and the feed de-duplication that
+        ``attention`` needs is done by the caller, which knows the previous state.
+        Un-retires the row for the same reason ``mark_attention`` does — a
+        limited agent is alive and is exactly the one an operator is looking for.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET state = 'limited', limit_resets_at = ?, last_seen_at = ?, "
+            "ended_at = NULL WHERE id = ?",
+            (resets_at.isoformat() if resets_at is not None else None, _now_iso(), session_id),
+        )
+        self._conn.commit()
 
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]:
         """Mark the session ended; optionally release its claims.
@@ -2265,6 +2331,36 @@ class SqliteStore:
                 "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
             )
         self._conn.commit()
+
+    # --- usage readings (v16, #146) ------------------------------------------------------------
+
+    def add_usage_sample(self, sample: UsageSample) -> None:
+        """Record one reading and drop this slot's readings older than :data:`_USAGE_RETENTION`."""
+        self._conn.execute(
+            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                sample.slot,
+                sample.fetched_at.isoformat(),
+                sample.session_percent,
+                sample.session_resets_at.isoformat() if sample.session_resets_at else None,
+                sample.week_percent,
+                sample.week_resets_at.isoformat() if sample.week_resets_at else None,
+            ),
+        )
+        self._conn.execute(
+            "DELETE FROM claude_usage WHERE slot = ? AND fetched_at < ?",
+            (sample.slot, (sample.fetched_at - _USAGE_RETENTION).isoformat()),
+        )
+        self._conn.commit()
+
+    def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]:
+        """This slot's readings taken at or after ``since``, oldest first."""
+        rows = self._conn.execute(
+            f"SELECT {_USAGE_COLUMNS} FROM claude_usage WHERE slot = ? AND fetched_at >= ? "
+            "ORDER BY fetched_at",
+            (slot, since.isoformat()),
+        ).fetchall()
+        return [_row_to_usage_sample(row) for row in rows]
 
     # --- per-project settings (v15) ---------------------------------------------------------
 

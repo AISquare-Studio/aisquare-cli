@@ -470,6 +470,9 @@ def test_the_wake_kinds_are_the_plans() -> None:
         "result",
         "question",
         "agent_exited",
+        # #146: an agent parked on a usage limit, and the hand-over that moved one.
+        "limited",
+        "switched",
     } == team_service.MANAGER_WAKE_KINDS
 
 

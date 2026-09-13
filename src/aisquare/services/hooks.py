@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import insights
@@ -31,6 +31,7 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
 from aisquare.services import ci_augment
+from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import team as team_service
@@ -183,6 +184,79 @@ def needs_attention(
     """Mark the session as needing the user, and put it on the feed."""
     if session_id is not None:
         team_service.hook_notification(session_id, cwd, message)
+
+
+def turn_failed(
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    error: str | None = None,
+    message: str | None = None,
+    details: str | None = None,
+) -> None:
+    """The turn ended on an API error (Claude Code's ``StopFailure``), not a Stop (#146).
+
+    Three steps, each failing on its own. The board first: a ``rate_limit``
+    parks the session as ``limited`` with the reset time the message named and
+    wakes the manager; any other error returns it to ``waiting`` with a feed
+    line. Then this turn's metrics row is closed — the turn is over, however it
+    ended. Last, and only when ``[accounts] on_limit = "switch"`` names it, the
+    hand-over: a limited FLEET agent is moved to the account with the most
+    headroom (``services.fleet.switch``), unless the limit lifts within
+    ``wait_if_reset_within_minutes`` — a reset ten minutes away is cheaper than a
+    cold start elsewhere, and Claude Code's own wait-and-continue covers it.
+
+    The hand-over runs INSIDE the limited agent's hook, i.e. as a child of the
+    process it is about to replace: ``switch`` starts the replacement and records
+    it before it kills the old window, so this process dying with that window
+    costs nothing that has not already happened. A hand-over that cannot find
+    headroom leaves the agent limited, its own wait intact, and says so on the
+    board — which is the ``wait`` behaviour, and correct.
+    """
+    if session_id is None:
+        return
+    failure = team_service.hook_stop_failure(
+        session_id, cwd, error=error, message=message, details=details
+    )
+    metrics_service.close_turn(session_id)
+    if failure is not None and failure.limited:
+        _hand_over_if_configured(failure)
+
+
+def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
+    settings = claude_accounts_service.accounts_settings()
+    if settings.on_limit != "switch":
+        return
+    session = failure.session
+    with store_session() as store:
+        agent = store.fleet_agent_for_session(session.project_id, session.id)
+        project = store.get_project(session.project_id)
+    if agent is None or project is None:
+        return  # a hand-typed session is the operator's to move
+    resets_at = failure.notice.resets_at if failure.notice is not None else None
+    if resets_at is not None:
+        wait = timedelta(minutes=settings.wait_if_reset_within_minutes)
+        if resets_at - datetime.now(tz=UTC) <= wait:
+            team_service.hook_note(
+                session.project_id,
+                f"{agent.label}: usage limit lifts within {settings.wait_if_reset_within_minutes} "
+                "min — waiting for the reset instead of switching",
+                session_id=session.id,
+            )
+            return
+    # Lazy: services.fleet imports this module's neighbours; a cycle at import
+    # time would cost every hook, and this branch runs on the rare turn.
+    from aisquare.services import fleet as fleet_service
+
+    window = failure.notice.window if failure.notice is not None else "usage"
+    try:
+        fleet_service.switch(
+            project, agent.label, reason=f"{window} limit", spawned_by="usage-limit"
+        )
+    except fleet_service.FleetError as exc:
+        team_service.hook_note(
+            session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id
+        )
 
 
 def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | None = None) -> str:

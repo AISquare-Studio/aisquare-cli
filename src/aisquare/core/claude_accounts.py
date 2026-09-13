@@ -57,9 +57,10 @@ import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aisquare.core import paths
 from aisquare.core.version import __version__
@@ -412,6 +413,90 @@ def subscription_label(creds: ClaudeCredentials | None) -> str | None:
     if match:
         return f"{match.group(1)} {match.group(2)}"
     return creds.subscription_type
+
+
+# --- what a usage-limit error says (#146) ----------------------------------------------------
+
+_LIMIT_MESSAGE = re.compile(
+    r"hit your (?P<window>session|weekly|Opus|Sonnet|Fable|[A-Za-z]+) limit"
+    r"(?:\s*·\s*resets\s+(?P<when>[^()\n]+?))?"
+    r"(?:\s*\((?P<zone>[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*)\))?\s*$",
+    re.IGNORECASE,
+)
+_RESET_TIME = re.compile(
+    r"^(?:(?P<day>mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?"
+    r"\s*(?P<ampm>am|pm)$",
+    re.IGNORECASE,
+)
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+@dataclass(frozen=True)
+class LimitNotice:
+    """What a Claude Code usage-limit error told us: which window, and when it lifts."""
+
+    window: str
+    """``session``, ``weekly``, ``opus``, ``sonnet``… — lowercased, as the message named it."""
+    resets_at: datetime | None
+    """The reset as an aware UTC datetime, or ``None`` when the message named no time
+    (or one this parser could not read — the raw text stays on the board event)."""
+
+
+def parse_limit_notice(text: str | None, *, now: datetime | None = None) -> LimitNotice | None:
+    """Read ``You've hit your session limit · resets 12:30am (America/Toronto)``, or ``None``.
+
+    That is the rendered text Claude Code shows — and hands a ``StopFailure``
+    hook as ``last_assistant_message`` — when a subscription's rolling allowance
+    runs out (measured in this machine's own transcripts, 2026-09-13; the errors
+    reference documents the same four shapes: session, weekly, Opus, Sonnet,
+    the weekly one with a weekday, ``resets Mon 12:00am``). The time is a clock
+    time in the zone named in parentheses, or the local zone when none is; it
+    is resolved to the next such moment at or after ``now``, on the named
+    weekday when there is one. A ``rate_limit`` that is not a usage limit —
+    ``Request rejected (429)`` from an API key, the server's own throttle —
+    does not match, and the caller treats it as a limit with no reset time.
+    """
+    if not text:
+        return None
+    match = _LIMIT_MESSAGE.search(text)
+    if match is None:
+        return None
+    window = match.group("window").lower()
+    when = (match.group("when") or "").strip()
+    if not when:
+        return LimitNotice(window, None)
+    resets_at = _resolve_reset(when, match.group("zone"), now or _now())
+    return LimitNotice(window, resets_at)
+
+
+def _resolve_reset(when: str, zone_name: str | None, now: datetime) -> datetime | None:
+    clock = _RESET_TIME.match(when.strip())
+    if clock is None:
+        return None
+    hour = int(clock.group("hour")) % 12
+    if clock.group("ampm").lower() == "pm":
+        hour += 12
+    minute = int(clock.group("minute") or 0)
+    if hour > 23 or minute > 59:
+        return None
+    try:
+        zone: tzinfo = ZoneInfo(zone_name) if zone_name else (now.astimezone().tzinfo or UTC)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = now.astimezone().tzinfo or UTC
+    local_now = now.astimezone(zone)
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    day = clock.group("day")
+    if day is not None:
+        # `resets Mon 12:00am`: the next Monday at that time — today if it is
+        # Monday and the time is still ahead, else up to a week out.
+        wanted = _WEEKDAYS.index(day.lower()[:3])
+        ahead = (wanted - candidate.weekday()) % 7
+        candidate += timedelta(days=ahead)
+        if candidate < local_now:
+            candidate += timedelta(days=7)
+    elif candidate < local_now:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(UTC)
 
 
 # --- launching ------------------------------------------------------------------------

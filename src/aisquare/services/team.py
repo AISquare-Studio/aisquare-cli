@@ -87,6 +87,10 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "result",
         "question",
         "agent_exited",
+        # #146: an agent parked on a usage limit needs a decision (switch it, or
+        # wait), and the hand-over that moved one is news the manager acts on.
+        "limited",
+        "switched",
     }
 )
 
@@ -1554,6 +1558,112 @@ def hook_notification(session_id: str, cwd: Path | None, message: str | None) ->
                 message or "needs your attention",
                 session_id=session.id,
             )
+
+
+@dataclass(frozen=True)
+class TurnFailure:
+    """What :func:`hook_stop_failure` recorded: the session, the error, and — for a
+    usage limit — what the message said about the reset."""
+
+    session: TeamSession
+    error: str
+    notice: claude_accounts_core.LimitNotice | None
+
+    @property
+    def limited(self) -> bool:
+        return self.error == "rate_limit"
+
+
+def hook_stop_failure(
+    session_id: str,
+    cwd: Path | None,
+    *,
+    error: str | None,
+    message: str | None,
+    details: str | None,
+) -> TurnFailure | None:
+    """The turn ended on an API error — Claude Code's ``StopFailure`` (#146).
+
+    ``rate_limit`` is the one that matters: a subscription's allowance ran out
+    (``You've hit your session limit · resets 12:30am (America/Toronto)``, the
+    text the hook hands over as ``last_assistant_message``), or an API key was
+    throttled. Either way the agent can do nothing until something changes, so
+    the row is parked as ``limited`` with the reset time the message named
+    (``core.claude_accounts.parse_limit_notice``; ``None`` when it named none),
+    a ``limited`` event goes on the feed ON THE TRANSITION only — Claude Code
+    can fire the hook again for the same window — and a waiting manager is
+    nudged (§7.3 path 2), the event kind being a wake kind for its own Stop.
+
+    Every other error (``overloaded``, ``authentication_failed``,
+    ``billing_error``…) ends the turn like a Stop would — the row says
+    ``waiting`` — with a ``turn_failed`` feed line naming it, so the board does
+    not show a session as mid-turn for thirty minutes because its turn died.
+    """
+    if not orchestrator.team_enabled():
+        return None
+    kind = (error or "unknown").strip() or "unknown"
+    text = (message or details or kind).strip()
+    with store_session() as store:
+        session = store.get_session(session_id)
+        if session is None:
+            return None
+        if kind != "rate_limit":
+            store.touch_session(session.id, state="waiting")
+            _emit(
+                store, session.project_id, "turn_failed", f"{kind}: {text}", session_id=session.id
+            )
+            refreshed = store.get_session(session.id) or session
+            return TurnFailure(refreshed, kind, None)
+        notice = claude_accounts_core.parse_limit_notice(message, now=_now())
+        already_limited = session.state == "limited"
+        store.mark_limited(session.id, notice.resets_at if notice is not None else None)
+        agent = store.fleet_agent_for_session(session.project_id, session.id)
+        label = agent.label if agent is not None else (session.label or short_id(session.id))
+        if not already_limited:
+            _emit(
+                store,
+                session.project_id,
+                "limited",
+                _limited_text(label, text, notice, fleet=agent is not None),
+                session_id=session.id,
+            )
+        refreshed = store.get_session(session.id) or session
+    if not already_limited:
+        # After the row says limited, never before, and outside the `with`
+        # (it opens its own connection): path 2 types into a WAITING manager;
+        # a working one reads the event on its next delta or its own Stop.
+        _nudge_manager(session.project_id, reason=f"{label} hit its usage limit")
+    return TurnFailure(refreshed, kind, notice)
+
+
+def _limited_text(
+    label: str, message: str, notice: claude_accounts_core.LimitNotice | None, *, fleet: bool
+) -> str:
+    """The feed line: what stopped, when it lifts, and the one command that moves it."""
+    if notice is None:
+        head = f"{label} is rate limited: {message}"
+    else:
+        head = f"{label} hit its {notice.window} limit"
+        if notice.resets_at is not None:
+            local = notice.resets_at.astimezone()
+            distance = notice.resets_at - _now()
+            far = distance > timedelta(hours=24)
+            stamp = local.strftime("%a %H:%M") if far else local.strftime("%H:%M")
+            head += f" · resets {stamp}"
+    if fleet:
+        head += (
+            f" — `aisquare fleet switch {label}` moves it to the account with the most headroom"
+            " (or wait for the reset)"
+        )
+    return head
+
+
+def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> None:
+    """A plain feed note from a hook — what a hand-over decided, and why (#146)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, "note", text, session_id=session_id)
 
 
 def hook_session_end(session_id: str, cwd: Path | None) -> None:

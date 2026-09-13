@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 from collections.abc import Callable, Container, Sequence
+from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -133,7 +134,16 @@ def doctor(
         _check_browser_tools(cwd),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
+        # Leaves the machine (one usage request per account), so --live only (#146).
+        *_live_only(live, _claude_account_headroom_check),
     ]
+
+
+def _live_only(live: bool, check: Callable[[], DoctorCheck | None]) -> list[DoctorCheck]:
+    if not live:
+        return []
+    found = check()
+    return [found] if found is not None else []
 
 
 def _ok(name: str, detail: str) -> DoctorCheck:
@@ -712,7 +722,9 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     """
     managed = claude_accounts_core.managed_accounts()
     if not managed:
-        return []
+        # No added accounts, so no `claude-accounts` line — but a plain-claude
+        # session can still be parked on a usage limit (#146).
+        return _claude_account_limit_checks()
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
@@ -729,8 +741,112 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
                 + "; ".join(f"aisquare accounts run {slot}" for slot in unsigned),
             ),
             *_claude_account_default_checks(),
+            *_claude_account_limit_checks(),
         ]
-    return [_ok("claude-accounts", detail), *_claude_account_default_checks()]
+    return [
+        _ok("claude-accounts", detail),
+        *_claude_account_default_checks(),
+        *_claude_account_limit_checks(),
+    ]
+
+
+def _claude_account_limit_checks() -> list[DoctorCheck]:
+    """Agents parked on a usage limit (#146) — offline, from the board rows alone.
+
+    Gated on ``context.db`` existing like the default check: a doctor run
+    creates nothing. One line for the whole machine, naming each limited agent
+    and when its limit lifts, with the one command that moves it. Nothing when
+    no session is limited, so an idle machine's doctor output is unchanged.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            projects = store.list_projects()
+            names = {p.id: p.codename or p.root.name or p.id for p in projects}
+            limited = [
+                (session, names[p.id])
+                for p in projects
+                for session in store.team_sessions(p.id)
+                if session.ended_at is None and session.state == "limited"
+            ]
+            labels = {}
+            for session, _project_name in limited:
+                agent = store.fleet_agent_for_session(session.project_id, session.id)
+                labels[session.id] = agent.label if agent is not None else session.id[:8]
+    except Exception:  # the database line reports a broken store
+        return []
+    if not limited:
+        return []
+    now = datetime.now(tz=UTC)
+    parts = []
+    for session, project_name in limited:
+        when = (
+            f"resets {session.limit_resets_at.astimezone():%H:%M}"
+            if session.limit_resets_at is not None and session.limit_resets_at > now
+            else "reset time unknown"
+        )
+        parts.append(f"{labels[session.id]} ({project_name}, {when})")
+    return [
+        _warn(
+            "claude-account-limits",
+            f"{len(limited)} agent(s) parked on a Claude usage limit: " + " · ".join(parts),
+            "Move one to an account with headroom: aisquare fleet switch <label>; or wait — "
+            "Claude Code continues by itself at the reset",
+        )
+    ]
+
+
+def _claude_account_headroom_check() -> DoctorCheck | None:
+    """``--live`` only: every enabled, signed-in account's five-hour window, against ``switch_at``.
+
+    Leaves the machine (the usage endpoint, one request per account), which is
+    why it runs only on ``doctor --live``. Warns when EVERY account is over the
+    line — a fleet about to stall with nowhere to switch to — and reports the
+    numbers otherwise so the operator can see them without opening the page.
+    ``None`` when there is nothing to measure (no signed-in account).
+    """
+    accounts = [
+        account
+        for account in claude_accounts_service.list_accounts()
+        if not account.disabled and claude_accounts_core.signed_in(account)
+    ]
+    if not accounts:
+        return None
+    settings = claude_accounts_service.accounts_settings()
+    readings = {account.slot: claude_accounts_service.sample_usage(account) for account in accounts}
+    measured = [
+        (account, reading.session_percent)
+        for account in accounts
+        if (reading := readings[account.slot]).available and reading.session_percent is not None
+    ]
+    unreadable = [
+        f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"
+        for account in accounts
+        if account.slot not in {a.slot for a, _ in measured}
+    ]
+    summary = " · ".join(
+        f"{claude_accounts_core.label(account)} {pct:.0f}%" for account, pct in measured
+    )
+    if unreadable:
+        summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
+    if measured and all(pct >= settings.switch_at for _, pct in measured):
+        return _warn(
+            "claude-account-headroom",
+            f"every account is at or over {settings.switch_at}% of its five-hour window: {summary}",
+            "Add or sign in another account (aisquare accounts add), or wait for a reset — "
+            "a fleet spawned now has nowhere to switch to",
+        )
+    if not measured:
+        return _warn(
+            "claude-account-headroom",
+            f"no account's usage could be read: {summary}",
+            "Open a session on the account to refresh its token, then: aisquare accounts usage",
+        )
+    return _ok(
+        "claude-account-headroom",
+        f"five-hour windows ({settings.switch_at}% is the line): {summary}",
+    )
 
 
 def _claude_account_default_checks() -> list[DoctorCheck]:

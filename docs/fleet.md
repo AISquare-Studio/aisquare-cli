@@ -99,7 +99,8 @@ tmux can see and its row says so (`no hooks`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
-   bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
+   bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
+   **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. `＋ spawn
    agent` on a project starts one of your own (Phase 4).
 5. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
@@ -207,8 +208,9 @@ its tmux session. `ls` shows live agents; `--all` (`-a`) includes the ones that
 have ended. `status` is the same data, always live only.
 
 State is **derived, never stored**: a fresh board session row wins (working ·
-waiting · attention); otherwise tmux's facts (a dead pane → exited with its
-code; activity → working; else waiting); no pane at all → lost; `· unknown`
+waiting · attention · limited — the last one trusted until the reset it names
+has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
+pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. The detail beside the chip says why when that
 is not obvious — an exit code, `no hooks` for a binary without our lifecycle
 hooks, `pane gone`.
@@ -364,6 +366,30 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   machine default. With none of those set, the agent runs on whatever `claude`
   the shell already has — exactly what it did before any of this existed. The
   agent's header and `fleet ls` show the slot it was resolved to.
+- **Headroom.** With `[accounts] pick = "headroom"` (the Settings tab's
+  *launches pick*, or `aisquare config set accounts.pick headroom`) the machine
+  default gives way to the account with room: every enabled, signed-in account's
+  five-hour window is read once, and the first one in priority order under
+  `switch_at` (85 % by default) is taken — or, when all are over it, the one
+  with the most left. Usage is the same best-effort endpoint as the bars, so an
+  account that does not answer is skipped with a note and, when none answers,
+  the machine default decides as before. Each reading is kept: the row's bar
+  gains *≈ 40 min to the limit* once two readings of the same window exist.
+- **A usage limit.** When an agent's turn ends on one (Claude Code's
+  `StopFailure` hook, `You've hit your session limit · resets 12:30am`), its
+  row turns **⏳ limited** with the reset time, a `limited` line goes on the
+  board naming `aisquare fleet switch <label>`, and the manager is woken. Claude
+  Code's own wait-and-continue at the reset is left running. `fleet switch`
+  stops the agent as `fleet stop` would and starts it again under the same
+  label, task and worktree on the account with the most headroom (`--to` names
+  one), **resuming its session** from its transcript (`claude --resume
+  <path>`) when that file is on disk — `--fresh` starts new with a hand-off
+  prompt built from the board instead. With `on_limit = "switch"` (*on a usage
+  limit* on the Settings tab) the fleet does this by itself when the limit
+  lifts more than `wait_if_reset_within_minutes` away; a hand-over that finds
+  no headroom leaves the agent parked, its own wait intact, and says so on the
+  board. `doctor` lists parked agents; `doctor --live` warns when every account
+  is over the line.
 
 Nothing on this page writes into Claude Code's own files: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
@@ -389,6 +415,10 @@ aisquare accounts alias 2 work         # a name: --account work, [work] on the b
 aisquare accounts order work 3         # the priority order; the rest follow as they were
 aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
+aisquare config set accounts.pick headroom     # spawns go where there is room (see above)
+aisquare config set accounts.on_limit switch   # …and an agent that hits its limit is moved
+aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
+aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
 `add` and `run` hand the terminal to Claude Code, so they have no `--json`

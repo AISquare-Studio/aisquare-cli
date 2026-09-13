@@ -881,3 +881,43 @@ def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_pr
     shown_value = drive(project, clear)
     assert shown_value == "2"  # the form opened on what the file held
     assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
+
+
+def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: ProjectInfo) -> None:
+    """`[accounts]` (#146) on the same form, through the same one writer."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        host.query_one("#accounts-pick", Select).value = "headroom"
+        host.query_one("#accounts-switch-at", Input).value = "70"
+        host.query_one("#accounts-on-limit", Select).value = "switch"
+        host.query_one("#accounts-wait-minutes", Input).value = "5"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    on_disk = _config_toml()["accounts"]
+    assert on_disk == {
+        "pick": "headroom",
+        "switch_at": 70,
+        "on_limit": "switch",
+        "wait_if_reset_within_minutes": 5,
+    }
+    assert load_config().accounts.pick == "headroom"
+
+    async def bad(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        shown_pick = str(host.query_one("#accounts-pick", Select).value)
+        host.query_one("#accounts-switch-at", Input).value = "250"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return shown_pick, host.notices
+
+    shown_pick, notices = drive(project, bad)
+    assert shown_pick == "headroom"  # the form opened on what the file holds
+    assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
+    assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer

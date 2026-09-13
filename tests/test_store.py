@@ -231,8 +231,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry (#145)
-    assert version == SCHEMA_VERSION == 15
+    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry
+    # (#145), v16 usage readings and the limited state (#146)
+    assert version == SCHEMA_VERSION == 16
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:

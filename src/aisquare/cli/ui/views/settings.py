@@ -35,6 +35,7 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, paths
 from aisquare.core.config import (
+    AccountsSettings,
     AppConfig,
     FleetRoleSettings,
     FleetSettings,
@@ -59,6 +60,16 @@ PERMISSION_MODES: tuple[tuple[str, str], ...] = (
 
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir
+PICK_MODES: tuple[tuple[str, str], ...] = (
+    ("the default account", "default"),
+    ("the account with headroom", "headroom"),
+)
+"""``[accounts] pick`` (#146): how a launch chooses when nothing names an account."""
+ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
+    ("wait for the reset (Claude Code continues by itself)", "wait"),
+    ("switch to the account with headroom", "switch"),
+)
+"""``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit."""
 _ID_SAFE = re.compile(r"[^A-Za-z0-9_-]")
 
 
@@ -123,11 +134,13 @@ class SettingsView(VerticalScroll):
     SettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
     """
     ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree and account per role"
+    ACCOUNTS_SECTION: ClassVar[str] = "accounts — how launches pick one; what a usage limit does"
 
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
         self.fleet = fleet_service.settings()
+        self.accounts = accounts_service.accounts_settings()
         self._roles: list[str] = role_order(self.fleet)
         self._account_bindings: dict[str, str] = self._read_bindings()
         self._accounts: list[ClaudeAccount] = self._read_accounts()
@@ -205,6 +218,30 @@ class SettingsView(VerticalScroll):
         with Horizontal(classes="row"):
             yield Label("native agent teams off")
             yield Switch(self.fleet.disable_native_agent_teams, id="native-teams")
+        yield Static(self.ACCOUNTS_SECTION, classes="section")
+        with Horizontal(classes="row"):
+            yield Label("launches pick")
+            yield Select(
+                PICK_MODES, value=self.accounts.pick, allow_blank=False, id="accounts-pick"
+            )
+        with Horizontal(classes="row"):
+            yield Label("switch at (% of 5 h)")
+            yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
+        with Horizontal(classes="row"):
+            yield Label("on a usage limit")
+            yield Select(
+                ON_LIMIT_MODES,
+                value=self.accounts.on_limit,
+                allow_blank=False,
+                id="accounts-on-limit",
+            )
+        with Horizontal(classes="row"):
+            yield Label("wait if reset within (min)")
+            yield Input(
+                value=str(self.accounts.wait_if_reset_within_minutes),
+                type="integer",
+                id="accounts-wait-minutes",
+            )
         with Horizontal(id="settings-buttons", classes="row"):
             yield Button("Save", id="save-settings", variant="primary")
             yield Button("Reload", id="reload-settings")
@@ -234,6 +271,13 @@ class SettingsView(VerticalScroll):
         self.query_one("#max-agents", Input).value = str(self.fleet.max_agents_per_project)
         self.query_one("#worktree-dir", Input).value = self.fleet.worktree_dir
         self.query_one("#native-teams", Switch).value = self.fleet.disable_native_agent_teams
+        self.accounts = accounts_service.accounts_settings()
+        self.query_one("#accounts-pick", Select).value = self.accounts.pick
+        self.query_one("#accounts-switch-at", Input).value = str(self.accounts.switch_at)
+        self.query_one("#accounts-on-limit", Select).value = self.accounts.on_limit
+        self.query_one("#accounts-wait-minutes", Input).value = str(
+            self.accounts.wait_if_reset_within_minutes
+        )
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
             suffix = widget_suffix(role)
@@ -289,6 +333,30 @@ class SettingsView(VerticalScroll):
             }
         )
 
+    def _form_accounts(self, current: AccountsSettings) -> AccountsSettings | str:
+        """``current`` with the ``[accounts]`` form applied — or why the form is not valid."""
+        raw_switch = self.query_one("#accounts-switch-at", Input).value.strip()
+        raw_wait = self.query_one("#accounts-wait-minutes", Input).value.strip()
+        try:
+            switch_at = int(raw_switch)
+            wait_minutes = int(raw_wait)
+        except ValueError:
+            return "switch at and wait-if-reset-within must be whole numbers"
+        if not 1 <= switch_at <= 100:
+            return "switch at must be between 1 and 100 (a percentage of the five-hour window)"
+        if wait_minutes < 0:
+            return "wait if reset within cannot be negative"
+        pick = self.query_one("#accounts-pick", Select).value
+        on_limit = self.query_one("#accounts-on-limit", Select).value
+        return current.model_copy(
+            update={
+                "pick": pick if isinstance(pick, str) else current.pick,
+                "switch_at": switch_at,
+                "on_limit": on_limit if isinstance(on_limit, str) else current.on_limit,
+                "wait_if_reset_within_minutes": wait_minutes,
+            }
+        )
+
     def _apply_account_bindings(self, config: AppConfig) -> None:
         """Fold the account selects into ``config.team.profiles`` — the binding's one home.
 
@@ -331,6 +399,11 @@ class SettingsView(VerticalScroll):
             return
         config.fleet = result
         self._apply_account_bindings(config)
+        accounts = self._form_accounts(config.accounts)
+        if isinstance(accounts, str):
+            self.notify(accounts, severity="error", timeout=6, markup=False)
+            return
+        config.accounts = accounts
         try:
             written = save_config(config)
         except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure

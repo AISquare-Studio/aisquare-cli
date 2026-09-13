@@ -738,6 +738,29 @@ pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
 
 
+class LaunchSpec(BaseModel):
+    """What an agent was launched WITH, recorded at spawn and replayed by a restart (#144).
+
+    A restart that re-read today's config would silently change what "the same
+    agent" means: a role's permission mode edited between runs, a binary
+    rebound, an extra argument added. The spec is the resolved answer at spawn
+    time — binary, permission mode, the arguments after the role's own, the
+    account slot, the worktree choice — so ``fleet restart`` and ``fleet
+    switch`` start the agent the way it was started, and only the things a
+    restart is FOR (the account, on a switch; a fresh session, on ``--fresh``)
+    change. ``command`` is the whole window argv as spawned, for the record.
+    """
+
+    binary: str
+    permission_mode: str | None = None
+    """The ``--permission-mode`` passed; ``None`` or ``""`` means no flag was passed."""
+    extra_args: list[str] = Field(default_factory=list)
+    """The role's ``extra_args`` followed by the caller's, as they went after the flags."""
+    account_slot: int | None = None
+    worktree: bool = False
+    command: list[str] = Field(default_factory=list)
+
+
 class FleetAgent(BaseModel):
     """One agent the fleet started: a tmux pane, the role it runs, and its board row.
 
@@ -765,6 +788,8 @@ class FleetAgent(BaseModel):
     account_slot: int | None = None
     """The Claude account slot the launch was resolved to (flag, binding or default);
     ``None`` when nothing chose one and the window ran on whatever its shell had."""
+    launch_spec: LaunchSpec | None = None
+    """How it was launched (#144); ``None`` on rows spawned before the spec existed."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None

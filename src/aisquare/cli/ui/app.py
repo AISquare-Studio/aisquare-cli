@@ -103,6 +103,30 @@ def _doctor_report(result: object) -> _DoctorReport | None:
     return None
 
 
+SELECTED_KEY = "fleet.selected"
+"""``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``,
+``accounts`` or ``doctor:<project or ''>`` (#144)."""
+SHOW_CAPTURED_KEY = "fleet.show_captured"
+
+
+def _ui_state(key: str) -> str | None:
+    """A remembered UI fact — ``None`` when there is none or the store cannot say."""
+    try:
+        with store_session() as store:
+            return store.ui_state(key)
+    except Exception:
+        return None
+
+
+def _remember_ui_state(key: str, value: str | None) -> None:
+    """Every change is the save; a store that will not take it costs the memory, never the UI."""
+    try:
+        with store_session() as store:
+            store.set_ui_state(key, value)
+    except Exception:
+        return
+
+
 @dataclass(frozen=True)
 class FleetSnapshot:
     """One frame of what the sidebar shows — kept on the app so tests and views can read it."""
@@ -240,9 +264,48 @@ class FleetApp(App[None], inherit_bindings=False):
     def on_mount(self) -> None:
         restore_theme(self)
         self._theme_restored = True
+        self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
+        self._restore_selection()
+
+    # --- what was open (#144) ---------------------------------------------------------
+
+    def _restore_selection(self) -> None:
+        """Reopen the view that was open when the UI last ran, if its row is still there.
+
+        Read from the store's ``ui_state`` (v18), never from a file the UI
+        keeps for itself: the theme stays in ``state.json`` because the board
+        shares it. A remembered agent whose row has left the frame falls back
+        to its project; a project that is gone falls back to the welcome view,
+        and the memory is dropped rather than retried every launch.
+        """
+        remembered = _ui_state(SELECTED_KEY)
+        if not remembered or self.snapshot is None:
+            return
+        kind, _, ident = remembered.partition(":")
+        if kind == "agent":
+            project_id, _, agent_id = ident.partition("/")
+            if self.snapshot.agent(project_id, agent_id) is not None:
+                self.post_message(AgentSelected(project_id, agent_id))
+                return
+            if self.snapshot.project(project_id) is not None:
+                self.post_message(ProjectSelected(project_id))
+                return
+        elif kind == "project" and self.snapshot.project(ident) is not None:
+            self.post_message(ProjectSelected(ident))
+            return
+        elif kind == "accounts":
+            self.post_message(AccountsSelected())
+            return
+        elif kind == "doctor":
+            self.post_message(DoctorSelected(ident or None))
+            return
+        _remember_ui_state(SELECTED_KEY, None)
+
+    def _remember_selection(self, value: str | None) -> None:
+        _remember_ui_state(SELECTED_KEY, value)
 
     @property
     def sidebar(self) -> Sidebar:
@@ -330,6 +393,7 @@ class FleetApp(App[None], inherit_bindings=False):
     def action_toggle_captured(self) -> None:
         """Show, or hide again, the captured directories the sidebar leaves out (#139)."""
         self.show_captured = not self.show_captured
+        _remember_ui_state(SHOW_CAPTURED_KEY, "1" if self.show_captured else None)
         self.refresh_data()
         self.notify(
             "showing captured directories too — `a` hides them again"
@@ -595,6 +659,7 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: ProjectView(project, id=view_id))
         self.sidebar.select(f"project:{project.id}")
         self._set_doctor_scope(project.id)
+        self._remember_selection(f"project:{project.id}")
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
@@ -605,6 +670,7 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(event.project_id)
+        self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
 
     async def on_agent_restarted(self, event: AgentRestarted) -> None:
         """A restart minted a new row (#138): show it where the old one was.
@@ -630,6 +696,7 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(started.project_id)
+        self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
@@ -643,6 +710,7 @@ class FleetApp(App[None], inherit_bindings=False):
             "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
         )
         self.sidebar.select("accounts")
+        self._remember_selection("accounts")
         if self.accounts_overview is not None:
             self.query_one("#accounts", AccountsView).show(self.accounts_overview)
 
@@ -654,6 +722,7 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show("doctor")
         self.sidebar.select("doctor")
         self.doctor_scope = event.project_id
+        self._remember_selection(f"doctor:{event.project_id or ''}")
         self.run_doctor()
 
     async def on_project_onboarded(self, event: ProjectOnboarded) -> None:

@@ -238,8 +238,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     finally:
         raw.close()
     # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry
-    # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139)
-    assert version == SCHEMA_VERSION == 17
+    # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139),
+    # v18 the launch spec and ui_state (#144)
+    assert version == SCHEMA_VERSION == 18
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -911,3 +912,46 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
     assert shown == {"prj_entries", "prj_named", "prj_linked", "prj_board", "prj_agent", "prj_snap"}
     assert everything == shown | {"prj_quiet"}, "the prompt-only row is captured, not shown"
     assert "prj_gone" not in everything, "forgotten stays forgotten"
+
+
+# --- the launch spec and ui_state (#144) ----------------------------------------------------
+
+
+def test_a_fleet_agents_launch_spec_round_trips_and_an_old_row_has_none(
+    store: ContextStore,
+) -> None:
+    from aisquare.models import FleetAgent, LaunchSpec
+
+    spec = LaunchSpec(
+        binary="claude",
+        permission_mode="auto",
+        extra_args=["--chrome", "--effort", "high"],
+        account_slot=2,
+        worktree=True,
+        command=["python", "-P", "-m", "aisquare", "launch", "coder"],
+    )
+    row = FleetAgent(
+        id="agt_spec", project_id=PROJECT.id, label="coder-1", role="coder", pane_id="%1",
+        cwd=Path("/w"), created_at=datetime.now(tz=UTC), launch_spec=spec,
+    )  # fmt: skip
+    stored = store.upsert_fleet_agent(row)
+    assert stored.launch_spec == spec
+    bare = store.upsert_fleet_agent(
+        row.model_copy(update={"id": "agt_old", "label": "coder-2", "launch_spec": None})
+    )
+    assert bare.launch_spec is None
+    # A spec that no longer parses (a future field renamed) costs the replay, not the row.
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("UPDATE fleet_agent SET launch_spec = '{not json' WHERE id = 'agt_spec'")
+    broken = store.get_fleet_agent("agt_spec")
+    assert broken is not None and broken.launch_spec is None
+
+
+def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
+    assert store.ui_state("fleet.selected") is None
+    store.set_ui_state("fleet.selected", "project:prj_test")
+    assert store.ui_state("fleet.selected") == "project:prj_test"
+    store.set_ui_state("fleet.selected", "agent:prj_test/agt_1")  # every change is the save
+    assert store.ui_state("fleet.selected") == "agent:prj_test/agt_1"
+    store.set_ui_state("fleet.selected", None)
+    assert store.ui_state("fleet.selected") is None

@@ -328,6 +328,19 @@ export class VoiceCapture {
   get state() {
     return {
       capturing: this.capturing,
+      /**
+       * Audio is actually reaching the socket — which is NOT the same as the
+       * trigger being down, and the mic dot follows this one.
+       *
+       * On the very first press the two differ by however long the operator
+       * takes to answer the permission prompt. Lighting the dot at the press
+       * would claim the microphone was live while the browser was still asking
+       * for it, which is precisely the lie §10 introduces the indicator to
+       * prevent: an operator who trusts a dot that is wrong speaks into a mic
+       * that is not recording, and repeats themselves anyway. Every later press
+       * reuses the stream and the two are the same instant.
+       */
+      live: this.capturing && this.headerSent,
       session: this.session,
       seq: this.seq,
       frames: this.frames,
@@ -408,6 +421,7 @@ export class VoiceCapture {
     }
     this.headerSent = true;
     this.source.connect(this.node); // frames start here, and not before
+    this.notify(); // ...and the dot lights here, for the same reason
 
     this.capTimer = setTimeout(() => {
       // Our cap, not the server's. See MAX_UTTERANCE_MS.

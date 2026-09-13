@@ -360,9 +360,11 @@ const voice = new VoiceCapture({
       focus.setVoice({ notice: '', alert: false });
       showSpeech('', false);
     }
-    // The dot belongs to the panel being spoken to, and only while that panel
-    // is the one in front of the operator.
-    focus.setVoice({ live: state.capturing && speakingAt === focus.sessionId });
+    // `state.live`, not `state.capturing`: the dot means audio is reaching the
+    // server, which on a first press is later than the trigger going down by
+    // however long the permission prompt was up. And only while the panel being
+    // spoken to is the one in front of the operator.
+    focus.setVoice({ live: state.live && speakingAt === focus.sessionId });
   },
 });
 

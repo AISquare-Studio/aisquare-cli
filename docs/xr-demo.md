@@ -289,7 +289,7 @@ the code being written.
 
 | § 16 line | Status | Evidence, or who settles it |
 |---|---|---|
-| `pip install -e '.[xr]'` works from a clean checkout | **done** | Fresh clone, fresh venv, `pip install -e ".[xr]"` → exit 0, 42 packages. Pasted in full on the integration PR. |
+| `pip install -e '.[xr]'` works from a clean checkout | **done** | Fresh clone, fresh venv, `pip install -e ".[xr]"` → exit 0, 43 packages (aisquare-cli plus 42 dependencies). Pasted in full on the integration PR. |
 | `aisquare xr` starts, prints URL and `adb reverse` command | **done** | `aisquare xr --show-token` prints the URL with the token fragment, the token, and `adb reverse tcp:8748 tcp:8748`; the server also prints all three plus the `chrome://flags` note on start. |
 | `aisquare doctor` reports XR status | **done** | `✓ xr: xr extra installed; port 8748 free; whisper model base.en cached` — all three facts in one row, from the clean install. |
 | `make check` passes | **done** | Green under **both** extras — `[dev]` and `[dev,xr]` — because the numpy stub trap only exists on the machine that has the extra. Run with an explicit `PYTHON=`; see the PR for why that matters. |

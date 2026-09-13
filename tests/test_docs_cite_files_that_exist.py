@@ -45,6 +45,12 @@ DOCS = [
     Path("docs/store-migration-race.md"),
     Path("README.md"),
     Path("docs/fleet.md"),
+    # The XR demo runbook cites the plan it implements and the one module of it
+    # that is live today. Deliberately NOT joined by `docs/plans/clixr.md`: that
+    # file is a verbatim copy of a forward-looking plan whose file tree names
+    # modules nobody has written yet, so requiring its citations to resolve
+    # would fail a document that is correct.
+    Path("docs/xr-demo.md"),
 ]
 
 #: References that name a file OUTSIDE this repo, each with the reason it

@@ -223,3 +223,15 @@ plugins = ["pydantic.mypy"]
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
+
+# faster-whisper is in the `xr` extra and absent from every `[dev]` install and
+# from CI, so mypy cannot find it. services/xr/speech.py imports it lazily
+# inside the factory on purpose -- the base install must not pay for
+# ctranslate2 and av -- which leaves exactly one unresolvable module name. The
+# ignore is scoped to it: anything else missing its stubs stays an error.
+# Unlike numpy above, nothing here parses: the module is simply not on disk, so
+# `ignore_missing_imports` is the whole fix and `follow_imports` has nothing to
+# follow.
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*"]
+ignore_missing_imports = true

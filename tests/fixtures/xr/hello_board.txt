@@ -1,0 +1,31 @@
+Show me the board and open the planner.
+
+The phrase spoken in hello_board.wav, which tests/test_xr_speech_backend.py
+feeds to the real faster-whisper backend in 20 ms frames.
+
+GENERATED, NOT RECORDED — reproducible, and no real person's voice enters the
+repository:
+
+    espeak-ng -v en-us -s 140 -w raw.wav "Show me the board and open the planner."
+    ffmpeg -i raw.wav -ar 16000 -ac 1 -c:a pcm_s16le hello_board.wav
+
+16 kHz mono PCM16LE, 2.96 s, 95 KB — the wire format of the client's
+AudioWorklet (docs/plans/clixr.md §10), so the test feeds this to the
+transcriber exactly as the websocket will, with no resampling in between.
+
+WHY THIS PHRASE AND NOT "hello board", which is what the filename suggests: the
+first fixture said exactly that, and base.en heard "Hello Bored" — then "Hello
+Bards" on a second phrasing. It is not a bug in the pipeline; "board" and
+"bored" are homophones, and a bare greeting gives the model no context to
+choose between them, so it picks the one that follows "hello" more often. With
+the article, "the board" is unambiguous and the sentence decodes exactly. The
+filename is kept because the task contract names it.
+
+That is worth knowing beyond this fixture: it is the same failure mode §10
+predicts for repo names, branch names and identifiers, reproduced on the single
+most important noun in this product. Keep the typing path.
+
+The test matches KEY WORDS case-insensitively rather than this string. A speech
+model may differ on casing and punctuation between versions, and a test that
+pinned those would fail an upgrade that got every word right. base.en
+transcribed it exactly, punctuation included, on 2026-09-12.

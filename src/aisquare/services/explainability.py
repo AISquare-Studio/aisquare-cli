@@ -953,6 +953,34 @@ def resolve_api_key() -> str | None:
     return stored or None
 
 
+def project_key_path(project_id: str) -> Path:
+    """Where a project's own key lives (#141): its data directory, mode 600, never the store."""
+    return paths.project_data_dir(project_id) / "explainability-key"
+
+
+def store_project_api_key(project_id: str, key: str) -> Path:
+    """Write a project's key at mode 600 and return where it landed.
+
+    The directory is created mode 700 when it does not exist yet; an existing
+    one keeps its mode (it holds the codebase snapshot, which is not secret).
+    """
+    target = project_key_path(project_id)
+    if not target.parent.exists():
+        target.parent.mkdir(parents=True, mode=0o700)
+    target.write_text(key.strip(), encoding="utf-8")
+    target.chmod(0o600)
+    return target
+
+
+def clear_project_api_key(project_id: str) -> bool:
+    """Remove a project's key file; ``False`` when there was none."""
+    target = project_key_path(project_id)
+    if not target.exists():
+        return False
+    target.unlink()
+    return True
+
+
 def store_api_key(key: str) -> Path:
     """Write the workspace key at mode 600 and return where it landed."""
     target = key_path()

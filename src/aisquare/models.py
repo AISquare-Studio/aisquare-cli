@@ -738,6 +738,24 @@ pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
 
 
+class ProjectExplainability(BaseModel):
+    """A project's own explainability key (#141): WHICH deployment it is for, and where it is.
+
+    The key VALUE never sits in the store — ``context.db`` is mode 644 on a
+    typical machine — only its path (a mode-600 file under the project's data
+    directory). ``target`` pins the deployment: a key attached for ``stg`` is
+    never handed to a ``prod`` gateway, the same rule the machine key file
+    follows (``tests/test_key_never_crosses_deployments.py``).
+    """
+
+    project_id: str
+    target: str
+    key_path: Path
+    set_at: datetime
+    set_by: str | None = None
+    """Who attached it — the signed-in email when there is one, else the OS user."""
+
+
 class LaunchSpec(BaseModel):
     """What an agent was launched WITH, recorded at spawn and replayed by a restart (#144).
 

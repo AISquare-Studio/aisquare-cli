@@ -562,7 +562,9 @@ def spawn(
             # re-prove.
             try:
                 effective = explainability_ops.effective_settings(tracing)
-                spawn_target = explainability_ops.resolve_target(tracing)
+                spawn_target = explainability_ops.resolve_target(
+                    tracing, project_id=orchestrator.team_project(None).id
+                )
                 spawn_key, spawn_gateway = spawn_target.api_key, spawn_target.gateway_url
             except Exception as exc:
                 effective, spawn_key, spawn_gateway = tracing, None, None

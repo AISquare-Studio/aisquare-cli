@@ -58,6 +58,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("explainability", "disable"),
     ("explainability", "register"),
     ("explainability", "ship"),
+    ("explainability", "key"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
     ("hook", "stop-failure"),

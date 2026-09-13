@@ -293,7 +293,7 @@ def test_the_guard_actually_inspects_something() -> None:
 #: ``probe_ingest``, ``register_roster`` and ``_check_config`` all do it and are
 #: correct. Accusing them would be the too-broad rule this file already
 #: committed once, when it conflated NAMING the key file with READING it.
-_OPS_MAY_RESOLVE_KEY = {"resolve_target"}
+_OPS_MAY_RESOLVE_KEY = {"resolve_target", "_project_api_key"}
 
 
 def _resolves_from_a_named_variable(node: ast.FunctionDef) -> bool:
@@ -313,6 +313,25 @@ def _resolves_from_a_named_variable(node: ast.FunctionDef) -> bool:
             and any(
                 isinstance(arg, ast.Attribute) and arg.attr == "api_key_env" for arg in inner.args
             )
+        ):
+            return True
+        # The project's key (#141): its file is read by `_project_api_key`, which only
+        # `resolve_target` may call; reading `key_path` off a binding anywhere else, or
+        # calling the reader, is a second resolver.
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "_project_api_key"
+            and node.name != "resolve_target"
+        ):
+            return True
+        if (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr in ("read_text", "read_bytes", "open")
+            and isinstance(inner.func.value, ast.Attribute)
+            and inner.func.value.attr == "key_path"
+            and node.name != "_project_api_key"
         ):
             return True
     return False

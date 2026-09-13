@@ -41,6 +41,7 @@ from aisquare.models import (
     FleetAgent,
     LaunchSpec,
     Pool,
+    ProjectExplainability,
     ProjectInfo,
     PromptRecord,
     TaskStatus,
@@ -627,6 +628,17 @@ CREATE TABLE ui_state (
     updated_at TEXT NOT NULL
 );
 """
+# v19 (#141): a project's own explainability key — its deployment and where the
+# mode-600 file is. Never the value: this database is mode 644.
+_SCHEMA_V19 = """
+CREATE TABLE project_explainability (
+    project_id TEXT PRIMARY KEY REFERENCES project (id),
+    target     TEXT NOT NULL,
+    key_path   TEXT NOT NULL,
+    set_at     TEXT NOT NULL,
+    set_by     TEXT
+);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -647,6 +659,7 @@ _MIGRATIONS = (
     _SCHEMA_V16,
     _SCHEMA_V17,
     _SCHEMA_V18,
+    _SCHEMA_V19,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -842,6 +855,12 @@ class ContextStore(Protocol):
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
+    def project_explainability(self, project_id: str) -> ProjectExplainability | None: ...
+    def project_explainability_all(self) -> list[ProjectExplainability]: ...
+    def set_project_explainability(
+        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+    ) -> ProjectExplainability: ...
+    def clear_project_explainability(self, project_id: str) -> bool: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
@@ -914,6 +933,16 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         exit_status=row["exit_status"],
         account_slot=row["account_slot"],
         launch_spec=_launch_spec(row["launch_spec"]),
+    )
+
+
+def _row_to_project_explainability(row: sqlite3.Row) -> ProjectExplainability:
+    return ProjectExplainability(
+        project_id=row["project_id"],
+        target=row["target"],
+        key_path=Path(row["key_path"]),
+        set_at=datetime.fromisoformat(row["set_at"]),
+        set_by=row["set_by"],
     )
 
 
@@ -2281,6 +2310,47 @@ class SqliteStore:
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    # --- a project's explainability key (#141) -----------------------------------------
+
+    def project_explainability(self, project_id: str) -> ProjectExplainability | None:
+        row = self._conn.execute(
+            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
+            "WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return _row_to_project_explainability(row) if row is not None else None
+
+    def project_explainability_all(self) -> list[ProjectExplainability]:
+        rows = self._conn.execute(
+            "SELECT project_id, target, key_path, set_at, set_by FROM project_explainability "
+            "ORDER BY project_id"
+        ).fetchall()
+        return [_row_to_project_explainability(row) for row in rows]
+
+    def set_project_explainability(
+        self, project_id: str, *, target: str, key_path: Path, set_by: str | None
+    ) -> ProjectExplainability:
+        """Attach (or re-point) the project's key: one row per project, the newest wins."""
+        self._conn.execute(
+            "INSERT INTO project_explainability (project_id, target, key_path, set_at, set_by) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (project_id) DO UPDATE SET target = excluded.target, "
+            "key_path = excluded.key_path, set_at = excluded.set_at, set_by = excluded.set_by",
+            (project_id, target, str(key_path), _now_iso(), set_by),
+        )
+        self._conn.commit()
+        stored = self.project_explainability(project_id)
+        assert stored is not None  # just written
+        return stored
+
+    def clear_project_explainability(self, project_id: str) -> bool:
+        """Detach the project's key; ``False`` when there was none."""
+        cursor = self._conn.execute(
+            "DELETE FROM project_explainability WHERE project_id = ?", (project_id,)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     # --- UI state (#144) ---------------------------------------------------------------
 

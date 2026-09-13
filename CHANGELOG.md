@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A workspace key per project** (#141). The explainability key was one per
+  machine; pointing one project at another workspace meant another shell or
+  swapping the file for everyone. `aisquare explainability key set [--project
+  P] [--target T]` attaches a key to a project — read from stdin or
+  `--from-env VAR`, never from argv — stored at mode 600 in the project's data
+  directory, with only the deployment and the path in the store (schema v19);
+  `key show` prints the origin (never the value) and `key clear` detaches it.
+  Resolution stays in the one resolver: project key → the target's variable →
+  the machine file, and a key attached for one deployment is never handed to
+  another. `launch`, `fleet spawn` and `explainability env [--project]`
+  authenticate the proxy with the project's key; `status` and the UI's
+  Explainability view show the origin for the active project, and the view
+  gains an *Attach key* field. The client lane (`ship`) still uses the
+  machine key.
 - **A restart is the same agent, and the UI comes back where it was** (#144).
   `fleet_agent` rows record a `launch_spec` at spawn — the binary, the
   permission mode actually passed, the arguments after the role's own, the

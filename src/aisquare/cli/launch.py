@@ -316,7 +316,9 @@ def launch(
         # never the launch.
         try:
             effective = explainability_ops.effective_settings(tracing)
-            target = explainability_ops.resolve_target(tracing)
+            target = explainability_ops.resolve_target(
+                tracing, project_id=project.id if project is not None else None
+            )
             api_key, gateway_url = target.api_key, target.gateway_url
         except Exception as exc:
             effective, api_key, gateway_url = tracing, None, None

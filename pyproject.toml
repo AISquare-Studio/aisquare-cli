@@ -157,6 +157,23 @@ plugins = ["pydantic.mypy"]
 # that imports them lazily (services/xr/speech.py, inside the factory, on
 # purpose) would fail typecheck for everyone. The ignore is scoped to those two
 # module names: anything else missing its stubs stays an error.
+#
+# KNOWN, AND NOT FIXABLE FROM HERE: this covers the machine where numpy is
+# ABSENT, which is every `[dev]` install and CI today. On a machine where the
+# `xr` extra IS installed, mypy finds numpy's real stubs and dies parsing them
+# under this project's `python_version = "3.11"`:
+#
+#   numpy/__init__.pyi:737: error: Type statement is only supported in Python
+#   3.12 and greater  [syntax]  ...  errors prevented further checking
+#
+# Measured 2026-09-12 with mypy 2.3.1 and numpy 2.x. It is a whole-run failure,
+# not one file's. Neither `follow_imports = "skip"` nor `ignore_errors` on this
+# override suppresses it — both were tried, and neither can, because the failure
+# happens while mypy PARSES the stub to build the module graph, before any
+# per-module setting applies. The two real fixes are `python_version = "3.12"`
+# for the whole project or a numpy floor/ceiling in the extra, and both are
+# decisions for whoever declares the `xr` extra rather than for the one file
+# that imports numpy inside a function.
 [[tool.mypy.overrides]]
 module = ["faster_whisper.*", "numpy.*"]
 ignore_missing_imports = true

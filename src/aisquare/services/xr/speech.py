@@ -76,8 +76,7 @@ SILENCE_RMS = 350.0
 #: commands because a diagnostic that names a problem without the line that
 #: fixes it is the thing this codebase's doctor idiom exists to avoid.
 INSTALL_FIX = (
-    f"Install the XR extra into the same environment as aisquare: "
-    f"pip install '{DISTRIBUTION}[xr]'"
+    f"Install the XR extra into the same environment as aisquare: pip install '{DISTRIBUTION}[xr]'"
 )
 
 

@@ -294,10 +294,7 @@ def test_importing_the_speech_module_does_not_import_faster_whisper(module: str)
     imports this module, so a module-level import would travel from here into
     every single command.
     """
-    probe = (
-        f"import sys; import {module}; "
-        "sys.exit(1 if 'faster_whisper' in sys.modules else 0)"
-    )
+    probe = f"import sys; import {module}; sys.exit(1 if 'faster_whisper' in sys.modules else 0)"
 
     result = subprocess.run(
         [sys.executable, "-c", probe],

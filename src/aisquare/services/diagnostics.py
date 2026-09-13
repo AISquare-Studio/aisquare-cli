@@ -1119,11 +1119,17 @@ def _experiment_checks() -> list[DoctorCheck]:
 def _bearer_note(source: str) -> str:
     """How ``doctor`` names the credential in use. Never its value.
 
-    The signed-in case names the email, which is what ``aisquare whoami`` prints
-    and is not a secret; the token itself never appears in either branch. The
-    email comes from ``ci_client.signed_in_display()``, the memoised read that
-    chose the bearer, which in turn reads through the ``iam`` module - the one
-    reader of the ``iam_*`` keys.
+    The signed-in case has two branches. With an email known it names that,
+    which is what ``aisquare whoami`` prints and is not a secret. Without one it
+    names the subject stored LOCALLY in the credentials file, labelled as such:
+    a different value from the email, and a different value from the one the
+    ``ci identity`` line prints, which is the issuer-qualified subject the CI
+    SERVER resolved the bearer to (``_signed_in_as``). The two can differ - that
+    is why the identity line asks the server - so this line says which it is
+    showing (round 9). Neither branch prints the token. Both values come from
+    ``ci_client.signed_in_display()``, the memoised read that chose the bearer,
+    which in turn reads through the ``iam`` module - the one reader of the
+    ``iam_*`` keys.
     """
     if source == ci_client.EXPERIMENT_TOKEN_SOURCE:
         return f"experiment token from {ci_client.EXPERIMENT_TOKEN_SOURCE}"
@@ -1136,7 +1142,7 @@ def _bearer_note(source: str) -> str:
         if email:
             return f"signed in as {email} (aisquare login)"
         if subject:
-            return f"signed in ({subject}) (aisquare login)"
+            return f"signed in (local subject {subject}) (aisquare login)"
         return "signed in (aisquare login)"
     return "no bearer"
 

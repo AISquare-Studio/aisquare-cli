@@ -410,8 +410,8 @@ def test_writing_a_document_sweeps_the_expired_ones(stub: StubCI, isolated_home:
 
 def test_signing_out_and_a_refusal_sweep_too(stub: StubCI, isolated_home: Path) -> None:
     """After a rotation the quiet cases - a sign-out, an unreachable server - are
-    where a predecessor's document would otherwise survive (round 8): both
-    paths sweep."""
+    where a predecessor's document would otherwise survive (round 8): a
+    refusal write sweeps the expired, and sign-out clears everything (round 9)."""
     import json
 
     ci_me.fetch(base=stub.url, key="aisq_old-token-000000000000000000000000000000")
@@ -420,8 +420,12 @@ def test_signing_out_and_a_refusal_sweep_too(stub: StubCI, isolated_home: Path) 
     raw["until"] = "2000-01-01T00:00:00+00:00"
     stale.write_text(json.dumps(raw), encoding="utf-8")
 
+    fresh = ci_me._cache_path("aisq_fresh-token-0000000000000000000000000000")
+    ci_me.fetch(base=stub.url, key="aisq_fresh-token-0000000000000000000000000000")
+    assert fresh.exists()
     ci_me.forget("aisq_current-token-00000000000000000000000000")
-    assert not stale.exists(), "sign-out sweeps"
+    assert not stale.exists(), "sign-out clears"
+    assert not fresh.exists(), "fresh or not: sign-out means gone, not tidied (round 9)"
 
     ci_me.fetch(base=stub.url, key="aisq_old-token-000000000000000000000000000000")
     stale.write_text(json.dumps(raw), encoding="utf-8")

@@ -13,6 +13,14 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 9, 2026-09-13.** A re-login forgets the previous token's
+> identity document (on the different-host path too, where the revoke is
+> skipped), and sign-out clears every identity document in the directory,
+> fresh or not - the developer's intent, not the write paths' housekeeping.
+> The test-bed line labels a locally stored subject as local, and its
+> docstring says how that differs from the server-resolved subject the
+> identity line prints.
+>
 > **Review round 8, 2026-09-12.** The sweep is scoped to this module's own
 > `me-*.json` files in the CI cache directory (the descriptor cache shares it
 > and carries the same `until` key), and it runs from `forget` and from a

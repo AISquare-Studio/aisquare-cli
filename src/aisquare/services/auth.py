@@ -38,15 +38,22 @@ def complete_sign_in(
 def _retire(
     previous: iam.Session | None, api_url: str, endpoints: iam.Endpoints, new_token: str
 ) -> None:
-    """Revoke the session this sign-in replaced, but only against its own host.
+    """Revoke the session this sign-in replaced, but only against its own host -
+    and forget its CI identity document either way.
 
     A stored token belongs to ``previous.api_url``. Sending it to any other
     server's revocation endpoint would hand that server a live bearer for the
     first one, so a sign-in to a different host leaves the old token alone (it
     expires on its own). Best effort: a failed revoke is not a failed sign-in.
+    The identity document the CI hooks cached for the previous token - the
+    developer's workspaces and runs, keyed by that token - is forgotten on both
+    paths: a rotation retires the token, and a document for a retired token is
+    never read again but was left readable for the life of the machine (the
+    review of #78, round 9). ``forget`` never raises.
     """
     if previous is None or previous.token == new_token:
         return
+    _forget_ci_identity(previous.token)
     if previous.api_url.rstrip("/") != api_url.rstrip("/"):
         return
     iam.revoke(endpoints, previous.token)

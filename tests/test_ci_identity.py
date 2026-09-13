@@ -774,10 +774,49 @@ def test_an_email_shaped_subject_is_not_presented_as_the_users_email(
     assert ci_client.signed_in_display() == ("", "user@tenant", "file")
     assert diagnostics._signed_in_as("aisquare-idp:x") == "signed in (aisquare-idp:x)"
     note = diagnostics._bearer_note(ci_client.SIGNED_IN_SOURCE)
-    assert note == "signed in (user@tenant) (aisquare login)"
+    assert note == "signed in (local subject user@tenant) (aisquare login)"
 
     credentials.store(**{iam.KEY_EMAIL: "dev@example.com"})
     assert diagnostics._signed_in_as("aisquare-idp:x") == "signed in as dev@example.com"
+
+
+def test_a_re_login_forgets_the_previous_tokens_identity_document(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """A rotation retires the previous token at the server and, since round 9,
+    forgets its identity document locally too - on the different-host path as
+    well, where the revoke is deliberately skipped."""
+    from aisquare.services import auth, ci_me, iam
+
+    revoked: list[str] = []
+
+    def fake_revoke(endpoints: iam.Endpoints, token: str) -> bool:
+        revoked.append(token)
+        return True
+
+    monkeypatch.setattr(iam, "revoke", fake_revoke)
+    endpoints = iam.Endpoints(
+        issuer="https://api.test",
+        device_authorization="https://api.test/o/device/",
+        token="https://api.test/o/token/",
+        userinfo="https://api.test/o/userinfo/",
+        revocation="https://api.test/o/revoke_token/",
+    )
+    previous_token = "aisq_previous-token-000000000000000000000000"
+    ci_me.fetch(base=stub.url, key=previous_token)
+    document = ci_me._cache_path(previous_token)
+    assert document.exists()
+    previous = iam.Session(api_url="https://api.test", token=previous_token, source="file")
+    new_token = "aisq_new-token-0000000000000000000000000000"
+
+    auth._retire(previous, "https://api.test", endpoints, new_token)
+    assert not document.exists(), "the rotated-out document is gone"
+    assert revoked == [previous_token]
+
+    ci_me.fetch(base=stub.url, key=previous_token)
+    auth._retire(previous, "https://elsewhere.test", endpoints, new_token)
+    assert not document.exists(), "forgotten on the different-host path too"
+    assert revoked == [previous_token], "and the revoke is still skipped there"
 
 
 def test_the_recall_predicate_resolves_the_project_from_the_servers_own_cwd(

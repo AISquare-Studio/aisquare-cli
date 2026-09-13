@@ -280,14 +280,12 @@ def _sweep() -> None:
     token refresh or re-issue left its predecessor's identity document behind -
     a readable list of the developer's workspaces per token, for the life of the
     machine, past the TTL that only stopped it being SERVED (the review of #78).
-    Called where a file is being written anyway - a document, a refusal - and
-    from ``forget``, because sign-out is the one moment the CLI knows the
-    developer wants this data gone and, after a rotation, the quiet cases (a
-    sign-out, an unreachable server, a machine left alone) are exactly where a
-    predecessor's document would otherwise survive (round 8). The directory is
-    bounded to roughly the tokens live inside one TTL; the server half of this
-    feature sweeps its map the same way. Every comparison sits inside the guard,
-    for the reason ``_read_cache`` gives.
+    Called where a file is being written anyway - a document, a refusal - so
+    the directory is bounded to roughly the tokens live inside one TTL; the
+    server half of this feature sweeps its map the same way. Sign-out and a
+    rotation do not sweep, they clear (``forget``): those are the developer's
+    intent, not housekeeping. Every comparison sits inside the guard, for the
+    reason ``_read_cache`` gives.
     """
     now = datetime.now(tz=UTC)
     try:
@@ -341,13 +339,23 @@ def _clear_refusal(key: str) -> None:
 
 
 def forget(key: str) -> None:
-    """Drop this bearer's cached answer and any cached refusal - and every expired
-    one, since sign-out is when the developer has said this data should be gone.
-    Never raises."""
+    """Drop this bearer's cached answer and refusal - and every other identity
+    document and refusal in the directory, fresh or not. Never raises.
+
+    Sign-out (and a rotation, through ``auth._retire``) is the developer saying
+    this data should be gone; that is a different rule from the write paths'
+    housekeeping, which drops only what has expired. A document for a token that
+    rotated two minutes before a sign-out is still fresh, and "signed out" with
+    the previous identity's workspace list still readable for three more
+    minutes is not what the word means (the review of #78, round 9).
+    """
     for path in (_cache_path(key), _refusal_path(key)):
         with contextlib.suppress(OSError):
             path.unlink()
-    _sweep()
+    with contextlib.suppress(OSError):
+        for path in paths.ci_cache_dir().glob("me-*.json"):
+            with contextlib.suppress(OSError):
+                path.unlink()
 
 
 def _replace(target: Path, body: str) -> None:

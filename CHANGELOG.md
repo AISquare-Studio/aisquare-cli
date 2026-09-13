@@ -29,9 +29,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the wire in cleartext; it is withheld instead and `doctor` says why. The
     experiment token keeps its old latitude. A stored login that has expired
     is not sent either: `doctor` says to sign in again instead of spending a
-    round trip to be refused. Signing out also forgets the cached `GET /v1/me`
-    answer for that token, and that answer is served only for the server it
-    came from. `doctor` asks `GET /v1/me` for an experiment token too, so the
+    round trip to be refused. Signing out clears every cached `GET /v1/me`
+    answer on the machine, fresh or not, and a re-login clears the answer the
+    previous token had; an answer is served only for the server it came from. `doctor` asks `GET /v1/me` for an experiment token too, so the
     `ci identity` line always says who the server resolved; a CI server that
     answers `/ready` but not the route is named as one that predates it (and,
     with a run exported, is not a warning), while a URL that answers neither

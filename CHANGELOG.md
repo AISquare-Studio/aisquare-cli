@@ -7,6 +7,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`aisquare xr` — the board as a spatial client (cliXR, M1).** A new command
+  serving a static WebXR client and one websocket on `127.0.0.1:8748`, beside
+  `serve` on 8747, from the new `[xr]` extra. It projects live board state:
+  one session per panel, with the role bucket, `working` / `waiting` /
+  `needs_you`, a claimed task's title, and a six-word summary computed from the
+  session's most recent board event — never from its transcript, which reaches
+  a client only for the one session it explicitly subscribes to. The projector
+  polls the store every 500 ms and sends a delta only when something moved, so
+  nothing in the hook path changes and no agent session can be blocked by a
+  headset.
+  - The wire protocol is generated, not described: a Pydantic model per message
+    in `services/xr/protocol.py`, with `python -m aisquare.services.xr.protocol
+    --write` emitting `web/xr/protocol.schema.json` and `--check` failing on
+    drift, so the browser client and the server cannot diverge silently. One
+    message beyond the plan's draft — `ack` — because a prompt sent to a panel
+    is delivered either by typing into a waiting pane or by filing a board note
+    (`fleet tell`'s own two paths), and an operator wants to know which.
+  - Auth is `serve`'s bearer token, from the same 0600 file: one credential for
+    both servers. It arrives in the socket's first frame (a browser cannot set
+    a header on a `WebSocket`) and is printed as a URL fragment, which is never
+    sent to a server and never lands in a log. `xr` prints the `adb reverse
+    tcp:8748 tcp:8748` line and the `chrome://flags` secure-origin note on
+    start, because `navigator.xr` exists only in a secure context and a LAN
+    address is not one. An occupied port is a sentence and exit 1
+    (`xr_port_busy`), checked before anything is activated.
+  - One toolchain note that comes with the extra: `faster-whisper` pulls in
+    numpy, whose stubs are PEP 695, and mypy parses them under this project's
+    `python_version = "3.11"` and stops the whole run on a syntax error in a
+    file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
+    takes `follow_imports_for_stubs` as well as `follow_imports` — the first
+    alone leaves the stub parsed and the run still red.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

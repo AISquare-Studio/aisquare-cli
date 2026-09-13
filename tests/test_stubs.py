@@ -29,6 +29,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("recall",),
     ("launch",),
     ("serve",),
+    ("xr",),
     ("login",),
     ("logout",),
     ("whoami",),

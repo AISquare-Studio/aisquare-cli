@@ -26,11 +26,14 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.core import outbox
 from aisquare.core.config import AppConfig, load_config, save_config
+from aisquare.core.store import store_session
+from aisquare.core.workspace import active_project
+from aisquare.models import ProjectInfo
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import RESERVED_ENV_VARS
@@ -69,7 +72,8 @@ def status_report() -> StatusReport:
     """
     config = load_config()
     settings = config.explainability
-    target = ops.resolve_target(settings, None)
+    project = _active()
+    target = ops.resolve_target(settings, None, project_id=project.id if project else None)
     proxy = ops.proxy_state(target, on=settings.enabled)
     shipping = explainability_service.shipping_state()
     try:
@@ -82,6 +86,7 @@ def status_report() -> StatusReport:
         ("target", target.name),
         ("gateway", f"{target.gateway_url or '(unset)'} [{target.gateway_source}]"),
         ("key", f"{target.key_origin} {'is set' if target.api_key else 'is NOT set'}"),
+        ("project", _project_key_row(project, target)),
         ("proxy", target.proxy_url),
         ("identity", target.agent_name_template),
         ("agents", ", ".join(target.agent_names) or "(none)"),
@@ -94,6 +99,50 @@ def status_report() -> StatusReport:
         ("redaction", ops.redaction_summary(config.redaction.level)),
     )
     return StatusReport(rows=rows, problem=settings.enabled and not proxy.healthy)
+
+
+def _active() -> ProjectInfo | None:
+    """The active project, for the per-project key (#141); ``None`` when the store cannot say."""
+    try:
+        with store_session() as store:
+            return active_project(store)
+    except Exception:
+        return None
+
+
+def _project_key_row(project: ProjectInfo | None, target: ops.ResolvedTarget) -> str:
+    """``<name>: its own key for stg`` / ``<name>: the machine key`` — the origin per project."""
+    if project is None:
+        return "(no active project)"
+    name = project.root.name or project.id
+    binding = ops.project_key_binding(project.id)
+    if binding is None:
+        return f"{name}: no key of its own — the machine's applies (attach one below)"
+    used = "in use" if target.key_source == "project" else f"not used for target {target.name}"
+    return f"{name}: its own key for target {binding.target} ({used})"
+
+
+def attach_project_key(value: str) -> Notice:
+    """What the Attach button does: the active project's key, for the active target."""
+    key = value.strip()
+    if not key:
+        return Notice("paste the workspace key first — nothing was attached", "warning")
+    project = _active()
+    if project is None:
+        return Notice("no active project to attach a key to", "error")
+    settings = load_config().explainability
+    target = ops.resolve_target(settings, None).name
+    path = explainability_service.store_project_api_key(project.id, key)
+    with store_session() as store:
+        store.set_project_explainability(
+            project.id, target=target, key_path=path, set_by=os.environ.get("USER") or None
+        )
+    name = project.root.name or project.id
+    return Notice(
+        f"✓ key attached to {name} for target {target} — {path} (mode 600); launches in this "
+        "project authenticate the proxy with it",
+        "information",
+    )
 
 
 def render_status(report: StatusReport) -> Text:
@@ -185,6 +234,8 @@ class ExplainabilityView(VerticalScroll):
     ExplainabilityView #explainability-actions { height: auto; }
     ExplainabilityView #explainability-actions Button { margin-right: 1; }
     ExplainabilityView #explainability-note { height: auto; margin-top: 1; color: $text-muted; }
+    ExplainabilityView #explainability-key { height: auto; margin-top: 1; }
+    ExplainabilityView #explainability-key Input { width: 1fr; }
     """
 
     def __init__(self, *, id: str | None = None) -> None:
@@ -200,6 +251,15 @@ class ExplainabilityView(VerticalScroll):
             yield Button("Register roster", id="explainability-register")
             yield Button("Ship spool", id="explainability-ship")
             yield Button("Refresh", id="explainability-refresh")
+        with Horizontal(id="explainability-key"):
+            # A key per project (#141): pasted, never echoed (password input), stored
+            # at mode 600 under the project's data directory.
+            yield Input(
+                placeholder="paste a workspace key for the active project…",
+                password=True,
+                id="explainability-key-value",
+            )
+            yield Button("Attach key", id="explainability-attach-key")
         yield Static(
             Text(
                 "Enable is the consent: sessions launched after it are traced through the "
@@ -256,6 +316,19 @@ class ExplainabilityView(VerticalScroll):
             )
             return False
         return True
+
+    @on(Button.Pressed, "#explainability-attach-key")
+    def _attach_key(self) -> None:
+        """Attach the pasted key to the active project (#141); the field is cleared either way."""
+        field = self.query_one("#explainability-key-value", Input)
+        try:
+            notice = attach_project_key(field.value)
+        except Exception as exc:  # a refused write is a notice, never a crash
+            notice = Notice(f"could not attach the key: {exc}", "error")
+        field.value = ""
+        self.notify(notice.message, severity=notice.severity, timeout=8, markup=False)
+        if notice.severity == "information":
+            self.refresh_status()
 
     @on(Button.Pressed, "#explainability-enable")
     def _turn_tracing_on(self) -> None:

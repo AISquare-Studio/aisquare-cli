@@ -54,6 +54,7 @@ from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
+from aisquare.core.store import store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
 from aisquare.models import (
     CheckStatus,
@@ -989,3 +990,44 @@ def test_start_manager_spawns_at_the_panes_own_size(
     # the pane's width, and the rows left under the header and the button.
     assert width == tab_width and 0 < height < tab_height
     assert width < 144, "a UI spawn must never be born wide enough to open the diff panel"
+
+
+def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_echoing_it(
+    project: ProjectInfo, quiet_explainability: dict[str, int]
+) -> None:
+    """#141: the shell-only gap — a key per project, from the UI. The value goes to a
+    mode-600 file and a binding row; the toast names the path, never the key."""
+    from aisquare.services import explainability as explainability_service
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[str, list[tuple[str, str]], str, str]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        view = host.query_one(ExplainabilityView)
+        before = view.status_text
+        await pilot.click("#explainability-attach-key")  # nothing pasted yet
+        await settle(pilot)
+        # A Button ignores a second press inside its 0.2 s active effect: wait it out,
+        # or the click below is swallowed and the test measures Textual, not the view.
+        await pilot.pause(0.3)
+        field = host.query_one("#explainability-key-value", Input)
+        field.value = "pk-ui-0123456789"
+        await pilot.click("#explainability-attach-key")
+        await settle(pilot)
+        return before, list(host.notices), field.value, view.status_text
+
+    before, notices, field_after, status = drive(project, scenario)
+    assert "project:" in before and "no key of its own" in before
+    assert any(m.startswith("paste the workspace key first") for m, _ in notices)
+    attached = [m for m, _ in notices if m.startswith("✓ key attached to")]
+    assert len(attached) == 1, notices
+    assert "pk-ui-0123456789" not in attached[0]
+    assert field_after == "", "the field is cleared either way"
+    path = explainability_service.project_key_path(project.id)
+    assert path.read_text(encoding="utf-8") == "pk-ui-0123456789"
+    assert (path.stat().st_mode & 0o777) == 0o600
+    with store_session() as store:
+        binding = store.project_explainability(project.id)
+    assert binding is not None and binding.key_path == path
+    assert "its own key for target" in status and "pk-ui" not in status

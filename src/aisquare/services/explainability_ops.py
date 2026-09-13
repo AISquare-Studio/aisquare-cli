@@ -56,7 +56,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.version import DISTRIBUTION
-from aisquare.models import CheckStatus, DoctorCheck, RedactionLevel
+from aisquare.models import CheckStatus, DoctorCheck, ProjectExplainability, RedactionLevel
 from aisquare.services.explainability import (
     EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
@@ -64,6 +64,7 @@ from aisquare.services.explainability import (
     ProxyProbe,
     key_path,
     probe_proxy,
+    project_key_path,
     running_editable,
     stored_api_key,
     trace_identity,
@@ -134,7 +135,7 @@ class ResolvedTarget:
     gateway_source: str  # "config" | "env" | "unset" — shown, so surprises are visible
     api_key_env: str
     api_key: str | None
-    #: "env" | "file" | "unset" — WHERE the key won, not just which variable was
+    #: "project" | "env" | "file" | "unset" — WHERE the key won, not just which variable was
     #: named. The gateway has carried its source since the split-brain fix for
     #: the same reason, and the key needed it the moment `resolve_target` gained
     #: the key-file fallback: until then `api_key_env` WAS the provenance,
@@ -149,6 +150,8 @@ class ResolvedTarget:
     agent_name_template: str
     studio_id: str
     roles: tuple[str, ...]
+    project_id: str | None = None
+    """The project the key was resolved FOR (#141); ``None`` for a machine-level read."""
 
     @property
     def configured(self) -> bool:
@@ -175,6 +178,8 @@ class ResolvedTarget:
         populate next, and it is what every remediation line already tells them
         to export.
         """
+        if self.key_source == "project":
+            return f"the project's own key ({project_key_path(self.project_id or '?')})"
         if self.key_source == "file":
             return str(key_path())
         return f"${self.api_key_env}"
@@ -252,12 +257,20 @@ def resolve_target(
     name: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
+    project_id: str | None = None,
 ) -> ResolvedTarget:
     """Fold the active target's overrides onto the top-level defaults.
 
     Precedence for the gateway URL is the target, then the SDK's environment
     variable, then the top-level ``gateway_url`` — and the winning source is
     reported either way.
+
+    THE KEY, with ``project_id`` (#141): the project's own key first — attached
+    with ``explainability key set`` and bound to ONE deployment, so it answers
+    only when that deployment is the one resolved here — then the target's
+    environment variable, then the machine key file under the same rule as
+    before. Without a project id the read is machine-level, as every caller
+    made it until now; ``doctor`` passes none and so opens no store.
 
     THE LAST FALLBACK IS THE SINGLE-DEPLOYMENT MACHINE, and it was missing.
     ``init --explainability`` writes ``settings.gateway_url`` and the key file
@@ -296,7 +309,9 @@ def resolve_target(
     if not gateway_url:
         source = "unset"
 
-    api_key, key_source = environ.get(target.api_key_env) or None, "env"
+    api_key, key_source = _project_api_key(project_id, chosen), "project"
+    if api_key is None:
+        api_key, key_source = environ.get(target.api_key_env) or None, "env"
     if api_key is None and target.api_key_env == KEY_ENV_VAR:
         api_key, key_source = stored_api_key(), "file"
     if api_key is None:
@@ -315,7 +330,45 @@ def resolve_target(
         agent_name_template=target.agent_name_template or settings.agent_name_template,
         studio_id=target.studio_id,
         roles=tuple(roles),
+        project_id=project_id,
     )
+
+
+def _project_api_key(project_id: str | None, target_name: str) -> str | None:
+    """The project's own key, when one is attached FOR ``target_name`` and its file reads.
+
+    Called from :func:`resolve_target` and nowhere else (the AST guard in
+    ``tests/test_one_key_resolver.py`` pins that). A binding for another
+    deployment is not a key for this one — the cross-deployment rule — and a
+    binding whose file is gone reads as no project key, so the next rung
+    answers; ``explainability key show`` is where that is reported.
+    """
+    if project_id is None:
+        return None
+    binding = project_key_binding(project_id)
+    if binding is None or binding.target != target_name:
+        return None
+    try:
+        value = binding.key_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def project_key_binding(project_id: str) -> ProjectExplainability | None:
+    """The project's key BINDING — its deployment and file path, never the value.
+
+    ``None`` when the project has none, or when the store cannot be read.
+    """
+    from aisquare.core.store import (
+        store_session,  # lazy: this module is imported by the store's users
+    )
+
+    try:
+        with store_session() as store:
+            return store.project_explainability(project_id)
+    except Exception:
+        return None
 
 
 def effective_settings(

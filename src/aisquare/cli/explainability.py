@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import sys
 from typing import Annotated
 
 import typer
@@ -34,11 +35,18 @@ from aisquare.cli.common import expected_config_write_errors, fail
 from aisquare.core import outbox
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.state import get_state
+from aisquare.core.store import store_session
+from aisquare.core.workspace import active_project
+from aisquare.models import ProjectInfo
 from aisquare.services import explainability_ops as ops
+from aisquare.services import iam
+from aisquare.services import project as project_service
 from aisquare.services.explainability import (
     RESERVED_ENV_VARS,
+    clear_project_api_key,
     ship_once,
     shipping_state,
+    store_project_api_key,
     trace_marker,
     wire_session,
 )
@@ -47,6 +55,159 @@ app = typer.Typer(
     help="Session tracing through the explainability proxy.",
     no_args_is_help=True,
 )
+key_app = typer.Typer(
+    help="A project's own workspace key (#141): attached per project, never one per machine.",
+    no_args_is_help=True,
+)
+app.add_typer(key_app, name="key")
+
+_PROJECT_OPTION = typer.Option(
+    "--project", "-P", help="Project by codename, name or id prefix (default: the active one)."
+)
+
+
+def _project_for(ref: str | None) -> ProjectInfo:
+    """The project a key command is about: ``--project``, else the active one."""
+    if ref is None:
+        with store_session() as store:
+            return active_project(store)
+    try:
+        return project_service.resolve(ref)
+    except KeyError:
+        fail(f"no project matches '{ref}'", error="not_found", ref=ref)
+    except ValueError as exc:
+        fail(str(exc), error="ambiguous_project", ref=ref)
+
+
+def _who() -> str | None:
+    """Who is attaching the key: the signed-in email when there is one, else the OS user."""
+    try:
+        session = iam.stored_session()
+        if session is not None and session.email:
+            return str(session.email)
+    except Exception:  # identity is decoration on the row
+        pass
+    return os.environ.get("USER") or None
+
+
+def _key_payload(project: ProjectInfo, target: str | None) -> dict[str, object]:
+    binding = ops.project_key_binding(project.id)
+    present = binding is not None and binding.key_path.is_file()
+    return {
+        "project": project.id,
+        "name": project.root.name or project.id,
+        "attached": binding is not None,
+        "target": binding.target if binding is not None else None,
+        "key_path": str(binding.key_path) if binding is not None else None,
+        "file_present": present,
+        "set_at": binding.set_at.isoformat() if binding is not None else None,
+        "set_by": binding.set_by if binding is not None else None,
+        "resolves_for": target,
+    }
+
+
+@key_app.command("set")
+def key_set(
+    project_ref: Annotated[str | None, _PROJECT_OPTION] = None,
+    target_name: Annotated[str | None, _TARGET_OPTION] = None,
+    from_env: Annotated[
+        str | None,
+        typer.Option(
+            "--from-env",
+            help="Read the key from this environment variable instead of stdin. "
+            "The key is never taken from the command line.",
+        ),
+    ] = None,
+) -> None:
+    """Attach a workspace key to ONE project, for ONE deployment.
+
+    The key comes from stdin (`echo "$KEY" | aisquare explainability key set`) or
+    from a named variable (`--from-env MY_KEY`), never from an argument — argv is
+    in every process list and shell history. It lands in the project's data
+    directory at mode 600; the store records only the deployment and the path.
+    Launches, `fleet spawn` and `explainability env` for this project then
+    authenticate the proxy with it; other projects keep the machine key.
+    """
+    project = _project_for(project_ref)
+    settings = load_config().explainability
+    target = ops.resolve_target(settings, target_name).name
+    if from_env is not None:
+        value = os.environ.get(from_env, "").strip()
+        if not value:
+            fail(f"${from_env} is not set or empty", error="no_key")
+    else:
+        if sys.stdin.isatty():
+            fail(
+                'pipe the key on stdin (echo "$KEY" | aisquare explainability key set) or '
+                "name a variable with --from-env — it is never taken from the command line",
+                error="no_key",
+            )
+        value = sys.stdin.read().strip()
+        if not value:
+            fail("nothing on stdin — the key was empty", error="no_key")
+    path = store_project_api_key(project.id, value)
+    with store_session() as store:
+        binding = store.set_project_explainability(
+            project.id, target=target, key_path=path, set_by=_who()
+        )
+    payload = _key_payload(project, target)
+    if get_state().json_output:
+        typer.echo(json.dumps(payload))
+        return
+    name = project.root.name or project.id
+    typer.echo(
+        f"✓ key attached to {name} for target {binding.target} — {path} (mode 600); "
+        "launches and spawns in this project authenticate the proxy with it"
+    )
+
+
+@key_app.command("show")
+def key_show(
+    project_ref: Annotated[str | None, _PROJECT_OPTION] = None,
+    target_name: Annotated[str | None, _TARGET_OPTION] = None,
+) -> None:
+    """Where this project's key comes from — the origin only, never the value."""
+    project = _project_for(project_ref)
+    settings = load_config().explainability
+    resolved = ops.resolve_target(settings, target_name, project_id=project.id)
+    payload = _key_payload(project, resolved.name)
+    payload["key_source"] = resolved.key_source
+    payload["key_origin"] = resolved.key_origin
+    payload["key_set"] = bool(resolved.api_key)
+    if get_state().json_output:
+        typer.echo(json.dumps(payload))
+        return
+    name = project.root.name or project.id
+    binding = ops.project_key_binding(project.id)
+    if binding is None:
+        typer.echo(
+            f"{name}: no key of its own — target {resolved.name} resolves {resolved.key_origin}"
+        )
+        return
+    where = str(binding.key_path) + ("" if binding.key_path.is_file() else " (file MISSING)")
+    match = "" if binding.target == resolved.name else f" — not used for target {resolved.name}"
+    typer.echo(
+        f"{name}: project key for target {binding.target} at {where}, set "
+        f"{binding.set_at:%Y-%m-%d %H:%M} by {binding.set_by or 'unknown'}{match}"
+    )
+
+
+@key_app.command("clear")
+def key_clear(project_ref: Annotated[str | None, _PROJECT_OPTION] = None) -> None:
+    """Detach the project's key and delete its file; the machine key applies again."""
+    project = _project_for(project_ref)
+    with store_session() as store:
+        had_row = store.clear_project_explainability(project.id)
+    had_file = clear_project_api_key(project.id)
+    if get_state().json_output:
+        typer.echo(json.dumps({"project": project.id, "cleared": had_row or had_file}))
+        return
+    name = project.root.name or project.id
+    if not (had_row or had_file):
+        typer.echo(f"{name} had no key of its own — nothing to clear")
+        return
+    typer.echo(f"✓ key cleared for {name} — the machine key applies again")
+
 
 _TARGET_OPTION = typer.Option("--target", help="Deployment to act on, e.g. stg or prod.")
 
@@ -66,7 +227,14 @@ def status(
     """
     config = load_config()
     settings = config.explainability
-    target = ops.resolve_target(settings, target_name)
+    # The key is resolved FOR the active project (#141): a project with its own
+    # key shows that origin here; everything else the machine's.
+    try:
+        with store_session() as store:
+            project_id: str | None = active_project(store).id
+    except Exception:  # a project is decoration on this line, never its gate
+        project_id = None
+    target = ops.resolve_target(settings, target_name, project_id=project_id)
     # One description of the proxy lane for both surfaces. It also decides
     # whether to probe at all: a machine that never configured tracing has
     # nothing to dial, and reporting a refused connection to a default address
@@ -476,6 +644,7 @@ def env(
         typer.Option("--session-id", help="Key the Run to this session id."),
     ] = None,
     target_name: Annotated[str | None, _TARGET_OPTION] = None,
+    project_ref: Annotated[str | None, _PROJECT_OPTION] = None,
     post_root: Annotated[
         bool,
         typer.Option(
@@ -541,7 +710,8 @@ def env(
     help text says when it is wrong to add by hand.
     """
     settings = load_config().explainability
-    target = ops.resolve_target(settings, target_name)
+    project = _project_for(project_ref)
+    target = ops.resolve_target(settings, target_name, project_id=project.id)
     # Print-only by default: no Run root is posted, so the target's gateway is
     # not even handed over — the key still is, because a hosted proxy
     # authenticates on it. `--post-root` takes the path `launch` takes: gateway,

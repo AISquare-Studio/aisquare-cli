@@ -270,6 +270,37 @@ whose Runs land somewhere else.
 
 ---
 
+## A key per project
+
+One machine, several workspaces: the key under `~/.aisquare/explainability-key`
+(or the target's variable) is the **machine** key, and every project shipped and
+proxied under it. A project can carry its own (#141):
+
+```bash
+cd ~/work/api
+aisquare explainability key set --from-env API_WORKSPACE_KEY   # from a variable (or pipe it on stdin)
+aisquare explainability key show                                # the origin, never the value
+aisquare explainability key clear
+```
+
+The key comes from a named variable (`--from-env`) or from stdin (pipe it in);
+it is never an argument, because argv is in every process list and shell
+history.
+
+The key lands in the project's data directory, mode 600
+(`~/.aisquare/projects/<id>/explainability-key`); the store records only the
+deployment it is for and the path. Resolution, inside the one resolver every
+lane uses, is **project key → the target's variable → the machine file**, and a
+key attached for `stg` is never handed to a `prod` gateway — the same rule the
+machine file follows. `aisquare launch`, `fleet spawn` (through `launch` in the
+window) and `explainability env [--project P]` authenticate the proxy with the
+project's key; `status` and the UI's Explainability view show the origin for the
+active project, and the view has an *Attach key* field (the key is pasted,
+never echoed). The client lane — the insights this CLI buffers and `ship`
+drains — still ships under the machine key; per-project shipping is a follow-up.
+`init --explainability` keeps writing the machine key, so a single-workspace
+machine is unaffected.
+
 ## If something breaks
 
 | Symptom | Cause |

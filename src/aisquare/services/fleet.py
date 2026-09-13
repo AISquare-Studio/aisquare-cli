@@ -56,6 +56,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import auto_mode
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
@@ -1088,6 +1089,13 @@ def spawn(
         )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
+    # `auto` behind the explainability proxy is refused from the first tool call
+    # once the session baseline is past what the proxy's non-streaming forward
+    # survives (#150). Said on the receipt when this machine's transcripts say
+    # so; a warning, never a reason not to spawn.
+    with contextlib.suppress(Exception):
+        if (warning := auto_mode.spawn_note(mode)) is not None:
+            notes.append(warning)
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
     # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
     # role binding, project default, machine default — runs HERE rather than

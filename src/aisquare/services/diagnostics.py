@@ -36,7 +36,7 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import auto_mode, ci_client, ci_descriptor, ci_override, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
@@ -135,9 +135,16 @@ def doctor(
         _check_browser_tools(cwd),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
+        # Only when a fleet role runs `auto` behind a configured proxy (#150);
+        # offline — config, the store, the head of a few transcripts.
+        *_optional(auto_mode.doctor_check()),
         # Leaves the machine (one usage request per account), so --live only (#146).
         *_live_only(live, _claude_account_headroom_check),
     ]
+
+
+def _optional(check: DoctorCheck | None) -> list[DoctorCheck]:
+    return [check] if check is not None else []
 
 
 def _live_only(live: bool, check: Callable[[], DoctorCheck | None]) -> list[DoctorCheck]:

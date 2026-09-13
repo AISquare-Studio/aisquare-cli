@@ -30,7 +30,7 @@ from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
-from aisquare.services import ci_augment
+from aisquare.services import auto_mode, ci_augment
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
@@ -175,6 +175,9 @@ def turn_stopped(
     # board its state change (or the manager its decisions), and close_turn
     # swallows its own errors.
     metrics_service.close_turn(session_id)
+    # Last, and it swallows its own errors too: auto-mode refusals in the
+    # transcript's tail put the row in attention with one board line (#150).
+    auto_mode.record_refusals(session_id)
     return decision
 
 

@@ -563,3 +563,27 @@ def test_show_token_warns_about_a_non_loopback_bind(runner: CliRunner) -> None:
     assert open_bind.exit_code == 0, open_bind.output
     assert "only gate" in open_bind.output and "trusted network" in open_bind.output
     assert "only gate" not in loopback.output, "loopback gives nothing up; stay quiet"
+
+
+def test_xr_is_registered_as_a_command_the_sweeps_must_not_invoke() -> None:
+    """`xr` binds a port and blocks, exactly as `serve` does.
+
+    Three repo-wide sweeps invoke every leaf in the command tree
+    (`test_no_traceback_on_a_damaged_store`, `test_no_traceback_in_a_configured_home`,
+    `test_json_stdout_is_machine_readable`). A command that never returns hangs
+    all three — not a failure, a WEDGE, which in CI is a job that burns its
+    whole budget and reports nothing.
+
+    This was not hypothetical. It was hidden for several full-suite runs because
+    a teammate's server happened to be holding 8748, so `aisquare --json xr`
+    exited immediately through `xr_port_busy` and the sweeps were green. They
+    stopped their server; the next run hung at 51%. A guard that depends on
+    somebody else's process is not a guard, so the entry is asserted here.
+    """
+    from tests.test_no_traceback_on_a_damaged_store import UNINVOKED
+
+    assert "xr" in UNINVOKED, (
+        "`aisquare xr` starts a blocking server, so the command-tree sweeps must "
+        "not invoke it — add it to UNINVOKED beside `serve`"
+    )
+    assert "blocks" in UNINVOKED["xr"], "the reason must say why, as every entry does"

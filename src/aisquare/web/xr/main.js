@@ -273,6 +273,19 @@ const voiceTimers = { speech: null, notice: null };
  */
 let speakingAt = null;
 
+/**
+ * A notice waiting for the final transcript to finish being read.
+ *
+ * The strip is one line, and after `audioEnd` the server sends the final `stt`
+ * and then the `ack` a few milliseconds later — `_close_utterance` transcribes,
+ * routes, and sends both without pausing. Rendering whichever arrived last
+ * would mean the operator never sees what was HEARD, only where it went, and
+ * that is the one check they have that ASR got their sentence right. So the two
+ * are shown in the order they happened: the words for their three seconds, then
+ * where they landed.
+ */
+let pendingNotice = null;
+
 function clearVoiceTimer(key) {
   clearTimeout(voiceTimers[key]);
   voiceTimers[key] = null;
@@ -282,20 +295,41 @@ function clearVoiceTimer(key) {
 function showSpeech(text, final) {
   clearVoiceTimer('speech');
   focus.setVoice({ speech: text, speechFinal: final });
-  if (!final || !text) return;
+  if (!final || !text) {
+    // An interim frame supersedes a queued ack from the PREVIOUS utterance: the
+    // operator has started a new sentence, and the old one's receipt is no
+    // longer what they are waiting to read.
+    if (!final) pendingNotice = null;
+    return;
+  }
   voiceTimers.speech = setTimeout(() => {
     voiceTimers.speech = null;
     focus.setVoice({ speech: '', speechFinal: false });
+    const queued = pendingNotice;
+    pendingNotice = null;
+    if (queued) showNotice(queued.text, queued.opts);
   }, FINAL_TEXT_MS);
 }
 
-/** The ack or error line under the transcript, and on the HUD when it is bad. */
-function showNotice(text, { alert = false, ms = ACK_MS, hudToo = false } = {}) {
-  clearVoiceTimer('notice');
-  focus.setVoice({ notice: text, alert });
+/**
+ * The ack or error line on the strip, and on the HUD when it is bad.
+ *
+ * Held back while a final transcript is still being read — see `pendingNotice`.
+ * The HUD copy is NOT held back: it is a different surface with its own line,
+ * so there is nothing for it to collide with, and a problem should reach the
+ * operator at the moment it happens.
+ */
+function showNotice(text, opts = {}) {
+  const { alert = false, ms = ACK_MS, hudToo = false } = opts;
   // A problem also goes to the HUD: it may have arrived when no panel is
   // focused, and on a desktop the HUD is where a tester is already looking.
   if (hudToo && text) hud.toast(text, ms);
+  if (text && voiceTimers.speech) {
+    pendingNotice = { text, opts };
+    return;
+  }
+  clearVoiceTimer('notice');
+  focus.setVoice({ notice: text, alert });
   if (!text) return;
   voiceTimers.notice = setTimeout(() => {
     voiceTimers.notice = null;
@@ -319,6 +353,11 @@ const voice = new VoiceCapture({
   onChange: (state) => {
     if (state.capturing) {
       speakingAt = state.session;
+      // A fresh utterance starts from a clean strip: the last one's words and
+      // its receipt both belong to a sentence that is over.
+      clearVoiceTimer('notice');
+      pendingNotice = null;
+      focus.setVoice({ notice: '', alert: false });
       showSpeech('', false);
     }
     // The dot belongs to the panel being spoken to, and only while that panel
@@ -964,8 +1003,21 @@ function startLiveFeed() {
     // Whatever went wrong, this utterance is over: the server has already
     // dropped it, and a mic dot still lit would be a lie.
     voice.abort(null);
-    if (code === 'stt_unavailable') hud.pin(message);
-    else showNotice(message, { alert: true, ms: 8000, hudToo: true });
+    if (code === 'stt_unavailable') {
+      // The full message carries the install command, so it is PINNED on the
+      // HUD where it can be read and acted on. But the HUD does not exist in a
+      // session without `dom-overlay`, and this is the one error an operator in
+      // a headset is most likely to hit — so a short form goes on the panel
+      // too, and says where the long form is. Without it the most important
+      // failure in the voice path would be silent in the headset.
+      hud.pin(message);
+      showNotice('speech is not installed on the host — see the message on screen', {
+        alert: true,
+        ms: 8000,
+      });
+    } else {
+      showNotice(message, { alert: true, ms: 8000, hudToo: true });
+    }
     speakingAt = null;
   });
 

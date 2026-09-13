@@ -41,6 +41,7 @@ from pathlib import Path
 from types import ModuleType
 
 from aisquare.core import codenames, harness, selfcli
+from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -1002,6 +1003,13 @@ def spawn(
     env = {"AISQUARE_FLEET_AGENT": agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
+    # The desktop as THIS process sees it (#147). A window inherits the tmux
+    # server's environment, frozen at the server's first start, so after a
+    # re-login every new agent had a stale DISPLAY, WAYLAND_DISPLAY, bus and SSH
+    # agent socket — ctrl+v image paste, desktop notifications and `gh` over an
+    # agent-forwarded key failed in silence. Set per window, the current values
+    # win over the server's for this agent alone.
+    env.update(tmux_core.desktop_environment())
     if account is not None:
         # `launch --account 1` restores "this shell's" login, and inside the
         # window that shell would be whoever started the private server — so

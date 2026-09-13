@@ -271,10 +271,20 @@ def translate(
         and not extended_keys
         and needs_extended_keys(translation.value)
     ):
-        translation = None
+        translation = LEGACY_FALLBACK.get(translation.value)
     if translation is None and printable and character:
         return Translation("literal", character)
     return translation
+
+
+#: What an extended-only chord becomes on a tmux below :data:`EXTENDED_MINIMUM`
+#: when the same meaning has a name every version carries (#147). ``S-Enter``
+#: is Claude Code's newline; so is ``C-j``, in every terminal. The outer
+#: terminal already told us shift was held — only one speaking the kitty
+#: protocol reports the chord at all — so nothing is faked: the meaning travels
+#: by the older spelling instead of being dropped, which typed nothing and
+#: made a shift+enter on a 3.4 server feel like a broken key.
+LEGACY_FALLBACK: dict[str, Translation] = {"S-Enter": Translation("key", "C-j")}
 
 
 def _translate(key: str, character: str | None, *, printable: bool) -> Translation | None:

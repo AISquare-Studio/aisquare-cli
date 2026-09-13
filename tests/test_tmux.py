@@ -1292,6 +1292,7 @@ def test_live_check_conf_accepts_the_bundled_conf_and_rejects_a_bad_one(
 
 
 _SET = re.compile(r"^set (-g|-s|-ga) (\S+) (.+)$")
+_BIND = re.compile(r"^bind-key -n (\S+) (.+)$")
 
 
 @requires_tmux
@@ -1305,8 +1306,19 @@ def test_live_every_bundled_option_is_applied_with_its_value(live: TmuxServer) -
     """
     _spawn(live, "asq-test-fox", "w0", CAT)
     lines = [line for line in BUNDLED_CONF.splitlines() if line and not line.startswith("#")]
-    rules = [_SET.match(line) for line in lines]
-    assert rules and all(rules), f"every line is a `set`: {lines}"
+    binds = [_BIND.match(line) for line in lines if line.startswith("bind-key")]
+    rules = [_SET.match(line) for line in lines if not line.startswith("bind-key")]
+    assert rules and all(rules), f"every other line is a `set`: {lines}"
+    assert binds and all(binds), "every bind-key line is `bind-key -n <key> <command>`"
+
+    for bind in binds:
+        assert bind is not None
+        pressed, command = bind.groups()
+        # The root table (`-n`): a key that needs no prefix — there is none (#147).
+        # The whole table: `list-keys -T root <key>` answers nothing on 3.7 (measured).
+        table = live.run("list-keys", "-T", "root")
+        rows = [row for row in table.splitlines() if f" {pressed} " in f"{row} "]
+        assert rows and all(command in row for row in rows), f"{pressed}: {table!r}"
 
     for rule in rules:
         assert rule is not None
@@ -1359,3 +1371,36 @@ def test_live_a_frame_fits_the_render_budget(live: TmuxServer, width: int, heigh
     print(f"\ncapture {width}x{height}: median {median:.1f} ms, max {max(samples):.1f} ms")
     assert len(capture.lines) == height and capture.facts.width == width
     assert median < 200, f"a {width}x{height} frame took {median:.0f} ms (median of 20)"
+
+
+# --- the desktop a window is given (#147) ------------------------------------------------------
+
+
+def test_desktop_environment_carries_only_the_variables_this_process_has() -> None:
+    """A window inherits the SERVER's environment, frozen at its first start; these
+    travel per window from the spawner instead. Unset here says nothing about the
+    server's copy, so it is not blanked — `-e` can only set anyway."""
+    from aisquare.core.tmux import DESKTOP_ENV_VARS, desktop_environment
+
+    shell = {
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "SSH_AUTH_SOCK": "/run/user/1000/keyring/ssh",
+        "COLORTERM": "truecolor",
+        "DBUS_SESSION_BUS_ADDRESS": "  ",  # blank counts as unset
+        "HOME": "/home/me",  # not a desktop fact
+    }
+    assert desktop_environment(shell) == {
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "SSH_AUTH_SOCK": "/run/user/1000/keyring/ssh",
+        "COLORTERM": "truecolor",
+    }
+    assert desktop_environment({}) == {}
+    assert set(desktop_environment(dict.fromkeys(DESKTOP_ENV_VARS, "x"))) == set(DESKTOP_ENV_VARS)
+    # The conf's update-environment names are the same list, minus what tmux carries by default.
+    listed = {
+        line.split()[-1] for line in BUNDLED_CONF.splitlines() if "update-environment" in line
+    }
+    assert listed == set(DESKTOP_ENV_VARS) - {"DISPLAY", "SSH_AUTH_SOCK"}
+    assert "set -g prefix None" in BUNDLED_CONF and "bind-key -n F12 detach-client" in BUNDLED_CONF

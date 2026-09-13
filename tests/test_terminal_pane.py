@@ -2512,11 +2512,12 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
     """``_extended_keys`` is this widget's half of core.keys' anti-corruption rule.
 
     Below 3.5 tmux TYPES ``S-Enter`` into the running agent instead of sending
-    the key (measured on 3.3a/3.4), so the pane drops it there — and sends it on
-    every modern server, which is the only reason shift+enter works at all.
-    Nothing outside test_keys.py's pure units reached the gate: the fake always
-    answered 3.7c and no test pressed an extended-only chord, so the widget's
-    gate could have been stuck at either value undetected.
+    the key (measured on 3.3a/3.4), so the pane never sends it there: shift+enter
+    travels as ``C-j`` — Claude Code's newline on every tmux (#147) — and the
+    chord itself goes on every modern server. Nothing outside test_keys.py's
+    pure units reached the gate: the fake always answered 3.7c and no test
+    pressed an extended-only chord, so the widget's gate could have been stuck
+    at either value undetected.
     """
     fake.version = "tmux 3.4"
     old_sent, old_notices = _press_shift_enter(fake, tmp_path)
@@ -2524,8 +2525,8 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
     modern.panes["%1"] = FakePane(screen=["one row"])
     modern_sent, modern_notices = _press_shift_enter(modern, tmp_path)
 
-    assert old_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
-    assert old_notices == ["no way to type shift+enter into a tmux pane"]
+    assert old_sent == [("C-j",), ("Enter",)], "the newline by its older spelling, never S-Enter"
+    assert old_notices == [], "nothing was dropped, so nothing is said"
     assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
     assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
     assert modern_notices == []
@@ -2560,7 +2561,7 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
 
     modern_sent, old_sent = run(drive())
     assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
-    assert old_sent == [], "…and the version was re-read for the server attached after it"
+    assert old_sent == [("C-j",)], "…and the 3.4 one its older spelling: the version was re-read"
 
 
 # --- placeholder and failure states -----------------------------------------------------------

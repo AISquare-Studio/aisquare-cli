@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
 from collections.abc import Callable
 from importlib import metadata
@@ -41,6 +42,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
+from aisquare.services.xr import speech as xr_speech
 
 
 def status() -> StatusReport:
@@ -123,6 +125,7 @@ def doctor(
         _check_harness(cwd),
         _check_self_invocation(cwd),
         _check_fleet(),
+        _check_xr(),
         *_experiment_checks(),
         *explainability_ops.checks(live=live, target_name=target),
     ]
@@ -1423,4 +1426,124 @@ def _check_fleet(
             name,
             f"not evaluated ({exc}) — stale fleet rows, if any, go unreported until "
             "the store opens",
+        )
+
+
+# --- the XR client's own preconditions (docs/plans/clixr.md §4, §16) -------------------
+
+_XR_PORT = 8748
+"""``serve`` owns 8747; ``xr`` owns this one (plan §2.5)."""
+
+#: The import names ``aisquare xr`` actually needs at runtime — the websocket
+#: server, its ASGI host, and the voice backend. Asked for by IMPORT NAME rather
+#: than by distribution name because that is the question that matters: a wheel
+#: recorded in metadata whose module will not import is the failure this line
+#: exists to catch, and ``find_spec`` answers the real one.
+_XR_MODULES = ("starlette", "uvicorn", "websockets", "faster_whisper")
+
+
+def _xr_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Is something listening on ``port``? A CONNECT, not a bind.
+
+    Binding to find out would be the diagnostic taking the resource it is
+    reporting on — briefly, but long enough to race the server it is about to
+    tell you to start. ``connect_ex`` returns 0 only when a listener accepted,
+    and the short timeout keeps a filtered port from stalling ``doctor``.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.2)
+        return probe.connect_ex((host, port)) == 0
+
+
+def _hf_hub_cache() -> Path:
+    """Where Hugging Face keeps downloaded models on this machine."""
+    home = os.environ.get("HF_HOME", "").strip()
+    if home:
+        return Path(home).expanduser() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _whisper_model_dir(model: str) -> Path | None:
+    """The cached model directory, or None when the first prompt would download it."""
+    path = _hf_hub_cache() / f"models--Systran--faster-whisper-{model}"
+    return path if path.is_dir() else None
+
+
+def _check_xr(
+    has_module: Callable[[str], bool] | None = None,
+    port_in_use: Callable[[int], bool] | None = None,
+    model_dir: Callable[[str], Path | None] | None = None,
+) -> DoctorCheck:
+    """Can this machine run ``aisquare xr``: extra installed, port free, model cached.
+
+    Three facts on one line, in the order they would stop you: with no extra
+    the command does not start; with 8748 held it starts and cannot bind; with
+    both of those right and no model cached it runs beautifully until the first
+    push-to-talk, which then goes to the network mid-demo. That last one is why
+    the check exists at all — it is the only one of the three that fails late,
+    and the plan's definition of done (§16) asks ``doctor`` to report it.
+
+    WARNS, NEVER FAILS, like ``tmux`` and ``gh``: XR is one optional surface,
+    and a machine that runs every other command is not unhealthy. Read-only and
+    offline — ``find_spec`` and a stat, plus one loopback connect that touches
+    nothing outside this box. The three seams are injectable for tests; the
+    defaults are the real ones.
+    """
+    name = "xr"
+    try:
+        has_module = has_module or _has_module
+        port_in_use = port_in_use or _xr_port_in_use
+        model_dir = model_dir or _whisper_model_dir
+
+        problems: list[str] = []
+        fixes: list[str] = []
+        facts: list[str] = []
+
+        missing = [module for module in _XR_MODULES if not has_module(module)]
+        if missing:
+            problems.append(f"the xr extra is not installed (no {', '.join(missing)})")
+            fixes.append(xr_speech.INSTALL_FIX)
+        else:
+            facts.append("xr extra installed")
+
+        if port_in_use(_XR_PORT):
+            problems.append(f"port {_XR_PORT} is in use")
+            fixes.append(
+                f"aisquare xr is already running or another process holds {_XR_PORT}; pass --port"
+            )
+        else:
+            facts.append(f"port {_XR_PORT} free")
+
+        model = xr_speech.model_name()
+        if model not in xr_speech.ALLOWED_MODELS:
+            # The operator's own export, named back to them. Reporting the
+            # default here instead would make a typo in a shell profile
+            # invisible at exactly the moment they are looking for it.
+            problems.append(
+                f"{xr_speech.ENV_MODEL}={model!r} is not a model the voice path supports"
+            )
+            fixes.append(
+                f"Voice input is command input, where latency dominates: set "
+                f"{xr_speech.ENV_MODEL} to one of {', '.join(xr_speech.ALLOWED_MODELS)}"
+            )
+        elif (cached := model_dir(model)) is not None:
+            facts.append(f"whisper model {model} cached ({cached})")
+        else:
+            problems.append(
+                f"whisper model {model} is not in the Hugging Face cache, so the first "
+                "push-to-talk downloads it"
+            )
+            fixes.append(xr_speech.download_fix(model))
+
+        if problems:
+            return _warn(name, "; ".join([*problems, *facts]), "; ".join(fixes))
+        return _ok(name, "; ".join(facts))
+    except Exception as exc:  # diagnostics must never crash
+        # Failing open costs this line its verdict and nothing else: `aisquare
+        # xr` checks the extra when it imports, the port when it binds, and the
+        # model when it loads one — each with its own message at that moment.
+        return _ok(
+            name,
+            f"not evaluated ({exc}) — aisquare xr reports a missing extra, a held port "
+            "or an uncached model itself when it starts",
         )

@@ -150,3 +150,13 @@ files = ["src", "tests"]
 strict = true
 pretty = true
 plugins = ["pydantic.mypy"]
+
+# faster-whisper and its numpy are in the `xr` extra, NOT in `dev` — they pull
+# ctranslate2 and av, and the hot path must work in a base install. mypy runs
+# over `src` in an environment that has neither, so without this the one file
+# that imports them lazily (services/xr/speech.py, inside the factory, on
+# purpose) would fail typecheck for everyone. The ignore is scoped to those two
+# module names: anything else missing its stubs stays an error.
+[[tool.mypy.overrides]]
+module = ["faster_whisper.*", "numpy.*"]
+ignore_missing_imports = true

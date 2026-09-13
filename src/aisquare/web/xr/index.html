@@ -1,13 +1,166 @@
 <!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>cliXR — spatial board</title>
-<!--
-  A placeholder, and deliberately the smallest one that can exist: the mount
-  point and the module entry, nothing else. Every .js file under this directory
-  belongs to the client task, and this file is expected to be rewritten by it.
-  The server does not parse it — it serves whatever is here — so the two halves
-  can land in either order.
--->
-<div id="app">Connecting…</div>
-<script type="module" src="./main.js"></script>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>cliXR</title>
+
+    <!--
+      One monospace family from a CDN, with the system-mono fallback stack that
+      style.js carries (plan §8). preconnect because the atlas cannot draw its
+      first cell until the face has arrived — main.js awaits it deliberately.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"
+    />
+
+    <!--
+      three.js pinned to an EXACT version (plan §2.2: no bundler, no build step,
+      plain ES modules, exact pin). A range like ^0.186.0 would let a CDN hand a
+      different build to the headset than the one this was verified against, and
+      there is no lockfile here to catch it.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <style>
+      :root {
+        color-scheme: dark;
+        /* Mirrors of style.js tokens, for the 2D chrome only. style.js remains
+           the single source of truth for everything drawn in the scene. */
+        --ink: #e8edf2;
+        --ink-dim: #8b97a6;
+        --surface: #12161c;
+        --rule: #2a323d;
+        --alert: #ff5a4e;
+        --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+          'Liberation Mono', monospace;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #5a6068;
+        font-family: var(--font-mono);
+      }
+
+      #scene {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      .overlay {
+        position: fixed;
+        z-index: 1;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--ink);
+        background: rgba(18, 22, 28, 0.86);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+        padding: 6px 10px;
+        pointer-events: none;
+      }
+
+      /* The transport state, readable without devtools: a tester reads this
+         chip for the reconnect criterion. */
+      #chip {
+        top: 12px;
+        left: 12px;
+        letter-spacing: 0.02em;
+      }
+      #chip::before {
+        content: '';
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        margin-right: 7px;
+        border-radius: 50%;
+        vertical-align: 1px;
+        background: var(--ink-dim);
+      }
+      #chip[data-state='connected']::before,
+      #chip[data-state='mock']::before {
+        background: #4fc3d9;
+      }
+      #chip[data-state='reconnecting']::before {
+        background: #f2b33d;
+      }
+      #chip[data-state='auth-failed']::before {
+        background: var(--alert);
+      }
+
+      #keys {
+        bottom: 12px;
+        left: 12px;
+        color: var(--ink-dim);
+      }
+      #keys b {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      #notice {
+        top: 12px;
+        right: 12px;
+        max-width: 30rem;
+        white-space: pre-wrap;
+      }
+      #notice code {
+        color: #f2b33d;
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="scene"></canvas>
+
+    <div id="chip" class="overlay">offline</div>
+
+    <div id="keys" class="overlay">
+      drag orbit · scroll zoom · <b>v</b> viewer scale · <b>i</b> inspect · <b>n</b> alert ·
+      <b>r</b> recenter · <b>[</b> <b>]</b> rotate · <b>p</b> page
+    </div>
+
+    <div id="notice" class="overlay" hidden></div>
+
+    <!--
+      Not a module, and above main.js on purpose: this has to report even when
+      the CDN import map fails, which is one of the two ways this page goes
+      blank. Informational only — AR entry is M3's, not this milestone's.
+    -->
+    <script>
+      (function () {
+        if (navigator.xr) return;
+        var notice = document.getElementById('notice');
+        var secure = window.isSecureContext;
+        notice.hidden = false;
+        notice.innerHTML = secure
+          ? 'Desktop mode: no WebXR device here, which is exactly what M2 expects.\n' +
+            'The ring below is the same scene the headset will show.'
+          : 'navigator.xr is undefined because <code>' +
+            location.origin +
+            '</code> is not a secure context.\n\n' +
+            'On the headset, tether over USB and run\n' +
+            '  <code>adb reverse tcp:8748 tcp:8748</code>\n' +
+            'then open <code>http://localhost:8748</code>, which IS a secure context and needs no certificates.\n' +
+            'Untethered: add this origin under chrome://flags → "Insecure origins treated as secure".\n\n' +
+            'The desktop ring below renders regardless — AR entry lands in a later milestone.';
+      })();
+    </script>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

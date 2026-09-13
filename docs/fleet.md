@@ -778,6 +778,18 @@ server — this ends every agent at once, so prefer `fleet stop` per agent:
 tmux -L asq kill-server
 ```
 
+**A panel reading "No changes this session" sits beside an agent's conversation
+and will not go away.** That is Claude Code's own diff panel (fullscreen
+renderer, v2.1.260+): it opens by itself once Claude edits a file in a terminal
+at least 144 columns wide, and once opened it opens again on every edit, in
+this session and later ones. Fleet windows are born 120 columns wide for
+exactly this reason (`core.tmux.DEFAULT_WINDOW_WIDTH`) and a spawn from the UI
+uses the pane's real size, so a panel should only appear if the pane itself is
+that wide. To close one: wait until the agent is idle (`⏸ waiting`) and type
+`/diff` into the pane — typed while Claude is working it is queued as a
+message, which is why it seemed to do nothing. The `✕` in the panel's header
+needs a forwarded click, which the pane does not do yet (#148).
+
 **An agent is stuck on a permission prompt.** Its row shows **🔔 NEEDS YOU**
 and the terminal rings. Nothing nudges it and nothing answers for it: click the
 agent, click into the pane, and answer as you would in the agent's own

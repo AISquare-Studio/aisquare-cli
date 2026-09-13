@@ -956,6 +956,7 @@ def spawn(
     spawned_by: str = "user",
     account: str | None = None,
     resume: ResumeSpec | None = None,
+    size: tuple[int, int] | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -976,6 +977,12 @@ def spawn(
     ``account`` is resolved through the one account resolver (flag, role
     binding, project default, machine default — #145) and the chosen slot is
     both passed to ``launch`` as ``--account`` and recorded on the row.
+
+    ``size`` is the ``(columns, rows)`` the window is born with. The UI passes
+    the pane it is about to attach, so the agent never runs wider than it will
+    be shown; a headless spawn (a manager starting coders, `fleet spawn` with
+    no UI open) takes ``core.tmux``'s default, which is kept under the 144
+    columns at which Claude Code opens its diff panel on its own (#149).
     """
     config = settings()
     if not _role_ok(role):
@@ -1115,8 +1122,11 @@ def spawn(
         command, carried = claude_accounts_service.carry_environment(command)
         env.update(carried)
     tmux_session = session_name(codename)
+    geometry = {"width": size[0], "height": size[1]} if size is not None else {}
     try:
-        window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)
+        window = srv.spawn_window(
+            tmux_session, name=picked, cwd=cwd, command=command, env=env, **geometry
+        )
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
 

@@ -921,3 +921,37 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: Pro
     assert shown_pick == "headroom"  # the form opened on what the file holds
     assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
     assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer
+
+
+def test_start_manager_spawns_at_the_panes_own_size(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#149: the window is born the size of the pane about to show it, never the 200x50
+    that grew Claude Code's diff panel before the first resize could shrink it."""
+    fleet: dict[str, FleetAgent | None] = {"manager": None}
+    sizes: list[object] = []
+
+    def spawn(target: ProjectInfo, role: str, **kwargs: object) -> fleet_service.SpawnReceipt:
+        sizes.append(kwargs.get("size"))
+        fleet["manager"] = fake_agent(target)
+        return fleet_service.SpawnReceipt(
+            agent=fake_agent(target), asked_label=None, tmux_session="asq-amber-otter"
+        )
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: fleet["manager"])
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, int]:
+        await pilot.click("#start-manager")
+        await settle(pilot)
+        return host.query_one(ManagerTab).content_size
+
+    tab_width, tab_height = drive(project, scenario)
+    assert len(sizes) == 1
+    size = sizes[0]
+    assert isinstance(size, tuple) and len(size) == 2
+    width, height = size
+    # The pane is hidden until the manager exists, so the tab's own size stands in:
+    # the pane's width, and the rows left under the header and the button.
+    assert width == tab_width and 0 < height < tab_height
+    assert width < 144, "a UI spawn must never be born wide enough to open the diff panel"

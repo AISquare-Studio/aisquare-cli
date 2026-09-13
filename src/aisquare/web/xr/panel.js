@@ -220,11 +220,25 @@ export class Panel {
     if (!this.alerting) this.alertMaterial.opacity = 0;
   }
 
-  /** Place on the ring: angle measured from +Z, panel faces the centre. */
-  setAngle(angle) {
-    this.mesh.position.set(RING.radius * Math.sin(angle), 0, RING.radius * Math.cos(angle));
+  /**
+   * Place on the ring: angle measured from +Z, panel faces the centre.
+   *
+   * `radius` is a parameter rather than `RING.radius` because push–pull (§9,
+   * right thumbstick Y) moves the whole arc. The angle is kept because M5's
+   * jump-to-next-alert has to ask each panel where it sits.
+   */
+  setAngle(angle, radius = RING.radius) {
+    this.angle = angle;
+    this.radius = radius;
+    this.mesh.position.set(radius * Math.sin(angle), 0, radius * Math.cos(angle));
     // Facing the centre means the plane's +Z normal points inward: a + π.
     this.mesh.rotation.y = angle + Math.PI;
+  }
+
+  /** World position of the panel centre — where its alert chime is emitted
+   *  from (§8: the cue is positioned at the panel, not at the operator). */
+  worldPosition(out) {
+    return this.mesh.getWorldPosition(out);
   }
 
   /** Per-frame, and only for alerting panels: a slow pulse, nothing else. */

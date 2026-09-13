@@ -24,7 +24,7 @@ import typer
 from rich.table import Table
 from rich.text import Text
 
-from aisquare.cli.common import expected_config_write_errors, fail, local_time
+from aisquare.cli.common import expected_config_write_errors, fail, format_reset
 from aisquare.cli.fleet import not_interactive_reason
 from aisquare.core import claude_accounts as core
 from aisquare.core.console import stderr_console, stdout_console
@@ -101,22 +101,23 @@ def _percent(value: float | None) -> str:
     return _DASH if value is None else f"{value:.0f}%"
 
 
-def _resets(when: datetime | None) -> str:
-    return _DASH if when is None else local_time(when).strftime("%H:%M")
+def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> tuple[str, str]:
+    """``(session, week)`` as the table shows them; the reason when there is nothing to show.
 
-
-def _usage_cells(usage: ClaudeUsage | None) -> tuple[str, str]:
-    """``(session, week)`` as the table shows them; the reason when there is nothing to show."""
+    The reset is ``format_reset``'s string — a distance and a clock time, the
+    date when it is not today — shared with the Accounts page so the two
+    cannot drift again (#152). ``now`` is for tests; the table reads the clock.
+    """
     if usage is None:
         return _DASH, _DASH
     if not usage.available:
         return usage.reason or "unavailable", ""
     session = _percent(usage.session_percent)
     if usage.session_resets_at is not None:
-        session += f" (resets {_resets(usage.session_resets_at)})"
+        session += f" · resets {format_reset(usage.session_resets_at, now=now)}"
     week = _percent(usage.week_percent)
     if usage.week_resets_at is not None:
-        week += f" (resets {_resets(usage.week_resets_at)})"
+        week += f" · resets {format_reset(usage.week_resets_at, now=now)}"
     return session, week
 
 

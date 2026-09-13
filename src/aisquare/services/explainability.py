@@ -513,6 +513,19 @@ def _usable_base_url(value: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def tracing_configured(settings: ExplainabilitySettings | None = None) -> bool:
+    """Whether a launch on this machine would be pointed at the proxy at all.
+
+    The two checks :func:`wire_session` makes before it ever probes: the
+    switch is on and ``proxy_url`` is an http(s) URL. Not whether the proxy
+    ANSWERS — that is the probe's business, and a doctor line or a spawn note
+    that only wants to know "is auto mode running behind a proxy here?" (#150)
+    must not dial anything to ask.
+    """
+    active = load_config().explainability if settings is None else settings
+    return bool(active.enabled) and _usable_base_url(active.proxy_url)
+
+
 def probe_proxy(proxy_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> ProxyProbe:
     """Check that ``proxy_url`` is the claude_code explainability proxy.
 

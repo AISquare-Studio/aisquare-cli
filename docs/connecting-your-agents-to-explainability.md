@@ -283,9 +283,59 @@ whose Runs land somewhere else.
 | `409` / `not a registered identity` | Step 5 |
 | `explainability proxy: unreachable` | Wrong `--proxy-url`, or a local proxy that is not running |
 | Everything green, nothing on the dashboard | The spool is not being drained — step 10 |
+| `… is temporarily unavailable (server error), so auto mode cannot determine the safety of Bash` on every tool call, while the chat itself keeps answering | Auto mode's **classifier** request failing behind the proxy — see the next section |
 
 `aisquare explainability status --json` is the machine-readable view, and the one
 to script a check against.
+
+### Auto mode refuses every tool call behind the proxy
+
+**The signature.** A session in `auto` permission mode, traced through the
+proxy, answers every Bash (and other classified tool call) with
+
+```text
+claude-opus-5[1m] is temporarily unavailable (server error), so auto mode cannot
+determine the safety of Bash right now. Wait a moment and then try this action again.
+```
+
+while its own replies keep arriving and `status.claude.com` is green. Reads
+still work (they are not classified). The model named is not your chat model:
+it is the **classifier** — auto mode sends a separate, *non-streaming* request
+carrying a portion of the transcript plus the pending action to a classifier
+model (Sonnet 5 by default, an Opus 1M fallback), and reports a 5xx from it
+this way. Chat survives because it streams.
+
+**Why it fails behind the proxy.** The proxy forwards non-streaming calls under
+fixed total timeouts and surfaces a timeout as an anonymous 500
+([AISquare-Explainability-SDK#1144](https://github.com/AISquare-Studio/AISquare-Explainability-SDK/issues/1144)
+— the fix belongs there). A classifier call is at least as large as the
+session's first request — its **baseline**: system prompt, tool schemas
+including every MCP connector's, skills, memory — and on a machine with a rich
+Claude config that is ~140k tokens before anyone has typed. Measured: sessions
+starting at ~137k were refused from their first shell command, manager and
+coders alike; probes at ~98k passed. `/compact` does not help a fresh agent —
+the baseline cannot be compacted.
+
+**What the CLI tells you.** `aisquare doctor` gains an `explainability
+auto-mode` line whenever a fleet role runs `auto` behind a configured proxy: it
+reads the first-turn size of your recent sessions from their transcripts and
+warns when that size is above ~100k tokens, or when a recent session was
+refused. `fleet spawn` puts the same warning on its receipt. A running session
+that is being refused is put in **attention** (🔔 on its row) by its Stop hook,
+with one `auto_mode_blocked` line on the board.
+
+**Until the proxy fix, pick one:**
+
+- a permission mode that needs no classifier for the fleet roles:
+  `aisquare config set fleet.roles.coder.permission_mode acceptEdits` (per
+  spawn: `aisquare fleet spawn coder --permission-mode acceptEdits`; a running
+  agent: set the mode, then `aisquare fleet restart <label>` — its session
+  resumes);
+- a lighter Claude config dir for the account the fleet launches under — fewer
+  MCP connectors; their tool schemas are the bulk of the baseline — and check
+  the new size with `aisquare doctor`;
+- run agents untraced: `aisquare explainability disable` (you lose the proxy
+  lane; the client lane still ships).
 
 ---
 

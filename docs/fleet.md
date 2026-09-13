@@ -461,6 +461,20 @@ yourself, per spawn (`--permission-mode acceptEdits`) or for the role
 (`aisquare config set fleet.roles.coder.permission_mode acceptEdits`).
 `bypassPermissions` is available and is never a default.
 
+**`auto` behind the explainability proxy.** The classifier auto mode relies on
+makes a separate, non-streaming request the proxy currently cuts short once the
+session is large — and a fleet agent's very first request is already the whole
+system prompt, tool schemas and skills (~140k tokens on a machine with several
+MCP connectors), so every tool call is refused with *"… is temporarily
+unavailable (server error), so auto mode cannot determine the safety of Bash"*
+while the chat itself keeps working. `aisquare doctor` says so (`explainability
+auto-mode`), the spawn receipt repeats it, and a session being refused is put in
+🔔 attention with one `auto_mode_blocked` board line. Until the proxy fix
+([AISquare-Explainability-SDK#1144](https://github.com/AISquare-Studio/AISquare-Explainability-SDK/issues/1144)):
+a non-classifier mode for the roles (`acceptEdits`, as above), a lighter config
+dir, or tracing off. Details and the measurements:
+[`connecting-your-agents-to-explainability.md`](connecting-your-agents-to-explainability.md#auto-mode-refuses-every-tool-call-behind-the-proxy).
+
 **Every default is a default.** Everything this guide calls one — permission
 mode, worktree-per-role, the escape key, the agent cap, the tmux socket, the
 native-agent-teams switch, codenames, labels — is yours to change, under one

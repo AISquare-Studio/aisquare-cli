@@ -524,6 +524,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Auto mode behind the explainability proxy is named, not mistaken for a
+  model outage** (#150). Fleet agents in `auto` permission mode traced through
+  the proxy were refused on every tool call — *"claude-opus-5[1m] is
+  temporarily unavailable (server error), so auto mode cannot determine the
+  safety of Bash"* — for hours, while the chat kept working and the API was
+  up: auto mode's separate, non-streaming **classifier** request fails behind
+  the proxy once the session is large, and a fleet agent's first request is
+  already ~140k tokens on a machine with several MCP connectors, so the
+  manager and its coders were refused from their first shell command. The fix
+  is the proxy's (AISquare-Explainability-SDK#1144); meanwhile: `aisquare
+  doctor` gains `explainability auto-mode` — present when a fleet role runs
+  `auto` behind a configured proxy, it reads the first-turn size of recent
+  sessions from their transcripts and warns above ~100k tokens or when a
+  recent session was refused; `fleet spawn` carries the same warning on its
+  receipt; a session being refused is put in 🔔 attention by its Stop hook
+  with one `auto_mode_blocked` board line; and the docs name the signature and
+  the three ways round it (a non-classifier mode per role, a lighter config
+  dir, tracing off).
 - **An exited agent can be restarted from the UI, and a dead manager no
   longer blocks its own replacement** (#138). A manager whose Claude Code was
   ended with ctrl+c inside its window sat on the sidebar as 💤 forever: the

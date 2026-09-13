@@ -514,7 +514,7 @@ class PaneScript:
             body = [*self.rows, *([""] * (self.height - len(self.rows)))][: self.height]
             facts = tmux_core._SEP.join(
                 ["%1", str(self.width), str(self.height), "0", "0", "1", "0", "0",
-                 "0", "", "0", "bash", "0", "0", ""]
+                 "0", "", "0", "bash", "0", "0", "0", "0", ""]
             )  # fmt: skip
             return Completed(0, "\n".join([*body, facts]) + "\n", "")
         return Completed(0, "", "")

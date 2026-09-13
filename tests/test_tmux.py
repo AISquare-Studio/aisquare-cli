@@ -98,6 +98,8 @@ def _facts_line(**overrides: str) -> str:
         "pane_current_command": "claude",
         "mouse_any_flag": "0",
         "mouse_sgr_flag": "0",
+        "mouse_button_flag": "0",
+        "mouse_all_flag": "0",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -557,6 +559,22 @@ def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
         current_command="claude",
         title="fedora",
     )
+
+
+def test_pane_facts_reads_which_mouse_reports_the_program_asked_for(
+    fake_bin: Path, conf: Path
+) -> None:
+    """``?1000`` alone is presses and releases; ``?1002`` (button-event) or ``?1003``
+    (any-event) is what makes a forwarded drag a report the program asked for (#148)."""
+
+    def facts(**flags: str) -> PaneFacts:
+        fake = FakeTmux(Completed(0, _facts_line(mouse_any_flag="1", **flags) + "\n", ""))
+        return _server(fake, fake_bin, conf).pane_facts("%3")  # type: ignore[return-value]
+
+    assert facts().mouse_on is True and facts().mouse_drag is False
+    assert facts(mouse_button_flag="1").mouse_drag is True
+    assert facts(mouse_all_flag="1").mouse_drag is True
+    assert facts(mouse_sgr_flag="1").mouse_sgr is True and facts().mouse_sgr is False
 
 
 def test_pane_facts_reads_a_dead_pane_and_the_flags(fake_bin: Path, conf: Path) -> None:

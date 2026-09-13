@@ -49,6 +49,21 @@ over the pane's history (clamped to ``history_size``); any key returns to live.
 ``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Forwarded
 input re-arms the fast cadence, so an echo never waits for the idle tick.
 
+Mouse (#148). A program that tracks the mouse (Claude Code's fullscreen renderer
+turns on ``?1000`` + ``?1006``) gets the pointer as the events it asked for —
+wheel notches, and button presses, drags and releases, SGR-encoded with the
+modifier bits (shift 4, alt 8, ctrl 16; X10 when that is what it asked for) — so
+a click places Claude Code's cursor, the ``✕`` on its diff panel and its menu
+rows respond, and a drag selects inside Claude Code, which copies on release by
+itself. While such a program owns the mouse this widget's own drag-select stands
+down (:meth:`TerminalPane.allow_select`); shift+drag is the one gesture that
+always selects locally, through this widget, and copies on release. After a
+forwarded left-button release the widget reads tmux's newest paste buffer — what
+Claude Code writes inside tmux when its own clipboard write cannot reach a
+display — and mirrors a changed one to the outer clipboard. Measured before the
+change (issue #148, 2026-09-12): tmux passes the sequences byte for byte with
+``mouse off``; the pane simply never sent them.
+
 Failing open. A pane that vanishes, a dead pane, an unavailable tmux, or an
 unexpected error in the render loop never take the app down: the last frame
 stays on screen with a notice in its bottom row — ``(pane gone)``,
@@ -144,6 +159,31 @@ def _extract(selection: Selection, rows: list[str]) -> str:
     return "\n".join(pieces).rstrip("\n")
 
 
+def _sgr(kind: str, code: int, x: int, y: int) -> str:
+    """One SGR (``?1006``) mouse report: ``ESC [ < b ; x ; y M`` — ``m`` for a release.
+
+    ``b`` is the button with its modifier bits (wheel notches are 64 and 65);
+    a drag adds 32, the motion flag. Coordinates are 1-based pane cells.
+    """
+    button = code + 32 if kind == "drag" else code
+    return f"\x1b[<{button};{x};{y}{'m' if kind == 'release' else 'M'}"
+
+
+def _x10(kind: str, code: int, x: int, y: int) -> bytes:
+    """One X10 (``?1000``) report: three bytes after ``ESC [ M``, each 32 + value.
+
+    A release is button 3 with the modifier bits kept, a drag adds 32, and a
+    cell past 223 cannot be expressed, so it is clamped.
+    """
+    if kind == "release":
+        button = 3 | (code & ~3)
+    elif kind == "drag":
+        button = code + 32
+    else:
+        button = code
+    return b"\x1b[M" + bytes([32 + button, 32 + min(x, 223), 32 + min(y, 223)])
+
+
 _MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
 """Every mounted pane, so the end of a gesture reaches them without a DOM walk."""
 
@@ -222,7 +262,11 @@ class TerminalPane(Widget, can_focus=True):
     WHEEL_LINES: int = 3
     """History lines one wheel notch moves."""
     WHEEL_COALESCE: float = 0.02
-    """Seconds notches are gathered before one tmux call carries them all."""
+    """Seconds mouse events are gathered before one tmux call carries them all."""
+    BUFFER_MIRROR_DELAY: float = 0.15
+    """Seconds after a forwarded left-button release before tmux's paste buffer is
+    read: the program's copy-on-select has to run first (Claude Code writes it
+    from its release handler; measured well under 100 ms on this machine)."""
     SCROLL_KEYS: ClassVar[dict[str, str]] = {
         "shift+pageup": "page_up",
         "shift+pagedown": "page_down",
@@ -277,9 +321,20 @@ class TerminalPane(Widget, can_focus=True):
         self._synced: tuple[str, int, int] | None = None
         self._warned: set[str] = set()
         self._reported_gone = False
-        self._wheel_queue: list[tuple[bool, int, int]] = []
-        """Notches (up?, pane column, pane row) awaiting one forwarding call."""
-        self._wheel_timer: Timer | None = None
+        self._mouse_queue: list[tuple[str, int, int, int]] = []
+        """Mouse events (kind, button code, pane column, pane row) awaiting one
+        forwarding call; ``kind`` is ``wheel``, ``press``, ``drag`` or ``release``."""
+        self._mouse_timer: Timer | None = None
+        self._forwarding: int | None = None
+        """The Textual button whose press went to the program — until its release."""
+        self._shift_drag: Offset | None = None
+        """Where a shift+drag began, while this widget runs that selection itself."""
+        self._buffer_before: str | None = None
+        """tmux's paste buffer as it stood at a forwarded left press (#148)."""
+        self._last_drag: tuple[int, int, int] | None = None
+        """The (code, column, row) of the last drag report sent, so a pointer that
+        has not left its cell is not reported again — a terminal reports motion
+        per cell, not per pixel."""
         self._marker: tuple[int, int] | None = None
         """``(scrollback, history)`` the corner marker last showed, or ``None``."""
         self._selection_bg: Style | None = None
@@ -352,10 +407,14 @@ class TerminalPane(Widget, can_focus=True):
         self._painted_span = None
         if self.is_mounted and self.text_selection is not None:
             self._clear_own_selection()  # agent A's highlight must not sit on agent B
-        self._wheel_queue = []
-        if self._wheel_timer is not None:
-            self._wheel_timer.stop()
-            self._wheel_timer = None
+        self._mouse_queue = []
+        if self._mouse_timer is not None:
+            self._mouse_timer.stop()
+            self._mouse_timer = None
+        self._forwarding = None
+        self._shift_drag = None
+        self._buffer_before = None
+        self._last_drag = None
         # A new attach may be a new server — ``ManagerTab`` assigns ``server``
         # then calls this — and a cached "extended chords are fine" from a 3.7
         # server would TYPE ``S-Enter`` into an agent on a 3.4 one. Re-read
@@ -379,8 +438,8 @@ class TerminalPane(Widget, can_focus=True):
         _MOUNTED_PANES.discard(self)
         if self._timer is not None:
             self._timer.stop()
-        if self._wheel_timer is not None:
-            self._wheel_timer.stop()
+        if self._mouse_timer is not None:
+            self._mouse_timer.stop()
         if self._resize_timer is not None:
             self._resize_timer.stop()
 
@@ -867,6 +926,26 @@ class TerminalPane(Widget, can_focus=True):
         hatch = self.escape_key.lower()
         return event.key.lower() == hatch or hatch in (alias.lower() for alias in event.aliases)
 
+    @property
+    def allow_select(self) -> bool:
+        """Textual's own drag-select — except while a program owns the mouse (#148).
+
+        Read by the screen at every mouse-down to decide whether the gesture may
+        start a selection. A program that tracks the mouse gets the gesture
+        instead (Claude Code selects, and copies, inside itself); shift+drag is
+        the local selection then, and this widget runs it by hand
+        (:meth:`on_mouse_down`).
+        """
+        return self.ALLOW_SELECT and not self._program_owns_mouse()
+
+    def _program_owns_mouse(self) -> bool:
+        """Whether the pointer belongs to the program in the pane right now.
+
+        The wheel's own decision (:meth:`_scroll_owner`): a program that asked for
+        mouse tracking, not in tmux copy mode, with the view live.
+        """
+        return self.attached and self.server is not None and self._scroll_owner() == "program"
+
     def on_key(self, event: events.Key) -> None:
         if self._is_escape(event):
             event.stop()
@@ -991,6 +1070,13 @@ class TerminalPane(Widget, can_focus=True):
         the double-click path owns the gesture and brokers it itself.
         """
         self.focus()
+        if self._program_owns_mouse() and not event.shift:
+            # The press and the release already went to the program (#148): a
+            # double click is two presses there, and Claude Code does its own
+            # word and line selection. Nothing to select here — and no default,
+            # which would select the whole pane.
+            event.prevent_default()
+            return
         if event.widget is self and event.chain >= 2:
             event.prevent_default()
             if event.chain == 2 and event.button == 1:
@@ -1028,8 +1114,155 @@ class TerminalPane(Widget, can_focus=True):
     # --- selection and copy ------------------------------------------------------------
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        """Note which button began a gesture HERE, for a release we may not see."""
+        """Note which button began a gesture here; under a program that owns the mouse, run it.
+
+        Three gestures can start here. Under a program that does not track the
+        mouse nothing changed: Textual's selection machinery takes the drag (the
+        screen decided that before this ran — see :meth:`allow_select`) and the
+        release is heard through :meth:`selection_gesture_ended`. Under one that
+        does, shift+drag begins a LOCAL selection this widget runs itself, the
+        mouse captured so the moves and the release arrive wherever they land;
+        any other press is forwarded as the SGR press the program asked for
+        (#148), the mouse captured for the drag and the release to follow.
+        ``event.stop()`` on both: a press the program owns is not the app's.
+        """
         self._drag_button = event.button
+        if not self._program_owns_mouse():
+            return
+        event.stop()
+        self.focus()
+        x, y = self._cell(event)
+        if event.shift:
+            self._shift_drag = Offset(x, y)
+            self._set_own_selection(Selection(Offset(x, y), Offset(x + 1, y)))
+            self.capture_mouse()
+            return
+        self._forwarding = event.button
+        code = self._button_code(event.button, event)
+        # A move that stays in the pressed cell is no motion: a terminal reports
+        # motion per cell, and Textual moves the pointer before every release.
+        self._last_drag = (code, x, y)
+        # The buffer as it stands, so a release can tell a NEW copy from an old one.
+        self._buffer_before = self._read_buffer() if event.button == 1 else None
+        self._queue_mouse("press", code, x, y)
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._shift_drag is not None:
+            event.stop()
+            self._set_own_selection(self._shift_span(event))
+            return
+        if self._forwarding is not None:
+            event.stop()
+            facts = self.facts
+            if facts is None or not facts.mouse_drag:
+                return  # the program asked for presses and releases only (``?1000``)
+            x, y = self._cell(event)
+            report = (self._button_code(self._forwarding, event), x, y)
+            if report == self._last_drag:
+                return
+            self._last_drag = report
+            self._queue_mouse("drag", *report)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        """End a gesture this widget began: the local shift+drag, or a forwarded button.
+
+        The shift+drag's copy is NOT made here: the screen posts ``TextSelected``
+        for this release too, the app routes it to :meth:`selection_gesture_ended`,
+        and that copies exactly as it does for a Textual-native drag — one
+        path, one toast. A forwarded left release arms the paste-buffer mirror.
+        """
+        if self._shift_drag is not None:
+            event.stop()
+            self._set_own_selection(self._shift_span(event))
+            self._shift_drag = None
+            self.release_mouse()
+            return
+        if self._forwarding is None:
+            return
+        event.stop()
+        button, self._forwarding = self._forwarding, None
+        self._drag_button = None
+        self._last_drag = None
+        self.release_mouse()
+        x, y = self._cell(event)
+        self._queue_mouse("release", self._button_code(button, event), x, y)
+        if button == 1:
+            self.set_timer(self.BUFFER_MIRROR_DELAY, self._mirror_buffer, name="buffer-mirror")
+
+    def _cell(self, event: events.MouseEvent) -> tuple[int, int]:
+        """The widget cell under the pointer, clamped to the rows and columns shown.
+
+        A captured pointer reports offsets outside the widget — negative, or past
+        the edge — and the program has no cell there to receive them.
+        """
+        width, height = self.content_size
+        return (
+            min(max(int(event.x), 0), max(width - 1, 0)),
+            min(max(int(event.y), 0), max(height - 1, 0)),
+        )
+
+    def _shift_span(self, event: events.MouseEvent) -> Selection:
+        """The local selection from where the shift+drag began to the cell under the pointer.
+
+        Ordered, whichever way the drag went: ``Selection.get_span`` reorders
+        nothing, so a reversed pair paints — and copies — nothing (see
+        :func:`_extract`). The cell under the pointer is included, as in every
+        terminal.
+        """
+        assert self._shift_drag is not None
+        x, y = self._cell(event)
+        here, there = Offset(x, y), self._shift_drag
+        if (here.y, here.x) < (there.y, there.x):
+            here, there = there, here
+        return Selection(there, Offset(here.x + 1, here.y))
+
+    @staticmethod
+    def _button_code(button: int, event: events.MouseEvent) -> int:
+        """The SGR button number: 0, 1, 2 for left, middle, right, plus the modifier bits.
+
+        Shift 4, alt (meta) 8, ctrl 16 — the xterm encoding every mouse-tracking
+        program reads, which is how ctrl+click opens a link in Claude Code.
+        """
+        code = {1: 0, 2: 1, 3: 2}.get(button, 0)
+        if event.shift:
+            code += 4
+        if event.meta:
+            code += 8
+        if event.ctrl:
+            code += 16
+        return code
+
+    def _read_buffer(self) -> str | None:
+        """tmux's newest paste buffer, or ``None`` when there is none or tmux cannot say."""
+        if self.server is None:
+            return None
+        try:
+            return self.server.show_buffer()
+        except TmuxError:
+            return None
+
+    def _mirror_buffer(self) -> None:
+        """After a forwarded left release: a paste buffer the program wrote is copied out.
+
+        Claude Code's copy-on-select runs ``wl-copy``/``xclip`` in the PANE's
+        environment — the tmux server's, which may have no display — and, inside
+        tmux, writes the tmux paste buffer. That buffer is the one place the
+        selection is sure to land, so one that changed between the press and now
+        goes to the outer terminal's clipboard (OSC 52), the way this widget's
+        own copies do. Unchanged, or none: nothing was selected there — a click
+        that placed the cursor — and nothing is said.
+        """
+        before, self._buffer_before = self._buffer_before, None
+        after = self._read_buffer()
+        if not after or after == before:
+            return
+        self.app.copy_to_clipboard(after)
+        count = len(after)
+        self.notify(
+            f"copied {count} character{'s' if count != 1 else ''} — the agent's own selection",
+            markup=False,
+        )
 
     def _set_own_selection(self, selection: Selection | None) -> None:
         """Write THIS widget's entry on the screen, leaving every other widget's alone.
@@ -1206,7 +1439,16 @@ class TerminalPane(Widget, can_focus=True):
         )
 
     def _queue_notches(self, up: bool, count: int, x: int, y: int) -> None:
-        """Queue ``count`` wheel notches for the program at pane cell ``(x, y)``."""
+        """Queue ``count`` wheel notches for the program at 1-based widget cell ``(x, y)``."""
+        for _ in range(count):
+            self._queue_mouse("wheel", 64 if up else 65, x - 1, y - 1)
+
+    def _queue_mouse(self, kind: str, code: int, x: int, y: int) -> None:
+        """Queue one mouse event for the program at widget cell ``(x, y)`` (0-based).
+
+        Presses, drags, releases and notches share one queue so they reach the
+        program in the order they happened.
+        """
         facts = self.facts
         if facts is None:
             return
@@ -1214,33 +1456,24 @@ class TerminalPane(Widget, can_focus=True):
         # debounced resize-window: the widget shows the pane's LAST rows, so a
         # widget row maps to a pane row that many lines further down.
         offset = max(0, facts.height - self.content_size.height)
-        self._wheel_queue.extend([(up, x, y + offset)] * count)
-        if self._wheel_timer is None:
-            # One tmux client per FLUSH, not per notch: a trackpad flick is 20-50
-            # notches a second, each of which was its own fork+exec.
-            self._wheel_timer = self.set_timer(self.WHEEL_COALESCE, self._flush_wheel, name="wheel")
+        self._mouse_queue.append((kind, code, x + 1, y + 1 + offset))
+        if self._mouse_timer is None:
+            # One tmux client per FLUSH, not per event: a trackpad flick is 20-50
+            # notches a second, a drag as many moves, each its own fork+exec before.
+            self._mouse_timer = self.set_timer(self.WHEEL_COALESCE, self._flush_mouse, name="mouse")
 
-    def _flush_wheel(self) -> None:
-        """Send every notch queued since the last flush as one tmux call."""
-        self._wheel_timer = None
-        queue, self._wheel_queue = self._wheel_queue, []
+    def _flush_mouse(self) -> None:
+        """Send every mouse event queued since the last flush as one tmux call."""
+        self._mouse_timer = None
+        queue, self._mouse_queue = self._mouse_queue, []
         facts = self.facts
         if not queue or self.pane_id is None or self.server is None or facts is None:
             return
         try:
             if facts.mouse_sgr:
-                self.server.send_literal(
-                    self.pane_id,
-                    "".join(f"\x1b[<{64 if up else 65};{x};{y}M" for up, x, y in queue),
-                )
+                self.server.send_literal(self.pane_id, "".join(_sgr(*event) for event in queue))
             else:
-                # X10: three bytes after ESC [ M, each 32 + value, one byte each —
-                # so a cell past 223 cannot be expressed and is clamped.
-                payload = b"".join(
-                    b"\x1b[M" + bytes([32 + (64 if up else 65), 32 + min(x, 223), 32 + min(y, 223)])
-                    for up, x, y in queue
-                )
-                self.server.send_bytes(self.pane_id, payload)
+                self.server.send_bytes(self.pane_id, b"".join(_x10(*event) for event in queue))
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
             return

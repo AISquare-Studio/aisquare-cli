@@ -633,6 +633,23 @@ tmux copy mode stays tmux's. The keyboard scrolls too: shift+PgUp / shift+PgDn
 scrollback), shift+Home (the top) and shift+End (live) — through the same
 decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
+
+**The mouse in a Claude Code pane.** A program that tracks the mouse — Claude
+Code's fullscreen renderer does — gets your clicks, drags and releases as the
+mouse events it asked for, the way it already got the wheel: click in the
+prompt to place Claude's cursor, click the `✕` on its diff panel, a `/model`
+row or a collapsed tool result, ctrl+click a link, and drag across the
+transcript to select *in Claude Code*, which copies on release by itself
+(double- and triple-click are its word and line selection). Claude's own copy
+runs `wl-copy`/`xclip` in the agent's environment — the tmux server's, which may
+have no display — and inside tmux writes the tmux paste buffer, so after a
+left-button release the UI reads that buffer and mirrors a changed one to your
+clipboard (OSC 52), the same way its own copies arrive. Claude Code's selection
+is copy-only by design: there is no "select in the prompt and paste over it"
+in Claude Code in any terminal. While such a program owns the mouse the UI's
+own drag-select stands down; **shift+drag** is the one gesture that always
+selects locally, in every pane, and copies on release. In a pane whose program
+does not track the mouse (a shell, the classic renderer) nothing changed:
 Drag to select text in a pane (double-click selects a word): it is copied to
 your clipboard on release (OSC 52 — your terminal has to accept it; Windows
 Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies again

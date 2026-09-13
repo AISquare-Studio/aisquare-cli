@@ -1,0 +1,580 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cliXR wire protocol",
+  "description": "Generated from aisquare.services.xr.protocol \u2014 do not edit. Regenerate with: python -m aisquare.services.xr.protocol --write",
+  "protocol": 1,
+  "server": {
+    "$defs": {
+      "Ack": {
+        "additionalProperties": false,
+        "description": "The outcome of a client action.\n\nThe one addition to the protocol as drafted, and the reason is\n:func:`services.fleet.tell`: a prompt is delivered either by typing into a\nwaiting pane or by filing a board note for the agent's next delta, and\nwhich of the two happened is something the operator wants to see. Without\nthis frame a prompt that became a note is indistinguishable from one that\nlanded in the pane.",
+        "properties": {
+          "t": {
+            "const": "ack",
+            "default": "ack",
+            "title": "T",
+            "type": "string"
+          },
+          "for": {
+            "const": "prompt",
+            "default": "prompt",
+            "title": "For",
+            "type": "string"
+          },
+          "session": {
+            "title": "Session",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "ok"
+        ],
+        "title": "Ack",
+        "type": "object"
+      },
+      "Delta": {
+        "additionalProperties": false,
+        "description": "What changed since the last frame. Never sent empty.",
+        "properties": {
+          "t": {
+            "const": "delta",
+            "default": "delta",
+            "title": "T",
+            "type": "string"
+          },
+          "changed": {
+            "items": {
+              "$ref": "#/$defs/Session"
+            },
+            "title": "Changed",
+            "type": "array"
+          },
+          "removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed",
+            "type": "array"
+          }
+        },
+        "title": "Delta",
+        "type": "object"
+      },
+      "Error": {
+        "additionalProperties": false,
+        "description": "Something the client asked for did not happen, and why.\n\n``code`` is the stable half \u2014 key on it. ``message`` is for a human\nreading a console.",
+        "properties": {
+          "t": {
+            "const": "error",
+            "default": "error",
+            "title": "T",
+            "type": "string"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "Error",
+        "type": "object"
+      },
+      "Group": {
+        "additionalProperties": false,
+        "description": "A visual container for several panels. Reserved: ``groups`` is ``[]`` today.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "colorKey": {
+            "enum": [
+              "planner",
+              "coder",
+              "runner"
+            ],
+            "title": "Colorkey",
+            "type": "string"
+          },
+          "sessions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "colorKey"
+        ],
+        "title": "Group",
+        "type": "object"
+      },
+      "Hello": {
+        "additionalProperties": false,
+        "description": "First frame after a successful auth.",
+        "properties": {
+          "t": {
+            "const": "hello",
+            "default": "hello",
+            "title": "T",
+            "type": "string"
+          },
+          "protocol": {
+            "default": 1,
+            "title": "Protocol",
+            "type": "integer"
+          },
+          "hub": {
+            "title": "Hub",
+            "type": "string"
+          },
+          "serverTime": {
+            "title": "Servertime",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hub",
+          "serverTime"
+        ],
+        "title": "Hello",
+        "type": "object"
+      },
+      "Session": {
+        "additionalProperties": false,
+        "description": "One agent session as a panel in the ring.\n\n``summary`` is computed by the server from the session's most recent BOARD\nEVENT and is capped at six words. It is never derived from transcript\ntext \u2014 the ambient tier must stay glanceable, and transcript content\nreaches the client only for the one session it has subscribed to.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "planner",
+              "coder",
+              "runner",
+              "remote"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "working",
+              "waiting",
+              "needs_you",
+              "gone"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "taskId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Taskid"
+          },
+          "colorKey": {
+            "enum": [
+              "planner",
+              "coder",
+              "runner"
+            ],
+            "title": "Colorkey",
+            "type": "string"
+          },
+          "lastActivityAt": {
+            "title": "Lastactivityat",
+            "type": "string"
+          },
+          "unread": {
+            "default": 0,
+            "title": "Unread",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "title",
+          "state",
+          "summary",
+          "colorKey",
+          "lastActivityAt"
+        ],
+        "title": "Session",
+        "type": "object"
+      },
+      "Snapshot": {
+        "additionalProperties": false,
+        "description": "The whole board. Sent once after ``hello``, and again on reconnect.",
+        "properties": {
+          "t": {
+            "const": "snapshot",
+            "default": "snapshot",
+            "title": "T",
+            "type": "string"
+          },
+          "sessions": {
+            "items": {
+              "$ref": "#/$defs/Session"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/$defs/Task"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/$defs/Group"
+            },
+            "title": "Groups",
+            "type": "array"
+          }
+        },
+        "title": "Snapshot",
+        "type": "object"
+      },
+      "Stt": {
+        "additionalProperties": false,
+        "description": "A speech-to-text result: interim (``final=False``) then final.",
+        "properties": {
+          "t": {
+            "const": "stt",
+            "default": "stt",
+            "title": "T",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "final": {
+            "default": false,
+            "title": "Final",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "Stt",
+        "type": "object"
+      },
+      "Task": {
+        "additionalProperties": false,
+        "description": "A board task, for the client's task-side affordances.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Role"
+          },
+          "claimedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimedby"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status"
+        ],
+        "title": "Task",
+        "type": "object"
+      },
+      "Transcript": {
+        "additionalProperties": false,
+        "description": "A chunk of the subscribed session's transcript.\n\n``seq`` increases per subscription, so a client that misses a frame knows.\n``final`` marks the end of one transcript record, not the end of the stream.",
+        "properties": {
+          "t": {
+            "const": "transcript",
+            "default": "transcript",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "title": "Session",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "final": {
+            "default": true,
+            "title": "Final",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session",
+          "seq",
+          "text"
+        ],
+        "title": "Transcript",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "ack": "#/$defs/Ack",
+        "delta": "#/$defs/Delta",
+        "error": "#/$defs/Error",
+        "hello": "#/$defs/Hello",
+        "snapshot": "#/$defs/Snapshot",
+        "stt": "#/$defs/Stt",
+        "transcript": "#/$defs/Transcript"
+      },
+      "propertyName": "t"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/Hello"
+      },
+      {
+        "$ref": "#/$defs/Snapshot"
+      },
+      {
+        "$ref": "#/$defs/Delta"
+      },
+      {
+        "$ref": "#/$defs/Transcript"
+      },
+      {
+        "$ref": "#/$defs/Stt"
+      },
+      {
+        "$ref": "#/$defs/Error"
+      },
+      {
+        "$ref": "#/$defs/Ack"
+      }
+    ]
+  },
+  "client": {
+    "$defs": {
+      "Audio": {
+        "additionalProperties": false,
+        "description": "Header for a push-to-talk burst. Binary frames follow until ``audioEnd``.",
+        "properties": {
+          "t": {
+            "const": "audio",
+            "default": "audio",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "title": "Session",
+            "type": "string"
+          },
+          "seq": {
+            "default": 0,
+            "title": "Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "Audio",
+        "type": "object"
+      },
+      "AudioEnd": {
+        "additionalProperties": false,
+        "description": "End of a push-to-talk burst: transcribe what was buffered.",
+        "properties": {
+          "t": {
+            "const": "audioEnd",
+            "default": "audioEnd",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "title": "Session",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "AudioEnd",
+        "type": "object"
+      },
+      "Auth": {
+        "additionalProperties": false,
+        "description": "Always the first frame. The socket is closed if it is not.",
+        "properties": {
+          "t": {
+            "const": "auth",
+            "default": "auth",
+            "title": "T",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "Auth",
+        "type": "object"
+      },
+      "Prompt": {
+        "additionalProperties": false,
+        "description": "Send text to one session, as the operator.",
+        "properties": {
+          "t": {
+            "const": "prompt",
+            "default": "prompt",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "title": "Session",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session",
+          "text"
+        ],
+        "title": "Prompt",
+        "type": "object"
+      },
+      "Subscribe": {
+        "additionalProperties": false,
+        "description": "Start (or with ``session=None``, stop) streaming one transcript.",
+        "properties": {
+          "t": {
+            "const": "subscribe",
+            "default": "subscribe",
+            "title": "T",
+            "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session"
+          }
+        },
+        "title": "Subscribe",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "audio": "#/$defs/Audio",
+        "audioEnd": "#/$defs/AudioEnd",
+        "auth": "#/$defs/Auth",
+        "prompt": "#/$defs/Prompt",
+        "subscribe": "#/$defs/Subscribe"
+      },
+      "propertyName": "t"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/Auth"
+      },
+      {
+        "$ref": "#/$defs/Subscribe"
+      },
+      {
+        "$ref": "#/$defs/Prompt"
+      },
+      {
+        "$ref": "#/$defs/Audio"
+      },
+      {
+        "$ref": "#/$defs/AudioEnd"
+      }
+    ]
+  }
+}

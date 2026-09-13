@@ -1,0 +1,335 @@
+"""Every message on the cliXR wire, as a Pydantic v2 model.
+
+This module is the contract. A browser client written against
+``web/xr/protocol.schema.json`` and this server are two implementations of the
+same document, built by different people at the same time, and the only thing
+keeping them honest is that the schema is generated from these models and
+committed::
+
+    python -m aisquare.services.xr.protocol --write    # regenerate
+    python -m aisquare.services.xr.protocol --check    # non-zero on drift
+
+``tests/test_xr_protocol.py`` runs ``--check``'s comparison, so a field renamed
+here and not regenerated fails the suite rather than a headset.
+
+Field names are ``camelCase`` on the wire because the other half is JavaScript;
+they are ``snake_case`` in Python where the two differ, and the alias is what
+serializes. ``for`` is the one field that cannot share its Python name at all
+(it is a keyword), so :class:`Ack` spells it ``for_`` and aliases it back.
+
+:data:`PROTOCOL_VERSION` goes out in every ``hello``. Bump it when a change
+would make an older client misread a frame — not for an added optional field,
+which both sides tolerate by construction.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
+PROTOCOL_VERSION = 1
+"""Wire version announced in ``hello``. See the module docstring for when to bump."""
+
+SessionState = Literal["working", "waiting", "needs_you", "gone"]
+"""What the operator needs to know about a session at a glance.
+
+``gone`` is in the vocabulary because the client may hold a panel that has
+aged out; the projector itself reports departures as ``delta.removed`` and
+never emits a session in this state (:func:`projector.classify`).
+"""
+
+SessionRole = Literal["planner", "coder", "runner", "remote"]
+"""The role bucket a panel is labelled with. ``remote`` is an MCP client."""
+
+ColorKey = Literal["planner", "coder", "runner"]
+"""Palette slot. The client maps this to hex; the server never sends colour."""
+
+
+class _Wire(BaseModel):
+    """Shared config: aliases populate both ways, unknown fields are refused.
+
+    ``extra="forbid"`` is deliberate on a protocol that two people are
+    implementing in parallel. A client that sends ``{"t": "prompt", "session":
+    …, "message": …}`` when the field is called ``text`` should be told so on
+    the first frame, not silently prompt an agent with an empty string.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+# --- entities -------------------------------------------------------------------
+
+
+class Session(_Wire):
+    """One agent session as a panel in the ring.
+
+    ``summary`` is computed by the server from the session's most recent BOARD
+    EVENT and is capped at six words. It is never derived from transcript
+    text — the ambient tier must stay glanceable, and transcript content
+    reaches the client only for the one session it has subscribed to.
+    """
+
+    id: str
+    role: SessionRole
+    title: str
+    """Short and human: the claimed task's title, the session's focus, or its label."""
+    state: SessionState
+    summary: str
+    """<= 6 words, from the latest board event. Never transcript text."""
+    task_id: str | None = Field(default=None, alias="taskId")
+    color_key: ColorKey = Field(alias="colorKey")
+    last_activity_at: str = Field(alias="lastActivityAt")
+    """ISO 8601. A string on the wire so the client parses it once, its way."""
+    unread: int = 0
+    """Board events for this session since this connection last subscribed to it."""
+
+
+class Task(_Wire):
+    """A board task, for the client's task-side affordances."""
+
+    id: str
+    title: str
+    status: str
+    role: str | None = None
+    claimed_by: str | None = Field(default=None, alias="claimedBy")
+
+
+class Group(_Wire):
+    """A visual container for several panels. Reserved: ``groups`` is ``[]`` today."""
+
+    id: str
+    title: str
+    color_key: ColorKey = Field(alias="colorKey")
+    sessions: list[str] = Field(default_factory=list)
+
+
+# --- server -> client -----------------------------------------------------------
+
+
+class Hello(_Wire):
+    """First frame after a successful auth."""
+
+    t: Literal["hello"] = "hello"
+    protocol: int = PROTOCOL_VERSION
+    hub: str
+    """The board this socket is attached to: the project id."""
+    server_time: str = Field(alias="serverTime")
+
+
+class Snapshot(_Wire):
+    """The whole board. Sent once after ``hello``, and again on reconnect."""
+
+    t: Literal["snapshot"] = "snapshot"
+    sessions: list[Session] = Field(default_factory=list)
+    tasks: list[Task] = Field(default_factory=list)
+    groups: list[Group] = Field(default_factory=list)
+
+
+class Delta(_Wire):
+    """What changed since the last frame. Never sent empty."""
+
+    t: Literal["delta"] = "delta"
+    changed: list[Session] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    """Session ids that ended or went stale. Sent once, on the transition."""
+
+
+class Transcript(_Wire):
+    """A chunk of the subscribed session's transcript.
+
+    ``seq`` increases per subscription, so a client that misses a frame knows.
+    ``final`` marks the end of one transcript record, not the end of the stream.
+    """
+
+    t: Literal["transcript"] = "transcript"
+    session: str
+    seq: int
+    text: str
+    final: bool = True
+
+
+class Stt(_Wire):
+    """A speech-to-text result: interim (``final=False``) then final."""
+
+    t: Literal["stt"] = "stt"
+    text: str
+    final: bool = False
+
+
+class Error(_Wire):
+    """Something the client asked for did not happen, and why.
+
+    ``code`` is the stable half — key on it. ``message`` is for a human
+    reading a console.
+    """
+
+    t: Literal["error"] = "error"
+    code: str
+    message: str
+
+
+class Ack(_Wire):
+    """The outcome of a client action.
+
+    The one addition to the protocol as drafted, and the reason is
+    :func:`services.fleet.tell`: a prompt is delivered either by typing into a
+    waiting pane or by filing a board note for the agent's next delta, and
+    which of the two happened is something the operator wants to see. Without
+    this frame a prompt that became a note is indistinguishable from one that
+    landed in the pane.
+    """
+
+    t: Literal["ack"] = "ack"
+    for_: Literal["prompt"] = Field(default="prompt", alias="for")
+    session: str
+    ok: bool
+    detail: str = ""
+
+
+# --- client -> server -----------------------------------------------------------
+
+
+class Auth(_Wire):
+    """Always the first frame. The socket is closed if it is not."""
+
+    t: Literal["auth"] = "auth"
+    token: str
+
+
+class Subscribe(_Wire):
+    """Start (or with ``session=None``, stop) streaming one transcript."""
+
+    t: Literal["subscribe"] = "subscribe"
+    session: str | None = None
+
+
+class Prompt(_Wire):
+    """Send text to one session, as the operator."""
+
+    t: Literal["prompt"] = "prompt"
+    session: str
+    text: str
+
+
+class Audio(_Wire):
+    """Header for a push-to-talk burst. Binary frames follow until ``audioEnd``."""
+
+    t: Literal["audio"] = "audio"
+    session: str
+    seq: int = 0
+
+
+class AudioEnd(_Wire):
+    """End of a push-to-talk burst: transcribe what was buffered."""
+
+    t: Literal["audioEnd"] = "audioEnd"
+    session: str
+
+
+ServerMessage = Annotated[
+    Hello | Snapshot | Delta | Transcript | Stt | Error | Ack,
+    Field(discriminator="t"),
+]
+ClientMessage = Annotated[
+    Auth | Subscribe | Prompt | Audio | AudioEnd,
+    Field(discriminator="t"),
+]
+
+_SERVER = TypeAdapter[Any](ServerMessage)
+_CLIENT = TypeAdapter[Any](ClientMessage)
+
+
+def parse_client(text: str) -> Any:
+    """One client frame as its model.
+
+    Raises ``pydantic.ValidationError`` for a frame that is not one of the
+    five client messages, and ``ValueError`` for text that is not JSON at all
+    — the caller turns both into an ``error`` frame rather than a traceback.
+    """
+    return _CLIENT.validate_json(text)
+
+
+def to_wire(message: Any) -> str:
+    """A server message as the JSON string to put on the socket.
+
+    ``by_alias`` is what makes ``for_`` serialize as ``for`` and ``taskId``
+    come out camelCase; every model here goes out through this one function so
+    a frame can never be dumped the other way by accident.
+    """
+    return json.dumps(message.model_dump(by_alias=True, mode="json"), separators=(",", ":"))
+
+
+# --- schema ---------------------------------------------------------------------
+
+
+def schema_document() -> dict[str, Any]:
+    """The committed schema: both directions of the protocol in one file.
+
+    ``serialization`` mode for the server half and ``validation`` for the
+    client half, because those are the two questions the client actually asks
+    of it — "what will I receive" and "what may I send" — and they differ
+    (a field with a default is required in neither, but only the validation
+    schema says so).
+    """
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "cliXR wire protocol",
+        "description": (
+            "Generated from aisquare.services.xr.protocol — do not edit. "
+            "Regenerate with: python -m aisquare.services.xr.protocol --write"
+        ),
+        "protocol": PROTOCOL_VERSION,
+        "server": _SERVER.json_schema(by_alias=True, mode="serialization"),
+        "client": _CLIENT.json_schema(by_alias=True, mode="validation"),
+    }
+
+
+def schema_text() -> str:
+    """:func:`schema_document` as the exact bytes that belong in the file."""
+    return json.dumps(schema_document(), indent=2) + "\n"
+
+
+def schema_path() -> Any:
+    """Where the committed schema lives, as an importlib Traversable.
+
+    Package data, not ``__file__`` arithmetic: the server serves this same
+    file to the browser out of an installed wheel, where the source tree the
+    ``--write`` path writes into does not exist.
+    """
+    from importlib.resources import files
+
+    return files("aisquare") / "web" / "xr" / "protocol.schema.json"
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description=__doc__, prog="aisquare.services.xr.protocol")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--write", action="store_true", help="Regenerate the committed schema.")
+    group.add_argument("--check", action="store_true", help="Exit non-zero if it has drifted.")
+    args = parser.parse_args(argv)
+
+    wanted = schema_text()
+    target = Path(str(schema_path()))
+    if args.write:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(wanted, encoding="utf-8")
+        print(f"wrote {target}")
+        return 0
+    current = target.read_text(encoding="utf-8") if target.exists() else ""
+    if current == wanted:
+        print(f"{target} is current (protocol {PROTOCOL_VERSION})")
+        return 0
+    print(
+        f"{target} has drifted from the models in {__name__}.\n"
+        "Regenerate it: python -m aisquare.services.xr.protocol --write",
+    )
+    return 1
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    raise SystemExit(_main())

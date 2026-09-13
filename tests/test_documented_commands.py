@@ -123,6 +123,15 @@ DOCUMENTED = (
     # The live-wiring handoff: doctor, the hooks by hand, metrics — all meant to
     # be typed against the staging server.
     "docs/ci-live-wiring-handoff.md",
+    # The XR demo runbook. Its fenced lines are the ones an operator types
+    # before putting the headset on — `launch`, `board`, `doctor` — so a flag
+    # that leaves the CLI must fail here. `aisquare xr` is deliberately INLINE
+    # in that document and therefore invisible to this guard: the command does
+    # not exist until the server task lands, and fencing it early would make
+    # this guard demand a command nobody can run yet. The integration task
+    # converts those to fenced blocks in the PR that adds the command
+    # (docs/plans/clixr.md §11/M7-M9).
+    "docs/xr-demo.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -886,6 +895,12 @@ CENSUS = {
     # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
     # `src/aisquare/...`).
     "docs/ci-live-wiring-handoff.md": (8, 2),
+    # Measured 2026-09-12 the same way, on the day the document was written:
+    # five fenced commands (`doctor`, three `launch`, `board` — the preflight and
+    # step 1, the only steps that are live) and no classified mentions. Every
+    # `aisquare xr` in that file is inline on purpose and so is not a shell line
+    # at all; re-measure when the integration task fences them.
+    "docs/xr-demo.md": (5, 0),
 }
 
 

@@ -74,14 +74,14 @@ accuracy (§10).
 
 ## The nine steps (plan §15)
 
-### 1. Three Claude Code sessions running in the target repo: one planner, two coders
+### 1. Three Claude Code sessions running in the target repo: planner, coder, tester
 
 From the repo you want to survey, in three terminals or three tmux windows:
 
 ```sh
 aisquare launch planner
 aisquare launch coder
-aisquare launch coder
+aisquare launch tester
 ```
 
 Confirm the board sees all three before you put the headset on — if a session
@@ -92,15 +92,17 @@ renderer for a bug in the launch:
 aisquare board
 ```
 
-> **On colours, before you are surprised in the headset.** Step 4 asks for
-> "three distinct role colours", but the roles above give you only *two*: the
-> ring colours a session by its **role bucket**, and `coder` and `reviewer`
-> share one (`services/xr/projector.py`). Planner + two coders is amber + cyan +
-> cyan. If you want the three-colour survey the plan describes, launch three
-> buckets — for example `planner`, `coder` and `tester`, which is
-> planner-amber `#F2B33D`, coder-cyan `#4FC3D9`, runner-violet `#A78BDB`. Both
-> readings of step 4 are fine to demo; decide which one you are showing before
-> you are wearing the headset.
+> **On colours, if you substitute a role above.** The three roles in that block
+> are three distinct *buckets*, which is what step 4's "three distinct role
+> colours" needs: planner-amber `#F2B33D`, coder-cyan `#4FC3D9`, runner-violet
+> `#A78BDB`. They are also what both rehearsals and the live run used. The ring
+> colours a session by its bucket rather than by its role name
+> (`services/xr/projector.py`), and several names share a bucket — `coder` and
+> `reviewer` are both cyan, and `tester`, `runner`, `validator` and
+> `unassigned` are all violet. So swapping `tester` for a second `coder` gives
+> you amber + cyan + cyan, and step 4 will show you two colours for three
+> panels. That is a fine thing to demo deliberately; it is a bad thing to
+> discover while wearing the headset.
 
 ### 2. `aisquare xr` running; USB connected; `adb reverse` established
 

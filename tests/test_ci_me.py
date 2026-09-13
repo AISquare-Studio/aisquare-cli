@@ -390,6 +390,13 @@ def test_writing_a_document_sweeps_the_expired_ones(stub: StubCI, isolated_home:
     )
     damaged = stale.parent / "me-damaged.json"
     damaged.write_text("not json", encoding="utf-8")
+    # Another module's files share the directory and carry the same `until`
+    # key: an unscoped glob read and deleted them (round 8).
+    descriptor_refusal = stale.parent / "descriptor-run_x.refused.json"
+    descriptor_refusal.write_text(
+        json.dumps({"detail": "x", "until": "2000-01-01T00:00:00+00:00", "endpoint": stub.url}),
+        encoding="utf-8",
+    )
 
     ci_me.fetch(base=stub.url, key="aisq_new-token-000000000000000000000000000000")
 
@@ -398,6 +405,30 @@ def test_writing_a_document_sweeps_the_expired_ones(stub: StubCI, isolated_home:
     assert ci_me._cache_path("aisq_fresh-token-0000000000000000000000000000").exists()
     assert ci_me._cache_path("aisq_new-token-000000000000000000000000000000").exists()
     assert damaged.exists(), "a file that cannot be read is left alone, never a raise"
+    assert descriptor_refusal.exists(), "another module's expired file is not this sweep's"
+
+
+def test_signing_out_and_a_refusal_sweep_too(stub: StubCI, isolated_home: Path) -> None:
+    """After a rotation the quiet cases - a sign-out, an unreachable server - are
+    where a predecessor's document would otherwise survive (round 8): both
+    paths sweep."""
+    import json
+
+    ci_me.fetch(base=stub.url, key="aisq_old-token-000000000000000000000000000000")
+    stale = ci_me._cache_path("aisq_old-token-000000000000000000000000000000")
+    raw = json.loads(stale.read_text(encoding="utf-8"))
+    raw["until"] = "2000-01-01T00:00:00+00:00"
+    stale.write_text(json.dumps(raw), encoding="utf-8")
+
+    ci_me.forget("aisq_current-token-00000000000000000000000000")
+    assert not stale.exists(), "sign-out sweeps"
+
+    ci_me.fetch(base=stub.url, key="aisq_old-token-000000000000000000000000000000")
+    stale.write_text(json.dumps(raw), encoding="utf-8")
+    stub.me_status = 503
+    # `current` is the caller that records a refusal (`fetch` alone never writes one).
+    ci_me.current(base=stub.url, key="aisq_another-token-00000000000000000000000000")
+    assert not stale.exists(), "a refusal write sweeps"
 
 
 def test_bindings_are_per_project_not_per_machine(isolated_home: Path, tmp_path: Path) -> None:

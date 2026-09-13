@@ -280,14 +280,22 @@ def _sweep() -> None:
     token refresh or re-issue left its predecessor's identity document behind -
     a readable list of the developer's workspaces per token, for the life of the
     machine, past the TTL that only stopped it being SERVED (the review of #78).
-    Called where a file is being written anyway, so the directory is bounded to
-    roughly the tokens live inside one TTL; the server half of this feature
-    sweeps its map the same way. Every comparison sits inside the guard, for the
-    reason ``_read_cache`` gives.
+    Called where a file is being written anyway - a document, a refusal - and
+    from ``forget``, because sign-out is the one moment the CLI knows the
+    developer wants this data gone and, after a rotation, the quiet cases (a
+    sign-out, an unreachable server, a machine left alone) are exactly where a
+    predecessor's document would otherwise survive (round 8). The directory is
+    bounded to roughly the tokens live inside one TTL; the server half of this
+    feature sweeps its map the same way. Every comparison sits inside the guard,
+    for the reason ``_read_cache`` gives.
     """
     now = datetime.now(tz=UTC)
     try:
-        candidates = list(_cache_path("").parent.glob("*.json"))
+        # This module's files only: the directory is shared with the delivery
+        # descriptor cache, whose refusals carry the same `until` key, so an
+        # unscoped glob read every cached descriptor per write and deleted
+        # another module's files without that module knowing (round 8).
+        candidates = list(paths.ci_cache_dir().glob("me-*.json"))
     except OSError:
         return
     for path in candidates:
@@ -324,6 +332,7 @@ def _write_refusal(key: str, detail: str, now: datetime, base: str) -> None:
         _refusal_path(key),
         json.dumps({"detail": detail, "until": until, "endpoint": base.rstrip("/")}),
     )
+    _sweep()
 
 
 def _clear_refusal(key: str) -> None:
@@ -332,10 +341,13 @@ def _clear_refusal(key: str) -> None:
 
 
 def forget(key: str) -> None:
-    """Drop this bearer's cached answer and any cached refusal. Never raises."""
+    """Drop this bearer's cached answer and any cached refusal - and every expired
+    one, since sign-out is when the developer has said this data should be gone.
+    Never raises."""
     for path in (_cache_path(key), _refusal_path(key)):
         with contextlib.suppress(OSError):
             path.unlink()
+    _sweep()
 
 
 def _replace(target: Path, body: str) -> None:

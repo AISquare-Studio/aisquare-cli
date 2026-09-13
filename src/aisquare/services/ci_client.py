@@ -204,22 +204,28 @@ def api_key_and_source() -> tuple[str, str]:
     return (token if _single_line(token) else ""), SIGNED_IN_SOURCE
 
 
-def signed_in_display() -> tuple[str, str]:
-    """``(who, source)`` for the signed-in session, from the memoised read. Never raises.
+def signed_in_display() -> tuple[str, str, str]:
+    """``(email, subject, source)`` for the signed-in session, from the memoised read.
 
-    ``who`` is the email when the session knows one, else its subject, else
-    ``""``; ``source`` is ``"env"`` for a session read from ``AISQUARE_TOKEN``.
-    ``doctor`` names the credential from this rather than from its own
-    ``iam.current_session()`` call, so the note it prints comes from the same
-    read that chose the bearer and cannot describe a different snapshot of the
-    credentials file (the review of #78); this module stays a caller of
-    ``iam``, not a second reader of the ``iam_*`` keys.
+    Any of the three may be ``""``; never the token. ``source`` is ``"env"`` for
+    a session read from ``AISQUARE_TOKEN``. The three are kept apart rather than
+    collapsed into one "who" string, so the caller decides what it knows: an
+    email is the user's email and a subject is the locally stored subject, and
+    a subject that happens to contain ``@`` is not promoted to an email by a
+    substring test (round 8). ``doctor`` names the credential from this rather
+    than from its own ``iam.current_session()`` call, so the note it prints
+    comes from the same read that chose the bearer and cannot describe a
+    different snapshot of the credentials file; this module stays a caller of
+    ``iam``, not a second reader of the ``iam_*`` keys. Never raises.
     """
     session = _signed_in_session()
     if session is None:
-        return "", ""
-    who = getattr(session, "email", "") or getattr(session, "sub", "") or ""
-    return str(who), str(getattr(session, "source", "") or "")
+        return "", "", ""
+    return (
+        str(getattr(session, "email", "") or ""),
+        str(getattr(session, "sub", "") or ""),
+        str(getattr(session, "source", "") or ""),
+    )
 
 
 def _signed_in_token() -> str:

@@ -13,6 +13,14 @@ pasted, so `test_documented_commands.py` leaves it alone.
 
 ---
 
+> **Review round 8, 2026-09-12.** The sweep is scoped to this module's own
+> `me-*.json` files in the CI cache directory (the descriptor cache shares it
+> and carries the same `until` key), and it runs from `forget` and from a
+> refusal write as well as from a document write - the quiet cases after a
+> rotation. `signed_in_display` returns email, subject and source apart, and
+> the doctor lines branch on the email being known rather than on a substring
+> test of a collapsed string.
+>
 > **Review round 7, 2026-09-12.** Writing a `GET /v1/me` document sweeps every
 > cached document and refusal whose own expiry has passed, so a token refresh
 > no longer leaves its predecessor's identity document behind for the life of

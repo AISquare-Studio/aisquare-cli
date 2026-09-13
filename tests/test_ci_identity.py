@@ -753,6 +753,33 @@ def test_the_memo_key_is_the_resolved_credentials_path(
     assert os.path.exists(tmp_path / "a" / "home" / "credentials")
 
 
+def test_an_email_shaped_subject_is_not_presented_as_the_users_email(
+    stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    """`signed_in_display` keeps email, subject and source apart; the doctor
+    lines branch on the email being known rather than on a substring test of
+    whatever string came back (round 8)."""
+    from aisquare.core import credentials
+    from aisquare.services import diagnostics, iam
+
+    monkeypatch.setenv(ci_client.ENABLED_ENV_VAR, "1")
+    monkeypatch.setenv(ci_client.URL_ENV_VAR, stub.url)
+    monkeypatch.delenv(ci_client.KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv("AISQUARE_TOKEN", raising=False)
+    credentials.store(
+        **{iam.KEY_API_URL: "https://api.test", iam.KEY_TOKEN: TOKEN, iam.KEY_SUB: "user@tenant"}
+    )
+    ci_client.reset_cache()
+
+    assert ci_client.signed_in_display() == ("", "user@tenant", "file")
+    assert diagnostics._signed_in_as("aisquare-idp:x") == "signed in (aisquare-idp:x)"
+    note = diagnostics._bearer_note(ci_client.SIGNED_IN_SOURCE)
+    assert note == "signed in (user@tenant) (aisquare login)"
+
+    credentials.store(**{iam.KEY_EMAIL: "dev@example.com"})
+    assert diagnostics._signed_in_as("aisquare-idp:x") == "signed in as dev@example.com"
+
+
 def test_the_recall_predicate_resolves_the_project_from_the_servers_own_cwd(
     stub: StubCI, monkeypatch: pytest.MonkeyPatch, isolated_home: Path, tmp_path: Path
 ) -> None:

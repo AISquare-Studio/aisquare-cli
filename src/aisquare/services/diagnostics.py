@@ -1132,8 +1132,12 @@ def _bearer_note(source: str) -> str:
     if source == ci_client.SIGNED_IN_SOURCE:
         # From the memoised read that chose the bearer, never a second parse
         # of the credentials file that could describe another snapshot.
-        who, _origin = ci_client.signed_in_display()
-        return f"signed in as {who} (aisquare login)" if who else "signed in (aisquare login)"
+        email, subject, _source = ci_client.signed_in_display()
+        if email:
+            return f"signed in as {email} (aisquare login)"
+        if subject:
+            return f"signed in ({subject}) (aisquare login)"
+        return "signed in (aisquare login)"
     return "no bearer"
 
 
@@ -1318,10 +1322,10 @@ def _signed_in_as(auth_subject: str) -> str:
     """ "signed in as <email>" when the session knows one, else the server's own
     issuer-qualified subject — never the token, in either branch. Read through
     ``ci_client``'s memo, the same read that chose the bearer."""
-    who, origin = ci_client.signed_in_display()
-    if who and "@" in who:
-        return f"signed in as {who}"
-    if origin == "env":
+    email, _subject, source = ci_client.signed_in_display()
+    if email:
+        return f"signed in as {email}"
+    if source == "env":
         return f"signed in via AISQUARE_TOKEN ({auth_subject})"
     return f"signed in ({auth_subject})"
 

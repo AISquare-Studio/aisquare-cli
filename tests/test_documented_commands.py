@@ -124,13 +124,16 @@ DOCUMENTED = (
     # be typed against the staging server.
     "docs/ci-live-wiring-handoff.md",
     # The XR demo runbook. Its fenced lines are the ones an operator types
-    # before putting the headset on — `launch`, `board`, `doctor` — so a flag
-    # that leaves the CLI must fail here. `aisquare xr` is deliberately INLINE
-    # in that document and therefore invisible to this guard: the command does
-    # not exist until the server task lands, and fencing it early would make
-    # this guard demand a command nobody can run yet. The integration task
-    # converts those to fenced blocks in the PR that adds the command
-    # (docs/plans/clixr.md §11/M7-M9).
+    # before putting the headset on — `doctor`, `launch`, `board`, `xr`, and the
+    # two `hook` invocations behind the pipes in §15 step 7 — so a flag that
+    # leaves the CLI must fail here. `aisquare xr` IS fenced and IS extracted
+    # (three lines, and the CENSUS entry below counts them): the integration
+    # task converted the inline mentions when it added the command, which is
+    # what the note that stood here used to promise (docs/plans/clixr.md
+    # §11/M7-M9). Do not restore the inline form to match a stale reading of
+    # this comment — that would drop three of the eleven commands from the
+    # census, and the 0.8 floor absorbs 8/11 without going red, so the guard
+    # would keep reporting green over three unchecked lines.
     "docs/xr-demo.md",
 )
 

@@ -259,10 +259,24 @@ def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None
     table.add_column("NAME")
     table.add_column("ID", no_wrap=True)
     table.add_column("ROOT")
+    # The column exists only when a captured row is in the list (`--all`), so
+    # the everyday table is unchanged (#139).
+    captured = any(project.onboarded_at is None for project in projects)
+    if captured:
+        table.add_column("LISTED", no_wrap=True)
     for project in projects:
         marker = "*" if project.id == active_id else ""
-        table.add_row(marker, project.root.name or "—", project.id, str(project.root))
+        cells = [marker, project.root.name or "—", project.id, str(project.root)]
+        if captured:
+            cells.append("captured" if project.onboarded_at is None else "yes")
+        table.add_row(*cells)
     stdout_console().print(table)
+    if captured:
+        stdout_console().print(
+            "captured = a hooked session ran there; add it on purpose to list it "
+            "(aisquare project onboard <path>), or drop the stale ones: "
+            "aisquare project prune --captured-only"
+        )
 
 
 def emit_project_action(message: str, project: ProjectInfo) -> None:

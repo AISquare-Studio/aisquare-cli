@@ -332,7 +332,7 @@ def ensure_codename(project: ProjectInfo, store: ContextStore | None = None) -> 
         return project
 
     def assign(store: ContextStore) -> ProjectInfo:
-        store.ensure_project(project)
+        store.onboard_project(project)  # entering the fleet is a deliberate add (#139)
         for _ in range(_CODENAME_RETRIES):
             current = store.get_project(project.id)
             if current is not None and current.codename:
@@ -2072,7 +2072,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
         if project is not None:
             projects = [store.get_project(project.id) or project]
         else:
-            projects = store.list_projects()
+            projects = store.list_projects(all=True)  # a captured directory can hold agents
         for current in projects:
             live = store.fleet_agents(current.id, live_only=True)
             if live:
@@ -2137,7 +2137,7 @@ def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = Non
             "3 to 7 lowercase letters joined by '-'"
         )
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)
         current = store.get_project(project.id) or project
         old = current.codename
         if old == codename:

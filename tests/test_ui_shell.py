@@ -89,7 +89,7 @@ def seed(tmp_path: Path, *specs: tuple[str, str, str | None]) -> list[ProjectInf
     with store_session() as store:
         for project_id, rel, codename in specs:
             project = ProjectInfo(id=project_id, root=tmp_path / rel)
-            store.ensure_project(project)
+            project = store.onboard_project(project)  # added on purpose: shown (#139)
             if codename:
                 project = store.set_codename(project_id, codename)
             projects.append(project)
@@ -1819,3 +1819,34 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
     assert current == "agent-agt_a_new" and selected == "agent:agt_a_new"
     assert any("✓ restarted manager — resumed its session" in toast for toast in toasts), toasts
     assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone
+
+
+def test_the_sidebar_hides_captured_directories_until_a_shows_them(
+    tmp_path: Path, script: Script
+) -> None:
+    """#139: every directory a hooked session ran in used to be a card. Now only the
+    projects added on purpose are; `a` shows the captured ones too, marked."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    with store_session() as store:
+        store.ensure_project(ProjectInfo(id="prj_scratch", root=tmp_path / "scratch"))  # a hook
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, list[str]]:
+        app = fleet_app(pilot)
+        before = [card.project.id for card in app.query(ProjectCard)]
+        app.sidebar.focus()
+        await pilot.press("a")
+        await pilot.pause()
+        shown = [card.project.id for card in app.query(ProjectCard)]
+        title = shown_text(app, "prj_scratch")
+        await pilot.press("a")
+        await pilot.pause()
+        return before, shown, title, [card.project.id for card in app.query(ProjectCard)]
+
+    def shown_text(app: FleetApp, project_id: str) -> str:
+        return shown(card_for(app, project_id).query_one(ProjectTitle))
+
+    before, with_captured, title, after = drive(go)
+    assert before == ["prj_a"], "a captured directory is not a card"
+    assert with_captured == ["prj_a", "prj_scratch"]
+    assert "captured" in title
+    assert after == ["prj_a"], "a hides them again"

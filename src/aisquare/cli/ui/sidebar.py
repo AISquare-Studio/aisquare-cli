@@ -154,6 +154,9 @@ def project_title_text(project: ProjectInfo, statuses: list[FleetAgentStatus]) -
     text.append(f"🗂 {project_name(project)}")
     if project.codename:
         text.append(f"  {project.codename}", style="dim")
+    if project.onboarded_at is None:
+        # Listed only while the shell shows captured directories (#139).
+        text.append("  captured", style="dim italic")
     alive = sum(1 for s in statuses if s.state in ALIVE_STATES)
     bells = sum(1 for s in statuses if s.state == "attention")
     if alive or bells:

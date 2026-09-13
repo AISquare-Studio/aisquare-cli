@@ -184,10 +184,16 @@ def test_schema_rejects_inconsistent_pool(store: ContextStore) -> None:
 def test_list_and_get_projects(store: ContextStore) -> None:
     other = ProjectInfo(id="prj_other", root=Path("/tmp/another-app"), linked_repos=[])
     store.ensure_project(other)  # PROJECT is already registered by the fixture
-    ids = {project.id for project in store.list_projects()}
-    assert ids == {PROJECT.id, "prj_other"}
-    assert store.get_project("prj_other") == other
+    # A captured registration is reachable by id and in the full list, but not LISTED
+    # until something adds it on purpose (#139).
+    assert {project.id for project in store.list_projects(all=True)} == {PROJECT.id, "prj_other"}
+    assert "prj_other" not in {project.id for project in store.list_projects()}
+    stored = store.get_project("prj_other")
+    assert stored is not None and stored.model_copy(update={"onboarded_at": None}) == other
     assert store.get_project("prj_missing") is None
+    store.onboard_project(other)
+    ids = {project.id for project in store.list_projects()}
+    assert ids >= {"prj_other"}
 
 
 def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
@@ -232,8 +238,8 @@ def test_migrations_reach_the_current_schema_version() -> None:
     finally:
         raw.close()
     # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry
-    # (#145), v16 usage readings and the limited state (#146)
-    assert version == SCHEMA_VERSION == 16
+    # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139)
+    assert version == SCHEMA_VERSION == 17
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -807,3 +813,101 @@ def test_project_settings_round_trip_per_project_and_clear(store: ContextStore) 
     assert store.project_settings("claude_account") == {other.id: "3"}
     with pytest.raises(sqlite3.IntegrityError):  # a foreign key: no setting for a ghost project
         store.set_project_setting("prj_ghost", "claude_account", "1")
+
+
+# --- captured versus onboarded (#139) ------------------------------------------------------
+
+
+def test_ensure_project_captures_and_only_onboard_project_shows() -> None:
+    from aisquare.models import ProjectInfo
+
+    store = open_store()
+    try:
+        quiet = ProjectInfo(id="prj_quiet", root=Path("/w/quiet"))
+        store.ensure_project(quiet)  # what a hook does
+        assert store.list_projects() == []  # captured, not shown
+        [captured] = store.list_projects(all=True)
+        assert captured.id == "prj_quiet" and captured.onboarded_at is None
+        assert [p.id for p in store.captured_projects()] == ["prj_quiet"]
+        assert store.get_project("prj_quiet") is not None  # reachable by id, as before
+        store.ensure_project(quiet)  # again: still nothing changes
+        assert store.list_projects() == []
+
+        shown = store.onboard_project(quiet)  # what init / onboard / link / + / team on do
+        assert shown.onboarded_at is not None
+        assert [p.id for p in store.list_projects()] == ["prj_quiet"]
+        assert store.captured_projects() == []
+        first = shown.onboarded_at
+        assert store.onboard_project(quiet).onboarded_at == first  # set once, kept
+
+        # forget clears the mark and hides; a hook's capture afterwards does NOT revive…
+        store.forget_project("prj_quiet")
+        assert store.list_projects(all=True) == [] and store.get_project("prj_quiet") is None
+        store.ensure_project(quiet)
+        assert store.list_projects(all=True) == [], "forget sticks against a capture"
+        # …and a deliberate add brings it back, with a fresh mark.
+        again = store.onboard_project(quiet)
+        assert again.onboarded_at is not None and again.onboarded_at >= first
+        assert [p.id for p in store.list_projects()] == ["prj_quiet"]
+    finally:
+        store.close()
+
+
+def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows with context entries, a codename, linked repos, board activity, a fleet
+    agent or a snapshot on disk become onboarded; captured-only rows stay hidden."""
+    from aisquare.core import snapshot as snapshot_core
+
+    rows = [
+        ("prj_entries", "/w/entries"),
+        ("prj_named", "/w/named"),
+        ("prj_linked", "/w/linked"),
+        ("prj_board", "/w/board"),
+        ("prj_agent", "/w/agent"),
+        ("prj_snap", "/w/snap"),
+        ("prj_quiet", "/w/quiet"),
+        ("prj_gone", "/w/gone"),
+    ]
+
+    def insert(pid: str, root: str) -> str:
+        repos = '["git@x:y.git"]' if pid == "prj_linked" else "[]"
+        name = root.rsplit("/", 1)[1]
+        return (
+            "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+            f"('{pid}', '{root}', '{name}', '{repos}', '2026-09-01T00:00:00+00:00');\n"
+        )
+
+    inserts = "".join(insert(pid, root) for pid, root in rows)
+    after = (
+        inserts
+        + """
+        UPDATE project SET codename = 'amber-otter' WHERE id = 'prj_named';
+        UPDATE project SET forgotten_at = '2026-09-02T00:00:00+00:00' WHERE id = 'prj_gone';
+        INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+            VALUES ('ent_1', 'project', 'prj_entries', 'a fact', '[]', 'cli',
+                    '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+        INSERT INTO team_event (id, project_id, session_id, kind, text, created_at)
+            VALUES ('evt_1', 'prj_board', NULL, 'activate', 'on', '2026-09-01T00:00:00+00:00');
+        INSERT INTO fleet_agent (id, project_id, label, role, tmux_socket, pane_id, cwd,
+                                 worktree, created_at)
+            VALUES ('agt_1', 'prj_agent', 'coder-1', 'coder', 'asq', '%1', '/w/agent', 0,
+                    '2026-09-01T00:00:00+00:00');
+        INSERT INTO prompt (id, project_id, text, source, created_at)
+            VALUES ('prm_1', 'prj_quiet', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+    """
+    )
+    _at_version(16, after=after)
+    snapshot_core.meta_path("prj_snap").parent.mkdir(parents=True, exist_ok=True)
+    snapshot_core.meta_path("prj_snap").write_text("{}", encoding="utf-8")
+
+    store = open_store()
+    try:
+        shown = {p.id for p in store.list_projects()}
+        everything = {p.id for p in store.list_projects(all=True)}
+    finally:
+        store.close()
+    assert shown == {"prj_entries", "prj_named", "prj_linked", "prj_board", "prj_agent", "prj_snap"}
+    assert everything == shown | {"prj_quiet"}, "the prompt-only row is captured, not shown"
+    assert "prj_gone" not in everything, "forgotten stays forgotten"

@@ -178,10 +178,19 @@ class FleetApp(App[None], inherit_bindings=False):
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
         Binding("r", "refresh_now", "refresh"),
+        Binding("a", "toggle_captured", "captured", show=False),
         Binding("question_mark", "help", "help", key_display="?"),
     ]
     SIDEBAR_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"quit", "pick_theme", "refresh_now", "help", "command_palette", "change_theme"}
+        {
+            "quit",
+            "pick_theme",
+            "refresh_now",
+            "help",
+            "command_palette",
+            "change_theme",
+            "toggle_captured",
+        }
     )
     """Actions that are live only while focus is in the sidebar (§4.3)."""
 
@@ -210,6 +219,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
+        self.show_captured = False
+        """Whether the sidebar also lists the directories sessions merely ran in (#139)."""
         self._gesture_button: int | None = None
         """Which button began the selection gesture now running, if one is."""
 
@@ -315,6 +326,17 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def action_refresh_now(self) -> None:
         self.refresh_data()
+
+    def action_toggle_captured(self) -> None:
+        """Show, or hide again, the captured directories the sidebar leaves out (#139)."""
+        self.show_captured = not self.show_captured
+        self.refresh_data()
+        self.notify(
+            "showing captured directories too — `a` hides them again"
+            if self.show_captured
+            else "captured directories hidden — `a` shows them",
+            timeout=4,
+        )
         self.run_doctor()
 
     # --- data ---------------------------------------------------------------------------
@@ -324,7 +346,7 @@ class FleetApp(App[None], inherit_bindings=False):
         sidebar = self.sidebar
         try:
             with store_session() as store:
-                projects = store.list_projects()
+                projects = store.list_projects(all=self.show_captured)
         except Exception as exc:  # the store is briefly unavailable — keep what is shown
             self.store_error = f"{type(exc).__name__}: {exc}"
             if self.snapshot is None:

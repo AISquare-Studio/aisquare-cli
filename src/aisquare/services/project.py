@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import paths
@@ -49,10 +50,10 @@ def info() -> ProjectInfo:
         return active_project(store)
 
 
-def list_projects() -> list[ProjectInfo]:
-    """List all registered projects."""
+def list_projects(*, all: bool = False) -> list[ProjectInfo]:
+    """The projects added on purpose — or, with ``all``, the captured directories too (#139)."""
     with store_session() as store:
-        return store.list_projects()
+        return store.list_projects(all=all)
 
 
 def switch(name: str) -> ProjectInfo:
@@ -160,21 +161,42 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     )
 
 
-def prune_candidates(*, missing: bool, worktrees: bool) -> list[PruneCandidate]:
+def prune_candidates(
+    *, missing: bool, worktrees: bool, captured_older_than: int | None = None
+) -> list[PruneCandidate]:
     """The registrations ``project prune`` would drop, and why — nothing is changed.
 
     ``missing``: the root is no longer a directory on disk. ``worktrees``: the
     root is a linked git worktree whose principal repository is ITSELF a
     registered project — a worktree of an unregistered repo is kept, since it
-    is the only handle on that repo's context. A live fleet agent count is
+    is the only handle on that repo's context. ``captured_older_than``: a
+    directory a session merely ran in (never added on purpose, #139) that holds
+    no context entries and was last touched more than that many days ago —
+    the scratch directories that pile up under a hooked Claude Code. Captured
+    rows are considered for the other two reasons too: a missing root is
+    missing whether or not anyone added it. A live fleet agent count is
     carried so the plan can show what will be kept and why.
     """
     with store_session() as store:
-        projects = store.list_projects()
+        projects = store.list_projects(all=True)
         by_root = {project.root: project for project in projects}
+        activity = store.project_activity() if captured_older_than is not None else {}
+        cutoff = (
+            (datetime.now(tz=UTC) - timedelta(days=captured_older_than)).isoformat()
+            if captured_older_than is not None
+            else None
+        )
         found: list[PruneCandidate] = []
         for project in projects:
             live = len(store.fleet_agents(project.id, live_only=True))
+            if (
+                cutoff is not None
+                and project.onboarded_at is None
+                and not store.entries("project", project_id=project.id)
+                and activity.get(project.id, "") < cutoff
+            ):
+                found.append(PruneCandidate(project=project, reason="captured", live_agents=live))
+                continue
             if not project.root.is_dir():
                 if missing:
                     found.append(
@@ -277,7 +299,7 @@ def link(repo: str) -> ProjectInfo:
     """Link a repository into the active project."""
     with store_session() as store:
         project = active_project(store)
-        store.ensure_project(project)
+        store.onboard_project(project)  # linking a repo is a deliberate add (#139)
         return store.add_linked_repo(project.id, repo)
 
 
@@ -293,7 +315,7 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     facts = [fact for marker, fact in _ECOSYSTEM_MARKERS if (root / marker).exists()]
     seeded: list[ContextEntry] = []
     with store_session() as store:
-        store.ensure_project(project)
+        store.onboard_project(project)  # the deliberate add (#139)
         project_entries = store.entries("project", project_id=project.id)
         already_onboarded = any(entry.source == "onboard" for entry in project_entries)
         if not (already_onboarded and not refresh):

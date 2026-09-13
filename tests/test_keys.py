@@ -27,6 +27,7 @@ from aisquare.core.keys import (
     CHORDS,
     CTRL_PUNCTUATION,
     EXTENDED_MINIMUM,
+    LEGACY_FALLBACK,
     MAX_FUNCTION_KEY,
     NO_CTRL,
     PUNCTUATION,
@@ -450,9 +451,13 @@ def test_the_extended_predicate_matches_the_measurement_both_ways() -> None:
 
 
 def test_an_old_server_drops_extended_only_chords_instead_of_mistyping() -> None:
-    """tmux < 3.5 TYPES these names into the agent (measured); None is the fix."""
-    for textual in ("shift+enter", "shift+escape", "ctrl+shift+a", "ctrl+alt+enter"):
+    """tmux < 3.5 TYPES these names into the agent (measured); None is the fix —
+    except where an older spelling carries the same meaning (#147): shift+enter is
+    Claude Code's newline, and so is ctrl+j on every tmux and every terminal."""
+    for textual in ("shift+escape", "ctrl+shift+a", "ctrl+alt+enter"):
         assert translate(textual, None, printable=False, extended_keys=False) is None, textual
+    assert translate("shift+enter", None, printable=False, extended_keys=False) == key("C-j")
+    assert {"S-Enter": key("C-j")} == LEGACY_FALLBACK, "one fallback, for one measured chord"
     # The negative half: legacy-encodable chords still flow on an old server…
     assert translate("shift+up", None, printable=False, extended_keys=False) == key("S-Up")
     assert translate("ctrl+shift+delete", None, printable=False, extended_keys=False) == key(
@@ -598,3 +603,93 @@ def test_real_tmux_types_none_of_our_names_literally(
     # it literally, 3.4 swallows it. Version-independent half: it must never
     # arrive as a WORKING backspace, the mistranslation the refusal prevents.
     assert "^? <C-BSpace>" not in text
+
+
+# --- Claude Code's documented shortcuts, through the table (#147) ------------------------
+
+#: (what Claude Code's interactive-mode reference calls it, what Textual reports for it
+#: — key, character, printable — and what tmux is sent). The matrix docs/fleet.md prints.
+CLAUDE_CODE_SHORTCUTS: list[tuple[str, str, str | None, bool, str]] = [
+    ("Ctrl+C interrupt", "ctrl+c", None, False, "C-c"),
+    ("Ctrl+D exit", "ctrl+d", None, False, "C-d"),
+    ("Ctrl+G open in editor", "ctrl+g", None, False, "C-g"),
+    ("Ctrl+L clear screen", "ctrl+l", None, False, "C-l"),
+    ("Ctrl+O verbose output", "ctrl+o", None, False, "C-o"),
+    ("Ctrl+R history search", "ctrl+r", None, False, "C-r"),
+    ("Ctrl+V paste image", "ctrl+v", None, False, "C-v"),
+    ("Ctrl+B background tasks", "ctrl+b", None, False, "C-b"),
+    ("Ctrl+T todo list", "ctrl+t", None, False, "C-t"),
+    ("Ctrl+S stash prompt", "ctrl+s", None, False, "C-s"),
+    ("Ctrl+Z suspend", "ctrl+z", None, False, "C-z"),
+    ("Ctrl+A line start", "ctrl+a", None, False, "C-a"),
+    ("Ctrl+E line end", "ctrl+e", None, False, "C-e"),
+    ("Ctrl+K kill to end", "ctrl+k", None, False, "C-k"),
+    ("Ctrl+U kill line", "ctrl+u", None, False, "C-u"),
+    ("Ctrl+W kill word", "ctrl+w", None, False, "C-w"),
+    ("Ctrl+Y yank", "ctrl+y", None, False, "C-y"),
+    ("Ctrl+P previous", "ctrl+p", None, False, "C-p"),
+    ("Ctrl+N next", "ctrl+n", None, False, "C-n"),
+    ("Ctrl+J newline", "ctrl+j", None, False, "C-j"),
+    ("Ctrl+X (then Ctrl+K / Ctrl+E)", "ctrl+x", None, False, "C-x"),
+    ("Esc (twice clears the input)", "escape", None, False, "Escape"),
+    ("Ctrl+[ vim normal mode", "ctrl+left_square_bracket", "\x1b", False, "C-["),
+    ("Ctrl+_ undo", "ctrl+underscore", None, False, "C-_"),
+    ("Alt+B word left", "alt+b", "b", True, "M-b"),
+    ("Alt+F word right", "alt+f", "f", True, "M-f"),
+    ("Alt+D delete word", "alt+d", "d", True, "M-d"),
+    ("Alt+Y yank pop", "alt+y", "y", True, "M-y"),
+    ("Alt+P model", "alt+p", "p", True, "M-p"),
+    ("Alt+T thinking", "alt+t", "t", True, "M-t"),
+    ("Alt+O output style", "alt+o", "o", True, "M-o"),
+    ("Alt+M permission mode", "alt+m", "m", True, "M-m"),
+    ("Alt+V paste", "alt+v", "v", True, "M-v"),
+    ("Option+Enter newline", "alt+enter", None, False, "M-Enter"),
+    ("Shift+Enter newline", "shift+enter", None, False, "S-Enter"),
+    ("Shift+Tab mode cycle", "shift+tab", None, False, "BTab"),
+    ("Tab completion", "tab", "\t", False, "Tab"),
+    ("Up / Down history", "up", None, False, "Up"),
+    ("PageUp transcript", "pageup", None, False, "PPage"),
+    ("Home / End", "home", None, False, "Home"),
+    ("Backspace", "backspace", None, False, "BSpace"),
+    ("Delete", "delete", None, False, "DC"),
+    ("F1..F12", "f5", None, False, "F5"),
+]
+
+#: Printable keys Claude Code gives a meaning: they travel as the text they are.
+CLAUDE_CODE_TEXT_KEYS: list[tuple[str, str, str]] = [
+    ("? help", "question_mark", "?"),
+    ("! bash mode", "exclamation_mark", "!"),
+    ("/ command", "slash", "/"),
+    ("@ file mention", "at", "@"),
+    ("[ transcript to scrollback", "left_square_bracket", "["),
+    ("\\ then Enter newline", "backslash", "\\"),
+    ("Space", "space", " "),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "textual", "character", "printable", "name"), CLAUDE_CODE_SHORTCUTS
+)
+def test_every_documented_claude_code_chord_has_its_tmux_name(
+    label: str, textual: str, character: str | None, printable: bool, name: str
+) -> None:
+    """One row per documented shortcut, on a capable server: the exact key tmux is sent."""
+    assert translate(textual, character, printable=printable) == key(name), label
+
+
+@pytest.mark.parametrize(("label", "textual", "character"), CLAUDE_CODE_TEXT_KEYS)
+def test_every_documented_claude_code_text_key_travels_as_text(
+    label: str, textual: str, character: str
+) -> None:
+    assert translate(textual, character, printable=True) == Translation("literal", character), label
+
+
+def test_below_tmux_35_only_shift_enter_changes_among_the_documented_chords() -> None:
+    """The matrix's second column: on 3.2 to 3.4 every documented chord travels unchanged
+    except shift+enter, which becomes ctrl+j — the same newline (#147)."""
+    changed = {
+        label: translate(textual, character, printable=printable, extended_keys=False)
+        for label, textual, character, printable, name in CLAUDE_CODE_SHORTCUTS
+        if translate(textual, character, printable=printable, extended_keys=False) != key(name)
+    }
+    assert changed == {"Shift+Enter newline": key("C-j")}, changed

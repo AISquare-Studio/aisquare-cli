@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from aisquare.core import codenames, selfcli
+from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
@@ -295,6 +296,9 @@ class FakeClock:
 def tmux(monkeypatch: pytest.MonkeyPatch) -> FakeTmux:
     fake = FakeTmux()
     monkeypatch.setattr(fleet_service, "server", lambda config=None: fake)
+    # The desktop variables a spawn carries per window (#147) are this PROCESS's,
+    # which a test must not depend on; one test below hands in its own.
+    monkeypatch.setattr(tmux_core, "desktop_environment", lambda environ=None: {})
     return fake
 
 
@@ -2922,3 +2926,21 @@ def test_spawn_and_stop_on_a_real_tmux_server(
     finally:
         with suppress(TmuxError):
             real.run("kill-server")
+
+
+def test_spawn_carries_this_shells_desktop_into_the_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#147: a window inherits the tmux SERVER's environment, frozen at its first
+    start, so after a re-login every new agent had a stale display and SSH agent
+    socket. The spawner's current values are set on the window (`new-window -e`)."""
+    monkeypatch.setattr(
+        tmux_core,
+        "desktop_environment",
+        lambda environ=None: {"WAYLAND_DISPLAY": "wayland-1", "SSH_AUTH_SOCK": "/run/u/1/ssh"},
+    )
+    _coder(project)
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    assert env["WAYLAND_DISPLAY"] == "wayland-1" and env["SSH_AUTH_SOCK"] == "/run/u/1/ssh"
+    assert "AISQUARE_FLEET_AGENT" in env  # the fleet's own variables still travel

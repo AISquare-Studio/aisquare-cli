@@ -55,7 +55,7 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
+from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
@@ -583,6 +583,24 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(event.project_id)
+        self._focus_pane(view_id)
+
+    def _focus_pane(self, view_id: str) -> None:
+        """Give the agent just selected the keyboard (#147).
+
+        Selecting a row showed the pane and left focus in the sidebar, where the
+        app's bindings are live: a sentence typed at what looked like Claude Code
+        quit the UI on its first ``q``. The pane takes focus once the frame that
+        shows it has been drawn — a view mounted this instant has no size to
+        focus into yet — and ``F12`` stays the deliberate way back.
+        """
+        try:
+            view = self.content.get_child_by_id(view_id)
+        except NoMatches:
+            return
+        pane = getattr(view, "pane", None)
+        if isinstance(pane, TerminalPane):
+            self.call_after_refresh(pane.focus)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.

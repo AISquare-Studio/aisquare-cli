@@ -162,6 +162,8 @@ _FACTS_FIELDS = (
     "pane_current_command",
     "mouse_any_flag",
     "mouse_sgr_flag",
+    "mouse_button_flag",
+    "mouse_all_flag",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -277,6 +279,11 @@ class PaneFacts:
     ``?1003``) — it wants the wheel itself. Claude Code's fullscreen TUI does."""
     mouse_sgr: bool = False
     """…and asked for SGR encoding (``?1006``), the form every modern program uses."""
+    mouse_drag: bool = False
+    """…and asked for motion while a button is held (``?1002``, button-event
+    tracking) or for every motion (``?1003``). Without either, a program gets
+    presses and releases only, and a drag forwarded to it would be a report it
+    never asked for (#148)."""
 
 
 @dataclass(frozen=True)
@@ -348,6 +355,7 @@ def _facts(line: str) -> PaneFacts:
         title=values["pane_title"],
         mouse_on=values["mouse_any_flag"] == "1",
         mouse_sgr=values["mouse_sgr_flag"] == "1",
+        mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
     )
 
 
@@ -869,6 +877,20 @@ class TmuxServer:
             # paste's, never the tidy-up's.
             with contextlib.suppress(TmuxError):
                 self.run("delete-buffer", "-b", buffer_name)
+            raise
+
+    def show_buffer(self) -> str | None:
+        """The newest paste buffer's text, or ``None`` when the server holds none.
+
+        ``show-buffer`` without ``-b`` prints the most recently used buffer, as
+        the program wrote it. A server with no buffers answers ``no buffers`` and
+        exits 1 — an answer, not a failure; every other error is raised.
+        """
+        try:
+            return self.run("show-buffer")
+        except TmuxError as exc:
+            if "no buffer" in str(exc).lower():
+                return None
             raise
 
     def resize(self, pane_id: str, width: int, height: int) -> None:

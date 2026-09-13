@@ -469,6 +469,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **Mouse buttons reach a Claude Code pane** (#148). Only the wheel was
+  forwarded, so in the fleet UI a click did not place Claude Code's cursor, its
+  `✕`, menu rows and collapsed tool results did nothing, and a drag selected
+  nothing in Claude Code (tmux was measured to pass the sequences byte for
+  byte — the pane never sent them). Now a program that tracks the mouse gets
+  presses, drags and releases as SGR events with the modifier bits (shift 4,
+  alt 8, ctrl 16 — so ctrl+click opens a link), X10 when that is what it asked
+  for; the UI's own drag-select stands down while the program owns the mouse,
+  **shift+drag** always selects locally and copies on release, and after a
+  left-button release the UI mirrors a changed tmux paste buffer — what Claude
+  Code's copy-on-select writes inside tmux when the agent's environment has no
+  display — to your clipboard. Documented in `docs/fleet.md`, with the note that
+  Claude Code's selection is copy-only by design.
 - **Tapping a bare modifier key in an agent pane no longer pops a warning
   toast** (#151). Terminals speaking the kitty keyboard protocol (kitty,
   ghostty, wezterm, foot, recent alacritty) report Shift, Control, Alt, Super

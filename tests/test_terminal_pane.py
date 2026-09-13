@@ -85,6 +85,8 @@ class FakePane:
     """The pane is in a tmux mode (copy mode): tmux owns it for the moment."""
     mouse_sgr: bool = False
     """…in SGR encoding (``?1006``); False is the X10 encoding older programs use."""
+    mouse_drag: bool = False
+    """…with motion while a button is held (``?1002``); False is presses and releases only."""
 
     def facts(self, pane_id: str, fmt: str) -> str:
         """``display-message`` output for ``fmt`` — any field order the caller asks for."""
@@ -98,6 +100,8 @@ class FakePane:
             "alternate_on": "1" if self.alternate_on else "0",
             "mouse_any_flag": "1" if self.mouse_on else "0",
             "mouse_sgr_flag": "1" if self.mouse_sgr else "0",
+            "mouse_button_flag": "1" if self.mouse_drag else "0",
+            "mouse_all_flag": "0",
             "history_size": str(len(self.history)),
             "pane_dead": "1" if self.dead else "0",
             "pane_dead_status": "" if self.dead_status is None else str(self.dead_status),
@@ -134,6 +138,9 @@ class FakeTmux:
         self.fail_resizes = 0
         """How many ``resize-window`` calls fail like a killed window first. The
         attempt is still recorded: a test counts the retries."""
+        self.buffer: str | None = None
+        """The newest tmux paste buffer — what ``show-buffer`` prints; ``None`` is
+        a server with no buffers (``no buffers``, exit 1)."""
 
     def server(self, tmp_path: Path) -> TmuxServer:
         # ``binary`` must resolve through ``shutil.which`` on a machine WITHOUT
@@ -173,6 +180,11 @@ class FakeTmux:
         if name == "load-buffer":
             self.input.append((name, (stdin or b"").decode("utf-8")))
             return Completed(0, "", "")
+        if name == "show-buffer":
+            self.input.append((name,))
+            if self.buffer is None:
+                return Completed(1, "", "no buffers\n")
+            return Completed(0, self.buffer, "")
         pane_id = self._flag(group, "-t")
         pane = self.panes.get(pane_id)
         if pane is None or pane.gone:
@@ -2724,6 +2736,252 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
     assert "working" in working and "waiting" not in working
 
 
+# --- mouse buttons (#148) ---------------------------------------------------------------------
+
+
+def _literals(fake: FakeTmux) -> str:
+    """Everything sent to the pane as literal text, in order — the SGR reports concatenated."""
+    return "".join(call[-1] for call in fake.sent() if call[:1] == ("-l",))
+
+
+def _hex(fake: FakeTmux) -> list[str]:
+    """Every byte sent with ``send-keys -H``, in order, across calls."""
+    out: list[str] = []
+    for call in fake.sent():
+        if call[:1] == ("-H",):
+            out.extend(call[1:])
+    return out
+
+
+def test_a_click_a_drag_and_a_release_reach_a_program_that_tracks_the_mouse(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """#148: only the wheel was forwarded, so a click never placed Claude Code's
+    cursor and its ``✕``, menu rows and collapsed tool results did nothing. tmux
+    was measured to pass the sequences byte for byte; the pane never sent them."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = pane.mouse_drag = True
+
+    async def drive() -> tuple[str, bool, Selection | None, str, str]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 7)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            allow = widget.allow_select
+            await pilot.mouse_down(widget, offset=(3, 2))
+            await pilot.hover(widget, offset=(5, 2))
+            await pilot.hover(widget, offset=(7, 3))
+            await pilot.mouse_up(widget, offset=(7, 3))
+            await pilot.pause(0.1)
+            forwarded = _literals(fake)
+            selection = widget.text_selection
+            # A plain click, with ctrl held: the modifier bit travels (ctrl+click opens a link).
+            await pilot.mouse_down(widget, offset=(0, 0), control=True)
+            await pilot.mouse_up(widget, offset=(0, 0), control=True)
+            await pilot.pause(0.1)
+            with_ctrl = _literals(fake)[len(forwarded) :]
+            # The right button, with alt: button 2, bit 8.
+            await pilot.mouse_down(widget, offset=(1, 1), button=3, meta=True)
+            await pilot.mouse_up(widget, offset=(1, 1), meta=True)
+            await pilot.pause(0.1)
+            right = _literals(fake)[len(forwarded) + len(with_ctrl) :]
+            return forwarded, allow, selection, with_ctrl, right
+
+    forwarded, allow, selection, with_ctrl, right = run(drive())
+    # 1-based pane cells; the drag carries the motion flag (+32); the release ends in `m`.
+    assert forwarded == "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<32;8;4M\x1b[<0;8;4m", repr(forwarded)
+    assert allow is False, "Textual's own drag-select stands down while the program owns the mouse"
+    assert selection is None, "…so the drag selected nothing here: the program did"
+    assert with_ctrl == "\x1b[<16;1;1M\x1b[<16;1;1m", repr(with_ctrl)
+    assert right == "\x1b[<10;2;2M\x1b[<10;2;2m", repr(right)
+
+
+def test_a_program_that_asked_for_presses_only_gets_no_drag_reports(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """``?1000`` without ``?1002``: motion reports would be ones it never asked for."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    pane.mouse_drag = False
+
+    async def drive() -> str:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(3, 2))
+            await pilot.hover(widget, offset=(5, 2))
+            await pilot.mouse_up(widget, offset=(7, 2))
+            await pilot.pause(0.1)
+            return _literals(fake)
+
+    assert run(drive()) == "\x1b[<0;4;3M\x1b[<0;8;3m"
+
+
+def test_buttons_are_x10_bytes_for_a_program_that_did_not_ask_for_sgr(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = True
+    pane.mouse_sgr = False
+
+    async def drive() -> list[tuple[str, ...]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(2, 1), shift=True)  # shift+click, not a drag
+            await pilot.pause(0.1)
+            return [call for call in fake.input if call[0] == "send-keys"]
+
+    sent = run(drive())
+    assert sent == [], "shift begins the local selection, whatever the encoding"
+    pane.mouse_sgr = False
+    pane.mouse_drag = True
+
+    async def drive_plain() -> None:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(2, 1))
+            await pilot.hover(widget, offset=(3, 1))
+            await pilot.mouse_up(widget, offset=(3, 1))
+            await pilot.pause(0.1)
+
+    run(drive_plain())
+    # ESC [ M, then 32 + button / column / row: press 0 at (3,2); drag 32 at (4,2); release 3.
+    assert _hex(fake) == [
+        "1b", "5b", "4d", "20", "23", "22",
+        "1b", "5b", "4d", "40", "24", "22",
+        "1b", "5b", "4d", "23", "24", "22",
+    ], _hex(fake)  # fmt: skip
+    assert _literals(fake) == "", "nothing went as text: a string cannot carry these bytes"
+
+
+def test_nothing_is_forwarded_in_copy_mode_into_history_or_to_a_program_without_the_mouse(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The wheel's guards, applied to buttons: a pane tmux owns for the moment, a
+    view scrolled into history, and a program that never asked, each keep the
+    gesture — and the last one keeps Textual's own drag-select, as before."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    pane.in_mode = True
+
+    async def in_copy_mode() -> tuple[bool, list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(1, 1))
+            await pilot.mouse_up(widget, offset=(1, 1))
+            await pilot.pause(0.1)
+            return widget.allow_select, list(fake.sent())
+
+    allow, sent = run(in_copy_mode())
+    assert allow is True and sent == []
+    pane.in_mode = False
+    pane.alternate_on = pane.mouse_on = False  # a shell: Textual's own selection
+
+    async def plain_pane() -> tuple[bool, list[tuple[str, ...]], str | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await _drag(pilot, widget, (0, 1), (5, 1))
+            return widget.allow_select, list(fake.sent()), host.clipboard
+
+    allow, sent, clipboard = run(plain_pane())
+    assert allow is True and sent == [] and clipboard == "second"
+
+
+def test_shift_drag_selects_locally_and_copies_while_the_program_owns_the_mouse(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The one gesture that works in every pane: shift+drag is this widget's own
+    selection even under Claude Code's fullscreen, copied on release through the
+    same end-of-gesture path as a plain drag anywhere else — one path, one toast."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str, int, list[tuple[str, ...]], Selection | None]:
+        host = Host(fake.server(tmp_path), "%1", with_header=True)
+        async with host.run_test(size=(40, 7)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(7, 1), shift=True)
+            await pilot.hover(widget, offset=(3, 1))  # dragged BACKWARDS
+            await pilot.mouse_up(widget, offset=(2, 1), shift=True)
+            await pilot.pause(0.1)
+            toasts = sum(1 for n in host.notices if n.startswith("copied"))
+            return host.clipboard, toasts, list(fake.sent()), widget.text_selection
+
+    copied, toasts, sent, selection = run(drive())
+    assert copied == "second row"[2:8], repr(copied)  # cells 2..7: the pointer's cell included
+    assert toasts == 1
+    assert sent == [], "nothing went to the program: shift is the local gesture"
+    assert selection == Selection(Offset(2, 1), Offset(8, 1))
+
+
+def test_a_double_click_is_two_presses_for_the_program_not_a_local_word(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+
+    async def drive() -> tuple[str, str, Selection | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.click(widget, offset=(1, 1), times=2)
+            await pilot.pause(0.1)
+            return _literals(fake), host.clipboard, widget.text_selection
+
+    forwarded, clipboard, selection = run(drive())
+    assert forwarded == "\x1b[<0;2;2M\x1b[<0;2;2m" * 2, repr(forwarded)
+    assert clipboard == "" and selection is None  # Claude Code's word selection, not ours
+
+
+def test_a_paste_buffer_the_program_wrote_on_release_is_mirrored_to_the_clipboard(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Claude Code's copy-on-select writes tmux's paste buffer (its ``wl-copy`` may
+    have no display in the server's environment). A buffer that CHANGED between
+    the press and the release is the selection just made; one that did not is a
+    click that placed the cursor, and says nothing."""
+    pane = fake.panes["%1"]
+    pane.alternate_on = pane.mouse_on = pane.mouse_sgr = True
+    fake.buffer = "stale copy"
+
+    async def drive() -> tuple[str, list[str], str, list[str]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(0, 0))
+            fake.buffer = "what Claude selected"  # the program's release handler ran
+            await pilot.mouse_up(widget, offset=(9, 0))
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            copied, toasts = host.clipboard, list(host.notices)
+            await pilot.mouse_down(widget, offset=(0, 1))  # a click: the buffer stands
+            await pilot.mouse_up(widget, offset=(0, 1))
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            await pilot.mouse_down(widget, offset=(0, 1), button=3)  # right: never read
+            fake.buffer = "changed under a right click"
+            await pilot.mouse_up(widget, offset=(0, 1))
+            await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.1)
+            return copied, toasts, host.clipboard, list(host.notices)
+
+    copied, toasts, after, toasts_after = run(drive())
+    assert copied == "what Claude selected"
+    assert toasts == ["copied 20 characters — the agent's own selection"], toasts
+    assert after == "what Claude selected" and toasts_after == toasts
+    reads = [call for call in fake.input if call[0] == "show-buffer"]
+    assert len(reads) == 4, "a read at each left press and its release; none for the right button"
+
+
 # --- against a real tmux ------------------------------------------------------------------------
 
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
@@ -2841,3 +3099,54 @@ def test_a_truly_unmappable_key_is_still_named_once_but_as_information(
     assert notices == ["no way to type f13 into a tmux pane"]
     assert severities == ["information"]
     assert fake.sent() == []
+
+
+@_needs_tmux
+def test_real_tmux_pane_delivers_a_forwarded_click_to_a_program_that_tracks_the_mouse(
+    real_server: TmuxServer, tmp_path: Path
+) -> None:
+    """The issue's own measurement, made a test: a program that turns on ``?1000``
+    + ``?1006`` in a real tmux pane receives the pane's press and release byte
+    for byte — tmux was never what blocked the mouse."""
+    script = tmp_path / "mouse_echo.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import sys, tty",
+                "out = sys.stdout",
+                "out.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006h'); out.flush()",
+                "tty.setraw(sys.stdin.fileno())",
+                "while True:",
+                "    data = sys.stdin.buffer.read1(64)",
+                "    if not data: break",
+                "    out.write(repr(data.decode('latin-1')) + '\\r\\n'); out.flush()",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    window = real_server.spawn_window(
+        "mouse",
+        name="probe",
+        cwd=tmp_path,
+        command=[sys.executable, str(script)],
+        width=80,
+        height=24,
+    )
+
+    async def drive() -> str:
+        host = Host(real_server, window.pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            await wait_until(
+                pilot, lambda: pane.facts is not None and pane.facts.mouse_on, timeout=5.0
+            )
+            await pilot.mouse_down(pane, offset=(4, 2))
+            await pilot.mouse_up(pane, offset=(4, 2))
+            await wait_until(
+                pilot, lambda: any("[<0;5;3m" in row for row in screen_text(pane)), timeout=3.0
+            )
+            return "\n".join(screen_text(pane))
+
+    shown = run(drive())
+    assert "[<0;5;3M" in shown and "[<0;5;3m" in shown, shown

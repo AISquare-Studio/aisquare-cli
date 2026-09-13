@@ -278,19 +278,36 @@ account that shell carries.
 
 Board notes and tasks are kept, but the ended rows' **claims are released**: a
 task left `doing` by a session that no longer exists is not untouched, it is
-stuck for four hours. A `fleet-paused` signal is cleared for each project this
-run CONFIRMED down, and the output says so — the fleet it paused is gone. A
-project with a row left live, a session left up or a listing that failed keeps
-its signal (`paused_kept` in the report): the manager's "spawn nothing while
-paused" is exactly the standing order wanted while you are trying to stop it.
+stuck for four hours. Only a row whose pane tmux CONFIRMED dead or gone is ended
+and released — a `kill-window` tmux refused is not a death, so that row stays
+live, keeps its claim and its board session, and is reported LEFT LIVE. A
+`fleet-paused` signal is cleared for each project this run CONFIRMED down, and
+the output says so — the fleet it paused is gone. A project with a row left
+live, a session left up or a listing that failed keeps its signal
+(`paused_kept` in the report): the manager's "spawn nothing while paused" is
+exactly the standing order wanted while you are trying to stop it. A signal the
+store would not let it read or clear is named in `pause_scan_failed` rather than
+passed over — the pause outlives the shutdown either way, and the next manager
+is still under orders to spawn nothing.
+
+A row that spawns AFTER the sessions are killed is reconciled too: still
+running, it is left live and reported; already exited on its own, it is ended
+with the exit status tmux kept — **and the pane tmux is still holding for it**
+(`remain-on-exit`) is removed with it. Otherwise that pane's window holds its
+session up, and the session the server, under a report saying the fleet is down.
+Whatever tmux will not confirm gone there is reported instead (`sessions_failed`
+or `sessions_left_up`), never assumed.
 
 It refuses rather than guess. With no usable tmux (`fleet_unavailable`), on a
 socket that cannot be ASKED whether a server is there (a wedged server's 30 s
 timeout), or when run from INSIDE the fleet's own tmux server — a `fleet attach`
 pane included, where the kill would take down the process printing the report —
-nothing is touched and the message says why. A row whose `stop` refused because
-its pane was seen ALIVE is left live, reported, and its session is spared; the
-command then exits 1, because the fleet is not down.
+nothing is touched and the message says why. The plan it asks you to confirm
+refuses on the same principle: if a session query fails after the probe
+answered, you get the refusal rather than a list that may be short of what the
+run would kill. A row whose `stop` refused because its pane was seen ALIVE — or
+whose kill tmux would not carry out — is left live, reported, and its session is
+spared; the command then exits 1, because the fleet is not down.
 
 Why this exists rather than `tmux -L asq kill-server` by hand: `stop` and
 `reap` refuse to end a row on a server they cannot reach, because an unreachable

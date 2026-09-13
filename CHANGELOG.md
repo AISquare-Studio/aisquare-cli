@@ -109,16 +109,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with no `--json` output), or a call from INSIDE the fleet's own tmux server,
   where the kill would take down the process printing the report. A row whose
   `stop` refused because its pane was seen ALIVE is left live, reported with that
-  reason, its session spared, and the command exits 1. Board notes and tasks are
-  kept. Doctor's fleet row now decides "the server is gone" with `answers()`
+  reason, its session spared, and the command exits 1. Round 9 closed the last
+  four places where the report could out-run what tmux confirmed. A
+  `kill-window` tmux REFUSED no longer ends the row: it was the one tmux failure
+  in `stop` still wrapped in `suppress(TmuxError)`, so a forced stop over a live
+  pane returned as *stopped* and released the running agent's claims to the next
+  worker; it goes through `_verify_gone` like every other failure there, and an
+  unconfirmed stop is LEFT LIVE with its claim and its board session intact. The
+  confirmation plan uses the strict `has_session_or_raise` and refuses on an
+  enumeration that fails after a good probe, instead of quietly omitting the
+  sessions it could not ask about — the operator confirmed one session and the
+  run killed two. A `fleet-paused` signal this could not READ or CLEAR is
+  reported in `pause_scan_failed` (kept, named, exit 1) instead of vanishing
+  into a blanket `suppress(Exception)` that left the next manager told to spawn
+  nothing under an exit-0 "done". And a row that spawns after the kill phase and
+  exits on its own now has its retained `remain-on-exit` pane REMOVED with the
+  row, so its window no longer holds a session — and the session a server —
+  under a shutdown reporting itself complete; a session that survives that is
+  spared if it holds a row left live, killed if it does not, and reported either
+  way. Board notes and tasks are kept. Doctor's fleet row now decides "the server is gone" with `answers()`
   rather than an empty `list-sessions` (which cannot tell an empty server from an
   absent one) and *appends* a scoped `fleet shutdown --project <codename>` to the
   reap advice instead of replacing it. Twenty service tests and eight CLI
   tests, including every refusal, the mixed one-gone-one-healthy socket state, a
   row spawned mid-shutdown, and a forgotten registration's live rows — plus the
   fake tmux made faithful where those paths live (a kill that fails with no
-  server up, an `answers()` that can raise, the `running` gate on every write,
-  and a per-socket fake) and `fleet shutdown` added to the no-traceback sweeps'
+  server up, a kill tmux REFUSES while pane, window and session all survive, an
+  `answers()` that can raise, the `running` gate on every write, and a
+  per-socket fake) and `fleet shutdown` added to the no-traceback sweeps'
   `UNINVOKED` list, which it was missing: a plain `make test` ran it against the
   developer's real `asq` socket and killed their live fleet.
 - **A `ui-tester` role: user-facing work is verified in a real browser, with

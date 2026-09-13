@@ -39,9 +39,11 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from aisquare.core.store import AmbiguousIdError
 from aisquare.models import ProjectInfo, TeamSession
 from aisquare.services.xr import projector
 from aisquare.services.xr.protocol import (
+    CLOSE_AUTH_FAILED,
     PROTOCOL_VERSION,
     Ack,
     Audio,
@@ -67,9 +69,6 @@ POLL_MS = 500
 
 AUTH_TIMEOUT_S = 5.0
 """How long a socket may stay silent before it has authenticated."""
-
-CLOSE_AUTH_FAILED = 4401
-"""Application close code for a failed auth. 4000-4999 is the private range."""
 
 TRANSCRIPT_BACKLOG_BYTES = 8192
 """How much of a transcript to replay on subscribe: the last screen or so."""
@@ -221,8 +220,10 @@ class _Connection:
         self._token = token
         self._sent: list[Session] = []
         self._unread_since: dict[str, int] = {}
+        self._board_seq = 0
         self._tail: asyncio.Task[None] | None = None
         self._audio: bytearray | None = None
+        self._audio_session: str | None = None
         self._transcript_seq = 0
 
     # -- lifecycle
@@ -308,6 +309,29 @@ class _Connection:
         latest = store.latest_seq(self._project.id)
         for row in store.team_sessions(self._project.id):
             self._unread_since[row.id] = latest
+        self._board_seq = latest
+
+    def _seed_late_joiners(self, store: Any) -> None:
+        """Watermark a session that first appeared AFTER this client connected.
+
+        :meth:`_seed_watermarks` only sees the sessions that exist at connect,
+        and :func:`projector._unread_counts` counts nothing for an id it holds
+        no watermark for. So a session spawned while the operator is wearing
+        the headset reported 0 unread forever, no matter how loudly it worked —
+        which is the exact case the badge exists for, and the one most likely
+        to happen during a demo, because that is when agents get spawned.
+
+        The watermark is the board position this connection had ALREADY seen,
+        not the current head and not 0. Not the head, because the events that
+        announced the session arrived in the same tick that revealed it and
+        would be swallowed; not 0, because that empties the session's entire
+        history into a badge meant to say "since you looked".
+        """
+        latest = store.latest_seq(self._project.id)
+        for row in store.team_sessions(self._project.id):
+            if row.id not in self._unread_since:
+                self._unread_since[row.id] = self._board_seq
+        self._board_seq = latest
 
     # -- outbound
 
@@ -344,6 +368,7 @@ class _Connection:
             await asyncio.sleep(interval)
             try:
                 with _store() as store:
+                    self._seed_late_joiners(store)
                     current = projector.sessions(
                         store, self._project.id, unread_since=self._unread_since
                     )
@@ -403,7 +428,7 @@ class _Connection:
         elif isinstance(message, Prompt):
             await self._prompt(message)
         elif isinstance(message, Audio):
-            self._audio = bytearray()
+            self._open_burst(message)
         elif isinstance(message, AudioEnd):
             await self._transcribe(message.session)
         elif isinstance(message, Auth):
@@ -424,12 +449,26 @@ class _Connection:
         if session_id is None:
             return
         with _store() as store:
-            row = store.get_session(session_id)
-            if row is not None:
-                # Focusing a panel is what marks it read. Only for a session
-                # that exists: a watermark for one that does not would sit in
+            try:
+                row = store.get_session(session_id)
+            except AmbiguousIdError as exc:
+                # A prefix that matches two sessions is the CLIENT's mistake.
+                # Left to escape, it reaches _read_loop's catch-all and the
+                # headset is told `internal` — a server fault — for a string it
+                # can fix by typing one more character.
+                await self._send_frame(Error(code="ambiguous_session", message=_one_line(exc)))
+                return
+            if row is not None and row.project_id == self._project.id:
+                # Focusing a panel is what marks it read, keyed on the id the
+                # BOARD uses. `get_session` resolves PREFIXES, and every frame
+                # that goes back out carries `row.id` — so keying this on the
+                # client's string watermarks an id nothing ever counts, leaving
+                # the badge frozen at whatever it said and the short string in
+                # the map for the life of the socket. That is the outcome the
+                # rest of this comment promises does not happen: a watermark
+                # for a session that does not exist ON THIS BOARD would sit in
                 # the map forever, counting nothing.
-                self._unread_since[session_id] = store.latest_seq(self._project.id)
+                self._unread_since[row.id] = store.latest_seq(self._project.id)
         if row is None or row.project_id != self._project.id:
             await self._send_frame(
                 Error(code="no_such_session", message=f"no session {session_id} on this board")
@@ -509,6 +548,21 @@ class _Connection:
             await asyncio.sleep(interval)
             try:
                 with path.open("rb") as handle:
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() < offset:
+                        # The file got SHORTER than what has already been read:
+                        # a compaction, a `/clear` onto the same path, a
+                        # rotation, or a new session handed the same
+                        # `transcript_path`. The offset only ever moved
+                        # forward, so seeking to it now reads b"" on every tick
+                        # from here to the end of the connection — no frame, no
+                        # error, no close. The operator is left looking at a
+                        # live ring beside a conversation that stopped, with
+                        # nothing anywhere saying why, and re-subscribing is
+                        # the only way back. Resync to the start of whatever is
+                        # there now, which for every case in that list is the
+                        # first record of the file that replaced it.
+                        offset = 0
                     handle.seek(offset)
                     fresh = handle.read()
             except OSError:
@@ -570,6 +624,19 @@ class _Connection:
 
     # -- audio
 
+    def _open_burst(self, message: Audio) -> None:
+        """Open a push-to-talk burst, and remember whose microphone it is.
+
+        The HEADER's ``session`` owns the burst. It used to be dropped on the
+        floor and the burst attributed to whatever ``audioEnd`` carried, so
+        ``audio(session=A)`` followed by ``audioEnd(session=B)`` transcribed
+        A's microphone into B's panel, silently — and the schema could not warn
+        anyone, because it required ``session`` on both frames and documented
+        no relationship between them. Now the two must agree.
+        """
+        self._audio = bytearray()
+        self._audio_session = message.session
+
     def _collect_audio(self, chunk: bytes) -> None:
         """Buffer one binary frame, if a burst is open.
 
@@ -593,6 +660,18 @@ class _Connection:
         the server half of that round trip belongs to the M6 task, not this one.
         """
         buffered, self._audio = self._audio, None
+        opened, self._audio_session = self._audio_session, None
+        if opened is not None and opened != session_id:
+            await self._send_frame(
+                Error(
+                    code="session_mismatch",
+                    message=(
+                        f"the burst was opened for {opened} and ended for {session_id}; "
+                        "one burst belongs to one session"
+                    ),
+                )
+            )
+            return
         hook = TRANSCRIBE
         if hook is None:
             await self._send_frame(

@@ -417,3 +417,61 @@ def test_unread_counts_events_since_this_connection_looked(work_dir: Path) -> No
         _event(store, project.id, CODER, "result", "and again")
         later = projector.sessions(store, project.id, unread_since=watermark)
     assert later[0].unread == 2
+
+
+def test_a_badge_keeps_counting_after_the_board_passes_the_scan_depth(work_dir: Path) -> None:
+    """An unread badge answers to what just happened, not to a window pinned at connect.
+
+    :func:`projector._unread_counts` used to read ``events_since(floor,
+    limit=_EVENT_SCAN)``. That query is ``ORDER BY seq ASC``, so it returns the
+    OLDEST ``_EVENT_SCAN`` events past ``floor`` — and ``floor`` is
+    ``min(since.values())``, which watermarks only ever move forward from, so it
+    is pinned where the headset connected. The scanned window was therefore a
+    fixed 500-event slice of the board's past, and once the board moved beyond
+    its far edge nothing that happened afterwards was ever inside it again.
+
+    Every badge on the ring then stops responding to anything except a
+    subscribe, showing a stale number that looks exactly like a measurement.
+    This is the shape an operator meets it in: one busy session fills the scan
+    depth, and then a QUIET one says three things and is never heard.
+    """
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _session(store, PLANNER, project.id, role="manager")
+        for index in range(projector._EVENT_SCAN + 100):
+            _event(store, project.id, CODER, "note", f"busy {index}")
+        for index in range(3):
+            _event(store, project.id, PLANNER, "note", f"quiet {index}")
+        counts = projector._unread_counts(store, project.id, {CODER: 0, PLANNER: 0})
+
+    assert counts.get(PLANNER) == 3, (
+        "the planner's three events are the NEWEST on this board; a badge that "
+        "cannot see them is reading a window that stopped moving"
+    )
+    # The depth still bounds the answer. That is a cap, and it behaves like one:
+    # it is reached only by a session with _EVENT_SCAN unread events, where the
+    # ring is saying "a great many" and the exact figure is not what the
+    # operator is about to act on.
+    assert 0 < counts[CODER] <= projector._EVENT_SCAN
+
+
+def test_a_session_with_no_watermark_is_counted_by_nobody(work_dir: Path) -> None:
+    """The contract the server's late-joiner seeding depends on.
+
+    ``_unread_counts`` skips any id absent from ``since``, which is why
+    ``server._seed_late_joiners`` has to exist at all: a session the connection
+    has never watermarked reports nothing, forever, however loudly it works.
+    Pinned here so that the seeding and the skipping cannot drift apart.
+    """
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _session(store, PLANNER, project.id, role="manager")
+        for index in range(3):
+            _event(store, project.id, PLANNER, "note", f"loud {index}")
+        counts = projector._unread_counts(store, project.id, {CODER: 0})
+
+    assert PLANNER not in counts, "no watermark, no count — seeding is what fixes this"

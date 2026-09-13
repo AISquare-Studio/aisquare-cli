@@ -200,38 +200,54 @@ strict = true
 pretty = true
 plugins = ["pydantic.mypy"]
 
-# numpy is never imported by this package. It arrives in the type graph only
-# because `_pytest.python_api` type-imports it for `approx`, and it is only
-# INSTALLED when the `xr` extra is (faster-whisper -> ctranslate2 -> numpy).
-# Its stubs are written in PEP 695 `type X = ...`, which mypy rejects while
-# `python_version` says 3.11 -- so `pip install -e ".[dev,xr]"` turned a green
-# typecheck into one syntax error inside site-packages, in a file nobody here
-# wrote or imports. Skipping the body is the honest scope: we are not
-# type-checking numpy, we are declining to parse it. Raising `python_version`
-# would be the wrong fix twice over -- it is the floor this package supports,
-# and it would silently stop checking our own code against 3.11.
+# numpy reaches the type graph two ways, on two different machines, and this
+# override answers both. It is INSTALLED only when the `xr` extra is
+# (faster-whisper -> ctranslate2 -> numpy). Each of the three lines is
+# load-bearing on exactly one of those machines; all three were measured, cold
+# cache, by deleting them one at a time in both environments.
 #
-# BOTH LINES BELOW ARE LOAD-BEARING, and the second is the one that is easy to
-# miss: `follow_imports` does not apply to stub files at all unless
-# `follow_imports_for_stubs` is on, so `follow_imports = "skip"` ALONE leaves
-# the .pyi parsed and the run still dies -- which is what makes this look
-# unfixable from the config, and it was reported that way. Measured here on a
-# cold cache with numpy 2.5.3 present via `pip install -e ".[dev,xr]"`: both
-# lines give "Success: no issues found in 270 source files"; delete the second
-# line and .mypy_cache and the same syntax error returns.
+# WHERE IT IS INSTALLED (`pip install -e ".[dev,xr]"`): numpy's stubs are
+# written in PEP 695 `type X = ...`, which mypy rejects while `python_version`
+# says 3.11 -- one syntax error inside site-packages, in a file nobody here
+# wrote, that stops the whole run ("errors prevented further checking").
+# Skipping the body is the honest scope: we are not type-checking numpy, we are
+# declining to parse it. `follow_imports` does NOT apply to stub files at all
+# unless `follow_imports_for_stubs` is on, so `follow_imports = "skip"` ALONE
+# leaves the .pyi parsed and the run still dies -- which is what makes this look
+# unfixable from the config, and it was first reported that way. Deleting either
+# line brings the syntax error straight back. Raising `python_version` would be
+# the wrong fix twice over: it is the floor this package supports, and it would
+# silently stop checking our own code against 3.11.
+#
+# WHERE IT IS ABSENT (every `[dev]` install, and CI): `services/xr/speech.py`
+# imports numpy lazily inside the factory, on purpose, and mypy raises
+# `import-not-found` for a module that is simply not on disk. `follow_imports`
+# has nothing to follow in that case and does not suppress it -- measured: with
+# numpy absent the run is green without it. `ignore_missing_imports` is the line
+# that covers this one, and it is the line that is unnecessary on the machine
+# above.
+#
+# Neither branch that merged into this file could see the second case alone:
+# the server tree had no file importing numpy, and the speech tree had no numpy
+# installed. The third line arrived with the merge, from the `[dev]` half of the
+# "green under both extras" acceptance.
 [[tool.mypy.overrides]]
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
+ignore_missing_imports = true
 
-# faster-whisper is in the `xr` extra and absent from every `[dev]` install and
-# from CI, so mypy cannot find it. services/xr/speech.py imports it lazily
-# inside the factory on purpose -- the base install must not pay for
-# ctranslate2 and av -- which leaves exactly one unresolvable module name. The
-# ignore is scoped to it: anything else missing its stubs stays an error.
-# Unlike numpy above, nothing here parses: the module is simply not on disk, so
-# `ignore_missing_imports` is the whole fix and `follow_imports` has nothing to
-# follow.
+# faster-whisper is imported in exactly one place -- inside
+# `services/xr/speech.py`'s factory, lazily, so a base install never pays for
+# ctranslate2 and av -- and it is unresolvable in BOTH environments, for two
+# different reasons that this one setting happens to cover:
+#
+#   [dev]      absent from disk    -> import-not-found
+#   [dev,xr]   installed, but ships no py.typed and no stubs -> import-untyped
+#
+# The second is the one worth writing down, because "we installed the extra, so
+# the import resolves" is the reasonable guess and it is wrong. Scoped to this
+# one module name: anything else missing its stubs stays an error.
 [[tool.mypy.overrides]]
 module = ["faster_whisper.*"]
 ignore_missing_imports = true

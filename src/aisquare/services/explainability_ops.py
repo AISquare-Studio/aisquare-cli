@@ -56,7 +56,13 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.version import DISTRIBUTION
-from aisquare.models import CheckStatus, DoctorCheck, ProjectExplainability, RedactionLevel
+from aisquare.models import (
+    CheckStatus,
+    DoctorCheck,
+    ProjectExplainability,
+    RedactionLevel,
+    TraceDestination,
+)
 from aisquare.services.explainability import (
     EDITABLE_INSTALL_HINT,
     FALLBACK_ROLE,
@@ -152,6 +158,8 @@ class ResolvedTarget:
     roles: tuple[str, ...]
     project_id: str | None = None
     """The project the key was resolved FOR (#141); ``None`` for a machine-level read."""
+    destination: TraceDestination | None = None
+    """Where the project's traces land (#142), when one was chosen and ``project_id`` was given."""
 
     @property
     def configured(self) -> bool:
@@ -298,7 +306,19 @@ def resolve_target(
     ``tests/test_key_never_crosses_deployments.py``.
     """
     environ = os.environ if env is None else env
-    chosen = name or environ.get(TARGET_ENV_VAR) or settings.target
+    # THE DESTINATION NAMES THE TARGET (#142), between the explicit forms and
+    # the machine default: a project whose traces were pointed at a workspace
+    # on staging resolves the staging deployment, whatever the machine's
+    # default is — the same way its own key wins over the machine's. An
+    # explicit ``--target`` or the environment variable still wins, because
+    # both are someone saying so right now.
+    destination = _project_destination(project_id)
+    chosen = (
+        name
+        or environ.get(TARGET_ENV_VAR)
+        or (destination.environment if destination is not None else None)
+        or settings.target
+    )
     target = settings.targets.get(chosen, ExplainabilityTarget())
 
     gateway_url, source = target.gateway_url, "config"
@@ -331,6 +351,7 @@ def resolve_target(
         studio_id=target.studio_id,
         roles=tuple(roles),
         project_id=project_id,
+        destination=destination,
     )
 
 
@@ -353,6 +374,24 @@ def _project_api_key(project_id: str | None, target_name: str) -> str | None:
     except OSError:
         return None
     return value or None
+
+
+def _project_destination(project_id: str | None) -> TraceDestination | None:
+    """Where the project's traces land (#142); ``None`` without a project, a choice, or a store.
+
+    Same shape as :func:`project_key_binding`: a lazy store import (this module
+    is imported by the store's users) and a fail-open read, because a resolver
+    consulted on every launch must never make a broken home cost the launch.
+    """
+    if project_id is None:
+        return None
+    from aisquare.core.store import store_session  # lazy, as above
+
+    try:
+        with store_session() as store:
+            return store.project_destination(project_id)
+    except Exception:
+        return None
 
 
 def project_key_binding(project_id: str) -> ProjectExplainability | None:
@@ -528,8 +567,12 @@ def _request(
     api_key: str | None = None,
     body: Any = None,
     timeout: float = _HTTP_TIMEOUT,
+    method: str | None = None,
 ) -> HttpVerdict:
     """One HTTP call, with every failure turned into a verdict.
+
+    ``method`` defaults to what the body implies (POST with one, GET without);
+    the routing binding (#142) is a PUT and names it.
 
     ``X-API-KEY`` alone, deliberately: the gateway sits behind a layer that
     tries to verify any ``Authorization`` header as a JWT and fails the whole
@@ -563,7 +606,7 @@ def _request(
             detail=f"not a usable URL: {url!r} (it needs an http:// or https:// scheme)",
         )
     try:
-        request = Request(url, data=data, headers=headers)
+        request = Request(url, data=data, headers=headers, method=method)
         with urlopen(request, timeout=timeout) as response:
             raw = _read_body(response)
             return HttpVerdict(

@@ -31,8 +31,11 @@ from aisquare.cli.common import fail
 from aisquare.core import browser
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
+from aisquare.core.store import store_session
+from aisquare.core.workspace import active_project
+from aisquare.models import TraceDestination
 from aisquare.services import auth as auth_service
-from aisquare.services import iam
+from aisquare.services import destinations, iam
 
 app = typer.Typer(help="Sign in to AISquare and inspect the session.", no_args_is_help=True)
 
@@ -358,14 +361,23 @@ def logout() -> None:
             if env_set:
                 _say(f"⚠ {iam.TOKEN_ENV_VAR} is still set in this shell.")
         return
+    # Before the session is revoked: revoking a minted key needs the Bearer.
+    keys_cleared = _forget_minted_keys(session)
     revoked = auth_service.sign_out(session)
     if get_state().json_output:
         typer.echo(
             json.dumps(
-                {"signed_out": True, "server_revoked": revoked, "env_token_still_set": env_set}
+                {
+                    "signed_out": True,
+                    "server_revoked": revoked,
+                    "env_token_still_set": env_set,
+                    "minted_keys_cleared": keys_cleared,
+                }
             )
         )
         return
+    if keys_cleared:
+        _say(f"✓ Forgot {keys_cleared} ingest key(s) the CLI had minted for your projects.")
     if revoked:
         _say("✓ Signed out. The session was revoked on the server.")
     else:
@@ -385,15 +397,42 @@ def whoami() -> None:
         _fail(exc)
     if session is None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
+    lands_in = _active_destination()
     if get_state().json_output:
-        typer.echo(json.dumps(session.as_json()))
+        typer.echo(json.dumps({**session.as_json(), "destination": destinations.as_json(lands_in)}))
         return
     if session.source == "env":
         stdout_console().print(f"token from {iam.TOKEN_ENV_VAR} · {session.api_url}")
-        return
-    days = session.expires_in_days()
-    expiry = f"expires in {days} days" if days is not None else "no recorded expiry"
-    stdout_console().print(f"{session.email or session.sub} · {session.api_url} · {expiry}")
+    else:
+        days = session.expires_in_days()
+        expiry = f"expires in {days} days" if days is not None else "no recorded expiry"
+        stdout_console().print(f"{session.email or session.sub} · {session.api_url} · {expiry}")
+    if lands_in is not None:
+        # The active project's workspace and studio (#142), on the line that
+        # answers "who am I here": the same sign-in, the other half of it.
+        stdout_console().print(f"traces: {lands_in.label} · {lands_in.environment}")
+
+
+def _active_destination() -> TraceDestination | None:
+    """Where the active project's traces land, or ``None`` — never a reason whoami fails."""
+    if not destinations.derived_credentials_exist():
+        return None
+    try:
+        with store_session() as store:
+            return store.project_destination(active_project(store).id)
+    except Exception:
+        return None
+
+
+def _forget_minted_keys(session: iam.Session) -> int:
+    """``logout``: the ingest keys the CLI minted go with the session (#142). Never raises."""
+    if not destinations.derived_credentials_exist():
+        return 0
+    try:
+        with store_session() as store:
+            return len(destinations.revoke_minted_keys(store, session))
+    except Exception:
+        return 0
 
 
 # --------------------------------------------------------------------------- aisquare auth

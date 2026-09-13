@@ -204,17 +204,28 @@ def _http(
     url: str,
     *,
     form: dict[str, str] | None = None,
+    json_body: Any | None = None,
     headers: dict[str, str] | None = None,
     timeout: float = HTTP_TIMEOUT_SECONDS,
 ) -> HttpResult:
-    """One request. HTTP error statuses come back as results; transport errors raise."""
+    """One request. HTTP error statuses come back as results; transport errors raise.
+
+    The provider's own endpoints take form bodies (RFC 8628); the API behind the
+    session takes JSON — ``json_body`` is for those (#142), and the two are
+    exclusive by construction: a call names one shape.
+    """
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
+    if form is not None and json_body is not None:
+        raise ValueError("a request has one body shape: form or JSON, not both")
     data = urlencode(form).encode("utf-8") if form is not None else None
     request_headers = {"Accept": "application/json", "User-Agent": user_agent()}
     if data is not None:
         request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif json_body is not None:
+        data = json.dumps(json_body).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
     request_headers.update(headers or {})
     request = Request(url, data=data, headers=request_headers, method=method)
     try:
@@ -526,10 +537,24 @@ def request(
     *,
     method: str = "GET",
     form: dict[str, str] | None = None,
+    json_body: Any | None = None,
     workspace: str | None = None,
     api_url: str | None = None,
+    tolerate: tuple[int, ...] = (),
 ) -> HttpResult:
-    """Call the AISquare API as the signed-in user. There is no refresh path."""
+    """Call the AISquare API as the signed-in user. There is no refresh path.
+
+    ``tolerate`` names statuses to hand back as results instead of raising:
+    a 401 is normally "the session is gone", but an endpoint whose
+    authentication class predates the sign-in token answers 401 to a perfectly
+    live session, and the caller that knows which endpoint it is talking to is
+    the one that can tell the two apart (#142).
+
+    ``workspace`` goes out as ``X-Workspace-Id`` — the API resolves the
+    workspace context from that header (an id or a workspace uid) and falls
+    back to the user's personal workspace without it, never to an error, so a
+    caller that means a particular workspace must always pass it (#142).
+    """
     resolved = resolve_api_url(api_url)
     session = current_session(resolved)
     if session is None:
@@ -543,7 +568,11 @@ def request(
     headers = {"Authorization": f"Bearer {session.token}"}
     if workspace:
         headers["X-Workspace-Id"] = workspace
-    result = _http(method, f"{resolved}/{path.lstrip('/')}", form=form, headers=headers)
+    result = _http(
+        method, f"{resolved}/{path.lstrip('/')}", form=form, json_body=json_body, headers=headers
+    )
+    if result.status in tolerate:
+        return result
     if result.status == 401:
         raise IamError(
             "session_expired",

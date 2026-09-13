@@ -51,6 +51,7 @@ from aisquare.models import (
     TeamEvent,
     TeamSession,
     TeamTask,
+    TraceDestination,
     TurnMetric,
     UsageSample,
 )
@@ -658,6 +659,29 @@ ALTER TABLE project ADD COLUMN group_id TEXT REFERENCES project_group (id);
 ALTER TABLE project ADD COLUMN position INTEGER;
 ALTER TABLE project ADD COLUMN pinned_at TEXT;
 """
+# v21 (#142): where a project's traces land — a workspace and a studio picked by a
+# signed-in user, from the API environment the session belongs to. Its own table
+# rather than new columns on ``project_explainability``: that row is the KEY
+# binding (#141) with a NOT NULL key path, and a destination exists before, or
+# without, any key — widening it would mean a rebuild migration and a nullable
+# path every reader of the binding would then have to reason about. Two rows
+# per project at most, each with one job; the resolver joins them by target.
+_SCHEMA_V21 = """
+CREATE TABLE project_destination (
+    project_id     TEXT PRIMARY KEY REFERENCES project (id),
+    api_url        TEXT NOT NULL,
+    environment    TEXT NOT NULL,
+    workspace_id   INTEGER NOT NULL,
+    workspace_uid  TEXT,
+    workspace_name TEXT NOT NULL,
+    studio_id      INTEGER,
+    studio_uid     TEXT,
+    studio_name    TEXT,
+    key_uid        TEXT,
+    set_at         TEXT NOT NULL,
+    set_by         TEXT
+);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -680,11 +704,16 @@ _MIGRATIONS = (
     _SCHEMA_V18,
     _SCHEMA_V19,
     _SCHEMA_V20,
+    _SCHEMA_V21,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 _PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
 _GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
+_DESTINATION_COLUMNS = (
+    "project_id, api_url, environment, workspace_id, workspace_uid, workspace_name, "
+    "studio_id, studio_uid, studio_name, key_uid, set_at, set_by"
+)
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
@@ -904,6 +933,12 @@ class ContextStore(Protocol):
         self, project_id: str, *, target: str, key_path: Path, set_by: str | None
     ) -> ProjectExplainability: ...
     def clear_project_explainability(self, project_id: str) -> bool: ...
+    # Where a project's traces land (v21, #142).
+    def project_destination(self, project_id: str) -> TraceDestination | None: ...
+    def project_destinations(self) -> list[TraceDestination]: ...
+    def set_project_destination(self, destination: TraceDestination) -> TraceDestination: ...
+    def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None: ...
+    def clear_project_destination(self, project_id: str) -> bool: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
@@ -990,6 +1025,23 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         exit_status=row["exit_status"],
         account_slot=row["account_slot"],
         launch_spec=_launch_spec(row["launch_spec"]),
+    )
+
+
+def _row_to_trace_destination(row: sqlite3.Row) -> TraceDestination:
+    return TraceDestination(
+        project_id=row["project_id"],
+        api_url=row["api_url"],
+        environment=row["environment"],
+        workspace_id=int(row["workspace_id"]),
+        workspace_uid=row["workspace_uid"],
+        workspace_name=row["workspace_name"],
+        studio_id=int(row["studio_id"]) if row["studio_id"] is not None else None,
+        studio_uid=row["studio_uid"],
+        studio_name=row["studio_name"],
+        key_uid=row["key_uid"],
+        set_at=datetime.fromisoformat(row["set_at"]),
+        set_by=row["set_by"],
     )
 
 
@@ -2545,6 +2597,74 @@ class SqliteStore:
         """Detach the project's key; ``False`` when there was none."""
         cursor = self._conn.execute(
             "DELETE FROM project_explainability WHERE project_id = ?", (project_id,)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    # --- where a project's traces land (#142) -------------------------------------------
+
+    def project_destination(self, project_id: str) -> TraceDestination | None:
+        row = self._conn.execute(
+            f"SELECT {_DESTINATION_COLUMNS} FROM project_destination WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return _row_to_trace_destination(row) if row is not None else None
+
+    def project_destinations(self) -> list[TraceDestination]:
+        rows = self._conn.execute(
+            f"SELECT {_DESTINATION_COLUMNS} FROM project_destination ORDER BY project_id"
+        ).fetchall()
+        return [_row_to_trace_destination(row) for row in rows]
+
+    def set_project_destination(self, destination: TraceDestination) -> TraceDestination:
+        """Record (or re-point) where the project's traces land: one row per project.
+
+        ``set_at`` is stamped here, not trusted from the caller, so the row says
+        when the choice was made on THIS machine. A re-point keeps ``key_uid``
+        only when the caller carries it over — a destination in another
+        workspace is not served by a key minted for the old one.
+        """
+        self._conn.execute(
+            f"INSERT INTO project_destination ({_DESTINATION_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (project_id) DO UPDATE SET api_url = excluded.api_url, "
+            "environment = excluded.environment, workspace_id = excluded.workspace_id, "
+            "workspace_uid = excluded.workspace_uid, workspace_name = excluded.workspace_name, "
+            "studio_id = excluded.studio_id, studio_uid = excluded.studio_uid, "
+            "studio_name = excluded.studio_name, key_uid = excluded.key_uid, "
+            "set_at = excluded.set_at, set_by = excluded.set_by",
+            (
+                destination.project_id,
+                destination.api_url,
+                destination.environment,
+                destination.workspace_id,
+                destination.workspace_uid,
+                destination.workspace_name,
+                destination.studio_id,
+                destination.studio_uid,
+                destination.studio_name,
+                destination.key_uid,
+                _now_iso(),
+                destination.set_by,
+            ),
+        )
+        self._conn.commit()
+        stored = self.project_destination(destination.project_id)
+        assert stored is not None  # just written
+        return stored
+
+    def set_project_destination_key(self, project_id: str, key_uid: str | None) -> None:
+        """Remember (or forget) the ingest key the CLI minted for this destination."""
+        self._conn.execute(
+            "UPDATE project_destination SET key_uid = ? WHERE project_id = ?",
+            (key_uid, project_id),
+        )
+        self._conn.commit()
+
+    def clear_project_destination(self, project_id: str) -> bool:
+        """Forget where the project's traces land; ``False`` when nothing was recorded."""
+        cursor = self._conn.execute(
+            "DELETE FROM project_destination WHERE project_id = ?", (project_id,)
         )
         self._conn.commit()
         return cursor.rowcount > 0

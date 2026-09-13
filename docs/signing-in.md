@@ -74,6 +74,11 @@ To sign in with a token obtained elsewhere instead of the browser:
 aisquare login --with-token < token.txt
 ```
 
+The session is also how a project chooses where its traces land: `aisquare
+explainability workspaces`, `studios` and `use <workspace>/<studio>` list what
+you can see and record the choice per project. See *Choose where traces land
+with your sign-in* in the explainability guide.
+
 ## Another environment
 
 `--api-url` points a sign-in at a different server, for example staging. The

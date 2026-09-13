@@ -301,6 +301,50 @@ drains — still ships under the machine key; per-project shipping is a follow-u
 `init --explainability` keeps writing the machine key, so a single-workspace
 machine is unaffected.
 
+## Choose where traces land with your sign-in
+
+The other half of `aisquare login`: the session knows **who** you are, so it can
+also list **where** a project's traces may land and record the choice — no key
+pasted, no gateway URL typed (#142).
+
+```bash
+aisquare login --api-url https://stg-api.aisquare.studio   # or the default, production
+aisquare explainability workspaces                          # what you can see, members first
+aisquare explainability studios --workspace acme
+aisquare explainability use acme/Frontend                   # for the active project (or --project P)
+aisquare explainability status                              # "destination: acme / Frontend · stg · …"
+aisquare explainability use --clear
+```
+
+`use` records the destination **per project** and does four things, each
+reported on its own line:
+
+- **target** — the deployment the session belongs to becomes the explainability
+  target for this project (`stg-api.aisquare.studio` → `stg`, with the staging
+  gateway and hosted proxy filled in; `api.aisquare.studio` → `prod`). It fills
+  only what is empty, so a gateway or proxy you set by hand stays, and it does
+  **not** turn tracing on — that is still `aisquare explainability enable`.
+- **key** — ingest still needs a workspace key (neither the gateway nor the
+  hosted proxy accepts a sign-in token), so the CLI obtains one on your behalf,
+  scoped to `ingest:write`, named `aisquare-cli <host> <project>` in the
+  dashboard's key list, and stores it exactly as `key set` would (mode 600,
+  per project). The API does not accept a sign-in token on that endpoint yet;
+  until AISquare-Studio-BE#3493 lands the line reads `key: none — …` and
+  `aisquare explainability key set --from-env VAR` is the way in. A key you
+  attached by hand is used as is and never touched.
+- **routing** — a span lands in the studio its agent identity is bound to in
+  that workspace (unbound identities go to the workspace's *Unassigned* inbox),
+  so `use` binds this machine's identities (`aisquare-planner`, `aisquare-coder`,
+  …) to the chosen studio with the key. Binding needs a workspace OWNER/ADMIN
+  key or the studio owner's; a refusal is reported per identity, and the
+  destination is still recorded.
+- `whoami` gains a `traces:` line for the active project; `aisquare logout`
+  forgets every key the CLI minted (revoking each on the server when it can) and
+  leaves hand-attached keys alone.
+
+`status --json` carries the choice under `destination`; `use --json` carries
+the destination, the target, the key's standing and the routing result.
+
 ## If something breaks
 
 | Symptom | Cause |

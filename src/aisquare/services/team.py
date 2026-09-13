@@ -74,7 +74,8 @@ def base_role(role: str) -> str:
 #: The board events worth waking a manager for: a sub-agent's verdict or hand-off
 #: (``task_review``, ``task_done``), a task that needs the manager back
 #: (``task_blocked``, ``task_reopened``), a result or a question on the board, and
-#: an agent that went away (``agent_exited`` is the fleet's, emitted by ``reap``).
+#: an agent that went away (``agent_exited`` is the fleet's, emitted wherever a
+#: fleet row ends: ``fleet.stop`` — and so ``fleet shutdown`` — and ``fleet.reap``).
 #: A plain note, a decision or a claim is news, not a decision the manager has to
 #: make — it arrives with the next prompt's delta like everyone else's.
 MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
@@ -667,7 +668,12 @@ def _signal_state(name: str, blob: str) -> SignalState:
 
 
 def set_signal(
-    name: str, value: str, *, session_ref: str | None = None, cwd: Path | None = None
+    name: str,
+    value: str,
+    *,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> tuple[SignalState, str | None]:
     """Set a named board state (``team signal NAME VALUE``); returns (state, prev).
 
@@ -689,7 +695,14 @@ def set_signal(
         raise ValueError(f"signal value {value!r} must be a single token (no whitespace)")
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        # A caller that names the project by ID resolves the board id-addressed,
+        # never through cwd — `AISQUARE_TEAM_HUB` redirects cwd resolution to one
+        # hub project, so `fleet shutdown -P b` cleared project A's pause and
+        # reported B (review of #121, round 8). `_board_of` also skips
+        # `ensure_project`, so a forgotten project's tombstone is not revived.
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
         key = _signal_key(board.id, name)
         prior = store.get_meta(key)
         prev = _signal_state(name, prior).value if prior is not None else None
@@ -723,13 +736,19 @@ def set_signal(
 
 
 def read_signal(
-    name: str, *, session_ref: str | None = None, cwd: Path | None = None
+    name: str,
+    *,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+    project_id: str | None = None,
 ) -> SignalState | None:
     """The current value of one named board state (``team signal NAME``)."""
     _require_enabled()
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = (
+            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+        )
         blob = store.get_meta(_signal_key(board.id, name))
         return _signal_state(name, blob) if blob is not None else None
 

@@ -907,7 +907,7 @@ CENSUS = {
     # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
     # `src/aisquare/...`).
     "docs/ci-live-wiring-handoff.md": (8, 2),
-    # Re-measured 2026-09-13 by the integration task (plan §11/M7–M9), which is
+    # Re-measured 2026-09-13 by the integration task (plan §11/M7-M9), which is
     # what the previous note here asked for. The document was rewritten so every
     # step is an instruction, and the `aisquare xr` mentions that were inline
     # because the command did not exist yet are now fenced: eleven fenced

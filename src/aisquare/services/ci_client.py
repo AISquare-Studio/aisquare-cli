@@ -41,6 +41,7 @@ the base install must stay unchanged and this path has to work without the
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -49,8 +50,10 @@ import urllib.error
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from aisquare.core import paths
 from aisquare.core.config import ExperimentSettings, load_config
 from aisquare.models import BriefingStatus, ClientReason, HookAction
 from aisquare.services.ci_contract import (
@@ -120,24 +123,235 @@ def endpoint() -> str:
     return url if url.lower().startswith(("http://", "https://")) else ""
 
 
-def api_key() -> str:
-    """The bearer token. Environment only — never read from ``config.toml``.
+EXPERIMENT_TOKEN_SOURCE = KEY_ENV_VAR
+"""What ``doctor`` calls the bearer when it came from the environment."""
 
-    A value spanning more than one line is treated as unset: it can never make
-    a valid header, and letting it reach ``http.client`` produced a
-    ``ValueError`` whose text — the token, verbatim — became a recorded detail.
-    :func:`api_key_problem` says why for ``doctor``.
+SIGNED_IN_SOURCE = "aisquare login"
+"""What ``doctor`` calls the bearer when it came from the signed-in user."""
+
+SIGNED_IN_WITHHELD_SOURCE = "signed-in token withheld"
+"""What ``doctor`` calls the bearer when a signed-in token exists but this build
+refuses to send it — see :func:`signed_in_allowed`."""
+
+SIGNED_IN_EXPIRED_SOURCE = "signed-in token expired"
+"""What ``doctor`` calls the bearer when the stored login has lapsed: nothing is
+sent, because a token known to be expired would only be refused."""
+
+
+def signed_in_allowed(base: str) -> bool:
+    """Whether the signed-in user's token may be sent to ``base``.
+
+    The predicate is :func:`aisquare.services.iam.safe_transport` - https
+    anywhere, http only to this machine - the same one that gates the sign-in
+    which minted the token, so the rule that decides whether a credential goes
+    on the wire in cleartext lives in one place. The experiment token keeps its
+    old latitude: it is purpose-minted for the test bed and set on purpose,
+    while the signed-in fallback is a 90-day OAuth token for the user's whole
+    Studio account and ``endpoint()`` accepts any URL with a scheme. An empty
+    ``base`` is allowed: with no endpoint nothing is sent, and the missing URL
+    is the line ``doctor`` should lead with.
     """
-    value = _raw_api_key()
-    return value if _single_line(value) else ""
+    if not base:
+        return True
+    from aisquare.services import iam
+
+    return iam.safe_transport(base)
+
+
+def api_key() -> str:
+    """The bearer token this build sends, or ``""``.
+
+    Two sources, in this order (``docs/ci-user-identity-handoff.md`` C1):
+
+    1. ``AISQUARE_CI_KEY`` — the experiment token. **Unchanged semantics, and it
+       keeps precedence**, because the harness, the joint smoke and every
+       ``CITEST_*`` identity depend on being able to say "be this credential"
+       from one shell variable.
+    2. the signed-in user's ``aisq_`` token, through
+       :func:`aisquare.services.iam.current_session`, which itself prefers
+       ``AISQUARE_TOKEN`` over the stored credential.
+
+    Nothing is read from ``config.toml``: a bearer in a file the CLI writes is a
+    credential in a place people paste.
+
+    A value spanning more than one line is treated as unset whichever source it
+    came from: it can never make a valid header, and letting it reach
+    ``http.client`` produced a ``ValueError`` whose text — the token, verbatim —
+    became a recorded detail. :func:`api_key_problem` says why for ``doctor``.
+    """
+    return api_key_and_source()[0]
+
+
+def api_key_and_source() -> tuple[str, str]:
+    """The bearer and the human name of where it came from.
+
+    One function returning both, because ``doctor`` must never answer "which
+    credential am I using" by re-deriving the precedence: two copies of that
+    order would be two answers, and the wrong one would be the one printed to
+    somebody debugging an authentication failure.
+    """
+    configured = _raw_api_key()
+    if configured:
+        return (configured if _single_line(configured) else ""), EXPERIMENT_TOKEN_SOURCE
+    session = _signed_in_session()
+    if session is None or not session.token.strip():
+        return "", ""
+    if _expired(session):
+        return "", SIGNED_IN_EXPIRED_SOURCE
+    if not signed_in_allowed(endpoint()):
+        return "", SIGNED_IN_WITHHELD_SOURCE
+    token = session.token.strip()
+    return (token if _single_line(token) else ""), SIGNED_IN_SOURCE
+
+
+def signed_in_display() -> tuple[str, str, str]:
+    """``(email, subject, source)`` for the signed-in session, from the memoised read.
+
+    Any of the three may be ``""``; never the token. ``source`` is ``"env"`` for
+    a session read from ``AISQUARE_TOKEN``. The three are kept apart rather than
+    collapsed into one "who" string, so the caller decides what it knows: an
+    email is the user's email and a subject is the locally stored subject, and
+    a subject that happens to contain ``@`` is not promoted to an email by a
+    substring test (round 8). ``doctor`` names the credential from this rather
+    than from its own ``iam.current_session()`` call, so the note it prints
+    comes from the same read that chose the bearer and cannot describe a
+    different snapshot of the credentials file; this module stays a caller of
+    ``iam``, not a second reader of the ``iam_*`` keys. Never raises.
+    """
+    session = _signed_in_session()
+    if session is None:
+        return "", "", ""
+    return (
+        str(getattr(session, "email", "") or ""),
+        str(getattr(session, "sub", "") or ""),
+        str(getattr(session, "source", "") or ""),
+    )
+
+
+def _signed_in_token() -> str:
+    """The signed-in user's access token, or ``""``. Never raises.
+
+    Every fragment of a stored token is still a candidate for
+    :func:`scrub_secret` whether or not precedence would send it, which is why
+    this returns the token even when it has expired or is withheld - the
+    scrubber must cover the loser too.
+    """
+    session = _signed_in_session()
+    return session.token.strip() if session is not None else ""
+
+
+_SESSION_MEMO: dict[str, Any] = {}
+"""One parse of the credentials file per change of it, keyed by the value of
+``AISQUARE_TOKEN`` (which wins over the file and can change between tests), by
+the file's resolved path and by a digest of its bytes.
+``iam.current_session()`` parses and validates ``~/.aisquare/credentials`` on
+every call; a hook asked for the bearer, its source, its problems, the doctor
+note and the scrubber once per recorded detail - six parses of one file per
+turn. Cleared by :func:`reset_cache`, which sign-in and sign-out call."""
+
+
+def _signed_in_session() -> Any:
+    """The signed-in session, memoised per process. Never raises.
+
+    Imported inside the function, not at module scope, so "off costs nothing"
+    stays true: with ``AISQUARE_CI`` unset nothing here runs at all, and this
+    module must not pull the credentials reader into the base import closure
+    (``tests/test_iam_single_reader.py`` pins ``iam`` as the ONE reader of the
+    ``iam_*`` keys, and this is a caller rather than a second reader).
+    """
+    env_token = os.environ.get("AISQUARE_TOKEN", "").strip()
+    # The key carries the credentials file's identity too, so a sign-in or
+    # sign-out in ANOTHER process (a `login` in a second terminal while `fleet
+    # ui` or `serve` runs) is seen on the next call: one small read instead of
+    # a parse, and no answer - `None` included - outlives the file that
+    # produced it. The path is in the key because two homes that both lack the
+    # file look alike otherwise - RESOLVED, since `AISQUARE_HOME` is taken
+    # verbatim and a relative value under a chdir, a symlink or a `..` would
+    # otherwise split one file over two entries or share one entry between two
+    # files (round 5) - and it is the bytes that are hashed rather than mtime
+    # and size because a same-length rewrite within one timestamp tick (a
+    # refresh, on a coarse filesystem) left those unchanged (round 4).
+    path = paths.credentials_path()
+    try:
+        resolved = str(path.resolve())
+    except OSError:  # a path whose ancestors cannot be resolved is its own name
+        resolved = str(path)
+    try:
+        digest: str | None = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        digest = None
+    key = (env_token, resolved, digest)
+    if _SESSION_MEMO.get("key") == key and "session" in _SESSION_MEMO:
+        return _SESSION_MEMO["session"]
+    try:
+        from aisquare.services import iam
+
+        session = iam.current_session()
+    except Exception:  # a damaged credentials file must not cost the hook a turn
+        session = None
+    _SESSION_MEMO.clear()
+    _SESSION_MEMO["key"] = key
+    _SESSION_MEMO["session"] = session
+    return session
+
+
+def _expired(session: Any) -> bool:
+    """Whether the stored login has lapsed. An environment token has no expiry."""
+    expires_at = getattr(session, "expires_at", None)
+    if expires_at is None:
+        return False
+    from datetime import UTC, datetime
+
+    return bool(expires_at <= datetime.now(UTC))
 
 
 def api_key_problem() -> str:
-    """Why the configured token cannot be used, or ``""``. Never the value."""
-    value = _raw_api_key()
-    if value and not _single_line(value):
-        return f"{KEY_ENV_VAR} spans more than one line"
-    return ""
+    """Why the bearer cannot be used, or ``""``. Never the value."""
+    return bearer_problem()[0]
+
+
+def api_key_fix() -> str:
+    """What to do about :func:`api_key_problem`, or ``""``."""
+    return bearer_problem()[1]
+
+
+def bearer_problem() -> tuple[str, str]:
+    """``(problem, fix)`` for a bearer this build will not send, else ``("", "")``.
+
+    One function for both halves, so the fix ``doctor`` prints is chosen by the
+    code that found the problem rather than by matching words in the problem's
+    text. Never the token's value.
+    """
+    configured = _raw_api_key()
+    if configured and not _single_line(configured):
+        return (
+            f"{KEY_ENV_VAR} spans more than one line",
+            f"Re-export the token on one line: export {KEY_ENV_VAR}=…",
+        )
+    if not configured:
+        signed_in = _signed_in_token()
+        session = _signed_in_session()
+        base = endpoint()
+        if signed_in and session is not None and _expired(session):
+            when = session.expires_at.date().isoformat() if session.expires_at else "already"
+            return (
+                f"the signed-in session expired ({when}); a lapsed token would only be refused",
+                "Sign in again: aisquare login",
+            )
+        if signed_in and not signed_in_allowed(base):
+            host = urlsplit(base).hostname or "the server"
+            return (
+                f"the signed-in token is withheld: {URL_ENV_VAR} is plain http:// to {host}, "
+                "and a login token travels only over https:// (loopback excepted)",
+                f"Point {URL_ENV_VAR} at https://…, or export an experiment token for a "
+                f"plain-http server: export {KEY_ENV_VAR}=…",
+            )
+        if signed_in and not _single_line(signed_in):
+            return (
+                "the signed-in token spans more than one line; run aisquare login again",
+                "Sign in again: aisquare login",
+            )
+    return "", ""
 
 
 def _raw_api_key() -> str:
@@ -149,19 +363,21 @@ def _single_line(value: str) -> bool:
 
 
 def scrub_secret(text: str) -> str:
-    """``text`` with any appearance of the configured token replaced.
+    """``text`` with any appearance of any candidate bearer replaced.
 
     Details quote exception text, and ``http.client`` quotes header values in
-    its. Every fragment of the raw environment value that is long enough to be
-    a secret is replaced, so no path that records or prints a detail can echo
-    the token — whatever shape the value had.
+    its. Every fragment of every value that COULD be the bearer is replaced —
+    not only the one precedence happened to pick — because the detail being
+    scrubbed may have been produced while a different source was winning, and a
+    scrubber that tracked the winner would leak the loser. Each is labelled with
+    its own source so a redacted detail still says which credential failed.
     """
-    raw = _raw_api_key()
-    fragments = {raw, *raw.splitlines()}
-    for fragment in sorted(
-        (f.strip() for f in fragments if len(f.strip()) >= 8), key=len, reverse=True
-    ):
-        text = text.replace(fragment, f"[{KEY_ENV_VAR}]")
+    for raw, label in ((_raw_api_key(), KEY_ENV_VAR), (_signed_in_token(), "signed-in token")):
+        fragments = {raw, *raw.splitlines()}
+        for fragment in sorted(
+            (f.strip() for f in fragments if len(f.strip()) >= 8), key=len, reverse=True
+        ):
+            text = text.replace(fragment, f"[{label}]")
     return text
 
 
@@ -169,6 +385,18 @@ def raw_run_id() -> str:
     """The configured run id as written, or ``""``. For diagnostics."""
     from_env = os.environ.get(RUN_ENV_VAR, "").strip()
     return from_env or _settings().run.strip()
+
+
+def workspace_id(project_id: str | None) -> str:
+    """The workspace ``project_id`` is bound to, or ``""``.
+
+    Per project (``[experiment].bindings``), never per shell — see the field's
+    docstring in :mod:`aisquare.core.config`. ``None`` is a caller with no
+    project, and a caller with no project has no binding.
+    """
+    if not project_id:
+        return ""
+    return _settings().bindings.get(project_id, "").strip()
 
 
 def run_id() -> str:
@@ -212,6 +440,7 @@ def reset_cache() -> None:
     same process.
     """
     _settings.cache_clear()
+    _SESSION_MEMO.clear()
 
 
 # --- one HTTP exchange under a wall-clock deadline ----------------------------

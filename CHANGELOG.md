@@ -7,6 +7,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The signed-in user is the Collective Intelligence principal.** After
+  `aisquare login`, the CI hooks and the recall tool send the user's own
+  `aisq_` token instead of an experiment token, and the server resolves it to
+  a `usr_<uid>` principal in the workspace the run belongs to — so every
+  ledger row on the server names the person whose session produced it.
+  `AISQUARE_CI_KEY` keeps precedence, so the harness is untouched.
+  - **Which run, without an environment variable.** At session start the CLI
+    asks `GET /v1/me` once (cached five minutes per bearer, a refusal cached a
+    minute) and uses the run published in the workspace this project is bound
+    to; `AISQUARE_CI_RUN` still wins when set. A developer in a single
+    workspace needs nothing; one in several binds the project with the hidden
+    `aisquare ci bind-workspace [ws_…]` (`--clear` forgets it), which lists
+    the workspaces `GET /v1/me` returns and refuses one the user is not in.
+    The binding is per project — `[experiment].bindings` in `config.toml`,
+    keyed by the project id — so binding one checkout leaves every other
+    alone; a selector the server checks, never authority.
+  - **The signed-in token travels only over `https://`** (or to this machine).
+    `AISQUARE_CI_URL` accepts any URL, and the fallback bearer is the user's
+    own 90-day account token, so a stale `http://` value would have put it on
+    the wire in cleartext; it is withheld instead and `doctor` says why. The
+    experiment token keeps its old latitude. A stored login that has expired
+    is not sent either: `doctor` says to sign in again instead of spending a
+    round trip to be refused. Signing out also forgets the cached `GET /v1/me`
+    answer for that token, and that answer is served only for the server it
+    came from. `doctor` asks `GET /v1/me` for an experiment token too, so the
+    `ci identity` line always says who the server resolved; a CI server that
+    answers `/ready` but not the route is named as one that predates it (and,
+    with a run exported, is not a warning), while a URL that answers neither
+    is a warning about the URL rather than a claim about the server.
+  - **`doctor` says who CI thinks you are.** The `ci test bed` line names the
+    credential in play (experiment token, or signed in as you — never its
+    value); signed in, two more lines follow: `ci identity` (the principal the
+    server resolved and how many workspaces it lists) and `ci workspace` (the
+    bound workspace, your role there, and the run), each warning with the
+    command that fixes it — `aisquare login` on a 401, `aisquare ci
+    bind-workspace` when a choice is needed. Probes are bounded and leave no
+    cache behind.
+  - Every candidate bearer is scrubbed from every detail the CLI records,
+    whichever one precedence picked.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

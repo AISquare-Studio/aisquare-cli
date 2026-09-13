@@ -1,0 +1,378 @@
+"""``GET /v1/me``: which run this developer may ask against.
+
+The descriptor says *how* to deliver for a run. It never said *which* run — that
+was ``AISQUARE_CI_RUN``, an environment variable a controller handed out per
+cohort. Fine for a harness, useless for a person, and the gap that stopped
+``aisquare login`` from being enough to join an experiment. This module closes
+it: one call at ``SessionStart``, cached, that says who the server resolved the
+bearer to and which run is published in each workspace they belong to.
+
+**It is bounded and negatively cached, for the reason the descriptor is.** This
+sits in front of the descriptor fetch on the synchronous session-start path, so
+a hanging ``/v1/me`` would cost every session its whole ceiling and then the
+descriptor's on top. It therefore borrows
+:data:`~aisquare.services.ci_descriptor.DESCRIPTOR_DEADLINE_MS` and caches a
+refusal for :data:`~aisquare.services.ci_descriptor.REFUSAL_TTL_SECONDS`, so a
+server that is down costs one probe per minute rather than one per prompt. The
+plan this implements did not say that; the review of the branch it was written
+against is why it does.
+
+**The run the client uses, in order.** ``AISQUARE_CI_RUN`` when set — the
+harness, the joint smoke and every ``CITEST_*`` identity depend on being able to
+say "this run" from one shell variable, and it keeps precedence. Otherwise the
+``active_run_id`` of the workspace this project is bound to
+(``[experiment].bindings``, keyed by project id). Otherwise, when the developer belongs to exactly
+one workspace, that one. Otherwise nothing, and the turn records ``no_run`` with
+a reason ``doctor`` can print — guessing between several workspaces would bind a
+project to whichever the server happened to list first.
+
+**Cached per bearer, not per user, and answered per server.** The cache file
+is keyed by a hash of the token, so signing out and in as somebody else cannot
+serve the previous identity's routing, and a re-issued token starts cold. The
+hash is truncated because a filename is not a secret store; the token itself is
+never written. The file also records which server answered, and is not served
+for any other: repointing ``AISQUARE_CI_URL`` within the TTL would otherwise
+route every hook to the previous server's ``active_run_id`` — the same rule the
+refusal cache already followed, applied to the document it protects.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from aisquare.core import paths
+from aisquare.models import ClientReason
+from aisquare.services import ci_client
+from aisquare.services.ci_contract import MeDocument, WorkspaceMembership, clip, first_error
+from aisquare.services.ci_descriptor import (
+    DESCRIPTOR_DEADLINE_MS,
+    REFUSAL_TTL_SECONDS,
+)
+
+ME_PATH = "/v1/me"
+"""Server-relative; joined to the configured base URL."""
+
+MAX_ME_BYTES = 65_536
+"""A principal and a handful of workspaces. Past this it is not a ``me.v1``."""
+
+CACHE_TTL_SECONDS = 300
+"""How long an answer is reused.
+
+Shorter than a token's life and longer than a session start, which is the window
+that matters: memberships change on human timescales, and a developer added to a
+workspace should not have to restart their editor for more than a few minutes.
+The descriptor's own expiry is unrelated and is not borrowed — that one is the
+server's statement about a run, this one is ours about an identity."""
+
+
+@dataclass(frozen=True)
+class MeResult:
+    """The document, or the reason there is none."""
+
+    me: MeDocument | None
+    detail: str = ""
+    from_cache: bool = False
+    status: int | None = None
+    """The HTTP status of a refusal, when the server answered with one. ``doctor``
+    picks its fix from this rather than from words in ``detail``."""
+
+    @property
+    def reason(self) -> ClientReason:
+        return ClientReason.none if self.me is not None else ClientReason.descriptor_unavailable
+
+
+def current(*, base: str, key: str, now: datetime | None = None) -> MeResult:
+    """The live ``me.v1`` for this bearer: the cache when fresh, else a fetch.
+
+    Never raises. ``base`` is the validated endpoint; ``key`` the bearer (sent,
+    never stored).
+    """
+    moment = now or datetime.now(tz=UTC)
+    cached = _read_cache(key, moment, base)
+    if cached is not None:
+        return MeResult(cached, "cached", from_cache=True)
+    refused = _read_refusal(key, moment, base)
+    if refused is not None:
+        return MeResult(None, f"{refused} (refusal cached)", from_cache=True)
+    result = fetch(base=base, key=key)
+    if result.me is None:
+        _write_refusal(key, result.detail, moment, base)
+    return result
+
+
+def fetch(
+    *, base: str, key: str, cache: bool = True, deadline_ms: int = DESCRIPTOR_DEADLINE_MS
+) -> MeResult:
+    """One GET, one attempt, every failure its own detail. Never raises.
+
+    ``cache=False`` answers without leaving a file behind — ``doctor`` uses it,
+    because a diagnostic must not create state. A document that arrives still
+    CLEARS a cached refusal either way: the refusal is a claim about the server
+    that this answer has just disproved, and leaving it would make ``doctor``
+    print a healthy identity while every hook kept reading the stale negative.
+    ``deadline_ms`` exists for ``doctor`` too, which bounds its probes tighter
+    than the session-start path does.
+    """
+    result = ci_client.exchange(
+        f"{base}{ME_PATH}",
+        method="GET",
+        deadline_ms=deadline_ms,
+        headers=ci_client.headers_for(key, json_body=False),
+        max_body=MAX_ME_BYTES,
+    )
+    if result.reason is not None:
+        return MeResult(None, f"{result.reason.value}: {result.detail}")
+    if result.status != 200:
+        return MeResult(None, _status_detail(result.status), status=result.status)
+    me, detail = parse_me(result.body)
+    if me is None:
+        return MeResult(None, detail)
+    if cache:
+        _write_cache(key, result.body, base)
+    else:
+        _clear_refusal(key)
+    return MeResult(me, "fetched")
+
+
+def parse_me(body: str) -> tuple[MeDocument | None, str]:
+    """Turn a body into a ``me.v1``, or say exactly why not. Never raises."""
+    try:
+        raw = json.loads(body)
+    except Exception:
+        return None, "me is not JSON"
+    if not isinstance(raw, dict):
+        return None, f"me is {type(raw).__name__}"
+    version = raw.get("contract_version")
+    if type(version) is not int or version != 1:
+        return None, f"me speaks contract_version {clip(repr(version), 40)}, this build speaks 1"
+    try:
+        return MeDocument.model_validate(raw), "ok"
+    except ValidationError as exc:
+        return None, f"me: {first_error(exc)}"
+
+
+class RunReason(StrEnum):
+    """Why :func:`run_for` chose what it chose - a code, so a caller that picks
+    a fix (``doctor``) switches on the branch that was taken rather than on
+    words in the detail, which a later edit could reword."""
+
+    resolved = "resolved"
+    no_workspaces = "no_workspaces"
+    not_a_member = "not_a_member"
+    unbound = "unbound"
+    no_run = "no_run"
+
+
+@dataclass(frozen=True)
+class RunChoice:
+    """The run this client should use (or none), the branch that decided, and why."""
+
+    run_id: str | None
+    reason: RunReason
+    detail: str
+    workspace: WorkspaceMembership | None = None
+
+
+def run_for(me: MeDocument, workspace_id: str | None) -> RunChoice:
+    """The run this client should use, and why — never raises.
+
+    ``run_id`` is ``None`` whenever the developer has nowhere to ask, which is
+    a normal state and not a failure: a token can be perfectly good while no
+    run is published for them yet.
+    """
+    if not me.workspaces:
+        return RunChoice(None, RunReason.no_workspaces, "signed in, but a member of no workspace")
+    member = me.membership(workspace_id)
+    if member is None:
+        if workspace_id:
+            return RunChoice(None, RunReason.not_a_member, f"not a member of {workspace_id}")
+        listed = ", ".join(m.workspace_id for m in me.workspaces)
+        return RunChoice(
+            None,
+            RunReason.unbound,
+            f"a member of {len(me.workspaces)} workspaces ({listed}) and none is bound — "
+            "run aisquare ci bind-workspace in this checkout",
+        )
+    if member.active_run_id is None:
+        return RunChoice(
+            None, RunReason.no_run, f"no run published in {member.workspace_id}", member
+        )
+    return RunChoice(
+        member.active_run_id,
+        RunReason.resolved,
+        f"run {member.active_run_id} from {member.workspace_id}",
+        member,
+    )
+
+
+def _status_detail(status: int | None) -> str:
+    if status == 401:
+        return "token rejected (401)"
+    if status == 403:
+        return "token not allowed to read its own identity (403)"
+    return f"http {status}"
+
+
+def _key_digest(key: str) -> str:
+    """A short, stable, one-way name for a bearer.
+
+    Keyed on the token so signing in as somebody else cannot serve the previous
+    identity's routing, and a re-issued token starts cold. Truncated because a
+    filename is a cache key and not a secret store; the token is never written.
+    """
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_path(key: str) -> Path:
+    return paths.ci_me_path(_key_digest(key))
+
+
+def _refusal_path(key: str) -> Path:
+    return _cache_path(key).with_suffix(".refused.json")
+
+
+def _read_cache(key: str, now: datetime, base: str) -> MeDocument | None:
+    """A fresh cached document for this bearer FROM THIS SERVER, or ``None``.
+
+    Every comparison sits inside the ``try``: a file whose ``until`` parses to a
+    naive datetime would otherwise raise ``TypeError`` out of the comparison, on
+    the synchronous hook path, from a function documented never to raise. The
+    writer always stores an aware timestamp, so this covers a hand-edited or
+    partially written file — exactly the population the guarantee exists for.
+    """
+    try:
+        raw = json.loads(_cache_path(key).read_text(encoding="utf-8"))
+        until = datetime.fromisoformat(raw["until"])
+        body = raw["body"]
+        scope = raw.get("endpoint")
+        if not isinstance(body, str) or now >= until or scope != base.rstrip("/"):
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    me, _ = parse_me(body)
+    return me
+
+
+def _write_cache(key: str, body: str, base: str) -> None:
+    """Store the answer with its own expiry and the server it came from. Never raises."""
+    until = (datetime.now(tz=UTC) + timedelta(seconds=CACHE_TTL_SECONDS)).isoformat()
+    _replace(
+        _cache_path(key),
+        json.dumps({"body": body, "until": until, "endpoint": base.rstrip("/")}),
+    )
+    _clear_refusal(key)
+    _sweep()
+
+
+def _sweep() -> None:
+    """Drop every cached document and refusal whose own expiry has passed. Never raises.
+
+    ``forget`` deletes the one token being signed out of, so before this every
+    token refresh or re-issue left its predecessor's identity document behind -
+    a readable list of the developer's workspaces per token, for the life of the
+    machine, past the TTL that only stopped it being SERVED (the review of #78).
+    Called where a file is being written anyway - a document, a refusal - and
+    from ``forget``, because sign-out is the one moment the CLI knows the
+    developer wants this data gone and, after a rotation, the quiet cases (a
+    sign-out, an unreachable server, a machine left alone) are exactly where a
+    predecessor's document would otherwise survive (round 8). The directory is
+    bounded to roughly the tokens live inside one TTL; the server half of this
+    feature sweeps its map the same way. Every comparison sits inside the guard,
+    for the reason ``_read_cache`` gives.
+    """
+    now = datetime.now(tz=UTC)
+    try:
+        # This module's files only: the directory is shared with the delivery
+        # descriptor cache, whose refusals carry the same `until` key, so an
+        # unscoped glob read every cached descriptor per write and deleted
+        # another module's files without that module knowing (round 8).
+        candidates = list(paths.ci_cache_dir().glob("me-*.json"))
+    except OSError:
+        return
+    for path in candidates:
+        with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if now >= datetime.fromisoformat(raw["until"]):
+                path.unlink()
+
+
+def _read_refusal(key: str, now: datetime, base: str) -> str | None:
+    """The detail of a recent refusal against ``base``, or ``None``."""
+    try:
+        raw = json.loads(_refusal_path(key).read_text(encoding="utf-8"))
+        until = datetime.fromisoformat(raw["until"])
+        detail = raw["detail"]
+        scope = raw.get("endpoint")
+        # Inside the try for the reason _read_cache gives: a naive `until`
+        # must be a miss, not a TypeError on the hook path.
+        if not isinstance(detail, str) or now >= until:
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if scope != base.rstrip("/"):
+        # A refusal from one server must not answer for the next: repointing
+        # AISQUARE_CI_URL invalidates it, the same rule the descriptor's
+        # refusal cache follows.
+        return None
+    return detail
+
+
+def _write_refusal(key: str, detail: str, now: datetime, base: str) -> None:
+    until = (now + timedelta(seconds=REFUSAL_TTL_SECONDS)).isoformat()
+    _replace(
+        _refusal_path(key),
+        json.dumps({"detail": detail, "until": until, "endpoint": base.rstrip("/")}),
+    )
+    _sweep()
+
+
+def _clear_refusal(key: str) -> None:
+    with contextlib.suppress(OSError):
+        _refusal_path(key).unlink()
+
+
+def forget(key: str) -> None:
+    """Drop this bearer's cached answer and any cached refusal - and every expired
+    one, since sign-out is when the developer has said this data should be gone.
+    Never raises."""
+    for path in (_cache_path(key), _refusal_path(key)):
+        with contextlib.suppress(OSError):
+            path.unlink()
+    _sweep()
+
+
+def _replace(target: Path, body: str) -> None:
+    """Write ``body`` to ``target`` in one step. Never raises."""
+    temporary = target.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(body, encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
+__all__ = [
+    "CACHE_TTL_SECONDS",
+    "MAX_ME_BYTES",
+    "ME_PATH",
+    "MeResult",
+    "RunChoice",
+    "RunReason",
+    "WorkspaceMembership",
+    "current",
+    "fetch",
+    "forget",
+    "parse_me",
+    "run_for",
+]

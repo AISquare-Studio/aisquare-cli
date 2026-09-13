@@ -72,6 +72,9 @@ _DOCUMENTED_FAILURE = {
     "client-delivery-descriptor.v1": "$",
     "delivery-capability-manifest.v1": "$.capabilities[1]",
     "error.v1": "$.code",
+    # Nested on purpose: closing only the root would let `arm_kind` ride one
+    # level down, and this path is what proves the member object is closed too.
+    "me.v1": "$.workspaces[0]",
 }
 
 
@@ -130,7 +133,17 @@ def test_vendored_bytes_match_the_server_at_the_pinned_commit() -> None:
         pytest.skip(f"the sibling aisquare-ci does not have commit {VENDORED_AT}; fetch it")
     drifted: list[str] = []
     for name in CONTRACTS:
-        family = "kernel" if name == "error.v1" else "delivery"
+        family = ci_schemas.FAMILIES.get(name, "delivery")
+        if name in ci_schemas.PENDING_VENDOR:
+            # Vendored from a server branch, so it cannot exist at the pin. The
+            # exception is asserted rather than assumed: when the pin moves to a
+            # commit that HAS the file, this fails and says to retire the entry.
+            path = f"contracts/jsonschema/{family}/{name}.schema.json"
+            assert blob(path) is None, (
+                f"{name} now exists at {VENDORED_AT} ({ci_schemas.PENDING_VENDOR[name]} landed) — "
+                "remove it from ci_schemas.PENDING_VENDOR so the bytes are held equal again"
+            )
+            continue
         pairs = [
             (
                 ci_schemas.SCHEMAS / f"{name}.schema.json",

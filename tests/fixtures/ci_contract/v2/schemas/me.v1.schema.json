@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aisquare.studio/ci/identity/me.v1.schema.json",
+  "title": "me.v1",
+  "description": "The answer to 'who does this server think I am, and where may I ask'. Returned by GET /v1/me to any authenticated principal, proposed by ADR 0008 and specified by docs/handoff-2026-09-03-user-identity.md section 3.1. WHY THIS ROUTE EXISTS. Every delivery call names a run, and the run names the workspace (ADR 0008 decision 4), so the tenant is never selected by a request field, header or body. That leaves one gap: a real user signed in through the identity provider has no way to LEARN their run, because until now the run id was an environment variable a controller handed out per cohort. This route closes that gap and nothing else. WHAT IT IS NOT, and why additionalProperties is false at the root AND inside every workspaces[] member. This route is reachable by the same `developer` principal the delivery routes serve, so it is the newest place an arm could leak into. The blinding argument in client-delivery-descriptor.v1 rests on the descriptor being the only run document a client fetches; that argument survives only while this route stays identity and routing. It therefore carries no architecture, source, reader, storage, arm, delivery or configuration field, and closing both objects makes that a statement about which fields are ABSENT rather than a convention: 'architecture', 'arm', 'arm_kind', 'delivery', 'sources' and 'opaque_config_id' would all validate against an open object, the payload would still look canon-shaped in review, and the leak would be invisible until someone diffed two cohorts' answers. The invalid fixture for this schema is exactly that case. WHAT IT STILL CANNOT STOP, stated plainly because a control whose limits are unwritten gets trusted past them: active_run_id is an opaque run id, and a descriptive one (run_r1_arm_b_007) leaks the arm through a legal field exactly as it does on the descriptor. Minting opaque run ids is a controller obligation, NOT expressible in JSON Schema, and it is the residual risk this schema shares with the descriptor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "principal_id",
+    "auth_subject",
+    "roles",
+    "workspaces"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 1,
+      "description": "This route's contract version, independent of the hook/delivery contract. Named contract_version rather than contract to match client-delivery-descriptor.v1, the other document a client fetches rather than posts."
+    },
+    "principal_id": {
+      "type": "string",
+      "pattern": "^usr_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "description": "The principal this server resolved for the bearer, identical to principal.v1's principal_id and to the principal_id on every ledger, grounding and export row the caller produces. For an identity-provider token this is 'usr_' + the provider's stable sub with its dashes removed (ADR 0008 decision 2), never a mutable username and never the provider's integer primary key."
+    },
+    "auth_subject": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "The opaque server-resolved subject from principal.v1, echoed so a developer can tell which identity a token resolved to without the server ever returning the token. Never secret material: it is an issuer-qualified subject ('aisquare-idp:<sub>'), not a credential, and a caller who did not already hold the bearer could not have reached this route to read it."
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "developer",
+          "reader",
+          "fixture_writer",
+          "experiment_runner",
+          "experiment_admin"
+        ]
+      },
+      "description": "The principal's roles. The enum is inlined rather than $ref'd into principal.v1, and that is a correction rather than a duplication: this is a CLIENT-facing document, and a $ref by absolute $id is only resolvable by a consumer that also holds the schema being referenced. The CLI vendors the contracts it consumes and has no business holding a server kernel record it never sees, so the first version of this schema was unresolvable in the one place it is actually read — the same reason client-delivery-descriptor.v1 is self-contained. The two copies are held equal by a test on the server (tests/test_me_endpoint.py), which is how this repository already pins a closed vocabulary a JSON Schema cannot import: deny-code.v1 mirrors app/domain/scope.py::DENY_CODES the same way."
+    },
+    "workspaces": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "role",
+          "active_run_id"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "pattern": "^ws_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "description": "A workspace the principal holds an active membership in. Reading this list grants nothing: it is the server's own answer about memberships it resolved server-side, and naming a workspace back to this server in a later request would not widen scope, because no request carries a workspace field at all (principal.v1's invariant)."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "developer",
+              "reader",
+              "fixture_writer",
+              "experiment_runner",
+              "experiment_admin"
+            ],
+            "description": "The role the principal holds FOR THIS WORKSPACE. Deliberately this server's vocabulary and not the identity provider's (OWNER/ADMIN/EDITOR/VIEWER): the provider's role model is an adapter detail that canon 05 A-06 keeps behind the adapter, and admitting it here would make a CI contract change whenever the provider renamed a tier. Same inlined enum as `roles`, for the same client-resolvability reason."
+          },
+          "active_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^run_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "description": "The run the controller has published for this workspace, or null when none is. Nullable rather than omitted so 'this workspace has no run' is a fact the client reads rather than an absence it infers; a client that saw a missing key could not tell it apart from a server that had stopped sending the field. Note that `pattern` does not apply to null in JSON Schema, so the type union and the pattern compose without a oneOf."
+          }
+        }
+      },
+      "description": "Every workspace the principal may act in, with the run published there. An empty array is valid and means exactly what it says: the token is good and there is nowhere to ask yet, which a client must render as 'signed in, no run' rather than as a failure. The client picks one workspace (its own configuration decides which) and uses that entry's active_run_id; AISQUARE_CI_RUN, when set, still wins over all of it, because the harness must keep working."
+    }
+  }
+}

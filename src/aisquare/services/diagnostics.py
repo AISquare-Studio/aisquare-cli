@@ -20,6 +20,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core import workspace as workspace_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.store import damaged_store_recovery, store_session
@@ -35,7 +36,7 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import ci_client, ci_descriptor, ci_me, ci_override, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
@@ -1269,12 +1270,27 @@ def _experiment_checks() -> list[DoctorCheck]:
             )
         ]
     shown = _display_url(base)
-    key = ci_client.api_key()
+    key, key_source = ci_client.api_key_and_source()
     raw_run = ci_client.raw_run_id()
     run = ci_client.run_id()
+    # The branches below ask "is there a bearer" (`key`) - the SAME question
+    # ci_augment._resolve_run asks - never "is it a signed-in one". The first
+    # draft branched on the bearer's source, so an experiment-token caller with
+    # no run exported was told "no run" while the hooks resolved one from the
+    # fixture workspace's membership; the source is for display only.
     checks: list[DoctorCheck] = []
+    identity: list[DoctorCheck] = []
+    # Probed first, printed in its usual place: the identity line reads a 404
+    # from GET /v1/me differently depending on whether /ready answered, and
+    # that is the only evidence that tells "an older CI server" from "a URL
+    # that reaches something else" (the round-5 review). The LINE is built
+    # after the identity lines, because when they conclude the URL is wrong
+    # this one must not offer a competing fix (round 6).
+    probe = _probe_ci_endpoint(base)
+    server_reached = probe.reason is None and probe.status == 200
+    url_diagnosed = False
     if not key:
-        problem = ci_client.api_key_problem()
+        problem, problem_fix = ci_client.bearer_problem()
         checks.append(
             _warn(
                 name,
@@ -1283,20 +1299,18 @@ def _experiment_checks() -> list[DoctorCheck]:
                 if problem
                 else f"enabled for {shown}, but no bearer token — the server will reject every "
                 "request",
-                "Re-export the token on one line: export AISQUARE_CI_KEY=…"
+                # The fix travels with the problem that found it (a multi-line
+                # key, a withheld login token), never re-derived from its words.
+                problem_fix
                 if problem
-                else "Set the experiment token: export AISQUARE_CI_KEY=…",
+                # Two ways in now, and the fix names both rather than assuming
+                # the operator is running the harness: a developer who has
+                # simply not signed in should be told to sign in.
+                else "Sign in with: aisquare login — or export the experiment "
+                "token: export AISQUARE_CI_KEY=…",
             )
         )
-    elif not raw_run:
-        checks.append(
-            _warn(
-                name,
-                f"enabled for {shown}, but no run id — every prompt records no_run",
-                "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
-            )
-        )
-    elif not run:
+    elif raw_run and not run:
         checks.append(
             _warn(
                 name,
@@ -1305,9 +1319,51 @@ def _experiment_checks() -> list[DoctorCheck]:
                 "Export the run the controller published: export AISQUARE_CI_RUN=run_…",
             )
         )
+    elif not raw_run:
+        # Nothing exported, and a bearer in hand (the `not key` arm above has
+        # claimed every other case): the run is whatever GET /v1/me says is
+        # published in the bound workspace - for a signed-in developer AND for
+        # a harness token, whose fixture membership the server reports the same
+        # way. The identity lines below carry the reasons.
+        identity, resolved, url_diagnosed = _identity_checks(
+            base, shown, key, key_source, exported_run=None, server_reached=server_reached
+        )
+        run = resolved or ""
+        if run:
+            checks.append(
+                _ok(
+                    name,
+                    f"enabled for {shown}, run {run} from GET /v1/me, {_bearer_note(key_source)}",
+                )
+            )
+        else:
+            # Named from the lines actually produced: on the 401 and 404 paths
+            # there is no `ci workspace` line, and a fix that pointed at one
+            # sent the reader looking for it (the round-5 review).
+            printed = " and ".join(line.name for line in identity) or "ci identity"
+            checks.append(
+                _warn(
+                    name,
+                    f"enabled for {shown}, but no run resolved for this bearer — "
+                    "every prompt records no_run",
+                    f"See the {printed} line{'s' if len(identity) > 1 else ''}",
+                )
+            )
     else:
-        checks.append(_ok(name, f"enabled for {shown}, run {run}"))
-    checks.append(_check_ci_endpoint(base, shown))
+        # Which credential is in play, never its value. An authentication
+        # failure is the commonest thing to debug here and "whose token is this"
+        # was unanswerable from the output: an operator with both an experiment
+        # token exported and a signed-in session had no way to see which one won.
+        checks.append(_ok(name, f"enabled for {shown}, run {run}, {_bearer_note(key_source)}"))
+        # An exported run wins over the server's routing; who CI resolves the
+        # bearer to is still worth a line, for every kind of bearer. A server
+        # that does not serve GET /v1/me yet is named as such on this branch,
+        # not treated as down: the hooks never ask it here.
+        identity, _resolved, url_diagnosed = _identity_checks(
+            base, shown, key, key_source, exported_run=run, server_reached=server_reached
+        )
+    checks.extend(identity)
+    checks.append(_endpoint_line(probe, shown, diagnosed_by_identity=url_diagnosed))
     descriptor: DeliveryDescriptor | None = None
     if key and run:
         descriptor_check, descriptor = _check_ci_descriptor(base, key, run)
@@ -1323,26 +1379,249 @@ def _experiment_checks() -> list[DoctorCheck]:
     return checks
 
 
+def _bearer_note(source: str) -> str:
+    """How ``doctor`` names the credential in use. Never its value.
+
+    The signed-in case names the email, which is what ``aisquare whoami`` prints
+    and is not a secret; the token itself never appears in either branch. The
+    email comes from ``ci_client.signed_in_display()``, the memoised read that
+    chose the bearer, which in turn reads through the ``iam`` module - the one
+    reader of the ``iam_*`` keys.
+    """
+    if source == ci_client.EXPERIMENT_TOKEN_SOURCE:
+        return f"experiment token from {ci_client.EXPERIMENT_TOKEN_SOURCE}"
+    if source in (ci_client.SIGNED_IN_WITHHELD_SOURCE, ci_client.SIGNED_IN_EXPIRED_SOURCE):
+        return source
+    if source == ci_client.SIGNED_IN_SOURCE:
+        # From the memoised read that chose the bearer, never a second parse
+        # of the credentials file that could describe another snapshot.
+        email, subject, _source = ci_client.signed_in_display()
+        if email:
+            return f"signed in as {email} (aisquare login)"
+        if subject:
+            return f"signed in ({subject}) (aisquare login)"
+        return "signed in (aisquare login)"
+    return "no bearer"
+
+
 _CI_PROBE_MS = 3_000
 """Doctor must stay fast; an unreachable endpoint is the common case here, and
 the transport's wall-clock deadline is what bounds each probe."""
 
 
-def _check_ci_endpoint(base: str, shown: str) -> DoctorCheck:
+def _identity_checks(
+    base: str,
+    shown: str,
+    key: str,
+    key_source: str,
+    *,
+    exported_run: str | None,
+    server_reached: bool,
+) -> tuple[list[DoctorCheck], str | None, bool]:
+    """The identity lines: who CI resolves the bearer to, and where it asks.
+
+    ``ci identity`` answers "who does CI think I am" from ``GET /v1/me``, fetched
+    without caching (a diagnostic must not create state) and bounded like every
+    other probe here - for ANY bearer, since the server answers for harness
+    tokens too. A 404 carries no version: it is read as "a CI server that
+    predates the route" only when ``/ready`` answered (``server_reached``) -
+    informational then with a run exported, since the hooks never ask it, and a
+    warning with the export as the fix when none is - and as "this URL is not a
+    CI server" otherwise. That last reading is the ONE diagnosis for that state,
+    stated here with the URL and its fix, and reported back (the third return
+    value) so the endpoint line states its fact without a competing fix and the
+    test-bed line points at this one (round 6). ``ci workspace`` applies the
+    same routing the hooks apply —
+    ``ci_me.run_for`` over this project's ``[experiment].bindings`` entry — so
+    the run it prints is the run a session would use, and the fix for each way
+    that can fail names the command that fixes it. When a run is exported the
+    workspace line is skipped: the export wins and the binding is not consulted,
+    so a warning about it would be a warning about nothing. Returns the lines,
+    the run the binding resolved (``None`` when a run was exported), and whether
+    the lines diagnosed the URL itself.
+    """
+    answer = ci_me.fetch(base=base, key=key, cache=False, deadline_ms=_CI_PROBE_MS)
+    if answer.me is None:
+        if answer.status == 401:
+            signed_in = key_source == ci_client.SIGNED_IN_SOURCE
+            return (
+                [
+                    _warn(
+                        "ci identity",
+                        "token rejected (401) — the signed-in session has expired or was revoked"
+                        if signed_in
+                        else "token rejected (401) — the experiment token is not one the server "
+                        "knows",
+                        "Sign in again: aisquare login"
+                        if signed_in
+                        else "Export the token the controller issued: export AISQUARE_CI_KEY=…",
+                    )
+                ],
+                None,
+                False,
+            )
+        if answer.status == 404:
+            if not server_reached:
+                # A 404 from a URL whose /ready did not answer either is not a
+                # version reading; it is most likely the wrong URL (a stale
+                # host, a prefix that no longer routes, a proxy that 404s the
+                # unknown). A green line here would hide exactly that (round
+                # 5). This line knows both facts, so it states the conclusion
+                # and the fix itself rather than forwarding the reader to a
+                # line whose fix would be the wrong one (round 6).
+                return (
+                    [
+                        _warn(
+                            "ci identity",
+                            "this endpoint is not answering as a CI server: GET /v1/me is "
+                            "http 404 and /ready did not answer either",
+                            f"Check {ci_client.URL_ENV_VAR} (currently {shown})",
+                        )
+                    ],
+                    None,
+                    True,
+                )
+            # /ready answers and /v1/me does not: a CI server that predates the
+            # route (it ships with aisquare-ci #141, and the CLI releases on
+            # its own). With a run exported the hooks never ask it, so there is
+            # nothing to warn about - round 4 found a harness operator whose
+            # delivery worked being told to consider turning the experiment
+            # off. Without one, the hooks WOULD ask and get nothing, and the
+            # fix is the export.
+            if exported_run is not None:
+                predates = (
+                    "not checked: /ready answers but GET /v1/me is not served (http 404), so "
+                    f"this CI server predates the route; the exported run {exported_run} is "
+                    "used as-is"
+                )
+                return [_ok("ci identity", predates)], None, False
+            return (
+                [
+                    _warn(
+                        "ci identity",
+                        "/ready answers but GET /v1/me is not served (http 404): this CI server "
+                        "predates the route, so no run can be resolved for this bearer",
+                        "Export the run the controller published until the server is upgraded: "
+                        "export AISQUARE_CI_RUN=run_…",
+                    )
+                ],
+                None,
+                False,
+            )
+        return (
+            [
+                _warn(
+                    "ci identity",
+                    f"GET /v1/me did not answer: {answer.detail}",
+                    "Check the ci endpoint line; if the server is down, AISQUARE_CI=0 turns the "
+                    "hooks off meanwhile",
+                )
+            ],
+            None,
+            False,
+        )
+    me = answer.me
+    count = len(me.workspaces)
+    plural = "" if count == 1 else "s"
+    who = (
+        _signed_in_as(me.auth_subject)
+        if key_source == ci_client.SIGNED_IN_SOURCE
+        else _bearer_note(key_source)
+    )
+    lines = [
+        _ok(
+            "ci identity",
+            f"{who} — CI resolves {me.principal_id} in {count} workspace{plural}",
+        )
+    ]
+    if exported_run is not None:
+        return lines, None, False
+    # THE project the hooks would act for - `active_project`, the pinned one
+    # only while it is still registered - so what doctor confirms is what a
+    # session reads. Opening the store needs a home; without one there is no
+    # pin either, and the cwd's project is the whole answer.
+    bound = ci_client.workspace_id(_bound_project_id()) or None
+    choice = ci_me.run_for(me, bound)
+    if choice.run_id and choice.workspace is not None:
+        lines.append(
+            _ok(
+                "ci workspace",
+                f"{choice.workspace.workspace_id} ({choice.workspace.role}), run {choice.run_id}",
+            )
+        )
+        return lines, choice.run_id, False
+    # The fix follows the branch run_for took, never words in its detail -
+    # the rule bearer_problem states, applied to the other half of the feature.
+    fixes = {
+        ci_me.RunReason.unbound: (
+            "Bind this project to one: aisquare ci bind-workspace <ws_…> (run it in the checkout)"
+        ),
+        ci_me.RunReason.not_a_member: (
+            "Bind this project to a workspace you are in: aisquare ci bind-workspace"
+        ),
+        ci_me.RunReason.no_run: (
+            "Ask the controller to publish a run there; until then every prompt records no_run"
+        ),
+        ci_me.RunReason.no_workspaces: (
+            "Join a workspace in AISquare Studio; until then every prompt records no_run"
+        ),
+    }
+    # .get, because a diagnostic must never raise out of the code that reports
+    # failures: `resolved` cannot reach here today, but the invariant spans two
+    # files and nothing asserts it.
+    lines.append(_warn("ci workspace", choice.detail, fixes.get(choice.reason, "")))
+    return lines, None, False
+
+
+def _bound_project_id() -> str:
+    """The project whose binding the hooks read, resolved the way the hooks resolve it."""
+    if not paths.aisquare_home().exists():
+        return workspace_core.current_project().id
+    with store_session() as store:
+        return active_project(store).id
+
+
+def _signed_in_as(auth_subject: str) -> str:
+    """ "signed in as <email>" when the session knows one, else the server's own
+    issuer-qualified subject — never the token, in either branch. Read through
+    ``ci_client``'s memo, the same read that chose the bearer."""
+    email, _subject, source = ci_client.signed_in_display()
+    if email:
+        return f"signed in as {email}"
+    if source == "env":
+        return f"signed in via AISQUARE_TOKEN ({auth_subject})"
+    return f"signed in ({auth_subject})"
+
+
+def _probe_ci_endpoint(base: str) -> ci_client.Exchange:
     """``GET /ready`` — public, cheap, and proof of a live server rather than a
     listener. It follows the same proxies the hook does, because it is the
     same transport."""
-    result = ci_client.exchange(
+    return ci_client.exchange(
         f"{base}/ready", method="GET", deadline_ms=_CI_PROBE_MS, max_body=4096
     )
-    if result.reason is None and result.status == 200:
-        return _ok("ci endpoint", f"{shown}/ready answered 200 in {result.elapsed_ms} ms")
-    why = result.detail if result.reason is not None else f"http {result.status}"
+
+
+def _endpoint_line(
+    probe: ci_client.Exchange, shown: str, *, diagnosed_by_identity: bool
+) -> DoctorCheck:
+    """The ``ci endpoint`` line for what the probe found.
+
+    When the identity line has already concluded the URL is not a CI server,
+    this line keeps its fact and offers no fix: one cause, one diagnosis, one
+    fix - the round-6 review found three warnings for one typo, the last of
+    which said to turn the test bed off.
+    """
+    if probe.reason is None and probe.status == 200:
+        return _ok("ci endpoint", f"{shown}/ready answered 200 in {probe.elapsed_ms} ms")
+    why = probe.detail if probe.reason is not None else f"http {probe.status}"
     return _warn(
         "ci endpoint",
         f"{shown}/ready did not answer ({why}) — prompts still work; whether the hooks can "
         "deliver is what the descriptor line says, not this one",
-        "Check the server is up, or turn the test bed off: export AISQUARE_CI=0",
+        ""
+        if diagnosed_by_identity
+        else "Check the server is up, or turn the test bed off: export AISQUARE_CI=0",
     )
 
 

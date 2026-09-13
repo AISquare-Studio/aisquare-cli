@@ -30,6 +30,7 @@ def complete_sign_in(
         scope=scope,
         claims=claims,
     )
+    _reset_ci_session_memo()
     _retire(previous, api_url, endpoints, access_token)
     return session
 
@@ -72,6 +73,7 @@ def sign_in_with_token(api_url: str, token: str) -> iam.Session:
     session = iam.store_session(
         api_url=api_url, token=token, expires_in=None, scope="", claims=claims
     )
+    _reset_ci_session_memo()
     _retire(previous, api_url, endpoints, token)
     return session
 
@@ -84,8 +86,40 @@ def sign_out(session: iam.Session) -> bool:
         revoked = iam.revoke(endpoints, session.token)
     except iam.IamError:
         revoked = False
+    _forget_ci_identity(session.token)
     iam.clear_session()
+    _reset_ci_session_memo()
     return revoked
+
+
+def _reset_ci_session_memo() -> None:
+    """The CI transport memoises the signed-in session per process; a sign-in or
+    sign-out in the same process (the fleet UI, a test) must not keep serving it."""
+    try:
+        from aisquare.services import ci_client
+
+        ci_client.reset_cache()
+    except Exception:
+        return
+
+
+def _forget_ci_identity(token: str) -> None:
+    """Drop the CI test bed's cached ``GET /v1/me`` answer for this bearer.
+
+    The credential is gone after sign-out, but the identity it resolved to —
+    the principal id, the issuer-qualified subject, every workspace the user
+    belongs to and the run published in each — would otherwise sit in
+    ``cache/ci/`` for the life of the machine; the TTL only stops it being
+    served. Imported here rather than at module scope so the sign-in path does
+    not pull the CI transport into its import closure, and never raises: a
+    cache that cannot be deleted must not stop a sign-out.
+    """
+    try:
+        from aisquare.services import ci_me
+
+        ci_me.forget(token)
+    except Exception:
+        return
 
 
 def live_check(session: iam.Session) -> dict[str, Any]:

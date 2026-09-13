@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from array import array
 from pathlib import Path
 
 import pytest
@@ -171,7 +172,13 @@ def test_finish_returns_the_final_transcript_and_resets() -> None:
 
 
 def test_the_decoder_is_handed_the_whole_utterance() -> None:
-    """Whisper has no streaming API: every decode is over the buffer so far."""
+    """Whisper has no streaming API: a decode is over the buffer, not a delta.
+
+    Below :data:`speech.INTERIM_WINDOW_BYTES`, which is every utterance this
+    path is for, "the buffer so far" and "the window" are the same bytes. The
+    test that pins them apart is
+    ``test_an_interim_decodes_a_bounded_window_however_long_the_press_runs``.
+    """
     decode = Decoder("hello board")
     transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES * 2)
 
@@ -182,6 +189,135 @@ def test_the_decoder_is_handed_the_whole_utterance() -> None:
         speech.FRAME_BYTES * 2,
         speech.FRAME_BYTES * 4,
     ]
+
+
+# --- a frame that splits mid-sample ----------------------------------------------------
+
+
+def _int16_decode(pcm: bytes) -> str:
+    """Production's decode shape: read the buffer as int16 and refuse a half sample.
+
+    ``speech.py``'s real decoder opens with
+    ``numpy.frombuffer(pcm, dtype=numpy.int16)``, which raises on a length that
+    is not a multiple of two. numpy is not a test dependency — the ``xr`` extra
+    is optional and this file runs without it — so the constraint is restated
+    rather than imported. ``array`` raises for exactly the same reason on
+    exactly the same lengths.
+    """
+    array("h").frombytes(pcm)
+    return "hello board"
+
+
+def test_a_frame_that_splits_mid_sample_loses_and_duplicates_nothing() -> None:
+    """The odd byte is carried into the next chunk, not dropped and not concatenated raw.
+
+    Dropping it would be the quiet wrong answer: every sample after the split
+    would be assembled from the wrong pair of bytes, which is noise that
+    decodes as nothing rather than an error anyone can see. So the assertion is
+    on the BYTES, not on the absence of a raise — what the decoder receives has
+    to be the audio that was sent, in order, entire.
+    """
+    speech_bytes = _tone(200)
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES)
+
+    cut = 0
+    for size in (639, 1, 640, 321, 319, 641):  # odd splits, in and out of alignment
+        transcriber.feed(speech_bytes[cut : cut + size])
+        cut += size
+    transcriber.feed(speech_bytes[cut:])
+
+    assert transcriber.finish() == "hello board"
+    assert decode.calls, "an interim was due long before the end of a 200 ms tone"
+    assert all(len(call) % speech.SAMPLE_BYTES == 0 for call in decode.calls), (
+        "every decode lands on a sample boundary"
+    )
+    assert decode.calls[-1] == speech_bytes, "the decoder saw the audio, whole and in order"
+
+
+def test_one_odd_frame_does_not_poison_every_decode_after_it() -> None:
+    """The parity of a raw-concatenated buffer never recovers on its own.
+
+    One 639-byte frame among 640s is enough: the buffer is odd from then on and
+    the next ``frombuffer`` raises, and so does the one after that, and so does
+    ``finish``. That is the whole sentence lost rather than one sample, which
+    is why the carry is in ``feed`` and not a ``try`` around the decode.
+    """
+    transcriber = BufferedTranscriber(_int16_decode)
+
+    transcriber.feed(_tone(20) + b"\x01")
+    for _ in range(speech.INTERIM_BYTES // speech.FRAME_BYTES + 1):
+        transcriber.feed(_tone(speech.FRAME_MS))
+
+    assert transcriber.finish() == "hello board"
+
+
+def test_a_lone_odd_byte_waits_for_the_partner_that_completes_it() -> None:
+    """A one-byte frame is not audio yet, and must not be treated as any."""
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.SAMPLE_BYTES)
+    loud = _tone(20)
+
+    assert transcriber.feed(loud[:1]) is None, "half a sample cannot open the gate"
+    assert not decode.calls
+    transcriber.feed(loud[1:])
+
+    assert decode.calls[-1] == loud, "the held byte led the chunk it belongs to"
+
+
+def test_a_held_byte_does_not_cross_into_the_next_utterance() -> None:
+    """``finish`` resets the carry with everything else, or one press bleeds into the next."""
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.SAMPLE_BYTES)
+
+    transcriber.feed(_tone(20) + b"\x01")
+    assert transcriber.finish() == "hello board"
+    transcriber.feed(_tone(20))
+
+    assert decode.calls[-1] == _tone(20), "the second utterance starts on a sample boundary"
+
+
+# --- the interim window ----------------------------------------------------------------
+
+
+def test_an_interim_decodes_a_bounded_window_however_long_the_press_runs() -> None:
+    """Re-decoding the whole buffer every second makes one press cost O(n^2).
+
+    The cap is 60 seconds (``server.MAX_UTTERANCE_S``), and unbounded that is
+    1890 audio-seconds handed to the decoder for one legal press — minutes of
+    CPU, on a path whose read loop is sequential, so the ``audioEnd`` that
+    would end it queues behind the backlog. Bounded, no single interim can
+    exceed the window no matter how long the operator talks.
+    """
+    decode = Decoder("hello board")
+    window = speech.FRAME_BYTES * 4
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES, window_bytes=window)
+
+    for _ in range(20):
+        transcriber.feed(_tone(speech.FRAME_MS))
+
+    assert len(decode.calls) == 20, "one interim per frame, at this cadence"
+    assert max(len(call) for call in decode.calls) == window, "no interim exceeds the window"
+    assert sum(len(call) for call in decode.calls) < speech.FRAME_BYTES * 20 * 20 // 2, (
+        "the total is linear in the utterance, not quadratic"
+    )
+
+
+def test_finish_still_decodes_the_whole_utterance() -> None:
+    """The window is an interim economy. The transcript that becomes a prompt is not windowed.
+
+    This is the line between "the panel shows a rolling tail" — acceptable, it
+    is a liveness signal — and "the operator's sentence is truncated before it
+    is routed", which would not be.
+    """
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, window_bytes=speech.FRAME_BYTES)
+
+    for _ in range(10):
+        transcriber.feed(_tone(speech.FRAME_MS))
+    transcriber.finish()
+
+    assert len(decode.calls[-1]) == speech.FRAME_BYTES * 10, "finish saw all ten frames"
 
 
 # --- FakeTranscriber ---------------------------------------------------------------------

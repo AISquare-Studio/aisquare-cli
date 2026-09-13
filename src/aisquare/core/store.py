@@ -474,6 +474,45 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _converge_v11_fork,
 }
 
+
+def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
+    """v16 → v17's backfill (#139): rows already used on purpose become onboarded.
+
+    Runs AFTER the column exists (a :data:`_FINISH` step, same transaction).
+    "On purpose" is read off what the row already carries: context entries, a
+    codename (it entered the fleet), linked repos, board activity, a fleet
+    agent — and a codebase snapshot on disk, which ``project onboard`` and
+    ``init`` write. Everything else — the 23 of 27 registrations on the
+    reporting machine that held nothing but captured prompts — stays hidden,
+    reachable through ``project list --all``.
+    """
+    connection.execute(
+        "UPDATE project SET onboarded_at = created_at WHERE onboarded_at IS NULL AND ("
+        "  codename IS NOT NULL"
+        "  OR (linked_repos IS NOT NULL AND linked_repos NOT IN ('[]', ''))"
+        "  OR id IN (SELECT project_id FROM entry WHERE project_id IS NOT NULL)"
+        "  OR id IN (SELECT project_id FROM team_event)"
+        "  OR id IN (SELECT project_id FROM team_task)"
+        "  OR id IN (SELECT project_id FROM fleet_agent)"
+        ")"
+    )
+    from aisquare.core import snapshot as snapshot_core  # lazy: keeps store import-light
+
+    rows = connection.execute("SELECT id FROM project WHERE onboarded_at IS NULL").fetchall()
+    with_snapshot = [row[0] for row in rows if snapshot_core.exists(str(row[0]))]
+    for project_id in with_snapshot:
+        connection.execute(
+            "UPDATE project SET onboarded_at = created_at WHERE id = ? AND onboarded_at IS NULL",
+            (project_id,),
+        )
+
+
+#: Steps run AFTER a migration's statements, in its transaction — the mirror of
+#: :data:`_PREPARE` for work that needs the columns the migration just added.
+_FINISH: dict[int, Callable[[sqlite3.Connection], None]] = {
+    16: _adopt_onboarded_projects,
+}
+
 # v14: ``project forget`` — a tombstone on the registration, in the same spirit as
 # ``entry.deleted_at``. A hard delete is not available to a plain forget:
 # ``entry.project_id`` and ``prompt.project_id`` are FOREIGN KEYS to this row
@@ -568,6 +607,14 @@ CREATE INDEX claude_usage_slot_time ON claude_usage (slot, fetched_at);
 ALTER TABLE team_session ADD COLUMN limit_resets_at TEXT;
 """
 
+# v17: captured is not shown (#139). Hooks register every directory a session
+# runs in — that must stay, prompt history and injection depend on it — but only
+# a project added ON PURPOSE (init, project onboard/link, the sidebar's +, team
+# on, a fleet spawn) carries ``onboarded_at``, and only those are listed. A
+# plain ALTER; the backfill is :func:`_adopt_onboarded_projects` (_FINISH).
+_SCHEMA_V17 = """
+ALTER TABLE project ADD COLUMN onboarded_at TEXT;
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -586,10 +633,11 @@ _MIGRATIONS = (
     _SCHEMA_V14,
     _SCHEMA_V15,
     _SCHEMA_V16,
+    _SCHEMA_V17,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
-_PROJECT_COLUMNS = "id, root, linked_repos, codename"
+_PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at"
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
@@ -686,7 +734,9 @@ class ContextStore(Protocol):
     def delete(self, entry_id: str) -> None: ...
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
-    def list_projects(self) -> list[ProjectInfo]: ...
+    def onboard_project(self, project: ProjectInfo) -> ProjectInfo: ...
+    def list_projects(self, *, all: bool = False) -> list[ProjectInfo]: ...
+    def captured_projects(self) -> list[ProjectInfo]: ...
     def get_project(self, project_id: str) -> ProjectInfo | None: ...
     def find_projects(self, term: str) -> list[ProjectInfo]: ...
     def add_linked_repo(self, project_id: str, repo: str) -> ProjectInfo: ...
@@ -820,11 +870,13 @@ def _row_to_entry(row: sqlite3.Row) -> ContextEntry:
 
 
 def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
+    onboarded = row["onboarded_at"]
     return ProjectInfo(
         id=row["id"],
         root=Path(row["root"]),
         linked_repos=json.loads(row["linked_repos"]),
         codename=row["codename"],
+        onboarded_at=datetime.fromisoformat(onboarded) if onboarded else None,
     )
 
 
@@ -1154,17 +1206,20 @@ class SqliteStore:
         return promoted
 
     def ensure_project(self, project: ProjectInfo) -> None:
-        """Register the project, or revive a forgotten registration of the same root.
+        """CAPTURE the project: make sure a row exists, and change nothing about a known one.
 
-        Registering IS the revival: ``project forget`` hides a row rather than
-        deleting it (see v12), and the next thing that registers the root —
-        ``init``, a hook recording a prompt, ``context add --project`` — wants the
-        project visible again, with whatever history the row still carries.
+        This is what a hook recording a prompt, the MCP server and a context
+        write call — automatic registration, so prompt history and injection
+        work in every directory (#139). It never sets ``onboarded_at`` and never
+        clears ``forgotten_at``: a forgotten project stays forgotten and a
+        captured one stays hidden until something DELIBERATE registers it
+        (:meth:`onboard_project`). Before #139 this was also the revival, which
+        is how ``project forget`` came undone on the next prompt.
         """
         self._conn.execute(
             "INSERT INTO project (id, root, name, linked_repos, created_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL",
+            "ON CONFLICT (id) DO NOTHING",
             (
                 project.id,
                 str(project.root),
@@ -1175,9 +1230,54 @@ class SqliteStore:
         )
         self._conn.commit()
 
-    def list_projects(self) -> list[ProjectInfo]:
+    def onboard_project(self, project: ProjectInfo) -> ProjectInfo:
+        """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
+
+        ``init``, ``project onboard`` / ``link``, the sidebar's ``+``, ``team on``
+        and a fleet spawn — the actions that mean "this is one of my projects".
+        ``onboarded_at`` is set once and kept; ``forgotten_at`` is cleared, so
+        the row comes back with whatever history it still carries (see v14).
+        """
+        now = _now_iso()
+        self._conn.execute(
+            "INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (id) DO UPDATE SET forgotten_at = NULL, "
+            "onboarded_at = COALESCE(project.onboarded_at, excluded.onboarded_at)",
+            (
+                project.id,
+                str(project.root),
+                project.root.name or str(project.root),
+                json.dumps(project.linked_repos),
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+        stored = self.get_project(project.id)
+        assert stored is not None  # just written
+        return stored
+
+    def list_projects(self, *, all: bool = False) -> list[ProjectInfo]:
+        """The projects added on purpose, by name — or, with ``all``, every captured one too.
+
+        Forgotten rows are out either way. The sidebar, ``project list`` and
+        the active-pin fallback read the default; machine-wide sweeps (reap,
+        doctor's row checks, the baseline) pass ``all=True`` because a captured
+        directory can hold fleet rows and sessions like any other.
+        """
+        shown = "" if all else " AND onboarded_at IS NOT NULL"
         rows = self._conn.execute(
-            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL ORDER BY name"
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE forgotten_at IS NULL{shown} "
+            "ORDER BY name"
+        ).fetchall()
+        return [_row_to_project(row) for row in rows]
+
+    def captured_projects(self) -> list[ProjectInfo]:
+        """The registrations a session made on its own that nothing has added on purpose."""
+        rows = self._conn.execute(
+            f"SELECT {_PROJECT_COLUMNS} FROM project "
+            "WHERE forgotten_at IS NULL AND onboarded_at IS NULL ORDER BY name"
         ).fetchall()
         return [_row_to_project(row) for row in rows]
 
@@ -1207,7 +1307,8 @@ class SqliteStore:
         unreachable through any project read until the root is registered again.
         """
         cursor = self._conn.execute(
-            "UPDATE project SET forgotten_at = ? WHERE id = ? AND forgotten_at IS NULL",
+            "UPDATE project SET forgotten_at = ?, onboarded_at = NULL "
+            "WHERE id = ? AND forgotten_at IS NULL",
             (_now_iso(), project_id),
         )
         self._conn.commit()
@@ -2622,6 +2723,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
                 prepare(connection)
             for statement in _statements(_MIGRATIONS[version]):
                 connection.execute(statement)
+            finish = _FINISH.get(version)
+            if finish is not None:
+                finish(connection)
             connection.execute(f"PRAGMA user_version = {version + 1}")
             connection.execute("COMMIT")
         except sqlite3.Error:

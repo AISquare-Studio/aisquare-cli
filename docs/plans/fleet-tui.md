@@ -72,7 +72,7 @@ process substrate.
 
 | Capability | Where | How the fleet uses it |
 | --- | --- | --- |
-| Project registry and identity; worktrees resolve to the principal repo | `core/workspace.py` (`find_project_root`, `git_common_root`), `store.project` | The left pane **is** `store.list_projects()`. A coder in a worktree shares its project's board for free. |
+| Project registry and identity; worktrees resolve to the principal repo | `core/workspace.py` (`find_project_root`, `git_common_root`), `store.project` | The left pane **is** `store.list_projects()` — the projects added on purpose; directories a hooked session merely ran in are captured but hidden until `init`, `project onboard`/`link`, the `+`, `team on` or a spawn adds them (#139; `a` shows them, `project list --all` too). A coder in a worktree shares its project's board for free. |
 | Setup and onboarding | `services/lifecycle.initialize()`, `services/project.onboard()` (Repomix snapshot) | Run from the Onboard view, in the background (§5.6). |
 | Doctor | `services/diagnostics.doctor()` → `DoctorCheck(name, status, detail, fix)`; `explainability_ops.apply_fixes` | Doctor section + view render these; fix buttons run known fixes. Note: several checks resolve the project from the **cwd**, so per-project runs need care (§5.6). |
 | Session lifecycle | Five Claude Code hooks (`core/agents._HOOKS`) → `team_session.state ∈ {working, waiting, attention}`, `transcript_path`, `model`, `effort` | Agent rows' state chips come from here, unchanged. The manager wake-up rides on `Stop` (§7.3). |
@@ -313,7 +313,7 @@ reasonably want otherwise.
 ### 4.1 Left pane — `Sidebar` (26–34 columns, collapsible)
 
 - **Fleet** header with `+` → opens the Onboard view.
-- One `ProjectCard` per registered project (`store.list_projects()`), with
+- One `ProjectCard` per onboarded project (`store.list_projects()`; captured-only directories are hidden, #139), with
   alternating `.odd` / `.even` background. Header row: disclosure ▾/▸, name
   (root basename), the fleet codename as a dim badge (§5.7), chips (agents alive
   · tasks open · 🔔 count); when two projects share a basename, the parent path

@@ -97,6 +97,12 @@ class ProjectInfo(BaseModel):
     codename: str | None = None
     """The fleet codename (``amber-otter``) — assigned the first time the project
     enters the fleet, never at ``init``; see ``core.codenames``."""
+    onboarded_at: datetime | None = None
+    """When the project was added ON PURPOSE (``init``, ``project onboard`` /
+    ``link``, the sidebar's ``+``, ``team on``, a fleet spawn) — #139. ``None``
+    is a directory a hooked session merely ran in: captured (prompt history and
+    injection keep working there) but not shown in the sidebar or ``project
+    list`` until something deliberate adds it."""
 
 
 class InjectionRecord(BaseModel):
@@ -687,7 +693,7 @@ class ProjectForgetReport(BaseModel):
     """Whether the forgotten project WAS the active one, so the pin moved."""
 
 
-PruneReason = Literal["missing", "worktree"]
+PruneReason = Literal["missing", "worktree", "captured"]
 """Why ``project prune`` selected a registration: its root is gone from disk, or
 its root is a linked git worktree of another registered project."""
 

@@ -33,9 +33,24 @@ def info() -> None:
 
 
 @app.command("list")
-def list_() -> None:
-    """List known projects (the active one is marked with *)."""
-    projects = project_service.list_projects()
+def list_(
+    all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Include the directories hooked sessions merely ran in (captured, not added).",
+        ),
+    ] = False,
+) -> None:
+    """List your projects (the active one is marked with *).
+
+    A directory a hooked Claude Code session ran in is CAPTURED — its prompt
+    history and injected memory work there — but it is listed, here and in the
+    fleet sidebar, only once something adds it on purpose: `init`, `project
+    onboard`, `project link`, the sidebar's +, `team on`, a fleet spawn.
+    `--all` shows the captured ones too, marked.
+    """
+    projects = project_service.list_projects(all=all)
     emit_projects(projects, active_id=project_service.info().id)
 
 
@@ -109,19 +124,38 @@ def prune(
         ),
     ] = False,
     purge: Annotated[bool, typer.Option("--purge", help=_PURGE_HELP)] = False,
+    captured_only: Annotated[
+        bool,
+        typer.Option(
+            "--captured-only",
+            help="Drop directories a session merely ran in (never added on purpose) that hold "
+            "no context entries and were last touched more than --older-than days ago.",
+        ),
+    ] = False,
+    older_than: Annotated[
+        int,
+        typer.Option("--older-than", min=0, help="Days of inactivity for --captured-only."),
+    ] = 30,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Drop without asking; required off a terminal.")
     ] = False,
 ) -> None:
     """Drop stale registrations: missing roots, worktrees — both when neither is given.
 
-    Prints what it would drop and asks first at a terminal. Off a terminal it
-    is a dry run unless --yes; under --json without --yes it lists the
-    candidates and changes nothing.
+    `--captured-only` is the third reason (#139): the scratch directories a
+    hooked session captured that nothing ever added on purpose, with no context
+    entries and nothing touched in `--older-than` days (30 by default). Prints
+    what it would drop and asks first at a terminal. Off a terminal it is a dry
+    run unless --yes; under --json without --yes it lists the candidates and
+    changes nothing.
     """
-    if not missing and not worktrees:
+    if not missing and not worktrees and not captured_only:
         missing = worktrees = True
-    candidates = project_service.prune_candidates(missing=missing, worktrees=worktrees)
+    candidates = project_service.prune_candidates(
+        missing=missing,
+        worktrees=worktrees,
+        captured_older_than=older_than if captured_only else None,
+    )
     if yes:
         emit_prune(project_service.prune(candidates, purge=purge))
         return

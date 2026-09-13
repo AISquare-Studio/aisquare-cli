@@ -148,7 +148,7 @@ def measure_baseline(limit: int = SAMPLE_SESSIONS) -> Baseline:
         with store_session() as store:
             sessions = [
                 session
-                for project in store.list_projects()
+                for project in store.list_projects(all=True)
                 for session in store.team_sessions(project.id)
                 if session.transcript_path
             ]

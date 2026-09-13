@@ -1126,3 +1126,29 @@ def test_the_dead_manager_line_never_creates_the_home(isolated_home: Path) -> No
     assert not isolated_home.exists()
     assert diagnostics._check_dead_managers() == []
     assert not isolated_home.exists(), "doctor must not create the home it reports on"
+
+
+# --- the projects line (#139) -------------------------------------------------------------------
+
+
+def test_doctor_counts_the_captured_directories_it_hides(home: Path, tmp_path: Path) -> None:
+    from aisquare.models import ProjectInfo
+
+    assert diagnostics._check_captured_projects() == []  # nothing captured: silent
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id="prj_shown", root=tmp_path / "shown"))
+        store.ensure_project(ProjectInfo(id="prj_one", root=tmp_path / "one"))
+        store.ensure_project(ProjectInfo(id="prj_two", root=tmp_path / "two"))
+
+    [check] = diagnostics._check_captured_projects()
+
+    assert check.name == "projects" and check.status is CheckStatus.ok
+    assert check.detail.startswith("2 captured directories hidden")
+    assert "project list --all" in check.detail and "prune --captured-only" in check.detail
+    assert "projects" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_projects_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_captured_projects() == []
+    assert not isolated_home.exists()

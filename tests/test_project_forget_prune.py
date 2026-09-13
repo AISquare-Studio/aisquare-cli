@@ -481,7 +481,8 @@ def _register_worktree_as_its_own_project(worktree: Path) -> str:
     """
     root = worktree.resolve()
     with store_session() as store:
-        store.ensure_project(ProjectInfo(id=project_id_for(root), root=root, linked_repos=[]))
+        # On purpose: the rows the issue measured were LISTED worktrees (#139 hides captures).
+        store.onboard_project(ProjectInfo(id=project_id_for(root), root=root, linked_repos=[]))
     return project_id_for(root)
 
 
@@ -597,3 +598,93 @@ def test_json_project_list_carries_the_name_the_table_shows(
 
     (project,) = _json(listed.stdout)
     assert project["name"] == "alpha"
+
+
+# --- captured versus onboarded (#139) ------------------------------------------------------
+
+
+def _capture(runner: CliRunner, monkeypatch: pytest.MonkeyPatch, directory: Path) -> str:
+    """Register ``directory`` the way a hooked session does: a prompt, nothing else."""
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"session_id": f"ses_{directory.name}", "cwd": str(directory), "prompt": "hi"}
+    )
+    result = runner.invoke(app, ["hook", "user-prompt-submit"], input=payload)
+    assert result.exit_code == 0, result.output
+    return project_id_for(directory.resolve())
+
+
+def test_a_hooked_session_captures_a_directory_without_listing_it(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shown = _register(runner, monkeypatch, tmp_path / "shown")  # a fact by hand: on purpose
+    scratch = _capture(runner, monkeypatch, tmp_path / "scratch")
+
+    assert _listed(runner) == {shown}
+    everything = runner.invoke(app, ["--json", "project", "list", "--all"])
+    rows = {row["id"]: row for row in _json(everything.stdout)}
+    assert set(rows) == {shown, scratch}
+    assert rows[scratch]["onboarded_at"] is None and rows[shown]["onboarded_at"] is not None
+    table = runner.invoke(app, ["project", "list", "--all"])
+    assert "LISTED" in table.stdout and "captured" in table.stdout
+    plain = runner.invoke(app, ["project", "list"])
+    assert "LISTED" not in plain.stdout, "the everyday table is unchanged"
+    # The captured directory still works for what capture is for: its history is there.
+    assert _raw("SELECT COUNT(*) FROM prompt WHERE project_id = ?", (scratch,)) == [(1,)]
+    # Adding it on purpose lists it.
+    monkeypatch.chdir(tmp_path / "scratch")
+    onboarded = runner.invoke(app, ["project", "onboard"])
+    assert onboarded.exit_code == 0, onboarded.output
+    assert _listed(runner) == {shown, scratch}
+
+
+def test_forget_sticks_against_the_next_prompt(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The issue's complaint: `ensure_project` cleared `forgotten_at`, so the next
+    prompt in a forgotten directory resurrected it."""
+    project_id = _register(runner, monkeypatch, tmp_path / "gone")
+    assert runner.invoke(app, ["project", "forget", project_id[:12]]).exit_code == 0
+    assert _capture(runner, monkeypatch, tmp_path / "gone") == project_id
+    assert project_id not in _listed(runner)
+    everything = runner.invoke(app, ["--json", "project", "list", "--all"])
+    all_ids = {row["id"] for row in _json(everything.stdout)}
+    assert project_id not in all_ids, "forgotten, not captured"
+    # A deliberate add brings it back, history and all.
+    monkeypatch.chdir(tmp_path / "gone")
+    assert runner.invoke(app, ["context", "add", "back", "--project"]).exit_code == 0
+    assert project_id in _listed(runner)
+
+
+def test_prune_captured_only_drops_stale_captures_and_keeps_the_rest(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    shown = _register(runner, monkeypatch, tmp_path / "shown")
+    fresh = _capture(runner, monkeypatch, tmp_path / "fresh")
+    stale = _capture(runner, monkeypatch, tmp_path / "stale")
+    with_fact = _capture(runner, monkeypatch, tmp_path / "with-fact")
+    long_ago = "2020-01-01T00:00:00+00:00"
+    for project_id in (stale, with_fact):
+        _raw_write("UPDATE project SET created_at = ? WHERE id = ?", (long_ago, project_id))
+        _raw_write("UPDATE prompt SET created_at = ? WHERE project_id = ?", (long_ago, project_id))
+    _raw_write(
+        "INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at) "
+        "VALUES ('ent_keep', 'project', ?, 'kept fact', '[]', 'cli', ?, ?)",
+        (with_fact, long_ago, long_ago),
+    )
+
+    plan = runner.invoke(app, ["--json", "project", "prune", "--captured-only"])
+    assert plan.exit_code == 0, plan.output
+    planned = {c["project"]["id"]: c["reason"] for c in _json(plan.stdout)["candidates"]}
+    assert planned == {stale: "captured"}, planned  # fresh: too recent; with-fact: has a fact
+
+    everything = runner.invoke(
+        app, ["--json", "project", "prune", "--captured-only", "--older-than", "0", "--yes"]
+    )
+    assert everything.exit_code == 0, everything.output
+    dropped = set(_json(everything.stdout)["dropped"])
+    assert dropped == {stale, fresh}, "with --older-than 0 every fact-less capture goes"
+    listing = runner.invoke(app, ["--json", "project", "list", "--all"])
+    remaining = {row["id"] for row in _json(listing.stdout)}
+    assert remaining == {shown, with_fact}
+    assert _listed(runner) == {shown}

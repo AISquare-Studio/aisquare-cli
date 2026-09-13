@@ -127,6 +127,7 @@ def doctor(
         _check_self_invocation(cwd),
         _check_fleet(),
         *_check_dead_managers(),
+        *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
         # within the warn group), so a row inserted at position 12 evicted one
@@ -758,6 +759,32 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
     ]
 
 
+def _check_captured_projects() -> list[DoctorCheck]:
+    """How many directories are registered but hidden (#139) — and how to see or drop them.
+
+    Silent when there are none; gated on the store existing (doctor creates
+    nothing). ``ok``: a hidden capture is the design working, not a fault.
+    """
+    if _uncreated_home("projects") is not None:
+        return []
+    try:
+        with store_session() as store:
+            captured = len(store.captured_projects())
+    except Exception:  # the database line reports a broken store
+        return []
+    if not captured:
+        return []
+    noun = "directory" if captured == 1 else "directories"
+    return [
+        _ok(
+            "projects",
+            f"{captured} captured {noun} hidden from the sidebar and `project list` (a hooked "
+            "session ran there; nothing added it on purpose) — see them: aisquare project "
+            "list --all; drop the stale ones: aisquare project prune --captured-only",
+        )
+    ]
+
+
 def _check_dead_managers() -> list[DoctorCheck]:
     """A project whose manager has exited while its fleet is still up (#138).
 
@@ -771,7 +798,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         return []
     try:
         with store_session() as store:
-            projects = store.list_projects()
+            projects = store.list_projects(all=True)
             headless = []
             for project in projects:
                 live = store.fleet_agents(project.id, live_only=True)
@@ -809,7 +836,7 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
         return []
     try:
         with store_session() as store:
-            projects = store.list_projects()
+            projects = store.list_projects(all=True)  # a session can sit in a captured dir
             names = {p.id: p.codename or p.root.name or p.id for p in projects}
             limited = [
                 (session, names[p.id])
@@ -1873,7 +1900,7 @@ def _check_fleet(
             # that matters when nothing can run, and the tmux check has the verdict.
             return _ok(name, "not evaluated — tmux is not installed (see the tmux check)")
         with store_session() as store:
-            projects = store.list_projects()
+            projects = store.list_projects(all=True)  # rows live wherever they were spawned
             names = {p.id: p.codename or p.root.name or p.id for p in projects}
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []

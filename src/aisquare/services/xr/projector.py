@@ -1,0 +1,289 @@
+"""Board rows -> wire models, and the diff between two of those.
+
+Everything here is a pure function of a :class:`ContextStore` read plus a clock:
+no sockets, no polling, no state of its own. The server calls
+:func:`snapshot` on a timer and :func:`delta` against what it last sent, which
+is what makes both testable against a seeded board with no server running.
+
+**The summary rule is a hard one.** ``Session.summary`` is computed from the
+session's most recent BOARD EVENT — never from its transcript. The ambient tier
+of the ring renders a summary per panel, ten panels at a time, and transcript
+text there is both a frame-budget problem and a privacy one: the operator
+subscribes to exactly one session when they want to read it. A test writes a
+sentinel string into a seeded transcript file and asserts it appears in no
+snapshot and no delta.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+
+from aisquare.core.harness import base_role
+from aisquare.core.store import ContextStore
+from aisquare.models import FleetAgent, TeamEvent, TeamSession, TeamTask
+from aisquare.services.team import _STALE_AFTER
+from aisquare.services.xr.protocol import (
+    ColorKey,
+    Delta,
+    Session,
+    SessionRole,
+    SessionState,
+    Snapshot,
+    Task,
+)
+
+SUMMARY_WORDS = 6
+"""Hard cap on ``Session.summary``. §5 of the plan: a glanceable ring, not text."""
+
+_EVENT_SCAN = 500
+"""How far back one pass reads the event pipe, for summaries and unread counts.
+
+Deep enough that every session doing anything has said something inside it, and
+bounded so a board with a hundred thousand events costs the same per poll as a
+board with two hundred.
+"""
+
+#: ``base_role`` output -> palette slot. Every role this repo profiles is
+#: listed; anything else (a bound role called ``bot7``, a seat whose base is
+#: not a profiled role, an MCP client's ``remote``) is a worker and gets the
+#: runner slot rather than no colour at all.
+_COLOR_KEYS: dict[str, ColorKey] = {
+    "planner": "planner",
+    "manager": "planner",
+    "coder": "coder",
+    "reviewer": "coder",
+    "runner": "runner",
+    "tester": "runner",
+    "validator": "runner",
+    "unassigned": "runner",
+}
+
+
+def color_key(role: str) -> ColorKey:
+    """Which of the three palette slots a role paints with."""
+    return _COLOR_KEYS.get(base_role(role), "runner")
+
+
+def wire_role(role: str) -> SessionRole:
+    """A board role narrowed to the four the client knows how to label.
+
+    An MCP client keeps its own bucket (``services.mcp_server._client_role``
+    writes ``remote``) because "a browser agent in the desktop app" is a
+    different thing to an operator than a pane on their own machine. Everything
+    else follows the colour buckets, so the label and the colour of a panel can
+    never disagree.
+    """
+    if base_role(role) == "remote":
+        return "remote"
+    return color_key(role)
+
+
+def classify(session: TeamSession, *, now: datetime) -> SessionState:
+    """``working`` / ``waiting`` / ``needs_you`` / ``gone`` for one row.
+
+    ``gone`` covers both ways a session leaves: it said so (``ended_at``), or
+    it stopped saying anything. The staleness horizon is
+    ``services.team._STALE_AFTER``, imported rather than re-chosen, so a panel
+    disappears from the ring at the same moment the board stops counting the
+    session as present.
+    """
+    if session.ended_at is not None:
+        return "gone"
+    if now - session.last_seen_at > _STALE_AFTER:
+        return "gone"
+    if session.state == "attention":
+        return "needs_you"
+    if session.state == "waiting":
+        return "waiting"
+    return "working"
+
+
+def summarize(event: TeamEvent | None) -> str:
+    """A board event as at most :data:`SUMMARY_WORDS` words.
+
+    The event ``kind`` leads because it is the part that is always meaningful
+    (``note``, ``result``, ``task_claim``) and the text is whatever a session
+    happened to write. Clipping mid-sentence is fine here: this is a glance
+    target, and the operator who wants the rest focuses the panel.
+    """
+    if event is None:
+        return ""
+    words = f"{event.kind} {event.text}".split()
+    clipped = words[:SUMMARY_WORDS]
+    return " ".join(clipped)
+
+
+def _title(session: TeamSession, task: TeamTask | None, agent: FleetAgent | None) -> str:
+    """The panel's heading: the work, else the intent, else the name.
+
+    A claimed task's title is the best answer because it is the thing the
+    operator assigned. ``focus`` is the session's own account of what it is
+    doing. The label (``coder-xr-server``) is last but never empty, so a panel
+    always has a heading — an untitled rectangle in a ring is unidentifiable.
+    """
+    if task is not None and task.title.strip():
+        return task.title.strip()
+    if session.focus and session.focus.strip():
+        return session.focus.strip()
+    if agent is not None and agent.label.strip():
+        return agent.label.strip()
+    if session.label and session.label.strip():
+        return session.label.strip()
+    return session.role
+
+
+def _claimed(tasks: Sequence[TeamTask], session_id: str) -> TeamTask | None:
+    """The task this session holds, if any. ``doing`` wins over anything else."""
+    held = [task for task in tasks if task.claimed_by == session_id]
+    if not held:
+        return None
+    doing = [task for task in held if task.status == "doing"]
+    chosen = doing or held
+    return max(chosen, key=lambda task: task.updated_at)
+
+
+def _latest_events(store: ContextStore, project_id: str) -> dict[str, TeamEvent]:
+    """The most recent event per session, for summaries.
+
+    One bounded read rather than a query per session: at this scale the tail of
+    the pipe holds an event for every session that is doing anything, and a
+    session whose last word has already scrolled out has nothing glanceable to
+    say anyway.
+    """
+    latest: dict[str, TeamEvent] = {}
+    for event in store.recent_events(project_id, limit=_EVENT_SCAN):
+        if event.session_id:
+            latest[event.session_id] = event
+    return latest
+
+
+def _unread_counts(
+    store: ContextStore, project_id: str, since: Mapping[str, int]
+) -> dict[str, int]:
+    """Events per session past that session's per-connection watermark.
+
+    ``since`` is owned by the connection: it is set to the board's current
+    position when the client subscribes to a session, so "unread" means "since
+    you last looked at this one", which is what the badge on a panel should
+    say. Sessions absent from the mapping have never been looked at and count
+    from the connection's own start, which the caller seeds.
+    """
+    if not since:
+        return {}
+    floor = min(since.values())
+    counts: dict[str, int] = {}
+    for event in store.events_since(project_id, floor, limit=_EVENT_SCAN):
+        sid = event.session_id
+        if sid is None or sid not in since:
+            continue
+        if event.seq > since[sid]:
+            counts[sid] = counts.get(sid, 0) + 1
+    return counts
+
+
+def sessions(
+    store: ContextStore,
+    project_id: str,
+    *,
+    now: datetime | None = None,
+    unread_since: Mapping[str, int] | None = None,
+) -> list[Session]:
+    """Every session that is still on the ring, as wire models.
+
+    Departures are not in this list: a ``gone`` session is reported once as a
+    ``delta.removed`` id (:func:`delta`) and then forgotten, which is what the
+    client needs to tear a panel down. Ordering is the store's own, so a
+    reconnecting client lays the ring out the same way it did before.
+    """
+    moment = now or datetime.now(tz=UTC)
+    tasks = store.team_tasks(project_id)
+    agents = {
+        agent.session_id: agent
+        for agent in store.fleet_agents(project_id, live_only=True)
+        if agent.session_id
+    }
+    latest = _latest_events(store, project_id)
+    counts = _unread_counts(store, project_id, unread_since or {})
+    out: list[Session] = []
+    for row in store.team_sessions(project_id):
+        state = classify(row, now=moment)
+        if state == "gone":
+            continue
+        task = _claimed(tasks, row.id)
+        agent = agents.get(row.id)
+        out.append(
+            Session(
+                id=row.id,
+                role=wire_role(row.role),
+                title=_title(row, task, agent),
+                state=state,
+                summary=summarize(latest.get(row.id)),
+                task_id=task.id if task is not None else None,
+                color_key=color_key(row.role),
+                last_activity_at=row.last_seen_at.isoformat(),
+                unread=counts.get(row.id, 0),
+            )
+        )
+    return out
+
+
+def tasks_of(store: ContextStore, project_id: str) -> list[Task]:
+    """Open board tasks as wire models. Closed ones are not ring furniture."""
+    return [
+        Task(
+            id=task.id,
+            title=task.title,
+            status=task.status,
+            role=task.role,
+            claimed_by=task.claimed_by,
+        )
+        for task in store.team_tasks(project_id)
+        if task.status not in ("done", "dropped")
+    ]
+
+
+def snapshot(
+    store: ContextStore,
+    project_id: str,
+    *,
+    now: datetime | None = None,
+    unread_since: Mapping[str, int] | None = None,
+) -> Snapshot:
+    """The whole board for one connection.
+
+    ``groups`` is empty and stays that way until groups ship; it is in the
+    frame from day one because adding a required key to a message a client is
+    already parsing is the change this protocol exists to avoid.
+    """
+    return Snapshot(
+        sessions=sessions(store, project_id, now=now, unread_since=unread_since),
+        tasks=tasks_of(store, project_id),
+        groups=[],
+    )
+
+
+def delta(previous: Sequence[Session], current: Sequence[Session]) -> Delta | None:
+    """What changed between two session lists, or ``None`` when nothing did.
+
+    ``None`` rather than an empty ``Delta`` because the server polls twice a
+    second and an idle board must put nothing on the wire — a socket that
+    speaks only when something happened is also the one a client can watch in
+    a console.
+
+    A session counts as changed when ANY field differs, compared on the dumped
+    models so a new field is covered the day it is added rather than the day
+    someone remembers to extend a hand-written comparison. ``unread`` is one of
+    those fields, which is deliberate: a badge that changed is a change.
+    """
+    before = {session.id: session for session in previous}
+    after = {session.id: session for session in current}
+    changed = [
+        session
+        for sid, session in after.items()
+        if sid not in before or before[sid].model_dump() != session.model_dump()
+    ]
+    removed = [sid for sid in before if sid not in after]
+    if not changed and not removed:
+        return None
+    return Delta(changed=changed, removed=removed)

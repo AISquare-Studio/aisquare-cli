@@ -219,9 +219,9 @@ def sessions(
                 title=_title(row, task, agent),
                 state=state,
                 summary=summarize(latest.get(row.id)),
-                taskId=task.id if task is not None else None,
-                colorKey=color_key(row.role),
-                lastActivityAt=row.last_seen_at.isoformat(),
+                task_id=task.id if task is not None else None,
+                color_key=color_key(row.role),
+                last_activity_at=row.last_seen_at.isoformat(),
                 unread=counts.get(row.id, 0),
             )
         )
@@ -236,7 +236,7 @@ def tasks_of(store: ContextStore, project_id: str) -> list[Task]:
             title=task.title,
             status=task.status,
             role=task.role,
-            claimedBy=task.claimed_by,
+            claimed_by=task.claimed_by,
         )
         for task in store.team_tasks(project_id)
         if task.status not in ("done", "dropped")

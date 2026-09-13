@@ -97,7 +97,7 @@ def _announce(port: int, token: str, bind: str) -> None:
     )
     console.print(
         f"  Untethered, add the LAN origin (http://<this machine>:{port}) under "
-        "chrome://flags → \"Insecure origins treated as secure\" in the Quest browser, "
+        'chrome://flags → "Insecure origins treated as secure" in the Quest browser, '
         "and relaunch it."
     )
     console.print(

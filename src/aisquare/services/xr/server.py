@@ -30,7 +30,6 @@ import asyncio
 import contextlib
 import json
 import os
-import secrets
 import socket
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
@@ -240,12 +239,10 @@ class _Connection:
                 Hello(
                     protocol=PROTOCOL_VERSION,
                     hub=self._project.id,
-                    serverTime=datetime.now(tz=UTC).isoformat(),
+                    server_time=datetime.now(tz=UTC).isoformat(),
                 )
             )
-            snapshot = projector.snapshot(
-                store, self._project.id, unread_since=self._unread_since
-            )
+            snapshot = projector.snapshot(store, self._project.id, unread_since=self._unread_since)
             self._sent = list(snapshot.sessions)
             await self._send(snapshot)
         poller = asyncio.create_task(self._poll())
@@ -273,9 +270,12 @@ class _Connection:
             return False
         except Exception:  # pragma: no cover - client vanished mid-handshake
             return False
-        if not isinstance(message, Auth) or not secrets.compare_digest(
-            message.token, self._token
-        ):
+        # Imported here, not at module scope: `secrets` pulls in hashlib and
+        # ssl, and tests/test_iam_single_reader.py ratchets those out of the
+        # import graph the hook path walks on every prompt.
+        import secrets
+
+        if not isinstance(message, Auth) or not secrets.compare_digest(message.token, self._token):
             await self._reject()
             return False
         return True
@@ -558,9 +558,9 @@ class _Connection:
 # --- helpers --------------------------------------------------------------------
 
 
-def _deliver(project: ProjectInfo, row: TeamSession, label: str | None, text: str) -> tuple[
-    bool, str
-]:
+def _deliver(
+    project: ProjectInfo, row: TeamSession, label: str | None, text: str
+) -> tuple[bool, str]:
     """Blocking half of :meth:`_Connection._prompt`. Runs off the event loop."""
     from aisquare.services import fleet as fleet_service
     from aisquare.services import team as team_service
@@ -607,9 +607,9 @@ def _record_text(line: bytes) -> str:
     parts = [
         block["text"]
         for block in content
-        if isinstance(block, dict) and block.get("type") == "text" and isinstance(
-            block.get("text"), str
-        )
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
     ]
     return "\n".join(part for part in parts if part.strip()).strip()
 

@@ -125,11 +125,15 @@
          pointer-events:none so they never eat an orbit drag, and this has to be
          clickable. It stays hidden until immersive-ar is known to be supported,
          so it is never a button that does nothing. */
+      /* Lifted clear of #say, which owns the bottom row. On Quest both are on
+         screen at once — you land on the page, see Enter AR, and the typed
+         field is already there — so a button sitting on top of an input is a
+         real collision rather than a theoretical one. */
       #enter-ar {
         position: fixed;
         z-index: 2;
         left: 50%;
-        bottom: 28px;
+        bottom: 62px;
         transform: translateX(-50%);
         font: 600 15px/1 var(--font-mono);
         letter-spacing: 0.04em;
@@ -164,7 +168,7 @@
          they are not looking at while talking. */
       #toast {
         left: 50%;
-        bottom: 76px;
+        bottom: 118px;
         transform: translateX(-50%);
         max-width: 36rem;
         text-align: center;

@@ -52,7 +52,7 @@ from textual.timer import Timer
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.common import local_time
+from aisquare.cli.common import format_reset, local_time
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.core import browser
 from aisquare.core import claude_accounts as core
@@ -166,8 +166,9 @@ def usage_bar(percent: float) -> Text:
     return text
 
 
-def _resets(when: datetime | None) -> str:
-    return "" if when is None else f" · resets {local_time(when):%H:%M}"
+def _resets(when: datetime | None, *, now: datetime | None = None) -> str:
+    """`` · resets in 3h 10m (18:00)`` — ``cli.common.format_reset``, the one formatter (#152)."""
+    return "" if when is None else f" · resets {format_reset(when, now=now)}"
 
 
 DEFAULT_BADGE = "★"
@@ -175,7 +176,11 @@ DEFAULT_BADGE = "★"
 
 
 def account_line_text(
-    status: ClaudeAccountStatus, usage: ClaudeUsage | None, trend: UsageTrend | None = None
+    status: ClaudeAccountStatus,
+    usage: ClaudeUsage | None,
+    trend: UsageTrend | None = None,
+    *,
+    now: datetime | None = None,
 ) -> Text:
     """One slot: ``★ 2  work  me@…  max 5x   session ▮▯▯▯▯ 3% · resets 15:29   week 7%``.
 
@@ -211,7 +216,7 @@ def account_line_text(
         if usage.session_percent is not None:
             text.append("  session ", style="dim")
             text.append_text(usage_bar(usage.session_percent))
-            text.append(_resets(usage.session_resets_at), style="dim")
+            text.append(_resets(usage.session_resets_at, now=now), style="dim")
             pace = accounts_service.describe_trend(trend)
             if pace:
                 # Where the window is heading at the current rate (#146), from the
@@ -220,7 +225,7 @@ def account_line_text(
         if usage.week_percent is not None:
             text.append("  week ", style="dim")
             text.append_text(usage_bar(usage.week_percent))
-            text.append(_resets(usage.week_resets_at), style="dim")
+            text.append(_resets(usage.week_resets_at, now=now), style="dim")
     return text
 
 

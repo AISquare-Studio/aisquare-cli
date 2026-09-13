@@ -348,7 +348,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   open. It is not a documented API; when it does not answer, the row says why
   (`usage unavailable`, `token expired — open a session to refresh it`) and
   nothing else on the page is affected. On macOS the token lives in the
-  Keychain, which the CLI does not read, so the row says so.
+  Keychain, which the CLI does not read, so the row says so. A reset reads as a
+  distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
+  02:00)` — the same string on the page and in `aisquare accounts usage`, so a
+  weekly window six days out never looks like tonight.
 - **Default**, **↑**/**↓** and **Disable** arrange the accounts. The row with
   the ★ is the **machine default**: what a launch runs on when nothing more
   specific says. The arrows set the **priority order** — the order the rows are

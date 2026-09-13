@@ -524,6 +524,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **A usage reset now says when, not just what o'clock** (#152). `aisquare
+  accounts usage`, `accounts list --usage` and the Accounts page showed a reset
+  as a bare `HH:MM`, which for the seven-day window can be six days away and
+  read as tonight, and around midnight could not tell a reset in ten minutes
+  from one a day out. Both surfaces now render the same string from one
+  formatter (`cli.common.format_reset`): `in 12m` within the hour, `in 3h 10m
+  (18:00)` later today, `in 2d 4h (Tue 02:00)` on another day — a weekly reset
+  is never a bare clock time again — and `now` when the reading is already
+  stale. `--json` is unchanged (ISO 8601 timestamps). A test walks both
+  modules' syntax trees so a third copy of the formatter cannot quietly return.
 - **Alt+letter chords reach the agent as chords.** Claude Code's alt+p (switch
   model) did nothing from a fleet pane — reported 2026-09-02 and again
   2026-09-10 — because Textual's parser reads `ESC p` as `Key("alt+p",

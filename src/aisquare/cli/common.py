@@ -6,7 +6,7 @@ import errno
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
 
@@ -44,6 +44,54 @@ _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 def local_time(value: datetime) -> datetime:
     """A stored (UTC) timestamp in the user's local timezone, for display."""
     return value.astimezone()
+
+
+def format_reset(when: datetime | None, *, now: datetime | None = None) -> str:
+    """When a rate-limit window lifts, as a distance AND a clock time: ``in 3h 10m (18:00)``.
+
+    The ONE formatter for both surfaces that show a reset — ``accounts usage``
+    / ``list --usage`` and the Accounts page — because two copies drifted
+    (#152): both printed a bare ``HH:MM``, which for the seven-day window can be
+    six days away and read as tonight.
+
+    The rules, each chosen so nobody has to do calendar arithmetic:
+
+    - under an hour: ``in 12m`` — the clock time adds nothing;
+    - later the same LOCAL day: ``in 3h 10m (18:00)``;
+    - another day: ``in 2d 4h (Tue 02:00)`` — the weekday is what tells a
+      weekly reset from tonight's, and it is never a bare ``HH:MM`` again;
+    - already past (the endpoint's reading is a little stale): ``now``.
+
+    ``now`` is the clock to measure against; production reads the wall clock,
+    tests pass one so the midnight boundary can be pinned. Returns ``""`` for
+    ``None`` so callers can append it unconditionally.
+    """
+    if when is None:
+        return ""
+    moment = now if now is not None else datetime.now(tz=UTC)
+    remaining = when - moment
+    if remaining <= timedelta(0):
+        return "now"
+    total_minutes = int(remaining.total_seconds() // 60)
+    days, rest = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(rest, 60)
+    # The clock time is shown to the nearest MINUTE. Measured against the live
+    # endpoint (2026-09-13): the same window's ``resets_at`` came back as
+    # 08:59:59.86, 09:00:00.26 and 08:59:59.62 on three calls seconds apart —
+    # it jitters across the second boundary — so a truncated ``%H:%M`` flickered
+    # between 04:59 and 05:00 from one refresh to the next. Rounding says what
+    # a person means by the time of a reset, and the distance still moves.
+    local_when = (local_time(when) + timedelta(seconds=30)).replace(second=0, microsecond=0)
+    local_now = moment.astimezone(local_when.tzinfo)
+    if remaining < timedelta(hours=1):
+        return f"in {max(minutes, 1)}m"
+    if days == 0:
+        distance = f"{hours}h" if minutes == 0 else f"{hours}h {minutes:02d}m"
+    else:
+        distance = f"{days}d" if hours == 0 else f"{days}d {hours}h"
+    if local_when.date() == local_now.date():
+        return f"in {distance} ({local_when:%H:%M})"
+    return f"in {distance} ({local_when:%a %H:%M})"
 
 
 def resolve_pool(user: bool, project: bool) -> Pool | None:

@@ -80,6 +80,35 @@ CHORDS: dict[str, str] = {
 #: tmux spelling and make the whole chord untranslatable.
 MODIFIERS: dict[str, str] = {"ctrl": "C-", "alt": "M-", "meta": "M-", "shift": "S-"}
 
+#: A modifier pressed ON ITS OWN, as the kitty keyboard protocol reports it and
+#: Textual names it (``textual/_keyboard_protocol.py``'s ``MODIFIER_FUNCTIONAL_KEYS``,
+#: plus the lock keys Textual would name the same way). There is no keystroke
+#: in such an event — a modifier is half of a chord, and the chord arrives as
+#: its own event — so the pane ignores these without a word (#151). Spelled out
+#: here rather than imported from Textual's private module, so a rename there
+#: breaks a test and not the UI.
+MODIFIER_ONLY_KEYS: frozenset[str] = frozenset(
+    {
+        "left_shift",
+        "left_control",
+        "left_alt",
+        "left_super",
+        "left_hyper",
+        "left_meta",
+        "right_shift",
+        "right_control",
+        "right_alt",
+        "right_super",
+        "right_hyper",
+        "right_meta",
+        "iso_level3_shift",
+        "iso_level5_shift",
+        "caps_lock",
+        "num_lock",
+        "scroll_lock",
+    }
+)
+
 #: Named keys tmux 3.7c refuses to combine with ctrl: ``C-Escape`` and
 #: ``C-BSpace`` come out as those literal strings.
 NO_CTRL: frozenset[str] = frozenset({"Escape", "BSpace"})

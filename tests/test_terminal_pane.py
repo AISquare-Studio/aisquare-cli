@@ -707,7 +707,9 @@ def test_an_untranslatable_key_is_dropped_with_one_notice_per_key_name(
 
     notices = run(drive())
     assert len(notices) == 2
-    assert notices[0].startswith("f13") and notices[1].startswith("ctrl+comma")
+    # The notice names the key and blames nothing: "no way to type f13 into a tmux pane" (#151).
+    assert notices[0] == "no way to type f13 into a tmux pane"
+    assert notices[1] == "no way to type ctrl+comma into a tmux pane"
     assert fake.sent() == [("Enter",)]  # nothing was mistyped into the agent
 
 
@@ -2511,7 +2513,7 @@ def test_the_servers_tmux_version_gates_the_chords_it_would_type_out(
     modern_sent, modern_notices = _press_shift_enter(modern, tmp_path)
 
     assert old_sent == [("Enter",)], "a chord tmux 3.4 would type out must not be sent"
-    assert len(old_notices) == 1 and old_notices[0].startswith("shift+enter")
+    assert old_notices == ["no way to type shift+enter into a tmux pane"]
     assert modern.version == "tmux 3.7c"  # the control's premise, spelled out
     assert modern_sent == [("S-Enter",), ("Enter",)]  # …and there the chord goes through
     assert modern_notices == []
@@ -2773,3 +2775,69 @@ def test_real_tmux_pane_renders_output_and_echoes_forwarded_keys(
     assert before[:2] == ["hello", ""]
     assert after[:2] == ["hellox", "x"]
     assert elapsed < 1.0
+
+
+def test_a_bare_modifier_press_is_ignored_in_silence(fake: FakeTmux, tmp_path: Path) -> None:
+    """#151: kitty-protocol terminals report Shift, Control… pressed ALONE as key events.
+
+    Nothing can be forwarded — a modifier is half of a chord — so nothing is
+    sent, and nothing is said: the old path raised one "tmux has no name for
+    this key — dropped" toast per modifier, three red toasts into an ordinary
+    typing session. Every name Textual can produce for a modifier is tried,
+    the lock keys included, and the control beside it is a chord that uses the
+    same modifier and still arrives.
+    """
+    from aisquare.core.keys import MODIFIER_ONLY_KEYS
+
+    async def drive() -> tuple[list[str], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            for key in sorted(MODIFIER_ONLY_KEYS):
+                await pilot.press(key)
+            await pilot.press("ctrl+a")  # the modifier USED: the chord still arrives
+            await pilot.pause()
+            return host.notices, fake.sent()
+
+    notices, sent = run(drive())
+    assert notices == []  # not one toast
+    assert sent == [("C-a",)]  # and not one stray send-keys for a bare modifier
+    assert {"left_shift", "right_control", "iso_level3_shift", "caps_lock"} <= MODIFIER_ONLY_KEYS
+
+
+def test_a_truly_unmappable_key_is_still_named_once_but_as_information(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The remaining notice does not blame tmux or say "dropped" in red (#151)."""
+
+    class Severities(Host):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.severities: list[str] = []
+
+        def notify(
+            self,
+            message: str,
+            *,
+            title: str = "",
+            severity: SeverityLevel = "information",
+            timeout: float | None = None,
+            markup: bool = True,
+        ) -> None:
+            self.severities.append(severity)
+            super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
+
+    async def drive() -> tuple[list[str], list[str]]:
+        host = Severities(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            host.pane.focus()
+            await pilot.pause()
+            await pilot.press("f13", "f13")
+            await pilot.pause()
+            return host.notices, host.severities
+
+    notices, severities = run(drive())
+    assert notices == ["no way to type f13 into a tmux pane"]
+    assert severities == ["information"]
+    assert fake.sent() == []

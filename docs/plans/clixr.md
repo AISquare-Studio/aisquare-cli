@@ -1,4 +1,11 @@
-> **Status: 2026-09-12 — implementation in progress; milestones tracked on the board.**
+> **Status: 2026-09-13 — M1–M7 done on the desktop; M8 skipped by decision; M9 pending on the headset.**
+>
+> | | |
+> |---|---|
+> | **M1–M7** | Done, and verified on the desktop. Every §16 line that a desktop can settle is settled with a pasted command and its output on the integration PR — the install from a clean checkout, `aisquare xr`, the `doctor` row, `make check` under both extras, the wheel's client assets, three live panels in three role colours, a session stopping and returning without a reload, and the §15 step 7 alert fired on demand and cleared. |
+> | **M8** | **Skipped by decision**, not by running out of hours. §12 names groups as the one stretch item worth taking; it was not taken, and nothing in §16 depends on it. |
+> | **M9** | The runbook is written — `docs/xr-demo.md` — and rehearsed twice on the desktop. **The rehearsal on the headset has not happened.** Four §16 lines can only be settled there and are marked *verify on headset* in that document's definition-of-done table: the ring compositing in passthrough, the focus tier being readable without leaning in, push-to-talk's reply visible in the headset, and collapse/summon after relocating. Nobody has claimed them. |
+>
 > Copied verbatim from the planning document below this header; the sections are cited by number from the code and the tests, so edit the plan and re-copy rather than editing this file in place.
 
 # cliXR — 24-hour implementation plan

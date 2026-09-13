@@ -1568,10 +1568,12 @@ def test_a_burst_that_ends_on_a_different_session_keeps_the_headers_owner(
         connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
         for _ in range(FRAMES_PER_INTERIM):
             connection.send_bytes(FRAME)
+        interim = json.loads(_until(connection, "stt"))
         connection.send_text(json.dumps({"t": "audioEnd", "session": SECOND}))
         final = json.loads(_until(connection, "stt"))
         ack = json.loads(_until(connection, "ack"))
 
+    assert interim["final"] is False, "one second of audio earns an interim decode first"
     assert final == {"t": "stt", "text": CANNED, "final": True}
     assert ack["session"] == CODER, "the words go to the panel whose microphone was opened"
     assert ack["ok"] is True, "a client bookkeeping bug must not cost the operator a sentence"

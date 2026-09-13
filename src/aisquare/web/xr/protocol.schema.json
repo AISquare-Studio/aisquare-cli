@@ -458,7 +458,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Session this burst is addressed to. The HEADER owns the burst: the matching audioEnd must name the same session, and the server refuses the burst if it does not, rather than attributing the operator's speech to whichever of the two frames it happened to read last.",
+            "description": "Session this burst is addressed to. The HEADER owns the burst: it is where the transcript is routed, and a matching audioEnd that names a different session does not move it -- the disagreement is logged, not answered, rather than attributing the operator's speech to whichever of the two frames the server happened to read last. See audioEnd.session for the whole of that rule.",
             "title": "Session",
             "type": "string"
           },

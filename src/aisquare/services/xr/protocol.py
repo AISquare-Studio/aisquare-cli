@@ -271,13 +271,26 @@ class Audio(_Wire):
     """
 
     t: Literal["audio"] = "audio"
+    # This description and audioEnd.session's are one contract in two halves,
+    # and they have to be edited together. Nothing in the tree catches them
+    # drifting apart: `--check` regenerates protocol.schema.json FROM this
+    # model, so a stale sentence is copied into the schema faithfully and the
+    # drift test then confirms the two agree -- about the wrong text; and no
+    # test asserts prose. This field claimed the server "refuses the burst"
+    # for the whole of the integration merge that made the header win instead
+    # (server._close_utterance logs the disagreement and routes to the
+    # header), because the one test that had asserted a refusal was rewritten
+    # in the same commit. It was found by a human reading the two fields
+    # together, which is the only guard there is. `audio` is the first frame a
+    # client sends, so this is the first field a client author reads.
     session: str = Field(
         description=(
-            "Session this burst is addressed to. The HEADER owns the burst: the "
-            "matching audioEnd must name the same session, and the server "
-            "refuses the burst if it does not, rather than attributing the "
-            "operator's speech to whichever of the two frames it happened to "
-            "read last."
+            "Session this burst is addressed to. The HEADER owns the burst: it "
+            "is where the transcript is routed, and a matching audioEnd that "
+            "names a different session does not move it -- the disagreement is "
+            "logged, not answered, rather than attributing the operator's "
+            "speech to whichever of the two frames the server happened to read "
+            "last. See audioEnd.session for the whole of that rule."
         )
     )
     seq: int = Field(

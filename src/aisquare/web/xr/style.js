@@ -134,10 +134,22 @@ export function ringAngles(n) {
  *   1408 × 768 texture — one texture, one material (plan §13: the shared atlas
  *   is the design, not an optimisation to do later).
  *
- *   Consequence worth knowing before you read a panel: 1.5° is road-sign type.
- *   At 37 px the mono advance is ~22 px, so a cell fits ~13 characters per line.
- *   The ambient tier is glanceable, not readable — reading is the focus tier's
- *   job (M4), and that is why the server sends a ≤ 6 word summary, not text.
+ *   Consequence, measured rather than assumed — this is what M2 is for:
+ *   1.5° is road-sign type. JetBrains Mono advances 0.6 em, so at 37 px a glyph
+ *   is 22.2 px and the 304 px text column holds
+ *        304 / 22.2 = 13.7 → THIRTEEN characters per line.
+ *
+ *   That is a hard physical consequence of the spec, not a tuning choice: the
+ *   angular floor fixes the glyph height, the 0.55 m panel fixes the column
+ *   width, and nothing in between is free. It also means a ≤ 6 word summary
+ *   (plan §6) does NOT fit an ambient cell — §6's own example, "claimed tsk_01k4
+ *   — wiring JWT", is 29 characters and truncates to 13. The two numbers were
+ *   specified independently and they do not meet.
+ *
+ *   The client implements the spec as written and truncates with an ellipsis;
+ *   which of the two numbers should move is a planning call, not this module's.
+ *   The ambient tier stays glanceable either way — reading is the focus tier's
+ *   job (M4), which is sized from FOCUS.minCapDeg below.
  */
 export const AMBIENT = {
   minCapDeg: 1.5,

@@ -13,14 +13,19 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from aisquare.core import paths, selfcli
+from aisquare.core.agent_adapters import adapters, get_adapter
+from aisquare.core.agent_adapters.types import HookSpec, config_home
 from aisquare.core.version import __version__
 from aisquare.models import AgentHookSite, AgentInfo
 
@@ -60,6 +65,8 @@ class AgentSpec:
     home: Path
     context_files: tuple[Path, ...]
     settings_path: Path | None = None  # where aisquare installs hooks, if supported
+    hooks: tuple[HookSpec, ...] = ()
+    first_context_file_only: bool = False
 
 
 def _home() -> Path:
@@ -67,7 +74,11 @@ def _home() -> Path:
     return Path.home()
 
 
-def _claude_home(config_dir: Path | None = None) -> Path:
+def _claude_home(
+    config_dir: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
     """Claude Code's config directory.
 
     Users run parallel Claude installs via ``CLAUDE_CONFIG_DIR`` (e.g. an
@@ -75,12 +86,9 @@ def _claude_home(config_dir: Path | None = None) -> Path:
     actual ``claude`` command reads. Priority: explicit ``--config-dir``,
     then ``CLAUDE_CONFIG_DIR``, then ``~/.claude``.
     """
-    if config_dir is not None:
-        return config_dir.expanduser()
-    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if env:
-        return Path(env).expanduser()
-    return _home() / ".claude"
+    return config_home(
+        get_adapter("claude-code"), _home(), os.environ if env is None else env, config_dir
+    )
 
 
 def claude_json_paths(config_dir: Path) -> list[Path]:
@@ -105,19 +113,23 @@ def claude_json_paths(config_dir: Path) -> list[Path]:
 
 
 def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
-    home = _home()
-    claude = _claude_home(config_dir)
-    return [
-        AgentSpec(
-            "claude-code",
-            "Claude Code",
-            claude,
-            (claude / "CLAUDE.md",),
-            settings_path=claude / "settings.json",
-        ),
-        AgentSpec("cursor", "Cursor", home / ".cursor", ()),
-        AgentSpec("codex", "Codex", home / ".codex", ()),
-    ]
+    specs = []
+    for adapter in adapters():
+        directory = config_home(adapter, _home(), os.environ, config_dir)
+        specs.append(
+            AgentSpec(
+                adapter.id,
+                adapter.label,
+                directory,
+                adapter.context_files(directory),
+                directory / adapter.settings_name,
+                adapter.capabilities.hooks,
+                adapter.capabilities.first_context_file_only,
+            )
+        )
+    # Detection of this legacy IDE entry is preserved; it has no terminal adapter.
+    specs.insert(1, AgentSpec("cursor", "Cursor", _home() / ".cursor", ()))
+    return specs
 
 
 _PROGRAM_NAMES = frozenset({"aisquare", "asq"})
@@ -186,14 +198,76 @@ def _aisquare_command() -> str:
     return " ".join(_quote(part) for part in selfcli.argv_for([]))
 
 
-def _read_settings(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
+_SETTINGS_SNAPSHOT: ContextVar[dict[Path, dict[str, Any]] | None] = ContextVar(
+    "agent_settings_snapshot", default=None
+)
+
+
+@contextmanager
+def inspection_snapshot() -> Iterator[None]:
+    if _SETTINGS_SNAPSHOT.get() is not None:
+        yield
+        return
+    token = _SETTINGS_SNAPSHOT.set({})
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        yield
+    finally:
+        _SETTINGS_SNAPSHOT.reset(token)
+
+
+def _read_settings(path: Path, *, strict: bool = False) -> dict[str, Any]:
+    """Optional caches fail open; hook inspection must distinguish unreadable files."""
+    import copy
+
+    snapshot = _SETTINGS_SNAPSHOT.get()
+    key = _dir_key(path)
+    if snapshot is not None and key in snapshot:
+        return copy.deepcopy(snapshot[key])
+    try:
+        result = _read_settings_file(path, strict=True)
+    except AgentSettingsError:
+        if strict:
+            raise
         return {}
-    return data if isinstance(data, dict) else {}
+    if snapshot is not None:
+        snapshot[key] = copy.deepcopy(result)
+    return result
+
+
+def _read_settings_file(path: Path, *, strict: bool = False) -> dict[str, Any]:
+    try:
+        _regular_settings(path)
+        content = path.read_text(encoding="utf-8")
+        data = json.loads(content) if content.strip() else {}
+        if not isinstance(data, dict):
+            raise ValueError("must contain a JSON object")
+        return data
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeError, ValueError) as exc:
+        if strict:
+            raise AgentSettingsError(
+                f"Cannot read {path}: {exc}. Existing settings preserved; "
+                "repair the file and retry."
+            ) from exc
+        return {}
+
+
+def _hook_command_parts(command: str) -> tuple[list[str], dict[str, str]]:
+    """Separate trailing hook options, independent of their order."""
+    tokens = _split_command(command)
+    options: dict[str, str] = {}
+    while len(tokens) >= 2 and tokens[-2] in {"--definition", "--config-dir"}:
+        options.setdefault(tokens[-2], tokens[-1])
+        tokens = tokens[:-2]
+    return tokens, options
+
+
+def _without_hook_definition(command: str) -> str:
+    tokens, options = _hook_command_parts(command)
+    if "--config-dir" in options:
+        tokens += ["--config-dir", options["--config-dir"]]
+    return " ".join(_quote(token) for token in tokens)
 
 
 def _is_aisquare_hook_command(command: str) -> bool:
@@ -214,82 +288,175 @@ def _is_aisquare_hook_command(command: str) -> bool:
     duplicate, and ``disconnect`` cannot remove them.
     """
     try:
-        tokens = _split_command(command)
+        tokens, _ = _hook_command_parts(command)
     except ValueError:
         return False
     if len(tokens) < 3 or tokens[-2] != "hook":
         return False
-    if tokens[-1] not in {subcommand for _, subcommand in _HOOKS}:
+    if tokens[-1] not in {
+        hook.command for adapter in adapters() for hook in adapter.capabilities.hooks
+    }:
         return False
     return _is_aisquare_program(tokens[0]) or tokens[-4:-2] == ["-m", "aisquare"]
 
 
-def _is_aisquare_group(group: Any) -> bool:
+def _owned_handlers(group: Any) -> list[dict[str, Any]]:
+    """The handlers installed by AISquare, including those in mixed groups."""
     if not isinstance(group, dict):
-        return False
+        return []
     hooks = group.get("hooks")
     if not isinstance(hooks, list):
-        return False
-    return any(
-        isinstance(item, dict)
+        return []
+    return [
+        item
+        for item in hooks
+        if isinstance(item, dict)
         and isinstance(item.get("command"), str)
         and _is_aisquare_hook_command(item["command"])
-        for item in hooks
-    )
+    ]
+
+
+def _is_aisquare_group(group: Any) -> bool:
+    return bool(_owned_handlers(group))
+
+
+def _without_owned(groups: Any) -> list[Any]:
+    """Remove our handlers, retaining unrelated handlers even in the same group."""
+    if not isinstance(groups, list):
+        return []
+    kept: list[Any] = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+            kept.append(group)
+            continue
+        owned = _owned_handlers(group)
+        if not owned:
+            kept.append(group)
+            continue
+        handlers = [item for item in group["hooks"] if item not in owned]
+        if handlers:
+            kept.append({**group, "hooks": handlers})
+    return kept
+
+
+def _write_settings(path: Path, settings: dict[str, Any]) -> None:
+    import tempfile
+
+    snapshot = _SETTINGS_SNAPSHOT.get()
+    if snapshot is not None:
+        snapshot.pop(_dir_key(path), None)
+    payload = json.dumps(settings, indent=2) + "\n"
+    existing = _regular_settings(path)
+    # No change means no rewrite: Codex trust refers to the installed definition.
+    if path.exists() and path.read_text(encoding="utf-8") == payload:
+        return
+    # Atomic replacement updates this directory entry; other hard links keep
+    # their original bytes. Symlinks continue to point to the updated target.
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, filename = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    temp = Path(filename)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            if existing is not None:
+                os.chmod(temp, stat.S_IMODE(existing.st_mode))
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+class AgentSettingsError(ValueError):
+    """A native settings file cannot be safely inspected or changed."""
+
+
+def _regular_settings(path: Path) -> os.stat_result | None:
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise AgentSettingsError(f"{path} is not a regular file; existing settings preserved.")
+    return info
+
+
+def _settings_for_write(path: Path) -> dict[str, Any]:
+    value = _read_settings(path, strict=True)
+    if "hooks" in value and not isinstance(value["hooks"], dict):
+        raise AgentSettingsError(
+            f"{path}: hooks must be an object; existing settings preserved. "
+            "Repair the file and retry agents connect/disconnect."
+        )
+    for event, groups in value.get("hooks", {}).items():
+        if not isinstance(groups, list):
+            raise AgentSettingsError(
+                f"{path}: hooks.{event} must be an array; existing settings preserved. "
+                "Repair the file and retry agents connect/disconnect."
+            )
+    return value
 
 
 def install_hooks(name: str, config_dir: Path | None = None) -> bool:
-    """Install aisquare's lifecycle hooks. False if the agent is unsupported."""
+    """Merge native hooks; preserve other handlers and avoid partial settings writes."""
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return False
-    settings = _read_settings(spec.settings_path)
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        hooks = {}
-    command = _aisquare_command()  # already shell-quoted where needed
-    for event, subcommand in _HOOKS:
-        groups = hooks.get(event)
-        kept = [g for g in groups if not _is_aisquare_group(g)] if isinstance(groups, list) else []
-        entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {subcommand}"}
-        if event in _CONTEXT_HOOKS:
-            # Never below the ceiling the CI hook may wait for; never *reducing*
-            # a longer one the operator chose deliberately.
-            existing = _installed_timeout(groups, event)
-            entry["timeout"] = max(CONTEXT_HOOK_TIMEOUT_SECONDS, existing or 0)
-        kept.append({"hooks": [entry]})
-        hooks[event] = kept
+    settings = _settings_for_write(spec.settings_path)
+    hooks = settings.get("hooks", {})
+    command = _aisquare_command()
+    for hook in spec.hooks:
+        groups = hooks.get(hook.event)
+        kept = _without_owned(groups)
+        suffix = f" --config-dir {_quote(str(spec.home))}" if hook.command == "codex" else ""
+        entry: dict[str, Any] = {
+            "type": "command",
+            "command": f"{command} hook {hook.command}{suffix}",
+        }
+        installed_timeout = _installed_timeout(groups, hook.event)
+        if hook.timeout is not None:
+            entry["timeout"] = max(hook.timeout, installed_timeout or 0)
+        group: dict[str, Any] = {"hooks": [entry]}
+        if hook.matcher is not None:
+            group["matcher"] = hook.matcher
+        kept.append(group)
+        hooks[hook.event] = kept
     settings["hooks"] = hooks
-    spec.settings_path.parent.mkdir(parents=True, exist_ok=True)
-    spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    if get_adapter(name).capabilities.requires_hook_trust:
+        definition = _definition_fingerprint(settings)
+        for groups in hooks.values():
+            for group in groups if isinstance(groups, list) else []:
+                for handler in _owned_handlers(group):
+                    handler["command"] = (
+                        _without_hook_definition(handler["command"]) + f" --definition {definition}"
+                    )
+    _write_settings(spec.settings_path, settings)
     return True
 
 
 def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
-    """Remove aisquare's hooks from the agent's settings. True if any were removed."""
     spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
+    if spec is None or spec.settings_path is None:
         return False
-    settings = _read_settings(spec.settings_path)
+    settings = _settings_for_write(spec.settings_path)
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
     removed = False
-    for event, _ in _HOOKS:
-        groups = hooks.get(event)
-        if not isinstance(groups, list):
-            continue
-        kept = [g for g in groups if not _is_aisquare_group(g)]
-        if len(kept) != len(groups):
+    for hook in spec.hooks:
+        groups = hooks.get(hook.event)
+        kept = _without_owned(groups)
+        if isinstance(groups, list) and kept != groups:
             removed = True
-        if kept:
-            hooks[event] = kept
-        else:
-            hooks.pop(event, None)
+            if kept:
+                hooks[hook.event] = kept
+            else:
+                hooks.pop(hook.event, None)
     if not hooks:
         settings.pop("hooks", None)
     if removed:
-        spec.settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        _write_settings(spec.settings_path, settings)
     return removed
 
 
@@ -319,7 +486,8 @@ def hooks_installed(name: str, config_dir: Path | None = None) -> bool:
     operator hand-edited). :func:`hook_timeout_shortfall` reports that, on its
     own line, with the same fix.
     """
-    return not _missing_events(name, config_dir, reconciled=False)
+    spec = _spec(name, config_dir)
+    return bool(spec and spec.hooks) and not _missing_events(name, config_dir, reconciled=False)
 
 
 def hook_timeout_shortfall(name: str, config_dir: Path | None = None) -> list[str]:
@@ -337,40 +505,34 @@ def _missing_events(name: str, config_dir: Path | None, *, reconciled: bool) -> 
     """Lifecycle events with no aisquare group — or, with ``reconciled``, none
     whose context timeout reaches :data:`CONTEXT_HOOK_TIMEOUT_SECONDS`."""
     spec = _spec(name, config_dir)
-    if spec is None or spec.settings_path is None or not spec.settings_path.exists():
-        return [event for event, _ in _HOOKS]
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    if spec is None or spec.settings_path is None:
+        return [hook.event for hook in spec.hooks] if spec else [event for event, _ in _HOOKS]
+    hooks = _settings_for_write(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
-        return [event for event, _ in _HOOKS]
+        return [hook.event for hook in spec.hooks] if spec else [event for event, _ in _HOOKS]
     accepts = _is_current_aisquare_group if reconciled else (lambda g, _e: _is_aisquare_group(g))
     return [
         event
-        for event, _ in _HOOKS
+        for event in (hook.event for hook in spec.hooks)
         if not any(accepts(group, event) for group in (hooks.get(event) or []))
     ]
 
 
 def _installed_timeout(groups: Any, event: str) -> int | None:
-    """The ``timeout`` an existing aisquare entry for ``event`` already carries.
+    """Preserve extra headroom only for the two context-producing hooks.
 
-    Read before rewriting so ``connect`` raises a short one to our ceiling and
-    leaves a longer one alone — an operator who set 180 chose more headroom
-    than we need, and reconciling that down would discard their choice.
+    UI and decision hooks must reconcile to their adapter's bounded timeout;
+    Claude hooks without a spec timeout retain the native default.
     """
     if event not in _CONTEXT_HOOKS or not isinstance(groups, list):
         return None
+    timeouts: list[int] = []
     for group in groups:
-        if not _is_aisquare_group(group):
-            continue
-        for item in (group or {}).get("hooks", []) if isinstance(group, dict) else []:
-            if not isinstance(item, dict) or not isinstance(item.get("command"), str):
-                continue
-            if not _is_aisquare_hook_command(item["command"]):
-                continue
+        for item in _owned_handlers(group):
             value = item.get("timeout")
-            if isinstance(value, int) and not isinstance(value, bool):
-                return value
-    return None
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                timeouts.append(value)
+    return max(timeouts, default=None)
 
 
 def _is_current_aisquare_group(group: Any, event: str) -> bool:
@@ -389,13 +551,10 @@ def _is_current_aisquare_group(group: Any, event: str) -> bool:
     if event not in _CONTEXT_HOOKS:
         return True
     return any(
-        isinstance(item, dict)
-        and isinstance(item.get("command"), str)
-        and _is_aisquare_hook_command(item["command"])
-        and isinstance(item.get("timeout"), int)
+        isinstance(item.get("timeout"), int)
         and not isinstance(item.get("timeout"), bool)
         and item["timeout"] >= CONTEXT_HOOK_TIMEOUT_SECONDS
-        for item in group.get("hooks", [])
+        for item in _owned_handlers(group)
     )
 
 
@@ -487,18 +646,22 @@ def set_connected(name: str, connected: bool, config_dir: Path | None = None) ->
 
 
 def _to_info(spec: AgentSpec, registry: dict[str, Any]) -> AgentInfo:
-    existing = [path for path in spec.context_files if path.exists()]
+    context = inspect_context(spec.name, spec.home, read_documents=False)
     sites = [
         AgentHookSite(
             config_dir=directory,
-            hooks_installed=hooks_installed(spec.name, directory),
+            hooks_installed=integration_readiness(spec.name, directory)[0]
+            in {"configured", "observed", "unverified"},
         )
         for directory in connected_dirs(spec.name, registry)
     ]
+    readiness, detail = integration_readiness(spec.name, _hook_dir(spec))
     return AgentInfo(
+        readiness=readiness,
+        detail=" ".join(filter(None, [detail, *context.notes])),
         name=spec.name,
-        detected=spec.home.exists() or bool(existing),
-        config_paths=existing,
+        detected=spec.home.exists() or bool(context.paths),
+        config_paths=context.paths,
         connected=spec.name in _connected_set(registry),
         sites=sites,
     )
@@ -517,9 +680,167 @@ def detect(name: str, config_dir: Path | None = None) -> AgentInfo | None:
 
 
 def context_files(name: str, config_dir: Path | None = None) -> list[Path]:
-    """Existing context files for an agent (its content, for ingestion)."""
+    """Readable, effective context files, using the same precedence as connect."""
+    documents, _ = read_context(name, config_dir)
+    return list(documents)
+
+
+def read_context(
+    name: str,
+    config_dir: Path | None = None,
+) -> tuple[dict[Path, str], list[str]]:
+    """Read effective instructions; missing/unreadable docs never block hook setup."""
+    context = inspect_context(name, config_dir)
+    return context.documents, context.notes
+
+
+@dataclass
+class ContextInspection:
+    paths: list[Path]
+    documents: dict[Path, str]
+    notes: list[str]
+
+
+def inspect_context(
+    name: str, config_dir: Path | None = None, *, read_documents: bool = True
+) -> ContextInspection:
+    """Keep failed candidates visible, while ingesting only effective regular files."""
     spec = _spec(name, config_dir)
-    return [path for path in spec.context_files if path.exists()] if spec else []
+    result = ContextInspection([], {}, [])
+    if spec is None:
+        return result
+    for path in spec.context_files:
+        try:
+            if not stat.S_ISREG(path.stat().st_mode):
+                result.paths.append(path)
+                result.notes.append(f"Skipped context file {path}: not a regular file")
+                continue
+            if read_documents:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            else:
+                # Codex uses the first nonblank file. Stream only until a
+                # nonblank chunk, never load large context into a status row.
+                content = ""
+                with path.open(encoding="utf-8", errors="replace") as handle:
+                    if not spec.first_context_file_only:
+                        content = "present"
+                    while spec.first_context_file_only and (chunk := handle.read(4096)):
+                        if chunk.strip():
+                            content = "present"
+                            break
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            result.paths.append(path)
+            result.notes.append(f"Skipped context file {path}: {exc}")
+            continue
+        if spec.first_context_file_only and not content.strip():
+            continue
+        result.paths.append(path)
+        result.documents[path] = content
+        if spec.first_context_file_only:
+            break
+    return result
+
+
+def hook_fingerprint(name: str, config_dir: Path) -> str:
+    spec = _spec(name, config_dir)
+    if spec is None or spec.settings_path is None:
+        return ""
+    return _definition_fingerprint(_settings_for_write(spec.settings_path))
+
+
+def _definition_fingerprint(settings: dict[str, Any]) -> str:
+    import hashlib
+
+    owned: dict[str, list[dict[str, Any]]] = {}
+    hooks = settings.get("hooks", {})
+    for event, groups in hooks.items() if isinstance(hooks, dict) else []:
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            handlers = _owned_handlers(group)
+            if not handlers:
+                continue
+            # Annotations do not affect execution. Preserve every other key,
+            # including future native execution controls we do not yet know.
+            annotations = {"description", "note", "comment"}
+            definition = {
+                key: value
+                for key, value in group.items()
+                if key not in annotations and key != "hooks"
+            }
+            definition["hooks"] = [
+                {
+                    key: _without_hook_definition(value)
+                    if key == "command" and isinstance(value, str)
+                    else value
+                    for key, value in handler.items()
+                    if key not in annotations
+                }
+                for handler in handlers
+            ]
+            owned.setdefault(event, []).append(definition)
+    return hashlib.sha256(json.dumps(owned, sort_keys=True).encode()).hexdigest()
+
+
+def _observation_path(name: str, config_dir: Path) -> Path:
+    import hashlib
+
+    key = hashlib.sha256(f"{name}:{config_dir.resolve()}".encode()).hexdigest()[:24]
+    return paths.cache_dir() / f"agent-hooks-{key}.json"
+
+
+def observe_hooks(name: str, config_dir: Path, definition: str | None = None) -> None:
+    """Evidence that the current native hook definition actually executed."""
+    if not definition:
+        return  # Legacy commands carry no evidence about the definition they ran.
+    # Disposable evidence cannot block context/board/Stop processing.
+    # Without a successful write, readiness remains unverified.
+    with suppress(OSError, UnicodeError, AgentSettingsError):
+        spec = _spec(name, config_dir)
+        if spec is None or spec.settings_path is None:
+            return
+        info = _regular_settings(spec.settings_path)
+        if info is None:
+            return
+        stamp = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        observation = _observation_path(name, config_dir)
+        previous = _read_settings(observation)
+        if previous.get("settings_stamp") == stamp and previous.get("fingerprint") == definition:
+            return
+        if hook_fingerprint(name, config_dir) != definition:
+            return
+        _write_settings(
+            observation,
+            {"fingerprint": definition, "settings_stamp": stamp},
+        )
+
+
+def integration_readiness(name: str, config_dir: Path) -> tuple[str, str]:
+    try:
+        adapter = get_adapter(name)
+    except ValueError:
+        return "unsupported", "No terminal integration is available"
+    try:
+        if not hooks_installed(name, config_dir):
+            return "not_configured", ""
+    except AgentSettingsError as exc:
+        return "unreadable", str(exc)
+    if not adapter.capabilities.requires_hook_trust:
+        return "configured", ""
+    observed = _read_settings(_observation_path(name, config_dir))
+    try:
+        fingerprint = hook_fingerprint(name, config_dir)
+    except AgentSettingsError as exc:
+        return "unreadable", str(exc)
+    if observed.get("fingerprint") == fingerprint:
+        return "observed", "Native hooks observed working; current session policy still applies"
+    return (
+        "unverified",
+        "Hooks configured; open /hooks in Codex to review and trust them. "
+        "AISquare has not yet observed this definition run.",
+    )
 
 
 # --- which aisquare do the hooks actually RUN? (#84) -------------------------------------
@@ -598,6 +919,7 @@ class HookSiteHealth:
     binary: Path | None = None
     binary_version: str | None = None
     binary_state: str | None = None
+    error: str | None = None
 
 
 def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
@@ -610,12 +932,14 @@ def hook_commands(name: str, config_dir: Path | None = None) -> list[str]:
     spec = _spec(name, config_dir)
     if spec is None or spec.settings_path is None:
         return []
-    hooks = _read_settings(spec.settings_path).get("hooks")
+    hooks = _settings_for_write(spec.settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return []
     found: list[str] = []
-    for event, _ in _HOOKS:
-        for group in hooks.get(event) or []:
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
             if not _is_aisquare_group(group):
                 continue
             for item in group["hooks"]:
@@ -644,7 +968,7 @@ def hook_binary(command: str) -> HookBinary | None:
     """The program ``command`` would run, or ``None`` when it is not one of our hooks."""
     if not _is_aisquare_hook_command(command):
         return None
-    tokens = _split_command(command)
+    tokens, _ = _hook_command_parts(command)
     if tokens[-4:-2] == ["-m", "aisquare"]:
         return HookBinary(_resolve_program(tokens[0]), module_form=True)
     return HookBinary(_resolve_program(tokens[0]))
@@ -746,9 +1070,13 @@ def hook_site_health(
     cache: dict[HookBinary, tuple[str, str | None]] | None = None,
 ) -> HookSiteHealth:
     """Grade one config directory: are the hooks all there, and what do they run?"""
-    installed = hooks_installed(name, config_dir)
+    try:
+        installed = hooks_installed(name, config_dir)
+        commands = hook_commands(name, config_dir)
+    except AgentSettingsError as exc:
+        return HookSiteHealth(config_dir, False, recorded, error=str(exc))
     binaries: list[HookBinary] = []
-    for command in hook_commands(name, config_dir):
+    for command in commands:
         binary = hook_binary(command)
         if binary is not None and binary not in binaries:
             binaries.append(binary)
@@ -772,29 +1100,25 @@ def hook_site_health(
     )
 
 
-def _claude_dirs_on_disk() -> list[Path]:
-    """Claude Code config directories on this machine that carry our hooks.
+def _agent_dirs_on_disk(name: str) -> list[Path]:
+    """Native config homes on disk carrying our hooks, including account siblings.
 
-    ``$CLAUDE_CONFIG_DIR``, ``~/.claude`` and every ``~/.claude*`` directory —
-    the ``[0-9]`` siblings of a parallel-install setup and the
-    ``~/.claude-account1`` naming the README documents. Only directories whose
-    ``settings.json`` holds at least one aisquare hook are returned: a hook that
-    is on disk runs whether or not this home ever heard of the directory, and
-    that is the only thing that makes a directory doctor's business.
-
-    A candidate whose ``settings.json`` this user cannot read — another
-    account's ``~/.claude-archived``, a backup left at mode 000 — is skipped, not
-    raised: it cannot be shown to carry our hooks, and one unreadable sibling
-    must not cost doctor every other row.
+    Read-only discovery supplements the registry for a fresh AISQUARE_HOME.
+    Only homes with a recognizable AISquare command count; unreadable sibling
+    settings do not hide the other sites from doctor.
     """
+    try:
+        adapter = get_adapter(name)
+    except ValueError:
+        return []
     candidates: list[Path] = []
-    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if env:
-        candidates.append(Path(env).expanduser())
     home = _home()
-    candidates.append(home / ".claude")
+    candidates.append(config_home(adapter, home, os.environ))
+    candidates.append(home / adapter.home_name)
     if home.is_dir():
-        candidates.extend(sorted(path for path in home.glob(".claude*") if path.is_dir()))
+        candidates.extend(
+            sorted(path for path in home.glob(adapter.home_name + "*") if path.is_dir())
+        )
     seen: set[Path] = set()
     found: list[Path] = []
     for candidate in candidates:
@@ -803,8 +1127,8 @@ def _claude_dirs_on_disk() -> list[Path]:
             continue
         seen.add(key)
         try:
-            ours = bool(hook_commands("claude-code", candidate))
-        except OSError:
+            ours = bool(hook_commands(name, candidate))
+        except (OSError, AgentSettingsError):
             continue  # unreadable settings.json — see the docstring
         if ours:
             found.append(candidate)
@@ -844,9 +1168,8 @@ def hook_sites(name: str) -> list[HookSiteHealth]:
     ambient = ambient_hook_dir(name)
     if ambient is not None and ambient.is_dir():
         add(ambient, recorded=False)
-    if name == "claude-code":
-        for path in _claude_dirs_on_disk():
-            add(path, recorded=False)
+    for path in _agent_dirs_on_disk(name):
+        add(path, recorded=False)
 
     cache: dict[HookBinary, tuple[str, str | None]] = {}
     return [

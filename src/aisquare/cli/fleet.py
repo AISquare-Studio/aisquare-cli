@@ -24,6 +24,7 @@ from typing import Annotated, NoReturn
 import typer
 
 from aisquare.cli.common import fail
+from aisquare.cli.native_args import NativeForwardingCommand
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
@@ -126,6 +127,7 @@ def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
 
 @app.command(
     "spawn",
+    cls=NativeForwardingCommand,
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def spawn(
@@ -153,6 +155,17 @@ def spawn(
             "--permission-mode",
             help="Claude Code permission mode (auto, acceptEdits, …); default per role.",
         ),
+    ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    sandbox: Annotated[
+        str | None,
+        typer.Option(
+            "--sandbox", help="Codex write scope: read-only, workspace-write, danger-full-access."
+        ),
+    ] = None,
+    approval: Annotated[
+        str | None,
+        typer.Option("--approval", help="Codex approval policy: on-request, untrusted, never."),
     ] = None,
     binary: Annotated[
         str | None, typer.Option("--bin", help="Agent executable (default: the role's binding).")
@@ -187,7 +200,10 @@ def spawn(
             task_id=task,
             worktree=worktree,
             permission_mode=permission_mode,
+            sandbox=sandbox,
+            approval_policy=approval,
             binary=binary,
+            agent=agent,
             prompt=prompt,
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",

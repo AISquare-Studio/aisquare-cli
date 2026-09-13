@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import contextlib
 import re
-import shutil
 import sqlite3
 import subprocess
 import time
@@ -54,6 +53,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import agent_launch
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 
@@ -182,7 +182,20 @@ def settings() -> FleetSettings:
 def role_settings(role: str, config: FleetSettings | None = None) -> FleetRoleSettings:
     """The role's launch shape, or the built-in default for a role the config omits."""
     config = config or settings()
-    return config.roles.get(role, FleetRoleSettings())
+    selected = config.roles.get(role, FleetRoleSettings())
+    base = config.roles.get(harness.base_role(role), FleetRoleSettings())
+    # Numbered seats historically use their own worktree/Claude permission/argv
+    # settings. Only native sandbox and approval defaults inherit per field.
+    return selected.model_copy(
+        update={
+            "sandbox": selected.sandbox if selected.sandbox is not None else base.sandbox,
+            "approval_policy": (
+                selected.approval_policy
+                if selected.approval_policy is not None
+                else base.approval_policy
+            ),
+        }
+    )
 
 
 def server(config: FleetSettings | None = None) -> TmuxServer:
@@ -867,7 +880,10 @@ def spawn(
     task_id: str | None = None,
     worktree: bool | None = None,
     permission_mode: str | None = None,
+    sandbox: str | None = None,
+    approval_policy: str | None = None,
     binary: str | None = None,
+    agent: str | None = None,
     prompt: str | None = None,
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
@@ -898,14 +914,44 @@ def spawn(
         )
     srv = server(config)
     _require_tmux(srv)
-    resolution = harness.resolve_binary(role, override=binary)
-    if shutil.which(resolution.binary) is None:
+    try:
+        selected = agent_launch.resolve(role, agent=agent, binary=binary, cwd=project.root)
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
+    if account is not None and selected.adapter.id != "claude-code":
+        raise FleetError(
+            "--account selects a Claude Code account; for Codex bind CODEX_HOME "
+            "with aisquare team bind ROLE --agent codex --env CODEX_HOME=PATH"
+        )
+    resolution = selected.binary
+    if agent_launch.executable(selected) is None:
         raise FleetError(
             f"{resolution.binary!r} is not on your PATH (chosen by: {resolution.source}) — "
             "install it, pass --bin, or change the role's binding"
         )
     role_config = role_settings(role, config)
-    notes: list[str] = []
+    from aisquare.core.agent_adapters.types import fleet_extra_args
+
+    role_args = fleet_extra_args(selected.adapter, role_config.extra_args, role_config.agent_args)
+    model_resolution = None
+    # Validate native model pins before creating a worktree/window or live row.
+    try:
+        defaults = harness.role_defaults(
+            role, binary=resolution.binary, args=[*selected.profile.args, *role_args, *agent_args]
+        )
+        arguments = agent_launch.prepare_arguments(
+            selected, [*defaults.args, *selected.profile.args, *role_args], list(agent_args)
+        )
+        model_resolution = agent_launch.launch_model_for(selected, role, arguments)
+        model_args = agent_launch.resolved_model_args(selected, model_resolution, arguments)
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
+    notes: list[str] = list(model_resolution.notes) if model_resolution else []
+    if role_config.extra_args and not selected.adapter.capabilities.legacy_fleet_args:
+        notes.append(
+            f"Legacy fleet extra_args apply only to Claude Code; use "
+            f"fleet.roles.{role}.agent_args.{selected.adapter.id} for native arguments"
+        )
     with store_session() as store:
         project = ensure_codename(project, store)
         codename = project.codename or codenames.codename_for(project.id)
@@ -932,6 +978,80 @@ def spawn(
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
 
+    mode = role_config.permission_mode if permission_mode is None else permission_mode
+    identity = (
+        explainability_service.plan_session_identity(resolution.binary, arguments.argv)
+        if selected.adapter.capabilities.assigns_session_id
+        else explainability_service.SessionIdentity(None, note="native ID binds at session start")
+    )
+    if identity.session_id is None and selected.adapter.capabilities.assigns_session_id:
+        notes.append(
+            f"no board join for this agent ({identity.note}) — its state comes from tmux alone"
+        )
+    agent_id = new_agent_id()
+    flags: list[str] = []
+    if resolution.source != "default":
+        # `launch` re-resolves the binary inside the window — and the window's
+        # environment is the long-lived tmux SERVER's, which never carries
+        # `AISQUARE_BIN_<ROLE>` or `AISQUARE_AGENT_BIN` (`core/tmux.py` spawns
+        # with `untraced_env()` and passes exactly two per-window keys). So
+        # ANYTHING but the default has to be carried explicitly, not just an
+        # explicit `--bin`: with the variable exported in this shell and not in
+        # the server's, the row recorded `claude2` while the pane silently ran
+        # `claude`. Measured on a role whose flags are keyed on the binary
+        # (`harness.role_defaults`), that also decided the flag question against
+        # the wrong executable — a ui-tester launched without `--chrome`, exit 0,
+        # nothing printed. `docs/fleet.md` promises `AISQUARE_BIN_<ROLE>` works
+        # for a fleet launch; this is what makes that true.
+        flags += ["--command", resolution.binary]
+    # The parent already resolved this family. Carry that decision through
+    # tmux so a legacy wrapper is not reclassified against inherited defaults.
+    flags += ["--agent", selected.adapter.id, "--no-bound-args"]
+    native_mode = mode if selected.adapter.id == "claude-code" else permission_mode
+    native_sandbox = (
+        role_config.sandbox if selected.adapter.capabilities.sandbox_permissions else None
+    )
+    native_approval = (
+        role_config.approval_policy if selected.adapter.capabilities.sandbox_permissions else None
+    )
+    try:
+        native = selected.adapter.fleet_args(
+            role,
+            picked,
+            native_mode,
+            sandbox=sandbox if sandbox is not None else native_sandbox,
+            approval=approval_policy if approval_policy is not None else native_approval,
+        )
+    except ValueError as exc:
+        raise FleetError(str(exc)) from exc
+    native += list(identity.inject_args)
+    if account is not None:
+        # Carried to `launch`, which resolves the slot and sets the account's
+        # variables inside the window; a slot that does not exist fails there
+        # with `unknown_account`, exactly as a hand-typed launch would.
+        flags += ["--account", account]
+    env = {
+        "AISQUARE_FLEET_AGENT": agent_id,
+        "AISQUARE_LAUNCH_ID": "",
+        agent_launch.LAUNCH_AGENT_ENV: selected.adapter.id,
+    }
+    if config.disable_native_agent_teams:
+        native_args, native_env = selected.adapter.disable_native_teams()
+        native += native_args
+        env.update(native_env)
+    command = selfcli.argv_for(
+        ["launch", role, *flags, "--", *native, *model_args, *arguments.argv]
+    )
+    if prompt and selected.adapter.capabilities.positional_prompt:
+        command += ["--", prompt]
+    if account is not None:
+        # `launch --account 1` restores "this shell's" login, and inside the
+        # window that shell would be whoever started the private server — so
+        # the CALLER's aisquare home and account variables travel with the
+        # window (set as absolute paths, or unset through `env -u`), exactly as
+        # the Accounts page's sign-in window carries them.
+        command, carried = claude_accounts_service.carry_environment(command)
+        env.update(carried)
     use_worktree = role_config.worktree if worktree is None else worktree
     cwd = project.root
     if use_worktree:
@@ -958,63 +1078,19 @@ def spawn(
             refuse_if_taken=refuse_if_taken,
         )
 
-    mode = role_config.permission_mode if permission_mode is None else permission_mode
-    role_args = list(role_config.extra_args)
-    extra = list(agent_args)
-    identity = explainability_service.plan_session_identity(resolution.binary, [*role_args, *extra])
-    if identity.session_id is None:
-        notes.append(
-            f"no board join for this agent ({identity.note}) — its state comes from tmux alone"
-        )
-    agent_id = new_agent_id()
-    flags: list[str] = []
-    if resolution.source != "default":
-        # `launch` re-resolves the binary inside the window — and the window's
-        # environment is the long-lived tmux SERVER's, which never carries
-        # `AISQUARE_BIN_<ROLE>` or `AISQUARE_AGENT_BIN` (`core/tmux.py` spawns
-        # with `untraced_env()` and passes exactly two per-window keys). So
-        # ANYTHING but the default has to be carried explicitly, not just an
-        # explicit `--bin`: with the variable exported in this shell and not in
-        # the server's, the row recorded `claude2` while the pane silently ran
-        # `claude`. Measured on a role whose flags are keyed on the binary
-        # (`harness.role_defaults`), that also decided the flag question against
-        # the wrong executable — a ui-tester launched without `--chrome`, exit 0,
-        # nothing printed. `docs/fleet.md` promises `AISQUARE_BIN_<ROLE>` works
-        # for a fleet launch; this is what makes that true.
-        flags += ["--command", resolution.binary]
-    if mode:
-        flags += ["--permission-mode", mode]
-    flags += list(identity.inject_args)
-    if account is not None:
-        # Carried to `launch`, which resolves the slot and sets the account's
-        # variables inside the window; a slot that does not exist fails there
-        # with `unknown_account`, exactly as a hand-typed launch would.
-        flags += ["--account", account]
-    flags += ["--name", picked]
-    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
-    env = {"AISQUARE_FLEET_AGENT": agent_id}
-    if config.disable_native_agent_teams:
-        env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
-    if account is not None:
-        # `launch --account 1` restores "this shell's" login, and inside the
-        # window that shell would be whoever started the private server — so
-        # the CALLER's aisquare home and account variables travel with the
-        # window (set as absolute paths, or unset through `env -u`), exactly as
-        # the Accounts page's sign-in window carries them.
-        command, carried = claude_accounts_service.carry_environment(command)
-        env.update(carried)
     tmux_session = session_name(codename)
     try:
         window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)
     except TmuxError as exc:
         raise FleetError(f"tmux could not start the window: {exc}") from exc
 
-    agent = FleetAgent(
+    fleet_agent = FleetAgent(
         id=agent_id,
         project_id=project.id,
         label=picked,
         role=role,
         binary=resolution.binary,
+        agent=selected.adapter.id,
         tmux_socket=config.tmux_socket,
         pane_id=window.pane_id,
         session_id=identity.session_id,
@@ -1025,9 +1101,9 @@ def spawn(
         created_at=_now(),
     )
     stored = _record(
-        agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
+        fleet_agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
     )
-    if prompt:
+    if prompt and not selected.adapter.capabilities.positional_prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
 
@@ -1249,6 +1325,7 @@ def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAg
 def status_of(agent: FleetAgent) -> FleetAgentStatus:
     """One agent's derived state: board session first, tmux facts second."""
     with store_session() as store:
+        agent = store.get_fleet_agent(agent.id) or agent
         project = store.get_project(agent.project_id)
         session = store.get_session(agent.session_id) if agent.session_id else None
     tmux_session = session_name(project.codename) if project and project.codename else None
@@ -1284,6 +1361,13 @@ def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = No
     with store_session() as store:
         agent = _live_agent(store, project, label)
     status = status_of(agent)
+    if agent.agent not in (None, "claude-code") and (
+        status.session is None
+        or status.session.state != "waiting"
+        or _now() - status.session.last_seen_at > _team()._STALE_AFTER
+    ):
+        how = _file_note(project, label, text, sender)
+        return TellResult(False, f"no confirmed waiting native session — {how}")
     if status.state == "waiting":
         srv = server_for(agent.tmux_socket)
         if not _pane_is_the_agent(srv, agent.pane_id):

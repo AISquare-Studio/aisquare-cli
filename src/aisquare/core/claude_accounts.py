@@ -61,7 +61,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from aisquare.core import paths
+from aisquare.core import agents, paths
 from aisquare.core.version import __version__
 from aisquare.models import ClaudeAccount, ClaudeIdentity
 
@@ -84,11 +84,6 @@ _SLOT_DIR = re.compile(r"^\d+$")
 _REMOVED_STAMP = "%Y%m%dT%H%M%SZ"
 
 
-def _home() -> Path:
-    """The user's home directory (indirection so tests can redirect it)."""
-    return Path.home()
-
-
 def _now() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -104,16 +99,13 @@ def tmp_root() -> Path:
     return paths.claude_accounts_tmp_dir()
 
 
-def default_config_dir() -> Path:
+def default_config_dir(env: Mapping[str, str] | None = None) -> Path:
     """What a plain ``claude`` from this environment uses: the variable, else ``~/.claude``."""
-    env = os.environ.get(CONFIG_DIR_VAR, "").strip()
-    if env:
-        return Path(env).expanduser()
-    return _home() / ".claude"
+    return agents._claude_home(env=env)
 
 
-def default_account() -> ClaudeAccount:
-    return ClaudeAccount(slot=DEFAULT_SLOT, config_dir=default_config_dir(), managed=False)
+def default_account(env: Mapping[str, str] | None = None) -> ClaudeAccount:
+    return ClaudeAccount(slot=DEFAULT_SLOT, config_dir=default_config_dir(env), managed=False)
 
 
 def _managed(slot: int) -> ClaudeAccount:
@@ -236,16 +228,25 @@ def discard_account(account: ClaudeAccount) -> None:
 # --- what Claude Code wrote there ---------------------------------------------------
 
 
-def claude_json_path(account: ClaudeAccount) -> Path:
+def claude_json_path(
+    account: ClaudeAccount,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Path:
     """Where this account's ``.claude.json`` is.
 
     Inside the directory whenever ``CLAUDE_CONFIG_DIR`` names it — every managed
     slot, and a default that the environment redirects — and at ``~/.claude.json``
     for the plain default, which is where Claude Code keeps it.
     """
-    if account.managed or os.environ.get(CONFIG_DIR_VAR, "").strip():
+    effective = os.environ if env is None else env
+    if (
+        account.managed
+        or effective.get(CONFIG_DIR_VAR, "").strip()
+        or account.config_dir != agents._home() / ".claude"
+    ):
         return account.config_dir / ".claude.json"
-    return _home() / ".claude.json"
+    return agents._home() / ".claude.json"
 
 
 def credentials_path(account: ClaudeAccount) -> Path:
@@ -260,9 +261,18 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def identity(account: ClaudeAccount) -> ClaudeIdentity | None:
+def identity(
+    account: ClaudeAccount,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> ClaudeIdentity | None:
     """The signed-in account, or ``None`` when the directory has no login recorded."""
-    data = _read_json(claude_json_path(account))
+    return read_identity(claude_json_path(account, env=env))
+
+
+def read_identity(path: Path) -> ClaudeIdentity | None:
+    """Read stable account identity without using or fingerprinting rotating tokens."""
+    data = _read_json(path)
     if data is None:
         return None
     oauth = data.get("oauthAccount")

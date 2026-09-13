@@ -1247,14 +1247,14 @@ def _printed_spawn(runner: CliRunner) -> str:
     printed = runner.invoke(app, ["--json", "team", "spawn", "coder", "--no-probe"])
     assert printed.exit_code == 0, printed.output
     command: str = json.loads(printed.stdout)["command"]
-    assert 'eval "$(aisquare explainability env coder --post-root)"; ' in command, command
+    assert "launch coder --agent claude-code" in command, command
     return command
 
 
 def test_the_printed_spawn_command_owns_its_run_through_a_real_shell(
     runner: CliRunner, tmp_path: Path
 ) -> None:
-    """ONE Run for a pasted spawn: the eval posts the root, the agent starts
+    """ONE Run for a pasted spawn: launch posts the root, the agent starts
     with ``traceparent`` naming it and the run key beside it, on the id the
     root carries as ``agent.run_id`` — and that id is the one the agent's own
     ``--session-id`` is pinned to, so the board row joins the same Run."""
@@ -1325,7 +1325,9 @@ def test_spawn_exec_still_posts_the_root_it_is_about_to_fill(
 
     monkeypatch.setattr(service, "_post_run_root", fake_post)
     seen: dict[str, Any] = {}
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.executable", lambda _selected: "/usr/bin/claude"
+    )
     monkeypatch.setattr(
         "aisquare.cli.team.os.execvpe", lambda file, argv, env: seen.update(argv=argv, env=env)
     )

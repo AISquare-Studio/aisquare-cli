@@ -499,7 +499,7 @@ class TestLaunchHonoursTheBoundBinary:
     def test_a_bound_bin_is_what_gets_executed(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
-        _bind("coder", bin="claude-wrapper")
+        _bind("coder", agent="claude-code", bin="claude-wrapper")
         result = runner.invoke(app, ["launch", "coder"])
 
         assert result.exit_code == 0, result.output
@@ -509,7 +509,7 @@ class TestLaunchHonoursTheBoundBinary:
     def test_command_flag_still_overrides_the_binding(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
-        _bind("coder", bin="from-config")
+        _bind("coder", agent="claude-code", bin="from-config")
         result = runner.invoke(app, ["launch", "coder", "--command", "from-flag"])
 
         assert result.exit_code == 0, result.output
@@ -529,7 +529,7 @@ class TestLaunchHonoursTheBoundBinary:
     ) -> None:
         # A bare "not on your PATH" sends the reader hunting through flag, env
         # and config to work out which of them picked the thing that is absent.
-        _bind("coder", bin="nowhere-to-be-found")
+        _bind("coder", agent="claude-code", bin="nowhere-to-be-found")
         monkeypatch.setattr(shutil, "which", lambda _cmd: None)
         result = runner.invoke(app, ["launch", "coder"])
 
@@ -541,7 +541,7 @@ class TestLaunchHonoursTheBoundBinary:
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
         # The invariant the defect broke: two entry points, one answer.
-        _bind("coder", bin="claude-wrapper")
+        _bind("coder", agent="claude-code", bin="claude-wrapper")
         assert harness.resolve_binary("coder").binary == "claude-wrapper"
         runner.invoke(app, ["launch", "coder"])
         assert spy["argv"][0] == harness.resolve_binary("coder").binary
@@ -567,7 +567,7 @@ class TestTracingReadsTheBoundBinaryNotTheFlag:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _tracing_on(monkeypatch)
-        _bind("coder", bin="my-agent-wrapper")
+        _bind("coder", agent="claude-code", bin="my-agent-wrapper")
 
         result = runner.invoke(app, ["launch", "coder"])
 

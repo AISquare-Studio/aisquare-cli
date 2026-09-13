@@ -362,10 +362,12 @@ def test_claim_conflict_reports_the_holder(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AISQUARE_ROLE", "planner")
-    _start(runner, PLANNER, work_dir)
-    _start(runner, CODER, work_dir)
+    for session_id in (PLANNER, CODER):
+        started = _start(runner, session_id, work_dir)
+        assert started.exit_code == 0, started.output
     monkeypatch.delenv("AISQUARE_ROLE")
-    runner.invoke(app, ["task", "add", "hot potato", "--as", "aaaa1111"])
+    added = runner.invoke(app, ["task", "add", "hot potato", "--as", "aaaa1111"])
+    assert added.exit_code == 0, added.output
     task_id = json.loads(runner.invoke(app, ["--json", "task", "list"]).stdout)[0]["id"]
     assert runner.invoke(app, ["task", "claim", task_id, "--as", "aaaa1111"]).exit_code == 0
     lost = runner.invoke(app, ["--json", "task", "claim", task_id, "--as", "bbbb2222"])

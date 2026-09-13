@@ -314,10 +314,12 @@ def test_launch_keeps_the_operators_word_on_chrome(
     assert spy["argv"] == ["claude", "--chrome", "--resume"], "never twice"
 
 
-def test_launch_adds_nothing_to_another_agent_binary_and_says_so(
+def test_launch_withholds_browser_flags_from_a_declared_wrapper_and_says_so(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
-    result = runner.invoke(app, ["launch", ROLE, "--command", "claude-next"])
+    result = runner.invoke(
+        app, ["launch", ROLE, "--agent", "claude-code", "--command", "claude-next"]
+    )
     assert result.exit_code == 0, result.output
     assert spy["argv"] == ["claude-next"], "Claude Code's flag is not another agent's"
     assert "--chrome withheld" in result.output, (
@@ -337,9 +339,11 @@ def test_spawn_prints_the_role_flag_in_the_pasteable_command(
     assert "--chrome" in result.output
     assert "--model sonnet" in result.output
 
-    bound = runner.invoke(app, ["team", "spawn", ROLE, "--bin", "claude-next"])
+    bound = runner.invoke(
+        app, ["--json", "team", "spawn", ROLE, "--agent", "claude-code", "--bin", "claude-next"]
+    )
     assert bound.exit_code == 0, bound.output
-    pasted = next(line for line in bound.output.splitlines() if "AISQUARE_ROLE" in line)
+    pasted = json.loads(bound.stdout)["command"]
     assert "--chrome" not in pasted, "Claude Code's flag is not another agent's"
     assert "--chrome withheld" in bound.output, "and the paste says what it is missing"
 
@@ -632,7 +636,7 @@ def test_doctor_honours_a_declined_project_server(
     )
 
 
-def test_doctor_scans_the_hook_sites_exactly_once(
+def test_doctor_scans_the_hook_sites_once_per_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`hook_sites` GRADES every site — `classify_hook_binary` runs a real
@@ -650,7 +654,8 @@ def test_doctor_scans_the_hook_sites_exactly_once(
 
     monkeypatch.setattr(agent_core, "hook_sites", counting)
     diagnostics.doctor(cwd=tmp_path, live=False)
-    assert calls == ["claude-code"], f"{len(calls)} hook_sites scans in one doctor run"
+    assert calls.count("claude-code") == 1
+    assert len(calls) == len(set(calls)), f"duplicate hook_sites scans in one doctor run: {calls}"
 
 
 def test_doctor_asks_only_about_this_homes_directories(

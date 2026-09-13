@@ -166,7 +166,7 @@ aisquare fleet spawn manager
 aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
-aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
+aisquare fleet spawn coder --agent claude-code --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
 Starts an agent in the project's tmux session — a window running
@@ -414,7 +414,7 @@ which is the harness's rule, not this one.
 
 Three places to change one:
 
-- **per spawn** — `fleet spawn … --permission-mode acceptEdits --no-worktree --bin claude2`;
+- **per spawn** — `fleet spawn … --agent claude-code --permission-mode acceptEdits --no-worktree --bin claude2`;
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
@@ -436,31 +436,37 @@ max_continuations_per_hour = 30           # cap on the manager's Stop-hook conti
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag
 worktree = false
 extra_args = []
+agent_args = {}
 
 [fleet.roles.coder]
 permission_mode = "auto"
 worktree = true                           # one worktree per coder: parallel coders never share a tree
 extra_args = []
+agent_args = {}
 
 [fleet.roles.tester]                      # `runner` is accepted as an alias
 permission_mode = "auto"
 worktree = false                          # runs in the repo root; point it at the branch yourself
 extra_args = []
+agent_args = {}
 
 [fleet.roles.reviewer]
 permission_mode = "auto"
 worktree = true
 extra_args = ["--restricted"]             # read-only by construction
+agent_args = {}
 
 [fleet.roles.ui-tester]
 permission_mode = "auto"
 worktree = false                          # tests the running app, not a tree of its own
 extra_args = []                           # --chrome is the role's own default; put "--no-chrome" here to drop it
+agent_args = {}
 
 [fleet.roles.validator]
 permission_mode = "auto"
 worktree = false
 extra_args = []
+agent_args = {}
 ```
 
 A role the file omits gets the built-in shape (`auto`, no worktree, no extra
@@ -469,10 +475,29 @@ never the fleet: the defaults apply and nothing refuses.
 
 **Model, effort and binary per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),
-`aisquare team bind <role> --bin … --env … --arg …` (launch profiles),
+`aisquare team bind <role> --agent claude-code --bin … --env … --arg …` (launch profiles),
 `AISQUARE_MODEL_<ROLE>`, `AISQUARE_EFFORT_<ROLE>` and `AISQUARE_BIN_<ROLE>` in
 the environment. A fleet launch is an `aisquare launch <role>` inside a tmux
 window, so all of it applies unchanged, as does the Explainability wiring.
+For an arbitrary wrapper binary, declare its family with
+`aisquare team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`),
+or pass `--agent` on that launch. User/project defaults and an operator-exported
+`AISQUARE_CODING_AGENT` do not identify arbitrary wrappers. Existing bin-only
+configurations without those defaults retain Claude compatibility, including
+inside AISquare-launched panes: a parent's family does not reclassify another
+wrapper. This also applies to wrappers selected through `AISQUARE_AGENT_BIN`
+and `AISQUARE_BIN_<ROLE>`.
+
+Legacy `[fleet.roles.ROLE] extra_args` belong to Claude Code. Agent-specific
+arguments name their owner, for example:
+
+```toml
+[fleet.roles.reviewer]
+agent_args = { codex = ["--no-alt-screen"], claude-code = ["--verbose"] }
+```
+
+The selected adapter combines only its own arguments with the role's native
+permission flags. Explicit arguments on a spawn still go to that launch.
 
 **Native agent teams are off in fleet launches.** Claude Code's own
 experimental *agent teams* (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) let a

@@ -116,6 +116,8 @@ from dataclasses import dataclass
 #: :data:`IDENTITY_ENV_VARS`, which is this plus :data:`MARKER_ENV_VARS` below.
 TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 
+LAUNCH_AGENT_ENV = "AISQUARE_LAUNCH_AGENT"
+
 #: The MARKER half, and the INVENTORY of it: the run key, the role the launch
 #: ran as, and — when the launch owns its Run rather than letting the proxy key
 #: it — the gateway Run key, all exported beside the headers by
@@ -138,7 +140,14 @@ TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 #: default) filed its insights and its join under whoever started the server,
 #: which ``trace_marker``'s own docstring calls "worse than no record because it
 #: reads as evidence".
-MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME", "AISQUARE_RUN_TRACE_ID")
+MARKER_ENV_VARS = (
+    "AISQUARE_PIPELINE_ID",
+    "AISQUARE_TRACE_AGENT_NAME",
+    "AISQUARE_RUN_TRACE_ID",
+    "AISQUARE_LAUNCH_ID",
+    LAUNCH_AGENT_ENV,
+    "AISQUARE_FLEET_AGENT",
+)
 
 #: Everything :func:`untraced_env` removes: the whole identity, header and
 #: marker. Separate from :data:`TRACING_ENV_VARS` because that tuple has a
@@ -167,6 +176,9 @@ class Seam:
 #: not part of the key: they move on every edit, and a guard that fails on
 #: reformatting is a guard people learn to silence.
 SEAMS: dict[str, Seam] = {
+    "aisquare/services/native_telemetry.py::start": Seam(
+        EXCLUDED, "local OTLP receiver; not a model process", strips_identity=True
+    ),
     "aisquare/cli/launch.py::_exec": Seam(
         TRACED, "the launch seam — this process BECOMES the agent"
     ),

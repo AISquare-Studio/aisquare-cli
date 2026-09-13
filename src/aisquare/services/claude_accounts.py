@@ -103,6 +103,10 @@ def install() -> ClaudeInstall:
 def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
     """Everything about one slot that can be read without leaving the machine."""
     creds = core.credentials(account)
+    from aisquare.core import agents as agent_core
+
+    context = agent_core.inspect_context(AGENT, account.config_dir, read_documents=False)
+    _readiness, detail = agent_core.integration_readiness(AGENT, account.config_dir)
     return ClaudeAccountStatus(
         account=account,
         label=core.label(account),
@@ -111,6 +115,7 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
         token_state=core.token_state(creds),
         subscription=core.subscription_label(creds),
         hooks_installed=_hooks_installed(account),
+        detail=" ".join(filter(None, [detail, *context.notes])),
     )
 
 
@@ -355,7 +360,14 @@ def sign_in_landed(account: ClaudeAccount) -> ClaudeIdentity | None:
 
 def complete_sign_in(account: ClaudeAccount) -> ClaudeAccountStatus:
     """Wire the newly signed-in directory like any other: aisquare's hooks into its settings."""
-    agents_service.connect(AGENT, account.config_dir)
+    try:
+        agents_service.connect(AGENT, account.config_dir)
+    except (ValueError, OSError) as exc:
+        # Login has already landed. Keep the account and report the partial
+        # success through both the terminal and the Accounts page.
+        return describe(account).model_copy(
+            update={"hooks_installed": False, "detail": f"Signed in; hook setup failed: {exc}"}
+        )
     return describe(account)
 
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from aisquare.core import agents as agent_core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.entries import new_entry
 from aisquare.core.store import store_session
 from aisquare.models import AgentConnection, AgentInfo
@@ -42,12 +44,19 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
     if info is None:
         raise KeyError(name)
     if not info.detected:
-        raise ValueError(f"{name} is not installed on this machine")
+        try:
+            binary = get_adapter(name).binary
+        except ValueError:
+            binary = name
+        if not shutil.which(binary):
+            raise ValueError(f"{name} is not installed on this machine")
 
-    sections: list[str] = []
-    for path in agent_core.context_files(name, config_dir):
-        sections.extend(_split_sections(path.read_text(encoding="utf-8")))
+    documents, notes = agent_core.read_context(name, config_dir)
+    sections = [section for content in documents.values() for section in _split_sections(content)]
 
+    # Validate and install hooks before committing imported user memories.
+    # A damaged native settings file must leave the shared pool untouched.
+    hooks_installed = agent_core.install_hooks(name, config_dir)
     added = 0
     with store_session() as store:
         existing = {entry.text for entry in store.entries("user")}
@@ -58,9 +67,21 @@ def connect(name: str, config_dir: Path | None = None) -> AgentConnection:
             existing.add(text)
             added += 1
 
-    hooks_installed = agent_core.install_hooks(name, config_dir)
     agent_core.set_connected(name, True, config_dir)
-    return AgentConnection(name=name, hooks_installed=hooks_installed, imported=added)
+    readiness, detail = (
+        agent_core.integration_readiness(
+            name, config_dir or agent_core.ambient_hook_dir(name) or agent_core._home()
+        )
+        if hooks_installed
+        else ("unsupported", "No terminal integration is available")
+    )
+    return AgentConnection(
+        name=name,
+        hooks_installed=hooks_installed,
+        imported=added,
+        readiness=readiness,
+        detail=" ".join(filter(None, [detail, *notes])),
+    )
 
 
 def disconnect(name: str, config_dir: Path | None = None) -> bool:

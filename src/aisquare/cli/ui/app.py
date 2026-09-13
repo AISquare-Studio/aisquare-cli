@@ -28,6 +28,7 @@ all of them must reach it.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -195,6 +196,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
         self._accounts = accounts
+        self._accounts_refresh_running = False
+        self._accounts_refresh_pending = False
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
@@ -330,26 +333,45 @@ class FleetApp(App[None], inherit_bindings=False):
         self._feed_open_views(self.snapshot)
         self.refresh_accounts()
 
-    def refresh_accounts(self) -> None:
+    def refresh_accounts(self, *, changed: bool = False) -> None:
+        if self._accounts is None:
+            return
+        if self._accounts_refresh_running:
+            self._accounts_refresh_pending |= changed
+            return
+        self._accounts_refresh_running = True
+        self.run_worker(self._refresh_accounts(), group="accounts-refresh")
+
+    async def _refresh_accounts(self) -> None:
+        try:
+            await self._read_accounts()
+        finally:
+            self._accounts_refresh_running = False
+            if self._accounts_refresh_pending:
+                self._accounts_refresh_pending = False
+                self.refresh_accounts()
+
+    async def _read_accounts(self) -> None:
         """Re-read the Claude accounts and the AISquare session; the section and the page follow.
 
-        Files only — a few small JSON reads — which is why it rides the same
-        two-second tick as the store. The usage numbers are the view's own,
-        slower business (``AccountsView.refresh_usage``).
+        Account files are read in a worker so larger login files cannot block
+        typing in an agent pane. Usage has its own slower refresh cadence.
         """
         if self._accounts is None:
             return
         sidebar = self.sidebar
         try:
-            overview: AccountsOverview | None = self._accounts()
+            overview: AccountsOverview | None = await asyncio.to_thread(self._accounts)
         except Exception:  # a directory we cannot read costs the line, never the frame
             overview = None
-        self.accounts_overview = overview
         session_known = True
         try:
-            session = read_session()
+            session = await asyncio.to_thread(read_session)
         except Exception:  # read_session never raises; belt to its braces
             session, session_known = None, False
+        if self._accounts_refresh_pending:
+            return  # An explicit change requires the trailing read's fresh snapshot.
+        self.accounts_overview = overview
         summary = summarise(overview, session, session_known=session_known)
         sidebar.show_accounts_summary(accounts_summary_text(summary.aisquare), summary.line)
         if overview is not None:
@@ -561,11 +583,16 @@ class FleetApp(App[None], inherit_bindings=False):
         self._set_doctor_scope(event.project_id)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
-        self.notify(
-            "the spawn dialog is not built yet — from a terminal: aisquare fleet spawn <role>",
-            timeout=6,
-        )
+        from aisquare.cli.ui.views.spawn import SpawnScreen
+
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        if project is not None:
+            self.push_screen(SpawnScreen(project))
+        else:
+            self.notify(
+                "Project data is not available yet; refresh and try spawning again.",
+                severity="warning",
+            )
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         await self._show(
@@ -577,7 +604,7 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def on_accounts_changed(self, event: AccountsChanged) -> None:
         """The page added, removed or signed in something: the section follows at once."""
-        self.refresh_accounts()
+        self.refresh_accounts(changed=True)
 
     async def on_doctor_selected(self, event: DoctorSelected) -> None:
         await self._show("doctor")

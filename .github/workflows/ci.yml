@@ -15,6 +15,19 @@ permissions:
   contents: read
 
 jobs:
+  outbox-windows:
+    name: outbox (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Verify Windows error handling and durable retry receipts
+        run: python -m pytest -q tests/test_outbox_portability.py
+
   check:
     name: check (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -146,6 +159,11 @@ jobs:
             # file branch is what needs a populated home to be real.
             # Set for anyone running the suite from inside a Claude session.
             echo "CLAUDE_CONFIG_DIR=$RUNNER_TEMP/claude-config"
+            echo "CODEX_HOME=$RUNNER_TEMP/codex-config"
+            echo "AISQUARE_CODING_AGENT=codex"
+            echo "AISQUARE_LAUNCH_AGENT=codex"
+            echo "AISQUARE_LAUNCH_ID=ci-parent-launch"
+            echo "AISQUARE_FLEET_AGENT=ci-parent-fleet"
           } >> "$GITHUB_ENV"
 
       - name: Configure an aisquare home, the way a developer's machine is
@@ -154,6 +172,8 @@ jobs:
           # that the suite must ignore, and a runner's real ~ stays empty so a
           # leak is unambiguous rather than accidental.
           mkdir -p "$AISQUARE_HOME" "$CLAUDE_CONFIG_DIR"
+          mkdir -p "$CODEX_HOME"
+          printf '[otel]\nexporter="none"\n' > "$CODEX_HOME/config.toml"
           cd "$(mktemp -d)"        # so `init` does not pack the checkout
           aisquare init --yes
           # No --proxy-url: the DEFAULT is 9090, and the default is what the
@@ -294,6 +314,28 @@ jobs:
           # would otherwise leave a GREEN run that silently tested the other
           # ambient — and a job cannot notice that it tested the wrong thing.
           assert_proxy after
+
+  codex:
+    name: Codex native integration (0.153.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install CLI, MCP and native terminal tools
+        run: |
+          python -m pip install -e ".[dev,serve]"
+          sudo apt-get install -y tmux
+          npm install --global --prefix "$RUNNER_TEMP/codex" @openai/codex@0.153.4
+          echo "$RUNNER_TEMP/codex/bin" >> "$GITHUB_PATH"
+      - name: Exercise hooks, MCP, resume, usage and the interactive fleet
+        run: |
+          # The fixture owns its temporary hooks and trusts only those. Its
+          # Responses endpoint is loopback; no login, model spend or gateway.
+          # The runner asserts the pinned version and a passing, unskipped test.
+          python -m tests.run_codex_native
 
   package:
     name: package (build + install)

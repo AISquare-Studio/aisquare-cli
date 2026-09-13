@@ -28,10 +28,11 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar
 
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
@@ -488,6 +489,36 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
 _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
+
+# v15: native coding-agent identity, independent of runtime session IDs.
+_SCHEMA_V15 = """
+ALTER TABLE team_session ADD COLUMN agent TEXT;
+ALTER TABLE team_session ADD COLUMN native_session_id TEXT;
+ALTER TABLE fleet_agent ADD COLUMN agent TEXT;
+UPDATE team_session SET agent = 'claude-code', native_session_id = id
+ WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl';
+UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
+"""
+
+_SCHEMA_V16 = """
+ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
+CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+"""
+
+# This version was used while the native-agent branch was being dogfooded.
+# Reserve its slot permanently and repair v16 stores made before its backfill
+# was added. Already-upgraded v17 stores have run this repair.
+_SCHEMA_V17 = """
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE updated_at = 0;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -504,6 +535,9 @@ _MIGRATIONS = (
     _SCHEMA_V12,
     _SCHEMA_V13,
     _SCHEMA_V14,
+    _SCHEMA_V15,
+    _SCHEMA_V16,
+    _SCHEMA_V17,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -560,7 +594,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort"
+    "transcript_path, account, model, effort, agent, native_session_id"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -569,7 +603,7 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status"
+    "task_id, spawned_by, created_at, ended_at, exit_status, agent"
 )
 
 
@@ -584,6 +618,7 @@ class AmbiguousIdError(LookupError):
 class ContextStore(Protocol):
     """Everything the service layer needs from persistent context storage."""
 
+    def transaction(self) -> AbstractContextManager[None]: ...
     def add(self, entry: ContextEntry) -> ContextEntry: ...
     def get(self, ref: str) -> ContextEntry | None: ...
     def entries(
@@ -613,6 +648,7 @@ class ContextStore(Protocol):
     ) -> list[PromptRecord]: ...
     def team_active(self, project_id: str) -> bool: ...
     def upsert_session(self, session: TeamSession) -> TeamSession: ...
+    def adopt_session(self, provisional_id: str, native_id: str, lease_until: datetime) -> None: ...
     def get_session(self, session_id: str) -> TeamSession | None: ...
     def team_sessions(self, project_id: str) -> list[TeamSession]: ...
     def update_session(
@@ -648,6 +684,12 @@ class ContextStore(Protocol):
     ) -> list[TurnMetric]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
+    def touch_meta(self, key: str) -> None: ...
+    def set_meta_once(self, key: str, value: str) -> bool: ...
+    def compare_meta(self, key: str, expected: str, value: str) -> bool: ...
+    def delete_meta(self, key: str, *, expected: str | None = None) -> bool: ...
+    def clear_native_launch(self, launch_id: str) -> int: ...
+    def expire_native_launches(self, before: float) -> int: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
     def add_signal_event(
         self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
@@ -720,6 +762,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         label=row["label"],
         role=row["role"],
         binary=row["binary"],
+        agent=row["agent"],
         tmux_socket=row["tmux_socket"],
         pane_id=row["pane_id"],
         session_id=row["session_id"],
@@ -809,6 +852,8 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         account=row["account"],
         model=row["model"],
         effort=row["effort"],
+        agent=row["agent"],
+        native_session_id=row["native_session_id"],
     )
 
 
@@ -905,11 +950,56 @@ def _scope_filter(
     return [f"{pool_col} = 'user'"], []
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _session_write(
+    method: Callable[Concatenate[SqliteStore, _P], _R],
+) -> Callable[Concatenate[SqliteStore, _P], _R]:
+    """Serialize alias resolution with session adoption, including in-flight MCP writes."""
+
+    @wraps(method)
+    def write(self: SqliteStore, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with self.transaction():
+            return method(self, *args, **kwargs)
+
+    return write
+
+
 class SqliteStore:
     """The SQLite implementation of :class:`ContextStore`."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._conn = connection
+        self._transaction_depth = 0
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Own the outer commit, including all nested writes and read-backs."""
+        outer = self._transaction_depth == 0
+        savepoint = f"aisquare_write_{self._transaction_depth}"
+        self._conn.execute("BEGIN IMMEDIATE" if outer else f"SAVEPOINT {savepoint}")
+        self._transaction_depth += 1
+        try:
+            yield
+            if outer:
+                self._conn.commit()
+            else:
+                self._conn.execute(f"RELEASE {savepoint}")
+        except BaseException:
+            if outer:
+                self._conn.rollback()
+            else:
+                self._conn.execute(f"ROLLBACK TO {savepoint}")
+                self._conn.execute(f"RELEASE {savepoint}")
+            raise
+        finally:
+            self._transaction_depth -= 1
+
+    def _commit(self) -> None:
+        if not self._transaction_depth:
+            self._conn.commit()
 
     def add(self, entry: ContextEntry) -> ContextEntry:
         self._conn.execute(
@@ -926,7 +1016,7 @@ class SqliteStore:
                 entry.deleted_at.isoformat() if entry.deleted_at else None,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return entry
 
     def get(self, ref: str) -> ContextEntry | None:
@@ -984,7 +1074,7 @@ class SqliteStore:
                 entry.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         updated = self.get(entry.id)
         assert updated is not None  # just updated, not deleted
         return updated
@@ -994,7 +1084,7 @@ class SqliteStore:
         if entry is None:
             raise KeyError(entry_id)
         self._conn.execute("UPDATE entry SET deleted_at = ? WHERE id = ?", (_now_iso(), entry.id))
-        self._conn.commit()
+        self._commit()
 
     def promote(self, entry_id: str) -> ContextEntry:
         entry = self.get(entry_id)
@@ -1008,7 +1098,7 @@ class SqliteStore:
             "UPDATE entry SET pool = 'user', project_id = NULL, updated_at = ? WHERE id = ?",
             (_now_iso(), entry.id),
         )
-        self._conn.commit()
+        self._commit()
         promoted = self.get(entry.id)
         assert promoted is not None  # just updated, not deleted
         return promoted
@@ -1033,7 +1123,7 @@ class SqliteStore:
                 _now_iso(),
             ),
         )
-        self._conn.commit()
+        self._commit()
 
     def list_projects(self) -> list[ProjectInfo]:
         rows = self._conn.execute(
@@ -1070,7 +1160,7 @@ class SqliteStore:
             "UPDATE project SET forgotten_at = ? WHERE id = ? AND forgotten_at IS NULL",
             (_now_iso(), project_id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise KeyError(project_id)
 
@@ -1098,7 +1188,8 @@ class SqliteStore:
             ).fetchall()
         ]
         removed: dict[str, int] = {}
-        with self._conn:  # one BEGIN…COMMIT: a purge is whole or it is nothing
+        with self.transaction():  # one BEGIN…COMMIT: a purge is whole or it is nothing
+            removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             for table in (
                 "entry",
                 "prompt",
@@ -1112,7 +1203,6 @@ class SqliteStore:
                     f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
                 )
                 removed[table] = cursor.rowcount
-            removed["team_meta"] = self._purge_team_meta(project_id, sessions)
             cursor = self._conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
             removed["project"] = cursor.rowcount
         if removed["project"] != 1:
@@ -1123,20 +1213,61 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (two terms per session): one statement
+        :data:`_META_BATCH` sessions each (six terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
-            "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
-            (f"distill_seq:{project_id}", f"signal/{_glob_prefix(project_id)[:-1]}/*"),
+            "DELETE FROM team_meta WHERE key IN (?, ?) OR key GLOB ?",
+            (
+                f"distill_seq:{project_id}",
+                f"coding-agent:{project_id}",
+                f"signal/{_glob_prefix(project_id)[:-1]}/*",
+            ),
         ).rowcount
+        for key, raw in self.list_meta("native-launch:").items():
+            try:
+                marker = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(marker, dict) and marker.get("project_id") == project_id:
+                removed += self._clear_native_launch(key.removeprefix("native-launch:"))
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
-            keys = [f"nudge:{sid}" for sid in batch]
-            globs = [f"continuations:{_glob_prefix(sid)[:-1]}:*" for sid in batch]
+            keys = [
+                f"{prefix}:{sid}" for sid in batch for prefix in ("nudge", "continuation-prompt")
+            ]
+            globs = [
+                pattern
+                for sid in batch
+                for pattern in (
+                    f"continuations:{_glob_prefix(sid)[:-1]}:*",
+                    f"agent-event:{_glob_prefix(sid)[:-1]}:*",
+                    f"launch-seen:*:{_glob_prefix(sid)[:-1]}",
+                    f"fleet-seen:*:{_glob_prefix(sid)[:-1]}",
+                )
+            ]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
                 f"DELETE FROM team_meta WHERE {' OR '.join(clauses)}", (*keys, *globs)
+            ).rowcount
+            # Binding values carry the canonical session ID; never match an
+            # unrelated metadata value just because it contains the same text.
+            launches = self._conn.execute(
+                "SELECT key FROM team_meta WHERE key GLOB 'launch-session:*' AND value IN ("
+                + ",".join("?" for _ in batch)
+                + ")",
+                batch,
+            ).fetchall()
+            for launch in launches:
+                removed += self._clear_native_launch(
+                    str(launch["key"]).removeprefix("launch-session:")
+                )
+            removed += self._conn.execute(
+                "DELETE FROM team_meta WHERE (key GLOB 'launch-session:*' "
+                "OR key GLOB 'fleet-session:*' OR key GLOB 'session-alias:*') AND value IN ("
+                + ",".join("?" for _ in batch)
+                + ")",
+                batch,
             ).rowcount
         return removed
 
@@ -1173,7 +1304,7 @@ class SqliteStore:
                 "UPDATE project SET linked_repos = ? WHERE id = ?",
                 (json.dumps([*project.linked_repos, repo]), project_id),
             )
-            self._conn.commit()
+            self._commit()
         updated = self.get_project(project_id)
         assert updated is not None  # just confirmed it exists
         return updated
@@ -1198,7 +1329,7 @@ class SqliteStore:
                 record.created_at.isoformat(),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return record
 
     def recent_prompts(
@@ -1232,18 +1363,79 @@ class SqliteStore:
         ).fetchone()
         return row is not None
 
+    def _canonical_session_id(self, session_id: str) -> str:
+        return self.get_meta(f"session-alias:{session_id}") or session_id
+
+    @_session_write
+    def adopt_session(self, provisional_id: str, native_id: str, lease_until: datetime) -> None:
+        """Atomically adopt a local MCP row; keep a retired alias for late callers."""
+        if not provisional_id.startswith("mcp:local:") or native_id.startswith("mcp:"):
+            raise ValueError("Only a local provisional session can be adopted by a native session")
+        if self._canonical_session_id(provisional_id) != provisional_id:
+            return  # Already adopted; a later native thread must not steal its work.
+        source = self.get_session(provisional_id)
+        target = self.get_session(native_id)
+        if source is None or target is None or source.project_id != target.project_id:
+            return
+        for table, column in (
+            ("team_task", "claimed_by"),
+            ("team_task", "created_by"),
+            ("team_event", "session_id"),
+            ("metric", "session_id"),
+            ("fleet_agent", "session_id"),
+        ):
+            self._conn.execute(
+                f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                (native_id, provisional_id),
+            )
+        self._conn.execute(
+            "UPDATE team_task SET claim_expires_at = ? WHERE claimed_by = ? AND status = 'doing'",
+            (lease_until.isoformat(), native_id),
+        )
+        for key, value in self.list_meta(f"signal/{source.project_id}/").items():
+            try:
+                state = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(state, dict) and state.get("session_id") == provisional_id:
+                state["session_id"] = native_id
+                self._conn.execute(
+                    "UPDATE team_meta SET value = ? WHERE key = ?", (json.dumps(state), key)
+                )
+        self._conn.execute(
+            "UPDATE team_session SET label = COALESCE(label, ?), focus = COALESCE(focus, ?), "
+            "started_at = MIN(started_at, ?), cursor = MIN(cursor, ?) WHERE id = ?",
+            (source.label, source.focus, source.started_at.isoformat(), source.cursor, native_id),
+        )
+        self._conn.execute(
+            "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
+            (_now_iso(), _now_iso(), provisional_id),
+        )
+        self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?)",
+            (f"session-alias:{provisional_id}", native_id),
+        )
+
+    @_session_write
     def upsert_session(self, session: TeamSession) -> TeamSession:
         """Insert the session, or revive/refresh it if the id is already known."""
+        canonical = self._canonical_session_id(session.id)
+        if canonical != session.id:
+            stored = self.get_session(canonical)
+            assert stored is not None
+            return stored  # A delayed MCP upsert must not resurrect the provisional row.
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
-            "effort = COALESCE(excluded.effort, effort)",
+            "effort = COALESCE(excluded.effort, effort), "
+            "agent = COALESCE(excluded.agent, agent), "
+            "native_session_id = COALESCE(excluded.native_session_id, native_session_id)",
             (
                 session.id,
                 session.project_id,
@@ -1259,14 +1451,17 @@ class SqliteStore:
                 session.account,
                 session.model,
                 session.effort,
+                session.agent,
+                session.native_session_id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         stored = self.get_session(session.id)
         assert stored is not None  # just upserted
         return stored
 
     def get_session(self, session_id: str) -> TeamSession | None:
+        session_id = self._canonical_session_id(session_id)
         row = self._conn.execute(
             f"SELECT {_SESSION_COLUMNS} FROM team_session WHERE id = ?", (session_id,)
         ).fetchone()
@@ -1288,6 +1483,7 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_session(row) for row in rows]
 
+    @_session_write
     def update_session(
         self,
         session_id: str,
@@ -1309,11 +1505,12 @@ class SqliteStore:
                 session.id,
             ),
         )
-        self._conn.commit()
+        self._commit()
         updated = self.get_session(session.id)
         assert updated is not None  # just updated
         return updated
 
+    @_session_write
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None:
@@ -1332,6 +1529,7 @@ class SqliteStore:
         silence. The evidence wins. Nothing resurrects on its own — only a
         signal from the session itself reaches this method.
         """
+        session_id = self._canonical_session_id(session_id)
         sets, params = ["last_seen_at = ?", "ended_at = NULL"], [_now_iso()]
         if cursor is not None:
             sets.append("cursor = ?")
@@ -1343,8 +1541,9 @@ class SqliteStore:
             f"UPDATE team_session SET {', '.join(sets)} WHERE id = ?",
             (*params, session_id),
         )
-        self._conn.commit()
+        self._commit()
 
+    @_session_write
     def mark_attention(self, session_id: str) -> bool:
         """Flip a session into the attention state, atomically.
 
@@ -1358,6 +1557,7 @@ class SqliteStore:
         not match it. A session waiting on a permission prompt is the most alive
         it ever is, and the one a human is most likely hunting for on the board.
         """
+        session_id = self._canonical_session_id(session_id)
         cursor = self._conn.execute(
             "UPDATE team_session SET state = 'attention', last_seen_at = ? "
             "WHERE id = ? AND state <> 'attention'",
@@ -1367,9 +1567,10 @@ class SqliteStore:
             "UPDATE team_session SET last_seen_at = ?, ended_at = NULL WHERE id = ?",
             (_now_iso(), session_id),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
+    @_session_write
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]:
         """Mark the session ended; optionally release its claims.
 
@@ -1382,6 +1583,7 @@ class SqliteStore:
         The return value still lists the tasks that WOULD have been released,
         so the caller can report them either way.
         """
+        session_id = self._canonical_session_id(session_id)
         released = [
             _row_to_task(row)
             for row in self._conn.execute(
@@ -1400,9 +1602,10 @@ class SqliteStore:
             "UPDATE team_session SET ended_at = ?, last_seen_at = ? WHERE id = ?",
             (now, now, session_id),
         )
-        self._conn.commit()
+        self._commit()
         return released
 
+    @_session_write
     def upsert_task(self, task: TeamTask) -> tuple[TeamTask, bool]:
         """Add a task; a duplicate ``(project_id, key)`` returns the existing one.
 
@@ -1422,15 +1625,15 @@ class SqliteStore:
                 task.status,
                 task.role,
                 json.dumps(task.needs),
-                task.claimed_by,
+                self._canonical_session_id(task.claimed_by) if task.claimed_by else None,
                 task.claim_expires_at.isoformat() if task.claim_expires_at else None,
-                task.created_by,
+                self._canonical_session_id(task.created_by) if task.created_by else None,
                 task.created_at.isoformat(),
                 task.updated_at.isoformat(),
             ),
         )
         created = cursor.rowcount == 1
-        self._conn.commit()
+        self._commit()
         row = self._conn.execute(
             f"SELECT {_TASK_COLUMNS} FROM team_task WHERE project_id = ? AND key = ?",
             (task.project_id, task.key),
@@ -1476,6 +1679,7 @@ class SqliteStore:
             ).fetchall()
         return [_row_to_task(row) for row in rows]
 
+    @_session_write
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool:
         """Atomically claim a task; exactly one concurrent claimer wins.
 
@@ -1487,18 +1691,25 @@ class SqliteStore:
             "claim_expires_at = ?, updated_at = ? "
             "WHERE id = ? AND (status IN ('todo', 'blocked') "
             "OR (status = 'doing' AND claim_expires_at < ?))",
-            (session_ref, lease_until.isoformat(), _now_iso(), task_id, _now_iso()),
+            (
+                self._canonical_session_id(session_ref),
+                lease_until.isoformat(),
+                _now_iso(),
+                task_id,
+                _now_iso(),
+            ),
         )
-        self._conn.commit()
+        self._commit()
         return cursor.rowcount == 1
 
+    @_session_write
     def renew_leases(self, session_id: str, lease_until: datetime) -> None:
         """Extend the claim lease on everything this session is working on."""
         self._conn.execute(
             "UPDATE team_task SET claim_expires_at = ? WHERE claimed_by = ? AND status = 'doing'",
-            (lease_until.isoformat(), session_id),
+            (lease_until.isoformat(), self._canonical_session_id(session_id)),
         )
-        self._conn.commit()
+        self._commit()
 
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask:
         task = self.get_task(task_id)
@@ -1517,7 +1728,7 @@ class SqliteStore:
                 "UPDATE team_task SET status = ?, updated_at = ? WHERE id = ?",
                 (status, _now_iso(), task.id),
             )
-        self._conn.commit()
+        self._commit()
         updated = self.get_task(task.id)
         assert updated is not None  # just updated
         return updated
@@ -1536,7 +1747,7 @@ class SqliteStore:
             "claim_expires_at = NULL, updated_at = ? WHERE id = ? AND status = 'doing'",
             (_now_iso(), task.id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise ValueError(f"task {task.id} is {task.status}, not doing — nothing to release")
         updated = self.get_task(task.id)
@@ -1559,7 +1770,7 @@ class SqliteStore:
             "WHERE id = ? AND status IN ('doing', 'review', 'blocked', 'done')",
             (_now_iso(), task.id),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount != 1:
             raise ValueError(
                 f"task {task.id} is {task.status} — reopen a doing/review/blocked/done task"
@@ -1656,7 +1867,7 @@ class SqliteStore:
         self._conn.execute(
             f"INSERT INTO metric ({_METRIC_COLUMNS}) VALUES ({placeholders})", values
         )
-        self._conn.commit()
+        self._commit()
         return metric
 
     def close_turn(self, session_id: str, *, ended_at: datetime) -> TurnMetric | None:
@@ -1693,7 +1904,7 @@ class SqliteStore:
             "UPDATE metric SET ended_at = ?, wall_ms = ? WHERE trace_id = ? AND ended_at IS NULL",
             (ended_at.isoformat(), wall_ms, row["trace_id"]),
         )
-        self._conn.commit()
+        self._commit()
         if cursor.rowcount == 0:
             return None
         closed = self._conn.execute(
@@ -1734,7 +1945,7 @@ class SqliteStore:
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        self._conn.commit()
+        self._commit()
 
     def list_meta(self, prefix: str) -> dict[str, str]:
         """Every ``team_meta`` entry under ``prefix``, key → value."""
@@ -1744,6 +1955,117 @@ class SqliteStore:
         ).fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
 
+    def touch_meta(self, key: str) -> None:
+        """Refresh retention for an existing fact without changing its value."""
+        self._conn.execute(
+            "UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) "
+            "WHERE key = ?",
+            (key,),
+        )
+        self._commit()
+
+    def set_meta_once(self, key: str, value: str) -> bool:
+        """Atomically record the first observation, including before a fleet row exists."""
+        cursor = self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+            (key, value),
+        )
+        self._commit()
+        return cursor.rowcount == 1
+
+    def compare_meta(self, key: str, expected: str, value: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE team_meta SET value = ? WHERE key = ? AND value = ?", (value, key, expected)
+        )
+        self._commit()
+        return cursor.rowcount == 1
+
+    def delete_meta(self, key: str, *, expected: str | None = None) -> bool:
+        clause = " AND value = ?" if expected is not None else ""
+        args = (key, expected) if expected is not None else (key,)
+        cursor = self._conn.execute("DELETE FROM team_meta WHERE key = ?" + clause, args)
+        self._commit()
+        return cursor.rowcount == 1
+
+    def _clear_native_launch(self, launch_id: str) -> int:
+        return self._conn.execute(
+            "DELETE FROM team_meta WHERE key = ? OR key GLOB ? OR key GLOB ?",
+            (
+                f"native-launch:{launch_id}",
+                _glob_prefix(f"native-event:{launch_id}:"),
+                _glob_prefix(f"native-provider:{launch_id}:"),
+            ),
+        ).rowcount
+
+    def clear_native_launch(self, launch_id: str) -> int:
+        """Drop transient native dedup/provider facts when their receiver exits."""
+        with self.transaction():
+            return self._clear_native_launch(launch_id)
+
+    def expire_native_launches(self, before: float) -> int:
+        """Reap crashed receivers and metadata from releases without lifecycle markers."""
+        removed = 0
+        with self.transaction():
+            for key, raw in self.list_meta("native-launch:").items():
+                try:
+                    marker = json.loads(raw)
+                    seen = marker.get("seen_at") if isinstance(marker, dict) else None
+                except ValueError:
+                    seen = None
+                if not isinstance(seen, (int, float)) or seen < before:
+                    removed += self._clear_native_launch(key.removeprefix("native-launch:"))
+            # Old versions had no marker, timestamp or owner to retain. These
+            # are only retry caches; queued insight records remain in outbox.
+            removed += self._conn.execute(
+                "DELETE FROM team_meta WHERE "
+                "(key GLOB 'native-event:*' OR key GLOB 'native-provider:*') "
+                "AND NOT EXISTS (SELECT 1 FROM team_meta AS marker WHERE marker.key = "
+                "'native-launch:' || substr(substr(team_meta.key, instr(team_meta.key, ':') + 1), "
+                "1, instr(substr(team_meta.key, instr(team_meta.key, ':') + 1), ':') - 1))"
+            ).rowcount
+            # Active sessions retain exact MCP/fleet joins even on long runs.
+            # Ended or abandoned sessions retain replay protection for the TTL.
+            cutoff = datetime.fromtimestamp(before, UTC).isoformat()
+            live = {
+                row["id"]
+                for row in self._conn.execute(
+                    "SELECT id FROM team_session WHERE ended_at IS NULL AND last_seen_at >= ?",
+                    (cutoff,),
+                )
+            }
+            active_panes = {
+                row["key"].replace("-session:", "-seen:", 1) + ":"
+                for row in self._conn.execute(
+                    "SELECT key, value, updated_at FROM team_meta "
+                    "WHERE key GLOB 'launch-session:*' "
+                    "OR key GLOB 'fleet-session:*'"
+                )
+                # SessionStart can refresh the binding before its session row.
+                # Keep older replay history while that refreshed pane is live.
+                if row["value"] in live or row["updated_at"] == 0 or row["updated_at"] >= before
+            }
+            rows = self._conn.execute(
+                "SELECT key, value FROM team_meta WHERE updated_at > 0 AND updated_at < ? AND ("
+                "key GLOB 'agent-event:*' OR key GLOB 'launch-session:*' OR "
+                "key GLOB 'launch-seen:*' OR key GLOB 'fleet-session:*' OR "
+                "key GLOB 'fleet-seen:*')",
+                (before,),
+            ).fetchall()
+            for row in rows:
+                key = row["key"]
+                if key.startswith("agent-event:"):
+                    active = any(key.startswith(f"agent-event:{session}:") for session in live)
+                elif "-seen:" in key:
+                    active = any(key.startswith(prefix) for prefix in active_panes)
+                else:
+                    active = row["value"] in live
+                if not active:
+                    removed += self._conn.execute(
+                        "DELETE FROM team_meta WHERE key = ?", (key,)
+                    ).rowcount
+        return removed
+
+    @_session_write
     def add_signal_event(
         self, event: TeamEvent, meta_key: str, meta_value: dict[str, Any]
     ) -> TeamEvent:
@@ -1755,30 +2077,11 @@ class SqliteStore:
         is injected into ``meta_value`` before the blob is stored, so the
         state row always names the event that produced it.
         """
-        with self._conn:  # one BEGIN…COMMIT for both statements
-            cursor = self._conn.execute(
-                "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-                "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event.id,
-                    event.project_id,
-                    event.session_id,
-                    event.kind,
-                    event.text,
-                    event.task_id,
-                    event.to_role,
-                    event.created_at.isoformat(),
-                ),
+        if event.session_id:
+            event = event.model_copy(
+                update={"session_id": self._canonical_session_id(event.session_id)}
             )
-            stamped = {**meta_value, "seq": cursor.lastrowid}
-            self._conn.execute(
-                "INSERT INTO team_meta (key, value) VALUES (?, ?) "
-                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                (meta_key, json.dumps(stamped)),
-            )
-        return event.model_copy(update={"seq": cursor.lastrowid})
-
-    def add_team_event(self, event: TeamEvent) -> TeamEvent:
+            meta_value = {**meta_value, "session_id": event.session_id}
         cursor = self._conn.execute(
             "INSERT INTO team_event (id, project_id, session_id, kind, text, "
             "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1793,7 +2096,35 @@ class SqliteStore:
                 event.created_at.isoformat(),
             ),
         )
-        self._conn.commit()
+        stamped = {**meta_value, "seq": cursor.lastrowid}
+        self._conn.execute(
+            "INSERT INTO team_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (meta_key, json.dumps(stamped)),
+        )
+        return event.model_copy(update={"seq": cursor.lastrowid})
+
+    @_session_write
+    def add_team_event(self, event: TeamEvent) -> TeamEvent:
+        if event.session_id:
+            event = event.model_copy(
+                update={"session_id": self._canonical_session_id(event.session_id)}
+            )
+        cursor = self._conn.execute(
+            "INSERT INTO team_event (id, project_id, session_id, kind, text, "
+            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.id,
+                event.project_id,
+                event.session_id,
+                event.kind,
+                event.text,
+                event.task_id,
+                event.to_role,
+                event.created_at.isoformat(),
+            ),
+        )
+        self._commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
 
     def get_event(self, event_id: str) -> TeamEvent | None:
@@ -1905,7 +2236,7 @@ class SqliteStore:
     def set_codename(self, project_id: str, codename: str) -> ProjectInfo:
         """Give a project its fleet codename (unique: the index raises on a clash)."""
         self._conn.execute("UPDATE project SET codename = ? WHERE id = ?", (codename, project_id))
-        self._conn.commit()
+        self._commit()
         project = self.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
@@ -1917,6 +2248,12 @@ class SqliteStore:
         ).fetchall()
         return {str(row["codename"]) for row in rows}
 
+    def _bound_fleet_agent(self, row: sqlite3.Row) -> FleetAgent:
+        agent = _row_to_fleet_agent(row)
+        key = f"fleet-session:{agent.id}"
+        bound = self.get_meta(key)
+        return agent.model_copy(update={"session_id": bound}) if bound else agent
+
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent:
         """Insert a fleet agent, or update the mutable facts of one already known.
 
@@ -1926,7 +2263,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -1947,9 +2284,10 @@ class SqliteStore:
                 agent.created_at.isoformat(),
                 agent.ended_at.isoformat() if agent.ended_at else None,
                 agent.exit_status,
+                agent.agent,
             ),
         )
-        self._conn.commit()
+        self._commit()
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
@@ -1962,16 +2300,23 @@ class SqliteStore:
         ).fetchall()
         if len(rows) > 1:
             raise AmbiguousIdError(ref)
-        return _row_to_fleet_agent(rows[0]) if rows else None
+        return self._bound_fleet_agent(rows[0]) if rows else None
 
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]:
-        clause = " AND ended_at IS NULL" if live_only else ""
+        clause = " AND f.ended_at IS NULL" if live_only else ""
+        columns = ", ".join("f." + column for column in _FLEET_AGENT_COLUMNS.split(", "))
         rows = self._conn.execute(
-            f"SELECT {_FLEET_AGENT_COLUMNS} FROM fleet_agent "
-            f"WHERE project_id = ?{clause} ORDER BY created_at, id",
+            f"SELECT {columns}, m.value AS bound_session_id FROM fleet_agent AS f "
+            "LEFT JOIN team_meta AS m ON m.key = 'fleet-session:' || f.id "
+            f"WHERE f.project_id = ?{clause} ORDER BY f.created_at, f.id",
             (project_id,),
         ).fetchall()
-        return [_row_to_fleet_agent(row) for row in rows]
+        return [
+            _row_to_fleet_agent(row).model_copy(update={"session_id": row["bound_session_id"]})
+            if row["bound_session_id"]
+            else _row_to_fleet_agent(row)
+            for row in rows
+        ]
 
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
@@ -1982,7 +2327,7 @@ class SqliteStore:
             f"WHERE project_id = ? AND label = ?{clause} ORDER BY created_at DESC LIMIT 1",
             (project_id, label),
         ).fetchone()
-        return _row_to_fleet_agent(row) if row is not None else None
+        return self._bound_fleet_agent(row) if row is not None else None
 
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
         """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
@@ -1991,7 +2336,7 @@ class SqliteStore:
             "WHERE id = ? AND ended_at IS NULL",
             (_now_iso(), exit_status, agent_id),
         )
-        self._conn.commit()
+        self._commit()
         agent = self.get_fleet_agent(agent_id)
         if agent is None:
             raise KeyError(agent_id)

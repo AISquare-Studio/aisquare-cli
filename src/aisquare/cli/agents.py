@@ -7,7 +7,14 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
+from aisquare.cli.common import (
+    emit_agents,
+    emit_connected,
+    emit_disconnected,
+    expected_config_write_errors,
+    fail,
+)
+from aisquare.core.agents import AgentSettingsError
 from aisquare.core.console import stderr_console
 from aisquare.services import agents as agents_service
 
@@ -44,8 +51,7 @@ ConfigDir = Annotated[
     Path | None,
     typer.Option(
         "--config-dir",
-        help="Claude Code config directory to target (for CLAUDE_CONFIG_DIR "
-        "installs, e.g. ~/.claude4). Default: $CLAUDE_CONFIG_DIR or ~/.claude.",
+        help="Agent config directory. Default: its native environment override or home.",
     ),
 ]
 
@@ -57,6 +63,8 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
         connection = agents_service.connect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    except AgentSettingsError as exc:
+        fail(str(exc), error="agent_configuration", ref=name, detail=str(exc))
     except ValueError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
@@ -69,9 +77,41 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         removed = agents_service.disconnect(name, config_dir)
     except KeyError:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
+    except AgentSettingsError as exc:
+        fail(str(exc), error="agent_configuration", ref=name, detail=str(exc))
     if not removed:
         stderr_console().print(
             "note: no aisquare hooks found in that config dir — if you connected "
             "with --config-dir, disconnect with the same one"
         )
     emit_disconnected(name)
+
+
+@app.command("use")
+def use(
+    name: AgentName,
+    project: Annotated[bool, typer.Option("--project", help="Set this project's default.")] = False,
+) -> None:
+    """Choose the coding agent for future launches (role bindings take precedence)."""
+    import json
+
+    from aisquare.core.state import get_state
+    from aisquare.services import agent_launch
+
+    try:
+        with expected_config_write_errors():
+            scope = agent_launch.use(name, project=project)
+    except ValueError as exc:
+        fail(str(exc), error="unknown_agent")
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "agent": name,
+                    "scope": "project" if project else "user",
+                    **({"project_id": scope} if project else {}),
+                }
+            )
+        )
+    else:
+        typer.echo(f"Default coding agent: {name} ({scope})")

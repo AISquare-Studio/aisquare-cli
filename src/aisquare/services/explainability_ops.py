@@ -427,7 +427,7 @@ def sdk_doctor(*, env: Mapping[str, str] | None = None) -> list[tuple[str, str, 
         # Not a declared dependency and deliberately not stubbed: the whole
         # point is that this import may not resolve, which the guard above and
         # the except below both handle.
-        from aisquare.explainability.doctor import run_doctor  # type: ignore[import-not-found]
+        run_doctor = importlib.import_module("aisquare.explainability.doctor").run_doctor
 
         return [(str(n), str(s), str(d)) for n, s, d in run_doctor()]
     except Exception:  # diagnostics must never crash

@@ -35,7 +35,7 @@ class CliResult:
         return self.returncode == 0
 
 
-def argv_for(args: Sequence[str]) -> list[str]:
+def argv_for(args: Sequence[str], *, module: str = "aisquare") -> list[str]:
     """``python -P -m aisquare <args>`` on THIS interpreter — the one install we know runs.
 
     ``-P`` (the flag form of ``PYTHONSAFEPATH``, Python 3.11+, which this CLI
@@ -57,7 +57,8 @@ def argv_for(args: Sequence[str]) -> list[str]:
     the fleet's window command, the detached distiller and the hook fallback —
     so the flag has exactly one home.
     """
-    return [sys.executable, "-P", "-m", "aisquare", *args]
+    # Internal worker modules use the same safe interpreter invocation.
+    return [sys.executable, "-P", "-m", module, *args]
 
 
 def run(

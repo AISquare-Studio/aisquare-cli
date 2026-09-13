@@ -323,15 +323,15 @@ def disown_inherited_trace(env: MutableMapping[str, str]) -> str | None:
     name needs no pass at all.
     """
     parent_run = (env.get(PIPELINE_ID_ENV_VAR) or "").strip()
-    if not parent_run or not any(env.get(name) for name in RESERVED_ENV_VARS):
-        return None
+    owns_routing = bool(parent_run and any(env.get(name) for name in RESERVED_ENV_VARS))
     # Read off the module, not bound at import, so the derivation is testable:
     # `tests/test_spawn_seams.py` adds a name to the tuple and asserts this
     # pops it. A `from … import` here would coincidentally match the tuple
     # today and silently stop following it tomorrow.
     for name in spawn.IDENTITY_ENV_VARS:
-        env.pop(name, None)
-    return parent_run
+        if owns_routing or name in spawn.MARKER_ENV_VARS:
+            env.pop(name, None)
+    return parent_run if owns_routing else None
 
 
 def trace_marker(wiring: SessionWiring) -> dict[str, str]:
@@ -392,6 +392,10 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
     may not speak the flag: same answer, for the same reason. Otherwise mint a
     fresh id and hand it over — the only case that produces a real join.
     """
+    # Flags past the native literal boundary are prompt text, not identity.
+    args = list(args)
+    if "--" in args:
+        args = args[: args.index("--")]
     present, value = _flag_value(args, _SESSION_ID_FLAG)
     if present:
         if value is None:
@@ -1374,6 +1378,38 @@ class _ClientLaneSegment:
 def _emit_span(sdk: Any, record: dict[str, object]) -> None:
     """Replay one spooled record as a span inside the open Run."""
     text = str(record.get("text") or "")
+    if record.get("kind") == "native_event":
+        facts = record.get("native")
+        facts = facts if isinstance(facts, dict) else {}
+        name = str(facts.get("event.name", "codex.event"))
+        if name == "codex.tool_result":
+            with sdk.ToolCallTracer(
+                tool_name=str(facts.get("tool_name") or facts.get("tool.name") or name)
+            ) as tool:
+                tool.set_result(json.dumps(facts, sort_keys=True))
+        elif any(key in facts for key in ("input_token_count", "gen_ai.usage.input_tokens")):
+            model = str(facts.get("model") or facts.get("gen_ai.request.model") or "unknown")
+            with sdk.LLMCallTracer(
+                model=model, provider=str(facts.get("provider_name") or "unknown")
+            ) as llm:
+                llm.set_token_counts(
+                    prompt=insights.token_count(
+                        facts.get("input_token_count")
+                        or facts.get("gen_ai.usage.input_tokens")
+                        or 0
+                    ),
+                    completion=insights.token_count(
+                        facts.get("output_token_count")
+                        or facts.get("gen_ai.usage.output_tokens")
+                        or 0
+                    ),
+                )
+        else:
+            with sdk.DecisionTracer(decision_type=name) as decision:
+                decision.set_selected(
+                    json.dumps(facts, sort_keys=True), reason="Codex native telemetry"
+                )
+        return
     if record.get("kind") == "ci_turn":
         # The CI test bed's ledger-join record: ids and timings, no prose. It
         # is a fact about the turn rather than a decision anyone took, but a

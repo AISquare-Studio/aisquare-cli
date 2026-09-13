@@ -299,7 +299,7 @@ def test_spawn_prints_a_ladder_resolved_command(isolated_home: Path) -> None:
     assert payload["role"] == "planner"
     assert payload["model"] == "fable"  # optimistic: probes disabled in tests
     assert payload["effort"] == "high"
-    assert "AISQUARE_ROLE=planner" in payload["command"]
+    assert "launch planner --agent claude-code" in payload["command"]
     assert "--model fable" in payload["command"]
     assert "--effort high" in payload["command"]
 
@@ -742,7 +742,7 @@ def test_tui_session_line_renders_model_and_mismatch() -> None:
 def test_spawn_exec_requires_claude_on_path(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: None)
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: None)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "planner", "--exec"])  # type: ignore[arg-type]
     assert result.exit_code != 0
@@ -759,7 +759,7 @@ def test_spawn_exec_replaces_the_process(
         calls["argv"] = argv
         calls["role"] = env.get("AISQUARE_ROLE")
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -800,16 +800,17 @@ def test_doctor_harness_check_reports_fable_fallback(
     work.mkdir()
     monkeypatch.chdir(work)
     team_service.activate(work)
-    harness._save_cache(
-        {
-            "fable": harness.ProbeResult(
-                alias="fable",
-                available=False,
-                reason="not entitled",
-                checked_at=datetime.now(tz=UTC),
-            )
-        }
-    )
+    with harness.probe_context(harness.ProbeContext(binary="claude", env=dict(os.environ))):
+        harness._save_cache(
+            {
+                "fable": harness.ProbeResult(
+                    alias="fable",
+                    available=False,
+                    reason="not entitled",
+                    checked_at=datetime.now(tz=UTC),
+                )
+            }
+        )
     check = diagnostics._check_harness()
     assert check.status is CheckStatus.warn
     assert "fable" in check.detail
@@ -1019,28 +1020,45 @@ def test_cached_probe_survives_a_naive_timestamp(monkeypatch: pytest.MonkeyPatch
     assert verdict is None or verdict.alias == "fable"
 
 
-def test_spawn_refresh_forgets_every_cached_verdict(isolated_home: Path) -> None:
+def test_spawn_refresh_forgets_this_accounts_verdicts_only(isolated_home: Path) -> None:
     """--refresh promises a re-check after an entitlement change; bypassing
     reads only re-verified the ladder being walked, leaving other roles'
-    stale verdicts in place. It must forget the whole cache (#36 review fix 3
-    — clear_probe_cache was dead code)."""
-    harness._save_cache(
-        {
-            "opus": harness.ProbeResult(
-                alias="opus",
-                available=False,
-                resolved_id=None,
-                checked_at=datetime.now(tz=UTC),
-            )
-        }
+    stale verdicts in place. Clear every role's verdict for the account the
+    spawn will use, while keeping another account's paid probes warm."""
+    from aisquare.services import agent_launch
+
+    selected = agent_launch.resolve()
+    context = harness.ProbeContext(selected.binary.binary, {**os.environ, **selected.profile.env})
+    other = harness.ProbeContext(
+        selected.binary.binary,
+        {**context.env, "CLAUDE_CONFIG_DIR": str(isolated_home / "other-account")},
     )
-    assert harness._cache_path().exists()
+    cache = {
+        "opus": harness.ProbeResult(
+            alias="opus",
+            available=False,
+            resolved_id=None,
+            checked_at=datetime.now(tz=UTC),
+        )
+    }
+    files = []
+    for scope in (context, other):
+        token = harness._PROBE_CONTEXT.set(scope)
+        try:
+            harness._save_cache(cache)
+            files.append(harness._cache_path())
+        finally:
+            harness._PROBE_CONTEXT.reset(token)
+    current_path, other_path = files
+    assert current_path != other_path and all(path.exists() for path in files)
+    other_before = other_path.read_bytes()
 
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--refresh", "--no-probe"])  # type: ignore[arg-type]
 
     assert result.exit_code == 0, result.output
-    assert not harness._cache_path().exists(), "spawn --refresh must forget the cache"
+    assert not current_path.exists(), "spawn --refresh must forget its account's cache"
+    assert other_path.read_bytes() == other_before
 
 
 # ── spawn x explainability wiring ────────────────────────────────────────────
@@ -1052,68 +1070,35 @@ def _tracing_enabled(proxy_url: str) -> None:
     save_config(AppConfig(explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url)))
 
 
-def test_spawn_print_default_config_is_unchanged(isolated_home: Path) -> None:
-    """Tracing off (the default) must leave the printed command byte-identical."""
+def test_spawn_print_default_config_uses_shared_launch(isolated_home: Path) -> None:
+    """Printed commands take their identity from launch, with tracing off too."""
     runner, app = _cli()
     result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert "explainability" not in payload["command"]
-    assert payload["command"].startswith("AISQUARE_ROLE=coder ")
+    assert (
+        "launch coder --agent claude-code --command claude --no-bound-args --" in payload["command"]
+    )
 
 
-def test_spawn_print_enabled_composes_a_fresh_eval(isolated_home: Path) -> None:
-    """The printed command must mint its pipeline id AT RUN TIME via eval —
-    a fixed id burned into the command would be reused on every paste and
-    merge those sessions into one Run.
-
-    The clear-out in front is part of that promise, not decoration: the eval
-    EXPORTS what it minted, so it outlives one paste, and a later spawn in the
-    same terminal would otherwise inherit the previous session's identity.
-
-    The unset list is the WHOLE identity — ``core.spawn.IDENTITY_ENV_VARS``,
-    the same tuple every stripping seam removes — so pinning it here is pinning
-    what a reader sees, not a second copy of the list. A name added to the tuple
-    lands in the printed command by construction.
-    """
+def test_spawn_print_enabled_defers_identity_to_launch(isolated_home: Path) -> None:
+    """Printing does no trace wiring; each execution mints its own identity."""
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
     result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["command"].startswith(
-        'if [ -n "${AISQUARE_PIPELINE_ID:-}" ]; then unset ANTHROPIC_BASE_URL '
-        "ANTHROPIC_CUSTOM_HEADERS AISQUARE_PIPELINE_ID AISQUARE_TRACE_AGENT_NAME "
-        "AISQUARE_RUN_TRACE_ID; fi; "
-        'eval "$(aisquare explainability env coder --post-root)"; AISQUARE_ROLE=coder '
-    )
+    assert "launch coder --agent claude-code" in payload["command"]
+    assert "eval" not in payload["command"]
     assert "X-Pipeline-Id" not in payload["command"]
 
 
 def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
     isolated_home: Path,
+    tmp_path: Path,
 ) -> None:
-    """Two pastes, one Run — the half a hand-written unset list kept missing.
-
-    Paste 1 is the printed command, whose eval is ``explainability env coder
-    --post-root`` (pinned below — a bare ``env`` is print-only and could never
-    export the key this scenario turns on): it posts a root and exports
-    ``AISQUARE_RUN_TRACE_ID=T1``; the agent exits, the shell keeps it. Paste 2
-    clears and re-wires, but its own root post is refused or times out, so
-    ``trace_marker`` emits no run trace id of its own and nothing overwrites T1
-    (``test_one_run_per_session`` pins that refused-root fallback for the
-    opt-in: exit 0, ``X-Pipeline-Id``, no run key). Session 2's SessionStart
-    hook then calls ``run_trace_id()`` and writes its join row against session
-    1's Run — and ``disown_inherited_trace`` cannot save it, because the
-    clear-out already removed the run key it keys off, so it returns early.
-
-    So the prelude must leave NO marker behind, whether or not the second wiring
-    owns a trace of its own. The stale env is synthesised rather than produced
-    by a real paste 1: the prelude is the unit under test, and it must clear
-    what ANY earlier paste left, not what one particular run of it left. Run
-    through real ``sh``, which also proves the snippet is valid POSIX shell —
-    reading the string cannot.
-    """
+    """Pasted launches disown old trace markers inside the child process."""
     import subprocess
     import sys
 
@@ -1121,51 +1106,45 @@ def test_spawn_prelude_clears_every_marker_a_previous_paste_exported(
 
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
-    result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
-    assert result.exit_code == 0, result.output
-    prelude, _, evaluated = json.loads(result.output)["command"].partition("; eval ")
-    assert prelude.startswith('if [ -n "'), prelude
-    # Paste 1 can only have exported T1 because the composed line opts in.
-    assert evaluated.startswith('"$(aisquare explainability env coder --post-root)"'), evaluated
-
-    # Paste 1's exports, still in the shell. The second wiring owns no trace,
-    # so nothing after the prelude re-exports any of them.
-    stale = dict.fromkeys(spawn.IDENTITY_ENV_VARS, "from-paste-1") | {
-        "AISQUARE_RUN_TRACE_ID": "T1",
-        "PATH": os.environ["PATH"],
-    }
-    probe = "import os,sys; print(' '.join(os.environ.get(n, '<unset>') for n in sys.argv[1:]))"
-    argv = [sys.executable, "-c", probe, *spawn.IDENTITY_ENV_VARS]
-    cleared = subprocess.run(
-        ["sh", "-c", f'{prelude}; exec "$@"', "sh", *argv],
-        env=stale,
+    printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
+    assert printed.exit_code == 0, printed.output
+    command = json.loads(printed.output)["command"]
+    stub = tmp_path / "claude"
+    stub.write_text(f"#!{sys.executable}\nimport os,json; print(json.dumps(dict(os.environ)))\n")
+    stub.chmod(0o755)
+    stale = dict.fromkeys(spawn.IDENTITY_ENV_VARS, "from-paste-1")
+    child = subprocess.run(
+        ["sh", "-c", command],
+        env={
+            **os.environ,
+            **stale,
+            "PATH": f"{tmp_path}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        },
         capture_output=True,
         text=True,
-        check=True,
+        timeout=30,
     )
-    assert cleared.stdout.split() == ["<unset>"] * len(spawn.IDENTITY_ENV_VARS), cleared.stdout
+    assert child.returncode == 0, child.stderr
+    env = json.loads(child.stdout)
+    assert env["AISQUARE_LAUNCH_ID"] != "from-paste-1"
+    assert env[spawn.LAUNCH_AGENT_ENV] == "claude-code"
+    assert all(
+        key not in env
+        for key in spawn.IDENTITY_ENV_VARS
+        if key not in {"AISQUARE_LAUNCH_ID", spawn.LAUNCH_AGENT_ENV}
+    )
 
-    # Negative control: without the prelude the probe reports every value, so a
-    # row of "<unset>" is the clear-out's work and not a blind reader.
-    kept = subprocess.run(argv, env=stale, capture_output=True, text=True, check=True)
-    assert "T1" in kept.stdout.split()
 
-
-def test_spawn_printed_command_takes_its_session_id_from_the_shell(
+def test_spawn_printed_command_defers_session_id_to_execution(
     isolated_home: Path,
 ) -> None:
-    """The printed command carries the SHAPE of a session id, never a value.
-
-    A literal id here would be pasted into every terminal that copied the
-    banner, and those agents would share one board row and one Run. The
-    ``:+`` form also means an eval that refused contributes no flag at all
-    rather than an empty ``--session-id ''``, which would be a broken launch.
-    """
+    """No fixed identity may be burned into a command reused across terminals."""
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
     result = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     command = json.loads(result.output)["command"]
-    assert command.endswith("${AISQUARE_PIPELINE_ID:+--session-id $AISQUARE_PIPELINE_ID}")
+    assert "launch coder --agent claude-code" in command
+    assert "--session-id" not in command
     assert not re.search(r"--session-id\s+[0-9a-f-]{36}", command), "no id may be burned in"
 
 
@@ -1176,11 +1155,11 @@ def test_spawn_printed_command_omits_the_flag_an_agent_may_not_speak(
     is never worth that. It still traces, just unjoined."""
     _tracing_enabled("http://127.0.0.1:9")
     runner, app = _cli()
-    argv = ["--json", "team", "spawn", "coder", "--bin", "aider"]
+    argv = ["--json", "team", "spawn", "coder", "--agent", "claude-code", "--bin", "aider"]
     result = runner.invoke(app, argv)  # type: ignore[arg-type]
     command = json.loads(result.output)["command"]
     assert "--session-id" not in command
-    assert 'eval "$(aisquare explainability env coder --post-root)"' in command, "it still traces"
+    assert "launch coder --agent claude-code --command aider" in command
 
 
 def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
@@ -1202,7 +1181,7 @@ def test_spawn_exec_starts_the_agent_on_the_id_it_traces_under(
         calls["argv"] = argv
         calls["env"] = env
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     with healthy_proxy() as proxy_url:
@@ -1246,7 +1225,7 @@ def test_spawn_exec_untraced_argv_is_never_pinned(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["argv"] = argv
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1282,7 +1261,7 @@ def test_spawn_exec_enabled_wires_the_traced_env(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["env"] = env
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1307,7 +1286,7 @@ def test_spawn_exec_dead_proxy_fails_open(
     def _fake_exec(file: str, argv: list[str], env: dict[str, str]) -> None:
         calls["env"] = env
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", _fake_exec)
     runner, app = _cli()
     result = runner.invoke(app, ["team", "spawn", "coder", "--exec"])  # type: ignore[arg-type]
@@ -1318,19 +1297,10 @@ def test_spawn_exec_dead_proxy_fails_open(
     assert "untraced" in result.output
 
 
-def test_spawn_printed_eval_fails_open_through_a_real_shell(
+def test_spawn_printed_launch_fails_open_through_a_real_shell(
     isolated_home: Path, tmp_path: Path
 ) -> None:
-    """THE fail-open-by-construction premise, executed for real.
-
-    The eval prefix is only safe because a refusing `explainability env`
-    writes its reason to STDERR and exits without touching stdout — the
-    substitution then contributes nothing and the agent command still runs.
-    If the refusal ever reached stdout, eval would execute the error text as
-    shell code; in that world the agent may STILL launch (`;` continues past
-    the eval), so the discriminating assert is env's empty stdout, not the
-    launch itself.
-    """
+    """A refusing trace endpoint must not stop the pasted launch from running."""
     import subprocess
     import sys
 
@@ -1338,7 +1308,7 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     runner, app = _cli()
     printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
     command = json.loads(printed.output)["command"]
-    assert 'eval "$(aisquare explainability env coder --post-root)"; ' in command
+    assert "launch coder --agent claude-code" in command
 
     venv_bin = Path(sys.executable).parent
     child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
@@ -1371,9 +1341,7 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     assert proc.returncode == 0, proc.stderr
     assert "ran base=[]" in proc.stdout, "the agent must launch, untraced"
     assert "command not found" not in proc.stderr
-    # The session-id substitution obeys the same premise: a refused eval
-    # exports nothing, so ${VAR:+…} contributes NO argument. An empty
-    # `--session-id ''` would be the one way this could still kill a launch.
+    # An untraced launch must not pass an empty --session-id to the native CLI.
     assert "--session-id" not in proc.stdout
 
 
@@ -1407,7 +1375,7 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
         printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
         command = json.loads(printed.output)["command"]
         child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
-        # Both pastes in ONE shell — the case the leading `unset` exists for.
+        # Both pastes share a shell, but each child owns a fresh identity.
         proc = subprocess.run(
             ["/bin/sh", "-c", f"{command}\n{command}"],
             capture_output=True,

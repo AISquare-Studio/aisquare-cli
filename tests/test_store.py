@@ -231,7 +231,37 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    assert version == SCHEMA_VERSION == 14  # v11 fleet, v12 metric, v13 converges, v14 forgotten_at
+    assert (
+        version == SCHEMA_VERSION == 17
+    )  # v17 repairs stores dogfooded before v16 backfilled timestamps
+
+
+def test_v14_upgrades_native_identity_without_guessing_legacy_agents() -> None:
+    db = _at_version(14)
+    now = datetime.now(UTC).isoformat()
+    with sqlite3.connect(str(db)) as raw:
+        for sid, account, transcript in (
+            ("claude", "/home/claude", "/home/claude/projects/repo/thread.jsonl"),
+            ("unclassified", None, None),
+            ("wrapper", "/home/other", "/home/other/session.jsonl"),
+        ):
+            raw.execute(
+                "INSERT INTO team_session "
+                "(id, project_id, started_at, last_seen_at, account, transcript_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, "prj_old", now, now, account, transcript),
+            )
+    open_store().close()
+    with sqlite3.connect(str(db)) as raw:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert raw.execute(
+            "SELECT id, agent, native_session_id FROM team_session ORDER BY id"
+        ).fetchall() == [
+            ("claude", "claude-code", "claude"),
+            ("unclassified", None, None),
+            ("wrapper", None, None),
+        ]
+        assert "forgotten_at" in {row[1] for row in raw.execute("PRAGMA table_info(project)")}
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:

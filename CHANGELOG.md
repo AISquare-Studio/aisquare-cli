@@ -6,7 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Harden coding-agent argument ownership, native effort mapping, and inherited
+  family selection; both printed spawn commands now use the shared launcher.
+- Preserve resumed session bindings, rate-limit cleanup for manually started
+  agents too, and defer account refreshes when a sign-in changes an in-flight read.
+- Deduplicate native telemetry with durable spool receipts across receiver crashes
+  and board checkpoint failures. Report spool failures in doctor and preserve valid
+  records beside malformed OTLP entries.
+- Bin-only wrappers retain Claude compatibility with the implicit or saved Claude user default.
+  This works inside AISquare-launched panes too. With a non-Claude user, project, or
+  operator-exported agent default, explicitly bind the wrapper's
+  family using `team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`).
+- Fleet `extra_args` retain their existing Claude ownership. Other agents use
+  `agent_args.<agent>`; spawn reports when legacy arguments are skipped.
+- Native hook settings are replaced atomically. Symlink targets are updated;
+  other hard links retain their previous contents.
+- Native argument values are validated by their agent and reported with source
+  `native`; explicit effort conflicts and compatibility mappings carry a note.
+- Launch metadata cleanup is rate-limited across processes. Existing metadata
+  gets a full retention period on upgrade; active bindings and durable board
+  history remain available.
+
 ### Added
+- Terminal Codex integration through a shared coding-agent adapter registry:
+  native hooks, memory, board identity, fleet launches, permissions, optional
+  MCP and native telemetry. User/project defaults and role bindings support
+  mixed Claude Code/Codex teams; setup, status and the UI expose agent choice.
+  See [coding-agent support](docs/coding-agents.md) for native trust and the
+  tested compatibility boundary.
+
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

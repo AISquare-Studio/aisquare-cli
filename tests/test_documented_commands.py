@@ -132,8 +132,17 @@ DOCUMENTED = (
     # what the note that stood here used to promise (docs/plans/clixr.md
     # §11/M7-M9). Do not restore the inline form to match a stale reading of
     # this comment — that would drop three of the eleven commands from the
-    # census, and the 0.8 floor absorbs 8/11 without going red, so the guard
-    # would keep reporting green over three unchecked lines.
+    # census. Which floor catches that is the whole point, so name it exactly:
+    # THIS DOCUMENT'S OWN floor does, and it goes RED.
+    # `test_every_aisquare_mention_is_classified` is parametrized over this
+    # tuple and asserts `len(extracted) >= was_resolved * 0.8`; with a CENSUS of
+    # eleven the floor is 8.8, and `8 >= 8.8` is false. The GLOBAL floor is the
+    # one that would have absorbed it silently — it is derived from every
+    # document at once (149 * 0.8 = 119.2, against 176 found when this was
+    # measured on 2026-09-13), and lives ~500 lines up in
+    # `test_the_extractor_found_the_documented_commands`. Three lines off a
+    # margin that wide is invisible there. That gap between the two floors is
+    # the reason this file carries a per-document one at all.
     "docs/xr-demo.md",
 )
 

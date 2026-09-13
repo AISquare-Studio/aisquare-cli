@@ -75,6 +75,12 @@ export const RING = {
   arcDeg: 200,
   eyeHeight: 1.6, // m — ring centre sits at seated/standing eye height
   maxPanels: 12, // live-updating panels; beyond this the ring paginates
+  /** Push–pull limits (plan §9, right thumbstick Y). Closer than `minRadius`
+   *  and the arc wraps past the edge of comfortable view; further than
+   *  `maxRadius` and the 1.5° cap height stops being met by the atlas, which
+   *  is sized for 1.6 m and does not re-render at a new distance. */
+  minRadius: 1.15,
+  maxRadius: 1.6,
 };
 
 /**
@@ -158,9 +164,136 @@ export const AMBIENT = {
   lines: 3, // title, state, summary — never more (plan §5)
 };
 
-/** Focus tier floor (plan §8). Its surface is sized in M4; the floor lives here
- *  so both tiers derive from one place. */
-export const FOCUS = { minCapDeg: 2.2 };
+/**
+ * Focus tier (plan §8 "focus tier ≥ 2.2°", §7 the `text-optimized` quad layer).
+ *
+ * This is the tier the manager's decision leans on: the ambient cell truncates
+ * its summary with an ellipsis and THIS surface carries the full text. So the
+ * arithmetic below is not a formality — a focus tier that cannot hold the
+ * untruncated summary would leave the truncation with nowhere to land.
+ *
+ *   1. Required cap height in metres at the pull-forward distance:
+ *        h_cap = 2 · d · tan(θ / 2)
+ *              = 2 × 0.9 m × tan(1.1°)
+ *              = 1.8 × 0.0192010 = 0.0345618 m   (34.56 mm)
+ *
+ *   2. Everything else follows from the em box, because the family is
+ *      monospace and its metrics are fixed:
+ *        em      = h_cap / 0.73      = 0.0473449 m
+ *        advance = 0.6 em            = 0.0284069 m per character
+ *
+ *      Note what step 2 means: at a FIXED angular cap height, the number of
+ *      characters that fit across a panel depends only on the panel's ANGULAR
+ *      width. Moving the panel further away and scaling it up changes nothing.
+ *      Resolution changes nothing either. The only free variable is how many
+ *      degrees of the operator's view the surface is allowed to occupy.
+ *
+ *   3. Pick the texel density, which fixes the pixel sizes:
+ *        D = 1280 px/m
+ *        font_px = 0.0473449 × 1280 = 60.60 → 61 px  (rounded UP, never down)
+ *        check:  61 × 0.73 = 44.53 px ÷ 1280 = 0.034789 m
+ *                2 · atan(0.0173945 / 0.9) = 2.214°  ≥ 2.2°  ✓
+ *        advance_px = 0.6 × 61 = 36.6 px
+ *        line_px    = 1.35 × 61 ≈ 82 px
+ *
+ *   4. Size the surface from the character target. The target is the wire
+ *      protocol's own summary cap: §6 allows 6 words, and its example
+ *      "claimed tsk_01k4 — wiring JWT" is 29 characters, so a 6-word summary
+ *      lands around 40. FORTY COLUMNS is therefore the floor at which this
+ *      tier does the job the manager assigned it.
+ *        text column = 40 × 36.6 = 1464 px, plus 100 px of bar and gutters
+ *        → 1564 px, rounded up to a clean 1600 px = 1.25 m at 1280 px/m,
+ *          which leaves 1500 px of column = 40 columns with 36 px to spare.
+ *        1024 px = 0.80 m gives (1024 − 96 − 40) / 82 = 10.8 → 10 rows.
+ *
+ *   5. What that costs in field of view, stated plainly because it is the
+ *      real price of the 2.2° floor:
+ *        width  1.25 m at 0.9 m = 2 · atan(0.625 / 0.9) = 69.6°
+ *        height 0.80 m at 0.9 m = 2 · atan(0.400 / 0.9) = 47.9°
+ *      About two thirds of the Quest 3's ~110° horizontal field. That is a
+ *      large slab, and it is deliberate: this tier only exists while the
+ *      operator is deliberately reading one session, and it is dismissed with
+ *      the same button that summoned it.
+ *
+ *   DEVIATION, called out for review: the task contract's `createQuadLayer`
+ *   example passes `width: 0.55, height: 0.40` — the AMBIENT panel's
+ *   dimensions. Carried over literally, at the mandatory 2.2° floor those give
+ *        (0.55 × 1280 − 100) / 36.6 = 16 columns
+ *        (0.40 × 1280 − 136) / 82   =  4 rows
+ *   i.e. a 16 × 4 transcript, which cannot hold one untruncated summary line,
+ *   let alone a transcript, and would fail plan §11/M4's "comfortably readable
+ *   without leaning in". The two numbers were specified independently — the
+ *   0.55 × 0.40 quad and the 2.2° floor — and they do not meet, in exactly the
+ *   way §6's 6-word summary and §8's 1.5° floor did not meet. That collision
+ *   was closed in favour of readability (board seq 293); this one is resolved
+ *   the same way. The floor is honoured exactly, and the surface grew.
+ *
+ *   To ship the literal 0.55 × 0.40 instead, set `width`/`height` below — the
+ *   pixel sizes and the column/row counts recompute from them, and the tier
+ *   degrades to 16 × 4 rather than breaking.
+ *
+ *   Known and accepted: the surface is flat, so it foreshortens away from the
+ *   axis — the far corner sits 1.166 m from the eye rather than 0.9 m, where
+ *   the cap height reads 1.71°. The floor is met on axis and across the middle
+ *   rows, which is where a transcript is actually read; the corner is where the
+ *   oldest scrolled-off line sits. A cylinder layer would hold 2.2° across the
+ *   full width, and is out of scope for M4.
+ */
+export const FOCUS = {
+  minCapDeg: 2.2,
+  /**
+   * Denser than the ambient tier's 0.86α, and the reason is what sits behind
+   * it rather than a change of mind about §8.
+   *
+   * An ambient panel has only passthrough behind it, and 0.86 over a room reads
+   * as a solid object. The focus surface covers ~70° of view at 0.9 m, so what
+   * is behind it is the RING — and at 0.86 the neighbouring panels' titles show
+   * through the transcript as ghost text, competing with the thing the operator
+   * pulled forward to read. §8 asks for panels "dark and opaque enough to hold
+   * their own"; against a lit room that is 0.86, against another panel it is
+   * this. Still short of 1.0, so the surface stays an object in a room.
+   */
+  surfaceAlpha: 0.97,
+  capEmRatio: 0.73, // JetBrains Mono cap height / em — same face as the ambient tier
+  distance: 0.9, // m in front of the viewer, at eye height
+  width: 1.25, // m
+  height: 0.8, // m
+  density: 1280, // px/m
+  fontPx: 61,
+  advancePx: 36.6, // 0.6 em — monospace, so this is exact
+  lineH: 82,
+  titleH: 96, // title bar strip, incl. its bottom rule
+  barW: 28, // 0.021875 m — the SAME physical bar width as the ambient cell
+  padL: 38,
+  padR: 34,
+  padY: 20, // above the first transcript line and below the last
+  /** Layer resolution. Derived, so a change to width/height carries through. */
+  get pixelWidth() {
+    return Math.round(this.width * this.density);
+  },
+  get pixelHeight() {
+    return Math.round(this.height * this.density);
+  },
+  get textX() {
+    return this.barW + this.padL;
+  },
+  get textW() {
+    return this.pixelWidth - this.textX - this.padR;
+  },
+  /** Characters per transcript line — what the wrapper wraps to. */
+  get cols() {
+    return Math.max(1, Math.floor(this.textW / this.advancePx));
+  },
+  /** Transcript lines visible at once — what one scroll page is measured in. */
+  get rows() {
+    return Math.max(1, Math.floor((this.pixelHeight - this.titleH - 2 * this.padY) / this.lineH));
+  },
+};
+
+/** Canvas font shorthand for the focus tier. */
+export function focusFont(weight = 400) {
+  return `${weight} ${FOCUS.fontPx}px ${FONT_FAMILY}`;
+}
 
 /** The atlas: cell size, grid and the resulting canvas. */
 export const ATLAS = {
@@ -214,6 +347,23 @@ export function ambientFont(weight = 400) {
  * drift, no breathing, no idle pulses. Everything else is static or responds
  * directly to an operator action.
  */
+/**
+ * Collapse / summon (plan §7, §11/M5). A transition, not an animation: it runs
+ * only while the operator is holding the button that asked for it, and it ends.
+ * §8 permits exactly this — "everything else is static or responds directly to
+ * an operator action (focus pull-forward, collapse, ring rotation)".
+ */
+export const COLLAPSE = {
+  ms: 250,
+  /** Scale the ring shrinks to. Not 0: a zero-scale matrix is singular and
+   *  three.js will warn when it tries to normalise the normal matrix. */
+  minScale: 0.001,
+};
+
+/** Pointer hover highlight — an outline, drawn in `ink`. Deliberately NOT
+ *  `alert`, which §8 reserves for `needs_you` and nothing else, ever. */
+export const HOVER = { color: COLOR.ink, opacity: 0.9, inset: 0.004 };
+
 export const ALERT_PULSE = {
   periodMs: 1800, // slow
   minOpacity: 0.0, // overlay alpha floor; the atlas bar underneath is already

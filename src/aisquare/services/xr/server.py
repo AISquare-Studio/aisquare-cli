@@ -466,10 +466,31 @@ class _Connection:
         Neither raises. Non-negotiable #6 is that a dead client affects nothing,
         and a traceback out of a background task here is how that stops being
         true.
+
+        It is also the connection's ONLY clock, which is why the utterance cap
+        is re-checked here and not just as frames arrive. A burst that is
+        opened and then abandoned — the headset put down mid-word that
+        :data:`MAX_UTTERANCE_S` names — sends no further frames, so a check
+        that only runs on arrival never runs again and the loaded transcriber
+        is held for the life of the socket. The resolution is one poll interval
+        rather than exact, which is the right precision for a cap whose job is
+        to bound a leak rather than to time anything.
         """
         interval = poll_interval()
         while True:
             await asyncio.sleep(interval)
+            idle = self._utterance
+            if (
+                idle is not None
+                and idle.transcriber is not None
+                and idle.past_cap(now=time.monotonic())
+            ):
+                try:
+                    await self._drop_past_cap(idle)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return
             try:
                 with _store() as store:
                     current = projector.sessions(
@@ -753,9 +774,13 @@ class _Connection:
 
         The client sends 20 ms (640 bytes) at a time, but nothing here depends
         on that. A websocket implementation may coalesce or split frames on its
-        own, and :class:`~aisquare.services.xr.speech.BufferedTranscriber`
-        concatenates whatever it is handed — so the size is the client's
-        business and the ORDER is the only thing this path needs.
+        own, including mid-sample, and
+        :class:`~aisquare.services.xr.speech.BufferedTranscriber` carries a
+        trailing odd byte into the next chunk rather than concatenating it raw
+        — so the size really is the client's business, and the ORDER is the
+        only thing this path needs. That carry is load-bearing for this
+        sentence: without it one odd-length frame would flip the buffer's
+        parity permanently and every decode after it would raise.
         """
         utterance = self._utterance
         if utterance is None:
@@ -797,7 +822,12 @@ class _Connection:
         )
 
     async def _drop_past_cap(self, utterance: _Utterance) -> None:
-        """Past :data:`MAX_UTTERANCE_S`: say so once, swallow the rest."""
+        """Past :data:`MAX_UTTERANCE_S`: say so once, swallow the rest.
+
+        Reached from both clocks — the next frame to arrive, and the poller
+        when none does. Idempotent by the ``transcriber = None`` below, which
+        is what keeps a burst that trips both from being answered twice.
+        """
         self._forget_transcriber()
         utterance.transcriber = None
         await self._send_frame(
@@ -824,9 +854,23 @@ class _Connection:
         await self._send_frame(Error(code="stt_failed", message=_one_line(exc)))
 
     def _forget_transcriber(self) -> None:
-        """Drop the cached transcriber instead of decoding audio already discarded.
+        """Drop the cached transcriber, because it may be unusable — not merely stale.
 
-        ``finish()`` is what resets a
+        THE REASON IS CORRECTNESS, and it has to be said first, because the
+        cost argument below reads like the whole story and invites the refactor
+        that reintroduces the bug: *we only drop this to save a decode; on a
+        decode FAILURE there is no decode to save, so keep the model.* That is
+        a pure win right up until the failure was a mid-utterance raise, which
+        leaves the transcriber holding the buffer that caused it. Reusing it
+        then costs the operator voice for the REST OF THE CONNECTION rather
+        than one sentence, and it surfaces as a socket that looks healthy and
+        transcribes nothing. A fresh object is the only state this connection
+        can reason about, so every path that abandons an utterance drops it.
+        ``tests/test_xr_server.py`` pins this: with the line below removed, an
+        odd-length frame anywhere in one burst kills the next burst too.
+
+        Cost agrees, which is why there is nothing to trade off. ``finish()``
+        is what resets a
         :class:`~aisquare.services.xr.speech.BufferedTranscriber`, and calling
         it here would run a decode over up to a minute of audio for the sole
         purpose of throwing the answer away. Dropping the object costs the NEXT

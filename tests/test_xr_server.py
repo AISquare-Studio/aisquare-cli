@@ -15,6 +15,7 @@ import socket
 import sqlite3
 import threading
 import time
+from array import array
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,7 +38,12 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import mcp_server
 from aisquare.services.xr import server as xr_server
 from aisquare.services.xr import speech
-from aisquare.services.xr.speech import FakeTranscriber, SpeechUnavailable, Transcriber
+from aisquare.services.xr.speech import (
+    BufferedTranscriber,
+    FakeTranscriber,
+    SpeechUnavailable,
+    Transcriber,
+)
 
 CODER = "bbbb2222-0000-0000-0000-000000000000"
 PLANNER = "aaaa1111-0000-0000-0000-000000000000"
@@ -712,6 +718,33 @@ def test_an_utterance_past_either_cap_is_dropped_with_one_error(
     assert not [frame for frame in frames if frame["t"] in ("stt", "ack")], "dropped, not decoded"
 
 
+def test_an_utterance_opened_and_abandoned_is_capped_by_the_clock(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headset put down mid-word, which is the case the cap's docstring names.
+
+    A burst that is opened and then simply stops sending frames is the one the
+    wall-clock cap exists for, and it is the one an arrival-triggered check can
+    never see: no frame arrives, so nothing re-evaluates, and the loaded model
+    is held for the life of the socket. The poller is the connection's only
+    clock, so the cap is re-checked there.
+
+    No frames at all after the header — not even one — because a single frame
+    would let the arrival path take the credit and leave the timer untested.
+    """
+    http, _project, token, built = voice
+    monkeypatch.setattr(xr_server, "MAX_UTTERANCE_S", 0.0)
+    with _authed(http, token) as connection:
+        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+        answer = json.loads(_until(connection, "error"))
+        connection.send_text(json.dumps({"t": "prompt", "session": CODER, "text": "still here"}))
+        assert json.loads(_until(connection, "ack"))["ok"] is True, "fail-open: the socket lives"
+
+    assert answer["code"] == "audio_too_long"
+    assert built[0].fed == b"", "the abandoned burst never fed the model it was holding"
+
+
 def test_an_utterance_that_transcribes_to_nothing_is_not_a_prompt(
     work_dir: Path,
 ) -> None:
@@ -768,6 +801,187 @@ def test_a_slow_decode_does_not_stall_the_board_poll(work_dir: Path) -> None:
         # interpreter exit and turn one failing test into a wedged run.
         release.set()
     assert [session["state"] for session in delta["changed"]] == ["needs_you"]
+
+
+TONE = b"\x40\x1f\xc0\xe0" * (speech.FRAME_BYTES // 4)
+"""One 20 ms frame a REAL transcriber will accept as speech, not room tone.
+
+:data:`FRAME` is zeroes, which is all the fake path needs and all it should
+use. The tests below drive a real
+:class:`~aisquare.services.xr.speech.BufferedTranscriber`, whose gate is
+one-way: until a frame is loud enough nothing is buffered at all, so an
+all-zero frame would make every assertion below vacuously pass. +/-8000 as a
+square wave, the same shape ``tests/test_xr_speech.py`` uses, and deliberately
+free of :data:`_POISON`'s byte pair.
+"""
+
+_POISON = b"\xad\xde"
+"""One sample (0xdead) a :func:`_strict_decode` refuses to transcribe.
+
+A stand-in for "the backend threw mid-utterance", which used to be reachable
+with an odd-length frame and no longer is — see
+``test_an_odd_frame_anywhere_is_transcribed_not_failed``. The failure it
+provokes is the real one, not a patched method: ``BufferedTranscriber`` calls
+``_reset()`` only AFTER ``_decode`` returns, so a decode that raises leaves the
+poisoned bytes in the buffer and every later decode on that object raises too.
+That is what makes dropping the object the fix and reusing it a permanent loss
+of voice.
+"""
+
+
+def _strict_decode(pcm: bytes) -> str:
+    """Production's decode shape: reject a half sample, and reject the poison.
+
+    ``speech.py``'s real decoder opens with ``numpy.frombuffer(pcm,
+    dtype=numpy.int16)``, which raises on a length that is not a multiple of
+    two. numpy ships in the optional ``xr`` extra, so it is used when it is
+    installed — which is what CI's ``[dev,xr]`` job runs — and ``array``, which
+    raises on exactly the same lengths for exactly the same reason, stands in
+    under ``[dev]``. The property is pinned in both, rather than skipped in one.
+    """
+    try:
+        import numpy
+    except ImportError:
+        array("h").frombytes(pcm)
+    else:
+        numpy.frombuffer(pcm, dtype=numpy.int16).astype(numpy.float32) / 32768.0
+    if _POISON in pcm:
+        raise ValueError("the backend refuses this audio")
+    return "real words"
+
+
+def _real_voice(
+    work_dir: Path,
+) -> Iterator[tuple[TestClient, ProjectInfo, str, list[BufferedTranscriber]]]:
+    """A socket whose transcriber is the REAL buffering one over :func:`_strict_decode`.
+
+    The list is the only way to see the claim these tests are about: nothing on
+    the wire says whether the connection built a new transcriber or reused the
+    one it already had.
+    """
+    built: list[BufferedTranscriber] = []
+
+    def factory() -> BufferedTranscriber:
+        made = BufferedTranscriber(_strict_decode)
+        built.append(made)
+        return made
+
+    for http, project, token in _voice(work_dir, factory):
+        yield http, project, token, built
+
+
+def _burst(connection: Any, frames: list[bytes], *, session: str = CODER) -> None:
+    """A push-to-talk burst of exactly these frames, in this order."""
+    connection.send_text(json.dumps({"t": "audio", "session": session, "seq": 0}))
+    for frame in frames:
+        connection.send_bytes(frame)
+    connection.send_text(json.dumps({"t": "audioEnd", "session": session}))
+
+
+def _tone_frames(*, odd_at: int | None = None, poison_at: int | None = None) -> list[bytes]:
+    """Enough loud frames to earn an interim, with one frame spoiled at ``at``."""
+    frames = [TONE] * (FRAMES_PER_INTERIM + 1)
+    if odd_at is not None:
+        frames[odd_at] = TONE + b"\x01"
+    if poison_at is not None:
+        frames[poison_at] = _POISON + TONE[len(_POISON) :]
+    return frames
+
+
+def _final_stt(connection: Any) -> dict[str, Any]:
+    """Drain interims and return the ``stt`` frame with ``final: true``."""
+    frame = json.loads(_until(connection, "stt"))
+    while frame["final"] is False:
+        frame = json.loads(_until(connection, "stt"))
+    return dict(frame)
+
+
+@pytest.mark.parametrize("where", [0, FRAMES_PER_INTERIM // 2, FRAMES_PER_INTERIM])
+def test_an_odd_frame_anywhere_is_transcribed_not_failed(work_dir: Path, where: int) -> None:
+    """A frame that ends mid-sample costs nothing — not the sentence, not the next one.
+
+    ``_on_audio_frame``'s docstring tells a client author the frame size is
+    their business and any size will do. It is true only because ``feed``
+    carries the trailing odd byte into the next chunk; concatenated raw, one
+    639-byte frame flips the buffer's parity permanently and every decode after
+    it raises, which reaches the operator as a bare ``stt_failed`` for a
+    sentence they now have to say again with no clue why.
+
+    First frame, mid-utterance and the last frame before ``audioEnd`` are all
+    tested because they fail differently: the first is the one the gate sees,
+    and the last is the only one that can reach ``finish`` without an interim
+    having decoded first.
+    """
+    for http, _project, token, built in _real_voice(work_dir):
+        with _authed(http, token) as connection:
+            _burst(connection, _tone_frames(odd_at=where))
+            final = _final_stt(connection)
+            assert final["text"] == "real words", f"the odd byte cost the sentence: {final}"
+            connection.send_text(json.dumps({"t": "prompt", "session": CODER, "text": "after"}))
+            assert json.loads(_until(connection, "ack"))["ok"] is True
+        assert len(built) == 1, "a clean utterance keeps the model it loaded"
+
+
+@pytest.mark.parametrize("where", [0, FRAMES_PER_INTERIM // 2, FRAMES_PER_INTERIM])
+def test_a_backend_failure_anywhere_does_not_poison_the_next_utterance(
+    work_dir: Path, where: int
+) -> None:
+    """A transcriber that raised is thrown away, because it may never work again.
+
+    ``BufferedTranscriber`` resets in ``finish()`` and only after the decode
+    returns, so an object that raised still holds the audio that made it raise:
+    reusing it turns one lost sentence into a socket that looks live and
+    transcribes nothing for as long as the operator keeps it open.
+
+    The final assertion is the one that actually pins it. The wire cannot show
+    whether the connection reused an object or built a new one, so a test that
+    only checked the second transcript would pass against a
+    ``_forget_transcriber`` that did nothing on any day the poison happened to
+    fall outside what the second decode was handed.
+    """
+    for http, _project, token, built in _real_voice(work_dir):
+        with _authed(http, token) as connection:
+            _burst(connection, _tone_frames(poison_at=where))
+            failure = _drain_until(connection, "error")[-1]
+            assert failure["code"] == "stt_failed", failure
+
+            _burst(connection, _tone_frames())
+            final = _final_stt(connection)
+            assert final["text"] == "real words", f"the next utterance was poisoned: {final}"
+        assert len(built) >= 2, f"the poisoned transcriber was REUSED: built={len(built)}"
+
+
+def test_two_clients_speaking_at_once_never_hear_each_other(work_dir: Path) -> None:
+    """Two headsets, both mid-utterance, frames interleaved on the wire.
+
+    The existing two-client test has one client speaking and one sending a
+    stray frame, so it builds a single transcriber and says nothing about the
+    case this one is for: two open utterances at the same time, which is the
+    shape a second headset in the room actually produces.
+    """
+    built: list[FakeTranscriber] = []
+
+    def factory() -> FakeTranscriber:
+        made = FakeTranscriber(f"speaker {len(built) + 1}")
+        built.append(made)
+        return made
+
+    for http, _project, token in _voice(work_dir, factory):
+        with _authed(http, token) as first, _authed(http, token) as second:
+            first.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+            second.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+            for _ in range(FRAMES_PER_INTERIM):
+                first.send_bytes(FRAME)
+                second.send_bytes(FRAME)
+            first.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
+            second.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
+            heard = (_final_stt(first)["text"], _final_stt(second)["text"])
+
+    assert len(built) == 2, "each connection loaded its own model"
+    assert set(heard) == {"speaker 1", "speaker 2"}, f"one client heard the other: {heard}"
+    assert [len(made.fed) for made in built] == [speech.INTERIM_BYTES] * 2, (
+        "each transcriber got its own client's frames and only those"
+    )
 
 
 def test_two_clients_keep_their_own_transcriber_and_their_own_utterance(

@@ -195,7 +195,20 @@ class ManagerTab(Vertical):
         self.run_worker(self._spawn_manager, name=SPAWN_WORKER, thread=True, exit_on_error=False)
 
     def _spawn_manager(self) -> fleet_service.SpawnReceipt:
-        return fleet_service.spawn(self.project, "manager")
+        # The window is born the size of the pane that is about to show it
+        # (#149): Claude Code's diff panel opens by itself past 144 columns, and
+        # a window spawned at the old 200x50 default grew one before the pane's
+        # first resize could shrink it — a panel the UI then could not close.
+        return fleet_service.spawn(self.project, "manager", size=self._pane_size())
+
+    def _pane_size(self) -> tuple[int, int] | None:
+        """The manager pane's content size, or ``None`` before it has one (the default applies)."""
+        pane = self.query_one("#manager-pane", TerminalPane)
+        width, height = pane.content_size
+        if width > 0 and height > 0:
+            return (width, height)
+        width, height = self.content_size
+        return (width, max(height - 3, 1)) if width > 0 and height > 3 else None
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != SPAWN_WORKER:

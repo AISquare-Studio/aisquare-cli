@@ -31,6 +31,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import codenames, selfcli
+from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
@@ -168,8 +169,8 @@ class FakeTmux(TmuxServer):
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
-        width: int = 200,
-        height: int = 50,
+        width: int = tmux_core.DEFAULT_WINDOW_WIDTH,
+        height: int = tmux_core.DEFAULT_WINDOW_HEIGHT,
     ) -> WindowInfo:
         self.binary()
         self._counter += 1
@@ -193,6 +194,7 @@ class FakeTmux(TmuxServer):
                 "cwd": cwd,
                 "command": list(command),
                 "env": dict(env or {}),
+                "size": (width, height),
             }
         )
         return window
@@ -3194,3 +3196,23 @@ def test_the_bell_clears_when_the_pane_prints_after_the_notice(
     tmux.printed(agent.pane_id, ago=timedelta(seconds=-2))
     [moved_on] = fleet_service.list_agents(project)
     assert moved_on.state == "working"
+
+
+# --- window geometry (#149) ------------------------------------------------------------------
+
+
+def test_spawn_passes_the_callers_size_and_otherwise_the_default_under_the_diff_panel_line(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """A window is born the size of the pane that will show it; headless, the safe default."""
+    fleet_service.spawn(project, "coder", worktree=False, size=(97, 31))
+    assert tmux.spawned[-1]["size"] == (97, 31)
+
+    fleet_service.spawn(project, "tester", worktree=False)
+    width, height = tmux.spawned[-1]["size"]
+    assert (width, height) == (tmux_core.DEFAULT_WINDOW_WIDTH, tmux_core.DEFAULT_WINDOW_HEIGHT)
+    # The numbers that matter, pinned where the default is consumed: under the 144
+    # columns at which Claude Code's diff panel opens by itself, and not below the
+    # 110 it needs to open the panel on demand — so `/diff` still works.
+    assert 110 <= width < 144
+    assert height >= 24

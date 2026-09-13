@@ -382,6 +382,24 @@ def _data_arg(value: str) -> str:
     return value
 
 
+DEFAULT_WINDOW_WIDTH = 120
+DEFAULT_WINDOW_HEIGHT = 40
+"""The geometry a window is born with when nobody says (#149).
+
+It was 200x50, and the number that matters is 144: Claude Code's fullscreen
+renderer opens its diff panel BY ITSELF "once Claude starts editing files, if
+your terminal is at least 144 columns wide" (interactive-mode reference, "Diff
+panel"), and remembers "opened once → open on every edit" for the session and
+later ones. Every headless spawn — a manager starting coders, a `fleet spawn`
+with no UI open — therefore ran wide enough to grow a panel the UI could
+neither close (clicks are not forwarded, #148) nor reach with `/diff` while
+Claude was busy (typed input is queued). 120 keeps a headless window under that
+line and above 110, the width Claude Code needs to open the panel ON DEMAND
+(`/diff`), so nothing is lost; a window the UI shows adopts the pane's real
+size on first attach (``TerminalPane._sync_size``), as before.
+"""
+
+
 class TmuxServer:
     """A handle on one private tmux server (``-L socket``).
 
@@ -641,8 +659,8 @@ class TmuxServer:
         cwd: Path,
         command: Sequence[str],
         env: Mapping[str, str] | None = None,
-        width: int = 200,
-        height: int = 50,
+        width: int = DEFAULT_WINDOW_WIDTH,
+        height: int = DEFAULT_WINDOW_HEIGHT,
     ) -> WindowInfo:
         """A new window named ``name`` running ``command`` — creating the session if needed.
 
@@ -654,10 +672,15 @@ class TmuxServer:
         would kill every agent), so ``name``, ``cwd``, ``env`` and every element
         of ``command`` go through :func:`_data_arg` and arrive verbatim.
 
-        ``width``/``height`` size a NEW session's first window; a window added
-        to an existing session takes the session's default size until
-        :meth:`resize`, which also pins that window to manual sizing (the global
-        ``window-size manual`` crashes tmux 3.4 — see :data:`BUNDLED_CONF`).
+        ``width``/``height`` size the window either way. A NEW session's first
+        window takes them on ``new-session -x -y``; a window added to an
+        EXISTING session is born at the session's size — 200x50 for every
+        session made before #149, or whatever its first window was — and is
+        therefore resized right after ``new-window`` through :meth:`resize`,
+        which also pins it to manual sizing (the global ``window-size manual``
+        crashes tmux 3.4 — see :data:`BUNDLED_CONF`). Without that second
+        step a coder spawned into a running manager's session was wide enough
+        for Claude Code to open its diff panel on its own (#149).
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
         """
@@ -670,7 +693,8 @@ class TmuxServer:
         ]
         args = [_data_arg(arg) for arg in command]
         fmt = f"#{{window_id}}{_SEP}#{{pane_id}}"
-        if self.has_session(session):
+        existing = self.has_session(session)
+        if existing:
             out = self.run(
                 "new-window", "-d", "-P", "-F", fmt, "-t", f"={session}:", "-n", _data_arg(name),
                 "-c", _data_arg(str(cwd)), *env_flags, "--", *args,
@@ -683,6 +707,14 @@ class TmuxServer:
                 "--", *args,
             )  # fmt: skip
         window_id, _, pane_id = out.strip().partition(_SEP)
+        if existing and pane_id:
+            # Born at the session's size, not the caller's (see the docstring);
+            # the resize is what makes the geometry argument mean the same
+            # thing on both branches. Fail-open: the window exists and is
+            # recorded whatever tmux says about its size — a refused resize
+            # costs geometry, never the agent, and the UI's own sync retries.
+            with contextlib.suppress(TmuxError):
+                self.resize(pane_id, width, height)
         return WindowInfo(
             session=session,
             window_id=window_id,

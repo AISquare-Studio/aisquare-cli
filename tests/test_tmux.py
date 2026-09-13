@@ -39,6 +39,8 @@ from aisquare.core.tmux import (
     BUNDLED_CONF,
     CHECK_SOCKET_SUFFIX,
     CONF_NAME,
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
     MIN_VERSION,
     PASTE_BUFFER,
     Capture,
@@ -426,7 +428,11 @@ def test_spawn_window_adds_a_window_when_the_session_exists(
         "-t", "=asq-amber-fox:", "-n", "reviewer", "-c", str(tmp_path),
         "--", "sh", "-c", "exit 3",
     ]  # fmt: skip
-    assert "-x" not in new_window, "an existing session's size is the session's"
+    assert "-x" not in new_window, "new-window takes no geometry: the session's applies…"
+    # …so the window is resized right after, to the requested (here: default) geometry —
+    # a coder spawned into a running manager's session was otherwise born at the
+    # session's 200x50 and grew Claude Code's diff panel on its own (#149).
+    assert fake.commands()[2] == ["resize-window", "-t", "%10", "-x", "120", "-y", "40"]
     assert (info.window_id, info.pane_id, info.current_command) == ("@5", "%10", "sh")
 
 
@@ -1341,3 +1347,29 @@ def test_live_a_frame_fits_the_render_budget(live: TmuxServer, width: int, heigh
     print(f"\ncapture {width}x{height}: median {median:.1f} ms, max {max(samples):.1f} ms")
     assert len(capture.lines) == height and capture.facts.width == width
     assert median < 200, f"a {width}x{height} frame took {median:.0f} ms (median of 20)"
+
+
+def test_the_default_geometry_stays_under_claude_codes_diff_panel_line(
+    fake_bin: Path, conf: Path, tmp_path: Path
+) -> None:
+    """#149: a window nobody sized must not be wide enough to open the diff panel by itself.
+
+    Claude Code's fullscreen renderer opens it "once Claude starts editing files, if
+    your terminal is at least 144 columns wide" and remembers that; the panel opens
+    on demand from 110 columns. Both numbers are pinned where the default is
+    defined and where it is consumed (a new session's ``-x``/``-y``).
+    """
+    assert 110 <= DEFAULT_WINDOW_WIDTH < 144
+    assert DEFAULT_WINDOW_HEIGHT >= 24
+    fake = FakeTmux(
+        Completed(1, "", "can't find session: asq-quiet-lark"),  # has-session
+        Completed(0, f"@1{_SEP}%1\n", ""),  # new-session -P
+    )
+    _server(fake, fake_bin, conf).spawn_window(
+        "asq-quiet-lark", name="coder-1", cwd=tmp_path, command=["claude"]
+    )
+    new_session = fake.commands()[1]
+    x, y = new_session.index("-x"), new_session.index("-y")
+    assert new_session[x + 1] == str(DEFAULT_WINDOW_WIDTH) == "120"
+    assert new_session[y + 1] == str(DEFAULT_WINDOW_HEIGHT) == "40"
+    assert len(fake.commands()) == 2  # a new session's first window needs no second step

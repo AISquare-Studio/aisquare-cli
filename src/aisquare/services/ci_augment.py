@@ -47,7 +47,7 @@ from aisquare.models import (
     RedactionLevel,
     TurnMetric,
 )
-from aisquare.services import ci_client, ci_descriptor, ci_override, ci_snapshot
+from aisquare.services import ci_client, ci_descriptor, ci_me, ci_override, ci_snapshot
 from aisquare.services.ci_contract import (
     MAX_PROMPT_CHARS,
     RECALL_TOOL,
@@ -229,7 +229,31 @@ class Gate:
         return self.reason is ClientReason.none
 
 
-def gate() -> Gate:
+def _resolve_run(base: str, key: str, project_id: str) -> tuple[str, str]:
+    """The run this session delivers against, and why — never raises.
+
+    ``AISQUARE_CI_RUN`` (or ``experiment.run``) first and unchanged: the harness,
+    the joint smoke and every ``CITEST_*`` identity depend on naming a run from
+    one shell variable, and a signed-in fallback that could override it would
+    make the harness depend on whoever happened to be logged in.
+
+    Then ``GET /v1/me``, but only with a bearer to ask with: without one the
+    honest answer is still "no run", and calling would spend a session-start
+    round trip to be told 401.
+    """
+    configured = ci_client.run_id()
+    if configured:
+        return configured, "run from AISQUARE_CI_RUN"
+    if not key:
+        return "", "no AISQUARE_CI_RUN, and no bearer to ask GET /v1/me with"
+    answer = ci_me.current(base=base, key=key)
+    if answer.me is None:
+        return "", f"no AISQUARE_CI_RUN, and GET /v1/me: {answer.detail}"
+    choice = ci_me.run_for(answer.me, ci_client.workspace_id(project_id) or None)
+    return (choice.run_id or ""), choice.detail
+
+
+def gate(project_id: str) -> Gate:
     """Master switch → usable URL → run id → descriptor, in that order.
 
     Each refusal is its own baseline or failure reason, so a machine that is
@@ -237,16 +261,29 @@ def gate() -> Gate:
     descriptor never share a row shape. With the switch off nothing past the
     first line runs — that is the "off costs nothing" promise, and it is why
     this function reads the environment before it reads anything else.
+
+    The run id has two sources now (``docs/ci-user-identity-handoff.md`` C2).
+    ``AISQUARE_CI_RUN`` keeps precedence, so the harness is untouched; when it
+    is unset and a bearer exists, ``GET /v1/me`` is asked which run is published
+    for the workspace this project is bound to. That call sits *before* the
+    descriptor fetch, which is why it is bounded and negatively cached the same
+    way — see :mod:`aisquare.services.ci_me`.
     """
+    # `project_id` is REQUIRED: the run comes from the project's own workspace
+    # binding, and a defaulted parameter is how two callers on the MCP recall
+    # path kept passing nothing through a refactor whose whole point was that
+    # the binding is per project (round-2 review). There is no caller that
+    # genuinely wants "no project".
     if not ci_client.enabled():
         return Gate(ClientReason.disabled)
     base = ci_client.endpoint()
     if not base:
         return Gate(ClientReason.not_configured, "no usable AISQUARE_CI_URL")
-    run = ci_client.run_id()
+    key = ci_client.api_key()
+    run, run_detail = _resolve_run(base, key, project_id)
     if not run:
-        return Gate(ClientReason.no_run, "no AISQUARE_CI_RUN", base=base)
-    result = ci_descriptor.current(run, base=base, key=ci_client.api_key())
+        return Gate(ClientReason.no_run, run_detail, base=base)
+    result = ci_descriptor.current(run, base=base, key=key)
     if result.descriptor is None:
         return Gate(ClientReason.descriptor_unavailable, result.detail, run_id=run, base=base)
     # The one place the staging override may speak, and it says so on the gate.
@@ -347,7 +384,9 @@ def _gated_event(
     cwd: Path | None,
 ) -> Augmentation:
     trace_id = new_trace_id()
-    opened = gate()
+    # The project's own binding decides which workspace's run is asked for
+    # (config `[experiment].bindings`, keyed by this id).
+    opened = gate(project.id)
     if not opened.open:
         return Augmentation(
             trigger,

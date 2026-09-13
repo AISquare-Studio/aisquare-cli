@@ -10,6 +10,7 @@ idea of what urllib does.
 Four routes, matching the server's:
 
 - ``GET /ready`` — always 200 (``doctor``'s reachability probe);
+- ``GET /v1/me`` — the identity-and-routing document, programmable;
 - ``GET /v1/experiment/runs/{run_id}`` — the delivery descriptor, programmable
   (default: the vendored valid fixture, so the stub and the contract agree);
 - ``POST /v1/hook`` — programmable status, body, delay before headers, and a
@@ -141,6 +142,11 @@ class StubCI:
     descriptor_status: int = 200
     descriptor_body: str = field(default_factory=lambda: json.dumps(live_descriptor()))
     ready_status: int = 200
+    me_status: int = 200
+    me_body: str = field(default_factory=lambda: fixture_text("me.v1.valid"))
+    """``GET /v1/me``'s answer, programmable like the descriptor's. Defaults to
+    the vendored valid fixture, so a test that does not care about identity gets
+    a document the client's own model accepts."""
     descriptor_location: str | None = None
     """A ``Location`` header on the descriptor route — a redirecting server."""
     seen: list[Recorded] = field(default_factory=list)
@@ -180,6 +186,15 @@ class StubCI:
     @property
     def descriptor_fetches(self) -> int:
         return sum(1 for r in self.seen if r.method == "GET" and "/v1/experiment/runs/" in r.path)
+
+    @property
+    def me_fetches(self) -> int:
+        """How many times ``GET /v1/me`` was actually asked.
+
+        The number the caching tests turn on: "cached" is only a claim until a
+        second call demonstrably does not reach the wire.
+        """
+        return sum(1 for r in self.seen if r.method == "GET" and r.path == "/v1/me")
 
     def respond(
         self,
@@ -256,6 +271,9 @@ def _handler(stub: StubCI) -> type[BaseHTTPRequestHandler]:
             self._record("")
             if self.path == "/ready":
                 self._send(stub.ready_status, b'{"status": "ready"}')
+                return
+            if self.path == "/v1/me":
+                self._send(stub.me_status, stub.me_body.encode("utf-8"))
                 return
             if self.path.startswith("/v1/experiment/runs/"):
                 self._send(

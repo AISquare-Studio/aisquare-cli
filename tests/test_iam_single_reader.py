@@ -23,10 +23,17 @@ READER = Path(iam.__file__).resolve()
 
 #: Existing HTTP clients outside the sign-in flow.
 PRE_EXISTING_HTTP = {
-    "services/ci_client.py",
     "services/explainability.py",
     "services/explainability_ops.py",
     "services/mcp_server.py",
+    # The CI test bed's transport, which landed on `main` with #72 after this
+    # guard was written. Its `urllib` import is at module scope on purpose and
+    # its docstring argues the case: the `prompt_submit` call runs synchronously
+    # in front of a developer who has just hit enter, so "disabled" has to mean
+    # zero measurable latency, and the path must work in a base install with no
+    # optional extra present. Deferring the import into the function would move
+    # the cost onto the first prompt rather than remove it.
+    "services/ci_client.py",
 }
 
 

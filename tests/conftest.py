@@ -189,9 +189,6 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_EXPLAINABILITY_TARGET",
         "EXPLAINABILITY_GATEWAY_URL",
         "EXPLAINABILITY_API_KEY",
-        # A sign-in token in the operator's shell would make every test run as them.
-        "AISQUARE_TOKEN",
-        "BROWSER",
         # The CI test bed's switches. An operator who has them exported would
         # otherwise run the suite's hooks against THEIR endpoint, with THEIR
         # token — measured once: four real POSTs to a listener during a green
@@ -203,6 +200,13 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "AISQUARE_CI_KEY",
         "AISQUARE_CI_RUN",
         "AISQUARE_CI_DELIVERY_OVERRIDE",
+        # A sign-in token in the operator's shell would make every test run as
+        # them — and, now that the CI bearer falls back to the signed-in user
+        # (docs/ci-user-identity-handoff.md C1), would send it to the CI server
+        # too. Cleared with the CI knobs rather than beside them, because after
+        # C1 they are one credential path with two sources.
+        "AISQUARE_TOKEN",
+        "BROWSER",
     ):
         monkeypatch.delenv(knob, raising=False)
     # The command sweeps invoke `login` with no arguments. Without this it would

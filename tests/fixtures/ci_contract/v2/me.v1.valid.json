@@ -1,0 +1,20 @@
+{
+  "contract_version": 1,
+  "principal_id": "usr_4f3c2b1a9e8d7c6b5a4938271605f4e3",
+  "auth_subject": "aisquare-idp:4f3c2b1a-9e8d-7c6b-5a49-38271605f4e3",
+  "roles": [
+    "developer"
+  ],
+  "workspaces": [
+    {
+      "workspace_id": "ws_kernel01",
+      "role": "developer",
+      "active_run_id": "run_kernel0001"
+    },
+    {
+      "workspace_id": "ws_9a8b7c6d5e4f30211203948576abcdef",
+      "role": "developer",
+      "active_run_id": null
+    }
+  ]
+}

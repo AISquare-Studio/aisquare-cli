@@ -688,7 +688,7 @@ def test_the_hook_boundary_survives_a_gate_that_raises(
         ci_descriptor, "current", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
     )
     with pytest.raises(RuntimeError):
-        ci_augment.gate()  # the gate itself is not guarded …
+        ci_augment.gate("prj_test")  # the gate itself is not guarded …
     # … the hook boundary is, and the session keeps its context.
     assert hooks_service.prompt_submitted("q", tmp_path, session_id=SESSION) == delta
     context = hooks_service.session_start_context(tmp_path, session_id=SESSION)

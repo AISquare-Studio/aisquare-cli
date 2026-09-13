@@ -94,6 +94,20 @@ def ci_descriptor_path(run_id: str) -> Path:
     return ci_cache_dir() / f"descriptor-{safe or 'unknown'}.json"
 
 
+def ci_me_path(bearer_digest: str) -> Path:
+    """Where ``GET /v1/me``'s answer is cached, keyed by a hash of the bearer.
+
+    By bearer rather than by user, so signing in as somebody else cannot serve
+    the previous identity's routing and a re-issued token starts cold. The
+    digest is sanitised the way ``ci_descriptor_path`` sanitises a run id even
+    though its caller only ever passes hex: the rule is that a value reaching a
+    path is bounded and alphabet-checked HERE, not trusted to have been checked
+    by whoever called.
+    """
+    safe = "".join(ch for ch in bearer_digest if ch.isalnum())[:32]
+    return ci_cache_dir() / f"me-{safe or 'unknown'}.json"
+
+
 def log_dir() -> Path:
     """Directory for capture and diagnostic logs."""
     return aisquare_home() / "log"

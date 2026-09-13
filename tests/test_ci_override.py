@@ -320,4 +320,4 @@ def test_the_override_costs_nothing_while_the_experiment_is_off(
         ci_override, "apply", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read"))
     )
     assert hooks_service.prompt_submitted("q", tmp_path, session_id=SESSION) == ""
-    assert ci_augment.gate().reason is ClientReason.disabled
+    assert ci_augment.gate("prj_test").reason is ClientReason.disabled

@@ -1,7 +1,7 @@
 # cliXR demo runbook
 
 > **Status: 2026-09-13 — every step below is an instruction, and every step a
-> desktop can settle has been run.** The four lines that need a headset are
+> desktop can settle has been run.** The five lines that need a headset are
 > marked **verify on headset** in the definition-of-done table at the end, and
 > nowhere else in this document is anything claimed that has not been executed.
 > Rehearsed twice end to end on the desktop; **not yet rehearsed on the
@@ -15,6 +15,34 @@ traps first — they are the only part of this that costs hours rather than
 minutes.
 
 ---
+
+## Before you start: the machine and the headset
+
+Two prerequisites this runbook assumes rather than installs. Both bite before
+step 1, and `aisquare doctor` only sees the first of them.
+
+**The CLI, with the `xr` extra.** The extra is what carries the WebXR server
+and the speech backend; a bare install has no `aisquare xr` at all:
+
+```sh
+pipx install 'aisquare-cli[xr]'
+```
+
+Working from a checkout of this repo instead — which is what the definition of
+done measures — install it editable from the repo root:
+
+```sh
+pip install -e '.[xr]'
+```
+
+**`adb`, and a Quest that will talk to it.** Step 2 says to accept the
+debugging prompt *inside* the headset; that prompt only ever appears if both
+sides were set up first. Install Android platform-tools so `adb` is on your
+`PATH` — `adb version` should answer — then enable **Developer Mode** for the
+device in the Meta Quest phone app and leave **USB debugging** on in the
+headset. Without it, the `adb reverse` line in trap 1 and step 2 fails with
+`no devices/emulators found`, the headset never sees `localhost`, and trap 1
+is then the symptom you chase instead of the cause.
 
 ## Before you start: the three traps (plan §13)
 
@@ -202,8 +230,16 @@ disrupts an agent.
 
 Within one poll (500 ms) the panel's bar turns the alert token `#FF5A4E` — the
 one colour in the palette reserved for `needs_you` and used nowhere else — and
-the chime fires from the panel's own position, which is the point: it tells you
-*where to turn*, not merely that something happened.
+the chime is emitted at the panel's own world position.
+
+**Verify on headset** (the audibly-located half). That the chime *is emitted*
+at the panel's position is settled on the desktop; that you can *hear where it
+is* is not, and hearing it is the half §16 asks for. Trigger it with the
+alerting panel behind your shoulder and outside your field of view, then turn
+towards the sound before you look at the ring. If you have to hunt for which
+panel it was, this line is not done — the bar going `#FF5A4E` is not evidence
+for it, and this is the step the plan calls the moment that justifies the whole
+thing.
 
 **It clears when that session goes back to work.** In the demo, answering the
 coder is what does it — its next prompt runs the `UserPromptSubmit` hook, which

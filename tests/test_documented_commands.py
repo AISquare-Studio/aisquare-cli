@@ -927,7 +927,12 @@ CENSUS = {
     # `--json board`, and the two `hook` invocations that drive §15 step 7 on
     # demand. The last two are the right-hand side of a `printf … |` pipeline,
     # which is why `_SEQUENCERS` learned `|`.
-    "docs/xr-demo.md": (11, 0),
+    #
+    # The one classified mention is the `pipx install 'aisquare-cli[xr]'` line in
+    # "Before you start": `aisquare-cli` matches the path-segment reason, so it is
+    # recorded as a mention rather than resolved as a command. That is correct —
+    # it names the distribution, not a subcommand of the CLI.
+    "docs/xr-demo.md": (11, 1),
 }
 
 

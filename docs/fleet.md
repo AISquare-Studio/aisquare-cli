@@ -590,6 +590,36 @@ badge beside the name. `fleet rename` changes it; `aisquare project switch
 amber-otter` and `--project amber-otter` both resolve it, and the "matches
 several projects" error lists codenames, because basenames are what collide.
 
+**Groups, pins and your own order.** The navigator is a flat list until you
+arrange it: **drag** a project card onto a group header to put it in that
+group, between cards to reorder it, or onto the empty space below the list to
+take it out of its group; drag a group header to reorder the groups. Without a
+mouse: with the sidebar focused, `shift+↑` / `shift+↓` move the project (or
+group) under the cursor one step, `g` opens the group picker (an existing
+group, *New group…*, or *Ungroup*), `p` pins or unpins, `space` folds a group
+(or a card), and `u` undoes the last gesture — a toast says what was undone.
+`shift+click` marks several cards; `shift+g` or a drag then moves the whole
+set. Pinned projects and groups sit in a **📌 Pinned** section at the top, in
+pin order; a group header carries the roll-up of its members' agents, so a
+folded group still tells you something is running. A group shares **nothing**:
+context, prompts, snapshots, boards and explainability settings stay per
+project, and deleting a group never deletes a project. The same layer from a
+shell, with the same store state:
+
+```sh
+aisquare project group create frontend web docs     # a group, with its first members
+aisquare project group add frontend cli
+aisquare project group remove cli
+aisquare project group rename frontend ui
+aisquare project group move tools --before ui
+aisquare project group delete ui                    # members go back to the top level
+aisquare project pin api
+aisquare project unpin api
+aisquare project move docs --to top --position 0    # or --to <group> [--before P | --after P]
+aisquare project list --group ui                    # or --pinned; --json carries group, position, pinned
+aisquare project onboard ~/work/new --group tools   # created if new
+```
+
 **What is listed, and what is only captured.** Every directory a hooked Claude
 Code session runs in is *captured* — registered so that its prompt history and
 injected memory work — but the sidebar and `aisquare project list` show only

@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Project groups, pinning and manual order in the sidebar** (#140). A
+  management layer only, like browser tab groups: a `project_group` table and
+  `group_id` / `position` / `pinned_at` on the project row (schema v20); a
+  group shares nothing and deleting one ungroups, never deletes. In the
+  sidebar: drag a card onto a group header, between cards, or below the list;
+  drag a group header to reorder groups; `shift+↑`/`shift+↓` move, `g` opens
+  the group picker (existing, new, ungroup), `p` pins, `space` folds, `u`
+  undoes the last gesture with a toast, `shift+click` marks several cards and
+  `shift+g` groups them. A 📌 Pinned section at the top; group headers roll up
+  their members' agents. CLI parity: `project group create|rename|delete|list|
+  add|remove|move`, `project pin|unpin`, `project move --to <group|top>
+  [--before|--after|--position]`, `project list --group|--pinned` (JSON
+  carries `group`, `position`, `pinned`), `project onboard --group`. One
+  arranger (`services.project_groups.arrange`) decides the order every
+  surface shows; every change returns its way back.
 - **A workspace key per project** (#141). The explainability key was one per
   machine; pointing one project at another workspace meant another shell or
   swapping the file for everyone. `aisquare explainability key set [--project

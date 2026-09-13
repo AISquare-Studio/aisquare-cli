@@ -45,6 +45,16 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.groups import (
+    DropGroup,
+    DropProject,
+    GroupPicker,
+    GroupProjects,
+    MoveRow,
+    ToggleCollapse,
+    TogglePin,
+    UndoLayout,
+)
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -63,7 +73,7 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
 from aisquare.models import (
     AccountsOverview,
     CheckStatus,
@@ -72,7 +82,7 @@ from aisquare.models import (
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, project_groups
 from aisquare.services import fleet as fleet_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
@@ -102,6 +112,9 @@ def _doctor_report(result: object) -> _DoctorReport | None:
             return scope, list(checks)
     return None
 
+
+UNDO_DEPTH = 50
+"""How many layout gestures ``u`` can walk back in one session (#140)."""
 
 SELECTED_KEY = "fleet.selected"
 """``ui_state`` key for what is open: ``project:<id>``, ``agent:<project>/<id>``,
@@ -245,6 +258,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self._theme_restored = False
         self.show_captured = False
         """Whether the sidebar also lists the directories sessions merely ran in (#139)."""
+        self._undo: list[project_groups.UndoEntry] = []
+        """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
         self._gesture_button: int | None = None
         """Which button began the selection gesture now running, if one is."""
 
@@ -411,6 +426,7 @@ class FleetApp(App[None], inherit_bindings=False):
         try:
             with store_session() as store:
                 projects = store.list_projects(all=self.show_captured)
+                groups = store.project_groups()
         except Exception as exc:  # the store is briefly unavailable — keep what is shown
             self.store_error = f"{type(exc).__name__}: {exc}"
             if self.snapshot is None:
@@ -436,7 +452,7 @@ class FleetApp(App[None], inherit_bindings=False):
         self.store_error = None
         self.snapshot = FleetSnapshot(projects, agents, notices)
         sidebar.show_notice(None)
-        sidebar.show_projects(projects, agents, notices=notices)
+        sidebar.show_projects(projects, agents, notices=notices, groups=groups)
         self._feed_open_views(self.snapshot)
         self.refresh_accounts()
 
@@ -697,6 +713,114 @@ class FleetApp(App[None], inherit_bindings=False):
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(started.project_id)
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
+
+    # --- groups, pins and order (#140) -------------------------------------------------
+
+    def _layout(self, what: Callable[[ContextStore], project_groups.UndoEntry], said: str) -> None:
+        """Apply one gesture through the service, remember its way back, repaint, say so."""
+        try:
+            with store_session() as store:
+                entry = what(store)
+        except KeyError as exc:
+            self.notify(f"nothing to do: {exc.args[0]!r} is gone", severity="warning", timeout=4)
+            return
+        except ValueError as exc:
+            self.notify(str(exc), severity="error", timeout=6, markup=False)
+            return
+        except Exception as exc:  # the store said no: the frame stands, the gesture is lost
+            self.notify(f"could not {said}: {exc}", severity="error", timeout=6, markup=False)
+            return
+        self._undo.append(entry)
+        del self._undo[:-UNDO_DEPTH]
+        self.refresh_data()
+
+    def on_move_row(self, event: MoveRow) -> None:
+        if event.kind == "group":
+            self._layout(lambda s: project_groups.step_group(s, event.ident, event.delta), "move")
+        else:
+            self._layout(lambda s: project_groups.step(s, event.ident, event.delta), "move")
+
+    def on_toggle_pin(self, event: TogglePin) -> None:
+        def flip(store: ContextStore) -> project_groups.UndoEntry:
+            if event.kind == "group":
+                group = store.get_project_group(event.ident)
+                if group is None:
+                    raise KeyError(event.ident)
+                return project_groups.pin_group(store, event.ident, group.pinned_at is None)
+            project = store.update_project_layout(event.ident)
+            return project_groups.pin(store, event.ident, project.pinned_at is None)
+
+        self._layout(flip, "pin")
+
+    def on_toggle_collapse(self, event: ToggleCollapse) -> None:
+        def fold(store: ContextStore) -> project_groups.UndoEntry:
+            group = store.get_project_group(event.group_id)
+            if group is None:
+                raise KeyError(event.group_id)
+            return project_groups.set_collapsed(store, event.group_id, not group.collapsed)
+
+        self._layout(fold, "fold")
+
+    def on_drop_project(self, event: DropProject) -> None:
+        ids = list(event.project_ids)
+
+        def drop(store: ContextStore) -> project_groups.UndoEntry:
+            entry = project_groups.UndoEntry(f"move {len(ids)} project(s)")
+            before = event.before
+            for project_id in ids:
+                part = project_groups.move_project(
+                    store, project_id, to=event.scope or project_groups.TOP, before=before
+                )
+                for pid, layout in part.projects.items():
+                    entry.projects.setdefault(pid, layout)
+            return entry
+
+        self._layout(drop, "move")
+        self.sidebar.action_clear_marks()
+
+    def on_drop_group(self, event: DropGroup) -> None:
+        self._layout(
+            lambda s: project_groups.move_group(s, event.group_id, before=event.before), "move"
+        )
+
+    def on_group_projects(self, event: GroupProjects) -> None:
+        """``g`` / ``shift+g``: the picker, then the move it chose."""
+        ids = list(event.project_ids)
+        try:
+            with store_session() as store:
+                groups = [g for g in store.project_groups()]
+        except Exception as exc:
+            self.notify(f"could not read the groups: {exc}", severity="error", markup=False)
+            return
+
+        def chosen(choice: str | None) -> None:
+            if choice is None:
+                return
+            if choice == "ungroup":
+                self._layout(lambda s: project_groups.remove_from_group(s, ids), "ungroup")
+            elif choice.startswith("new:"):
+                name = choice[4:]
+                self._layout(lambda s: project_groups.create_group(s, name, ids)[1], "group")
+            elif choice.startswith("group:"):
+                gid = choice[6:]
+                self._layout(lambda s: project_groups.add_to_group(s, gid, ids), "group")
+            self.sidebar.action_clear_marks()
+
+        self.push_screen(GroupPicker(groups, len(ids)), chosen)
+
+    def on_undo_layout(self, event: UndoLayout) -> None:
+        if not self._undo:
+            self.notify("nothing to undo", timeout=3)
+            return
+        entry = self._undo.pop()
+        try:
+            with store_session() as store:
+                done = project_groups.undo(store, entry)
+        except Exception as exc:
+            self.notify(f"could not undo: {exc}", severity="error", markup=False)
+            return
+        self.refresh_data()
+        self.notify(f"undid: {done}", timeout=4, markup=False)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.

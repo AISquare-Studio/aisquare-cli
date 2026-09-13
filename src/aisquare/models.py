@@ -103,6 +103,13 @@ class ProjectInfo(BaseModel):
     is a directory a hooked session merely ran in: captured (prompt history and
     injection keep working there) but not shown in the sidebar or ``project
     list`` until something deliberate adds it."""
+    group_id: str | None = None
+    """The one :class:`ProjectGroup` this project sits in, like a browser tab (#140)."""
+    position: int | None = None
+    """Manual order inside its scope (its group, or the top level); ``None`` = never
+    arranged, which sorts after every arranged project, by name."""
+    pinned_at: datetime | None = None
+    """Set when the project is pinned: it renders in the Pinned section, in pin order."""
 
 
 class InjectionRecord(BaseModel):
@@ -736,6 +743,23 @@ FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited"
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
+
+
+class ProjectGroup(BaseModel):
+    """A named, collapsible container of projects — a management layer only (#140).
+
+    A group shares NOTHING: context entries, prompt history, snapshots, boards
+    and explainability settings stay per project, and no other table carries a
+    group id. Deleting a group ungroups its members and deletes no project.
+    """
+
+    id: str
+    name: str
+    position: int = 0
+    """Manual order among the top-level groups."""
+    pinned_at: datetime | None = None
+    collapsed: bool = False
+    created_at: datetime
 
 
 class ProjectExplainability(BaseModel):

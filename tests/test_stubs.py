@@ -118,7 +118,19 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     *(
         (group, command)
         for group in ("project", "workspace")
-        for command in ("info", "list", "switch", "link", "onboard", "forget", "prune")
+        for command in (
+            "info",
+            "list",
+            "switch",
+            "link",
+            "onboard",
+            "forget",
+            "prune",
+            "pin",
+            "unpin",
+            "move",
+            "group",
+        )
     ),
     *(("config", command) for command in ("list", "get", "set", "redaction")),
     *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),

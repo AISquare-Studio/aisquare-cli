@@ -9,8 +9,10 @@ proves the same path a headset sees.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import logging
 import socket
 import sqlite3
 import threading
@@ -19,7 +21,7 @@ from array import array
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -1226,3 +1228,345 @@ def test_xr_is_registered_as_a_command_the_sweeps_must_not_invoke() -> None:
         "not invoke it — add it to UNINVOKED beside `serve`"
     )
     assert "blocks" in UNINVOKED["xr"], "the reason must say why, as every entry does"
+
+
+# --- unread badges --------------------------------------------------------------
+
+SECOND = "bbbb3333-0000-0000-0000-000000000000"
+"""Shares a four-character prefix with :data:`CODER`, which is the point."""
+
+
+def _join(project: ProjectInfo, session_id: str, *, role: str = "runner") -> None:
+    """Register a session on a board that is already being watched.
+
+    Committed on its own, before any event for it, because that is the order
+    the real thing happens in — a session registers and then works — and it is
+    the order the poll loop's seeding is written against.
+    """
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=session_id,
+                project_id=project.id,
+                role=role,
+                started_at=now,
+                last_seen_at=now,
+            )
+        )
+
+
+def _say(project: ProjectInfo, session_id: str, count: int) -> None:
+    """``count`` board events from one session: the thing a badge counts."""
+    from aisquare.core.ids import new_event_id
+    from aisquare.models import TeamEvent
+
+    with store_session() as store:
+        for index in range(count):
+            store.add_team_event(
+                TeamEvent(
+                    id=new_event_id(),
+                    project_id=project.id,
+                    session_id=session_id,
+                    kind="note",
+                    text=f"working {index}",
+                    created_at=datetime.now(tz=UTC),
+                )
+            )
+
+
+def _badges_until(connection: Any, session_id: str, *, want: int) -> list[int]:
+    """Every badge ``session_id`` reported, up to and including ``want``.
+
+    Returns the trail instead of asserting on it, so the assertion stays where
+    a reader can see it: ``test_every_test_can_fail.py`` is right that one
+    buried in a helper is invisible, and it caught these four tests when they
+    were written that way.
+
+    The trail rather than the last value, because "the badge never moved" and
+    "the badge moved and moved back" are different bugs and a bare timeout
+    names neither. A stuck badge emits no delta at all, so the wait ends in
+    :data:`RECEIVE_TIMEOUT_S` and the trail so far is the answer.
+    """
+    seen: list[int] = []
+    for _ in range(60):
+        try:
+            frame = json.loads(_text(connection))
+        except AssertionError:
+            break  # nothing more is coming; the trail is what there is to report
+        if frame.get("t") != "delta":
+            continue
+        for session in frame["changed"]:
+            if session["id"] != session_id:
+                continue
+            seen.append(session["unread"])
+            if session["unread"] == want:
+                return seen
+    return seen
+
+
+def test_a_session_that_joins_after_the_client_connects_gets_a_badge(
+    client: tuple[TestClient, ProjectInfo, str],
+) -> None:
+    """A late joiner counts from when the client learned of it, not from never.
+
+    ``_seed_watermarks`` runs once, at connect, over the sessions that exist
+    then — and ``projector._unread_counts`` skips any id it holds no watermark
+    for. So a session spawned while the operator is wearing the headset had no
+    watermark, was skipped, and reported 0 unread permanently however many
+    events it produced (measured at four), until the operator thought to
+    subscribe to a panel whose badge gave them no reason to.
+
+    That is precisely the case the badge exists for: a newly spawned agent
+    announcing it is working is a fresh agent shouting for attention with a
+    blank badge, and spawning agents mid-session is what an operator does
+    during the demo this is built for.
+    """
+    http, project, token = client
+    with _authed(http, token) as connection:
+        _join(project, SECOND)
+        _say(project, SECOND, 3)
+        badges = _badges_until(connection, SECOND, want=3)
+
+    assert badges[-1:] == [3], (
+        "a session that joined after this client connected reported "
+        f"{badges or 'no badge at all'} — it has no watermark, so nothing counts it"
+    )
+
+
+def test_a_session_present_at_connect_still_counts_from_the_connection(
+    client: tuple[TestClient, ProjectInfo, str],
+) -> None:
+    """The path that already worked, pinned so the late-joiner seeding cannot bend it.
+
+    A session the client could see at connect is watermarked at the board's
+    position then, so its badge counts what happened while the operator was
+    wearing the headset and nothing that happened before.
+    """
+    http, project, token = client
+    _say(project, CODER, 5)  # before the socket exists: already read, by definition
+    with _authed(http, token) as connection:
+        _say(project, CODER, 3)
+        badges = _badges_until(connection, CODER, want=3)
+
+    assert badges[-1:] == [3], f"the five before the socket are not unread; got {badges}"
+
+
+def test_subscribing_clears_the_badge_and_counting_resumes_from_there(
+    work_dir: Path,
+) -> None:
+    """Focusing a panel marks it read, and the next event starts a new count."""
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("first"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    token = mcp_server.serve_token()
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        _authed(http, token) as connection,
+    ):
+        _say(project, CODER, 3)
+        counted = _badges_until(connection, CODER, want=3)
+        connection.send_text(json.dumps({"t": "subscribe", "session": CODER}))
+        cleared = _badges_until(connection, CODER, want=0)
+        _say(project, CODER, 2)
+        resumed = _badges_until(connection, CODER, want=2)
+
+    assert counted[-1:] == [3], f"three events, three unread; got {counted}"
+    assert cleared[-1:] == [0], f"focusing the panel marks it read; got {cleared}"
+    assert resumed[-1:] == [2], f"and the count starts again from there; got {resumed}"
+
+
+def test_subscribing_by_id_prefix_clears_the_badge_it_was_aimed_at(
+    work_dir: Path,
+) -> None:
+    """The watermark belongs to the session, so it is keyed on the session's own id.
+
+    ``store.get_session`` resolves PREFIXES — short ids work everywhere else in
+    this repo — and every frame that goes back out carries ``row.id``. Keying
+    the watermark on the string the CLIENT typed therefore wrote a watermark
+    that nothing ever reads: the badge stayed where it was for the life of the
+    socket, focusing the panel never cleared it, and the short string sat in
+    the map counting nothing — the exact outcome the comment above that line
+    says it is there to prevent.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("first"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    token = mcp_server.serve_token()
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        _authed(http, token) as connection,
+    ):
+        _say(project, CODER, 4)
+        counted = _badges_until(connection, CODER, want=4)
+        connection.send_text(json.dumps({"t": "subscribe", "session": CODER[:8]}))
+        cleared = _badges_until(connection, CODER, want=0)
+
+    assert counted[-1:] == [4], f"four events, four unread; got {counted}"
+    assert cleared[-1:] == [0], (
+        "subscribing by prefix must clear the badge of the session it resolved to, "
+        f"not of the string the client typed; got {cleared or 'no badge at all'}"
+    )
+
+
+def test_an_ambiguous_id_prefix_is_the_clients_error_not_an_internal_one(
+    work_dir: Path,
+) -> None:
+    """A prefix matching two sessions is bad input, and must be named as such.
+
+    ``AmbiguousIdError`` escaping ``_subscribe`` reaches ``_read_loop``'s
+    catch-all, which reports every escape as ``internal`` — a server fault.
+    The client is then told the server broke, when what happened is that it
+    typed four characters where it needed five.
+    """
+    project = _seed(work_dir)
+    _join(project, SECOND, role="coder")
+    token = mcp_server.serve_token()
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        _authed(http, token) as connection,
+    ):
+        connection.send_text(json.dumps({"t": "subscribe", "session": "bbbb"}))
+        answer = json.loads(_until(connection, "error"))
+        # Still alive: a fixable typo must not cost the operator their ring.
+        connection.send_text(json.dumps({"t": "subscribe", "session": None}))
+
+    assert answer["code"] == "ambiguous_session", (
+        "a two-way prefix tie is the client's input, not a server fault"
+    )
+    assert "bbbb" in answer["message"], "and it must say which string was ambiguous"
+
+
+# --- transcript tails -----------------------------------------------------------
+
+
+def _record(*texts: str) -> str:
+    """JSONL conversation turns, the shape ``_record_text`` reads."""
+    return (
+        "\n".join(
+            json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": text}]}})
+            for text in texts
+        )
+        + "\n"
+    )
+
+
+class _Recorder:
+    """A websocket that only remembers, for driving one tail without a client."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(json.loads(text))
+
+    def of(self, kind: str) -> list[dict[str, Any]]:
+        return [frame for frame in self.sent if frame.get("t") == kind]
+
+
+async def _until_frames(recorder: _Recorder, kind: str, count: int, what: str) -> None:
+    for _ in range(500):
+        if len(recorder.of(kind)) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"only {len(recorder.of(kind))} {kind} frames arrived — {what}")
+
+
+def test_the_transcript_tail_resyncs_when_the_file_shrinks(work_dir: Path) -> None:
+    """A transcript that is replaced must not kill the panel for good.
+
+    The tail seeks to a monotonically increasing offset and nothing compared it
+    to the file's size, so the moment the file became SHORTER than what had
+    already been read — a compaction, a ``/clear`` onto the same path, a log
+    rotation, a restarted session handed the same ``transcript_path`` — every
+    later read returned ``b""`` and was skipped by ``if not fresh: continue``.
+    No frame, no error, no close, forever: the board deltas keep flowing on the
+    same socket, so the operator sees a live ring beside a conversation that
+    has quietly stopped and nothing anywhere says why. Re-subscribing is the
+    only way back and nothing tells them to.
+
+    The docstring on this method reasons carefully about the opposite case — a
+    poll landing mid-write, where dropping a fragment costs one turn. This cost
+    every turn from then on.
+    """
+    transcript = work_dir / "session.jsonl"
+    transcript.write_text(_record("turn one", "turn two", "turn three"), encoding="utf-8")
+    project = _seed(work_dir, transcript=str(transcript))
+    with store_session() as store:
+        row = store.get_session(CODER)
+    assert row is not None
+
+    recorder = _Recorder()
+    connection = xr_server._Connection(cast(Any, recorder), project=project, token="unused")
+
+    async def drive() -> list[str]:
+        tail = asyncio.create_task(connection._stream_transcript(row))
+        try:
+            await _until_frames(recorder, "transcript", 3, "the backlog never replayed")
+            before = [frame["text"] for frame in recorder.of("transcript")]
+            assert before == ["turn one", "turn two", "turn three"]
+            # The file is REPLACED by a shorter one, in place: this is what a
+            # compaction or a reused transcript_path looks like from here.
+            transcript.write_text(_record("after the compaction"), encoding="utf-8")
+            await _until_frames(
+                recorder,
+                "transcript",
+                4,
+                "the tail is seeking past the end of a file that got shorter and "
+                "will never produce another frame",
+            )
+            return [frame["text"] for frame in recorder.of("transcript")]
+        finally:
+            tail.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await tail
+
+    delivered = asyncio.run(drive())
+
+    assert delivered[-1] == "after the compaction", "the stream follows the file that is there now"
+    assert recorder.of("error") == [], "a resync is recovery, not something to report"
+
+
+# --- push-to-talk bursts --------------------------------------------------------
+
+
+def test_a_burst_that_ends_on_a_different_session_keeps_the_headers_owner(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``audio`` owns the burst; ``audioEnd`` may not quietly re-address it.
+
+    The header's ``session`` used to be dropped on the floor and the burst
+    attributed to whatever ``audioEnd`` carried, so ``audio(session=A)``
+    followed by ``audioEnd(session=B)`` transcribed A's microphone into B's
+    panel, silently — and the schema could not warn anyone, because it required
+    ``session`` on both frames and documented no relationship between them.
+
+    The header wins rather than the burst being refused. Both close the defect,
+    but only this one keeps the operator's sentence: the microphone was opened
+    for A and the samples were recorded for A, so A is where they belong.
+    Discarding a spoken sentence over a client's bookkeeping bug would spend
+    the operator's words on our problem. The disagreement is logged instead,
+    because a client whose two frames disagree is still worth finding.
+    """
+    http, project, token, _built = voice
+    from aisquare.services import team as team_service
+
+    team_service.activate(project.root)
+    with caplog.at_level(logging.INFO, logger=xr_server.__name__):
+        with _authed(http, token) as connection:
+            connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+            for _ in range(FRAMES_PER_INTERIM):
+                connection.send_bytes(FRAME)
+            connection.send_text(json.dumps({"t": "audioEnd", "session": SECOND}))
+            final = json.loads(_until(connection, "stt"))
+            ack = json.loads(_until(connection, "ack"))
+
+    assert final == {"t": "stt", "text": CANNED, "final": True}
+    assert ack["session"] == CODER, "the words go to the panel whose microphone was opened"
+    assert ack["ok"] is True, "a client bookkeeping bug must not cost the operator a sentence"
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert CODER in logged and SECOND in logged, (
+        "the disagreement is not answered, so the log is the only place it is recorded"
+    )

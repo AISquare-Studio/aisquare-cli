@@ -42,6 +42,13 @@ _EVENT_SCAN = 500
 Deep enough that every session doing anything has said something inside it, and
 bounded so a board with a hundred thousand events costs the same per poll as a
 board with two hundred.
+
+"Back" is load-bearing and both readers honour it: this is a depth from the
+NEWEST event, so it is :meth:`~aisquare.core.store.ContextStore.recent_events`
+(``ORDER BY seq DESC``) that both callers use. The same number handed to
+``events_since`` means the OLDEST 500 past a floor, which reads identically and
+behaves in the opposite way — see :func:`_unread_counts`, which used to do
+exactly that.
 """
 
 #: ``base_role`` output -> palette slot. Every role this repo profiles is
@@ -186,12 +193,29 @@ def _unread_counts(
     you last looked at this one", which is what the badge on a panel should
     say. Sessions absent from the mapping have never been looked at and count
     from the connection's own start, which the caller seeds.
+
+    **Scanned from the newest end, which is the whole point.** This read used to
+    be ``events_since(floor, limit=_EVENT_SCAN)`` with ``floor`` the minimum
+    watermark — and since watermarks only ever move forward on a subscribe, that
+    floor is pinned at wherever the headset connected. ``events_since`` is
+    ``ORDER BY seq ASC``, so the window was a fixed 500-event slice anchored at
+    connect time, and once the board moved past its far edge NO event on the
+    board was ever in it again. Every badge on the ring froze at whatever it
+    happened to be showing: 700 unread read 500, 1000 unread still read 500. Not
+    a cap — a number that had stopped being about anything, sitting there
+    looking like a measurement.
+
+    Counting down from the newest instead means a badge always answers to what
+    just happened. :data:`_EVENT_SCAN` still bounds the work, and it does still
+    bound the ANSWER — a badge cannot report more than the scan is deep. That
+    is a cap and it behaves like one: it is reached only by a session with 500
+    unread events, where the ring is telling the operator "a great many" and the
+    exact figure is not what they are about to act on.
     """
     if not since:
         return {}
-    floor = min(since.values())
     counts: dict[str, int] = {}
-    for event in store.events_since(project_id, floor, limit=_EVENT_SCAN):
+    for event in store.recent_events(project_id, limit=_EVENT_SCAN):
         sid = event.session_id
         if sid is None or sid not in since:
             continue

@@ -137,6 +137,62 @@ def test_the_schema_names_both_directions_and_the_version() -> None:
     assert json.dumps(document), "the schema must be JSON-serializable as committed"
 
 
+def test_the_schema_carries_the_binary_audio_format() -> None:
+    """The audio half of the protocol must be implementable from the contract.
+
+    ``protocol.py`` opens by calling itself the contract that this server and a
+    browser client written by someone else are two implementations of. For the
+    JSON frames that is delivered. For the binary ones it was not: sample rate,
+    bit depth, channel count and endianness appeared NOWHERE in this tree —
+    ``audio`` said only "binary frames follow", and the single mention of a
+    format anywhere was a comment about a byte CAP ("~4 minutes of 16 kHz mono
+    PCM"), which is an inference about a magnitude, not a specification.
+
+    A second implementer could therefore read every line of the schema and
+    still send 48 kHz float32, which this server accepts and hands to whisper.
+    The two implementations that exist agreed out of band, in task
+    descriptions — the channel that is gone in six months.
+    """
+    audio = wire.schema_document()["audio"]
+    assert audio["encoding"] == "pcm_s16le"
+    assert audio["sampleRateHz"] == 16_000
+    assert audio["sampleBits"] == 16
+    assert audio["signed"] is True
+    assert audio["endianness"] == "little"
+    assert audio["channels"] == 1
+    assert audio["frameBytes"] == 640, "20 ms of 16 kHz mono PCM16 — 320 samples"
+    assert "sample" in audio["alignment"], "an odd byte length shifts every sample after it"
+
+
+def test_the_schema_says_which_close_code_must_not_be_retried() -> None:
+    """4401 is the one close a client must not reconnect through.
+
+    Every other close this server can produce is a transport close, where
+    reconnecting with backoff is correct — and reconnect-on-close is what the
+    client is specified to do. A client author who cannot tell the two apart
+    from the schema has to guess, and the guess that costs nothing to write is
+    an infinite retry loop against a token that will never be accepted.
+    """
+    codes = wire.schema_document()["closeCodes"]
+    entry = codes[str(wire.CLOSE_AUTH_FAILED)]
+    assert wire.CLOSE_AUTH_FAILED == 4401
+    assert entry["retry"] is False, "the machine-readable half is what a client branches on"
+    assert "transport close" in entry["description"], "and it must say what the others are"
+
+
+def test_a_negative_burst_ordinal_is_refused() -> None:
+    """``Audio.seq`` carries a constraint rather than only a default.
+
+    It was published with neither: no description and no bound, in a schema a
+    client author reads to decide what a field means. The reasonable readings
+    — a per-CHUNK sequence number, a gap-detection cursor — are both wrong and
+    neither exists anywhere in this server.
+    """
+    assert wire.parse_client('{"t":"audio","session":"ses_1","seq":7}').seq == 7
+    with pytest.raises(Exception, match=r"greater than or equal|seq"):
+        wire.parse_client('{"t":"audio","session":"ses_1","seq":-1}')
+
+
 # --- projector ------------------------------------------------------------------
 
 
@@ -407,3 +463,61 @@ def test_unread_counts_events_since_this_connection_looked(work_dir: Path) -> No
         _event(store, project.id, CODER, "result", "and again")
         later = projector.sessions(store, project.id, unread_since=watermark)
     assert later[0].unread == 2
+
+
+def test_a_badge_keeps_counting_after_the_board_passes_the_scan_depth(work_dir: Path) -> None:
+    """An unread badge answers to what just happened, not to a window pinned at connect.
+
+    :func:`projector._unread_counts` used to read ``events_since(floor,
+    limit=_EVENT_SCAN)``. That query is ``ORDER BY seq ASC``, so it returns the
+    OLDEST ``_EVENT_SCAN`` events past ``floor`` — and ``floor`` is
+    ``min(since.values())``, which watermarks only ever move forward from, so it
+    is pinned where the headset connected. The scanned window was therefore a
+    fixed 500-event slice of the board's past, and once the board moved beyond
+    its far edge nothing that happened afterwards was ever inside it again.
+
+    Every badge on the ring then stops responding to anything except a
+    subscribe, showing a stale number that looks exactly like a measurement.
+    This is the shape an operator meets it in: one busy session fills the scan
+    depth, and then a QUIET one says three things and is never heard.
+    """
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _session(store, PLANNER, project.id, role="manager")
+        for index in range(projector._EVENT_SCAN + 100):
+            _event(store, project.id, CODER, "note", f"busy {index}")
+        for index in range(3):
+            _event(store, project.id, PLANNER, "note", f"quiet {index}")
+        counts = projector._unread_counts(store, project.id, {CODER: 0, PLANNER: 0})
+
+    assert counts.get(PLANNER) == 3, (
+        "the planner's three events are the NEWEST on this board; a badge that "
+        "cannot see them is reading a window that stopped moving"
+    )
+    # The depth still bounds the answer. That is a cap, and it behaves like one:
+    # it is reached only by a session with _EVENT_SCAN unread events, where the
+    # ring is saying "a great many" and the exact figure is not what the
+    # operator is about to act on.
+    assert 0 < counts[CODER] <= projector._EVENT_SCAN
+
+
+def test_a_session_with_no_watermark_is_counted_by_nobody(work_dir: Path) -> None:
+    """The contract the server's late-joiner seeding depends on.
+
+    ``_unread_counts`` skips any id absent from ``since``, which is why
+    ``server._seed_late_joiners`` has to exist at all: a session the connection
+    has never watermarked reports nothing, forever, however loudly it works.
+    Pinned here so that the seeding and the skipping cannot drift apart.
+    """
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _session(store, PLANNER, project.id, role="manager")
+        for index in range(3):
+            _event(store, project.id, PLANNER, "note", f"loud {index}")
+        counts = projector._unread_counts(store, project.id, {CODER: 0})
+
+    assert PLANNER not in counts, "no watermark, no count — seeding is what fixes this"

@@ -48,6 +48,34 @@ serve = [
   # keeps one from being resolved in the first place.
   "mcp>=2.1,<3",
 ]
+xr = [
+  # The `aisquare xr` transport: static client + one websocket on 8748.
+  # Starlette is the ASGI app and uvicorn runs it -- the same pair `serve`
+  # already reaches for (mcp brings them in), chosen here for the same reason:
+  # the websocket half of this server is twelve lines on starlette and a
+  # protocol implementation on anything smaller.
+  #
+  # 0.37 is the floor because that is where `starlette.testclient` gained the
+  # websocket_connect context manager the suite drives the handshake through;
+  # 0.30 for uvicorn is its first release on the current `Config`/`Server`
+  # split. Both are lower bounds only: this code uses no API either has since
+  # changed, and pinning an upper bound would strand an operator who already
+  # has a newer one for something else in the same env.
+  "starlette>=0.37",
+  "uvicorn>=0.30",
+  # uvicorn speaks HTTP on its own but delegates the websocket protocol, and
+  # with neither `websockets` nor `wsproto` installed it answers every
+  # handshake with 404 -- a server that serves the page and silently refuses
+  # the socket. So this is a runtime dependency of the feature, not a dev
+  # convenience. >=12 is the rewritten asyncio implementation uvicorn's
+  # `websockets` impl targets.
+  "websockets>=12",
+  # Speech-to-text for push-to-talk. A later task wires it in behind
+  # services/xr/server.py's TRANSCRIBE hook; declared here because the extra
+  # is what an operator installs once, and a second install step for the half
+  # of the feature that needs a microphone is the step everyone skips.
+  "faster-whisper>=1.0",
+]
 explainability = [
   # This extra installs a distribution that shares our top-level package
   # DIRECTORY. `aisquare` (the SDK) ships aisquare/__init__.py; so do we. pip's
@@ -115,6 +143,16 @@ dev = [
   # py.typed and mypy runs strict over tests.
   "jsonschema>=4.18",
   "types-jsonschema>=4.18",
+  # The web half of `[xr]`, duplicated here exactly as `mcp` is above and for
+  # the same reason: mypy runs strict over src and tests, and an unresolvable
+  # `import starlette` in services/xr/ is a red typecheck job in CI, which
+  # installs `.[dev]` alone. faster-whisper is deliberately NOT duplicated --
+  # nothing imports it yet (the TRANSCRIBE hook defaults to None), and it
+  # drags ctranslate2 and a CUDA-shaped wheel set into every CI run to type
+  # nothing.
+  "starlette>=0.37",
+  "uvicorn>=0.30",
+  "websockets>=12",
 ]
 
 [project.scripts]

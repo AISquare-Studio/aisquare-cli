@@ -81,7 +81,7 @@ def test_the_session_entity_carries_every_field_the_client_draws() -> None:
             "role": "coder",
             "title": "auth refactor",
             "state": "needs_you",
-            "summary": "note wiring JWT",
+            "summary": "wiring JWT",
             "taskId": "tsk_1",
             "colorKey": "coder",
             "lastActivityAt": "2026-09-12T00:00:00Z",
@@ -277,12 +277,58 @@ def test_summary_is_at_most_six_words_of_the_latest_board_event(work_dir: Path) 
         _event(store, project.id, CODER, "result", "the latest event is the one that shows")
         snapshot = projector.snapshot(store, project.id)
     summary = snapshot.sessions[0].summary
-    assert summary.split()[0] == "result", "the newest event wins"
+    assert summary.startswith("the latest event"), "the newest event wins"
     # Six, the literal from plan §5 — not `projector.SUMMARY_WORDS`. Asserting
     # against the constant would make this test agree with any value the
     # constant is later given, which is the one thing it exists to prevent.
     assert len(summary.split()) <= 6, summary
     assert projector.SUMMARY_WORDS == 6, "the cap is the plan's number, not a preference"
+
+
+def test_the_summary_spends_its_characters_on_text_not_on_the_event_kind(
+    work_dir: Path,
+) -> None:
+    """Board seq 293, and it is an arithmetic finding rather than a taste one.
+
+    A panel at arm's length under §8's 1.5-degree cap-height floor fits about
+    THIRTEEN legible characters of summary. The kind used to lead, so all
+    thirteen went to it — ``claimed tsk_…`` — while the state chip beside the
+    panel was already saying the same word. The first thirteen characters are
+    the only ones the operator reads at that size, so this asserts on exactly
+    that prefix rather than on the whole string.
+    """
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _event(store, project.id, CODER, "task_claim", "wiring JWT into the refresh path")
+        snapshot = projector.snapshot(store, project.id)
+    summary = snapshot.sessions[0].summary
+
+    assert summary.startswith("wiring JWT"), summary
+    assert "task_claim" not in summary, "the state chip already carries the kind"
+    assert summary[:13] == "wiring JWT in", "the thirteen the operator actually reads"
+    # The cap is unchanged: the client truncates and the FOCUS tier renders the
+    # field whole. Dropping the prefix is not a licence to shrink the promise.
+    assert len(summary.split()) == 6, summary
+
+
+def test_an_event_with_no_text_falls_back_to_its_kind_rather_than_a_blank(
+    work_dir: Path,
+) -> None:
+    """The one case the kind still appears, and why it is not the old prefix.
+
+    It can only show up when there is no content for it to push out, which is
+    the whole objection to the prefix. A blank line under a panel title tells
+    the operator less than ``heartbeat`` does.
+    """
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(store, CODER, project.id, role="coder")
+        _event(store, project.id, CODER, "heartbeat", "   ")
+        snapshot = projector.snapshot(store, project.id)
+    assert snapshot.sessions[0].summary == "heartbeat"
 
 
 def test_transcript_text_never_reaches_the_ambient_tier(work_dir: Path) -> None:

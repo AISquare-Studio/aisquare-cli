@@ -100,18 +100,36 @@ def classify(session: TeamSession, *, now: datetime) -> SessionState:
 
 
 def summarize(event: TeamEvent | None) -> str:
-    """A board event as at most :data:`SUMMARY_WORDS` words.
+    """A board event's TEXT as at most :data:`SUMMARY_WORDS` words.
 
-    The event ``kind`` leads because it is the part that is always meaningful
-    (``note``, ``result``, ``task_claim``) and the text is whatever a session
-    happened to write. Clipping mid-sentence is fine here: this is a glance
-    target, and the operator who wants the rest focuses the panel.
+    **The event kind is not in this string, and that is a decision** (board
+    seq 293), not an omission. The cap here is six words, but the ambient tier
+    is a panel at arm's length with a 1.5-degree cap-height floor — §8's floor,
+    which exists because passthrough washes out low contrast — and the
+    arithmetic of those two numbers is about thirteen legible characters. Six
+    words do not fit in thirteen characters, so the client truncates, and
+    whatever leads is the whole of what the operator actually reads.
+
+    Leading with the kind spent all thirteen of them on it: ``task_claim
+    tsk_01k4 — wiring JWT`` renders as ``claimed tsk_…`` — a word the state
+    chip beside it already carries, and an id nobody reads off a wall. Leading
+    with the text spends them on ``wiring JWT``. The kind is not lost; it is
+    shown as the chip, which is the part of the panel that is *for* it.
+
+    The cap stays at six words rather than falling to two, because it is what
+    the protocol promises and the FOCUS tier renders the same field in full —
+    that two-tier split is what §5 and §7 are for. Clipping mid-sentence is
+    fine at both sizes: this is a glance target, and the operator who wants the
+    rest focuses the panel.
+
+    An event with no text at all falls back to its kind, because a blank panel
+    line says less than ``task_claim`` does. That is a fallback and not the old
+    prefix: it can only appear when there is no content to displace.
     """
     if event is None:
         return ""
-    words = f"{event.kind} {event.text}".split()
-    clipped = words[:SUMMARY_WORDS]
-    return " ".join(clipped)
+    words = event.text.split() or event.kind.split()
+    return " ".join(words[:SUMMARY_WORDS])
 
 
 def _title(session: TeamSession, task: TeamTask | None, agent: FleetAgent | None) -> str:

@@ -32,28 +32,34 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import paths
 from aisquare.core.spawn import untraced_env
+from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxServer, WindowInfo
 from aisquare.core.version import __version__
 from aisquare.models import (
     AccountsOverview,
     ClaudeAccount,
+    ClaudeAccountRecord,
     ClaudeAccountStatus,
     ClaudeIdentity,
     ClaudeInstall,
     ClaudeUsage,
+    ProjectInfo,
 )
 from aisquare.services import agents as agents_service
+from aisquare.services import settings as settings_service
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 """What Claude Code's ``/usage`` reads; ``anthropic-beta: oauth-2025-04-20`` is required."""
@@ -124,26 +130,372 @@ def _hooks_installed(account: ClaudeAccount) -> bool:
 
 
 def overview() -> AccountsOverview:
-    """The install plus every slot, offline. Usage is a separate, slower question."""
+    """The install plus every slot in priority order, offline. Usage is a separate, slower question.
+
+    "Offline" still holds: the registry is a local SQLite read. A store that
+    cannot be opened costs the ARRANGEMENT (order, aliases, the default badge)
+    and never the listing — see :func:`list_accounts`.
+    """
     return AccountsOverview(
-        claude=install(), accounts=[describe(account) for account in core.list_accounts()]
+        claude=install(), accounts=[describe(account) for account in list_accounts()]
     )
 
 
+# --- the registry: alias, priority order, default, disabled (#145) ------------------------------
+#
+# The directories under ~/.aisquare/claude-accounts say WHICH accounts exist and
+# who is signed in (core.claude_accounts). What no directory can say is how the
+# operator ARRANGED them — which one a launch should pick when nothing more
+# specific says, in what order to try them, what to call them — and that lives
+# in the ``claude_account`` table (core.store, v15). This section is the only
+# code that reads or writes it, and :func:`choose` is the only place a launch's
+# account is decided (pinned by tests/test_one_account_resolver.py).
+#
+# The two records are reconciled on every read, directories winning: a slot
+# with no row gets one at the end of the order, a row whose directory is gone is
+# dropped. There is no "migration" step because there is nothing to migrate —
+# every existing machine is the "no rows yet" case, and the first read arranges
+# its slots in slot order, which is exactly the order they were listed in before.
+
+PROJECT_ACCOUNT_KEY = "claude_account"
+"""The ``project_setting`` key holding a project's default account (a slot number)."""
+
+ChoiceSource = Literal["flag", "role binding", "project default", "machine default"]
+
+
+class AccountsUnreadable(AccountsError):
+    """The registry could not be read — the store is damaged or locked.
+
+    Raised only by the WRITERS (``set_default`` and friends), where refusing is
+    the honest answer. The readers fail open: they return the directories'
+    view with a note, because a launch and a listing must survive a wedged
+    ``context.db`` (tests/test_launch_survives_a_damaged_store.py).
+    """
+
+
+@dataclass(frozen=True)
+class AccountChoice:
+    """What :func:`choose` decided: an account and WHY, or no decision at all.
+
+    ``account is None`` means nothing chose — no flag, no binding, no project or
+    machine default — and the caller must leave the launch environment exactly
+    as it found it. That is the pre-#145 behaviour, byte for byte, and it is the
+    case every machine that never ran ``accounts default`` is in. It is
+    deliberately distinct from "slot 1 was chosen": an EXPLICIT slot 1 restores
+    this shell's own variables over a role binding's (``core.apply_launch_env``),
+    which a silent default must never do to a binding someone wrote by hand.
+    """
+
+    account: ClaudeAccount | None
+    source: ChoiceSource | None
+    notes: list[str] = field(default_factory=list)
+    """What was skipped or could not be read on the way down the ladder — for
+    the launch line's dim notes, never a reason to refuse."""
+
+    def describe(self) -> str:
+        """``account 2`` for a flag; ``work · machine default`` when a default decided."""
+        if self.account is None:
+            return ""
+        name = core.label(self.account)
+        return name if self.source == "flag" else f"{name} · {self.source}"
+
+
+def _arranged(store: ContextStore) -> list[ClaudeAccount]:
+    """Every slot on disk, folded with its registry row, in priority order.
+
+    Reconciles as it reads (see the section comment): rows are created for new
+    slots and dropped for vanished ones, so the table can never describe an
+    account that is not there.
+    """
+    on_disk = {account.slot: account for account in core.list_accounts()}
+    rows: dict[int, ClaudeAccountRecord] = {
+        record.slot: record for record in store.claude_accounts()
+    }
+    for slot in sorted(on_disk):
+        if slot not in rows:
+            rows[slot] = store.upsert_claude_account(slot, on_disk[slot].config_dir)
+    if any(slot not in on_disk for slot in rows):
+        for slot in list(rows):
+            if slot not in on_disk:
+                store.delete_claude_account(slot)
+        # A delete renumbers the order (the store closes the gap), so the rows
+        # read before it are stale: re-read rather than hand back positions with
+        # a hole where the pruned slot was.
+        rows = {record.slot: record for record in store.claude_accounts()}
+    arranged = [
+        on_disk[record.slot].model_copy(
+            update={
+                "alias": record.alias,
+                "position": record.position,
+                "is_default": record.is_default,
+                "disabled": record.disabled,
+            }
+        )
+        for record in sorted(rows.values(), key=lambda r: (r.position, r.slot))
+    ]
+    return arranged
+
+
+def _read_arranged() -> tuple[list[ClaudeAccount], str | None]:
+    """The arranged list, or the plain directories plus the reason the registry was not read."""
+    try:
+        with store_session() as store:
+            return _arranged(store), None
+    except sqlite3.Error as exc:
+        return core.list_accounts(), f"accounts registry unreadable ({exc})"
+
+
+def list_accounts() -> list[ClaudeAccount]:
+    """The accounts in priority order, each carrying its alias, rank, default and disabled flags.
+
+    Fails open to ``core.list_accounts()`` — slot order, no arrangement — when
+    the store cannot be opened, so the Accounts page and ``accounts list`` keep
+    working on a machine whose ``context.db`` is wedged; ``doctor`` is where
+    that state is reported.
+    """
+    accounts, _note = _read_arranged()
+    return accounts
+
+
 def resolve(ref: str | int) -> ClaudeAccount:
-    """A slot by number, or by the email it is signed in as."""
+    """A slot by number, by alias, or by the email it is signed in as.
+
+    The three spellings cannot collide: a slot is all digits, an email has an
+    ``@``, and an alias starts with a letter and has no ``@``
+    (``core.normalise_alias``). Lookups are case-insensitive.
+    """
     text = str(ref).strip()
+    accounts, note = _read_arranged()
     if text.isdigit():
-        account = core.find_account(int(text))
+        account = next((a for a in accounts if a.slot == int(text)), None)
         if account is None:
             raise NoSuchAccount(f"no Claude account in slot {text} — see: aisquare accounts")
         return account
     wanted = text.lower()
-    for account in core.list_accounts():
+    if "@" not in wanted:
+        by_alias = next((a for a in accounts if a.alias == wanted), None)
+        if by_alias is not None:
+            return by_alias
+    for account in accounts:
         identity = core.identity(account)
         if identity is not None and identity.email.lower() == wanted:
             return account
-    raise NoSuchAccount(f"no Claude account is signed in as {text!r} — see: aisquare accounts")
+    if "@" in wanted:
+        raise NoSuchAccount(f"no Claude account is signed in as {text!r} — see: aisquare accounts")
+    detail = f" ({note})" if note else ""
+    raise NoSuchAccount(
+        f"no Claude account is called {text!r} — not a slot, an alias or a signed-in email"
+        f"{detail}; see: aisquare accounts"
+    )
+
+
+def _role_binding_ref(role: str | None) -> tuple[str | None, str | None]:
+    """The account reference ``role``'s binding names, or the reason the config was unreadable."""
+    if role is None:
+        return None, None
+    try:
+        return settings_service.role_account_bindings().get(role), None
+    except Exception as exc:  # a broken config.toml costs the binding, never the launch
+        return None, f"role bindings unreadable ({type(exc).__name__}: {exc})"
+
+
+def choose(
+    explicit: str | None = None,
+    *,
+    role: str | None = None,
+    project: ProjectInfo | None = None,
+) -> AccountChoice:
+    """THE account resolver: which Claude account a launch runs under, and why.
+
+    The ladder, top rung wins::
+
+        --account <ref>            the flag (a slot, alias or email)
+        team bind <role> --account the role's binding
+        accounts default --project the project's default
+        accounts default           the machine default
+        (nothing)                  the launch environment is left untouched
+
+    ``launch``, ``fleet spawn`` and the Settings tab all ask here and nowhere
+    else — tests/test_one_account_resolver.py pins that — because the whole
+    point of a default is that every surface agrees on it.
+
+    A rung that names an account which DOES NOT EXIST raises
+    :class:`NoSuchAccount` naming the rung: a binding to a removed slot must
+    stop the launch, not quietly run it somewhere else (the same rule
+    ``resolve_binary`` applies to a missing executable). A rung that names a
+    DISABLED account is skipped with a note and the ladder continues — disabled
+    means "never pick this one for me", and the operator can still name it on
+    the flag, which is why the flag rung does not check. A registry or config
+    that cannot be read costs its rung and leaves a note, never the launch.
+    """
+    if explicit is not None:
+        return AccountChoice(resolve(explicit), "flag")
+    notes: list[str] = []
+    bound, note = _role_binding_ref(role)
+    if note is not None:
+        notes.append(note)
+    if bound:
+        try:
+            account = resolve(bound)
+        except NoSuchAccount as exc:
+            raise NoSuchAccount(
+                f"the role binding for {role!r} names account {bound!r}: {exc}"
+            ) from exc
+        if account.disabled:
+            notes.append(f"{core.label(account)} (bound to {role}) is disabled — skipped")
+        else:
+            return AccountChoice(account, "role binding", notes)
+    accounts, note = _read_arranged()
+    if note is not None:
+        notes.append(note)
+        return AccountChoice(None, None, notes)
+    if project is not None:
+        slot = _project_default_slot(project)
+        if slot is not None:
+            preferred = next((a for a in accounts if a.slot == slot), None)
+            if preferred is None:
+                raise NoSuchAccount(
+                    f"the default account of {project.root.name or project.id} is slot {slot}, "
+                    "which no longer exists — see: aisquare accounts default --project"
+                )
+            if preferred.disabled:
+                notes.append(f"{core.label(preferred)} (project default) is disabled — skipped")
+            else:
+                return AccountChoice(preferred, "project default", notes)
+    default = next((a for a in accounts if a.is_default), None)
+    if default is not None:
+        if default.disabled:
+            notes.append(f"{core.label(default)} (machine default) is disabled — skipped")
+        else:
+            return AccountChoice(default, "machine default", notes)
+    return AccountChoice(None, None, notes)
+
+
+def _project_default_slot(project: ProjectInfo) -> int | None:
+    with store_session() as store:
+        raw = store.project_setting(project.id, PROJECT_ACCOUNT_KEY)
+    return int(raw) if raw is not None and raw.isdigit() else None
+
+
+# --- arranging: the writers ---------------------------------------------------------------------
+#
+# Every writer resolves its reference FIRST (a bad name is a usage error, not a
+# half-applied change), then opens the store once. They raise AccountsError
+# subclasses with a sentence — never a traceback — because the CLI and the page
+# both show the message as-is.
+
+
+def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> ClaudeAccount | None:
+    """Make ``ref`` the machine default — or ``project``'s — and return it; ``None`` clears.
+
+    A project default is stored as the SLOT NUMBER, resolved now: the project
+    table is ours, and a number cannot go stale the way a typed alias could.
+    ``remove`` clears every project default that names the slot it removes.
+    """
+    account = resolve(ref) if ref is not None else None
+    try:
+        with store_session() as store:
+            _arranged(store)  # the row must exist before it can be the default
+            if project is not None:
+                store.ensure_project(project)
+                if account is None:
+                    store.clear_project_setting(project.id, PROJECT_ACCOUNT_KEY)
+                else:
+                    store.set_project_setting(project.id, PROJECT_ACCOUNT_KEY, str(account.slot))
+            else:
+                store.set_claude_account_default(account.slot if account else None)
+    except sqlite3.Error as exc:
+        raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
+    return account
+
+
+def project_default(project: ProjectInfo) -> ClaudeAccount | None:
+    """The account ``project`` defaults to, or ``None`` when it has none (or it vanished)."""
+    slot = _project_default_slot(project)
+    if slot is None:
+        return None
+    return next((a for a in list_accounts() if a.slot == slot), None)
+
+
+def machine_default() -> ClaudeAccount | None:
+    return next((a for a in list_accounts() if a.is_default), None)
+
+
+def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
+    """Name a slot (``None`` unnames it). The name must be free and well-formed."""
+    account = resolve(ref)
+    normalised = core.normalise_alias(alias) if alias is not None else None
+    try:
+        with store_session() as store:
+            _arranged(store)
+            try:
+                store.set_claude_account_alias(account.slot, normalised)
+            except sqlite3.IntegrityError as exc:
+                raise AccountsError(
+                    f"the alias {normalised!r} is already taken — see: aisquare accounts"
+                ) from exc
+            return next(a for a in _arranged(store) if a.slot == account.slot)
+    except sqlite3.Error as exc:
+        raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
+
+
+def set_disabled(ref: str, disabled: bool) -> ClaudeAccount:
+    """Take a slot out of (or back into) automatic selection. It stays usable by name."""
+    account = resolve(ref)
+    try:
+        with store_session() as store:
+            _arranged(store)
+            store.set_claude_account_disabled(account.slot, disabled)
+            return next(a for a in _arranged(store) if a.slot == account.slot)
+    except sqlite3.Error as exc:
+        raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
+
+
+def reorder(refs: Sequence[str]) -> list[ClaudeAccount]:
+    """Put ``refs`` first, in that order; everything else keeps its relative order after them."""
+    slots = [resolve(ref).slot for ref in refs]
+    try:
+        with store_session() as store:
+            _arranged(store)
+            store.order_claude_accounts(slots)
+            return _arranged(store)
+    except sqlite3.Error as exc:
+        raise AccountsUnreadable(f"the accounts registry cannot be written ({exc})") from exc
+
+
+Direction = Literal["up", "down", "top", "bottom"]
+
+
+def move(ref: str, direction: Direction) -> list[ClaudeAccount]:
+    """Move one slot a step (or all the way) in the priority order."""
+    account = resolve(ref)
+    order = [a.slot for a in list_accounts()]
+    index = order.index(account.slot)
+    order.pop(index)
+    if direction == "up":
+        order.insert(max(index - 1, 0), account.slot)
+    elif direction == "down":
+        order.insert(min(index + 1, len(order)), account.slot)
+    elif direction == "top":
+        order.insert(0, account.slot)
+    else:
+        order.append(account.slot)
+    return reorder([str(slot) for slot in order])
+
+
+def forget_arrangement(slot: int) -> None:
+    """Drop a removed slot's row and every project default that named it.
+
+    Best effort, after the directory is already gone: a registry that cannot
+    be written leaves rows the next read prunes anyway (``_arranged``), and a
+    project default pointing at a missing slot is reported by ``choose`` and
+    ``doctor`` rather than silently honoured.
+    """
+    with contextlib.suppress(sqlite3.Error), store_session() as store:
+        store.delete_claude_account(slot)
+        for project_id, value in store.project_settings(PROJECT_ACCOUNT_KEY).items():
+            if value == str(slot):
+                store.clear_project_setting(project_id, PROJECT_ACCOUNT_KEY)
 
 
 # --- usage ------------------------------------------------------------------------------
@@ -380,7 +732,12 @@ def remove(account: ClaudeAccount) -> Path:
     # The directory is leaving either way; a settings.json we cannot parse is not a stop.
     with contextlib.suppress(Exception):
         agents_service.disconnect(AGENT, account.config_dir)
-    return core.remove_account(account)
+    moved = core.remove_account(account)
+    # After the rename, never before: the number is free again the moment the
+    # directory moves, and a default or alias left behind would be inherited by
+    # whatever `add` puts in that slot next.
+    forget_arrangement(account.slot)
+    return moved
 
 
 # --- running ------------------------------------------------------------------------------------

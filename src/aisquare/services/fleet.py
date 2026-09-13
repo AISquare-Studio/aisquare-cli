@@ -896,6 +896,9 @@ def spawn(
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6).
+    ``account`` is resolved through the one account resolver (flag, role
+    binding, project default, machine default — #145) and the chosen slot is
+    both passed to ``launch`` as ``--account`` and recorded on the row.
     """
     config = settings()
     if not _role_ok(role):
@@ -966,6 +969,21 @@ def spawn(
         )
 
     mode = role_config.permission_mode if permission_mode is None else permission_mode
+    # WHICH ACCOUNT, decided here and carried into the window as an explicit
+    # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
+    # role binding, project default, machine default — runs HERE rather than
+    # only inside the window because the window's environment is the tmux
+    # server's, not the spawner's: a default of "slot 1" means THIS shell's
+    # claude, and only this process knows what that is (`carry_environment`
+    # below). It also lets the row record the slot before the agent has said a
+    # word, which a restart (#144) or a hand-over (#146) reads. An account the
+    # ladder names and the machine does not have refuses the spawn now, with
+    # the rung named, rather than starting a window that dies on its first line.
+    try:
+        choice = claude_accounts_service.choose(account, role=role, project=project)
+    except claude_accounts_service.NoSuchAccount as exc:
+        raise FleetError(str(exc)) from exc
+    notes.extend(f"accounts: {note}" for note in choice.notes)
     role_args = list(role_config.extra_args)
     extra = list(agent_args)
     identity = explainability_service.plan_session_identity(resolution.binary, [*role_args, *extra])
@@ -992,17 +1010,17 @@ def spawn(
     if mode:
         flags += ["--permission-mode", mode]
     flags += list(identity.inject_args)
-    if account is not None:
-        # Carried to `launch`, which resolves the slot and sets the account's
-        # variables inside the window; a slot that does not exist fails there
-        # with `unknown_account`, exactly as a hand-typed launch would.
-        flags += ["--account", account]
+    if choice.account is not None:
+        # Carried to `launch` as the RESOLVED slot, so the window's own pass
+        # through the resolver lands on the same account whatever its
+        # environment says, and sets the account's variables there.
+        flags += ["--account", str(choice.account.slot)]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {"AISQUARE_FLEET_AGENT": agent_id}
     if config.disable_native_agent_teams:
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
-    if account is not None:
+    if choice.account is not None:
         # `launch --account 1` restores "this shell's" login, and inside the
         # window that shell would be whoever started the private server — so
         # the CALLER's aisquare home and account variables travel with the
@@ -1029,6 +1047,7 @@ def spawn(
         worktree=use_worktree,
         task_id=resolved_task_id,
         spawned_by=spawned_by,
+        account_slot=choice.account.slot if choice.account is not None else None,
         created_at=_now(),
     )
     stored = _record(

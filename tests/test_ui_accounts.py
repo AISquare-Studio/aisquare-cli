@@ -259,7 +259,7 @@ def test_account_line_says_who_what_plan_and_how_much() -> None:
         week_resets_at=NOW,
     )
     signed = account_line_text(_status(2, "two@example.com"), usage).plain
-    assert signed.startswith("2  account 2")
+    assert signed.startswith("  2  account 2")  # two blanks: no default badge
     assert "two@example.com" in signed and "max 5x" in signed
     assert "session ▮▯▯▯▯ 12%" in signed and "week ▮▮▯▯▯ 40%" in signed
     assert "resets" in signed
@@ -271,7 +271,7 @@ def test_account_line_says_who_what_plan_and_how_much() -> None:
     assert "usage: HTTP 503" in account_line_text(_status(2, "two@example.com"), unavailable).plain
 
     absent = account_line_text(_status(3, None), usage).plain
-    assert absent.startswith("3  account 3") and "not signed in" in absent
+    assert absent.startswith("  3  account 3") and "not signed in" in absent
     assert "▮" not in absent and "max" not in absent  # nothing about a login that is not there
 
     expired = _status(1, "me@example.com", token_state="expired")
@@ -352,8 +352,8 @@ def test_the_section_summarises_and_opens_the_page(no_network: dict[str, Any]) -
     assert title == "Accounts  ✓ AISquare"
     assert detail == "2 Claude · me@example.com"
     assert before == "welcome"
-    assert rows[0].startswith("1  default") and "me@example.com" in rows[0]
-    assert rows[1].startswith("2  account 2") and "two@example.com" in rows[1]
+    assert rows[0].startswith("  1  plain claude") and "me@example.com" in rows[0]
+    assert rows[1].startswith("  2  account 2") and "two@example.com" in rows[1]
     assert "Signed in as me@aisquare.studio" in status
     assert claude.startswith("Claude Code 2.1.266")
 
@@ -884,3 +884,119 @@ def test_remove_runs_the_service_and_reports_where_the_directory_went(
     said = drive(go, overview=overview)
     assert removed == [2]
     assert said.startswith("✓ removed") and "2.removed-20260909T120000Z" in said
+
+
+# --- arranging (#145): the default badge, the order arrows, disable -----------------------------
+
+
+def _arranged(
+    status: ClaudeAccountStatus,
+    *,
+    is_default: bool = False,
+    disabled: bool = False,
+    alias: str | None = None,
+    position: int | None = None,
+) -> ClaudeAccountStatus:
+    """``status`` with its registry arrangement set, as ``services.claude_accounts`` folds it."""
+    account = status.account.model_copy(
+        update={
+            "is_default": is_default,
+            "disabled": disabled,
+            "alias": alias,
+            "position": position,
+        }
+    )
+    return status.model_copy(update={"account": account, "label": core.label(account)})
+
+
+def test_the_default_is_starred_named_by_its_alias_and_its_row_hides_the_default_button() -> None:
+    overview = _overview(
+        _arranged(_status(2, "two@example.com"), is_default=True, alias="work", position=1),
+        _arranged(_status(1, "me@example.com"), position=2),
+        _arranged(_status(3, "three@example.com"), disabled=True, position=3),
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], dict[int, tuple[bool, bool, bool, str]]]:
+        view = await open_accounts(pilot)
+        order = [r.slot for r in view.rows()]
+        buttons = {
+            slot: (
+                row(view, slot).query_one(f"#account-default-{slot}", Button).display,
+                row(view, slot).query_one(f"#account-up-{slot}", Button).disabled,
+                row(view, slot).query_one(f"#account-down-{slot}", Button).disabled,
+                str(row(view, slot).query_one(f"#account-toggle-{slot}", Button).label),
+            )
+            for slot in (2, 1, 3)
+        }
+        return [line(view, slot) for slot in order], buttons
+
+    lines, buttons = drive(go, overview=overview)
+    assert lines[0].startswith("★ 2  work") and "two@example.com" in lines[0]  # the default, first
+    assert lines[1].startswith("  1  plain claude")  # no star: not the default
+    assert lines[2].startswith("  3  account 3") and "disabled" in lines[2]
+    assert buttons[2] == (False, True, False, "Disable")  # default hidden; first: ↑ disabled
+    assert buttons[1] == (True, False, False, "Disable")  # middle: both arrows live
+    assert buttons[3] == (True, False, True, "Enable")  # last: ↓ disabled; disabled → Enable
+
+
+def test_default_move_and_disable_buttons_write_through_the_service_and_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row never paints optimistically: the service is called, the shell re-reads."""
+    calls: list[tuple[str, ...]] = []
+    frames: list[AccountsOverview] = [
+        _overview(_status(1, "me@example.com"), _status(2, "two@example.com")),
+        _overview(
+            _arranged(_status(2, "two@example.com"), is_default=True, position=1),
+            _arranged(_status(1, "me@example.com"), position=2),
+        ),
+    ]
+
+    def set_default(ref: str | None, *, project: Any = None) -> Any:
+        calls.append(("default", str(ref)))
+        return None
+
+    def move(ref: str, direction: str) -> list[Any]:
+        calls.append(("move", ref, direction))
+        return []
+
+    def set_disabled(ref: str, disabled: bool) -> Any:
+        calls.append(("disable", ref, str(disabled)))
+        raise accounts_service.AccountsUnreadable("the accounts registry cannot be written (x)")
+
+    monkeypatch.setattr(accounts_service, "set_default", set_default)
+    monkeypatch.setattr(accounts_service, "move", move)
+    monkeypatch.setattr(accounts_service, "set_disabled", set_disabled)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[int], str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#account-default-2")
+        await settle(app)
+        await pilot.pause()
+        after_default = notice(view)
+        # The shell's next frame is the arranged one; the page follows it.
+        frames.pop(0)
+        app.refresh_accounts()
+        await pilot.pause()
+        order = [r.slot for r in view.rows()]
+        await pilot.click("#account-down-2")
+        await settle(app)
+        await pilot.click("#account-toggle-1")
+        await settle(app)
+        await pilot.pause()
+        return after_default, order, notice(view)
+
+    async def run() -> tuple[str, list[int], str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=lambda: frames[0])
+        async with app.run_test(size=SIZE) as pilot:
+            await pilot.pause()
+            return await go(pilot)
+
+    after_default, order, last = asyncio.run(run())
+    assert after_default == "✓ slot 2 is the machine default"
+    assert order == [2, 1]  # the page re-read the shell's frame: the default moved up
+    assert ("default", "2") in calls
+    assert ("move", "2", "down") in calls
+    assert ("disable", "1", "True") in calls
+    assert last.startswith("✗ the accounts registry cannot be written")  # the error, not a crash

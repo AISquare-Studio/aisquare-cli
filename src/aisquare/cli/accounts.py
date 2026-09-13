@@ -18,29 +18,60 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 import typer
 from rich.table import Table
 from rich.text import Text
 
-from aisquare.cli.common import fail, local_time
+from aisquare.cli.common import expected_config_write_errors, fail, local_time
 from aisquare.cli.fleet import not_interactive_reason
 from aisquare.core import claude_accounts as core
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
-from aisquare.models import AccountsOverview, ClaudeAccount, ClaudeAccountStatus, ClaudeUsage
+from aisquare.models import (
+    AccountsOverview,
+    ClaudeAccount,
+    ClaudeAccountStatus,
+    ClaudeUsage,
+    ProjectInfo,
+)
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 
 app = typer.Typer(
-    help="Claude Code accounts this CLI manages: list, add, remove, run, usage.",
+    help="Claude Code accounts this CLI manages: list, add, remove, run, usage, "
+    "default, alias, order, move, disable, enable.",
     no_args_is_help=False,
     invoke_without_command=True,
 )
 
-SlotRef = Annotated[str, typer.Argument(help="Slot number, or the email the slot is signed in as.")]
+SlotRef = Annotated[
+    str, typer.Argument(help="Slot number, alias, or the email the slot is signed in as.")
+]
+ProjectOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--project",
+        "-P",
+        help="Act on a PROJECT's default instead of the machine's: a codename, name or id "
+        "prefix, or `.` for the project of the current directory.",
+        metavar="PROJECT",
+    ),
+]
+RoleOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--role",
+        help="Act on a ROLE's binding instead of the machine default (what "
+        "`aisquare team bind <role> --account` writes).",
+        metavar="ROLE",
+    ),
+]
 
 _DASH = "—"
+_DEFAULT_MARK = "*"
 
 
 @app.callback(invoke_without_command=True)
@@ -113,7 +144,10 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         version = f" {claude.version}" if claude.version else ""
         console.print(Text.assemble(("✓ ", "green"), f"Claude Code{version} · {claude.binary}"))
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
-    for column in ("slot", "label", "signed in as", "plan", "hooks"):
+    # Rows arrive in PRIORITY order (services.claude_accounts.list_accounts), so
+    # the table reads top-down as "the order the fleet would try them"; the
+    # default is starred the way `project list` stars the active project.
+    for column in (" ", "slot", "label", "signed in as", "plan", "hooks"):
         table.add_column(column)
     if with_usage:
         table.add_column("session")
@@ -123,9 +157,13 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         if status.identity and not status.signed_in:
             who = Text(f"{status.identity.email} (token missing)", style="yellow")
+        label = Text(status.label)
+        if status.account.disabled:
+            label.append(" (disabled)", style="dim")
         cells: list[Text | str] = [
+            Text(_DEFAULT_MARK, style="bold green") if status.account.is_default else "",
             str(status.account.slot),
-            status.label,
+            label,
             who,
             status.subscription or _DASH,
             Text("✓", style="green") if status.hooks_installed else Text("✗", style="red"),
@@ -135,6 +173,15 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         cells.append(Text(_short(status.account.config_dir), style="dim"))
         table.add_row(*cells)
     console.print(table)
+    default = next((s for s in overview.accounts if s.account.is_default), None)
+    if default is None:
+        console.print(
+            Text(
+                "no default account — launches run on whatever claude the shell has; "
+                "pick one: aisquare accounts default <slot|alias|email>",
+                style="dim",
+            )
+        )
     console.print(
         Text(
             "add one: aisquare accounts add · open one: aisquare accounts run <slot> · "
@@ -194,6 +241,265 @@ def usage_(
         session, week = _usage_cells(status.usage)
         table.add_row(str(status.account.slot), who, session, week)
     console.print(table)
+
+
+# --- arranging: default, alias, order, disable (#145) -----------------------------------------
+#
+# Every command here is thin over one service call and renders the result; the
+# ladder a launch walks — flag, role binding, project default, machine default —
+# lives in ``services.claude_accounts.choose`` and nowhere in this file.
+
+
+def _account_json(account: ClaudeAccount | None) -> dict[str, Any] | None:
+    if account is None:
+        return None
+    payload = account.model_dump(mode="json")
+    payload["label"] = core.label(account)
+    identity = core.identity(account)
+    payload["email"] = identity.email if identity else None
+    return payload
+
+
+def _who(account: ClaudeAccount) -> str:
+    identity = core.identity(account)
+    email = f" ({identity.email})" if identity else ""
+    return f"slot {account.slot} · {core.label(account)}{email}"
+
+
+def _project_for(ref: str) -> ProjectInfo:
+    """``.`` is the project of the current directory; anything else is a fleet project reference."""
+    try:
+        return fleet_service.resolve_project(None if ref == "." else ref)
+    except fleet_service.FleetError as exc:
+        fail(str(exc), error="no_such_project", ref=ref)
+
+
+def _arrangement_failed(exc: Exception) -> NoReturn:
+    code = "unknown_account" if isinstance(exc, accounts_service.NoSuchAccount) else "accounts"
+    if isinstance(exc, accounts_service.AccountsUnreadable):
+        code = "store_unreadable"
+    fail(str(exc), error=code)
+
+
+def _show_defaults(project: ProjectInfo | None) -> None:
+    """The ladder as it stands: machine default, a project's default, every role binding."""
+    machine = accounts_service.machine_default()
+    per_project = accounts_service.project_default(project) if project is not None else None
+    try:
+        bindings = settings_service.role_account_bindings()
+    except Exception as exc:  # a broken config.toml: say so, show the rest
+        bindings = {}
+        stderr_console().print(f"role bindings unreadable ({exc})", style="dim")
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "machine_default": _account_json(machine),
+                    "project": project.id if project is not None else None,
+                    "project_default": _account_json(per_project),
+                    "role_bindings": bindings,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    if machine is None:
+        console.print(
+            "machine default: none — launches run on whatever claude the shell has "
+            "(set one: aisquare accounts default <slot|alias|email>)",
+            markup=False,
+        )
+    else:
+        console.print(f"machine default: {_who(machine)}", markup=False)
+    if project is not None:
+        name = project.root.name or project.id
+        if per_project is None:
+            console.print(f"project {name}: no default of its own", markup=False)
+        else:
+            console.print(f"project {name}: {_who(per_project)}", markup=False)
+    if bindings:
+        for role in sorted(bindings):
+            console.print(f"role {role}: account {bindings[role]}", markup=False)
+    console.print(
+        Text(
+            "a launch picks, in order: --account · the role's binding · the project default · "
+            "the machine default · whatever the shell has",
+            style="dim",
+        )
+    )
+
+
+@app.command("default")
+def default(
+    ref: Annotated[
+        str | None,
+        typer.Argument(
+            help="Slot number, alias or email to make the default. Omit to show the defaults."
+        ),
+    ] = None,
+    project: ProjectOpt = None,
+    role: RoleOpt = None,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Remove the default at the chosen level.")
+    ] = False,
+) -> None:
+    """Choose the account a launch runs under — for the machine, a project, or a role.
+
+    Without a reference it prints the defaults as they stand. With one it sets
+    the MACHINE default, or a PROJECT's (``--project``), or a ROLE's binding
+    (``--role``, the same thing ``team bind <role> --account`` writes). A launch
+    resolves them top-down: ``--account`` on the command line, then the role's
+    binding, then the project's default, then the machine's; with none of those
+    it runs on whatever ``claude`` the shell already has, exactly as before.
+    """
+    if project is not None and role is not None:
+        fail("--project and --role are mutually exclusive", error="usage")
+    target = _project_for(project) if project is not None else None
+    if ref is None and not clear:
+        _show_defaults(
+            target if target is not None else _project_for(".") if _has_project() else None
+        )
+        return
+    if role is not None:
+        _set_role_default(role, ref, clear=clear)
+        return
+    try:
+        chosen = accounts_service.set_default(None if clear else ref, project=target)
+    except accounts_service.AccountsError as exc:
+        _arrangement_failed(exc)
+    level = f"project {target.root.name or target.id}" if target is not None else "machine"
+    if get_state().json_output:
+        typer.echo(json.dumps({"level": level, "default": _account_json(chosen)}))
+        return
+    if chosen is None:
+        stdout_console().print(f"✓ {level} default cleared", markup=False)
+    else:
+        stdout_console().print(f"✓ {level} default: {_who(chosen)}", markup=False)
+
+
+def _has_project() -> bool:
+    """Whether the current directory resolves to a registered project (never raises)."""
+    try:
+        fleet_service.resolve_project(None)
+    except Exception:
+        return False
+    return True
+
+
+def _set_role_default(role: str, ref: str | None, *, clear: bool) -> None:
+    if not clear:
+        if ref is None:
+            fail("pass an account to bind, or --clear", error="usage")
+        try:
+            accounts_service.resolve(ref)  # a bad name is a usage error, not a stored binding
+        except accounts_service.AccountsError as exc:
+            _arrangement_failed(exc)
+    with expected_config_write_errors():
+        bound = settings_service.bind_role(role, account=ref, clear_account=clear)
+    if get_state().json_output:
+        typer.echo(json.dumps({"level": f"role {role}", "default": bound.account}))
+        return
+    if clear:
+        stdout_console().print(f"✓ role {role}: account binding cleared", markup=False)
+    else:
+        stdout_console().print(f"✓ role {role} launches on account {bound.account}", markup=False)
+
+
+@app.command("alias")
+def alias(
+    ref: SlotRef,
+    name: Annotated[
+        str | None, typer.Argument(help="The name: a letter, then up to 31 of a-z 0-9 . _ -")
+    ] = None,
+    clear: Annotated[bool, typer.Option("--clear", help="Remove the slot's alias.")] = False,
+) -> None:
+    """Name an account (`work`, `personal`) so --account and the board can say it."""
+    if name is None and not clear:
+        fail("pass a name, or --clear", error="usage")
+    try:
+        account = accounts_service.set_alias(ref, None if clear else name)
+    except ValueError as exc:
+        fail(str(exc), error="bad_alias")
+    except accounts_service.AccountsError as exc:
+        _arrangement_failed(exc)
+    if get_state().json_output:
+        typer.echo(json.dumps({"account": _account_json(account)}))
+        return
+    if clear:
+        stdout_console().print(f"✓ slot {account.slot}: alias cleared", markup=False)
+    else:
+        stdout_console().print(f"✓ slot {account.slot} is now called {account.alias}", markup=False)
+
+
+def _emit_order(accounts: list[ClaudeAccount]) -> None:
+    if get_state().json_output:
+        typer.echo(json.dumps({"order": [_account_json(account) for account in accounts]}))
+        return
+    console = stdout_console()
+    for account in accounts:
+        mark = _DEFAULT_MARK if account.is_default else " "
+        off = "  (disabled)" if account.disabled else ""
+        console.print(f"{mark} {account.position}. {_who(account)}{off}", markup=False)
+
+
+@app.command("order")
+def order(
+    refs: Annotated[
+        list[str],
+        typer.Argument(help="Accounts first to last (slot, alias or email); the rest follow."),
+    ],
+) -> None:
+    """Set the priority order — what `fleet spawn` tries first when it picks by headroom."""
+    try:
+        arranged = accounts_service.reorder(refs)
+    except accounts_service.AccountsError as exc:
+        _arrangement_failed(exc)
+    _emit_order(arranged)
+
+
+@app.command("move")
+def move(
+    ref: SlotRef,
+    direction: Annotated[str, typer.Argument(help="up, down, top or bottom")],
+) -> None:
+    """Move one account a step in the priority order."""
+    if direction not in ("up", "down", "top", "bottom"):
+        fail(f"direction must be up, down, top or bottom, not {direction!r}", error="usage")
+    try:
+        arranged = accounts_service.move(ref, direction)  # type: ignore[arg-type]
+    except accounts_service.AccountsError as exc:
+        _arrangement_failed(exc)
+    _emit_order(arranged)
+
+
+def _toggle(ref: str, *, disabled: bool) -> None:
+    try:
+        account = accounts_service.set_disabled(ref, disabled)
+    except accounts_service.AccountsError as exc:
+        _arrangement_failed(exc)
+    if get_state().json_output:
+        typer.echo(json.dumps({"account": _account_json(account)}))
+        return
+    if disabled:
+        stdout_console().print(
+            f"✓ {_who(account)} is disabled — never picked automatically; "
+            "still usable with --account",
+            markup=False,
+        )
+    else:
+        stdout_console().print(f"✓ {_who(account)} is enabled", markup=False)
+
+
+@app.command("disable")
+def disable(ref: SlotRef) -> None:
+    """Keep an account out of automatic selection; naming it with --account still works."""
+    _toggle(ref, disabled=True)
+
+
+@app.command("enable")
+def enable(ref: SlotRef) -> None:
+    """Put an account back into automatic selection."""
+    _toggle(ref, disabled=False)
 
 
 @app.command("add")

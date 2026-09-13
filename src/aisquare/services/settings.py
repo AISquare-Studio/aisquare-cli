@@ -66,6 +66,8 @@ def bind_role(
     env: dict[str, str] | None = None,
     unset: Sequence[str] = (),
     args: Sequence[str] = (),
+    account: str | None = None,
+    clear_account: bool = False,
 ) -> RoleLaunchProfile:
     """Merge a launch binding into ``role`` and persist it.
 
@@ -74,6 +76,13 @@ def bind_role(
     would silently drop the first, and the operator would not find out until a
     launch came up on the wrong install. ``unset`` is applied after the merge,
     which makes "replace this one key" a single call.
+
+    ``account`` REPLACES rather than merges — a role runs under one account —
+    and ``clear_account`` removes it, leaving the rest of the binding alone.
+    The reference is stored as typed (slot, alias or email) and resolved at
+    launch, so renaming an alias or re-adding a slot changes what it means the
+    way the operator would expect; validation that it names a real account is
+    the caller's (``team bind`` resolves it before calling this).
     """
     config = load_config()
     profile = config.team.profiles.setdefault(role, RoleLaunchProfile())
@@ -83,8 +92,26 @@ def bind_role(
     for key in unset:
         profile.env.pop(key, None)
     profile.args.extend(args)
+    if clear_account:
+        profile.account = None
+        if not (profile.bin or profile.env or profile.args):
+            # Clearing the only thing bound leaves no binding: the table goes, as
+            # `--clear` would take it, rather than an empty `[team.profiles.<role>]`
+            # that `launch._declared_roles` would read as an operator-declared role.
+            config.team.profiles.pop(role, None)
+    elif account is not None:
+        profile.account = account
     save_config(config)
     return profile
+
+
+def role_account_bindings() -> dict[str, str]:
+    """Role → the account reference its binding names, for every role that names one."""
+    return {
+        role: profile.account
+        for role, profile in load_config().team.profiles.items()
+        if profile.account
+    }
 
 
 def clear_role_binding(role: str) -> None:

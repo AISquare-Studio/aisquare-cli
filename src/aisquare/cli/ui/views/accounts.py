@@ -15,6 +15,12 @@ docs/plans/claude-accounts.md. Two halves, one page:
   directory and, the moment Claude Code has written a login into it, records
   the account, installs aisquare's hooks and closes the window. Nothing is
   typed for the user and nothing is written into Claude Code's files.
+- **Arranging** (#145) — each row carries *Default*, *↑*/*↓* and
+  *Disable*/*Enable*: the machine default a launch picks when nothing more
+  specific says, the priority order, and whether the slot may be picked at
+  all. They write the registry through ``services.claude_accounts`` exactly as
+  ``aisquare accounts default|move|disable`` do; the page shows the default
+  with a ★ and lists the slots in priority order.
 
 **The view holds no state that matters** (fleet-tui plan §2). The shell hands
 it a fresh ``AccountsOverview`` on every refresh; what the view owns is the
@@ -67,6 +73,7 @@ SIGN_IN_WORKER = "aisquare-sign-in"
 SIGN_OUT_WORKER = "aisquare-sign-out"
 COMPLETE_WORKER = "claude-complete-sign-in"
 REMOVE_WORKER = "claude-remove"
+ARRANGE_WORKER = "claude-arrange"
 
 _BAR_CELLS = 5
 _WARN_AT = 50.0
@@ -157,11 +164,26 @@ def _resets(when: datetime | None) -> str:
     return "" if when is None else f" · resets {local_time(when):%H:%M}"
 
 
+DEFAULT_BADGE = "★"
+"""Marks the machine default (#145) — the account a launch picks when nothing more specific says."""
+
+
 def account_line_text(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> Text:
-    """One slot: ``2  account 2  me@…  max 5x   session ▮▯▯▯▯ 3% · resets 15:29   week 7%``."""
+    """One slot: ``★ 2  work  me@…  max 5x   session ▮▯▯▯▯ 3% · resets 15:29   week 7%``.
+
+    The star is the default; a disabled slot says so after its label. The label
+    is the alias when there is one (``core.label``), so the row reads the way
+    the operator named it.
+    """
     text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(f"{DEFAULT_BADGE} " if status.account.is_default else "  ", style="bold green")
     text.append(f"{status.account.slot}  ", style="bold")
-    text.append(f"{status.label:<10}", style="cyan")
+    # Padded to the longest built-in label ("plain claude") plus one, so a row
+    # never runs its label into the email; an alias longer than that simply
+    # pushes the rest of the row right.
+    text.append(f"{status.label:<12} ", style="cyan")
+    if status.account.disabled:
+        text.append(" disabled ", style="dim italic")
     if status.identity is None:
         text.append("not signed in", style="dim")
         return text
@@ -249,18 +271,29 @@ class _ClaudeLogin:
 
 
 class AccountRow(Horizontal):
-    """One slot: its line, a *Sign in* when it has no login, a *Remove* when it is ours."""
+    """One slot: its line, then the buttons that arrange it and the two that change the machine.
+
+    *Default* makes it the machine default (hidden once it is); *↑*/*↓* move it
+    in the priority order (the end stops are disabled); *Disable*/*Enable*
+    take it out of or back into automatic selection; *Sign in* appears when it
+    has no login; *Remove* when the CLI owns the directory. Every button is a
+    command (``aisquare accounts default|move|disable|enable|run|remove``),
+    and the row shows what the shell's next frame says rather than guessing.
+    """
 
     DEFAULT_CSS = """
     AccountRow { height: auto; margin: 0 0 1 0; }
     AccountRow .account-line { width: 1fr; height: auto; padding: 1 0 0 0; }
     AccountRow Button { min-width: 10; margin: 0 0 0 1; }
+    AccountRow .arrow { min-width: 5; }
     """
 
     def __init__(self, status: ClaudeAccountStatus, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.status = status
         self.usage: ClaudeUsage | None = None
+        self.first = True
+        self.last = True
 
     @property
     def slot(self) -> int:
@@ -268,22 +301,44 @@ class AccountRow(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Static(account_line_text(self.status, self.usage), classes="account-line")
+        yield Button("Default", id=f"account-default-{self.slot}", variant="success")
+        yield Button("↑", id=f"account-up-{self.slot}", classes="arrow")
+        yield Button("↓", id=f"account-down-{self.slot}", classes="arrow")
+        yield Button("Disable", id=f"account-toggle-{self.slot}")
         yield Button("Sign in", id=f"account-sign-in-{self.slot}", variant="primary")
         yield Button("Remove", id=f"account-remove-{self.slot}", variant="default")
 
     def on_mount(self) -> None:
         self._paint()
 
-    def show(self, status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> None:
+    def show(
+        self,
+        status: ClaudeAccountStatus,
+        usage: ClaudeUsage | None,
+        *,
+        first: bool | None = None,
+        last: bool | None = None,
+    ) -> None:
         self.status = status
         self.usage = usage
+        if first is not None:
+            self.first = first
+        if last is not None:
+            self.last = last
         if self.is_mounted:
             self._paint()
 
     def _paint(self) -> None:
+        account = self.status.account
         self.query_one(".account-line", Static).update(account_line_text(self.status, self.usage))
+        self.query_one(f"#account-default-{self.slot}", Button).display = not account.is_default
+        self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
+        self.query_one(f"#account-down-{self.slot}", Button).disabled = self.last
+        toggle = self.query_one(f"#account-toggle-{self.slot}", Button)
+        toggle.label = "Enable" if account.disabled else "Disable"
+        toggle.variant = "warning" if account.disabled else "default"
         self.query_one(f"#account-sign-in-{self.slot}", Button).display = not self.status.signed_in
-        self.query_one(f"#account-remove-{self.slot}", Button).display = self.status.account.managed
+        self.query_one(f"#account-remove-{self.slot}", Button).display = account.managed
 
 
 class AccountsView(Vertical):
@@ -329,6 +384,7 @@ class AccountsView(Vertical):
         self._usage_timer: Timer | None = None
         self._cancel_sign_in: threading.Event | None = None
         self._on_screen = False
+        self._arrange_done = ""
 
     # --- layout ------------------------------------------------------------------------
 
@@ -444,18 +500,21 @@ class AccountsView(Vertical):
         self.query_one("#claude-add", Button).disabled = not overview.claude.installed
         holder = self.query_one("#claude-rows", Vertical)
         existing = {row.slot: row for row in holder.query(AccountRow)}
+        count = len(overview.accounts)
         for index, status in enumerate(overview.accounts):
             slot = status.account.slot
             row = existing.pop(slot, None)
+            first, last = index == 0, index == count - 1
             if row is None:
                 row = AccountRow(status, id=f"account-row-{slot}")
                 row.usage = self.usage.get(slot)
+                row.first, row.last = first, last
                 if index < len(holder.children):
                     holder.mount(row, before=index)
                 else:
                     holder.mount(row)
             else:
-                row.show(status, self.usage.get(slot))
+                row.show(status, self.usage.get(slot), first=first, last=last)
                 if index < len(holder.children) and holder.children[index] is not row:
                     holder.move_child(row, before=index)
         for stale in existing.values():
@@ -615,6 +674,61 @@ class AccountsView(Vertical):
         elif button_id.startswith("account-remove-"):
             event.stop()
             self.remove_claude_account(int(button_id.rsplit("-", 1)[1]))
+        elif button_id.startswith("account-default-"):
+            event.stop()
+            slot = int(button_id.rsplit("-", 1)[1])
+            self.arrange_accounts(
+                lambda: accounts_service.set_default(str(slot)),
+                done=f"✓ slot {slot} is the machine default",
+            )
+        elif button_id.startswith("account-up-") or button_id.startswith("account-down-"):
+            event.stop()
+            slot = int(button_id.rsplit("-", 1)[1])
+            direction: accounts_service.Direction = (
+                "up" if button_id.startswith("account-up-") else "down"
+            )
+            self.arrange_accounts(
+                lambda: accounts_service.move(str(slot), direction),
+                done=f"✓ slot {slot} moved {direction} in the priority order",
+            )
+        elif button_id.startswith("account-toggle-"):
+            event.stop()
+            slot = int(button_id.rsplit("-", 1)[1])
+            current = next((r for r in self.rows() if r.slot == slot), None)
+            disabling = current is None or not current.status.account.disabled
+            outcome = "disabled — never picked automatically" if disabling else "enabled"
+            self.arrange_accounts(
+                lambda: accounts_service.set_disabled(str(slot), disabling),
+                done=f"✓ slot {slot} {outcome}",
+            )
+
+    # --- arranging (#145): default, order, disabled ----------------------------------------------
+
+    def arrange_accounts(self, change: Callable[[], object], *, done: str) -> None:
+        """Run one registry write off the UI thread, then let the shell re-read the page.
+
+        The write is a local SQLite statement, but the store's busy timeout is
+        seconds, not milliseconds, and a wedged ``context.db`` must not freeze
+        the UI — so it runs as a thread worker like *Remove* does. The row is
+        NOT updated optimistically: the shell's next frame (``AccountsChanged``)
+        is what the page shows, so what the operator sees is what was written.
+        """
+        self._arrange_done = done
+        self.run_worker(
+            change,
+            name=ARRANGE_WORKER,
+            group=ARRANGE_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _arrange_finished(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS:
+            self._notice(self._arrange_done, "ok")
+        elif state is WorkerState.ERROR:
+            self._notice(f"✗ {worker.error}", "error")
+        self.post_message(AccountsChanged())
 
     def begin_claude_sign_in(self, slot: int | None) -> None:
         """Open Claude Code on ``slot`` (a fresh slot when ``None``) in a pane, watched."""
@@ -773,3 +887,5 @@ class AccountsView(Vertical):
             self._complete_finished(worker, state)
         elif worker.name == REMOVE_WORKER:
             self._remove_finished(worker, state)
+        elif worker.name == ARRANGE_WORKER:
+            self._arrange_finished(worker, state)

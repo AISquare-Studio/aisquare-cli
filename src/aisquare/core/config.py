@@ -170,11 +170,22 @@ class RoleLaunchProfile(BaseModel):
     business knowing it, unusable by anyone laid out differently and liable to
     break for its author the day they reorganised. The operator states the
     spec; we carry it.
+
+    ``account`` is the ONE exception, and it is not that cut coming back: it
+    names a Claude account the CLI itself owns — a slot number, an alias or the
+    email it is signed in as (``aisquare accounts``) — never a path. It is
+    resolved at launch by the one account resolver
+    (``services.claude_accounts.choose``), after ``env``, so a binding that
+    carries both a hand-written ``CLAUDE_CONFIG_DIR`` and an ``account`` runs on
+    the account. Written by ``team bind <role> --account`` and the Settings tab;
+    ``None`` means the role expresses no preference and the project or machine
+    default applies (#145).
     """
 
     bin: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     args: list[str] = Field(default_factory=list)
+    account: str | None = None
 
 
 class TeamSettings(BaseModel):

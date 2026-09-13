@@ -22,12 +22,30 @@ from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgentStatus
 from aisquare.services import fleet as fleet_service
+from aisquare.services import team as team_service
 
 SEPARATOR = "  "
 
 
+def account_text(status: FleetAgentStatus) -> str:
+    """Which Claude account the agent runs under, or ``""`` when nothing says.
+
+    The slot the spawn RESOLVED to comes first (``FleetAgent.account_slot``,
+    #145): it is known before the agent has said a word, and it is what the
+    operator chose. Failing that, the config directory the session's first
+    hook reported (``TeamSession.account``) — the right answer for an agent
+    started by hand or before #145 — through the same label the board uses.
+    """
+    slot = status.agent.account_slot
+    if slot is not None:
+        return "plain claude" if slot == 1 else f"account {slot}"
+    if status.session is not None and status.session.account:
+        return team_service.account_label(status.session.account) or ""
+    return ""
+
+
 def header_text(status: FleetAgentStatus) -> Text:
-    """One line: ``🔨 coder-auth  coder  ▶ working  task 01k…  ~/repo ⎇  exited 1``."""
+    """One line: ``🔨 coder-auth  coder  ▶ working  account 2  task 01k…  ~/repo ⎇  exited 1``."""
     agent = status.agent
     chip, chip_style = STATE_CHIP.get(status.state, ("·", "dim"))
     text = Text(no_wrap=True, overflow="ellipsis")
@@ -40,6 +58,9 @@ def header_text(status: FleetAgentStatus) -> Text:
         text.append(f" ({status.detail})", style="dim")
     if status.session is not None and status.session.model:
         text.append(SEPARATOR + status.session.model, style="dim")
+    on = account_text(status)
+    if on:
+        text.append(SEPARATOR + on, style="dim")
     if agent.task_id:
         text.append(SEPARATOR + f"task {agent.task_id[-8:]}", style="dim")
     text.append(SEPARATOR + str(agent.cwd), style="dim")

@@ -7,6 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A Claude account can be chosen: a default, a priority order, aliases, and
+  disabling — in the CLI and on the Accounts page** (#145). Several accounts
+  could be added and seen and none picked: slot 1 was the default by constant,
+  the order was the slot number, and a role ran elsewhere only through a
+  `CLAUDE_CONFIG_DIR` buried in `team bind --env`. Now `aisquare accounts
+  default <slot|alias|email>` sets the **machine default**, `--project P` a
+  project's, `--role R` a role's (the same binding `aisquare team bind <role>
+  --account` writes); `accounts alias 2 work` names a slot so `--account work`
+  and the board's `[work]` can say it; `accounts order` and `accounts move`
+  set the **priority order** `accounts list` shows (and a headroom-based pick
+  will try first); `accounts disable` keeps a slot out of every automatic
+  choice while `--account` still reaches it. Every launch — `aisquare launch`,
+  `fleet spawn`, a manager spawning a coder — resolves its account in one
+  order through one resolver: the flag, the role's binding, the project's
+  default, the machine's default, and with none of those set the environment
+  is left exactly as it was, so a machine that never ran `accounts default`
+  notices nothing. A rung naming an account the machine no longer has refuses
+  the launch with the rung named rather than running on another login. The
+  arrangement lives in the store (`claude_account`, schema v15) and the
+  directories stay the record of which accounts exist; a removed slot's
+  default, alias and project defaults go with it, so the next `add` in that
+  number inherits nothing. On the Accounts page each row carries ★ *Default*,
+  ↑/↓ and *Disable*/*Enable*; the Settings tab binds an account per role; the
+  agent header and `fleet ls` show the slot an agent was resolved to. `doctor`
+  warns when the default is not signed in or disabled (`claude-account-default`)
+  and when a role or project names a missing account (`claude-account-bindings`).
+  Slot 1 is labelled `plain claude` (it was `default`, a word that now means
+  the chosen account). Plan: `docs/plans/claude-accounts.md` §9.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

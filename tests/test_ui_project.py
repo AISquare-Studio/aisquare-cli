@@ -840,3 +840,44 @@ def test_explainability_ship_drains_through_the_service_and_register_refuses_unc
     assert ("shipped 3 records\nruns: run-1", "information") in notices
     assert rosters == []  # no gateway configured → refused before any request
     assert any("has no gateway URL" in m and s == "error" for m, s in notices), notices
+
+
+def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_profile(
+    project: ProjectInfo,
+) -> None:
+    """The select beside each role is `team bind <role> --account` with a mouse (#145)."""
+    from aisquare.core import claude_accounts as accounts_core
+
+    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[tuple[str, str]]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        select = host.query_one("#acct-coder", Select)
+        labels = [str(label) for label, _value in select._options]
+        select.value = "2"
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return labels, host.notices
+
+    labels, notices = drive(project, scenario)
+    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
+    assert labels[0] == "(no account binding)"
+    assert any(label.startswith("2 · account 2") for label in labels), labels
+    assert load_config().team.profiles["coder"].account == "2"  # the binding's one home
+    assert _config_toml()["team"]["profiles"]["coder"]["account"] == "2"  # the bytes
+    assert "manager" not in load_config().team.profiles  # an untouched role gains no profile
+
+    async def clear(pilot: Pilot[None], host: Host) -> str | None:
+        host.query_one(ProjectView).active = "tab-settings"
+        await pilot.pause()
+        select = host.query_one("#acct-coder", Select)
+        shown_value = select.value
+        select.value = ""
+        host.query_one("#save-settings", Button).press()
+        await pilot.pause()
+        return str(shown_value)
+
+    shown_value = drive(project, clear)
+    assert shown_value == "2"  # the form opened on what the file held
+    assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes

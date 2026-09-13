@@ -16,6 +16,13 @@ appends ``--session-id <uuid>`` so the agent's session id, the board row and
 the gateway Run's ``X-Pipeline-Id`` are one key (see
 ``services.explainability``). With tracing off — the default — the argv is
 byte-identical to what it always was.
+
+The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
+``--account`` names one for this launch; without it the role's binding, the
+project's default and the machine's default are consulted in that order
+(``aisquare accounts default``), and with none of those set the environment is
+exactly what it always was. One resolver, ``services.claude_accounts.choose``,
+answers for ``launch`` and ``fleet spawn`` alike.
 """
 
 from __future__ import annotations
@@ -124,10 +131,11 @@ def launch(
         typer.Option(
             "--account",
             "-a",
-            help="Claude Code account to run under: a slot number or the email it is signed "
-            "in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and CLAUDE_CODE_TMPDIR "
-            "over the role's binding.",
-            metavar="SLOT",
+            help="Claude Code account to run under: a slot number, an alias or the email it "
+            "is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
+            "CLAUDE_CODE_TMPDIR over the role's binding. Without it: the role's bound "
+            "account, then the project default, then the machine default.",
+            metavar="ACCOUNT",
         ),
     ] = None,
 ) -> None:
@@ -202,20 +210,31 @@ def launch(
             style="dim",
         )
     env.update(profile.env)
-    if account is not None:
-        # The account wins over the binding: the flag names an account this
-        # launch is FOR, and the binding is the role's standing shape. For the
-        # default slot that means RESTORING this shell's own two variables (or
-        # their absence) over whatever the binding set — a launch announced as
-        # `[default]` must not run on the binding's other login.
-        try:
-            chosen = claude_accounts_service.resolve(account)
-        except claude_accounts_service.NoSuchAccount as exc:
-            fail(str(exc), error="unknown_account", ref=account)
-        claude_accounts_core.apply_launch_env(env, chosen, shell=os.environ)
+    # WHICH ACCOUNT, decided in exactly one place (#145): the flag, else the
+    # role's `team bind --account`, else the project's default, else the
+    # machine's — `services.claude_accounts.choose`, pinned by
+    # tests/test_one_account_resolver.py so `fleet spawn` cannot disagree with
+    # a hand-typed launch. An account wins over the binding's env: the flag or
+    # the default names an account this launch is FOR, and the binding's env is
+    # the role's standing shape. For slot 1 that means RESTORING this shell's
+    # own two variables (or their absence) over whatever the binding set — a
+    # launch announced as `[plain claude]` must not run on the binding's other
+    # login. When NOTHING chose (no flag, no binding, no default — every
+    # machine before #145), the environment is left exactly as it was.
+    try:
+        choice = claude_accounts_service.choose(account, role=role, project=project)
+    except claude_accounts_service.NoSuchAccount as exc:
+        fail(str(exc), error="unknown_account", ref=account)
+    for note in choice.notes:
+        # A skipped rung is otherwise invisible: the launch lands on the next
+        # one down and nobody learns why. Same channel and style as the
+        # binding and tracing notes around this.
+        stderr_console().print(f"accounts: {note}", style="dim")
+    if choice.account is not None:
+        claude_accounts_core.apply_launch_env(env, choice.account, shell=os.environ)
     whose = f" ({','.join(sorted(profile.env))})" if profile.env else ""
-    if account is not None:
-        whose += f" [{claude_accounts_core.label(chosen)}]"
+    if choice.account is not None:
+        whose += f" [{choice.describe()}]"
     try:
         tracing = load_config().explainability
     except Exception as exc:  # tracing is an observer: a broken config must

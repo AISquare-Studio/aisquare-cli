@@ -12,6 +12,13 @@ var (the orchestrator's own knobs are a different surface).
 Model, effort and binary per role are NOT here on purpose: they live in
 ``team harness`` / ``team bind`` / ``AISQUARE_MODEL_<ROLE>`` — one home per
 concept, which is the rule that deleted ``bins`` in #56.
+
+The one ``[team]`` value on this form is the ACCOUNT per role (#145): the
+select beside each role writes ``team.profiles.<role>.account`` — exactly what
+``aisquare team bind <role> --account`` writes — through the same one writer.
+It is here rather than on the Accounts page because it is a property of the
+role, and it is the middle rung of the account ladder a launch walks
+(``--account`` > role binding > project default > machine default).
 """
 
 from __future__ import annotations
@@ -25,15 +32,18 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, paths
 from aisquare.core.config import (
     AppConfig,
     FleetRoleSettings,
     FleetSettings,
+    RoleLaunchProfile,
     load_config,
     save_config,
 )
-from aisquare.models import ProjectInfo
+from aisquare.models import ClaudeAccount, ProjectInfo
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 
 PERMISSION_MODES: tuple[tuple[str, str], ...] = (
@@ -73,6 +83,29 @@ def permission_options(current: str) -> list[tuple[str, str]]:
     return options
 
 
+NO_ACCOUNT = ""
+"""The select's value for "this role expresses no preference" — the binding's ``account = None``."""
+
+
+def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[tuple[str, str]]:
+    """``(label, value)`` per account, plus the no-binding row first; ``current`` always shows.
+
+    Values are SLOT NUMBERS as strings: the binding stores a reference the
+    resolver reads, and the slot is the one spelling that cannot be renamed
+    out from under it. A binding written by hand as an alias or an email is
+    shown as its own row (``work (as bound)``) so the form never silently
+    rewrites what the operator typed just by being opened and saved.
+    """
+    options: list[tuple[str, str]] = [("(no account binding)", NO_ACCOUNT)]
+    for account in accounts:
+        identity = accounts_core.identity(account)
+        who = f" · {identity.email}" if identity else " · not signed in"
+        options.append((f"{account.slot} · {accounts_core.label(account)}{who}", str(account.slot)))
+    if current and current not in {value for _, value in options}:
+        options.append((f"{current} (as bound)", current))
+    return options
+
+
 class SettingsView(VerticalScroll):
     """The ``[fleet]`` form for one project."""
 
@@ -81,6 +114,7 @@ class SettingsView(VerticalScroll):
     SettingsView .row { height: auto; margin-bottom: 1; }
     SettingsView .row Label { width: 24; padding-top: 1; }
     SettingsView .row Select { width: 26; }
+    SettingsView .row .account-select { width: 40; margin-left: 2; }
     SettingsView .row Input { width: 26; }
     SettingsView .row Switch { margin-left: 1; }
     SettingsView .row .worktree-label { width: 10; margin-left: 2; }
@@ -88,13 +122,34 @@ class SettingsView(VerticalScroll):
     SettingsView #settings-buttons Button { margin-right: 1; }
     SettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
     """
-    ROLE_SECTION: ClassVar[str] = "roles — permission mode and worktree per role"
+    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree and account per role"
 
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
         self.fleet = fleet_service.settings()
         self._roles: list[str] = role_order(self.fleet)
+        self._account_bindings: dict[str, str] = self._read_bindings()
+        self._accounts: list[ClaudeAccount] = self._read_accounts()
+
+    @staticmethod
+    def _read_bindings() -> dict[str, str]:
+        """Role → bound account reference; an unreadable config reads as no bindings."""
+        try:
+            return {
+                role: profile.account
+                for role, profile in load_config().team.profiles.items()
+                if profile.account
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _read_accounts() -> list[ClaudeAccount]:
+        try:
+            return accounts_service.list_accounts()
+        except Exception:  # no accounts to offer is a form with one row, not a crash
+            return []
 
     # --- layout ----------------------------------------------------------------------
 
@@ -123,6 +178,14 @@ class SettingsView(VerticalScroll):
                 )
                 yield Label("worktree", classes="worktree-label")
                 yield Switch(settings.worktree, id=f"worktree-{suffix}")
+                bound = self._account_bindings.get(role)
+                yield Select(
+                    account_options(self._accounts, bound),
+                    value=bound or NO_ACCOUNT,
+                    allow_blank=False,
+                    id=f"acct-{suffix}",
+                    classes="account-select",
+                )
         yield Static("fleet", classes="section")
         with Horizontal(classes="row"):
             yield Label("escape key")
@@ -150,7 +213,9 @@ class SettingsView(VerticalScroll):
                 f"saved to {paths.config_path()} — a per-spawn flag still wins over "
                 "these (no [fleet] value is read from the environment). Model, effort "
                 "and binary per role live in `aisquare team harness` and "
-                "`aisquare team bind`.",
+                "`aisquare team bind`. The account per role is `team bind <role> "
+                "--account`; the machine and project defaults are on the Accounts page "
+                "and `aisquare accounts default`.",
             ),
             id="settings-note",
         )
@@ -162,6 +227,8 @@ class SettingsView(VerticalScroll):
         """Discard edits: show what the file holds (the roles list can change with it)."""
         self.fleet = fleet_service.settings()
         self._roles = role_order(self.fleet)
+        self._account_bindings = self._read_bindings()
+        self._accounts = self._read_accounts()
         self.query_one("#codename", Input).value = self.project.codename or ""
         self.query_one("#escape-key", Input).value = self.fleet.escape_key
         self.query_one("#max-agents", Input).value = str(self.fleet.max_agents_per_project)
@@ -173,11 +240,15 @@ class SettingsView(VerticalScroll):
             try:
                 select = self.query_one(f"#perm-{suffix}", Select)
                 switch = self.query_one(f"#worktree-{suffix}", Switch)
+                account = self.query_one(f"#acct-{suffix}", Select)
             except Exception:  # a role bound since this form was composed; shown after a reopen
                 continue
             select.set_options(permission_options(settings.permission_mode))
             select.value = settings.permission_mode
             switch.value = settings.worktree
+            bound = self._account_bindings.get(role)
+            account.set_options(account_options(self._accounts, bound))
+            account.value = bound or NO_ACCOUNT
 
     # --- writing -----------------------------------------------------------------------
 
@@ -218,6 +289,29 @@ class SettingsView(VerticalScroll):
             }
         )
 
+    def _apply_account_bindings(self, config: AppConfig) -> None:
+        """Fold the account selects into ``config.team.profiles`` — the binding's one home.
+
+        A role whose select says "no binding" and whose profile holds nothing
+        else has its profile REMOVED, not emptied: `team bind --clear` is one
+        pop for the same reason, and an empty ``[team.profiles.coder]`` table
+        would make ``_declared_roles`` think the operator declared a role.
+        """
+        for role in self._roles:
+            value = self.query_one(f"#acct-{widget_suffix(role)}", Select).value
+            chosen = value if isinstance(value, str) and value != NO_ACCOUNT else None
+            profile = config.team.profiles.get(role)
+            if chosen is None:
+                if profile is None:
+                    continue
+                profile.account = None
+                if not (profile.bin or profile.env or profile.args):
+                    config.team.profiles.pop(role, None)
+            else:
+                if profile is None:
+                    profile = config.team.profiles.setdefault(role, RoleLaunchProfile())
+                profile.account = chosen
+
     @on(Button.Pressed, "#save-settings")
     def _save_fleet_settings(self) -> None:
         """Write the form through the one config writer, then show what landed."""
@@ -236,6 +330,7 @@ class SettingsView(VerticalScroll):
             self.notify(result, severity="error", timeout=6, markup=False)
             return
         config.fleet = result
+        self._apply_account_bindings(config)
         try:
             written = save_config(config)
         except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure

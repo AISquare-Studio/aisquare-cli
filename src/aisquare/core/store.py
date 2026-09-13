@@ -27,7 +27,7 @@ import re
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,6 +36,7 @@ from typing import Any, Protocol
 from aisquare.core import paths
 from aisquare.core.ids import new_prompt_id
 from aisquare.models import (
+    ClaudeAccountRecord,
     ContextEntry,
     FleetAgent,
     Pool,
@@ -488,6 +489,58 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
 _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
+
+# v15: the Claude account REGISTRY and per-project settings (#145).
+#
+# ``claude_account`` is the operator's arrangement of the account slots — an
+# alias, a priority order, the machine default, a disabled flag — and nothing
+# else. The slots themselves stay directories under ``~/.aisquare/claude-accounts``
+# (docs/plans/claude-accounts.md §2: "the directories are the record"); this table
+# holds only what a directory cannot: a name and a rank. ``slot`` is the join,
+# ``config_dir`` is recorded for the launch record and never consulted, and a row
+# whose directory is gone is pruned on the next sync rather than trusted.
+#
+# Two invariants are the DATABASE's, not the service's, because both were once
+# left to callers in this repo and both drifted: at most ONE default (a partial
+# unique index on ``is_default = 1``) and no two slots with the same alias
+# (a partial unique index on ``alias``). ``ALTER TABLE`` cannot add a UNIQUE
+# constraint in SQLite, and a CHECK cannot span rows, so both are indexes.
+#
+# ``project_setting`` is a small key/value table per project — the "per-project
+# settings table" #141 and #142 also need (an explainability key reference, a
+# workspace/studio selection). Introduced here for one key, ``claude_account``
+# (the project's default account), and shaped for the rest so the next feature
+# adds a key rather than a table.
+#
+# ``fleet_agent.account_slot`` records which account a fleet window was launched
+# under, as resolved at spawn: the flag, the role binding, the project default or
+# the machine default. ``team_session.account`` (v8) carries the config DIRECTORY
+# once the session's first hook reports a transcript path; this is the slot, known
+# before the agent has said a word, which is what a restart (#144) or a hand-over
+# (#146) needs.
+_SCHEMA_V15 = """
+CREATE TABLE claude_account (
+    slot        INTEGER PRIMARY KEY,
+    config_dir  TEXT NOT NULL,
+    alias       TEXT,
+    position    INTEGER NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+    disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX claude_account_alias ON claude_account (alias) WHERE alias IS NOT NULL;
+CREATE UNIQUE INDEX claude_account_default ON claude_account (is_default) WHERE is_default = 1;
+
+CREATE TABLE project_setting (
+    project_id  TEXT NOT NULL REFERENCES project (id),
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    set_at      TEXT NOT NULL,
+    PRIMARY KEY (project_id, key)
+);
+ALTER TABLE fleet_agent ADD COLUMN account_slot INTEGER;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -504,6 +557,7 @@ _MIGRATIONS = (
     _SCHEMA_V12,
     _SCHEMA_V13,
     _SCHEMA_V14,
+    _SCHEMA_V15,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -569,8 +623,9 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status"
+    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot"
 )
+_CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
 
 class AmbiguousIdError(LookupError):
@@ -692,6 +747,19 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    # The Claude account registry (v15, #145): the arrangement of the slots.
+    def claude_accounts(self) -> list[ClaudeAccountRecord]: ...
+    def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
+    def delete_claude_account(self, slot: int) -> bool: ...
+    def set_claude_account_default(self, slot: int | None) -> None: ...
+    def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
+    def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
+    def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
+    # Per-project settings (v15): one key, one value, per project.
+    def project_setting(self, project_id: str, key: str) -> str | None: ...
+    def set_project_setting(self, project_id: str, key: str, value: str) -> None: ...
+    def clear_project_setting(self, project_id: str, key: str) -> bool: ...
+    def project_settings(self, key: str) -> dict[str, str]: ...
     def close(self) -> None: ...
 
 
@@ -740,6 +808,19 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         created_at=datetime.fromisoformat(row["created_at"]),
         ended_at=_maybe_dt(row["ended_at"]),
         exit_status=row["exit_status"],
+        account_slot=row["account_slot"],
+    )
+
+
+def _row_to_claude_account(row: sqlite3.Row) -> ClaudeAccountRecord:
+    return ClaudeAccountRecord(
+        slot=int(row["slot"]),
+        config_dir=Path(row["config_dir"]),
+        alias=row["alias"],
+        position=int(row["position"]),
+        is_default=bool(row["is_default"]),
+        disabled=bool(row["disabled"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
@@ -1977,11 +2058,12 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
-            "ended_at = excluded.ended_at, exit_status = excluded.exit_status",
+            "ended_at = excluded.ended_at, exit_status = excluded.exit_status, "
+            "account_slot = excluded.account_slot",
             (
                 agent.id,
                 agent.project_id,
@@ -1998,6 +2080,7 @@ class SqliteStore:
                 agent.created_at.isoformat(),
                 agent.ended_at.isoformat() if agent.ended_at else None,
                 agent.exit_status,
+                agent.account_slot,
             ),
         )
         self._conn.commit()
@@ -2078,6 +2161,144 @@ class SqliteStore:
         if agent is None:
             raise KeyError(agent_id)
         return agent
+
+    # --- the Claude account registry (v15, #145) --------------------------------------------
+    #
+    # Every write here is one statement and one commit, and every invariant that
+    # matters — one default, unique aliases — is an index the statement trips
+    # rather than a check the caller remembers. The service layer decides WHICH
+    # slot; this layer only refuses what the schema refuses.
+
+    def claude_accounts(self) -> list[ClaudeAccountRecord]:
+        """Every registered slot in priority order (position, then slot)."""
+        rows = self._conn.execute(
+            f"SELECT {_CLAUDE_ACCOUNT_COLUMNS} FROM claude_account ORDER BY position, slot"
+        ).fetchall()
+        return [_row_to_claude_account(row) for row in rows]
+
+    def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord:
+        """Register ``slot`` at the END of the order, or refresh a known slot's directory.
+
+        The arrangement of a known slot — alias, position, default, disabled —
+        is never touched by an upsert: a sync that re-reads the directories
+        must not reorder what the operator arranged. New slots queue at the
+        end because "the account I just added" is the one most safely ranked
+        last; ``order_claude_accounts`` moves it wherever it belongs.
+        """
+        self._conn.execute(
+            f"INSERT INTO claude_account ({_CLAUDE_ACCOUNT_COLUMNS}) VALUES "
+            "(?, ?, NULL, COALESCE((SELECT MAX(position) FROM claude_account), 0) + 1, 0, 0, ?) "
+            "ON CONFLICT (slot) DO UPDATE SET config_dir = excluded.config_dir",
+            (slot, str(config_dir), _now_iso()),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            f"SELECT {_CLAUDE_ACCOUNT_COLUMNS} FROM claude_account WHERE slot = ?", (slot,)
+        ).fetchone()
+        assert row is not None  # just written
+        return _row_to_claude_account(row)
+
+    def delete_claude_account(self, slot: int) -> bool:
+        """Forget a slot's arrangement; True when there was one.
+
+        A default that named this slot goes with the row — the partial index
+        keeps "one default" true, and a default pointing at nothing is exactly
+        the state a removal must not leave behind (the next ``add`` reuses the
+        number, and a stale default would silently adopt the newcomer).
+        """
+        cursor = self._conn.execute("DELETE FROM claude_account WHERE slot = ?", (slot,))
+        self._conn.commit()
+        if cursor.rowcount == 1:
+            self.order_claude_accounts([])  # close the gap the row leaves in the order
+        return cursor.rowcount == 1
+
+    def set_claude_account_default(self, slot: int | None) -> None:
+        """Make ``slot`` the one default (``None`` clears it). Unknown slot → ``KeyError``.
+
+        Two statements in one transaction: clear, then set. The partial unique
+        index would otherwise refuse the second default before the first was
+        cleared, and a clear that committed alone would leave NO default if
+        the set then failed — which is a worse state than the one asked for.
+        """
+        self._conn.execute("UPDATE claude_account SET is_default = 0 WHERE is_default = 1")
+        if slot is not None:
+            cursor = self._conn.execute(
+                "UPDATE claude_account SET is_default = 1 WHERE slot = ?", (slot,)
+            )
+            if cursor.rowcount != 1:
+                self._conn.rollback()
+                raise KeyError(slot)
+        self._conn.commit()
+
+    def set_claude_account_alias(self, slot: int, alias: str | None) -> None:
+        """Name a slot (``None`` unnames it). A taken alias raises ``sqlite3.IntegrityError``."""
+        cursor = self._conn.execute(
+            "UPDATE claude_account SET alias = ? WHERE slot = ?", (alias, slot)
+        )
+        if cursor.rowcount != 1:
+            self._conn.rollback()
+            raise KeyError(slot)
+        self._conn.commit()
+
+    def set_claude_account_disabled(self, slot: int, disabled: bool) -> None:
+        cursor = self._conn.execute(
+            "UPDATE claude_account SET disabled = ? WHERE slot = ?", (int(disabled), slot)
+        )
+        if cursor.rowcount != 1:
+            self._conn.rollback()
+            raise KeyError(slot)
+        self._conn.commit()
+
+    def order_claude_accounts(self, slots: Sequence[int]) -> None:
+        """Rewrite the positions: ``slots`` first, in that order, then everything else as it was.
+
+        Positions are renumbered 1..n on every call, so the order is always a
+        dense sequence and never accumulates gaps or ties. Unknown slots in
+        ``slots`` are ignored — the directories are the record, and the caller
+        already resolved what exists.
+        """
+        current = [record.slot for record in self.claude_accounts()]
+        wanted = [slot for slot in slots if slot in current]
+        rest = [slot for slot in current if slot not in wanted]
+        for position, slot in enumerate([*wanted, *rest], start=1):
+            self._conn.execute(
+                "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
+            )
+        self._conn.commit()
+
+    # --- per-project settings (v15) ---------------------------------------------------------
+
+    def project_setting(self, project_id: str, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM project_setting WHERE project_id = ? AND key = ?",
+            (project_id, key),
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def set_project_setting(self, project_id: str, key: str, value: str) -> None:
+        """Set one key for one project. The project row must exist (a foreign key)."""
+        self._conn.execute(
+            "INSERT INTO project_setting (project_id, key, value, set_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (project_id, key) DO UPDATE SET "
+            "value = excluded.value, set_at = excluded.set_at",
+            (project_id, key, value, _now_iso()),
+        )
+        self._conn.commit()
+
+    def clear_project_setting(self, project_id: str, key: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM project_setting WHERE project_id = ? AND key = ?", (project_id, key)
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def project_settings(self, key: str) -> dict[str, str]:
+        """``key``'s value for every project that has one, keyed by project id."""
+        rows = self._conn.execute(
+            "SELECT project_id, value FROM project_setting WHERE key = ? ORDER BY project_id",
+            (key,),
+        ).fetchall()
+        return {str(row["project_id"]): str(row["value"]) for row in rows}
 
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
         """The latest done/dropped event per task — archive attribution.

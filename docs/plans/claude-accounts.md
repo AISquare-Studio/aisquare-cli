@@ -1,7 +1,8 @@
 # Accounts: the AISquare sign-in and the Claude Code accounts, in one page
 
 Status: implemented 2026-09-09 on top of PR #77 (`aisquare login`), which lands
-first. The user guide is the "Accounts" section of `docs/fleet.md`; the README's
+first; §9 (the default, the priority order, aliases — #145) added 2026-09-13.
+The user guide is the "Accounts" section of `docs/fleet.md`; the README's
 "Several accounts, one team" covers the command line.
 
 This document is a reference, not a script: commands appear as inline code.
@@ -150,7 +151,80 @@ test censuses (`tests/test_stubs.py`, `tests/test_no_traceback_on_a_damaged_stor
 ## 8. Later
 
 - A spawn that picks the account with the most headroom, from the same usage
-  numbers.
-- The Settings tab could bind a default account per role; today that is
-  `team bind coder1 --env …` or `--account` per launch.
+  numbers (#146 — the priority order and `disabled` flag of §9 are its inputs).
+- ~~The Settings tab could bind a default account per role~~ — done in §9
+  (#145): the account select beside each role, `team bind <role> --account`.
 - Reading the macOS Keychain for usage.
+
+## 9. Choosing one: default, order, aliases (#145, 2026-09-13)
+
+**The gap.** Several accounts could be added and seen, and none chosen. Slot 1
+was the default by constant (`DEFAULT_SLOT = 1`), the order was the slot
+number, and a role ran elsewhere only through a `CLAUDE_CONFIG_DIR` buried in
+`team bind --env` — which the UI never showed and one typo of which started an
+unauthenticated Claude.
+
+**The record stays the directories; the arrangement goes to SQLite.** §2's
+argument against a registry file — a second copy of facts the filesystem
+already holds — still stands for *which accounts exist and who is signed in*,
+and that is still read from disk every time. What a directory cannot carry is
+how the operator ARRANGED them: a name, a rank, a choice. Those live in the
+`claude_account` table (`core.store`, v15: `slot, config_dir, alias, position,
+is_default, disabled, created_at`), joined to the directories by `slot`. The
+two are reconciled on every read (`services.claude_accounts._arranged`),
+directories winning: a slot with no row gets one at the end of the order, a
+row whose directory is gone is dropped. That is also the migration: an existing
+machine is the "no rows yet" case, and its first read arranges the slots in
+slot order, which is the order they were always listed in. Two invariants are
+the schema's rather than a caller's — at most one default and no duplicate
+alias, both partial unique indexes — because both had been left to callers
+elsewhere in this repo and both drifted.
+
+**The ladder.** `services.claude_accounts.choose` is the one place a launch's
+account is decided, and `aisquare launch`, `fleet spawn` (and so a manager
+spawning a coder) both ask it: the `--account` flag, else the role's binding
+(`RoleLaunchProfile.account`, written by `team bind <role> --account` and the
+Settings tab), else the project's default (`project_setting` key
+`claude_account`, a slot number), else the machine default (`is_default`), else
+**nothing** — and "nothing" means the launch environment is left exactly as it
+was, byte for byte, so a machine that never arranged anything is unaffected. A
+rung naming an account that does not exist refuses the launch with the rung
+named (a binding to a removed slot must not quietly run somewhere else); a
+rung naming a `disabled` account is skipped with a note and the ladder goes
+on. `tests/test_one_account_resolver.py` pins structurally that neither
+launching module decides an account any other way, with positive and negative
+controls (CONTRIBUTING, "Writing a guard that still guards").
+
+**References.** `--account` takes a slot number, an alias or a signed-in email
+everywhere. The three cannot collide: an alias must start with a letter and
+cannot contain `@` (`core.normalise_alias`, lowercase, ≤ 32). The project
+default is stored as the resolved slot number; the role binding is stored as
+typed, so renaming an alias changes what it means the way the operator expects.
+
+**Removal and reuse.** `remove` drops the row and every project default that
+named the slot, after the rename — the number is free again the moment the
+directory moves, and a default or alias left behind would be inherited by
+whatever `add` puts in that slot next. Role bindings in `config.toml` are not
+edited by a removal (a file people hand-edit is not ours to rewrite as a side
+effect); `doctor` reports them as dangling and the launch refuses with the rung
+named.
+
+**Slot 1 is "plain claude" now.** It was labelled `default`, and once "default"
+meant the chosen account, a slot that was not the default could not keep the
+word. The label is the alias when one is set.
+
+**Failing open.** Readers (`list_accounts`, `resolve`, `choose`) fall back to the
+directories' view with a note when the store cannot be opened — the Accounts
+page and `accounts list` keep working on a wedged `context.db`, and a launch
+starts (on no default) rather than dying; `doctor` reports the cost. Writers
+(`set_default`, `set_alias`, `reorder`, `set_disabled`) refuse with
+`AccountsUnreadable`, which the CLI reports as `store_unreadable`.
+
+**Surface.** `aisquare accounts default [REF] [--project P] [--role R]
+[--clear]`, `alias <slot> <name> [--clear]`, `order <ref>…`, `move <ref>
+up|down|top|bottom`, `disable`/`enable <ref>`; `team bind <role> --account A |
+--clear-account`; `accounts list` stars the default and lists in priority order;
+the Accounts page rows carry ★ *Default*, ↑/↓ and *Disable*; the Settings tab
+binds an account per role; the agent header and `fleet ls` show the resolved
+slot (`fleet_agent.account_slot`, recorded at spawn). `doctor` gains
+`claude-account-default` and `claude-account-bindings`.

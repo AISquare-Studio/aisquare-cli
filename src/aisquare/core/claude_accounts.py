@@ -165,8 +165,44 @@ def managed_slot(config_dir: Path | str) -> int | None:
 
 
 def label(account: ClaudeAccount) -> str:
-    """``default`` for slot 1, ``account N`` otherwise — what the board and the UI call it."""
-    return "default" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+    """What the board, the UI and a launch line call the slot.
+
+    The alias when the operator gave it one; else ``plain claude`` for slot 1
+    and ``account N`` for a managed slot. Slot 1 was called ``default`` until
+    #145 gave "default" a meaning of its own — the account a launch picks when
+    nothing more specific says — and a slot that is NOT the default could not
+    keep wearing the word. "Plain claude" is what it is: whatever ``claude``
+    already is in the shell ``asq`` was started from.
+    """
+    if account.alias:
+        return account.alias
+    return "plain claude" if account.slot == DEFAULT_SLOT else f"account {account.slot}"
+
+
+ALIAS_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,31}$")
+"""What an alias may look like, after lowercasing.
+
+It must START WITH A LETTER so it can never be mistaken for a slot number, and
+it cannot contain ``@`` so it can never be mistaken for an email — those are
+the two other spellings ``--account`` accepts, and a reference that could be
+read two ways is a launch that could land on two accounts. Lowercase because
+``resolve`` compares case-insensitively (as it already does for emails), and a
+name that round-trips through ``--json`` and a shell should have one spelling.
+"""
+
+
+def normalise_alias(raw: str) -> str:
+    """The stored form of an alias, or ``ValueError`` saying what is wrong with it."""
+    alias = raw.strip().lower()
+    if not alias:
+        raise ValueError("an alias cannot be empty")
+    if alias.isdigit():
+        raise ValueError(f"{raw!r} reads as a slot number — an alias must start with a letter")
+    if "@" in alias:
+        raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
+    if not ALIAS_PATTERN.match(alias):
+        raise ValueError(f"{raw!r} is not a valid alias — a letter, then up to 31 of a-z 0-9 . _ -")
+    return alias
 
 
 # --- creating and removing ----------------------------------------------------------

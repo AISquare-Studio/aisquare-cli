@@ -40,6 +40,7 @@ from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
 
@@ -717,7 +718,7 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
         for status in statuses
     ]
-    detail = f"{len(statuses)} added beside the default: " + " · ".join(parts)
+    detail = f"{len(statuses)} added beside the plain claude: " + " · ".join(parts)
     unsigned = [status.account.slot for status in statuses if not status.signed_in]
     if unsigned:
         return [
@@ -726,9 +727,94 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
                 detail,
                 "Sign in from asq → Accounts, or: "
                 + "; ".join(f"aisquare accounts run {slot}" for slot in unsigned),
+            ),
+            *_claude_account_default_checks(),
+        ]
+    return [_ok("claude-accounts", detail), *_claude_account_default_checks()]
+
+
+def _claude_account_default_checks() -> list[DoctorCheck]:
+    """The arrangement (#145): is the account a launch will pick one that can launch?
+
+    Reads the registry only when ``context.db`` already exists — a doctor run
+    must not create the store (``tests/test_doctor_does_not_create_state.py``)
+    — and says nothing at all when no default, project default or role binding
+    has ever been set, so a machine that never arranged its accounts keeps the
+    doctor output it had. What it warns about is the class #145 exists for: a
+    default that is not signed in or is disabled launches Claude Code's login
+    screen (or the next rung down) instead of the account the operator meant,
+    and a binding or project default naming a removed slot refuses every
+    launch of that role or project with `unknown_account`.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        accounts = claude_accounts_service.list_accounts()
+        bindings = settings_service.role_account_bindings()
+        with store_session() as store:
+            per_project = store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY)
+            names = {
+                project_id: (project.root.name or project.id)
+                for project_id in per_project
+                if (project := store.get_project(project_id)) is not None
+            }
+    except Exception as exc:  # the database line says WHY the store is broken; this says the cost
+        return [
+            _warn(
+                "claude-account-default",
+                f"the accounts registry could not be read ({exc}) — launches run without a "
+                "default account",
+                "aisquare doctor  (the database line above says what is wrong with context.db)",
             )
         ]
-    return [_ok("claude-accounts", detail)]
+    by_slot = {account.slot: account for account in accounts}
+    default = next((account for account in accounts if account.is_default), None)
+    if default is None and not per_project and not bindings:
+        return []
+    checks: list[DoctorCheck] = []
+    if default is not None:
+        label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
+        if default.disabled:
+            checks.append(
+                _warn(
+                    "claude-account-default",
+                    f"the machine default is {label} and it is disabled — launches skip it",
+                    f"aisquare accounts enable {default.slot}, or pick another: "
+                    "aisquare accounts default <slot>",
+                )
+            )
+        elif not claude_accounts_core.signed_in(default):
+            checks.append(
+                _warn(
+                    "claude-account-default",
+                    f"the machine default is {label} but it is not signed in — a launch "
+                    "would open Claude Code's login instead of the account you meant",
+                    f"aisquare accounts run {default.slot} and sign in, or pick another: "
+                    "aisquare accounts default <slot>",
+                )
+            )
+        else:
+            checks.append(_ok("claude-account-default", f"machine default: {label}"))
+    dangling: list[str] = []
+    for project_id, raw in per_project.items():
+        if not raw.isdigit() or int(raw) not in by_slot:
+            dangling.append(f"project {names.get(project_id, project_id)} → slot {raw}")
+    for role, ref in bindings.items():
+        try:
+            claude_accounts_service.resolve(ref)
+        except claude_accounts_service.AccountsError:
+            dangling.append(f"role {role} → {ref}")
+    if dangling:
+        checks.append(
+            _warn(
+                "claude-account-bindings",
+                "these name an account this machine does not have, so their launches are "
+                "refused: " + "; ".join(dangling),
+                "aisquare accounts default --clear --project <project>, or "
+                "aisquare team bind <role> --clear-account",
+            )
+        )
+    return checks
 
 
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------

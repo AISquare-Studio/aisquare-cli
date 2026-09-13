@@ -615,7 +615,12 @@ there is no safe name the character still travels: `ctrl+alt+1` types a `1`, and
 so does a chord your tmux is too old to carry (below 3.5, `ctrl+alt+space`
 inserts a space rather than doing nothing). The one exception is a modifier tmux
 cannot spell at all — Cmd (super) or hyper — which is dropped rather than typed,
-because Cmd+V is a command and not a request for a `v`.
+because Cmd+V is a command and not a request for a `v`. A modifier pressed on
+its own (Shift, Control, Alt… — terminals speaking the kitty keyboard protocol
+report those as keys) is nothing to type and is ignored without a word; a key
+that genuinely has no tmux spelling (F13, ctrl on a digit) is named once per
+session in a quiet notice — `no way to type f13 into a tmux pane` — and
+nothing is sent, since mistyping into a running agent is the worse failure.
 Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and

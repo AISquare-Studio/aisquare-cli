@@ -41,7 +41,9 @@ Input (§4.3). With the pane focused every key goes to tmux through
 ``core.keys.translate`` — literal text via ``send-keys -l``, everything else by
 tmux's key name — except the escape hatch (``F12`` by default), which posts
 :class:`EscapeToSidebar` and is never forwarded. A key tmux has no safe name for
-is dropped, with ONE warning per key name. ``Paste`` goes through the paste
+is dropped, with ONE quiet notice per key name; a modifier pressed on its own
+(a kitty-protocol terminal reports those) is ignored in silence (#151). ``Paste``
+goes through the paste
 buffer so the agent sees one bracketed paste. The wheel scrolls our own offset
 over the pane's history (clamped to ``history_size``); any key returns to live.
 ``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Forwarded
@@ -88,6 +90,7 @@ from textual.widget import Widget
 from aisquare.core.keys import (
     ARGV_SEPARATOR,
     EXTENDED_MINIMUM,
+    MODIFIER_ONLY_KEYS,
     Translation,
     translate,
 )
@@ -896,6 +899,17 @@ class TerminalPane(Widget, can_focus=True):
             if self._copy_selection(standing=False):
                 self._clear_own_selection()
             return
+        if event.key in MODIFIER_ONLY_KEYS:
+            # A bare modifier press. Terminals speaking the kitty keyboard
+            # protocol (kitty, ghostty, wezterm, foot, recent alacritty — the
+            # ones docs/fleet.md recommends for Shift+Enter) report it as a key
+            # event, and Textual names it ``left_shift``, ``right_control``…
+            # There is no keystroke in it to forward — a modifier is half of a
+            # chord — so it is neither sent nor worth a word: the old path sent
+            # nothing too, but said "tmux has no name for this key — dropped"
+            # once per modifier, three red toasts into a normal typing session
+            # that read as tmux failing (#151).
+            return
         translation = translate(
             event.key,
             event.character,
@@ -903,7 +917,11 @@ class TerminalPane(Widget, can_focus=True):
             extended_keys=self._extended_keys(),
         )
         if translation is None:
-            self._warn_once(event.key, f"{event.key}: tmux has no name for this key — dropped")
+            # A genuinely unmappable chord (ctrl on a digit, F13…). Nothing is
+            # typed — mistyping into a running agent is the worse failure — and
+            # the reader is told once, as information: tmux did not fail, and
+            # nothing was "dropped" that could have been sent.
+            self._warn_once(event.key, f"no way to type {event.key} into a tmux pane")
             return
         self._send(translation)
         if self.scrollback:
@@ -931,10 +949,17 @@ class TerminalPane(Widget, can_focus=True):
             self._fail(PANE_GONE)
 
     def _warn_once(self, key: str, message: str) -> None:
+        """Say ``message`` once per key name, as information — never as an alarm.
+
+        An unmappable key is a fact about the key table, not a fault in tmux
+        or the pane, so the toast is the information severity (#151): the
+        warning colour read as "something is broken" for a chord that simply
+        has no tmux spelling.
+        """
         if key in self._warned:
             return
         self._warned.add(key)
-        self.notify(message, severity="warning", markup=False)
+        self.notify(message, severity="information", markup=False)
 
     def on_paste(self, event: events.Paste) -> None:
         if self.pane_id is None or self.server is None:

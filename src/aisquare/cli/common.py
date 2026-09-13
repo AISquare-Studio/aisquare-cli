@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -234,18 +234,31 @@ def _project_name(project: ProjectInfo) -> str:
     return project.root.name or project.id
 
 
-def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None:
+def emit_projects(
+    projects: list[ProjectInfo],
+    *,
+    active_id: str | None,
+    group_names: Mapping[str, str] | None = None,
+) -> None:
     """Render the project list — a JSON array under ``--json``, a table otherwise.
 
     The JSON carries the same ``name`` the table shows (#83): it is derived from
     the root rather than stored on the model, and a script picking a project
-    by name had nothing to pick on.
+    by name had nothing to pick on. It also carries ``group`` (the name),
+    ``position`` and ``pinned`` (#140); the table shows a GROUP column and a
+    📌 marker only when something is grouped or pinned.
     """
+    names = group_names or {}
     if get_state().json_output:
         typer.echo(
             json.dumps(
                 [
-                    {**project.model_dump(mode="json"), "name": _project_name(project)}
+                    {
+                        **project.model_dump(mode="json"),
+                        "name": _project_name(project),
+                        "group": names.get(project.group_id or "", project.group_id),
+                        "pinned": project.pinned_at is not None,
+                    }
                     for project in projects
                 ]
             )
@@ -264,11 +277,18 @@ def emit_projects(projects: list[ProjectInfo], *, active_id: str | None) -> None
     captured = any(project.onboarded_at is None for project in projects)
     if captured:
         table.add_column("LISTED", no_wrap=True)
+    arranged = any(project.group_id or project.pinned_at for project in projects)
+    if arranged:
+        table.add_column("GROUP", no_wrap=True)
     for project in projects:
         marker = "*" if project.id == active_id else ""
+        if project.pinned_at is not None:
+            marker = (marker + "📌").strip()
         cells = [marker, project.root.name or "—", project.id, str(project.root)]
         if captured:
             cells.append("captured" if project.onboarded_at is None else "yes")
+        if arranged:
+            cells.append(names.get(project.group_id or "", project.group_id or "") or "")
         table.add_row(*cells)
     stdout_console().print(table)
     if captured:

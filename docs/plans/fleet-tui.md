@@ -313,7 +313,7 @@ reasonably want otherwise.
 ### 4.1 Left pane — `Sidebar` (26–34 columns, collapsible)
 
 - **Fleet** header with `+` → opens the Onboard view.
-- One `ProjectCard` per onboarded project (`store.list_projects()`; captured-only directories are hidden, #139), with
+- One `ProjectCard` per onboarded project (`store.list_projects()`; captured-only directories are hidden, #139), arranged by `services.project_groups.arrange` — a Pinned section, group headers with indented members, then the loose projects in manual order (#140) — with
   alternating `.odd` / `.even` background. Header row: disclosure ▾/▸, name
   (root basename), the fleet codename as a dim badge (§5.7), chips (agents alive
   · tasks open · 🔔 count); when two projects share a basename, the parent path

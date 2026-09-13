@@ -40,14 +40,17 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp, HelpScreen
+from aisquare.cli.ui.groups import GroupPicker
 from aisquare.cli.ui.sidebar import (
     Activatable,
     AgentRow,
     Disclosure,
     DoctorSection,
     DoctorTitle,
+    GroupHeader,
     ProjectCard,
     ProjectTitle,
+    SectionLabel,
     ordered_agents,
     short_path,
 )
@@ -68,6 +71,7 @@ from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project_groups as groups_service
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -1889,3 +1893,144 @@ def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
     assert drive(relaunch) == ("welcome", None)
     with store_session() as store:
         assert store.ui_state("fleet.selected") is None, "a stale memory is dropped, not retried"
+
+
+# --- groups, pins and manual order (#140) ---------------------------------------------------
+
+
+def _cards(app: FleetApp) -> list[str]:
+    """The visible cards and group headers in sidebar order."""
+    holder = app.sidebar.query_one("#projects")
+    out: list[str] = []
+    for child in holder.children:
+        if isinstance(child, ProjectCard) and child.display:
+            out.append(child.project.id)
+        elif isinstance(child, GroupHeader):
+            out.append(f"group:{child.group.name}")
+        elif isinstance(child, SectionLabel):
+            out.append("pinned")
+    return out
+
+
+def test_the_sidebar_shows_groups_pins_and_manual_order_and_the_keys_move_them(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """#140 by keyboard alone: shift+↓ moves, p pins, space folds, u undoes — every
+    gesture through the service, every change surviving a relaunch."""
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b", "prj_c"])
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[list[str], list[str], list[str], list[str], str, list[str], list[str]]:
+        app = fleet_app(pilot)
+        initial = _cards(app)
+        app.sidebar.focus()
+        app.sidebar.select("project:prj_c")  # the cursor's anchor
+        await pilot.press("shift+up")
+        await pilot.pause()
+        moved = _cards(app)
+        await pilot.press("p")
+        await pilot.pause()
+        pinned = _cards(app)
+        await pilot.press("u")
+        await pilot.pause()
+        undone = _cards(app)
+        app.sidebar.select("group:" + store_group_id("tools"))
+        await pilot.press("space")
+        await pilot.pause()
+        folded = _cards(app)
+        header = app.sidebar.query_one(GroupHeader)
+        rollup = shown(header)
+        await pilot.press("space")
+        await pilot.pause()
+        return initial, moved, pinned, undone, rollup, folded, _cards(app)
+
+    def store_group_id(name: str) -> str:
+        with store_session() as store:
+            return groups_service.resolve_group(store, name).id
+
+    initial, moved, pinned, undone, rollup, folded, unfolded = drive(go)
+    # The group first, then the loose project; shift+↑ stepped docs above cli;
+    # p moved it into the Pinned section; u put it back where it was.
+    assert initial == ["group:tools", "prj_b", "prj_c", "prj_a"]
+    assert moved == ["group:tools", "prj_c", "prj_b", "prj_a"]
+    assert pinned == ["pinned", "prj_c", "group:tools", "prj_b", "prj_a"]
+    assert undone == ["group:tools", "prj_c", "prj_b", "prj_a"]
+    assert folded == ["group:tools", "prj_a"], "a folded group hides its members"
+    assert rollup.startswith("▸ 📁 tools"), rollup
+    assert unfolded == ["group:tools", "prj_c", "prj_b", "prj_a"]
+
+    async def relaunch(pilot: Pilot[None]) -> list[str]:
+        await pilot.pause()
+        return _cards(fleet_app(pilot))
+
+    assert drive(relaunch) == unfolded, "the arrangement is the store's, not the session's"
+
+
+def test_a_group_header_rolls_up_its_members_agents(tmp_path: Path, script: Script) -> None:
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    script["prj_b"] = [status("prj_b", "coder-1", "coder", "attention")]
+    with store_session() as store:
+        groups_service.create_group(store, "all", ["prj_a", "prj_b"])
+
+    async def go(pilot: Pilot[None]) -> str:
+        return shown(fleet_app(pilot).query_one(GroupHeader))
+
+    header = drive(go)
+    assert "📁 all" in header and header.rstrip().endswith("2 · 🔔1")
+
+
+def test_dragging_a_card_onto_a_group_header_groups_it_and_the_picker_groups_a_selection(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    seed(tmp_path, ("prj_a", "api", None), ("prj_b", "cli", None), ("prj_c", "docs", None))
+    with store_session() as store:
+        groups_service.create_group(store, "tools", ["prj_b"])
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str], list[str]]:
+        app = fleet_app(pilot)
+        before = _cards(app)
+        # Drag docs (a loose card) onto the group header.
+        title = card_for(app, "prj_c").query_one(ProjectTitle)
+        header = app.sidebar.query_one(GroupHeader)
+        await pilot.mouse_down(title, offset=(2, 0))
+        await pilot.hover(header, offset=(3, 0))
+        await pilot.mouse_up(header, offset=(3, 0))
+        await pilot.pause()
+        await pilot.pause()
+        dragged = _cards(app)
+        # A press and release without motion opens the project, as before.
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await pilot.pause()
+        opened = app.current_view().id if app.current_view() else None
+        assert opened == "project-prj_a", opened
+        # shift+click marks two cards; shift+g groups them into a NEW group through the picker.
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle), shift=True)
+        await pilot.click(card_for(app, "prj_c").query_one(ProjectTitle), shift=True)
+        marked = sorted(c.project.id for c in app.query(ProjectCard) if c.has_class("marked"))
+        app.sidebar.focus()
+        await pilot.press("shift+g")
+        await pilot.pause()
+        assert isinstance(app.screen, GroupPicker), type(app.screen).__name__
+        await pilot.press("end")  # … the last option is Ungroup; New group… is just above it
+        await pilot.press("up")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press(*"web")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        return before, dragged, marked, _cards(app)
+
+    before, dragged, marked, grouped = drive(go)
+    assert before == ["group:tools", "prj_b", "prj_a", "prj_c"]
+    assert dragged == ["group:tools", "prj_b", "prj_c", "prj_a"], "dropped on the header: last"
+    assert marked == ["prj_a", "prj_c"]
+    assert grouped == ["group:tools", "prj_b", "group:web", "prj_a", "prj_c"]
+    with store_session() as store:
+        names = {g.name for g in store.project_groups()}
+    assert names == {"tools", "web"}

@@ -27,10 +27,12 @@ import re
 import sqlite3
 import sys
 import time
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Protocol
 
 from aisquare.core import paths
@@ -42,6 +44,7 @@ from aisquare.models import (
     LaunchSpec,
     Pool,
     ProjectExplainability,
+    ProjectGroup,
     ProjectInfo,
     PromptRecord,
     TaskStatus,
@@ -639,6 +642,22 @@ CREATE TABLE project_explainability (
     set_by     TEXT
 );
 """
+# v20 (#140): project groups, pinning and manual order — a management layer over
+# projects. One group per project (like a browser tab), positions per scope,
+# pins on projects and groups. Nothing else references a group.
+_SCHEMA_V20 = """
+CREATE TABLE project_group (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    position   INTEGER NOT NULL DEFAULT 0,
+    pinned_at  TEXT,
+    collapsed  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+ALTER TABLE project ADD COLUMN group_id TEXT REFERENCES project_group (id);
+ALTER TABLE project ADD COLUMN position INTEGER;
+ALTER TABLE project ADD COLUMN pinned_at TEXT;
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -660,10 +679,12 @@ _MIGRATIONS = (
     _SCHEMA_V17,
     _SCHEMA_V18,
     _SCHEMA_V19,
+    _SCHEMA_V20,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
-_PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at"
+_PROJECT_COLUMNS = "id, root, linked_repos, codename, onboarded_at, group_id, position, pinned_at"
+_GROUP_COLUMNS = "id, name, position, pinned_at, collapsed, created_at"
 
 _COLUMNS = "id, pool, project_id, text, tags, source, created_at, updated_at, deleted_at"
 _PROMPT_COLUMNS = "id, project_id, text, source, created_at"
@@ -855,6 +876,28 @@ class ContextStore(Protocol):
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
+    def project_groups(self) -> list[ProjectGroup]: ...
+    def get_project_group(self, group_id: str) -> ProjectGroup | None: ...
+    def find_project_group(self, name: str) -> ProjectGroup | None: ...
+    def create_project_group(self, name: str, *, group_id: str | None = None) -> ProjectGroup: ...
+    def update_project_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        position: int | None = None,
+        pinned_at: datetime | EllipsisType | None = ...,
+        collapsed: bool | None = None,
+    ) -> ProjectGroup: ...
+    def delete_project_group(self, group_id: str) -> list[str]: ...
+    def update_project_layout(
+        self,
+        project_id: str,
+        *,
+        group_id: str | EllipsisType | None = ...,
+        position: int | EllipsisType | None = ...,
+        pinned_at: datetime | EllipsisType | None = ...,
+    ) -> ProjectInfo: ...
     def project_explainability(self, project_id: str) -> ProjectExplainability | None: ...
     def project_explainability_all(self) -> list[ProjectExplainability]: ...
     def set_project_explainability(
@@ -911,6 +954,20 @@ def _row_to_project(row: sqlite3.Row) -> ProjectInfo:
         linked_repos=json.loads(row["linked_repos"]),
         codename=row["codename"],
         onboarded_at=datetime.fromisoformat(onboarded) if onboarded else None,
+        group_id=row["group_id"],
+        position=row["position"],
+        pinned_at=_maybe_dt(row["pinned_at"]),
+    )
+
+
+def _row_to_project_group(row: sqlite3.Row) -> ProjectGroup:
+    return ProjectGroup(
+        id=row["id"],
+        name=row["name"],
+        position=int(row["position"]),
+        pinned_at=_maybe_dt(row["pinned_at"]),
+        collapsed=bool(row["collapsed"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
@@ -2310,6 +2367,146 @@ class SqliteStore:
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    # --- project groups, pins and order (#140) ------------------------------------------
+
+    def project_groups(self) -> list[ProjectGroup]:
+        rows = self._conn.execute(
+            f"SELECT {_GROUP_COLUMNS} FROM project_group ORDER BY position, name"
+        ).fetchall()
+        return [_row_to_project_group(row) for row in rows]
+
+    def get_project_group(self, group_id: str) -> ProjectGroup | None:
+        row = self._conn.execute(
+            f"SELECT {_GROUP_COLUMNS} FROM project_group WHERE id = ?", (group_id,)
+        ).fetchone()
+        return _row_to_project_group(row) if row is not None else None
+
+    def find_project_group(self, name: str) -> ProjectGroup | None:
+        """By exact name, then case-insensitively — names are unique either way."""
+        row = self._conn.execute(
+            f"SELECT {_GROUP_COLUMNS} FROM project_group WHERE name = ? "
+            "OR lower(name) = lower(?) ORDER BY name = ? DESC LIMIT 1",
+            (name, name, name),
+        ).fetchone()
+        return _row_to_project_group(row) if row is not None else None
+
+    def create_project_group(self, name: str, *, group_id: str | None = None) -> ProjectGroup:
+        """A new group at the END of the top level; a duplicate name raises ``ValueError``.
+
+        ``group_id`` lets an undo re-create a deleted group under the id its
+        members' rows were restored with.
+        """
+        if self.find_project_group(name) is not None:
+            raise ValueError(f"a group named {name!r} already exists")
+        last = self._conn.execute("SELECT MAX(position) FROM project_group").fetchone()[0]
+        position = int(last) + 1 if last is not None else 0
+        new_id = group_id or f"grp_{uuid.uuid4().hex[:24]}"
+        try:
+            self._conn.execute(
+                f"INSERT INTO project_group ({_GROUP_COLUMNS}) VALUES (?, ?, ?, NULL, 0, ?)",
+                (new_id, name, position, _now_iso()),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"a group named {name!r} already exists") from exc
+        self._conn.commit()
+        created = self.get_project_group(new_id)
+        assert created is not None
+        return created
+
+    def update_project_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        position: int | None = None,
+        pinned_at: datetime | EllipsisType | None = ...,
+        collapsed: bool | None = None,
+    ) -> ProjectGroup:
+        """Change the given fields; ``...`` for ``pinned_at`` means "leave it" (``None`` unpins)."""
+        sets: list[str] = []
+        params: list[object] = []
+        if name is not None:
+            taken = self.find_project_group(name)
+            if taken is not None and taken.id != group_id:
+                raise ValueError(f"a group named {name!r} already exists")
+            sets.append("name = ?")
+            params.append(name)
+        if position is not None:
+            sets.append("position = ?")
+            params.append(int(position))
+        if pinned_at is not ...:
+            sets.append("pinned_at = ?")
+            params.append(pinned_at.isoformat() if pinned_at is not None else None)
+        if collapsed is not None:
+            sets.append("collapsed = ?")
+            params.append(int(collapsed))
+        if sets:
+            try:
+                cursor = self._conn.execute(
+                    f"UPDATE project_group SET {', '.join(sets)} WHERE id = ?",
+                    (*params, group_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"a group named {name!r} already exists") from exc
+            self._conn.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(group_id)
+        updated = self.get_project_group(group_id)
+        if updated is None:
+            raise KeyError(group_id)
+        return updated
+
+    def delete_project_group(self, group_id: str) -> list[str]:
+        """Delete the group; its members are ungrouped (never deleted). Returns their ids."""
+        members = [
+            str(row["id"])
+            for row in self._conn.execute(
+                "SELECT id FROM project WHERE group_id = ?", (group_id,)
+            ).fetchall()
+        ]
+        self._conn.execute(
+            "UPDATE project SET group_id = NULL, position = NULL WHERE group_id = ?", (group_id,)
+        )
+        cursor = self._conn.execute("DELETE FROM project_group WHERE id = ?", (group_id,))
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise KeyError(group_id)
+        return members
+
+    def update_project_layout(
+        self,
+        project_id: str,
+        *,
+        group_id: str | EllipsisType | None = ...,
+        position: int | EllipsisType | None = ...,
+        pinned_at: datetime | EllipsisType | None = ...,
+    ) -> ProjectInfo:
+        """Change where a project sits — group, position, pin; ``...`` leaves a field alone."""
+        sets: list[str] = []
+        params: list[object] = []
+        if group_id is not ...:
+            sets.append("group_id = ?")
+            params.append(group_id)
+        if position is not ...:
+            sets.append("position = ?")
+            params.append(int(position) if position is not None else None)
+        if pinned_at is not ...:
+            sets.append("pinned_at = ?")
+            params.append(pinned_at.isoformat() if pinned_at is not None else None)
+        if sets:
+            cursor = self._conn.execute(
+                f"UPDATE project SET {', '.join(sets)} WHERE id = ?", (*params, project_id)
+            )
+            self._conn.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(project_id)
+        updated = self._conn.execute(
+            f"SELECT {_PROJECT_COLUMNS} FROM project WHERE id = ?", (project_id,)
+        ).fetchone()
+        if updated is None:
+            raise KeyError(project_id)
+        return _row_to_project(updated)
 
     # --- a project's explainability key (#141) -----------------------------------------
 

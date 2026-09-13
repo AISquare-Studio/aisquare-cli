@@ -36,13 +36,25 @@ from typing import ClassVar
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
-from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.cli.ui.groups import (
+    DragState,
+    DropGroup,
+    DropProject,
+    GroupProjects,
+    MoveRow,
+    ToggleCollapse,
+    TogglePin,
+    UndoLayout,
+)
+from aisquare.models import FleetAgentStatus, ProjectGroup, ProjectInfo
+from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
 ROLE_ICON: dict[str, str] = {
     "manager": "🧭",
@@ -299,7 +311,12 @@ class Disclosure(Static):
 
 
 class ProjectTitle(Activatable):
-    """The card's header line: name, codename badge, chips. Click → Project view."""
+    """The card's header line: name, codename badge, chips. Click → Project view.
+
+    Also the card's drag handle (#140): press and hold, move, drop on a group
+    header or between cards. A shift+click marks the card for a multi-selection
+    instead of opening it.
+    """
 
     DEFAULT_CSS = """
     ProjectTitle { width: 1fr; }
@@ -312,6 +329,26 @@ class ProjectTitle(Activatable):
 
     def message(self) -> Message:
         return ProjectSelected(self.project_id)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        sidebar = self._sidebar()
+        if sidebar is None or event.button != 1 or event.shift:
+            return  # a shift+click is a mark, decided on the click
+        ids = sidebar.marked_ids()
+        if self.project_id not in ids:
+            ids = [self.project_id]
+        state = DragState("project", self.project_id, ids, origin_y=event.screen_y)
+        sidebar.begin_drag(state, self)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        sidebar = self._sidebar()
+        if event.shift and sidebar is not None:
+            sidebar.toggle_mark(self.project_id)
+            return
+        if sidebar is not None and sidebar.drag_happened():
+            return  # the release of a drag is not an open
+        self.activate()
 
 
 class AgentRow(Activatable):
@@ -352,6 +389,74 @@ class SpawnRow(Activatable):
         return SpawnAgent(self.project_id)
 
 
+def group_header_text(entry: GroupEntry, agents: Mapping[str, list[FleetAgentStatus]]) -> Text:
+    """``▾ 📁 frontend  3 · 🔔1`` — the disclosure, the name, and the roll-up over its members.
+
+    The roll-up sums ``ALIVE_STATES`` and the bells over EVERY member, the
+    pinned ones included (they are listed under Pinned but they are still the
+    group's), so a collapsed group still says something is running in it.
+    """
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append("▸ " if entry.group.collapsed else "▾ ")
+    text.append(f"📁 {entry.group.name}", style="bold")
+    if entry.group.pinned_at is not None:
+        text.append(" 📌", style="dim")
+    statuses = [s for member in entry.members for s in agents.get(member.id, [])]
+    alive = sum(1 for s in statuses if s.state in ALIVE_STATES)
+    bells = sum(1 for s in statuses if s.state == "attention")
+    if alive or bells:
+        text.append("  ")
+    if alive:
+        text.append(str(alive), style="bold")
+    if bells:
+        if alive:
+            text.append(" · ", style="dim")
+        text.append(f"🔔{bells}", style="bold red")
+    return text
+
+
+class GroupHeader(Activatable):
+    """A group's line: Enter or a click folds and unfolds it; drag it to reorder groups (#140)."""
+
+    DEFAULT_CSS = """
+    GroupHeader { padding: 0 1; color: $text; background: $boost; }
+    GroupHeader.-dragging { opacity: 60%; }
+    GroupHeader.-drop-before { border-top: solid $accent; }
+    """
+
+    def __init__(self, entry: GroupEntry, agents: Mapping[str, list[FleetAgentStatus]]) -> None:
+        super().__init__(group_header_text(entry, agents), id=f"group-{entry.group.id}")
+        self.group: ProjectGroup = entry.group
+        self.selection_key = f"group:{entry.group.id}"
+
+    def show(self, entry: GroupEntry, agents: Mapping[str, list[FleetAgentStatus]]) -> None:
+        self.group = entry.group
+        self.update(group_header_text(entry, agents))
+
+    def message(self) -> Message:
+        return ToggleCollapse(self.group.id)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        sidebar = self._sidebar()
+        if sidebar is not None and event.button == 1 and not event.shift:
+            sidebar.begin_drag(DragState("group", self.group.id, origin_y=event.screen_y), self)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        sidebar = self._sidebar()
+        if sidebar is not None and sidebar.drag_happened():
+            return
+        self.activate()
+
+
+class SectionLabel(Static):
+    """``📌 Pinned`` — a heading that is not a row (the cursor skips it)."""
+
+    DEFAULT_CSS = """
+    SectionLabel { height: 1; padding: 0 1; color: $text-muted; text-style: italic; }
+    """
+
+
 class ProjectCard(Vertical):
     """One project: header row, optional path subtitle, agent rows, spawn row.
 
@@ -364,6 +469,10 @@ class ProjectCard(Vertical):
     ProjectCard { height: auto; padding: 0 1; }
     ProjectCard.even { background: $surface; }
     ProjectCard.odd { background: $panel; }
+    ProjectCard.grouped { padding-left: 2; }
+    ProjectCard.marked #card-header { background: $secondary 30%; }
+    ProjectCard.-dragging { opacity: 60%; }
+    ProjectCard.-drop-before { border-top: solid $accent; }
     ProjectCard #card-header { height: 1; }
     ProjectCard .card-subtitle {
         height: 1; padding-left: 3; color: $text-muted;
@@ -388,6 +497,8 @@ class ProjectCard(Vertical):
         self.subtitle = subtitle
         self.notice = notice
         self.collapsed = False
+        self.scope: str | None = None
+        """The group this card is shown under, or ``None`` at the top level / under Pinned."""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="card-header"):
@@ -544,6 +655,15 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
+        # Groups, pins and order (#140) — every gesture here has a CLI twin.
+        Binding("shift+up", "move_up", "move up", show=False),
+        Binding("shift+down", "move_down", "move down", show=False),
+        Binding("p", "toggle_pin", "pin", show=False),
+        Binding("g", "group_picker", "group", show=False),
+        Binding("shift+g", "group_marked", "group selection", show=False),
+        Binding("space", "toggle_collapse", "fold", show=False),
+        Binding("u", "undo_layout", "undo", show=False),
+        Binding("escape", "clear_marks", "clear marks", show=False),
     ]
 
     can_focus = True
@@ -555,6 +675,14 @@ class Sidebar(Vertical):
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
+        self.arrangement: Arrangement | None = None
+        """The order the last frame was painted in (groups, pins, loose) — #140."""
+        self._marked: list[str] = []
+        """Project ids shift+clicked into a multi-selection, in click order."""
+        self._drag: DragState | None = None
+        self._drag_source: Widget | None = None
+        self._drop_target: Widget | None = None
+        self._last_drag_moved = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
@@ -583,6 +711,7 @@ class Sidebar(Vertical):
         agents: dict[str, list[FleetAgentStatus]],
         *,
         notices: Mapping[str, str] | None = None,
+        groups: list[ProjectGroup] | None = None,
     ) -> None:
         """Paint one frame. Cards and rows are updated in place, keyed by id.
 
@@ -590,42 +719,247 @@ class Sidebar(Vertical):
         cost of a fleet call that failed open); it is shown as a dim line
         where the rows would be, so an empty card is never mistaken for an
         idle fleet.
+
+        The ORDER is the arrangement's (#140): a **Pinned** section, then each
+        group's header with its members indented under it (hidden while the
+        group is collapsed), then the loose projects — pins and manual order
+        from the store, nothing sorted behind the user's back. Children are
+        reconciled into that order by id, so a frame costs moves, not rebuilds.
         """
         notices = notices or {}
+        arrangement = arrange(projects, groups or [])
+        self.arrangement = arrangement
         holder = self.query_one("#projects", VerticalScroll)
         self.query_one("#projects-empty", Static).display = not projects
-        existing = {card.project.id: card for card in holder.query(ProjectCard)}
+        existing_cards = {card.project.id: card for card in holder.query(ProjectCard)}
+        existing_headers = {header.group.id: header for header in holder.query(GroupHeader)}
+        existing_labels = {label.id: label for label in holder.query(SectionLabel)}
         names = Counter(project_name(p) for p in projects)
-        for index, project in enumerate(projects):
+        ordered: list[Widget] = []
+        stripe = 0
+
+        def card_for(project: ProjectInfo, *, scope: str | None, hidden: bool) -> None:
+            nonlocal stripe
             statuses = ordered_agents(agents.get(project.id, []))
             subtitle = short_path(project.root) if names[project_name(project)] > 1 else None
             notice = notices.get(project.id)
-            card = existing.pop(project.id, None)
+            card = existing_cards.pop(project.id, None)
             if card is None:
                 card = ProjectCard(
-                    project,
-                    statuses,
-                    subtitle=subtitle,
-                    notice=notice,
-                    id=f"card-{project.id}",
+                    project, statuses, subtitle=subtitle, notice=notice, id=f"card-{project.id}"
                 )
-                slot = index + 1  # after the (hidden) empty-state line
-                if slot < len(holder.children):
-                    holder.mount(card, before=slot)
-                else:
-                    holder.mount(card)
             else:
                 card.show(project, statuses, subtitle=subtitle, notice=notice)
-                slot = index + 1
-                if slot < len(holder.children) and holder.children[slot] is not card:
-                    holder.move_child(card, before=slot)
-            card.set_class(index % 2 == 0, "even")
-            card.set_class(index % 2 == 1, "odd")
-        for stale in existing.values():
-            stale.remove()
+            card.scope = scope
+            card.set_class(scope is not None, "grouped")
+            card.set_class(project.id in self._marked, "marked")
+            card.set_class(stripe % 2 == 0, "even")
+            card.set_class(stripe % 2 == 1, "odd")
+            card.display = not hidden
+            stripe += 1
+            ordered.append(card)
+
+        def header_for(entry: GroupEntry) -> None:
+            header = existing_headers.pop(entry.group.id, None)
+            if header is None:
+                header = GroupHeader(entry, agents)
+            else:
+                header.show(entry, agents)
+            ordered.append(header)
+            for member in entry.members:
+                card_for(member, scope=entry.group.id, hidden=entry.group.collapsed)
+
+        if arrangement.pinned:
+            label = existing_labels.pop("pinned-label", None) or SectionLabel(
+                Text("📌 Pinned"), id="pinned-label"
+            )
+            ordered.append(label)
+            for entry in arrangement.pinned:
+                if isinstance(entry, GroupEntry):
+                    header_for(entry)
+                else:
+                    card_for(entry, scope=None, hidden=False)
+        for entry in arrangement.groups:
+            header_for(entry)
+        for project in arrangement.loose:
+            card_for(project, scope=None, hidden=False)
+
+        stale: list[Widget] = [
+            *existing_cards.values(),
+            *existing_headers.values(),
+            *existing_labels.values(),
+        ]
+        for widget in stale:
+            widget.remove()
+        # Slot 0 is the (hidden) empty-state line; everything else follows the order.
+        for index, widget in enumerate(ordered):
+            slot = index + 1
+            if not widget.is_mounted:
+                if slot < len(holder.children):
+                    holder.mount(widget, before=slot)
+                else:
+                    holder.mount(widget)
+            elif slot < len(holder.children) and holder.children[slot] is not widget:
+                holder.move_child(widget, before=slot)
         self.last_frame = (projects, agents)
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
+
+    # --- groups, pins and order (#140) ----------------------------------------------
+
+    def marked_ids(self) -> list[str]:
+        return list(self._marked)
+
+    def toggle_mark(self, project_id: str) -> None:
+        """shift+click: add the card to (or drop it from) the multi-selection."""
+        if project_id in self._marked:
+            self._marked.remove(project_id)
+        else:
+            self._marked.append(project_id)
+        for card in self.query(ProjectCard):
+            card.set_class(card.project.id in self._marked, "marked")
+
+    def action_clear_marks(self) -> None:
+        self._marked.clear()
+        for card in self.query(ProjectCard):
+            card.remove_class("marked")
+
+    def _cursor_target(self) -> tuple[str, str] | None:
+        """``("project", id)`` or ``("group", id)`` for the row under the cursor (or selected)."""
+        key = self._cursor_key or self.selected_key
+        if not key:
+            return None
+        kind, _, ident = key.partition(":")
+        if kind == "project":
+            return ("project", ident)
+        if kind == "group":
+            return ("group", ident)
+        if kind in ("agent", "spawn"):
+            for card in self.query(ProjectCard):
+                if any(s.agent.id == ident for s in card.statuses) or (
+                    kind == "spawn" and card.project.id == ident
+                ):
+                    return ("project", card.project.id)
+        return None
+
+    def action_move_up(self) -> None:
+        self._step(-1)
+
+    def action_move_down(self) -> None:
+        self._step(1)
+
+    def _step(self, delta: int) -> None:
+        target = self._cursor_target()
+        if target is not None:
+            self.post_message(MoveRow(target[0], target[1], delta))  # type: ignore[arg-type]
+
+    def action_toggle_pin(self) -> None:
+        target = self._cursor_target()
+        if target is not None:
+            self.post_message(TogglePin(target[0], target[1]))  # type: ignore[arg-type]
+
+    def action_toggle_collapse(self) -> None:
+        target = self._cursor_target()
+        if target is None:
+            return
+        if target[0] == "group":
+            self.post_message(ToggleCollapse(target[1]))
+            return
+        # Space on a project folds its card, as the disclosure glyph does.
+        for card in self.query(ProjectCard):
+            if card.project.id == target[1]:
+                card.toggle()
+
+    def action_group_picker(self) -> None:
+        target = self._cursor_target()
+        if self._marked:
+            self.post_message(GroupProjects(list(self._marked)))
+        elif target is not None and target[0] == "project":
+            self.post_message(GroupProjects([target[1]]))
+
+    def action_group_marked(self) -> None:
+        if self._marked:
+            self.post_message(GroupProjects(list(self._marked)))
+
+    def action_undo_layout(self) -> None:
+        self.post_message(UndoLayout())
+
+    # drag and drop: press on a title or a group header, move past its row, release on a target
+
+    def begin_drag(self, state: DragState, source: Widget) -> None:
+        """A press on a drag handle: nothing moves until the pointer leaves the row."""
+        self._drag, self._drag_source = state, source
+        self._last_drag_moved = False
+        self.capture_mouse()
+
+    def drag_happened(self) -> bool:
+        """Whether the gesture that just ended was a drag (so its release is not a click)."""
+        return self._last_drag_moved
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        drag = self._drag
+        if drag is None or self._drag_source is None:
+            return
+        if not drag.started:
+            if abs(event.screen_y - drag.origin_y) < 1:
+                return
+            drag.started = True
+            self._drag_source.add_class("-dragging")
+        self._mark_drop(self._target_at(event.screen_x, event.screen_y))
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        drag, source = self._drag, self._drag_source
+        self._drag, self._drag_source = None, None
+        self.release_mouse()
+        if drag is None or source is None:
+            return
+        source.remove_class("-dragging")
+        self._last_drag_moved = drag.started
+        target = self._drop_target
+        self._mark_drop(None)
+        if not drag.started:
+            return
+        self.call_later(self._end_drag_flag)
+        if drag.kind == "group":
+            before = target.group.id if isinstance(target, GroupHeader) else None
+            if before == drag.ident:
+                return  # dropped on itself: snap back
+            self.post_message(DropGroup(drag.ident, before=before))
+            return
+        if isinstance(target, GroupHeader):
+            self.post_message(DropProject(drag.project_ids, scope=target.group.id, before=None))
+        elif isinstance(target, ProjectCard):
+            if target.project.id in drag.project_ids:
+                return  # dropped on itself: snap back
+            self.post_message(
+                DropProject(drag.project_ids, scope=target.scope, before=target.project.id)
+            )
+        else:
+            # Empty space below the list: the top level's end (ungroup).
+            self.post_message(DropProject(drag.project_ids, scope=None, before=None))
+
+    def _end_drag_flag(self) -> None:
+        self._last_drag_moved = False
+
+    def _target_at(self, x: int, y: int) -> Widget | None:
+        """The card or group header under the pointer, or ``None`` over nothing."""
+        try:
+            widget, _ = self.screen.get_widget_at(x, y)
+        except Exception:
+            return None
+        for node in (widget, *widget.ancestors):
+            if isinstance(node, ProjectCard | GroupHeader):
+                return node
+        return None
+
+    def _mark_drop(self, target: Widget | None) -> None:
+        if self._drop_target is target:
+            return
+        if self._drop_target is not None:
+            self._drop_target.remove_class("-drop-before")
+        self._drop_target = target
+        if target is not None and target is not self._drag_source:
+            target.add_class("-drop-before")
 
     def show_notice(self, text: str | None) -> None:
         """A one-line warning above the list (a stale frame, say); ``None`` clears it."""

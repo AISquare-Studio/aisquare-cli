@@ -239,8 +239,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
         raw.close()
     # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry
     # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139),
-    # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141)
-    assert version == SCHEMA_VERSION == 19
+    # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141),
+    # v20 project groups, pins and manual order (#140)
+    assert version == SCHEMA_VERSION == 20
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:

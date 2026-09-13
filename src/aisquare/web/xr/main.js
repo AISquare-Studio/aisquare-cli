@@ -428,14 +428,21 @@ sayForm.addEventListener('submit', (event) => {
   speakingAt = null; // a typed prompt's ack belongs to the focused panel
 });
 
-// The field takes the keyboard while it has focus, so the single-letter
-// bindings must not fire into it — `t` would start recording as you typed the
-// word "test". input.js listens on window, so this stops it at the source.
+/**
+ * The field owns the keyboard while it has focus.
+ *
+ * `input.js` binds its whole key map on `window` in the bubble phase, so a
+ * keystroke into this field would reach it too: typing "test" would fire
+ * push-to-talk on the `t`, and Enter is bound to `select`, which toggles the
+ * focus panel — so submitting a prompt would close the panel it was aimed at.
+ * Stopping propagation here cuts every one of those off at the source.
+ *
+ * Enter is stopped along with the rest, and the form still submits: propagation
+ * and default actions are different things, and implicit form submission is the
+ * latter. Only `preventDefault` would have cancelled it, and this is not that.
+ */
 for (const type of ['keydown', 'keyup']) {
-  sayText.addEventListener(type, (event) => {
-    if (event.key === 'Enter') return; // the form still needs its submit
-    event.stopPropagation();
-  });
+  sayText.addEventListener(type, (event) => event.stopPropagation());
 }
 
 /* --------------------------------------------------------------- AR entry -- */

@@ -243,7 +243,9 @@ export class FocusPanel {
    * @param {string}  [patch.speech]       interim or final transcript
    * @param {boolean} [patch.speechFinal]  render it as committed, not provisional
    * @param {string}  [patch.notice]       the ack line, or an error
-   * @param {boolean} [patch.alert]        render the notice as a problem
+   * @param {boolean} [patch.alert]        this notice is a problem. Does NOT
+   *   colour it red — see `drawVoice` — but it is what routes the message to
+   *   the HUD as well, where the scene's palette rules do not apply.
    */
   setVoice(patch = {}) {
     let changed = false;
@@ -532,7 +534,9 @@ export class FocusPanel {
    */
   drawVoice() {
     const { ctx } = this;
-    const { live, speech, speechFinal, notice, alert } = this.voice;
+    // `alert` is deliberately not read here — it routes to the HUD, it does not
+    // colour anything in the scene. See the fillStyle below.
+    const { live, speech, speechFinal, notice } = this.voice;
     if (!live && !speech && !notice) return;
 
     const midY = FOCUS.voiceTop + FOCUS.voiceH / 2;
@@ -561,12 +565,20 @@ export class FocusPanel {
     const text = notice || speech;
     if (!text) return;
 
+    // Provisional speech is dim and light; anything committed — a final
+    // transcript, an ack, an error — is ink and heavy. Two steps, legible at
+    // 0.9 m without reading the words.
+    //
+    // NOT `alert`, even for an error, and the temptation is worth naming: §8
+    // reserves that red for `state === 'needs_you'` and the token's own comment
+    // says "used nowhere else, ever". A red line on a focus panel is the exact
+    // signal an operator scans the ring for, and spending it on "speech is not
+    // installed" would make the one colour that means "an agent is blocked on
+    // you" mean two things. `makeHoverOutline` refused it on the same grounds.
+    // The error's own words carry the alarm here, and the HUD — 2D chrome,
+    // outside the scene and outside §8 — is where its red edge lives.
     ctx.font = voiceFont(notice || speechFinal ? 600 : 400);
-    // Three weights of certainty, and the operator can tell them apart without
-    // reading: a provisional transcript is dim, a committed one is ink, and a
-    // problem is alert — the one colour §8 reserves, used here for the same
-    // meaning it has on a panel bar.
-    ctx.fillStyle = alert ? COLOR.alert : notice || speechFinal ? COLOR.ink : COLOR.inkDim;
+    ctx.fillStyle = notice || speechFinal ? COLOR.ink : COLOR.inkDim;
 
     const max = FOCUS.voiceCols;
     // Clipped from the FRONT for live speech: the words that matter while you

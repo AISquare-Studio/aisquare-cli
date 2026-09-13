@@ -1497,7 +1497,15 @@ def test_the_transcript_tail_resyncs_when_the_file_shrinks(work_dir: Path) -> No
     assert row is not None
 
     recorder = _Recorder()
-    connection = xr_server._Connection(cast(Any, recorder), project=project, token="unused")
+    # A factory is required to build a connection, but this one never opens a
+    # burst: the subject is `_stream_transcript`, driven directly. The fake is
+    # here to satisfy the constructor, not to be called.
+    connection = xr_server._Connection(
+        cast(Any, recorder),
+        project=project,
+        token="unused",
+        transcriber_factory=lambda: FakeTranscriber(CANNED),
+    )
 
     async def drive() -> list[str]:
         tail = asyncio.create_task(connection._stream_transcript(row))
@@ -1553,14 +1561,16 @@ def test_a_burst_that_ends_on_a_different_session_keeps_the_headers_owner(
     from aisquare.services import team as team_service
 
     team_service.activate(project.root)
-    with caplog.at_level(logging.INFO, logger=xr_server.__name__):
-        with _authed(http, token) as connection:
-            connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
-            for _ in range(FRAMES_PER_INTERIM):
-                connection.send_bytes(FRAME)
-            connection.send_text(json.dumps({"t": "audioEnd", "session": SECOND}))
-            final = json.loads(_until(connection, "stt"))
-            ack = json.loads(_until(connection, "ack"))
+    with (
+        caplog.at_level(logging.INFO, logger=xr_server.__name__),
+        _authed(http, token) as connection,
+    ):
+        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+        for _ in range(FRAMES_PER_INTERIM):
+            connection.send_bytes(FRAME)
+        connection.send_text(json.dumps({"t": "audioEnd", "session": SECOND}))
+        final = json.loads(_until(connection, "stt"))
+        ack = json.loads(_until(connection, "ack"))
 
     assert final == {"t": "stt", "text": CANNED, "final": True}
     assert ack["session"] == CODER, "the words go to the panel whose microphone was opened"

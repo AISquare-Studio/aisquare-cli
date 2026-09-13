@@ -125,11 +125,15 @@
          pointer-events:none so they never eat an orbit drag, and this has to be
          clickable. It stays hidden until immersive-ar is known to be supported,
          so it is never a button that does nothing. */
+      /* Lifted clear of #say, which owns the bottom row. On Quest both are on
+         screen at once — you land on the page, see Enter AR, and the typed
+         field is already there — so a button sitting on top of an input is a
+         real collision rather than a theoretical one. */
       #enter-ar {
         position: fixed;
         z-index: 2;
         left: 50%;
-        bottom: 28px;
+        bottom: 62px;
         transform: translateX(-50%);
         font: 600 15px/1 var(--font-mono);
         letter-spacing: 0.04em;
@@ -157,6 +161,71 @@
       #notice code {
         color: #f2b33d;
       }
+
+      /* The voice HUD: where a message goes when there is no focused panel to
+         draw it on, or when it has to outlive one utterance. Centred above the
+         typed field so it is in the operator's eyeline rather than in a corner
+         they are not looking at while talking. */
+      #toast {
+        left: 50%;
+        bottom: 118px;
+        transform: translateX(-50%);
+        max-width: 36rem;
+        text-align: center;
+        white-space: pre-wrap;
+      }
+      /* Pinned messages name something the operator must go and do, so they get
+         the alert edge. A toast is just information passing through. */
+      #toast[data-pinned='true'] {
+        border-color: var(--alert);
+      }
+
+      /* §10 keeps the typed path because ASR mangles repo and branch names.
+         Not an `.overlay`: those are pointer-events:none, and this is the one
+         thing on the page you have to be able to click into and type. */
+      #say {
+        position: fixed;
+        z-index: 2;
+        left: 50%;
+        bottom: 12px;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 6px;
+        width: min(36rem, calc(100vw - 24px));
+      }
+      #say input {
+        flex: 1;
+        min-width: 0;
+        font: 400 13px/1.4 var(--font-mono);
+        color: var(--ink);
+        background: rgba(18, 22, 28, 0.92);
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+        padding: 8px 10px;
+      }
+      #say input::placeholder {
+        color: var(--ink-dim);
+      }
+      #say input:focus {
+        outline: none;
+        border-color: #4fc3d9;
+      }
+      #say input:disabled {
+        opacity: 0.55;
+      }
+      #say button {
+        font: 600 13px/1 var(--font-mono);
+        color: #08111a;
+        background: #4fc3d9;
+        border: 0;
+        border-radius: 6px;
+        padding: 0 14px;
+        cursor: pointer;
+      }
+      #say button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
     </style>
   </head>
 
@@ -173,10 +242,34 @@
       <b>f</b> focus · <b>b</b> next alert · <b>c</b> collapse/summon · <b>r</b> recenter ·
       <b>←→</b> rotate · <b>↑↓</b> scroll · <b>t</b> hold to talk<br />
       <b>n</b> alert · <b>p</b> page · <b>v</b> viewer pose · <b>i</b> inspect · <b>−</b> <b>=</b> push/pull ·
-      drag orbit
+      drag orbit · type in the field below for names ASR mangles
     </div>
 
     <div id="notice" class="overlay" hidden></div>
+
+    <!-- Voice feedback that has nowhere else to go. Everything an operator in
+         the headset must see is ALSO drawn on the focus panel, because this
+         element is only visible in an immersive session when `dom-overlay` was
+         granted. -->
+    <div id="toast" class="overlay" hidden></div>
+
+    <!--
+      The typed path (plan §10). Kept, not optional: "repo names, branch names
+      and identifiers will be mangled by ASR". This is the ONLY thing in the
+      client that sends `{t:"prompt"}` — the voice path never does, because the
+      server routes a final transcript as the prompt itself.
+    -->
+    <form id="say" autocomplete="off">
+      <input
+        id="say-text"
+        type="text"
+        placeholder="focus a panel, then type to send it a prompt"
+        aria-label="Send a typed prompt to the focused session"
+        maxlength="2000"
+        disabled
+      />
+      <button id="say-send" type="submit" disabled>send</button>
+    </form>
 
     <!--
       Not a module, and above main.js on purpose: this has to report even when

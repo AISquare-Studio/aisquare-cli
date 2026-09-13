@@ -78,7 +78,7 @@ export class ConnectionChip {
     this.set('offline');
   }
 
-  /** @param {'connected'|'reconnecting'|'auth failed'|'offline'|'mock'} state */
+  /** @param {'connected'|'reconnecting'|'auth failed'|'server gone'|'offline'|'mock'} state */
   set(state, detail = '') {
     this.state = state;
     if (!this.el) return;
@@ -91,6 +91,19 @@ export class ConnectionChip {
 
 const BACKOFF_MIN_MS = 500;
 const BACKOFF_MAX_MS = 8000;
+
+/**
+ * Attempts after which the chip stops saying "reconnecting" and says "server
+ * gone" instead (plan §11/M7).
+ *
+ * It does NOT stop retrying — this client is fail-open and the server coming
+ * back must not need a headset reload, which is the whole M7 verification. It
+ * is a change of wording, and the wording is the point: five failures in a row
+ * with the backoff already at its ceiling is no longer "a blip", and an
+ * operator watching a chip that has said "reconnecting" for two minutes has no
+ * way to tell a slow reconnect from a server they forgot to start.
+ */
+const GONE_AFTER_ATTEMPTS = 5;
 
 /* -------------------------------------------------------------------- net -- */
 
@@ -143,9 +156,11 @@ export class Net {
 
   /**
    * Subscribe to a server message type: `hello`, `snapshot`, `delta`,
-   * `transcript`, `stt`, `error`, `ack` (plan §6). Two pseudo-types are emitted
-   * locally: `status` when the chip changes, and `open` on every (re)connection
-   * after `hello` — the cue to treat the next snapshot as authoritative.
+   * `transcript`, `stt`, `error`, `ack` (plan §6). Three pseudo-types are emitted
+   * locally: `status` when the chip changes, `open` on every (re)connection
+   * after `hello` — the cue to treat the next snapshot as authoritative — and
+   * `drop` when a socket closes, which is the cue to abandon anything that was
+   * in flight on it.
    */
   on(type, handler) {
     if (!this.handlers.has(type)) this.handlers.set(type, new Set());
@@ -205,6 +220,11 @@ export class Net {
     socket.addEventListener('close', (event) => {
       if (socket !== this.socket) return; // a stale socket losing a race
       this.socket = null;
+      // Before anything else: whatever was mid-flight on this socket is gone.
+      // A push-to-talk burst in particular has audio the server has already
+      // forgotten, and the operator has to be told to say it again rather than
+      // waiting on a transcript that is never coming (§11/M7).
+      this.emit('drop', { code: event.code, reason: event.reason });
       if (this.closedByUs || this.authFailed) return;
       // 1008 is policy violation — how a server refuses a bad token.
       if (event.code === 1008) return this.failAuth(event.reason || 'token rejected');
@@ -226,20 +246,43 @@ export class Net {
     const base = Math.min(BACKOFF_MIN_MS * 2 ** this.attempt, BACKOFF_MAX_MS);
     const delay = base * (0.75 + Math.random() * 0.5);
     this.attempt += 1;
-    this.setStatus(navigator.onLine === false ? 'offline' : 'reconnecting');
+    if (navigator.onLine === false) {
+      this.setStatus('offline');
+    } else if (this.attempt > GONE_AFTER_ATTEMPTS) {
+      // Still retrying on the same ladder — only the wording has given up.
+      this.setStatus('server gone', `retrying · attempt ${this.attempt}`);
+    } else {
+      // The attempt count is what makes this chip testable: "reconnecting" that
+      // never changes is indistinguishable from a frozen client, and the M7
+      // criterion is a RISING count (§11/M7).
+      this.setStatus('reconnecting', `attempt ${this.attempt}`);
+    }
     this.timer = setTimeout(() => {
       this.timer = null;
       this.connect();
     }, delay);
   }
 
+  /**
+   * A token the server will not accept. Terminal, and the only terminal state
+   * here: retrying a rejected token just hammers the server with the same
+   * rejection, and no amount of backoff turns a stale token into a good one.
+   *
+   * The detail carries §13's recovery, because it is not guessable. The token
+   * rotates when the server restarts, the stored copy is now the wrong one, and
+   * the fix is to open the URL `aisquare xr` printed — which is also why
+   * `clearToken` runs first, so that URL's `#token=…` is not shadowed by the
+   * dead one in localStorage on the next load.
+   */
   failAuth(detail) {
     this.authFailed = true;
     clearToken();
     clearTimeout(this.timer);
     this.timer = null;
-    // Retrying a rejected token just hammers the server with the same rejection.
-    this.setStatus('auth failed', detail);
+    this.setStatus(
+      'auth failed',
+      `${detail} — open the URL \`aisquare xr\` printed (the token rotates with the server)`,
+    );
   }
 
   /** Stop for good — used by the mock feed, which owns the scene instead. */
@@ -303,6 +346,25 @@ export class Net {
     return true;
   }
 
+  /**
+   * One binary frame — 16 kHz mono PCM16LE audio, and nothing else ever.
+   *
+   * Separate from `send` because it must not be JSON.stringify'd, and because
+   * the failure mode is different: a dropped audio frame is 20 ms of a sentence
+   * and the right response is to carry on, whereas a dropped `prompt` is the
+   * whole message and the caller has to know. So this reports false the same
+   * way, but `VoiceCapture` reads it as a byte counter rather than an error.
+   *
+   * `bufferedAmount` is not checked. At 32 kB/s over loopback or `adb reverse`
+   * the socket is never the bottleneck, and dropping frames to protect a buffer
+   * that is not filling would punch holes in the audio for no reason.
+   */
+  sendBinary(buffer) {
+    if (!this.isOpen) return false;
+    this.socket.send(buffer);
+    return true;
+  }
+
   /** `null` means ambient only — no transcript stream (plan §6). */
   subscribe(sessionId = null) {
     return this.send({ t: 'subscribe', session: sessionId ?? null });
@@ -310,5 +372,26 @@ export class Net {
 
   prompt(sessionId, text) {
     return this.send({ t: 'prompt', session: sessionId, text });
+  }
+
+  /**
+   * Open a push-to-talk burst. Binary frames follow until `audioEnd` (§6).
+   *
+   * Every binary frame before this header is a "stray" to the server, which
+   * answers the first one with an error and stays quiet for the rest — so the
+   * caller must not start the worklet until this has returned true.
+   */
+  audioStart(sessionId, seq = 0) {
+    return this.send({ t: 'audio', session: sessionId, seq });
+  }
+
+  /**
+   * Close the burst: the server transcribes what it buffered and ROUTES THE
+   * FINAL TEXT AS THE PROMPT ITSELF. There is deliberately no `prompt` call
+   * anywhere on the voice path — sending one here would deliver the operator's
+   * sentence twice.
+   */
+  audioEnd(sessionId) {
+    return this.send({ t: 'audioEnd', session: sessionId });
   }
 }

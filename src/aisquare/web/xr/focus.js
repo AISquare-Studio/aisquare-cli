@@ -30,6 +30,7 @@ import {
   barColor,
   focusFont,
   rgba,
+  voiceFont,
 } from './style.js';
 
 /** Wrap monospace text to a fixed column count, breaking over-long tokens. */
@@ -102,10 +103,30 @@ export class FocusPanel {
     this.texture.minFilter = THREE.LinearFilter;
     this.texture.magFilter = THREE.LinearFilter;
 
-    /** Grows only when the transcript actually changes — the focus tier's
-     *  equivalent of the atlas invariant, and checkable the same way. */
+    /**
+     * Canvas redraws. Grows only when something on the panel actually changed
+     * — never per frame — which is the focus tier's half of the atlas
+     * invariant and is checkable the same way.
+     *
+     * Voice shares this canvas, so an interim `stt` frame necessarily redraws
+     * it: there is one texture and the speech line is on it. That would blur
+     * the invariant, so voice-caused redraws are ALSO counted on their own and
+     * the transcript figure stays recoverable as `redraws - voiceRedraws`.
+     * With the mic idle the two move exactly as they did before voice existed.
+     */
     this.redraws = 0;
+    /** Of `redraws`, the ones caused by the voice strip rather than by data. */
+    this.voiceRedraws = 0;
+    this._dirty = false;
+    this._dataDirty = false;
     this.dirty = true;
+
+    /**
+     * The voice strip's contents (§10). Timers live in main.js — this object
+     * is a rendering input, and a panel that expired its own text would be a
+     * second place where "how long does a final transcript stay up" is decided.
+     */
+    this.voice = { live: false, speech: '', speechFinal: false, notice: '', alert: false };
 
     /* ------------------------------------------------- in-scene fallback -- */
 
@@ -139,6 +160,25 @@ export class FocusPanel {
     );
 
     this.draw();
+  }
+
+  /**
+   * Needs a redraw. Assigning true through this setter also records that DATA
+   * asked for it — which is what keeps `redraws - voiceRedraws` meaning exactly
+   * what `redraws` meant before voice shared the canvas.
+   *
+   * A setter rather than a rename so that every existing `this.dirty = true` in
+   * this file keeps working and keeps being attributed correctly; `setVoice` is
+   * the one writer that goes to `_dirty` directly, because a voice update must
+   * not claim a redraw the transcript had already earned.
+   */
+  get dirty() {
+    return this._dirty;
+  }
+
+  set dirty(value) {
+    this._dirty = Boolean(value);
+    if (value) this._dataDirty = true;
   }
 
   get open() {
@@ -188,6 +228,44 @@ export class FocusPanel {
     this.scrollOffset = Math.min(max, Math.max(0, Math.round(this.scrollOffset)));
   }
 
+  /**
+   * Update the voice strip. Only the keys passed are changed.
+   *
+   * Returns true if anything actually moved. The comparison is the load-bearing
+   * part, not a micro-optimisation: interim `stt` frames repeat their prefix as
+   * the decoder firms it up, and a panel that redrew on every identical string
+   * would upload a 1600 × 1024 texture for a no-op — the exact failure the
+   * atlas invariant exists to catch, arriving through the other tier.
+   *
+   * @param {object}  patch
+   * @param {boolean} [patch.live]         mic dot on/off. On/off only: §8 allows
+   *   exactly one animated thing in the scene and it is the alert bar.
+   * @param {string}  [patch.speech]       interim or final transcript
+   * @param {boolean} [patch.speechFinal]  render it as committed, not provisional
+   * @param {string}  [patch.notice]       the ack line, or an error
+   * @param {boolean} [patch.alert]        this notice is a problem. Does NOT
+   *   colour it red — see `drawVoice` — but it is what routes the message to
+   *   the HUD as well, where the scene's palette rules do not apply.
+   */
+  setVoice(patch = {}) {
+    let changed = false;
+    for (const key of ['live', 'speech', 'speechFinal', 'notice', 'alert']) {
+      if (!(key in patch)) continue;
+      const value = key === 'speech' || key === 'notice' ? String(patch[key] ?? '') : Boolean(patch[key]);
+      if (this.voice[key] === value) continue;
+      this.voice[key] = value;
+      changed = true;
+    }
+    if (!changed) return false;
+    this._dirty = true; // deliberately not through the setter — see `dirty`
+    return true;
+  }
+
+  /** Everything voice put on the panel, gone. Used when focus moves. */
+  clearVoice() {
+    return this.setVoice({ live: false, speech: '', speechFinal: false, notice: '', alert: false });
+  }
+
   /** New session data for the panel already focused (state, title, unread). */
   setSession(session) {
     if (!session || session.id !== this.sessionId) return;
@@ -212,6 +290,9 @@ export class FocusPanel {
       this.lines = [];
       this.scrollOffset = 0;
       this.seq = -1;
+      // A different session: the previous one's speech feedback is not about
+      // this panel and must not appear under its title.
+      this.voice = { live: false, speech: '', speechFinal: false, notice: '', alert: false };
     }
     this.dirty = true;
     this.place(pose);
@@ -222,6 +303,9 @@ export class FocusPanel {
     this.session = null;
     this.lines = [];
     this.seq = -1;
+    // Leaving a final transcript or an ack on the strip would put the last
+    // session's words under the next session's title.
+    this.voice = { live: false, speech: '', speechFinal: false, notice: '', alert: false };
     this.mesh.visible = false;
     this.mesh.userData.sessionId = null;
     if (this.layer) {
@@ -377,8 +461,10 @@ export class FocusPanel {
     const w = FOCUS.pixelWidth;
     const h = FOCUS.pixelHeight;
 
-    this.dirty = false;
+    this._dirty = false;
     this.redraws += 1;
+    if (!this._dataDirty) this.voiceRedraws += 1;
+    this._dataDirty = false;
     this.texture.needsUpdate = true;
 
     ctx.clearRect(0, 0, w, h);
@@ -433,6 +519,78 @@ export class FocusPanel {
       ctx.fillStyle = COLOR.inkDim;
       ctx.fillText('waiting for transcript…', FOCUS.textX, top + FOCUS.lineH / 2);
     }
+
+    this.drawVoice();
+  }
+
+  /**
+   * The voice strip along the foot of the panel: the mic dot, then one line.
+   *
+   * This is what §10 asks for in as many words — "show interim ASR text on the
+   * focused panel as it arrives; without that feedback the operator cannot tell
+   * whether the mic is live, and will repeat themselves". Both halves of that
+   * are here, and both are on the PANEL rather than the HUD, because in an
+   * immersive session the DOM overlay may not exist at all.
+   */
+  drawVoice() {
+    const { ctx } = this;
+    // `alert` is deliberately not read here — it routes to the HUD, it does not
+    // colour anything in the scene. See the fillStyle below.
+    const { live, speech, speechFinal, notice } = this.voice;
+    if (!live && !speech && !notice) return;
+
+    const midY = FOCUS.voiceTop + FOCUS.voiceH / 2;
+
+    // A hairline, so the strip reads as chrome rather than as a transcript line
+    // that has come adrift from the ones above it.
+    ctx.fillStyle = COLOR.rule;
+    ctx.fillRect(FOCUS.barW, FOCUS.voiceTop, FOCUS.pixelWidth - FOCUS.barW - FOCUS.padR, 2);
+
+    let x = FOCUS.textX;
+
+    // The mic-live dot. A filled circle in ink, drawn or not drawn — there is
+    // no opacity ramp and no timer behind it. §8 allows exactly one animated
+    // thing in this scene and it is the alert bar; a "breathing" mic indicator
+    // would be a second, and would also make `voiceRedraws` climb while the
+    // operator simply held the trigger.
+    if (live) {
+      ctx.beginPath();
+      ctx.arc(x + FOCUS.dotR, midY, FOCUS.dotR, 0, Math.PI * 2);
+      ctx.fillStyle = COLOR.ink;
+      ctx.fill();
+    }
+    x += FOCUS.dotR * 4; // the gutter is held whether or not the dot is lit, so
+    // text does not jump sideways when the trigger comes up.
+
+    const text = notice || speech;
+    if (!text) return;
+
+    // Provisional speech is dim and light; anything committed — a final
+    // transcript, an ack, an error — is ink and heavy. Two steps, legible at
+    // 0.9 m without reading the words.
+    //
+    // NOT `alert`, even for an error, and the temptation is worth naming: §8
+    // reserves that red for `state === 'needs_you'` and the token's own comment
+    // says "used nowhere else, ever". A red line on a focus panel is the exact
+    // signal an operator scans the ring for, and spending it on "speech is not
+    // installed" would make the one colour that means "an agent is blocked on
+    // you" mean two things. `makeHoverOutline` refused it on the same grounds.
+    // The error's own words carry the alarm here, and the HUD — 2D chrome,
+    // outside the scene and outside §8 — is where its red edge lives.
+    ctx.font = voiceFont(notice || speechFinal ? 600 : 400);
+    ctx.fillStyle = notice || speechFinal ? COLOR.ink : COLOR.inkDim;
+
+    const max = FOCUS.voiceCols;
+    // Clipped from the FRONT for live speech: the words that matter while you
+    // are still talking are the ones you just said. A notice is a whole short
+    // sentence, so it clips from the back like every other label here.
+    const shown =
+      text.length <= max
+        ? text
+        : notice
+          ? `${text.slice(0, max - 1)}…`
+          : `…${text.slice(text.length - (max - 1))}`;
+    ctx.fillText(shown, x, midY);
   }
 
   /** Trim to a pixel width with a tail ellipsis. Monospace, so this is exact. */

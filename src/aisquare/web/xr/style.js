@@ -288,7 +288,52 @@ export const FOCUS = {
   get rows() {
     return Math.max(1, Math.floor((this.pixelHeight - this.titleH - 2 * this.padY) / this.lineH));
   },
+
+  /* ------------------------------------------------------------- voice -- */
+
+  /**
+   * The voice strip: the mic dot and one line of speech feedback (§10).
+   *
+   * It occupies the slack that integer line-fitting already leaves at the foot
+   * of the panel — `rows` is a floor, so the transcript never reaches the
+   * bottom edge — and that is deliberate rather than lucky. Reserving a strip
+   * by taking a line AWAY from `rows` would re-wrap and re-page the transcript
+   * the moment voice shipped, and `rows` is part of the geometry the ui-tester
+   * reads out of `__xr.geometry`. Today the slack is 88 px against a 61 px
+   * face, which is why the line is set smaller: it has to fit here, and it is
+   * chrome rather than transcript, so it should not read at transcript weight.
+   */
+  get voiceTop() {
+    return this.titleH + this.padY + this.rows * this.lineH;
+  },
+  get voiceH() {
+    return this.pixelHeight - this.voiceTop;
+  },
+  /** Slightly under two thirds of the transcript face — secondary, and it fits. */
+  get voiceFontPx() {
+    return Math.round(this.fontPx * 0.62);
+  },
+  get voiceAdvancePx() {
+    return this.voiceFontPx * 0.6; // monospace
+  },
+  /** Characters of speech feedback that fit, after the dot and its gutter. */
+  get voiceCols() {
+    return Math.max(
+      1,
+      Math.floor((this.textW - this.dotR * 4) / this.voiceAdvancePx),
+    );
+  },
+  /** The mic-live dot. Solid, in ink, ON or OFF — §8 permits no third state
+   *  and certainly no pulse: the alert bar is the only animated thing here. */
+  get dotR() {
+    return Math.round(this.voiceFontPx * 0.22);
+  },
 };
+
+/** Canvas font shorthand for the focus tier's voice line. */
+export function voiceFont(weight = 400) {
+  return `${weight} ${FOCUS.voiceFontPx}px ${FONT_FAMILY}`;
+}
 
 /** Canvas font shorthand for the focus tier. */
 export function focusFont(weight = 400) {

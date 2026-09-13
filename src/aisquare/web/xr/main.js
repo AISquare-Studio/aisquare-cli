@@ -23,9 +23,19 @@ import { FocusPanel, poseInFrontOf } from './focus.js';
 import { Input } from './input.js';
 import { AlertAudio } from './audio.js';
 import { ConnectionChip, Net, hashParams } from './net.js';
+import { Hud, VoiceCapture } from './voice.js';
 
 const params = hashParams();
 const MOCK = params.has('mock');
+/**
+ * `#audio48` — refuse the 16 kHz AudioContext and make the worklet resample.
+ *
+ * On Chrome and the Quest browser the context comes up at 16 kHz for the
+ * asking, which leaves the worklet's resampler as a pass-through and therefore
+ * unexercised on every machine anyone tests on. This flag is how that path gets
+ * driven deliberately rather than only on hardware nobody has.
+ */
+const FORCE_RESAMPLE = params.has('audio48');
 const DEV = location.hostname === 'localhost' || location.hostname === '127.0.0.1' || params.has('debug');
 
 /* ------------------------------------------------------------------ fonts -- */
@@ -199,6 +209,7 @@ function toggleFocus(sessionId) {
   ring.setFocused(sessionId);
   subscribe(sessionId);
   if (MOCK) focus.setTranscript(mockTranscript(session));
+  refreshSayField();
   return sessionId;
 }
 
@@ -207,6 +218,7 @@ function closeFocus() {
   focus.hide();
   ring.setFocused(null);
   subscribe(null);
+  refreshSayField();
 }
 
 /* ------------------------------------------------------------------- input -- */
@@ -224,8 +236,142 @@ const input = new Input({
   targets: () => (focus.open ? [...ring.panelMeshes, focus.mesh] : ring.panelMeshes),
 });
 
-/** The last push-to-talk edge. Voice capture itself is the M6 task's (§10). */
+/**
+ * Push-to-talk (§10, M6).
+ *
+ * `talk` is the edge record M3 left; `voice` is the capture that hangs off it.
+ * The division is worth keeping: `input.js` decides WHEN the operator wants to
+ * speak from a trigger or a key, and knows nothing about microphones, while
+ * `voice.js` owns the microphone and knows nothing about controllers.
+ */
 const talk = { active: false, since: 0, source: null };
+
+const hud = new Hud(document.getElementById('toast'));
+
+/**
+ * How long a committed transcript stays on the panel before it clears.
+ *
+ * Long enough to read back what was heard — the operator's only check that ASR
+ * got it right — and short enough that it is gone before the agent's reply
+ * arrives on the same panel. The ack line that follows it has its own, longer
+ * life: it says where the prompt went, which is worth reading after the words
+ * themselves have stopped being interesting.
+ */
+const FINAL_TEXT_MS = 3000;
+const ACK_MS = 6000;
+
+const voiceTimers = { speech: null, notice: null };
+
+/**
+ * The session the utterance in flight was aimed at.
+ *
+ * `stt` frames carry no session id — the server has at most one open utterance
+ * per socket, so it does not need to say — which means the client is the only
+ * side that knows where the microphone was pointed. Kept so that speech landing
+ * after the operator has moved the focus goes to the HUD instead of appearing
+ * under a different session's title, and so the ack can say the same.
+ */
+let speakingAt = null;
+
+/**
+ * A notice waiting for the final transcript to finish being read.
+ *
+ * The strip is one line, and after `audioEnd` the server sends the final `stt`
+ * and then the `ack` a few milliseconds later — `_close_utterance` transcribes,
+ * routes, and sends both without pausing. Rendering whichever arrived last
+ * would mean the operator never sees what was HEARD, only where it went, and
+ * that is the one check they have that ASR got their sentence right. So the two
+ * are shown in the order they happened: the words for their three seconds, then
+ * where they landed.
+ */
+let pendingNotice = null;
+
+function clearVoiceTimer(key) {
+  clearTimeout(voiceTimers[key]);
+  voiceTimers[key] = null;
+}
+
+/** Put speech on the focus panel, and schedule its removal if it is final. */
+function showSpeech(text, final) {
+  clearVoiceTimer('speech');
+  focus.setVoice({ speech: text, speechFinal: final });
+  if (!final || !text) {
+    // An interim frame supersedes a queued ack from the PREVIOUS utterance: the
+    // operator has started a new sentence, and the old one's receipt is no
+    // longer what they are waiting to read.
+    if (!final) pendingNotice = null;
+    return;
+  }
+  voiceTimers.speech = setTimeout(() => {
+    voiceTimers.speech = null;
+    focus.setVoice({ speech: '', speechFinal: false });
+    const queued = pendingNotice;
+    pendingNotice = null;
+    if (queued) showNotice(queued.text, queued.opts);
+  }, FINAL_TEXT_MS);
+}
+
+/**
+ * The ack or error line on the strip, and on the HUD when it is bad.
+ *
+ * Held back while a final transcript is still being read — see `pendingNotice`.
+ * The HUD copy is NOT held back: it is a different surface with its own line,
+ * so there is nothing for it to collide with, and a problem should reach the
+ * operator at the moment it happens.
+ */
+function showNotice(text, opts = {}) {
+  const { alert = false, ms = ACK_MS, hudToo = false } = opts;
+  // A problem also goes to the HUD: it may have arrived when no panel is
+  // focused, and on a desktop the HUD is where a tester is already looking.
+  if (hudToo && text) hud.toast(text, ms);
+  if (text && voiceTimers.speech) {
+    pendingNotice = { text, opts };
+    return;
+  }
+  clearVoiceTimer('notice');
+  focus.setVoice({ notice: text, alert });
+  if (!text) return;
+  voiceTimers.notice = setTimeout(() => {
+    voiceTimers.notice = null;
+    focus.setVoice({ notice: '', alert: false });
+  }, ms);
+}
+
+const voice = new VoiceCapture({
+  // `net` is created later by `startLiveFeed`, and under `#mock` never at all.
+  // A thunk rather than the value, so this binding is not captured as null.
+  net: { get isOpen() { return Boolean(net?.isOpen); },
+         audioStart: (...a) => Boolean(net?.audioStart(...a)),
+         audioEnd: (...a) => Boolean(net?.audioEnd(...a)),
+         sendBinary: (...a) => Boolean(net?.sendBinary(...a)) },
+  hud,
+  focusedSession: () => focus.sessionId,
+  forceResample: FORCE_RESAMPLE,
+  // The mic dot follows capture and nothing else — on at the press, off at the
+  // release. No timer, no ramp: §8 allows one animated thing in this scene and
+  // it is the alert bar.
+  onChange: (state) => {
+    if (state.capturing) {
+      speakingAt = state.session;
+      // A fresh utterance starts from a clean strip: the last one's words and
+      // its receipt both belong to a sentence that is over.
+      clearVoiceTimer('notice');
+      pendingNotice = null;
+      focus.setVoice({ notice: '', alert: false });
+      showSpeech('', false);
+    }
+    // `state.live`, not `state.capturing`: the dot means audio is reaching the
+    // server, which on a first press is later than the trigger going down by
+    // however long the permission prompt was up. And only while the panel being
+    // spoken to is the one in front of the operator.
+    focus.setVoice({ live: state.live && speakingAt === focus.sessionId });
+  },
+});
+
+/** True when voice feedback belongs on the panel rather than on the HUD. */
+function speechOnPanel() {
+  return focus.open && (speakingAt === null || speakingAt === focus.sessionId);
+}
 
 input.on('hover', ({ targetId }) => ring.setHover(targetId));
 input.on('rotate', ({ delta }) => ring.rotate(delta));
@@ -257,11 +403,14 @@ input.on('talkStart', ({ source }) => {
   talk.active = true;
   talk.since = performance.now();
   talk.source = source;
-  if (DEV) console.info(`[xr] talkStart (${source}) — capture lands with the voice task (§10, M6)`);
+  // Synchronous call, so the AudioContext inside it is still constructed within
+  // this gesture — a Quest will not start one otherwise (§13, and voice.js).
+  voice.press();
 });
 input.on('talkEnd', ({ source }) => {
   if (!talk.active) return;
   talk.active = false;
+  voice.release();
   if (DEV) console.info(`[xr] talkEnd (${source}) after ${Math.round(performance.now() - talk.since)}ms`);
 });
 input.on('muteToggle', () => {
@@ -271,9 +420,75 @@ input.on('muteToggle', () => {
   if (DEV) console.info('[xr] muteToggle (no readout to mute yet)');
 });
 
+/* ------------------------------------------------------------ typed path -- */
+
+/**
+ * The typed field (§10: "Keep the typing path: repo names, branch names and
+ * identifiers will be mangled by ASR").
+ *
+ * This is the ONLY caller of `net.prompt` in the client, and that is the
+ * invariant that keeps voice from double-sending: the server turns a final
+ * transcript into a prompt on its own, so the voice path must never produce
+ * one. Typing is the one way a `{t:"prompt"}` frame leaves this page.
+ *
+ * Availability in the headset is decided by `dom-overlay`, which §13 warns is
+ * optional like `layers` — so it is requested optionally, checked on
+ * `sessionstart`, and the field is hidden rather than left as a control that
+ * cannot be reached. On the desktop it is always there.
+ */
+const sayForm = document.getElementById('say');
+const sayText = document.getElementById('say-text');
+const saySend = document.getElementById('say-send');
+
+/** Enabled only when there is both a panel to talk to and a socket to talk on. */
+function refreshSayField() {
+  const ready = Boolean(focus.sessionId) && (MOCK || Boolean(net?.isOpen));
+  sayText.disabled = !ready;
+  saySend.disabled = !ready;
+  sayText.placeholder = focus.sessionId
+    ? `prompt ${ring.sessions.get(focus.sessionId)?.title ?? focus.sessionId}`
+    : 'focus a panel, then type to send it a prompt';
+}
+
+sayForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const text = sayText.value.trim();
+  const session = focus.sessionId;
+  if (!text || !session) return;
+  if (MOCK) {
+    hud.toast('#mock has no server to send to', 2000);
+    return;
+  }
+  if (!net?.prompt(session, text)) {
+    showNotice('not connected — the prompt was not sent', { alert: true, hudToo: true });
+    return;
+  }
+  // Cleared optimistically: the ack that follows says where it landed, and a
+  // field that still held the text would invite a second send of the same line.
+  sayText.value = '';
+  speakingAt = null; // a typed prompt's ack belongs to the focused panel
+});
+
+/**
+ * The field owns the keyboard while it has focus.
+ *
+ * `input.js` binds its whole key map on `window` in the bubble phase, so a
+ * keystroke into this field would reach it too: typing "test" would fire
+ * push-to-talk on the `t`, and Enter is bound to `select`, which toggles the
+ * focus panel — so submitting a prompt would close the panel it was aimed at.
+ * Stopping propagation here cuts every one of those off at the source.
+ *
+ * Enter is stopped along with the rest, and the form still submits: propagation
+ * and default actions are different things, and implicit form submission is the
+ * latter. Only `preventDefault` would have cancelled it, and this is not that.
+ */
+for (const type of ['keydown', 'keyup']) {
+  sayText.addEventListener(type, (event) => event.stopPropagation());
+}
+
 /* --------------------------------------------------------------- AR entry -- */
 
-const xrState = { supported: false, session: null, placed: false, targetHz: 72 };
+const xrState = { supported: false, session: null, placed: false, targetHz: 72, domOverlay: false };
 
 /**
  * §13's trap, and the reason it is worth a paragraph of UI: on
@@ -331,7 +546,12 @@ async function enterAR() {
 
     const session = await navigator.xr.requestSession('immersive-ar', {
       requiredFeatures: ['local-floor'],
-      optionalFeatures: ['layers', 'hand-tracking', 'anchors'],
+      // `dom-overlay` carries the typed field and the HUD into the session.
+      // OPTIONAL, for the same reason §13 gives for `layers`: it is not
+      // universal, and a hard dependency would refuse the session outright on a
+      // device that simply lacks it — trading the whole demo for one control.
+      optionalFeatures: ['layers', 'hand-tracking', 'anchors', 'dom-overlay'],
+      domOverlay: { root: document.body },
     });
     await renderer.xr.setSession(session);
   } catch (err) {
@@ -361,15 +581,29 @@ renderer.xr.addEventListener('sessionstart', () => {
     xrState.targetHz = session.frameRate || xrState.targetHz;
   });
 
+  // Whether the typed path exists in the headset is not a guess: ask the
+  // session. Without the overlay the field is unreachable — invisible, and not
+  // hit-testable by a controller ray, which only sees the 3D scene — so it is
+  // hidden rather than left as a control that swallows presses. Voice still
+  // works; this is the fallback §10 keeps for names ASR mangles, and on a
+  // device without the overlay that fallback is the desktop tab.
+  xrState.domOverlay = Boolean(session.enabledFeatures?.includes('dom-overlay'));
+  sayForm.hidden = !xrState.domOverlay;
+
   console.info(
     `[xr] immersive-ar started · features: ${[...(session.enabledFeatures ?? ['unreported'])].join(', ')} · ` +
-      `${xrState.targetHz}Hz target`,
+      `${xrState.targetHz}Hz target · typed field ${xrState.domOverlay ? 'available' : 'unavailable (no dom-overlay)'}`,
   );
 });
 
 renderer.xr.addEventListener('sessionend', () => {
   xrState.session = null;
   xrState.placed = false;
+  // Out of the headset the overlay question does not arise: this is a web page.
+  sayForm.hidden = false;
+  // A trigger still held as the session ends would otherwise latch the mic on
+  // with no way to release it.
+  voice.abort(null);
   scene.background = new THREE.Color(MOCK_BACKGROUND);
   renderer.setClearAlpha(1);
   controls.enabled = true;
@@ -689,7 +923,12 @@ function startLiveFeed() {
   // Every (re)connection: re-assert whatever the operator is looking at. A
   // focused panel must survive a reconnect, or walking away from the desk for
   // the length of a backoff would silently stop its transcript.
-  net.on('open', () => net.subscribe(focus.sessionId));
+  net.on('open', () => {
+    net.subscribe(focus.sessionId);
+    refreshSayField();
+  });
+  // Reconnecting, gone, or back: the field is only usable with a live socket.
+  net.on('status', refreshSayField);
 
   // A snapshot is authoritative, always — on a reconnect the client rebuilds
   // from it rather than reconciling against whatever it was holding (§2.6).
@@ -711,21 +950,97 @@ function startLiveFeed() {
     if (msg.session && msg.session === focus.sessionId) focus.append(msg);
   });
 
-  // Interim STT belongs to the voice pipeline (M6, §10). Kept as the last
-  // untouched frame so that task has a seam, and so a server emitting it today
-  // is visibly not ignored.
+  /**
+   * Speech, interim then final (§10).
+   *
+   * This is the feedback the plan is emphatic about: "without that feedback the
+   * operator cannot tell whether the mic is live, and will repeat themselves".
+   * It goes up the instant the first interim arrives — roughly a second into
+   * the sentence, which is the server's `INTERIM_SECONDS` — and the final one
+   * stays just long enough to read back what was heard.
+   *
+   * Note what does NOT happen here: no `prompt` is sent. The server routes the
+   * final transcript as the prompt itself, so echoing one back would deliver
+   * the operator's sentence to their agent twice.
+   */
   net.on('stt', (msg) => {
     lastFrames.stt = msg;
+    const text = String(msg.text ?? '');
+    if (speechOnPanel()) showSpeech(text, Boolean(msg.final));
+    else if (msg.final && text) hud.toast(`heard: ${text}`, FINAL_TEXT_MS);
+    if (msg.final) speakingAt = null;
   });
+
+  /**
+   * Where the prompt went (§6's one protocol addition).
+   *
+   * `detail` is the server's own words — "typed into its pane (it was waiting)"
+   * or "filed as board note #293 to coder" — and it is repeated rather than
+   * re-worded, because the difference between the two is the thing the operator
+   * wants and any paraphrase here would drift from what `fleet.tell` did.
+   */
   net.on('ack', (msg) => {
     lastFrames.ack = msg;
-    if (msg.ok === false) console.warn(`[xr] ack: ${msg.for} rejected — ${msg.detail ?? 'no detail'}`);
+    const detail = String(msg.detail ?? '');
+    const line = msg.ok ? `sent — ${detail}` : `not sent — ${detail || 'no detail'}`;
+    if (msg.session && msg.session === focus.sessionId) showNotice(line, { alert: !msg.ok });
+    else hud.toast(line, ACK_MS);
+    if (msg.ok === false) console.warn(`[xr] ack: ${msg.for} rejected — ${detail || 'no detail'}`);
+  });
+
+  /**
+   * A server error about something the client asked for (§6).
+   *
+   * `stt_unavailable` is pinned rather than toasted: its message carries the
+   * doctor's install line, which is a thing to go and do, and a fix that has
+   * already scrolled away cannot be acted on. Everything else passes through —
+   * the server writes these for a human to read and re-wording them here would
+   * only put this client's guess in front of the server's knowledge.
+   */
+  net.on('error', (msg) => {
+    lastFrames.error = msg;
+    const code = String(msg.code ?? '');
+    const message = String(msg.message ?? code);
+    if (!code.startsWith('stt') && !code.startsWith('audio')) return; // not ours
+    // Whatever went wrong, this utterance is over: the server has already
+    // dropped it, and a mic dot still lit would be a lie.
+    voice.abort(null);
+    if (code === 'stt_unavailable') {
+      // The full message carries the install command, so it is PINNED on the
+      // HUD where it can be read and acted on. But the HUD does not exist in a
+      // session without `dom-overlay`, and this is the one error an operator in
+      // a headset is most likely to hit — so a short form goes on the panel
+      // too, and says where the long form is. Without it the most important
+      // failure in the voice path would be silent in the headset.
+      hud.pin(message);
+      showNotice('speech is not installed on the host — see the message on screen', {
+        alert: true,
+        ms: 8000,
+      });
+    } else {
+      showNotice(message, { alert: true, ms: 8000, hudToo: true });
+    }
+    speakingAt = null;
+  });
+
+  /**
+   * The socket went away mid-sentence (§11/M7).
+   *
+   * The server forgets a burst whose connection closed, so there is no
+   * transcript coming and nothing to wait for. Saying so is the whole point:
+   * silence here is indistinguishable from a slow decode, and the operator
+   * would stand there waiting for words that were discarded on the far end.
+   */
+  net.on('drop', () => {
+    speakingAt = null;
+    voice.abort('dropped — say it again');
+    refreshSayField();
   });
 
   net.connect(true);
 }
 
-const lastFrames = { transcript: null, stt: null, ack: null };
+const lastFrames = { transcript: null, stt: null, ack: null, error: null };
 
 /* ------------------------------------------------------------------- boot -- */
 
@@ -753,9 +1068,21 @@ window.__xr = {
   get atlasRedraws() {
     return atlas.redraws;
   },
-  /** The focus tier's equivalent: grows only when the transcript changes. */
+  /**
+   * The focus tier's equivalent. Grows only when the panel's contents change.
+   *
+   * Voice shares that canvas, so an interim `stt` frame necessarily redraws it.
+   * `voiceRedraws` counts exactly those, so the pre-voice figure is still
+   * recoverable as `focusRedraws - voiceRedraws`, and with the mic idle the two
+   * behave precisely as they did before this milestone.
+   */
   get focusRedraws() {
     return focus.redraws;
+  },
+  /** Of `focusRedraws`, the ones the voice strip caused. Two per utterance for
+   *  the dot alone — on, then off — because it toggles and does not pulse. */
+  get voiceRedraws() {
+    return focus.voiceRedraws;
   },
   get droppedFrames() {
     return frameStats.droppedFrames;
@@ -774,6 +1101,23 @@ window.__xr = {
   },
   get talk() {
     return { ...talk };
+  },
+  /** Capture state: whether the mic is live, the frame and byte counters for
+   *  the current burst, and whether the worklet is resampling or passing
+   *  through. `bytes / 640` must equal `frames` — every frame is 20 ms. */
+  get voice() {
+    return { ...voice.state, speakingAt };
+  },
+  get hud() {
+    return { text: hud.text, pinned: hud.pinned };
+  },
+  /** Present and reachable? In a session that is `dom-overlay`'s answer. */
+  get typedPath() {
+    return {
+      present: !sayForm.hidden,
+      enabled: !sayText.disabled,
+      domOverlay: xrState.domOverlay,
+    };
   },
   mock: MOCK,
   flipRandomToNeedsYou,

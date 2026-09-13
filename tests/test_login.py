@@ -474,7 +474,7 @@ def test_login_with_token_clears_the_previous_sessions_optional_fields(
     assert whoami.exit_code == 0, whoami.output
     # whoami carries one field login does not: where the active project's traces
     # land (#142) — none chosen here.
-    assert json.loads(whoami.stdout) == {**payload, "destination": None}
+    assert json.loads(whoami.stdout) == {**payload, "destination": None, "credits": None}
     assert _stored()["api_key"] == "keep-me"
     assert _stored()["serve_token"] == "keep-this-too"
 

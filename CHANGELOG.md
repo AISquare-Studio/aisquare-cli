@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Workspace credits beside where traces land** (#143). With a destination
+  chosen (#142), `explainability status` and `whoami` print a `credits:` line
+  for that workspace — run and build pools, today and this month, what is left
+  and when it resets, the server's `low`/`exhausted` band — and `status --json`
+  carries the numbers under `credits`. The Accounts page draws the same as bars
+  under the AISquare card on its minute tick; the Explainability view has a
+  `credits` row; `doctor --live` gains `workspace-credits`, warning before a
+  fleet is spawned into a low or exhausted workspace. One request per
+  workspace, cached a minute, never on a hook or session path; failures are a
+  reason on the row, nothing else.
 - **Pick where a project's traces land with your sign-in** (#142).
   `aisquare explainability workspaces`, `studios [--workspace W]` and
   `use <workspace>[/<studio>] [--project P] [--no-key] [--clear]` list what the

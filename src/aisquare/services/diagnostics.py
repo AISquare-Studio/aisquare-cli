@@ -36,8 +36,16 @@ from aisquare.models import (
     ShippingStatus,
     StatusReport,
 )
-from aisquare.services import auto_mode, ci_client, ci_descriptor, ci_override, explainability_ops
+from aisquare.services import (
+    auto_mode,
+    ci_client,
+    ci_descriptor,
+    ci_override,
+    explainability_ops,
+    iam,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import credits as credits_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
@@ -142,6 +150,8 @@ def doctor(
         *_optional(auto_mode.doctor_check()),
         # Leaves the machine (one usage request per account), so --live only (#146).
         *_live_only(live, _claude_account_headroom_check),
+        # One balance request per destination workspace (#143), so --live only.
+        *_live_only(live, _workspace_credits_check),
     ]
 
 
@@ -964,6 +974,61 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         "claude-account-headroom",
         f"five-hour windows ({settings.switch_at}% is the line): {summary}",
     )
+
+
+def _workspace_credits_check() -> DoctorCheck | None:
+    """``--live`` only: the credits of every workspace a project points at (#143).
+
+    Reads the destinations only when ``context.db`` exists (a doctor run must not
+    create the store) and asks only with a session for the destination's host.
+    Warns on the server's own band — ``low`` or ``exhausted`` — and when a
+    balance could not be read at all, because a fleet spawned into an
+    exhausted workspace traces nothing. ``None`` when there is nothing to ask.
+    """
+    if not paths.db_path().exists():
+        return None
+    try:
+        session = iam.current_session()
+    except iam.IamError:
+        session = None
+    if session is None:
+        return None
+    try:
+        with store_session() as store:
+            destinations = store.project_destinations()
+    except Exception:
+        return None
+    readings: list[credits_service.WorkspaceCredits] = []
+    seen: set[int] = set()
+    for destination in destinations:
+        if destination.workspace_id in seen:
+            continue
+        reading = credits_service.for_destination(session, destination, use_cache=False)
+        if reading is None:
+            continue
+        seen.add(destination.workspace_id)
+        readings.append(reading)
+    if not readings:
+        return None
+    summary = " · ".join(credits_service.describe(reading) for reading in readings)
+    short = [r for r in readings if r.available and r.state in ("low", "exhausted")]
+    unread = [r for r in readings if not r.available]
+    if short:
+        bands = ", ".join(sorted({r.state or "" for r in short}))
+        return _warn(
+            "workspace-credits",
+            f"{', '.join(r.workspace_name for r in short)}: the server says {bands} — {summary}",
+            "Top up the workspace in the dashboard before spawning a fleet into it; "
+            "an exhausted workspace traces nothing",
+        )
+    if unread:
+        names = ", ".join(r.workspace_name for r in unread)
+        return _warn(
+            "workspace-credits",
+            f"could not read the balance of {names} — {summary}",
+            "Sign in again (aisquare login) or check the API; the row reads once it answers",
+        )
+    return _ok("workspace-credits", summary)
 
 
 def _claude_account_default_checks() -> list[DoctorCheck]:

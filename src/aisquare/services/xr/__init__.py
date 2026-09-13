@@ -8,9 +8,15 @@ Four modules, one direction of dependency:
 ``projector``
     ``ContextStore`` rows -> ``protocol`` models, plus the diff between two
     snapshots. Pure: it takes a store and returns models, and opens nothing.
+``speech``
+    Speech-to-text. A ``Transcriber`` fed 16kHz mono PCM16 and asked for
+    interim text, plus the ``FakeTranscriber`` the tests inject. Imports
+    faster-whisper lazily, inside the factory, so a base install never pays
+    for it. Nothing here imports the rest either.
 ``server``
-    The Starlette app. Static files, one websocket, the poll loop, and the
-    fan-out to each connection.
+    The Starlette app. Static files, one websocket, the poll loop, the
+    fan-out to each connection, and the voice path that hands binary frames
+    to ``speech`` and routes the final transcript as a prompt.
 
 The board is read, never written, with one exception that is a board write by
 construction: a ``prompt`` message hands its text to ``services.fleet.tell`` or

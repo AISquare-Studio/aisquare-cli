@@ -13,10 +13,17 @@ Shape, and why it is this one:
   :data:`POLL_MS`. Nothing in the hook path changes, nothing new has to be
   kept consistent, and the cost is a bounded read twice a second.
 - **Fail-open, per connection.** Every connection owns its own store handle,
-  its own poll task, its own transcript tail and its own audio buffer. A
-  client that vanishes mid-frame, or sends nonsense, or asks for a session
-  that is not there, affects nothing else — and no agent session is ever
-  blocked on any of it. That is non-negotiable #6.
+  its own poll task, its own transcript tail, its own transcriber and its own
+  utterance state. A client that vanishes mid-frame, or sends nonsense, or
+  asks for a session that is not there, or holds a push-to-talk trigger for a
+  minute, affects nothing else — and no agent session is ever blocked on any
+  of it. That is non-negotiable #6.
+- **Voice is a command path, so the event loop never waits on a model.**
+  Every call into :mod:`services.xr.speech` — loading it, feeding it, ending
+  an utterance — goes through :func:`asyncio.to_thread`. A whisper decode is
+  hundreds of milliseconds and a model load is seconds; either one on the loop
+  would stall the 500 ms board poll, and a ring that freezes while the
+  operator talks is the failure this whole design is arranged to avoid (§10).
 
 What this module does NOT do: it never writes to the board except through the
 two public service entry points a prompt reaches (``fleet.tell``,
@@ -29,9 +36,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import socket
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -40,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from aisquare.models import ProjectInfo, TeamSession
-from aisquare.services.xr import projector
+from aisquare.services.xr import projector, speech
 from aisquare.services.xr.protocol import (
     PROTOCOL_VERSION,
     Ack,
@@ -57,6 +67,9 @@ from aisquare.services.xr.protocol import (
     parse_client,
     to_wire,
 )
+from aisquare.services.xr.speech import SpeechUnavailable, Transcriber
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from starlette.applications import Starlette
@@ -74,18 +87,63 @@ CLOSE_AUTH_FAILED = 4401
 TRANSCRIPT_BACKLOG_BYTES = 8192
 """How much of a transcript to replay on subscribe: the last screen or so."""
 
-MAX_AUDIO_BYTES = 8 * 1024 * 1024
-"""Cap on one push-to-talk burst. ~4 minutes of 16 kHz mono PCM."""
+MAX_UTTERANCE_S = 60.0
+"""How long one push-to-talk burst may run before it is dropped.
 
-TRANSCRIBE: Any = None
-"""Hook: ``(bytes) -> str``, set by the speech backend when it lands.
-
-``None`` — the default, and the state of this tree — makes ``audioEnd`` answer
-with ``stt_unavailable`` rather than failing in a way the client has to guess
-at. A later task assigns ``services.xr.speech.transcribe`` here; nothing in
-this module imports it, so the ``[xr]`` extra's whisper dependency stays
-unimported until something actually speaks.
+A minute is already far past the end of a spoken command — the operator is
+holding a trigger down the whole time — so reaching it means the trigger is
+stuck, a client is replaying a file, or a headset was put down mid-word.
+Dropping is the fail-open answer: the socket stays up, the ring keeps
+updating, and the only thing lost is audio nobody was going to act on.
 """
+
+MAX_AUDIO_BYTES = int(speech.SAMPLE_RATE * speech.SAMPLE_BYTES * MAX_UTTERANCE_S)
+"""The same cap counted in bytes, which is the one that bounds memory.
+
+Derived from the wire format rather than written out, so it tracks
+:data:`MAX_UTTERANCE_S` and the client's frame format instead of drifting from
+both. The wall clock alone would bound nothing: a client streaming a file as
+fast as the socket will take it can push ten minutes of audio through in
+seconds, and the buffer it lands in belongs to the transcriber, where this
+module cannot see it grow. Whichever cap trips first ends the utterance.
+"""
+
+TranscriberFactory = Callable[[], Transcriber]
+"""How a connection gets its :class:`~aisquare.services.xr.speech.Transcriber`.
+
+No arguments and one return, so a test passes
+``lambda: FakeTranscriber("open the ring")`` and this module needs to know
+nothing about models, extras or downloads. Raising
+:class:`~aisquare.services.xr.speech.SpeechUnavailable` is part of the
+contract rather than a violation of it: that is how "this machine cannot do
+voice, and here is the line that fixes it" reaches the operator.
+
+It replaces the ``TRANSCRIBE`` hook this module shipped with. A module-level
+callable that a later task was supposed to assign is a seam that can only be
+occupied once, by whoever imports last; a factory is per app, per connection,
+and a test can hold two different ones at the same time.
+"""
+
+_factory: TranscriberFactory = speech.transcriber
+"""The process-wide default. :func:`set_transcriber_factory` replaces it."""
+
+
+def set_transcriber_factory(factory: TranscriberFactory | None) -> None:
+    """Replace the default factory; ``None`` restores the real one.
+
+    The coarse knob, for a caller that builds no app of its own.
+    :func:`build_app` takes a per-app factory and ``app.state`` carries it,
+    which is what the suite uses — a module-level override is process state,
+    and two tests that both set it are two tests that can only be read
+    together.
+    """
+    global _factory
+    _factory = factory or speech.transcriber
+
+
+def transcriber_factory() -> TranscriberFactory:
+    """The current process-wide default factory."""
+    return _factory
 
 
 def poll_interval() -> float:
@@ -138,12 +196,23 @@ def _resolved(relative: str) -> Iterator[Path | None]:
         yield None
 
 
-def build_app(project: ProjectInfo, *, token: str) -> Starlette:
+def build_app(
+    project: ProjectInfo,
+    *,
+    token: str,
+    transcriber_factory: TranscriberFactory | None = None,
+) -> Starlette:
     """The ASGI app for one project's board.
 
     The token is taken as an argument rather than read here so a test can drive
     a wrong one, and so the value is resolved once at startup instead of per
     frame.
+
+    ``transcriber_factory`` is the voice seam. It lands on
+    ``app.state.transcriber_factory`` and is read there per connection, so it
+    can also be swapped on a running app — which is what makes a test able to
+    start with a working backend and then take it away. ``None`` falls back to
+    the process-wide default, which is the real faster-whisper one.
     """
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -168,15 +237,25 @@ def build_app(project: ProjectInfo, *, token: str) -> Starlette:
             )
 
     async def socket(websocket: WebSocket) -> None:
-        await _Connection(websocket, project=project, token=token).serve_client()
+        await _Connection(
+            websocket,
+            project=project,
+            token=token,
+            # Read per connection, not captured once: `app.state` is the
+            # documented place to swap this, and a value bound at build time
+            # would make that swap silently do nothing.
+            transcriber_factory=getattr(app.state, "transcriber_factory", None) or _factory,
+        ).serve_client()
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/", index),
             WebSocketRoute("/ws", socket),
             Route("/{path:path}", asset),
         ]
     )
+    app.state.transcriber_factory = transcriber_factory
+    return app
 
 
 _MEDIA_TYPES = {
@@ -207,6 +286,28 @@ def _media_type(name: str) -> str:
 # --- one websocket --------------------------------------------------------------
 
 
+@dataclass
+class _Utterance:
+    """One push-to-talk burst, from the ``audio`` header to ``audioEnd``.
+
+    ``transcriber`` is ``None`` for a burst that is being ACCEPTED AND
+    DISCARDED — speech is unavailable on this machine, or the burst ran past
+    its cap, or the backend threw. That is a state, not an error: the client
+    has already been told once and cannot un-press the trigger, so the frames
+    still arriving have somewhere to go that is neither a transcript nor a
+    second complaint.
+    """
+
+    session: str
+    started: float
+    transcriber: Transcriber | None
+    audio_bytes: int = 0
+
+    def past_cap(self, *, now: float) -> bool:
+        """Whether this burst has run past either cap. See :data:`MAX_AUDIO_BYTES`."""
+        return now - self.started > MAX_UTTERANCE_S or self.audio_bytes > MAX_AUDIO_BYTES
+
+
 class _Connection:
     """One client socket, from the auth frame to the close.
 
@@ -215,14 +316,24 @@ class _Connection:
     neither can wedge the other.
     """
 
-    def __init__(self, websocket: WebSocket, *, project: ProjectInfo, token: str) -> None:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        *,
+        project: ProjectInfo,
+        token: str,
+        transcriber_factory: TranscriberFactory,
+    ) -> None:
         self._ws = websocket
         self._project = project
         self._token = token
+        self._make_transcriber = transcriber_factory
         self._sent: list[Session] = []
         self._unread_since: dict[str, int] = {}
         self._tail: asyncio.Task[None] | None = None
-        self._audio: bytearray | None = None
+        self._transcriber: Transcriber | None = None
+        self._utterance: _Utterance | None = None
+        self._stray_reported = False
         self._transcript_seq = 0
 
     # -- lifecycle
@@ -253,6 +364,7 @@ class _Connection:
         finally:
             poller.cancel()
             await self._stop_tail()
+            self._discard_utterance("the client disconnected mid-burst")
             with contextlib.suppress(asyncio.CancelledError):
                 await poller
 
@@ -266,11 +378,24 @@ class _Connection:
         """
         try:
             raw = await asyncio.wait_for(self._ws.receive_text(), timeout=AUTH_TIMEOUT_S)
-            message = parse_client(raw)
-        except (TimeoutError, ValidationError, ValueError, KeyError):
-            await self._reject()
+        except TimeoutError:
+            # Told apart from every other refusal on purpose, and it is the one
+            # exception to "one answer for every way of not being authorised":
+            # silence is not a guess. A client that never sent a frame has a
+            # transport problem — a reverse-forward that is not up, a socket
+            # that opened against the wrong port — and `auth_failed` would send
+            # its operator looking for a token that was never the issue.
+            await self._reject(
+                code="auth_timeout",
+                message=f"no auth frame arrived within {AUTH_TIMEOUT_S:.0f}s",
+            )
             return False
         except Exception:  # pragma: no cover - client vanished mid-handshake
+            return False
+        try:
+            message = parse_client(raw)
+        except (ValidationError, ValueError, KeyError):
+            await self._reject()
             return False
         # Imported here, not at module scope: `secrets` pulls in hashlib and
         # ssl, and tests/test_iam_single_reader.py ratchets those out of the
@@ -291,11 +416,14 @@ class _Connection:
             return False
         return True
 
-    async def _reject(self) -> None:
+    async def _reject(
+        self,
+        *,
+        code: str = "auth_failed",
+        message: str = "the first frame must be a valid auth token",
+    ) -> None:
         with contextlib.suppress(Exception):
-            await self._send_frame(
-                Error(code="auth_failed", message="the first frame must be a valid auth token")
-            )
+            await self._send_frame(Error(code=code, message=message))
             await self._ws.close(code=CLOSE_AUTH_FAILED)
 
     def _seed_watermarks(self, store: Any) -> None:
@@ -382,7 +510,7 @@ class _Connection:
                 return
             data = packet.get("bytes")
             if data is not None:
-                self._collect_audio(data)
+                await self._on_audio_frame(data)
                 continue
             text = packet.get("text")
             if text is None:
@@ -403,9 +531,9 @@ class _Connection:
         elif isinstance(message, Prompt):
             await self._prompt(message)
         elif isinstance(message, Audio):
-            self._audio = bytearray()
+            await self._open_utterance(message)
         elif isinstance(message, AudioEnd):
-            await self._transcribe(message.session)
+            await self._close_utterance(message.session)
         elif isinstance(message, Auth):
             # Already authenticated; a re-auth is a no-op rather than an error,
             # so a reconnecting client that replays its opening frames is fine.
@@ -532,7 +660,11 @@ class _Connection:
     # -- prompts
 
     async def _prompt(self, message: Prompt) -> None:
-        """Route the operator's text to one session, and say how it landed.
+        """A typed ``prompt`` frame. The routing itself is :meth:`_route`."""
+        await self._send_frame(await self._route(message.session, message.text))
+
+    async def _route(self, session_id: str, text: str) -> Ack:
+        """Send text to one session as the operator, and say how it landed.
 
         Two paths, and the client is told which. A session with a live fleet
         pane goes through :func:`services.fleet.tell`, which types into a
@@ -541,81 +673,223 @@ class _Connection:
         client, an agent someone started by hand) has nothing to type into, so
         the note is filed directly, addressed to its label or role, where the
         agent's next delta injection delivers it.
+
+        Shared by the typed path and the voice one, which is the point: a
+        spoken command and a typed one must reach the agent by the same route
+        with the same answer, or "say it instead of typing it" quietly means
+        something else. Returns the ``ack`` rather than sending it, because the
+        voice path has an ``stt`` frame to put on the wire first.
         """
-        text = message.text.strip()
+        text = text.strip()
         if not text:
-            await self._send_frame(
-                Ack(session=message.session, ok=False, detail="refusing to send an empty prompt")
-            )
-            return
+            return Ack(session=session_id, ok=False, detail="refusing to send an empty prompt")
         with _store() as store:
-            row = store.get_session(message.session)
+            row = store.get_session(session_id)
             agent = next(
                 (
                     candidate
                     for candidate in store.fleet_agents(self._project.id, live_only=True)
-                    if candidate.session_id == message.session
+                    if candidate.session_id == session_id
                 ),
                 None,
             )
         if row is None or row.project_id != self._project.id:
-            await self._send_frame(
-                Ack(session=message.session, ok=False, detail="no such session on this board")
-            )
-            return
+            return Ack(session=session_id, ok=False, detail="no such session on this board")
         ok, detail = await asyncio.to_thread(
             _deliver, self._project, row, agent.label if agent is not None else None, text
         )
-        await self._send_frame(Ack(session=message.session, ok=ok, detail=detail))
+        return Ack(session=session_id, ok=ok, detail=detail)
 
     # -- audio
 
-    def _collect_audio(self, chunk: bytes) -> None:
-        """Buffer one binary frame, if a burst is open.
+    async def _open_utterance(self, message: Audio) -> None:
+        """Start a burst for one session, and get a transcriber for it.
 
-        Bytes outside an ``audio``/``audioEnd`` pair are dropped rather than
-        buffered: a client that sends audio without a header has told the
-        server nothing about which session it is for.
+        The factory runs in a thread for the same reason every ``feed`` does:
+        the real one loads a whisper model, which is the most expensive call in
+        this file by two orders of magnitude, and doing it on the loop would
+        stop the board dead for seconds the first time anyone speaks.
+
+        A WORKING transcriber is cached for the connection and reused by every
+        later utterance — that is what the model load is paid for, and
+        :class:`~aisquare.services.xr.speech.BufferedTranscriber` resets itself
+        in ``finish()``. A FAILING factory is deliberately not cached: it is
+        retried on the next press, so an operator who installs the extra while
+        the headset is still on gets voice back without reconnecting.
         """
-        if self._audio is None:
+        self._discard_utterance("a second audio header arrived before audioEnd")
+        self._stray_reported = False
+        started = time.monotonic()
+        try:
+            transcriber = await self._ensure_transcriber()
+        except SpeechUnavailable as exc:
+            await self._open_discarding(message.session, started, f"{exc.reason} — {exc.fix}")
             return
-        if len(self._audio) + len(chunk) > MAX_AUDIO_BYTES:
-            self._audio = None
+        except Exception as exc:  # a broken factory must not cost the socket
+            await self._open_discarding(message.session, started, _one_line(exc))
             return
-        self._audio.extend(chunk)
+        self._utterance = _Utterance(message.session, started, transcriber)
 
-    async def _transcribe(self, session_id: str) -> None:
-        """End the burst: hand the buffer to :data:`TRANSCRIBE`, or say why not.
+    async def _open_discarding(self, session_id: str, started: float, message: str) -> None:
+        """Open an utterance that goes nowhere, and say why exactly once.
 
-        The result goes back as an ``stt`` frame and stops there. Turning a
-        final transcription into a ``prompt`` for ``session_id`` is the client's
-        call — the operator gets to see what was heard before it is sent — and
-        the server half of that round trip belongs to the M6 task, not this one.
+        The frames are already in flight — the operator is mid-sentence and the
+        client cannot un-press the trigger — so they are accepted and dropped
+        rather than refused one by one. Everything else on the socket keeps
+        working while this happens, which is what fail-open means here: the
+        ring still turns, deltas still arrive, typing still routes.
         """
-        buffered, self._audio = self._audio, None
-        hook = TRANSCRIBE
-        if hook is None:
-            await self._send_frame(
-                Error(
-                    code="stt_unavailable",
-                    message="speech-to-text is not wired up in this build",
-                )
-            )
+        self._utterance = _Utterance(session_id, started, None)
+        await self._send_frame(Error(code="stt_unavailable", message=message))
+
+    async def _ensure_transcriber(self) -> Transcriber:
+        """The connection's transcriber, loaded once, off the event loop."""
+        if self._transcriber is None:
+            self._transcriber = await asyncio.to_thread(self._make_transcriber)
+        return self._transcriber
+
+    async def _on_audio_frame(self, chunk: bytes) -> None:
+        """One binary frame: 16 kHz mono PCM16LE, in order, any size.
+
+        The client sends 20 ms (640 bytes) at a time, but nothing here depends
+        on that. A websocket implementation may coalesce or split frames on its
+        own, and :class:`~aisquare.services.xr.speech.BufferedTranscriber`
+        concatenates whatever it is handed — so the size is the client's
+        business and the ORDER is the only thing this path needs.
+        """
+        utterance = self._utterance
+        if utterance is None:
+            await self._report_stray()
             return
-        if not buffered:
-            await self._send_frame(
-                Error(
-                    code="stt_empty",
-                    message=f"no audio arrived for the burst addressed to {session_id}",
-                )
-            )
+        if utterance.transcriber is None:
+            return  # accepted and discarded; this utterance was already answered
+        utterance.audio_bytes += len(chunk)
+        if utterance.past_cap(now=time.monotonic()):
+            await self._drop_past_cap(utterance)
+            return
+        if not chunk:
             return
         try:
-            text = await asyncio.to_thread(hook, bytes(buffered))
+            interim = await asyncio.to_thread(utterance.transcriber.feed, chunk)
         except Exception as exc:
-            await self._send_frame(Error(code="stt_failed", message=_one_line(exc)))
+            await self._fail_utterance(utterance, exc)
             return
-        await self._send_frame(Stt(text=text or "", final=True))
+        if interim:
+            await self._send_frame(Stt(text=interim, final=False))
+
+    async def _report_stray(self) -> None:
+        """Answer the FIRST stray binary frame, then stay quiet until a header.
+
+        Once, not once per frame. A client whose ``audio`` header was lost
+        sends dozens more before it could possibly react, and dozens of
+        identical errors would bury the one frame the operator needed to read
+        under a flood the server generated itself. The latch lifts on the next
+        header, so the next genuine mistake is reported like the first.
+        """
+        if self._stray_reported:
+            return
+        self._stray_reported = True
+        await self._send_frame(
+            Error(
+                code="audio_unexpected",
+                message="binary audio arrived with no open utterance — send an audio header first",
+            )
+        )
+
+    async def _drop_past_cap(self, utterance: _Utterance) -> None:
+        """Past :data:`MAX_UTTERANCE_S`: say so once, swallow the rest."""
+        self._forget_transcriber()
+        utterance.transcriber = None
+        await self._send_frame(
+            Error(
+                code="audio_too_long",
+                message=(
+                    f"the utterance ran past {MAX_UTTERANCE_S:.0f}s and was dropped — "
+                    "release the trigger and say it again"
+                ),
+            )
+        )
+
+    async def _fail_utterance(self, utterance: _Utterance, exc: Exception) -> None:
+        """The backend raised mid-utterance: drop it, keep the socket.
+
+        ``stt_failed`` is the code this module already used for a backend that
+        threw, kept rather than renamed. A decode that crashes is not one of
+        the four failure modes the voice contract enumerates, and answering it
+        with silence would be the one outcome worse than any of them: a mic
+        that looks live and produces nothing, with no line anywhere saying why.
+        """
+        self._forget_transcriber()
+        utterance.transcriber = None
+        await self._send_frame(Error(code="stt_failed", message=_one_line(exc)))
+
+    def _forget_transcriber(self) -> None:
+        """Drop the cached transcriber instead of decoding audio already discarded.
+
+        ``finish()`` is what resets a
+        :class:`~aisquare.services.xr.speech.BufferedTranscriber`, and calling
+        it here would run a decode over up to a minute of audio for the sole
+        purpose of throwing the answer away. Dropping the object costs the NEXT
+        utterance a model load instead, which is the right way round: the
+        abusive path pays for itself, and the common one — press, speak,
+        release, press again — keeps the model it already loaded.
+        """
+        self._transcriber = None
+
+    def _discard_utterance(self, reason: str) -> None:
+        """Forget an open burst without transcribing it, and log the one line.
+
+        One line, at info, naming the session: a headset taken off mid-sentence
+        is ordinary and must not produce a traceback, but a burst that vanishes
+        with no record at all is the thing nobody can debug afterwards.
+        """
+        if self._utterance is None:
+            return
+        _log.info(
+            "xr: dropped a voice utterance for session %s — %s", self._utterance.session, reason
+        )
+        self._utterance = None
+        self._forget_transcriber()
+
+    async def _close_utterance(self, session_id: str) -> None:
+        """``audioEnd``: the final transcript, then route it exactly like a prompt.
+
+        The client does not echo a ``prompt`` for voice, and that is the
+        design rather than a shortcut: the operator committed when they
+        released the trigger, and a round trip through the headset to ask them
+        to confirm what they just said is exactly the latency §10 exists to
+        remove. The interim frames are what let them see it coming.
+
+        An ``audioEnd`` with no open utterance is ignored rather than answered.
+        The client sending one is usually a client whose burst this server has
+        already dropped — it cannot know that yet — and an error there would
+        report the server's own decision back as the client's mistake.
+        """
+        utterance, self._utterance = self._utterance, None
+        self._stray_reported = False
+        if utterance is None or utterance.transcriber is None:
+            return
+        if utterance.session != session_id:
+            # The header opened the burst and the audio was recorded for it, so
+            # the header wins. Logged rather than corrected: a client whose two
+            # frames disagree has a bug worth finding.
+            _log.info(
+                "xr: audioEnd named session %s but the burst was opened for %s — using the header",
+                session_id,
+                utterance.session,
+            )
+        try:
+            text = (await asyncio.to_thread(utterance.transcriber.finish)).strip()
+        except Exception as exc:
+            await self._fail_utterance(utterance, exc)
+            return
+        await self._send_frame(Stt(text=text, final=True))
+        if not text:
+            # Silence is not a prompt. `speech`'s gate already refuses to
+            # invent one out of room tone, and routing "" from here would file
+            # an empty board note against an operator who simply did not speak.
+            return
+        await self._send_frame(await self._route(utterance.session, text))
 
 
 # --- helpers --------------------------------------------------------------------
@@ -738,10 +1012,14 @@ def run(project: ProjectInfo, *, bind: str, port: int, token: str) -> None:
 
 
 __all__: Sequence[str] = (
+    "MAX_AUDIO_BYTES",
+    "MAX_UTTERANCE_S",
     "POLL_MS",
-    "TRANSCRIBE",
+    "TranscriberFactory",
     "build_app",
     "port_in_use",
     "run",
+    "set_transcriber_factory",
+    "transcriber_factory",
     "web_root",
 )

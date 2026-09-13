@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,14 +27,17 @@ from aisquare.cli.app import app
 from aisquare.core.orchestrator import team_project
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.store import store_session
-from aisquare.models import ProjectInfo, TeamSession
+from aisquare.models import FleetAgent, ProjectInfo, TeamSession
 
 pytest.importorskip("starlette.testclient", reason="the [xr] extra is not installed")
 
 from starlette.testclient import TestClient
 
+from aisquare.services import fleet as fleet_service
 from aisquare.services import mcp_server
 from aisquare.services.xr import server as xr_server
+from aisquare.services.xr import speech
+from aisquare.services.xr.speech import FakeTranscriber, SpeechUnavailable, Transcriber
 
 CODER = "bbbb2222-0000-0000-0000-000000000000"
 PLANNER = "aaaa1111-0000-0000-0000-000000000000"
@@ -367,40 +370,462 @@ def test_an_empty_prompt_and_an_unknown_session_are_refused_in_the_ack(
     assert unknown["ok"] is False and "no such session" in unknown["detail"]
 
 
-def test_audio_without_a_speech_backend_says_so(
+# --- voice ----------------------------------------------------------------------
+
+CANNED = "open the ring"
+"""What the fake hears. Short, like the commands this path is actually for."""
+
+FRAME = b"\x00" * speech.FRAME_BYTES
+"""One 20 ms frame of 16 kHz mono PCM16LE — the size the client's worklet emits.
+
+Zeroes, which a REAL transcriber's silence gate would refuse; that gate is
+``tests/test_xr_speech.py``'s subject. What is measured here is the path the
+bytes take, and it must be measured with bytes the client would really send.
+"""
+
+FRAMES_PER_INTERIM = speech.INTERIM_BYTES // speech.FRAME_BYTES
+"""How many frames earn one interim decode: 50, i.e. one second of audio.
+
+Derived, not typed: it is the same arithmetic
+``services.xr.speech.BufferedTranscriber`` does, so a change to the frame size
+or the interim cadence moves this suite with it instead of silently making the
+interim assertions untestable.
+"""
+
+
+def _voice(
+    work_dir: Path, factory: xr_server.TranscriberFactory
+) -> Iterator[tuple[TestClient, ProjectInfo, str]]:
+    project = _seed(work_dir)
+    token = mcp_server.serve_token()
+    with TestClient(xr_server.build_app(project, token=token, transcriber_factory=factory)) as http:
+        yield http, project, token
+
+
+@pytest.fixture
+def voice(
+    work_dir: Path,
+) -> Iterator[tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]]]:
+    """A board and a socket whose transcriber is a fake, recording every one built.
+
+    The list is the point of the fixture: "one transcriber per connection,
+    reused across utterances" is a claim about how many times the factory ran,
+    and nothing on the wire can show that.
+    """
+    built: list[FakeTranscriber] = []
+
+    def factory() -> FakeTranscriber:
+        made = FakeTranscriber(CANNED)
+        built.append(made)
+        return made
+
+    for http, project, token in _voice(work_dir, factory):
+        yield http, project, token, built
+
+
+def _drain_until(connection: Any, kind: str) -> list[dict[str, Any]]:
+    """Every frame up to and INCLUDING the first of ``kind``.
+
+    ``_until`` answers "did this arrive"; this one answers "and what else did,
+    on the way". Half the voice failure modes are specified as *exactly one*
+    of something, which is a claim about the frames nobody asked for.
+    """
+    seen: list[dict[str, Any]] = []
+    for _ in range(60):
+        frame = dict(json.loads(_text(connection)))
+        seen.append(frame)
+        if frame.get("t") == kind:
+            return seen
+    raise AssertionError(f"no {kind} frame arrived; saw {[frame.get('t') for frame in seen]}")
+
+
+def _speak(connection: Any, *, frames: int = FRAMES_PER_INTERIM, session: str = CODER) -> None:
+    """A push-to-talk burst: header, ``frames`` binary frames, ``audioEnd``."""
+    connection.send_text(json.dumps({"t": "audio", "session": session, "seq": 0}))
+    for _ in range(frames):
+        connection.send_bytes(FRAME)
+    connection.send_text(json.dumps({"t": "audioEnd", "session": session}))
+
+
+def test_the_default_factory_is_the_real_backend_and_is_replaceable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seam, at rest: a live server transcribes for real, a test does not.
+
+    Asserted by identity and never called — invoking it here would load a
+    whisper model on whatever machine is running the suite.
+    """
+    assert xr_server.transcriber_factory() is speech.transcriber
+
+    def fake() -> Transcriber:
+        return FakeTranscriber(CANNED)
+
+    monkeypatch.setattr(xr_server, "_factory", speech.transcriber)
+    xr_server.set_transcriber_factory(fake)
+    assert xr_server.transcriber_factory() is fake
+    xr_server.set_transcriber_factory(None)
+    assert xr_server.transcriber_factory() is speech.transcriber, "None restores the real one"
+
+
+def test_a_spoken_burst_is_interim_stt_then_one_final_then_a_routed_prompt(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """The whole M6 server half in one pass, on the board-note delivery route.
+
+    The client sends no ``prompt`` of its own: releasing the trigger IS the
+    commit, and the ``ack`` is how the operator learns where their words went.
+    """
+    http, project, token, built = voice
+    from aisquare.services import team as team_service
+
+    team_service.activate(project.root)
+    with _authed(http, token) as connection:
+        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+        for _ in range(FRAMES_PER_INTERIM):
+            connection.send_bytes(FRAME)
+        interim = json.loads(_until(connection, "stt"))
+        connection.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
+        final = json.loads(_until(connection, "stt"))
+        ack = json.loads(_until(connection, "ack"))
+
+    assert interim == {"t": "stt", "text": CANNED, "final": False}
+    assert final == {"t": "stt", "text": CANNED, "final": True}
+    assert ack["for"] == "prompt"
+    assert ack["ok"] is True
+    assert "board note" in ack["detail"], ack
+
+    # The transcript reached the agent by the same route a typed prompt takes.
+    with store_session() as store:
+        texts = [event.text for event in store.recent_events(project.id, limit=10)]
+    assert any(CANNED in text for text in texts)
+
+    assert len(built) == 1, "one transcriber for the connection"
+    assert bytes(built[0].fed) == FRAME * FRAMES_PER_INTERIM, "every frame arrived, in order"
+    assert built[0].finished
+
+
+def test_a_second_burst_on_one_connection_reuses_the_transcriber(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """The model load is paid once per headset, not once per sentence.
+
+    That is the only reason the transcriber is cached at all, so it is worth a
+    test of its own: an operator says three things in a row and waits for a
+    whisper load on none of them.
+    """
+    http, project, token, built = voice
+    from aisquare.services import team as team_service
+
+    team_service.activate(project.root)
+    with _authed(http, token) as connection:
+        for _ in range(2):
+            _speak(connection)
+            assert json.loads(_until(connection, "stt"))["final"] is False
+            assert json.loads(_until(connection, "stt"))["final"] is True
+            assert json.loads(_until(connection, "ack"))["ok"] is True
+    assert len(built) == 1, "the second utterance built no second transcriber"
+
+
+def test_a_spoken_prompt_reaches_a_fleet_pane_by_that_agents_label(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other delivery route: a session with a live pane is typed into.
+
+    ``fleet.tell`` is patched rather than run because the real one needs tmux,
+    and what this asserts is the ROUTING — the label the voice path resolved
+    and the text it handed over — not tmux's ability to type.
+    """
+    http, project, token, _built = voice
+    told: list[tuple[str, str]] = []
+
+    def tell(
+        project_arg: ProjectInfo, label: str, text: str, *, sender: str | None = None
+    ) -> fleet_service.TellResult:
+        told.append((label, text))
+        return fleet_service.TellResult(True, "typed into the waiting pane")
+
+    monkeypatch.setattr(fleet_service, "tell", tell)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="flt_voice",
+                project_id=project.id,
+                label="coder-xr-voice",
+                role="coder",
+                pane_id="%7",
+                session_id=CODER,
+                cwd=project.root,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+    with _authed(http, token) as connection:
+        _speak(connection)
+        ack = json.loads(_until(connection, "ack"))
+
+    assert told == [("coder-xr-voice", CANNED)], "the agent's label, and the words as heard"
+    assert ack["ok"] is True
+    assert ack["detail"] == "typed into the waiting pane"
+    assert ack["session"] == CODER
+
+
+def test_a_machine_with_no_speech_backend_says_so_once_and_keeps_the_ring(
+    work_dir: Path,
+) -> None:
+    """Fail open, in the shape an operator meets it in.
+
+    One error carrying the FIX, the frames already in flight swallowed rather
+    than refused one by one, and — the part that matters — the board still
+    arriving underneath. A voice failure that took the ring with it would cost
+    the operator the thing they put the headset on for.
+    """
+
+    def missing() -> Transcriber:
+        raise SpeechUnavailable("faster-whisper is not installed", "pip install 'aisquare-cli[xr]'")
+
+    for http, _project, token in _voice(work_dir, missing):
+        with _authed(http, token) as connection:
+            _speak(connection, frames=10)
+            with store_session() as store:
+                store.mark_attention(CODER)
+            frames = _drain_until(connection, "delta")
+
+    errors = [frame for frame in frames if frame["t"] == "error"]
+    assert len(errors) == 1, [frame["t"] for frame in frames]
+    assert errors[0]["code"] == "stt_unavailable"
+    assert "faster-whisper is not installed" in errors[0]["message"]
+    assert "pip install" in errors[0]["message"], "the fix travels with the complaint"
+    assert not [frame for frame in frames if frame["t"] in ("stt", "ack")]
+    assert [session["state"] for session in frames[-1]["changed"]] == ["needs_you"]
+
+
+def test_the_backend_is_retried_on_the_next_press_not_written_off(
+    work_dir: Path,
+) -> None:
+    """An operator who installs the extra mid-session gets voice on press two.
+
+    Caching the FAILURE would be the easy read of "one error per utterance",
+    and it would mean the fix this server just printed cannot be applied
+    without a reconnect.
+    """
+    attempts: list[int] = []
+
+    def flaky() -> Transcriber:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise SpeechUnavailable("not installed yet", "pip install 'aisquare-cli[xr]'")
+        return FakeTranscriber(CANNED)
+
+    for http, project, token in _voice(work_dir, flaky):
+        from aisquare.services import team as team_service
+
+        team_service.activate(project.root)
+        with _authed(http, token) as connection:
+            _speak(connection, frames=5)
+            first = json.loads(_until(connection, "error"))
+            _speak(connection)
+            final = json.loads(_until(connection, "stt"))
+            while final["final"] is False:
+                final = json.loads(_until(connection, "stt"))
+    assert first["code"] == "stt_unavailable"
+    assert final == {"t": "stt", "text": CANNED, "final": True}
+    assert len(attempts) == 2
+
+
+def test_a_stray_binary_frame_is_one_error_and_nothing_else(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """Audio with no header names no session, so there is nothing to do with it.
+
+    "Nothing else" is measured rather than assumed: the delta is provoked
+    AFTER the stray frame, so every frame the server chose to send in between
+    is in the list being asserted on.
+    """
+    http, _project, token, built = voice
+    with _authed(http, token) as connection:
+        connection.send_bytes(FRAME)
+        with store_session() as store:
+            store.mark_attention(CODER)
+        frames = _drain_until(connection, "delta")
+
+    assert [frame["t"] for frame in frames] == ["error", "delta"]
+    assert frames[0]["code"] == "audio_unexpected"
+    assert built == [], "a stray frame must not load a model"
+
+
+def test_a_flood_of_stray_frames_is_still_exactly_one_error(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """A client whose header was lost sends the whole burst before it can react.
+
+    Answering each frame would bury the one message the operator needs under a
+    flood the server generated itself.
+    """
+    http, _project, token, _built = voice
+    with _authed(http, token) as connection:
+        for _ in range(20):
+            connection.send_bytes(FRAME)
+        with store_session() as store:
+            store.mark_attention(CODER)
+        frames = _drain_until(connection, "delta")
+    assert [frame["t"] for frame in frames].count("error") == 1
+
+
+def test_the_stray_latch_lifts_so_the_next_real_mistake_is_reported(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """Quietening a flood must not quieten the channel permanently."""
+    http, _project, token, _built = voice
+    with _authed(http, token) as connection:
+        connection.send_bytes(FRAME)
+        assert json.loads(_until(connection, "error"))["code"] == "audio_unexpected"
+        _speak(connection, frames=2)
+        assert json.loads(_until(connection, "stt"))["final"] is True
+        connection.send_bytes(FRAME)
+        assert json.loads(_until(connection, "error"))["code"] == "audio_unexpected"
+
+
+@pytest.mark.parametrize("cap", ["MAX_UTTERANCE_S", "MAX_AUDIO_BYTES"])
+def test_an_utterance_past_either_cap_is_dropped_with_one_error(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+    monkeypatch: pytest.MonkeyPatch,
+    cap: str,
+) -> None:
+    """Both caps exist and both must end the burst the same way.
+
+    The clock catches a stuck trigger; the byte count catches a client pushing
+    a file through faster than real time, where the clock would never fire and
+    the buffer is the thing that grows. Dropping is the whole response: no
+    transcript, no prompt, and a socket that is still there afterwards.
+    """
+    http, _project, token, _built = voice
+    monkeypatch.setattr(xr_server, cap, 0)
+    with _authed(http, token) as connection:
+        _speak(connection, frames=5)
+        with store_session() as store:
+            store.mark_attention(CODER)
+        frames = _drain_until(connection, "delta")
+
+    errors = [frame for frame in frames if frame["t"] == "error"]
+    assert len(errors) == 1, [frame["t"] for frame in frames]
+    assert errors[0]["code"] == "audio_too_long"
+    assert not [frame for frame in frames if frame["t"] in ("stt", "ack")], "dropped, not decoded"
+
+
+def test_an_utterance_that_transcribes_to_nothing_is_not_a_prompt(
+    work_dir: Path,
+) -> None:
+    """Silence is answered, and it is answered with silence.
+
+    The final ``stt`` still goes out — the panel must stop showing a live mic —
+    but nothing is routed. Filing an empty board note against an operator who
+    simply did not speak would be a write this server had no reason to make.
+    """
+    for http, _project, token in _voice(work_dir, lambda: FakeTranscriber("")):
+        with _authed(http, token) as connection:
+            _speak(connection)
+            with store_session() as store:
+                store.mark_attention(CODER)
+            frames = _drain_until(connection, "delta")
+
+    stt = [frame for frame in frames if frame["t"] == "stt"]
+    assert stt == [{"t": "stt", "text": "", "final": True}]
+    assert not [frame for frame in frames if frame["t"] == "ack"], "nothing to route"
+
+
+def test_a_slow_decode_does_not_stall_the_board_poll(work_dir: Path) -> None:
+    """The reason ``feed`` runs in a thread, measured instead of asserted by eye.
+
+    The transcriber is held inside ``feed`` while the board is mutated from
+    another thread. The delta that arrives WHILE it is still held is the whole
+    proof: on the event loop there would be no poll tick to send it, and this
+    test would time out rather than fail on a value.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowTranscriber:
+        def feed(self, pcm: bytes) -> str | None:
+            entered.set()
+            release.wait(RECEIVE_TIMEOUT_S)
+            return None
+
+        def finish(self) -> str:
+            return "held"
+
+    try:
+        for http, _project, token in _voice(work_dir, SlowTranscriber):
+            with _authed(http, token) as connection:
+                connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
+                connection.send_bytes(FRAME)
+                assert entered.wait(RECEIVE_TIMEOUT_S), "the frame never reached the transcriber"
+                with store_session() as store:
+                    store.mark_attention(CODER)
+                delta = json.loads(_until(connection, "delta"))
+                assert not release.is_set(), "the decode is still running"
+    finally:
+        # Always, even on a failure: an un-released worker would be joined at
+        # interpreter exit and turn one failing test into a wedged run.
+        release.set()
+    assert [session["state"] for session in delta["changed"]] == ["needs_you"]
+
+
+def test_two_clients_keep_their_own_transcriber_and_their_own_utterance(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """Two headsets on one board share the SQLite file and nothing else.
+
+    One is mid-utterance while the other sends audio it never announced; each
+    gets its own answer and neither sees the other's.
+    """
+    http, _project, token, built = voice
+    with _authed(http, token) as first, _authed(http, token) as second:
+        _speak(first)
+        second.send_bytes(FRAME)
+        assert json.loads(_until(second, "error"))["code"] == "audio_unexpected"
+        final = json.loads(_until(first, "stt"))
+        while final["final"] is False:
+            final = json.loads(_until(first, "stt"))
+    assert final["text"] == CANNED
+    assert len(built) == 1, "the stray-frame client never needed a transcriber"
+
+
+def test_a_client_that_never_authenticates_is_closed_with_auth_timeout(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silence is not a wrong guess, and is not answered as one.
+
+    ``auth_failed`` would send the operator looking for a token problem they do
+    not have; a socket that opened and said nothing is a transport problem —
+    an ``adb reverse`` that is not up, a client pointed at the wrong port.
+    """
+    project = _seed(work_dir)
+    token = mcp_server.serve_token()
+    monkeypatch.setattr(xr_server, "AUTH_TIMEOUT_S", 0.05)
+    with (
+        TestClient(xr_server.build_app(project, token=token)) as http,
+        http.websocket_connect("/ws") as connection,
+    ):
+        answer = json.loads(_text(connection))
+    assert answer["t"] == "error"
+    assert answer["code"] == "auth_timeout"
+
+
+def test_hello_server_time_is_an_absolute_instant_a_client_can_parse(
     client: tuple[TestClient, ProjectInfo, str],
 ) -> None:
-    """``TRANSCRIBE`` is ``None`` in this tree; a later task wires it in."""
+    """ISO8601 with an offset, so a headset in another timezone lands on the same moment.
+
+    A naive timestamp here is the bug that costs an hour in a demo and looks
+    like a clock problem in the room.
+    """
     http, _project, token = client
-    assert xr_server.TRANSCRIBE is None
-    with _authed(http, token) as connection:
-        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
-        connection.send_bytes(b"\x00\x01" * 16)
-        connection.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
-        answer = json.loads(_until(connection, "error"))
-    assert answer["code"] == "stt_unavailable"
-
-
-def test_a_buffered_burst_reaches_the_transcribe_hook(
-    client: tuple[TestClient, ProjectInfo, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The seam the speech task plugs into: bytes in, one ``stt`` frame out."""
-    http, _project, token = client
-    seen: list[bytes] = []
-
-    def transcribe(payload: bytes) -> str:
-        seen.append(payload)
-        return "open the ring"
-
-    monkeypatch.setattr(xr_server, "TRANSCRIBE", transcribe)
-    with _authed(http, token) as connection:
-        connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 0}))
-        connection.send_bytes(b"abc")
-        connection.send_bytes(b"def")
-        connection.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
-        answer = json.loads(_until(connection, "stt"))
-    assert seen == [b"abcdef"], "binary frames are concatenated in order"
-    assert answer == {"t": "stt", "text": "open the ring", "final": True}
+    with http.websocket_connect("/ws") as connection:
+        connection.send_text(json.dumps({"t": "auth", "token": token}))
+        hello = json.loads(_text(connection))
+    moment = datetime.fromisoformat(hello["serverTime"])
+    assert moment.tzinfo is not None, hello["serverTime"]
+    assert moment.utcoffset() == timedelta(0), "UTC, as a Z or a +00:00"
 
 
 def test_a_malformed_frame_is_answered_not_fatal(

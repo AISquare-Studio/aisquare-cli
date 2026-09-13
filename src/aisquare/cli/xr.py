@@ -79,6 +79,30 @@ def _adb_reverse(port: int) -> str:
     return f"adb reverse tcp:{port} tcp:{port}"
 
 
+_LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
+
+
+def _announce_open_bind(bind: str) -> None:
+    """Say what a non-loopback bind gives up, or say nothing.
+
+    Printed from BOTH paths — serving and ``--show-token`` — for the reason
+    ``cli/serve.py`` gives for doing the same: ``--show-token`` is what an
+    operator reads while wiring a client up, and is often the only thing they
+    read at all. A warning attached only to the path they skip is not a warning.
+    """
+    if bind in _LOOPBACK_BINDS:
+        return
+    # Spelled out rather than interpolated inline: a backslash inside an
+    # f-string expression is a syntax error before 3.12, and this package
+    # supports 3.11.
+    shown = bind or '""'
+    stderr_console().print(
+        f"--bind {shown} is not one of {', '.join(_LOOPBACK_BINDS)}: the token is the "
+        "only gate, and it crosses the wire in clear over plain HTTP. Keep this on a "
+        "trusted network, or behind a TLS-terminating proxy."
+    )
+
+
 def _announce(port: int, token: str, bind: str) -> None:
     """Everything an operator needs to get a headset onto this board.
 
@@ -104,15 +128,7 @@ def _announce(port: int, token: str, bind: str) -> None:
         "  Bookmark the URL the first time. Typing it again in a headset is its own "
         "small punishment."
     )
-    if bind not in ("127.0.0.1", "localhost", "::1"):
-        # Spelled out rather than interpolated inline: a backslash inside an
-        # f-string expression is a syntax error before 3.12, and this package
-        # supports 3.11.
-        shown = bind or '""'
-        console.print(
-            f"--bind {shown} is not loopback: the token is the only gate, and it "
-            "crosses the wire in clear over plain HTTP. Trusted networks only."
-        )
+    _announce_open_bind(bind)
 
 
 def xr(
@@ -161,6 +177,7 @@ def xr(
             console.print(f"URL:   {_url(port, token)}")
             console.print(f"Token: {token}")
             console.print(f"Adb:   {_adb_reverse(port)}")
+        _announce_open_bind(bind)
         return
 
     from aisquare.services.xr import server as xr_server

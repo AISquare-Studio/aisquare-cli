@@ -32,6 +32,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     start, because `navigator.xr` exists only in a secure context and a LAN
     address is not one. An occupied port is a sentence and exit 1
     (`xr_port_busy`), checked before anything is activated.
+  - One toolchain note that comes with the extra: `faster-whisper` pulls in
+    numpy, whose stubs are PEP 695, and mypy parses them under this project's
+    `python_version = "3.11"` and stops the whole run on a syntax error in a
+    file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
+    takes `follow_imports_for_stubs` as well as `follow_imports` — the first
+    alone leaves the stub parsed and the run still red.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

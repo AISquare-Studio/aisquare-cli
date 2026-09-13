@@ -550,3 +550,16 @@ def test_a_record_written_in_two_writes_is_not_lost(work_dir: Path) -> None:
 
     assert frame["text"] == "split turn"
     assert frame["seq"] == 2, "one record, delivered once"
+
+
+def test_show_token_warns_about_a_non_loopback_bind(runner: CliRunner) -> None:
+    """`serve --show-token` says this; the path an operator actually reads.
+
+    A warning printed only when serving is a warning they meet after the
+    decision, not before it.
+    """
+    open_bind = runner.invoke(app, ["xr", "--show-token", "--bind", "0.0.0.0"])
+    loopback = runner.invoke(app, ["xr", "--show-token"])
+    assert open_bind.exit_code == 0, open_bind.output
+    assert "only gate" in open_bind.output and "trusted network" in open_bind.output
+    assert "only gate" not in loopback.output, "loopback gives nothing up; stay quiet"

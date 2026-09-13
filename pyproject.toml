@@ -188,3 +188,27 @@ files = ["src", "tests"]
 strict = true
 pretty = true
 plugins = ["pydantic.mypy"]
+
+# numpy is never imported by this package. It arrives in the type graph only
+# because `_pytest.python_api` type-imports it for `approx`, and it is only
+# INSTALLED when the `xr` extra is (faster-whisper -> ctranslate2 -> numpy).
+# Its stubs are written in PEP 695 `type X = ...`, which mypy rejects while
+# `python_version` says 3.11 -- so `pip install -e ".[dev,xr]"` turned a green
+# typecheck into one syntax error inside site-packages, in a file nobody here
+# wrote or imports. Skipping the body is the honest scope: we are not
+# type-checking numpy, we are declining to parse it. Raising `python_version`
+# would be the wrong fix twice over -- it is the floor this package supports,
+# and it would silently stop checking our own code against 3.11.
+#
+# BOTH LINES BELOW ARE LOAD-BEARING, and the second is the one that is easy to
+# miss: `follow_imports` does not apply to stub files at all unless
+# `follow_imports_for_stubs` is on, so `follow_imports = "skip"` ALONE leaves
+# the .pyi parsed and the run still dies -- which is what makes this look
+# unfixable from the config, and it was reported that way. Measured here on a
+# cold cache with numpy 2.5.3 present via `pip install -e ".[dev,xr]"`: both
+# lines give "Success: no issues found in 270 source files"; delete the second
+# line and .mypy_cache and the same syntax error returns.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

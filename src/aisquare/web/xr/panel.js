@@ -46,10 +46,42 @@ function fitText(ctx, text, maxW) {
   return `${s.slice(0, lo)}…`;
 }
 
-/** The state line: state plus an unread count when the server sent one. */
-function stateLine(session) {
+/**
+ * The state chip's text (plan §11/M7: "state chips, unread counts").
+ *
+ * The wire spells the three states in snake_case because Python wrote them
+ * (`SessionState` in protocol.py); the panel spells them the way an operator
+ * reads them. `needs_you` → "needs you" is the only one that differs, and it is
+ * the one that matters most — an underscore in the middle of the alert state is
+ * the sort of detail that makes a demo look unfinished.
+ *
+ * Anything unrecognised is passed through rather than blanked: a server that
+ * grows a fourth state should show it, not show nothing.
+ */
+const STATE_LABEL = { working: 'working', waiting: 'waiting', needs_you: 'needs you', gone: 'gone' };
+
+function stateLabel(session) {
+  const state = String(session.state ?? '');
+  return STATE_LABEL[state] ?? state.replace(/_/g, ' ');
+}
+
+/**
+ * The unread badge: board events for this session since this connection last
+ * subscribed to it (`Session.unread`, §6).
+ *
+ * Item 7 on the §12 cut list, kept because it is genuinely cheap — it is a
+ * measureText and a fillText against a cell that is being drawn anyway — and
+ * because it answers the one question the three ambient lines cannot: which
+ * panel has been busy while you were looking somewhere else.
+ *
+ * Capped rather than truncated to a number that would not fit: a cell 352 px
+ * wide has no room for "1284", and "99+" is both shorter and more useful than
+ * a count nobody is going to read exactly.
+ */
+function unreadBadge(session) {
   const unread = Number(session.unread) || 0;
-  return unread > 0 ? `${session.state} ·${unread}` : String(session.state ?? '');
+  if (unread <= 0) return '';
+  return unread > 99 ? '99+' : String(unread);
 }
 
 /**
@@ -141,17 +173,32 @@ export class Atlas {
     ctx.fillRect(0, 0, CELL.barW, ATLAS.cellH);
     ctx.globalAlpha = 1;
 
-    // Three lines, never more: title, state, summary (plan §5).
+    // The unread badge, top-right, in inkDim (§11/M7). Measured first because
+    // the title shares the line with it and has to be trimmed to what is left —
+    // a title long enough to run under the badge is the common case, not the
+    // edge case, and overlapping glyphs read as corruption at ring distance.
     ctx.textBaseline = 'top';
+    const badge = unreadBadge(session);
+    let badgeW = 0;
+    if (badge) {
+      ctx.font = ambientFont(400);
+      badgeW = ctx.measureText(badge).width;
+      ctx.fillStyle = COLOR.inkDim;
+      ctx.fillText(badge, ATLAS.cellW - CELL.padR - badgeW, CELL.textTop);
+      badgeW += CELL.padR; // the gutter the title must also keep clear
+    }
+
+    // Three lines, never more: title, state, summary (plan §5).
     const lines = [
-      { text: session.title, font: ambientFont(600), fill: COLOR.ink },
-      { text: stateLine(session), font: ambientFont(400), fill: alerting ? COLOR.alert : COLOR.ink },
+      { text: session.title, font: ambientFont(600), fill: COLOR.ink, reserve: badgeW },
+      { text: stateLabel(session), font: ambientFont(400), fill: alerting ? COLOR.alert : COLOR.ink },
       { text: session.summary, font: ambientFont(400), fill: COLOR.inkDim },
     ];
     lines.forEach((line, i) => {
       ctx.font = line.font;
       ctx.fillStyle = line.fill;
-      ctx.fillText(fitText(ctx, line.text, CELL.textW), CELL.textX, CELL.textTop + i * CELL.lineH);
+      const width = CELL.textW - (line.reserve ?? 0);
+      ctx.fillText(fitText(ctx, line.text, width), CELL.textX, CELL.textTop + i * CELL.lineH);
     });
 
     ctx.restore();

@@ -1537,18 +1537,94 @@ def _manager_wakeup(
     )
 
 
-def hook_notification(session_id: str, cwd: Path | None, message: str | None) -> None:
-    """The session needs the user (permission request / idle notice).
+#: Claude Code ``notification_type`` values that mean A HUMAN IS NEEDED: a
+#: permission prompt, an MCP elicitation (a form or a URL to visit), a sub-agent
+#: asking its user. These ring the bell (``attention``); nothing else does.
+ATTENTION_NOTIFICATIONS: frozenset[str] = frozenset(
+    {
+        "permission_prompt",
+        "elicitation_dialog",
+        "elicitation_url_dialog",
+        "agent_needs_input",
+    }
+)
 
-    The feed event is emitted only on the transition INTO attention —
-    Claude re-notifies while parked, and a per-notice event floods the feed
-    with lines nobody can act on twice.
+#: Types that are ROUTINE and change nothing on the board: the idle notice
+#: ("Claude is waiting for your input", sent ~60 s into every pause — 164 of the
+#: 183 bells measured in #153) and the housekeeping of elicitations closing.
+QUIET_NOTIFICATIONS: frozenset[str] = frozenset(
+    {"idle_prompt", "elicitation_complete", "elicitation_response"}
+)
+
+#: Message fragments that identify the type when Claude Code sent none (a version
+#: before ``notification_type`` existed). The idle notice's text is the one that
+#: matters: without it every old-style notification rang the bell, as before #153.
+_IDLE_MESSAGE = "waiting for your input"
+_PROMPT_MESSAGES = ("needs your permission", "wants to use your", "needs your input")
+
+
+def classify_notification(notification_type: str | None, message: str | None) -> str:
+    """``attention`` · ``quiet`` · ``notice`` — what a Claude Code notification means for the board.
+
+    By ``notification_type`` first (#153): the documented values are sorted
+    above, and an UNKNOWN type is a ``notice`` — a feed line, never a bell,
+    because the cost of a false bell (every agent reading as stuck, the real
+    prompt lost in the noise) is the defect this exists to end, and the cost of
+    a missed bell on a brand-new type is one feed line the operator can read.
+    Without a type — older Claude Code — the message decides: the idle notice
+    is quiet, a permission or browser request is attention, and anything else
+    keeps the pre-#153 behaviour (attention), so an old install loses nothing.
+    """
+    if notification_type:
+        if notification_type in ATTENTION_NOTIFICATIONS:
+            return "attention"
+        if notification_type in QUIET_NOTIFICATIONS:
+            return "quiet"
+        return "notice"
+    text = (message or "").lower()
+    if _IDLE_MESSAGE in text:
+        return "quiet"
+    if any(fragment in text for fragment in _PROMPT_MESSAGES) or not text:
+        return "attention"
+    return "attention"
+
+
+def hook_notification(
+    session_id: str,
+    cwd: Path | None,
+    message: str | None,
+    *,
+    notification_type: str | None = None,
+) -> None:
+    """A Claude Code notification: ring the bell only for what needs a human (#153).
+
+    ``attention`` (a permission prompt, an elicitation, a sub-agent asking) flips
+    the row to ``attention``; the feed event is emitted only on the transition
+    INTO it — Claude re-notifies while parked, and a per-notice event floods the
+    feed with lines nobody can act on twice. ``quiet`` (the idle notice) changes
+    nothing at all: the agent has finished a turn and is ``waiting``, which the
+    board already says, and it was these — nine bells in ten — that made the
+    bell meaningless. ``notice`` (``auth_success``, the quota auto-resume
+    family, a sub-agent finishing, an unknown type) is a feed line for the
+    human board, no state change.
     """
     if not orchestrator.team_enabled():
+        return
+    kind = classify_notification(notification_type, message)
+    if kind == "quiet":
         return
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
+            return
+        if kind == "notice":
+            _emit(
+                store,
+                session.project_id,
+                "notice",
+                message or notification_type or "notification",
+                session_id=session.id,
+            )
             return
         if store.mark_attention(session.id):
             _emit(

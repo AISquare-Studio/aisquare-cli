@@ -1850,3 +1850,42 @@ def test_the_sidebar_hides_captured_directories_until_a_shows_them(
     assert with_captured == ["prj_a", "prj_scratch"]
     assert "captured" in title
     assert after == ["prj_a"], "a hides them again"
+
+
+def test_the_shell_reopens_what_was_open_when_its_row_is_still_there(
+    tmp_path: Path, script: Script
+) -> None:
+    """#144: the UI restored exactly one thing at mount, the theme. What was open —
+    a project, an agent, a page — is remembered in the store's ui_state and comes
+    back; an agent whose row is gone falls back to its project."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+
+    async def open_agent(pilot: Pilot[None]) -> str | None:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await pilot.pause()
+        view = app.current_view()
+        return view.id if view else None
+
+    assert drive(open_agent) == "agent-agt_a_coder-auth"
+    with store_session() as store:
+        assert store.ui_state("fleet.selected") == "agent:prj_a/agt_a_coder-auth"
+
+    async def relaunch(pilot: Pilot[None]) -> tuple[str | None, str | None]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        await pilot.pause()
+        view = app.current_view()
+        return (view.id if view else None), app.sidebar.selected_key
+
+    assert drive(relaunch) == ("agent-agt_a_coder-auth", "agent:agt_a_coder-auth")
+
+    script["prj_a"] = []  # the agent's row is gone: its project is the fallback
+    assert drive(relaunch) == ("project-prj_a", "project:prj_a")
+
+    with store_session() as store:
+        store.set_ui_state("fleet.selected", "project:prj_gone")  # nothing to reopen
+    assert drive(relaunch) == ("welcome", None)
+    with store_session() as store:
+        assert store.ui_state("fleet.selected") is None, "a stale memory is dropped, not retried"

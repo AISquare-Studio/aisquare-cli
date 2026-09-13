@@ -127,6 +127,7 @@ def doctor(
         _check_self_invocation(cwd),
         _check_fleet(),
         *_check_dead_managers(),
+        *_check_resumable_agents(),
         *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
@@ -756,6 +757,48 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         _ok("claude-accounts", detail),
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
+    ]
+
+
+def _check_resumable_agents() -> list[DoctorCheck]:
+    """How many exited agents a restart would CONTINUE rather than reset (#144).
+
+    An ended fleet row whose session transcript is still on disk resumes with
+    ``fleet restart <label>`` (or the row's Restart); one without starts fresh
+    from a hand-off prompt. Counted over the last day's rows, machine-wide;
+    silent when there are none. Gated on the store existing.
+    """
+    if _uncreated_home("fleet-resume") is not None:
+        return []
+    try:
+        cutoff = datetime.now(tz=UTC) - fleet_service.RECENTLY_ENDED
+        resumable: list[str] = []
+        with store_session() as store:
+            for project in store.list_projects(all=True):
+                name = project.codename or project.root.name or project.id
+                for agent in store.fleet_agents(project.id, live_only=False):
+                    if agent.ended_at is None or agent.ended_at < cutoff or not agent.session_id:
+                        continue
+                    session = store.get_session(agent.session_id)
+                    if session is None or not session.transcript_path:
+                        continue
+                    if Path(session.transcript_path).is_file():
+                        resumable.append(f"{agent.label} ({name})")
+    except Exception:  # the database line reports a broken store
+        return []
+    if not resumable:
+        return []
+    shown = ", ".join(resumable[:6])
+    if len(resumable) > 6:
+        shown += f", +{len(resumable) - 6} more"
+    noun = "agent" if len(resumable) == 1 else "agents"
+    return [
+        _ok(
+            "fleet-resume",
+            f"{len(resumable)} exited {noun} can be resumed — the transcript is on disk, so "
+            f"Restart continues the session instead of starting over: {shown} "
+            "(aisquare fleet restart <label>)",
+        )
     ]
 
 

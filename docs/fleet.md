@@ -422,6 +422,8 @@ aisquare config set accounts.pick headroom     # spawns go where there is room (
 aisquare config set accounts.on_limit switch   # …and an agent that hits its limit is moved
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
+                                       # …launched as it was first launched: the row records the
+                                       # binary, permission mode, arguments and account (#144)
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
@@ -676,6 +678,14 @@ config is bundled and regenerated (do not edit it): status line off,
 extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
 session per project; one window per agent.
+
+**What the UI remembers.** The view that was open — a project, an agent, the
+Accounts page, the Doctor — comes back at the next launch if its row is still
+there (an agent that has gone falls back to its project), and so does the
+captured-directories toggle; both live in the store's `ui_state` table (#144),
+the theme in `state.json` because the board shares it, the navigator width
+beside the theme. Nothing else is kept: the panes are tmux's and the rows are
+the store's.
 
 **The UI holds no state that matters.** What must keep running lives in tmux
 (the processes) and `~/.aisquare/context.db` (the `fleet_agent` rows, the

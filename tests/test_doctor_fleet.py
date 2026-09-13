@@ -1152,3 +1152,46 @@ def test_the_projects_line_never_creates_the_home(isolated_home: Path) -> None:
     assert not isolated_home.exists()
     assert diagnostics._check_captured_projects() == []
     assert not isolated_home.exists()
+
+
+# --- resumable exited agents (#144) -------------------------------------------------------------
+
+
+def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_path: Path) -> None:
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t1.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+    resumable = _agent(project.id, "coder-1", "%1", ended=True).model_copy(
+        update={"session_id": "ses_resumable"}
+    )
+    no_transcript = _agent(project.id, "coder-2", "%2", ended=True).model_copy(
+        update={"session_id": "ses_bare"}
+    )
+    still_live = _agent(project.id, "coder-3", "%3").model_copy(update={"session_id": "ses_live"})
+    _seed(tmp_path / "repo", resumable, no_transcript, still_live)
+    transcripts = {"ses_resumable": str(on_disk), "ses_bare": None, "ses_live": str(on_disk)}
+    with store_session() as store:
+        for sid, path in transcripts.items():
+            session = TeamSession(
+                id=sid,
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=path,
+            )
+            store.upsert_session(session)
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.name == "fleet-resume" and check.status is CheckStatus.ok
+    assert check.detail.startswith("1 exited agent can be resumed")
+    assert "coder-1 (repo)" in check.detail
+    assert "coder-2" not in check.detail and "coder-3" not in check.detail
+    assert "fleet restart <label>" in check.detail
+    assert "fleet-resume" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+    on_disk.unlink()
+    assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"

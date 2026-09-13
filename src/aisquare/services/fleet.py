@@ -51,6 +51,7 @@ from aisquare.models import (
     FleetAgent,
     FleetAgentState,
     FleetAgentStatus,
+    LaunchSpec,
     ProjectInfo,
     TeamEvent,
     TeamSession,
@@ -964,8 +965,16 @@ def spawn(
     account: str | None = None,
     resume: ResumeSpec | None = None,
     size: tuple[int, int] | None = None,
+    spec: LaunchSpec | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
+
+    ``spec`` REPLAYS a recorded launch (#144): the binary, permission mode,
+    worktree choice and arguments come from what the agent was started with,
+    not from today's config, so a role edited between runs cannot change what
+    a restart means. An explicit ``binary`` / ``permission_mode`` / ``worktree``
+    argument still wins over the spec, as it wins over the config. Every spawn
+    records the spec it ended up with on the row.
 
     Every ``None`` means "the role's default" (config, then built-in). Refuses
     past ``max_agents_per_project``, a second manager, a worktree in a non-git
@@ -997,6 +1006,13 @@ def spawn(
             f"unknown role {role!r} — expected one of: {', '.join(FLEET_ROLES)}, a harness "
             "role, or one bound with `aisquare team bind`"
         )
+    if spec is not None:
+        # The recorded launch stands in for the role's config, argument by argument.
+        binary = binary if binary is not None else spec.binary
+        permission_mode = permission_mode if permission_mode is not None else spec.permission_mode
+        worktree = worktree if worktree is not None else spec.worktree
+        if not agent_args:
+            agent_args = list(spec.extra_args)
     srv = server(config)
     _require_tmux(srv)
     resolution = harness.resolve_binary(role, override=binary)
@@ -1111,8 +1127,14 @@ def spawn(
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
     notes.extend(f"accounts: {note}" for note in choice.notes)
-    role_args = list(role_config.extra_args)
+    # A replayed spec already holds the role's arguments as they were at spawn;
+    # adding today's would double them (or add ones the agent never had).
+    role_args = [] if spec is not None else list(role_config.extra_args)
     extra = list(agent_args)
+    # What the spec records: the agent's own arguments, BEFORE this launch's
+    # `--resume` is prepended — a resume is per launch, and a restart of the
+    # restarted agent must not carry an old transcript path into the new one.
+    recorded_args = [*role_args, *extra]
     if resume is not None:
         # `--resume <transcript path>` keeps the ORIGINAL session id (#146), so
         # the row is joined to it here rather than minted or learned later; the
@@ -1187,6 +1209,14 @@ def spawn(
         task_id=resolved_task_id,
         spawned_by=spawned_by,
         account_slot=choice.account.slot if choice.account is not None else None,
+        launch_spec=LaunchSpec(
+            binary=resolution.binary,
+            permission_mode=mode or None,
+            extra_args=recorded_args,
+            account_slot=choice.account.slot if choice.account is not None else None,
+            worktree=use_worktree,
+            command=list(command),
+        ),
         created_at=_now(),
     )
     stored = _record(
@@ -1869,6 +1899,11 @@ def _respawn(
             "no transcript on disk to resume — the replacement starts fresh with a hand-off prompt"
         )
     prompt = None if resume is not None else _handoff_prompt(agent, task, recent, reason)
+    if agent.launch_spec is not None:
+        notes.append(
+            "launched as recorded at its first spawn — binary, permission mode and arguments "
+            "come from the row, not from today's config (#144)"
+        )
     receipt = spawn(
         project,
         agent.role,
@@ -1880,6 +1915,7 @@ def _respawn(
         account=account,
         resume=resume,
         size=size,
+        spec=agent.launch_spec,
     )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes

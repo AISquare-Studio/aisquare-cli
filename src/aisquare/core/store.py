@@ -39,6 +39,7 @@ from aisquare.models import (
     ClaudeAccountRecord,
     ContextEntry,
     FleetAgent,
+    LaunchSpec,
     Pool,
     ProjectInfo,
     PromptRecord,
@@ -615,6 +616,17 @@ ALTER TABLE team_session ADD COLUMN limit_resets_at TEXT;
 _SCHEMA_V17 = """
 ALTER TABLE project ADD COLUMN onboarded_at TEXT;
 """
+# v18 (#144): the launch spec a restart replays, and a home for UI state that
+# used to live in scattered files — one key/value table, read at mount and
+# written on change, so what was open comes back after a restart.
+_SCHEMA_V18 = """
+ALTER TABLE fleet_agent ADD COLUMN launch_spec TEXT;
+CREATE TABLE ui_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -634,6 +646,7 @@ _MIGRATIONS = (
     _SCHEMA_V15,
     _SCHEMA_V16,
     _SCHEMA_V17,
+    _SCHEMA_V18,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -704,7 +717,7 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot"
+    "task_id, spawned_by, created_at, ended_at, exit_status, account_slot, launch_spec"
 )
 _CLAUDE_ACCOUNT_COLUMNS = "slot, config_dir, alias, position, is_default, disabled, created_at"
 
@@ -827,6 +840,8 @@ class ContextStore(Protocol):
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def fleet_agent_for_session(self, project_id: str, session_id: str) -> FleetAgent | None: ...
+    def ui_state(self, key: str) -> str | None: ...
+    def set_ui_state(self, key: str, value: str | None) -> None: ...
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
@@ -898,7 +913,18 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         ended_at=_maybe_dt(row["ended_at"]),
         exit_status=row["exit_status"],
         account_slot=row["account_slot"],
+        launch_spec=_launch_spec(row["launch_spec"]),
     )
+
+
+def _launch_spec(raw: object) -> LaunchSpec | None:
+    """The recorded spec, or ``None`` for a row without one or with one that no longer parses."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return LaunchSpec.model_validate_json(raw)
+    except ValueError:
+        return None
 
 
 def _row_to_claude_account(row: sqlite3.Row) -> ClaudeAccountRecord:
@@ -2225,12 +2251,12 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
             "ended_at = excluded.ended_at, exit_status = excluded.exit_status, "
-            "account_slot = excluded.account_slot",
+            "account_slot = excluded.account_slot, launch_spec = excluded.launch_spec",
             (
                 agent.id,
                 agent.project_id,
@@ -2248,12 +2274,33 @@ class SqliteStore:
                 agent.ended_at.isoformat() if agent.ended_at else None,
                 agent.exit_status,
                 agent.account_slot,
+                agent.launch_spec.model_dump_json() if agent.launch_spec is not None else None,
             ),
         )
         self._conn.commit()
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    # --- UI state (#144) ---------------------------------------------------------------
+
+    def ui_state(self, key: str) -> str | None:
+        """The remembered UI fact under ``key``, or ``None``."""
+        row = self._conn.execute("SELECT value FROM ui_state WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row is not None else None
+
+    def set_ui_state(self, key: str, value: str | None) -> None:
+        """Remember ``value`` under ``key``; ``None`` forgets it. Every change is the save."""
+        if value is None:
+            self._conn.execute("DELETE FROM ui_state WHERE key = ?", (key,))
+        else:
+            self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (key, value, _now_iso()),
+            )
+        self._conn.commit()
 
     def bind_fleet_agent_session(self, agent_id: str, session_id: str) -> bool:
         """Join a LIVE fleet row to the session running in its pane; False if none did.

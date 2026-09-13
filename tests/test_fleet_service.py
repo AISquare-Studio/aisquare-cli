@@ -3543,3 +3543,56 @@ def test_a_reused_pane_id_never_makes_an_ended_row_present_nor_kills_a_live_wind
         "coder-third",
         "coder-old",
     ]
+
+
+# --- the launch spec (#144) --------------------------------------------------------------------
+
+
+def test_spawn_records_the_launch_spec_and_a_restart_replays_it_over_a_changed_config(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#144: a restart re-read today's config, so a role's permission mode or extra
+    arguments edited between runs silently changed what "the same agent" was."""
+    _settings(
+        monkeypatch,
+        roles={"coder": FleetRoleSettings(permission_mode="auto", extra_args=["--effort", "high"])},
+    )
+    agent = fleet_service.spawn(project, "coder", worktree=False, agent_args=["--verbose"]).agent
+    spec = agent.launch_spec
+    assert spec is not None
+    assert spec.binary == "claude" and spec.permission_mode == "auto" and spec.worktree is False
+    assert spec.extra_args == ["--effort", "high", "--verbose"]
+    assert spec.command == _command(tmux) and spec.account_slot == agent.account_slot
+    with store_session() as store:
+        stored = store.get_fleet_agent(agent.id)
+    assert stored is not None and stored.launch_spec == spec
+
+    # The config changes under the agent…
+    _settings(
+        monkeypatch,
+        roles={"coder": FleetRoleSettings(permission_mode="acceptEdits", extra_args=["--quiet"])},
+    )
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 1)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    command = _command(tmux)
+    assert _flag(command, "--permission-mode") == "auto", "the recorded mode, not today's"
+    assert "--effort" in command and "--verbose" in command and "--quiet" not in command
+    assert command.count("--effort") == 1, "the role's arguments are not doubled on replay"
+    assert receipt.started.launch_spec is not None
+    assert receipt.started.launch_spec.extra_args == ["--effort", "high", "--verbose"]
+    assert any("launched as recorded" in note for note in receipt.notes)
+
+    # A fresh spawn in the same role takes the NEW config: the spec is per agent.
+    fresh = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert fresh.launch_spec is not None
+    assert fresh.launch_spec.permission_mode == "acceptEdits"
+    assert fresh.launch_spec.extra_args == ["--quiet"]

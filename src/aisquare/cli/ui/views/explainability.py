@@ -34,6 +34,7 @@ from aisquare.core.config import AppConfig, load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
+from aisquare.services import destinations
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import RESERVED_ENV_VARS
@@ -85,6 +86,10 @@ def status_report() -> StatusReport:
         ("enabled", "on" if settings.enabled else "off"),
         ("target", target.name),
         ("gateway", f"{target.gateway_url or '(unset)'} [{target.gateway_source}]"),
+        # "lands in" rather than the CLI's "destination": the view's label column is
+        # as wide as its longest label plus one, and a longer word re-pads every
+        # row (tests pin "enabled:   on"). Same renderer, same sentence.
+        ("lands in", destinations.describe(target.destination, key_source=target.key_source)),
         ("key", f"{target.key_origin} {'is set' if target.api_key else 'is NOT set'}"),
         ("project", _project_key_row(project, target)),
         ("proxy", target.proxy_url),

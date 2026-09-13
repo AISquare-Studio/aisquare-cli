@@ -780,6 +780,41 @@ class ProjectExplainability(BaseModel):
     """Who attached it — the signed-in email when there is one, else the OS user."""
 
 
+class TraceDestination(BaseModel):
+    """Where a project's traces land (#142): a workspace and a studio, chosen while signed in.
+
+    Recorded per project from the API the sign-in session belongs to, so the
+    CLI never handles a key to know WHERE traces go. ``environment`` is the
+    deployment the API host maps to (``prod``, ``stg``, ``dev`` — or the host
+    itself when the mapping does not know it) and doubles as the explainability
+    TARGET name: the gateway and proxy of that deployment apply to this project
+    without anyone typing a URL. ``key_uid`` is set only when the CLI minted an
+    ingest key for this destination — the derived credential ``logout`` clears;
+    a key attached by hand (#141) is the operator's and is left alone.
+    """
+
+    project_id: str
+    api_url: str
+    environment: str
+    workspace_id: int
+    workspace_uid: str | None = None
+    workspace_name: str
+    studio_id: int | None = None
+    studio_uid: str | None = None
+    studio_name: str | None = None
+    key_uid: str | None = None
+    set_at: datetime
+    set_by: str | None = None
+    """Who chose it — the signed-in email."""
+
+    @property
+    def label(self) -> str:
+        """``workspace / studio`` as every surface prints it."""
+        if self.studio_name:
+            return f"{self.workspace_name} / {self.studio_name}"
+        return self.workspace_name
+
+
 class LaunchSpec(BaseModel):
     """What an agent was launched WITH, recorded at spawn and replayed by a restart (#144).
 

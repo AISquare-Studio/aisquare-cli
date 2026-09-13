@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Pick where a project's traces land with your sign-in** (#142).
+  `aisquare explainability workspaces`, `studios [--workspace W]` and
+  `use <workspace>[/<studio>] [--project P] [--no-key] [--clear]` list what the
+  signed-in user can see and record the choice per project (schema v21,
+  `project_destination`). The deployment the session belongs to becomes the
+  project's explainability target with its gateway and hosted proxy filled in
+  (`stg-api` → `stg`, `api` → `prod`; nothing typed, nothing enabled behind
+  your back); the one resolver consults it between `--target` and the machine
+  default. The CLI obtains a workspace `ingest:write` key on your behalf and
+  stores it as `key set` would — the API still refuses a sign-in token there
+  (AISquare-Studio-BE#3493), so until then the line says so and `key set` is the
+  way in — and binds this machine's agent identities to the chosen studio, which
+  is what makes spans land there. `status` shows `destination:` (the UI's
+  Explainability view `lands in`); `whoami` gains a `traces:` line; `logout` forgets every key the
+  CLI minted and leaves hand-attached keys alone.
 - **Project groups, pinning and manual order in the sidebar** (#140). A
   management layer only, like browser tab groups: a `project_group` table and
   `group_id` / `position` / `pinned_at` on the project row (schema v20); a

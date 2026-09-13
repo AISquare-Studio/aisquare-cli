@@ -38,6 +38,7 @@ from aisquare.core.state import get_state
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
+from aisquare.services import destinations as dest
 from aisquare.services import explainability_ops as ops
 from aisquare.services import iam
 from aisquare.services import project as project_service
@@ -212,6 +213,271 @@ def key_clear(project_ref: Annotated[str | None, _PROJECT_OPTION] = None) -> Non
 _TARGET_OPTION = typer.Option("--target", help="Deployment to act on, e.g. stg or prod.")
 
 
+# ── where traces land, chosen while signed in (#142) ─────────────────────────
+
+
+def _session_or_fail() -> iam.Session:
+    try:
+        session = iam.current_session()
+    except iam.IamError as exc:
+        fail(exc.message, error=exc.code)
+    if session is None:
+        fail("Not signed in. Run aisquare login.", error="not_authenticated")
+    return session
+
+
+def _workspace_rows(found: list[dest.Workspace]) -> list[dict[str, object]]:
+    return [
+        {
+            "id": w.id,
+            "uid": w.uid,
+            "name": w.name,
+            "type": w.type,
+            "role": w.role,
+            "invite_status": w.invite_status,
+            "member": w.member,
+        }
+        for w in found
+    ]
+
+
+@app.command()
+def workspaces() -> None:
+    """List the workspaces you can see — where a project's traces can land.
+
+    Read with the sign-in session (``aisquare login``); no key is involved.
+    Members first, then pending invitations, which are listed so the answer to
+    "why can't I pick it" is on screen rather than in the web app.
+    """
+    session = _session_or_fail()
+    try:
+        found = dest.list_workspaces(session)
+    except iam.IamError as exc:
+        fail(exc.message, error=exc.code)
+    except dest.DestinationError as exc:
+        fail(exc.message, error=exc.code)
+    if get_state().json_output:
+        typer.echo(json.dumps(_workspace_rows(found)))
+        return
+    if not found:
+        typer.echo("no workspaces — you are not a member of any yet")
+        return
+    width = max(len(w.name) for w in found)
+    for w in found:
+        standing = w.role.lower() if w.role else f"invited ({w.invite_status or 'pending'})"
+        typer.echo(f"{w.name:<{width}}  {standing:<18} id {w.id}" + (f"  {w.uid}" if w.uid else ""))
+
+
+def _workspace_for(
+    session: iam.Session, ref: str | None, project_ref: str | None
+) -> dest.Workspace:
+    """``--workspace`` by name/uid/id, else the active project's chosen workspace."""
+    if ref is not None:
+        return dest.pick_workspace(ref, dest.list_workspaces(session))
+    project = _project_for(project_ref)
+    with store_session() as store:
+        chosen = store.project_destination(project.id)
+    if chosen is None:
+        fail(
+            f"{project.root.name or project.id} has no destination yet — name one: "
+            "aisquare explainability studios --workspace <name>",
+            error="no_destination",
+        )
+    return dest.Workspace(
+        id=chosen.workspace_id, uid=chosen.workspace_uid, name=chosen.workspace_name
+    )
+
+
+@app.command()
+def studios(
+    workspace: Annotated[
+        str | None,
+        typer.Option("--workspace", "-w", help="Workspace by name, uid or id."),
+    ] = None,
+    project_ref: Annotated[str | None, _PROJECT_OPTION] = None,
+) -> None:
+    """List a workspace's studios (default: the active project's chosen workspace)."""
+    session = _session_or_fail()
+    try:
+        chosen = _workspace_for(session, workspace, project_ref)
+        found = dest.list_studios(session, chosen)
+    except iam.IamError as exc:
+        fail(exc.message, error=exc.code)
+    except dest.DestinationError as exc:
+        fail(exc.message, error=exc.code)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "workspace": {"id": chosen.id, "uid": chosen.uid, "name": chosen.name},
+                    "studios": [
+                        {
+                            "id": s.id,
+                            "uid": s.uid,
+                            "name": s.name,
+                            "default": s.is_default,
+                            "inbox": s.is_inbox,
+                            "visibility": s.visibility,
+                        }
+                        for s in found
+                    ],
+                }
+            )
+        )
+        return
+    if not found:
+        typer.echo(f"{chosen.name}: no studios you can see")
+        return
+    width = max(len(s.name) for s in found)
+    for s in found:
+        marks = " ".join(m for m, on in (("default", s.is_default), ("inbox", s.is_inbox)) if on)
+        typer.echo(f"{s.name:<{width}}  id {s.id}" + (f"  ({marks})" if marks else ""))
+
+
+def _routing_lines(report: dest.RosterReport) -> list[str]:
+    return [f"{b.agent} → {'bound' if b.ok else 'not bound: ' + b.detail}" for b in report.bound]
+
+
+@app.command()
+def use(
+    destination: Annotated[
+        str | None,
+        typer.Argument(
+            help="WORKSPACE or WORKSPACE/STUDIO, each by name, uid or id; without a studio, "
+            "the workspace's default studio is used when it has one.",
+            show_default=False,
+        ),
+    ] = None,
+    project_ref: Annotated[str | None, _PROJECT_OPTION] = None,
+    no_key: Annotated[
+        bool,
+        typer.Option("--no-key", help="Record the choice without obtaining an ingest key."),
+    ] = False,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Forget the project's destination instead.")
+    ] = False,
+) -> None:
+    """Pick where ONE project's traces land: a workspace and a studio, as the signed-in user.
+
+    What it does, in order, and each step is reported: records the choice per
+    project; makes the deployment the session belongs to an explainability
+    target (gateway and proxy filled from the environment, nothing typed);
+    obtains a workspace ingest key on your behalf when the project has none for
+    that deployment (the API refuses this for a sign-in token today — the
+    message names the backend issue and the ``key set`` fallback); and binds
+    this machine's agent identities to the studio, which is what makes spans
+    land THERE rather than in the workspace's inbox. Tracing itself stays off
+    until ``aisquare explainability enable`` — picking a destination must not
+    silently start sending.
+
+    Idempotent: re-running with the same destination changes nothing; a
+    different workspace drops the key the CLI minted for the old one.
+    """
+    project = _project_for(project_ref)
+    pname = project.root.name or project.id
+    if clear:
+        with store_session() as store:
+            previous = dest.forget(store, project)
+        if get_state().json_output:
+            typer.echo(json.dumps({"project": project.id, "cleared": dest.as_json(previous)}))
+        elif previous is None:
+            typer.echo(f"{pname} had no destination")
+        else:
+            typer.echo(f"✓ {pname} no longer points at {previous.label}")
+        return
+    if destination is None:
+        fail(
+            "name a destination: WORKSPACE or WORKSPACE/STUDIO — see: aisquare explainability "
+            "workspaces",
+            error="usage",
+        )
+    session = _session_or_fail()
+    workspace_ref, _, studio_ref = destination.partition("/")
+    try:
+        workspace = dest.pick_workspace(workspace_ref, dest.list_workspaces(session))
+        studios_seen = dest.list_studios(session, workspace)
+        studio = dest.pick_studio(studio_ref or None, studios_seen, workspace)
+    except iam.IamError as exc:
+        fail(exc.message, error=exc.code)
+    except dest.DestinationError as exc:
+        fail(exc.message, error=exc.code)
+
+    config = load_config()
+    target_name, changed = dest.ensure_target(config, session.api_url)
+    if changed:
+        with expected_config_write_errors():
+            save_config(config)
+    with store_session() as store:
+        previous = store.project_destination(project.id)
+        row = dest.choose(store, project, workspace, studio, session, previous=previous)
+        target = ops.resolve_target(config.explainability, None, project_id=project.id)
+        key_note: str
+        minted = None
+        if target.api_key is not None:
+            key_note = {
+                "project": "the project's own key",
+                "env": f"${target.api_key_env} from this shell",
+                "file": "the machine key file",
+            }.get(target.key_source, target.key_origin)
+        elif no_key:
+            key_note = "none — skipped (--no-key)"
+        else:
+            try:
+                minted = dest.mint_key(store, project, row, session)
+                row = store.project_destination(project.id) or row
+                target = ops.resolve_target(config.explainability, None, project_id=project.id)
+                key_note = f"minted on your behalf → {minted.path} (mode 600)"
+            except iam.IamError as exc:
+                key_note = f"none — {exc.message}"
+            except dest.DestinationError as exc:
+                key_note = f"none — {exc.message}"
+    routing = dest.bind_roster(row, target) if target.api_key else dest.RosterReport()
+
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "project": project.id,
+                    "name": pname,
+                    "destination": dest.as_json(row),
+                    "target": {
+                        "name": target.name,
+                        "gateway": target.gateway_url,
+                        "proxy": target.proxy_url,
+                        "enabled": config.explainability.enabled,
+                    },
+                    "key": {
+                        "source": target.key_source,
+                        "minted": minted is not None,
+                        "note": key_note,
+                    },
+                    "routing": [
+                        {
+                            "agent": b.agent,
+                            "bound": b.ok,
+                            "detail": b.detail,
+                            "studio_id": b.studio_id,
+                        }
+                        for b in routing.bound
+                    ],
+                }
+            )
+        )
+        return
+    typer.echo(f"✓ traces from {pname} land in {row.label} ({row.environment})")
+    proxy = f"  [proxy {target.proxy_url}]" if target.proxy_url else ""
+    typer.echo(f"  target:   {target_name} → {target.gateway_url or '(no gateway known)'}{proxy}")
+    typer.echo(f"  key:      {key_note}")
+    if routing.bound:
+        typer.echo(f"  routing:  {'; '.join(_routing_lines(routing))}")
+    else:
+        typer.echo("  routing:  not applied — no key to bind the agent identities with")
+    if not config.explainability.enabled:
+        typer.echo("  next:     aisquare explainability enable   (tracing is off on this machine)")
+    else:
+        typer.echo("  next:     aisquare doctor --live")
+
+
 @app.command()
 def status(
     target_name: Annotated[str | None, _TARGET_OPTION] = None,
@@ -264,6 +530,8 @@ def status(
                     "target": target.name,
                     "gateway": target.gateway_url,
                     "gateway_source": target.gateway_source,
+                    # Where the active project's traces land (#142); null until chosen.
+                    "destination": dest.as_json(target.destination),
                     "key_env": target.api_key_env,
                     "key_set": bool(target.api_key),
                     # `key_set` alone said "the named variable holds a key",
@@ -311,6 +579,10 @@ def status(
         typer.echo(f"enabled:  {settings.enabled}")
         typer.echo(f"target:   {target.name}")
         typer.echo(f"gateway:  {target.gateway_url or '(unset)'} [{target.gateway_source}]")
+        # `destination:` — the same word as the JSON key, because
+        # tests/test_redaction_surface.py holds every human label to a key.
+        described = dest.describe(target.destination, key_source=target.key_source)
+        typer.echo(f"destination: {described}")
         typer.echo(f"key:      {target.key_origin} {'is set' if target.api_key else 'is NOT set'}")
         typer.echo(f"proxy:    {target.proxy_url}")
         typer.echo(f"identity: {target.agent_name_template}")

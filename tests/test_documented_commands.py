@@ -872,7 +872,9 @@ CENSUS = {
     # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
     # fenced example to the memory section.
     "README.md": (58, 5),
-    "docs/connecting-your-agents-to-explainability.md": (11, 4),
+    # Re-measured 2026-09-13 when "Choose where traces land with your sign-in"
+    # (#142) added its fence: 20 commands, the same four classified mentions.
+    "docs/connecting-your-agents-to-explainability.md": (20, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
     "docs/signing-in.md": (8, 0),

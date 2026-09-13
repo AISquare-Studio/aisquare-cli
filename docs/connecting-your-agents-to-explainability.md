@@ -345,6 +345,17 @@ reported on its own line:
 `status --json` carries the choice under `destination`; `use --json` carries
 the destination, the target, the key's standing and the routing result.
 
+**How much is left.** With a destination chosen, `status` and `whoami` add a
+`credits:` line for that workspace — the run and build pools, today and this
+month, what is left of each and when it resets, and the server's band when it
+is not `ok` (`[low]`, `[exhausted]`); `status --json` carries the numbers under
+`credits`. The Accounts page in `aisquare ui` draws the same as bars under the
+AISquare card, refreshed on the page's minute tick beside the Claude accounts,
+and `doctor --live` adds a `workspace-credits` row that warns before a fleet is
+spawned into a low or exhausted workspace. One request per workspace, cached
+for a minute, never from a hook or a session path; when the API cannot answer
+the line says `credits unavailable` with the reason and nothing else changes.
+
 ## If something breaks
 
 | Symptom | Cause |

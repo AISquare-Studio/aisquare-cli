@@ -38,6 +38,7 @@ from aisquare.core.state import get_state
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
+from aisquare.services import credits as credits_service
 from aisquare.services import destinations as dest
 from aisquare.services import explainability_ops as ops
 from aisquare.services import iam
@@ -214,6 +215,17 @@ _TARGET_OPTION = typer.Option("--target", help="Deployment to act on, e.g. stg o
 
 
 # ── where traces land, chosen while signed in (#142) ─────────────────────────
+
+
+def _credits_for(target: ops.ResolvedTarget) -> credits_service.WorkspaceCredits | None:
+    """The destination workspace's credits (#143), or ``None`` when there is nothing to ask."""
+    if target.destination is None:
+        return None
+    try:
+        session = iam.current_session()
+    except iam.IamError:
+        return None
+    return credits_service.for_destination(session, target.destination)
 
 
 def _session_or_fail() -> iam.Session:
@@ -522,6 +534,10 @@ def status(
         queue_dir: str | None = str(outbox.queue_dir())
     except Exception:
         queue_dir = None
+    # The workspace's credits (#143): ONE request, cached a minute, only when a
+    # destination is chosen and a session exists for its host — otherwise the
+    # line is not shown at all. Never a reason for `status` to fail.
+    credits = _credits_for(target)
     if get_state().json_output:
         typer.echo(
             json.dumps(
@@ -532,6 +548,8 @@ def status(
                     "gateway_source": target.gateway_source,
                     # Where the active project's traces land (#142); null until chosen.
                     "destination": dest.as_json(target.destination),
+                    # That workspace's credits (#143); null until a destination is chosen.
+                    "credits": credits.as_json() if credits is not None else None,
                     "key_env": target.api_key_env,
                     "key_set": bool(target.api_key),
                     # `key_set` alone said "the named variable holds a key",
@@ -583,6 +601,8 @@ def status(
         # tests/test_redaction_surface.py holds every human label to a key.
         described = dest.describe(target.destination, key_source=target.key_source)
         typer.echo(f"destination: {described}")
+        if credits is not None:
+            typer.echo(f"credits:  {credits_service.describe(credits)}")
         typer.echo(f"key:      {target.key_origin} {'is set' if target.api_key else 'is NOT set'}")
         typer.echo(f"proxy:    {target.proxy_url}")
         typer.echo(f"identity: {target.agent_name_template}")

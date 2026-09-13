@@ -541,6 +541,7 @@ def request(
     workspace: str | None = None,
     api_url: str | None = None,
     tolerate: tuple[int, ...] = (),
+    timeout: float = HTTP_TIMEOUT_SECONDS,
 ) -> HttpResult:
     """Call the AISquare API as the signed-in user. There is no refresh path.
 
@@ -569,7 +570,12 @@ def request(
     if workspace:
         headers["X-Workspace-Id"] = workspace
     result = _http(
-        method, f"{resolved}/{path.lstrip('/')}", form=form, json_body=json_body, headers=headers
+        method,
+        f"{resolved}/{path.lstrip('/')}",
+        form=form,
+        json_body=json_body,
+        headers=headers,
+        timeout=timeout,
     )
     if result.status in tolerate:
         return result

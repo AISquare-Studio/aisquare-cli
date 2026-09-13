@@ -34,7 +34,8 @@ from aisquare.core.config import AppConfig, load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
-from aisquare.services import destinations
+from aisquare.services import credits as credits_service
+from aisquare.services import destinations, iam
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.explainability import RESERVED_ENV_VARS
@@ -90,6 +91,7 @@ def status_report() -> StatusReport:
         # as wide as its longest label plus one, and a longer word re-pads every
         # row (tests pin "enabled:   on"). Same renderer, same sentence.
         ("lands in", destinations.describe(target.destination, key_source=target.key_source)),
+        ("credits", _credits_row(target)),
         ("key", f"{target.key_origin} {'is set' if target.api_key else 'is NOT set'}"),
         ("project", _project_key_row(project, target)),
         ("proxy", target.proxy_url),
@@ -104,6 +106,17 @@ def status_report() -> StatusReport:
         ("redaction", ops.redaction_summary(config.redaction.level)),
     )
     return StatusReport(rows=rows, problem=settings.enabled and not proxy.healthy)
+
+
+def _credits_row(target: ops.ResolvedTarget) -> str:
+    """The destination workspace's credits (#143) — cached a minute, off the UI thread."""
+    if target.destination is None:
+        return "(no destination chosen)"
+    try:
+        session = iam.current_session()
+    except iam.IamError:
+        session = None
+    return credits_service.describe(credits_service.for_destination(session, target.destination))
 
 
 def _active() -> ProjectInfo | None:

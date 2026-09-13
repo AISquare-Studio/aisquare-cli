@@ -35,6 +35,7 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import TraceDestination
 from aisquare.services import auth as auth_service
+from aisquare.services import credits as credits_service
 from aisquare.services import destinations, iam
 
 app = typer.Typer(help="Sign in to AISquare and inspect the session.", no_args_is_help=True)
@@ -398,8 +399,17 @@ def whoami() -> None:
     if session is None:
         fail("Not signed in. Run aisquare login.", error="not_authenticated")
     lands_in = _active_destination()
+    credits = credits_service.for_destination(session, lands_in)
     if get_state().json_output:
-        typer.echo(json.dumps({**session.as_json(), "destination": destinations.as_json(lands_in)}))
+        typer.echo(
+            json.dumps(
+                {
+                    **session.as_json(),
+                    "destination": destinations.as_json(lands_in),
+                    "credits": credits.as_json() if credits is not None else None,
+                }
+            )
+        )
         return
     if session.source == "env":
         stdout_console().print(f"token from {iam.TOKEN_ENV_VAR} · {session.api_url}")
@@ -411,6 +421,8 @@ def whoami() -> None:
         # The active project's workspace and studio (#142), on the line that
         # answers "who am I here": the same sign-in, the other half of it.
         stdout_console().print(f"traces: {lands_in.label} · {lands_in.environment}")
+    if credits is not None:
+        stdout_console().print(f"credits: {credits_service.describe(credits)}")
 
 
 def _active_destination() -> TraceDestination | None:

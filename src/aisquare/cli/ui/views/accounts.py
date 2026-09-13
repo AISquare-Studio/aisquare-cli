@@ -54,8 +54,9 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.common import format_reset, local_time
 from aisquare.cli.ui.terminal import TerminalPane
-from aisquare.core import browser
+from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
+from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import (
     AccountsOverview,
@@ -66,8 +67,10 @@ from aisquare.models import (
 )
 from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import credits as credits_service
 from aisquare.services import device_flow, iam
 from aisquare.services import fleet as fleet_service
+from aisquare.services.credits import WorkspaceCredits
 
 USAGE_SECONDS = 60.0
 """How often the usage numbers are re-fetched while the page is on screen."""
@@ -75,6 +78,7 @@ LOGIN_POLL_SECONDS = 1.0
 """How often a sign-in window's directory is checked for a landed login."""
 
 USAGE_WORKER = "accounts-usage"
+CREDITS_WORKER = "workspace-credits"
 SIGN_IN_WORKER = "aisquare-sign-in"
 SIGN_OUT_WORKER = "aisquare-sign-out"
 COMPLETE_WORKER = "claude-complete-sign-in"
@@ -164,6 +168,70 @@ def usage_bar(percent: float) -> Text:
     text.append("▮" * filled + "▯" * (_BAR_CELLS - filled), style=style)
     text.append(f" {clamped:.0f}%", style=style)
     return text
+
+
+def credits_text(readings: list[WorkspaceCredits], *, now: datetime | None = None) -> Text:
+    """One line per destination workspace (#143): ``acme  run today ▮▮▮▮▯ 76% · resets …``.
+
+    The same bars as the Claude rows below — used, not remaining, so the two
+    halves of the page read alike — and ``unlimited`` where the API says ``-1``.
+    The server's band is the suffix when it is not ``ok``.
+    """
+    text = Text(no_wrap=True, overflow="ellipsis")
+    for index, reading in enumerate(readings):
+        if index:
+            text.append("\n")
+        text.append(f"{reading.workspace_name}  ", style="bold")
+        if not reading.available:
+            text.append(f"credits: {reading.reason or 'unavailable'}", style="dim")
+            continue
+        shown_any = False
+        for pool in ("run", "build"):
+            for span, word in (("daily", "today"), ("monthly", "month")):
+                window = reading.window(pool, span)
+                if window is None:
+                    continue
+                shown_any = True
+                text.append(f"{pool} {word} ", style="dim")
+                if window.percent is None:
+                    text.append("unlimited", style="dim")
+                else:
+                    text.append_text(usage_bar(window.percent))
+                    text.append(_resets(window.resets_at, now=now), style="dim")
+                text.append("  ")
+        if not shown_any:
+            text.append("no pools reported", style="dim")
+        if reading.state and reading.state != "ok":
+            tone = "bold red" if reading.state == "exhausted" else "yellow"
+            text.append(f"[{reading.state}]", style=tone)
+    return text
+
+
+def _read_credits(session: iam.Session) -> list[WorkspaceCredits]:
+    """Off the UI thread: every destination workspace of this session's host, one reading each.
+
+    Distinct by workspace — two projects pointed at the same workspace share a
+    balance and a request. Fails open: a store that cannot be read shows no
+    credits line, and the rest of the page is untouched.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            destinations = store.project_destinations()
+    except Exception:
+        return []
+    readings: list[WorkspaceCredits] = []
+    seen: set[int] = set()
+    for destination in destinations:
+        if destination.workspace_id in seen:
+            continue
+        reading = credits_service.for_destination(session, destination)
+        if reading is None:
+            continue  # another host than the session's: not this session's to ask
+        seen.add(destination.workspace_id)
+        readings.append(reading)
+    return readings
 
 
 def _resets(when: datetime | None, *, now: datetime | None = None) -> str:
@@ -433,6 +501,7 @@ class AccountsView(Vertical):
         with VerticalScroll(id="accounts-body"):
             yield Static(Text("AISquare", style="bold"), classes="section-title")
             yield Static(aisquare_status_text(None), id="aisquare-status")
+            yield Static("", id="aisquare-credits")
             yield Static("", id="aisquare-code")
             with Horizontal(classes="actions", id="aisquare-actions"):
                 yield Button("Sign in", id="aisquare-sign-in", variant="primary")
@@ -599,6 +668,25 @@ class AccountsView(Vertical):
             thread=True,
             exit_on_error=False,
         )
+        self.refresh_credits()
+
+    def refresh_credits(self) -> None:
+        """The destination workspaces' credits (#143), on the same tick, when signed in."""
+        session = self.session
+        if not self._on_screen or session is None:
+            self.query_one("#aisquare-credits", Static).update("")
+            return
+        self.run_worker(
+            lambda: _read_credits(session),
+            name=CREDITS_WORKER,
+            group=CREDITS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _show_credits(self, readings: list[WorkspaceCredits]) -> None:
+        self.query_one("#aisquare-credits", Static).update(credits_text(readings))
 
     def _show_usage(self, fetched: dict[int, tuple[ClaudeUsage, UsageTrend | None]]) -> None:
         for slot, (usage, trend) in fetched.items():
@@ -930,6 +1018,9 @@ class AccountsView(Vertical):
         if worker.name == USAGE_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, dict):
                 self._show_usage(worker.result)
+        elif worker.name == CREDITS_WORKER:
+            if state is WorkerState.SUCCESS and isinstance(worker.result, list):
+                self._show_credits(worker.result)
         elif worker.name == SIGN_IN_WORKER:
             self._sign_in_finished(worker, state)
         elif worker.name == SIGN_OUT_WORKER:

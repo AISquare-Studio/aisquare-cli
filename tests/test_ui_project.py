@@ -473,6 +473,40 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     assert button_back is True and pane_after is False  # no manager in the snapshot → button
 
 
+def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
+    project: ProjectInfo,
+) -> None:
+    """#138: an exited manager's row stays listed while its window stands (its last
+    screen is readable behind it); the tab must not call that "no manager yet"."""
+    now = datetime.now(tz=UTC)
+    gone = fake_agent(project, pane_id="%31").model_copy(
+        update={"ended_at": now, "exit_status": 130}
+    )
+    coder = fake_agent(project, pane_id="%32", label="coder-auth")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, bool, bool, str]:
+        view = host.query_one(ProjectView)
+        view.refresh_status(
+            [
+                FleetAgentStatus(agent=gone, state="exited", detail="exit 130"),
+                FleetAgentStatus(agent=coder, state="working"),
+            ]
+        )
+        await pilot.pause()
+        header = str(host.query_one("#manager-header").render())
+        button = host.query_one("#start-manager", Button).display
+        pane = host.query_one("#manager-pane", TerminalPane).display
+        view.refresh_status([FleetAgentStatus(agent=coder, state="working")])  # no such row
+        await pilot.pause()
+        return header, button, pane, str(host.query_one("#manager-header").render())
+
+    header, button, pane, without = drive(project, scenario)
+    assert "manager exited (130)" in header and "Restart on its sidebar row" in header
+    assert "aisquare fleet restart manager" in header and "no manager yet" not in header
+    assert button is True and pane is False  # the way to a NEW session is right there
+    assert "has no manager yet" in without and "exited" not in without  # the control
+
+
 def test_refresh_routes_a_snapshot_and_a_bare_refresh_only_repaints(project: ProjectInfo) -> None:
     """The plan spells the push ``refresh(snapshot)``; Textual's own ``refresh()`` must survive."""
     manager = fake_agent(project, pane_id="%21")

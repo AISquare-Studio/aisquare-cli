@@ -105,15 +105,34 @@ def manager_text(status: FleetAgentStatus) -> Text:
     return text
 
 
-def no_manager_text(project: ProjectInfo, unavailable: str | None) -> Text:
-    """The Manager tab's header when the project has no live manager."""
+def no_manager_text(
+    project: ProjectInfo, unavailable: str | None, *, exited: FleetAgentStatus | None = None
+) -> Text:
+    """The Manager tab's header when the project has no live manager.
+
+    ``exited`` is a manager row that ENDED while its window still stands (#138:
+    the listing keeps it so the last screen stays readable). "No manager yet"
+    would be false for that project; the header says what happened and names
+    both ways back — the button for a new session, the row's **Restart** for
+    the same one.
+    """
     name = project.root.name or project.id
     text = Text()
-    text.append(f"{name} has no manager yet.\n", style="bold")
-    text.append(
-        "Start one to task this project in prose: it plans, spawns coders, testers and "
-        "reviewers on the board, and reports back when the goal is met.",
-    )
+    if exited is not None:
+        status = exited.agent.exit_status
+        suffix = f" ({status})" if status is not None else ""
+        text.append(f"{name}'s manager exited{suffix}.\n", style="bold")
+        text.append(
+            "Start manager begins a new session. Restart on its sidebar row brings the same "
+            "session back (its last screen is still there); aisquare fleet restart manager "
+            "does the same from a shell.",
+        )
+    else:
+        text.append(f"{name} has no manager yet.\n", style="bold")
+        text.append(
+            "Start one to task this project in prose: it plans, spawns coders, testers and "
+            "reviewers on the board, and reports back when the goal is met.",
+        )
     if unavailable:
         text.append(f"\nfleet unavailable: {unavailable}", style="bold red")
     return text
@@ -125,6 +144,16 @@ def manager_status(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | Non
         if status.agent.label == fleet_service.MANAGER_LABEL and status.agent.ended_at is None:
             return status
     return None
+
+
+def exited_manager(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | None:
+    """The latest ENDED manager row among ``agents`` — listed while its window stands (#138)."""
+    ended = [
+        status
+        for status in agents
+        if status.agent.label == fleet_service.MANAGER_LABEL and status.agent.ended_at is not None
+    ]
+    return max(ended, key=lambda s: s.agent.ended_at or s.agent.created_at, default=None)
 
 
 class ManagerTab(Vertical):
@@ -167,14 +196,24 @@ class ManagerTab(Vertical):
             status = FleetAgentStatus(agent=manager)
         self.show(status)
 
-    def show(self, status: FleetAgentStatus | None, *, unavailable: str | None = None) -> None:
-        """Render ``status`` — the pane when there is a manager, the button when not."""
+    def show(
+        self,
+        status: FleetAgentStatus | None,
+        *,
+        unavailable: str | None = None,
+        exited: FleetAgentStatus | None = None,
+    ) -> None:
+        """Render ``status`` — the pane when there is a manager, the button when not.
+
+        ``exited`` is the ended manager row the snapshot still lists (#138); it
+        only changes what the header above the button says.
+        """
         self.status = status
         header = self.query_one("#manager-header", Static)
         button = self.query_one("#start-manager", Button)
         pane = self.query_one("#manager-pane", TerminalPane)
         if status is None:
-            header.update(no_manager_text(self.project, unavailable))
+            header.update(no_manager_text(self.project, unavailable, exited=exited))
             button.display = True
             pane.display = False
             if pane.pane_id is not None:
@@ -304,7 +343,7 @@ class ProjectView(TabbedContent):
         if not tabs:
             self._pending = list(agents)
             return
-        tabs.first().show(manager_status(agents))
+        tabs.first().show(manager_status(agents), exited=exited_manager(agents))
 
     def on_mount(self) -> None:
         if self._pending is not None:

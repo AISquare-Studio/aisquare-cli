@@ -421,6 +421,7 @@ aisquare accounts disable 3            # out of automatic selection; enable puts
 aisquare config set accounts.pick headroom     # spawns go where there is room (see above)
 aisquare config set accounts.on_limit switch   # …and an agent that hits its limit is moved
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
+aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
@@ -777,6 +778,24 @@ server — this ends every agent at once, so prefer `fleet stop` per agent:
 ```sh
 tmux -L asq kill-server
 ```
+
+**The manager shows 💤 exited and nothing brings it back.** You ended its
+Claude Code (ctrl+c until it quit, or `/exit`) inside its window; tmux keeps
+the dead window (`remain-on-exit`) so the last screen stays readable, and the
+row stays on the sidebar as **💤 exited** for a day while that window is
+there. Its row now records the exit the moment any listing sees the dead pane
+— no `reap` needed — so `aisquare fleet spawn manager` is not refused any more,
+and the row itself offers **Restart**: same label, role, task, worktree and
+account, and the SAME session resumed from its transcript when that file is
+on disk, so the manager comes back knowing its intake, its contracts and its
+coders (`--fresh` in the command, or a missing transcript, starts new with a
+hand-off prompt built from the board). From a shell: `aisquare fleet restart
+manager`. The project's Manager tab says *manager exited (130)* over its
+**Start manager** button instead of "no manager yet". **Stop** on an exited
+row removes the dead window and takes the row off the listing; so does
+starting the same label again (the replacement supersedes the old window, so
+the sidebar never shows two rows called manager); `doctor` names a project
+whose manager exited while agents are still running (`fleet-manager`).
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

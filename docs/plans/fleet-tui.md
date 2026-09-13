@@ -787,7 +787,7 @@ continuation cap.
 
 | Situation | What the user sees | What the system does |
 | --- | --- | --- |
-| Agent process dies | 💤 exited(N) on the row; the last screen stays readable (`remain-on-exit`) | manager nudged once with `agent_exited`; restart keeps the label, mints a new session id |
+| Agent process dies | 💤 exited(N) on the row; the last screen stays readable (`remain-on-exit`); the row offers **Restart** and **Stop** (#138) | the row is ended the moment a listing sees the dead pane; manager nudged once with `agent_exited`; restart keeps the label and RESUMES the session from its transcript when it is on disk (a new id only with `--fresh` or no transcript) |
 | Agent stuck on a permission prompt | 🔔 + bell | nothing nudges it; the user clicks in and answers |
 | Manager needs the human | 🔔 on the project | same |
 | `context.db` locked or corrupt | UI keeps the last frame; Doctor shows the failure | agents are unaffected — hooks fail open |

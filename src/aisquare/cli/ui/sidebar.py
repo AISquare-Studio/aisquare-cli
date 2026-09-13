@@ -140,8 +140,11 @@ def agent_row_text(status: FleetAgentStatus) -> Text:
     text.append(f"{ROLE_ICON.get(agent.role, CUSTOM_ROLE_ICON)} ")
     text.append(f"{agent.label:<13} ")
     text.append(chip, style=style)
-    if status.state == "exited" and agent.exit_status is not None:
-        text.append(f"({agent.exit_status})", style="dim")
+    if status.state == "exited":
+        # 💤 alone read as "sleeping" (#138); the word says what happened.
+        text.append(" exited", style="dim")
+        if agent.exit_status is not None:
+            text.append(f"({agent.exit_status})", style="dim")
     return text
 
 

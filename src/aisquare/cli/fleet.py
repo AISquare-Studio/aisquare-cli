@@ -255,6 +255,58 @@ def status(project: ProjectRef = None) -> None:
     _emit_agents(target, agents)
 
 
+@app.command("restart")
+def restart(
+    label: Annotated[str, typer.Argument(help="Agent label, e.g. manager or coder-auth.")],
+    fresh: Annotated[
+        bool,
+        typer.Option(
+            "--fresh",
+            help="Start a new session with a hand-off prompt built from the board instead of "
+            "resuming the agent's transcript.",
+        ),
+    ] = False,
+    project: ProjectRef = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Start an agent again under its own label — exited, lost or still running.
+
+    Same role, task, worktree and account; the session is resumed from its
+    transcript when that file is on disk (`claude --resume <transcript>`), so a
+    manager killed with ctrl+c comes back knowing its intake and its coders.
+    A running agent is stopped first as `fleet stop` stops it.
+    """
+    target = _project(project)
+    try:
+        receipt = fleet_service.restart(target, label, fresh=fresh, spawned_by=as_session or "user")
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "replaced": receipt.replaced.model_dump(mode="json"),
+                    "started": receipt.started.model_dump(mode="json"),
+                    "resumed": receipt.resumed,
+                    "was_running": receipt.was_running,
+                    "tmux_session": receipt.tmux_session,
+                    "notes": receipt.notes,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    how = "resumed its session" if receipt.resumed else "started fresh with a hand-off prompt"
+    before = "stopped and " if receipt.was_running else ""
+    console.print(
+        f"✓ {label}: {before}restarted — {how} "
+        f"({receipt.started.pane_id} in {receipt.tmux_session})",
+        markup=False,
+    )
+    for note in receipt.notes:
+        console.print(f"  · {note}", markup=False)
+
+
 @app.command("switch")
 def switch(
     label: Annotated[str, typer.Argument(help="Agent label, e.g. coder-auth.")],
@@ -355,7 +407,11 @@ def stop(
     project: ProjectRef = None,
     force: Annotated[bool, typer.Option("--force", help="Kill without a graceful /exit.")] = False,
 ) -> None:
-    """Stop an agent: /exit, a grace period, then the window is killed."""
+    """Stop an agent: /exit, a grace period, then the window is killed.
+
+    On an agent that already exited (💤) it removes the dead window that
+    `remain-on-exit` kept, which is what takes the row off the live listing.
+    """
     target = _project(project)
     try:
         agent = fleet_service.stop(target, label, force=force)

@@ -3,6 +3,25 @@
   "title": "cliXR wire protocol",
   "description": "Generated from aisquare.services.xr.protocol \u2014 do not edit. Regenerate with: python -m aisquare.services.xr.protocol --write",
   "protocol": 1,
+  "audio": {
+    "description": "Binary websocket frames between an `audio` header and its `audioEnd` are raw samples in this format, with no container and no per-frame header. JSON Schema cannot describe a binary frame, so it is stated here: this block IS the contract for the audio half.",
+    "encoding": "pcm_s16le",
+    "sampleRateHz": 16000,
+    "sampleBits": 16,
+    "signed": true,
+    "endianness": "little",
+    "channels": 1,
+    "frameMs": 20,
+    "frameBytes": 640,
+    "alignment": "Every frame must be a whole number of samples. An odd byte length is half a sample and shifts every sample after it by eight bits."
+  },
+  "closeCodes": {
+    "4401": {
+      "name": "CLOSE_AUTH_FAILED",
+      "retry": false,
+      "description": "The token was rejected. Do not reconnect with it \u2014 it will be rejected again. Every close code NOT listed here is a transport close, where reconnecting with backoff is right."
+    }
+  },
   "server": {
     "$defs": {
       "Ack": {
@@ -430,7 +449,7 @@
     "$defs": {
       "Audio": {
         "additionalProperties": false,
-        "description": "Header for a push-to-talk burst. Binary frames follow until ``audioEnd``.",
+        "description": "Header for a push-to-talk burst. Binary frames follow until ``audioEnd``.\n\nThose frames are raw ``pcm_s16le`` \u2014 16 kHz, mono, signed 16-bit\nlittle-endian PCM, no container \u2014 and never anything else. The module\ndocstring states it in full and :func:`schema_document` publishes the\nnumbers as the ``audio`` block, so a client author never has to open this\nfile or infer the format from a comment about a byte cap.",
         "properties": {
           "t": {
             "const": "audio",
@@ -439,11 +458,14 @@
             "type": "string"
           },
           "session": {
+            "description": "Session this burst is addressed to. The HEADER owns the burst: the matching audioEnd must name the same session, and the server refuses the burst if it does not, rather than attributing the operator's speech to whichever of the two frames it happened to read last.",
             "title": "Session",
             "type": "string"
           },
           "seq": {
             "default": 0,
+            "description": "Ordinal of this burst on this connection; 0 for a client that does not number its bursts. It is NOT a per-chunk sequence number: the binary frames carry no sequencing and there is no gap detection anywhere in this protocol, because a websocket delivers its messages in order or not at all. The server reads this only to reject a negative value.",
+            "minimum": 0,
             "title": "Seq",
             "type": "integer"
           }
@@ -465,6 +487,7 @@
             "type": "string"
           },
           "session": {
+            "description": "Must equal the session on the audio header that opened this burst. A mismatch is answered with a session_mismatch error and the audio is discarded.",
             "title": "Session",
             "type": "string"
           }

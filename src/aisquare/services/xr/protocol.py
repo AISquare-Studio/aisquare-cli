@@ -20,6 +20,25 @@ serializes. ``for`` is the one field that cannot share its Python name at all
 :data:`PROTOCOL_VERSION` goes out in every ``hello``. Bump it when a change
 would make an older client misread a frame — not for an added optional field,
 which both sides tolerate by construction.
+
+**The binary frames are part of this contract too.** Everything above is JSON,
+and for JSON the generated schema is the whole story. Audio is not: between an
+``audio`` header and its ``audioEnd`` the client sends RAW SAMPLES as binary
+websocket messages, and a format that lives only in the two implementations is
+a format that is gone the day either author is. The encoding is therefore fixed
+here, carried into the schema as the ``audio`` block by :func:`schema_document`,
+and stated once in full:
+
+``pcm_s16le`` — 16 kHz, mono, signed 16-bit PCM, little-endian, no container
+and no header of any kind. One frame is 20 ms: 320 samples, 640 bytes. A frame
+of an odd byte length is half a sample and there is no way to interpret it —
+every sample after it is shifted by eight bits — so the sender's buffer must be
+sample-aligned by construction.
+
+These are not aspirational numbers. They are what
+:mod:`aisquare.services.xr.speech` decodes (``SAMPLE_RATE``/``SAMPLE_BYTES``)
+and what the client's ``AudioWorklet`` emits, and the cap on one burst
+(``server.MAX_AUDIO_BYTES``) is derived from them rather than guessed at.
 """
 
 from __future__ import annotations
@@ -31,6 +50,34 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 PROTOCOL_VERSION = 1
 """Wire version announced in ``hello``. See the module docstring for when to bump."""
+
+AUDIO_ENCODING = "pcm_s16le"
+"""Encoding of every binary frame between ``audio`` and ``audioEnd``."""
+
+AUDIO_SAMPLE_RATE_HZ = 16_000
+"""Sample rate of :data:`AUDIO_ENCODING`. What the speech backend decodes at."""
+
+AUDIO_SAMPLE_BITS = 16
+"""Bits per sample: signed, little-endian, two bytes."""
+
+AUDIO_CHANNELS = 1
+"""Mono. A headset microphone array is downmixed by the client, not here."""
+
+AUDIO_FRAME_MS = 20
+"""Nominal frame duration: 320 samples, 640 bytes. The server buffers whatever
+arrives, so this is the shape to send rather than a length it enforces."""
+
+CLOSE_AUTH_FAILED = 4401
+"""Websocket close code for a rejected token: do not retry with this one.
+
+In the private 4000-4999 range, and stated in the CONTRACT rather than only in
+the server because the client's reconnect policy turns on it. Every other close
+this server can produce is a transport close, where reconnecting with backoff
+is correct; this is the one case where it is wrong, because the token will be
+just as wrong the next time. A client that cannot tell the two apart from the
+schema has to guess, and the guess that costs its author nothing to write is
+the one that spins forever against a server that will never accept it.
+"""
 
 SessionState = Literal["working", "waiting", "needs_you", "gone"]
 """What the operator needs to know about a session at a glance.
@@ -214,18 +261,50 @@ class Prompt(_Wire):
 
 
 class Audio(_Wire):
-    """Header for a push-to-talk burst. Binary frames follow until ``audioEnd``."""
+    """Header for a push-to-talk burst. Binary frames follow until ``audioEnd``.
+
+    Those frames are raw ``pcm_s16le`` — 16 kHz, mono, signed 16-bit
+    little-endian PCM, no container — and never anything else. The module
+    docstring states it in full and :func:`schema_document` publishes the
+    numbers as the ``audio`` block, so a client author never has to open this
+    file or infer the format from a comment about a byte cap.
+    """
 
     t: Literal["audio"] = "audio"
-    session: str
-    seq: int = 0
+    session: str = Field(
+        description=(
+            "Session this burst is addressed to. The HEADER owns the burst: the "
+            "matching audioEnd must name the same session, and the server "
+            "refuses the burst if it does not, rather than attributing the "
+            "operator's speech to whichever of the two frames it happened to "
+            "read last."
+        )
+    )
+    seq: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Ordinal of this burst on this connection; 0 for a client that does "
+            "not number its bursts. It is NOT a per-chunk sequence number: the "
+            "binary frames carry no sequencing and there is no gap detection "
+            "anywhere in this protocol, because a websocket delivers its "
+            "messages in order or not at all. The server reads this only to "
+            "reject a negative value."
+        ),
+    )
 
 
 class AudioEnd(_Wire):
     """End of a push-to-talk burst: transcribe what was buffered."""
 
     t: Literal["audioEnd"] = "audioEnd"
-    session: str
+    session: str = Field(
+        description=(
+            "Must equal the session on the audio header that opened this burst. "
+            "A mismatch is answered with a session_mismatch error and the audio "
+            "is discarded."
+        )
+    )
 
 
 ServerMessage = Annotated[
@@ -272,6 +351,13 @@ def schema_document() -> dict[str, Any]:
     of it — "what will I receive" and "what may I send" — and they differ
     (a field with a default is required in neither, but only the validation
     schema says so).
+
+    ``audio`` and ``closeCodes`` are hand-built blocks rather than generated
+    ones, because neither is a JSON frame and JSON Schema can describe neither:
+    a binary websocket message has no schema, and a close code is not a message
+    at all. They are here anyway, because a contract that covers only the part
+    that generates easily is a contract with a hole in it exactly where the
+    second implementer has to guess.
     """
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -281,6 +367,39 @@ def schema_document() -> dict[str, Any]:
             "Regenerate with: python -m aisquare.services.xr.protocol --write"
         ),
         "protocol": PROTOCOL_VERSION,
+        "audio": {
+            "description": (
+                "Binary websocket frames between an `audio` header and its "
+                "`audioEnd` are raw samples in this format, with no container "
+                "and no per-frame header. JSON Schema cannot describe a binary "
+                "frame, so it is stated here: this block IS the contract for "
+                "the audio half."
+            ),
+            "encoding": AUDIO_ENCODING,
+            "sampleRateHz": AUDIO_SAMPLE_RATE_HZ,
+            "sampleBits": AUDIO_SAMPLE_BITS,
+            "signed": True,
+            "endianness": "little",
+            "channels": AUDIO_CHANNELS,
+            "frameMs": AUDIO_FRAME_MS,
+            "frameBytes": AUDIO_SAMPLE_RATE_HZ * (AUDIO_SAMPLE_BITS // 8) * AUDIO_FRAME_MS // 1000,
+            "alignment": (
+                "Every frame must be a whole number of samples. An odd byte "
+                "length is half a sample and shifts every sample after it by "
+                "eight bits."
+            ),
+        },
+        "closeCodes": {
+            str(CLOSE_AUTH_FAILED): {
+                "name": "CLOSE_AUTH_FAILED",
+                "retry": False,
+                "description": (
+                    "The token was rejected. Do not reconnect with it — it will "
+                    "be rejected again. Every close code NOT listed here is a "
+                    "transport close, where reconnecting with backoff is right."
+                ),
+            }
+        },
         "server": _SERVER.json_schema(by_alias=True, mode="serialization"),
         "client": _CLIENT.json_schema(by_alias=True, mode="validation"),
     }

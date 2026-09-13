@@ -137,6 +137,62 @@ def test_the_schema_names_both_directions_and_the_version() -> None:
     assert json.dumps(document), "the schema must be JSON-serializable as committed"
 
 
+def test_the_schema_carries_the_binary_audio_format() -> None:
+    """The audio half of the protocol must be implementable from the contract.
+
+    ``protocol.py`` opens by calling itself the contract that this server and a
+    browser client written by someone else are two implementations of. For the
+    JSON frames that is delivered. For the binary ones it was not: sample rate,
+    bit depth, channel count and endianness appeared NOWHERE in this tree —
+    ``audio`` said only "binary frames follow", and the single mention of a
+    format anywhere was a comment about a byte CAP ("~4 minutes of 16 kHz mono
+    PCM"), which is an inference about a magnitude, not a specification.
+
+    A second implementer could therefore read every line of the schema and
+    still send 48 kHz float32, which this server accepts and hands to whisper.
+    The two implementations that exist agreed out of band, in task
+    descriptions — the channel that is gone in six months.
+    """
+    audio = wire.schema_document()["audio"]
+    assert audio["encoding"] == "pcm_s16le"
+    assert audio["sampleRateHz"] == 16_000
+    assert audio["sampleBits"] == 16
+    assert audio["signed"] is True
+    assert audio["endianness"] == "little"
+    assert audio["channels"] == 1
+    assert audio["frameBytes"] == 640, "20 ms of 16 kHz mono PCM16 — 320 samples"
+    assert "sample" in audio["alignment"], "an odd byte length shifts every sample after it"
+
+
+def test_the_schema_says_which_close_code_must_not_be_retried() -> None:
+    """4401 is the one close a client must not reconnect through.
+
+    Every other close this server can produce is a transport close, where
+    reconnecting with backoff is correct — and reconnect-on-close is what the
+    client is specified to do. A client author who cannot tell the two apart
+    from the schema has to guess, and the guess that costs nothing to write is
+    an infinite retry loop against a token that will never be accepted.
+    """
+    codes = wire.schema_document()["closeCodes"]
+    entry = codes[str(wire.CLOSE_AUTH_FAILED)]
+    assert wire.CLOSE_AUTH_FAILED == 4401
+    assert entry["retry"] is False, "the machine-readable half is what a client branches on"
+    assert "transport close" in entry["description"], "and it must say what the others are"
+
+
+def test_a_negative_burst_ordinal_is_refused() -> None:
+    """``Audio.seq`` carries a constraint rather than only a default.
+
+    It was published with neither: no description and no bound, in a schema a
+    client author reads to decide what a field means. The reasonable readings
+    — a per-CHUNK sequence number, a gap-detection cursor — are both wrong and
+    neither exists anywhere in this server.
+    """
+    assert wire.parse_client('{"t":"audio","session":"ses_1","seq":7}').seq == 7
+    with pytest.raises(Exception, match=r"greater than or equal|seq"):
+        wire.parse_client('{"t":"audio","session":"ses_1","seq":-1}')
+
+
 # --- projector ------------------------------------------------------------------
 
 

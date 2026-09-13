@@ -406,9 +406,11 @@ precedence rule:
 
 > per-spawn flag  >  `[fleet]` config  >  built-in default
 
-**No `[fleet]` setting is read from the environment**: there is no
-`AISQUARE_FLEET_*` variable, and the fleet reads this section from the config
-file alone. The environment layer is real one level down — the model, effort
+**No `[fleet]` setting is read from the environment**: the fleet reads this
+section from the config file alone. (`AISQUARE_FLEET_AGENT` exists, but it is
+not a setting — `fleet spawn` sets it on each window as the agent's identity,
+and the session-start hook reads it to brief the agent on the task it was
+spawned for.) The environment layer is real one level down — the model, effort
 and binary a launch resolves (`AISQUARE_MODEL_<ROLE>` and friends, below) —
 which is the harness's rule, not this one.
 
@@ -603,9 +605,18 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`) and the scroll keys below. Printable characters travel as typed; special keys are
-translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
-`BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
+hatch (`F12`), the scroll keys below, ctrl+c while text is selected (it copies)
+and cmd+c, which is only ever the copy. Printable characters travel as typed —
+except with alt held, where the chord is the meaning: an ASCII letter or digit
+(`M-p`, so Claude Code's alt+p switches the model) or a key tmux has a name for
+(alt+space is `M-Space`). Special keys are translated into tmux's names (Enter,
+BSpace, ctrl+c → `C-c` when nothing is selected, shift+tab → `BTab`, …). Where
+there is no safe name the character still travels: `ctrl+alt+1` types a `1`, and
+so does a chord your tmux is too old to carry (below 3.5, `ctrl+alt+space`
+inserts a space rather than doing nothing). The one exception is a modifier tmux
+cannot spell at all — Cmd (super) or hyper — which is dropped rather than typed,
+because Cmd+V is a command and not a request for a `v`.
+Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and
 scrolls its transcript; a fullscreen program that does not is left alone (its own
@@ -617,12 +628,36 @@ tmux copy mode stays tmux's. The keyboard scrolls too: shift+PgUp / shift+PgDn
 scrollback), shift+Home (the top) and shift+End (live) — through the same
 decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
+Drag to select text in a pane (double-click selects a word): it is copied to
+your clipboard on release (OSC 52 — your terminal has to accept it; Windows
+Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies again
+while the selection stands. Only a left-button drag is a copy, so a right-click
+over a highlight leaves your clipboard alone, and so does a drag somewhere else
+entirely while a highlight stands. A drag that crosses the pane's edge — begun
+on the agent header, or released outside it — copies too, one character short
+of the same gesture made inside the pane: the terminal library reports the
+crossing endpoint without the trailing cell, and the highlight stops there too,
+so what you see is what you get. What is copied is always what is shown under the
+highlight at the moment you copy: cut to the columns the pane actually shows,
+and including the `[↑k/history]` marker and the `(exited 0)` notice where those
+are what the row displays. Under an agent that is still printing that means the
+text at release, not at the press — the same text you can see highlighted.
 Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+The alt chord has two limits, both in Textual's key parser rather than in this
+UI, and the kitty protocol is the *worse* case for this one rather than the
+better one. A terminal speaking it reports the typed text alongside the chord,
+and the parser then drops the `alt` token from the key name — so under kitty,
+ghostty, wezterm and foot, and on macOS where Option produces a character,
+alt+p still types a `p` and does not switch the model. And Escape is what the
+parser has to tell an alt chord from: a letter arriving within ~100 ms of a
+lone Escape is read as that chord, so pressing Esc and immediately typing `p`
+switches the model instead of typing the letter.
 
 ---
 

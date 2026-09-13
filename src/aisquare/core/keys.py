@@ -220,7 +220,21 @@ def translate(
     (the pane reads its version once): on an older server the extended-only
     chords are dropped here, because tmux would otherwise type their NAMES into
     the agent — the exact mistyping this module exists to prevent.
+
+    TWO ANSWERS WHEN THERE IS NO NAME, and the difference is the user's intent.
+    A modifier tmux cannot spell — ``super``/``hyper``, which is how macOS Cmd
+    and the kitty protocol's extras arrive — means a COMMAND was pressed: Cmd+V
+    is not a request to type a ``v``, so it is dropped and never falls back.
+    Anything else with no name is a chord whose text the terminal already
+    decided: ctrl or shift on a digit, ctrl+alt on Space, a chord this server is
+    too old to carry. There the reported character still travels, which is what
+    this module did before any chord exception existed. Each round of review
+    found one more branch that had grown its own answer to that question
+    (digits in round 3, ``SPECIAL`` in round 5); it is asked once, here.
     """
+    *modifiers, _base = key.split("+")
+    if any(modifier and modifier not in MODIFIERS for modifier in modifiers):
+        return None
     translation = _translate(key, character, printable=printable)
     if (
         translation is not None
@@ -228,7 +242,9 @@ def translate(
         and not extended_keys
         and needs_extended_keys(translation.value)
     ):
-        return None
+        translation = None
+    if translation is None and printable and character:
+        return Translation("literal", character)
     return translation
 
 
@@ -237,21 +253,65 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
 
     ``key`` is Textual's ``Key.key`` (``"ctrl+c"``, ``"shift+tab"``, ``"f5"``,
     ``"a"``), ``character`` its ``Key.character`` and ``printable`` its
-    ``Key.is_printable``. Printable input is always literal, so a pasted ``é``
-    or a typed ``[`` never goes through the name table at all — and neither does
-    a shifted symbol, whose meaning only the keyboard layout knows.
+    ``Key.is_printable``. Printable input is literal, so a pasted ``é`` or a
+    typed ``[`` never goes through the name table at all — and neither does a
+    shifted symbol, whose meaning only the keyboard layout knows.
+
+    EXCEPT alt/meta on an ASCII letter or digit, or on a key ``SPECIAL`` names
+    (in practice Space, the only one a terminal reports a character for).
+    Textual's parser reads ``ESC p``
+    as ``Key("alt+p", character="p")`` — the character is always set for an
+    alt+letter chord, and it is printable — so "the text wins" here typed a
+    bare ``p`` into the agent and Claude Code's alt+p (switch model) never
+    fired. Reported 2026-09-02 and 2026-09-10 from the fleet UI. With alt held
+    the chord is the meaning; the character is only how the terminal spelt it.
+    Alt on PUNCTUATION stays text: through the name table it would be dropped
+    (``;`` is tmux's separator) or worse — ``M-[`` is ``ESC [``, the CSI
+    introducer, and a program reading raw bytes would mis-parse everything
+    typed after it — where before it simply received the character. ASCII,
+    because every name this module can emit was measured against a real tmux
+    (see the module docstring) and ``M-é`` / ``M-ф`` were never in that sweep:
+    ``str.isalnum`` is Unicode-aware and an AltGr or accented layout reaches
+    here, so the gate says so explicitly rather than by accident.
+
+    And a modifier tmux has no spelling for — ``super``/``hyper``, which is how
+    macOS Cmd and the kitty protocol's own extras arrive — drops the key rather
+    than falling through to its character: Cmd+V is not a request to type a
+    ``v``. That is the printable rule giving way to the modifier gate below,
+    which is deliberate and pinned by a test (review of the second version).
+
+    Known limits, recorded rather than hidden: a terminal speaking the kitty
+    protocol reports the text alongside the chord and Textual then drops the
+    ``alt`` token from the key name (``_xterm_parser._parse_extended_key``), so
+    the event arrives as a bare letter and this table cannot see the chord;
+    and Escape typed within ~100 ms before a letter is read by Textual's parser
+    as that alt chord — both are the parser's, not this table's.
     """
-    if printable and character:
-        return Translation("literal", character)
-    if key in CHORDS:
-        return Translation("key", CHORDS[key])
-    if not key or key.endswith("+"):
-        return None
     *modifiers, base = key.split("+")
-    if any(modifier not in MODIFIERS for modifier in modifiers):
+    if not base or not all(modifiers):
+        # A malformed name — ``""``, ``"+"``, ``"+a"``, ``"ctrl+"``, ``"ctrl++"``,
+        # ``"alt+"``. There is nothing to look up, and no modifier to read: an
+        # empty token is a broken NAME, never a modifier that happens to be
+        # unspellable. ``translate`` types the reported character for these, as
+        # it did before any of this existed (reviews of the third to fifth
+        # versions, which each broke a different one of these spellings).
         return None
     ctrl = "ctrl" in modifiers
     alt = "alt" in modifiers or "meta" in modifiers
+    if printable and character:
+        # With alt held, a chord the table can spell SAFELY wins over the
+        # character: an ASCII letter or digit, or a key ``SPECIAL`` names. Space
+        # is the only ``SPECIAL`` key a terminal reports a printable character
+        # for, and without it ``M-Space`` was unreachable — the
+        # ``not (ctrl or alt)`` guard below exists to emit it and never fired
+        # (review of the fourth version).
+        spellable = base in SPECIAL or (character.isascii() and character.isalnum())
+        if not (alt and spellable):
+            return Translation("literal", character)
+    if not key or key.endswith("+"):
+        return None
+    if key in CHORDS:
+        return Translation("key", CHORDS[key])
     shift = "shift" in modifiers
     prefix = ("C-" if ctrl else "") + ("M-" if alt else "") + ("S-" if shift else "")
 
@@ -286,6 +346,7 @@ def _translate(key: str, character: str | None, *, printable: bool) -> Translati
         if ctrl or shift:
             # ``C-1`` reaches the agent as ``1``; ``shift+1`` is ``!`` on one
             # layout and ``+`` on another — without the character we cannot know.
+            # No name: ``translate`` types the character when there is one.
             return None
         return Translation("key", prefix + char)
     # Punctuation with a modifier.

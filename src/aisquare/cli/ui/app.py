@@ -45,6 +45,13 @@ from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.divider import (
+    Divider,
+    ResizeSidebar,
+    SidebarResized,
+    load_sidebar_width,
+    save_sidebar_width,
+)
 from aisquare.cli.ui.sidebar import (
     AccountsSelected,
     AddProject,
@@ -218,6 +225,9 @@ class FleetApp(App[None], inherit_bindings=False):
     def compose(self) -> ComposeResult:
         with Horizontal(id="main"):
             yield Sidebar(id="sidebar")
+            # The partition is a widget, not a border: drag it, or step it with
+            # < > = from the sidebar; the width is remembered (#137).
+            yield Divider("#sidebar", id="divider")
             with ContentSwitcher(id="content", initial="welcome"):
                 yield WelcomeView(escape_key=self.escape_key, id="welcome")
                 # The Onboard view is built on the first `+` (on_add_project): its
@@ -229,6 +239,10 @@ class FleetApp(App[None], inherit_bindings=False):
     def on_mount(self) -> None:
         restore_theme(self)
         self._theme_restored = True
+        saved = load_sidebar_width()
+        if saved is not None:
+            # After the first layout: the bounds need the screen's width.
+            self.call_after_refresh(self.query_one(Divider).resize_to, saved)
         self.refresh_data()
         self.set_interval(self.refresh_seconds, self.refresh_data)
         self.run_doctor()
@@ -268,6 +282,16 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def on_escape_to_sidebar(self, event: EscapeToSidebar) -> None:
         self.sidebar.focus()
+
+    # --- the partition (#137) ---------------------------------------------------------
+
+    def on_resize_sidebar(self, event: ResizeSidebar) -> None:
+        """The sidebar's keyboard fallback: step or reset the partition."""
+        self.query_one(Divider).step(event.delta)
+
+    def on_sidebar_resized(self, event: SidebarResized) -> None:
+        """Every settled width is the save; the next launch starts from it."""
+        save_sidebar_width(event.width)
 
     # --- theme ----------------------------------------------------------------------
 

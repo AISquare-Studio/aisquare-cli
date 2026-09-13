@@ -40,6 +40,15 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui.app import FleetApp, HelpScreen
+from aisquare.cli.ui.divider import (
+    DEFAULT_WIDTH,
+    MIN_CONTENT,
+    MIN_WIDTH,
+    STATE_KEY,
+    STEP,
+    Divider,
+    clamp_width,
+)
 from aisquare.cli.ui.sidebar import (
     Activatable,
     AgentRow,
@@ -1767,3 +1776,105 @@ def test_theme_picker_applies_live_and_autosaves(
         return str(fleet_app(pilot).theme)
 
     assert drive(relaunch) == final  # restored on the next launch
+
+
+# --- the partition (#137) -----------------------------------------------------------------
+
+
+def _state(isolated_home: Path) -> dict[str, object]:
+    path = isolated_home / "state.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def test_clamp_width_keeps_both_sides_usable() -> None:
+    total = SIZE[0]
+    assert clamp_width(45, total) == 45
+    assert clamp_width(5, total) == MIN_WIDTH
+    assert clamp_width(500, total) == total - 1 - MIN_CONTENT  # one column is the divider's
+    assert clamp_width(30, 50) == MIN_WIDTH, "too narrow for both minimums: the navigator's wins"
+
+
+def test_dragging_the_divider_resizes_the_sidebar_within_bounds_and_remembers_it(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    """The partition was `Sidebar { width: 30 }` and nothing could move it (#137)."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[int, int, int, int, int, dict[str, object]]:
+        app = fleet_app(pilot)
+        divider = app.query_one(Divider)
+        before = app.sidebar.outer_size.width
+        await pilot.mouse_down(divider, offset=(0, 5))
+        await pilot.hover(None, offset=(40, 5))
+        mid = app.sidebar.outer_size.width
+        await pilot.hover(None, offset=(50, 5))
+        await pilot.mouse_up(None, offset=(50, 5))
+        await pilot.pause()
+        widened = app.sidebar.outer_size.width
+        saved_after_drag = _state(isolated_home).get(STATE_KEY)
+        assert saved_after_drag == widened, "the release is the save"
+        # Past both bounds: clamped, never a broken layout.
+        await pilot.mouse_down(divider, offset=(0, 5))
+        await pilot.mouse_up(None, offset=(3, 5))
+        await pilot.pause()
+        narrowest = app.sidebar.outer_size.width
+        await pilot.mouse_down(divider, offset=(0, 5))
+        await pilot.mouse_up(None, offset=(SIZE[0] - 2, 5))
+        await pilot.pause()
+        widest = app.sidebar.outer_size.width
+        return before, mid, widened, narrowest, widest, _state(isolated_home)
+
+    before, mid, widened, narrowest, widest, state = drive(go)
+    assert before == DEFAULT_WIDTH
+    assert mid == 40, "the width follows the pointer while dragging"
+    assert widened == 50
+    assert narrowest == MIN_WIDTH
+    assert widest == SIZE[0] - 1 - MIN_CONTENT
+    assert state[STATE_KEY] == widest and state.get("board_theme") is None  # only our key
+
+    async def relaunch(pilot: Pilot[None]) -> int:
+        await pilot.pause()
+        return fleet_app(pilot).sidebar.outer_size.width
+
+    assert drive(relaunch) == widest, "restored on the next launch"
+
+
+def test_the_keyboard_steps_the_partition_from_the_sidebar_and_a_double_click_resets_it(
+    tmp_path: Path, script: Script, isolated_home: Path
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[int], int, int, list[tuple[str, ...]]]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        widths: list[int] = []
+        for key in ("greater_than_sign", "greater_than_sign", "less_than_sign", "equals_sign"):
+            await pilot.press(key)
+            await pilot.pause()
+            widths.append(app.sidebar.outer_size.width)
+        await pilot.press("greater_than_sign")
+        await pilot.pause()
+        stepped = app.sidebar.outer_size.width
+        await pilot.click(app.query_one(Divider), times=2)
+        await pilot.pause()
+        reset = app.sidebar.outer_size.width
+        # With a pane focused the same keys are text for the agent, not a resize.
+        pane = RecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        pane.focus()
+        await pilot.pause()
+        await pilot.press("greater_than_sign")
+        await pilot.pause()
+        return widths, stepped, reset, [(k,) for k in pane.keys]
+
+    widths, stepped, reset, pane_keys = drive(go)
+    assert widths == [
+        DEFAULT_WIDTH + STEP,
+        DEFAULT_WIDTH + 2 * STEP,
+        DEFAULT_WIDTH + STEP,
+        DEFAULT_WIDTH,
+    ]
+    assert stepped == DEFAULT_WIDTH + STEP and reset == DEFAULT_WIDTH
+    assert _state(isolated_home)[STATE_KEY] == DEFAULT_WIDTH
+    assert pane_keys == [("greater_than_sign",)], "a focused pane keeps the key"

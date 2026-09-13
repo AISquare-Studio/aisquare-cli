@@ -105,6 +105,12 @@ tmux can see and its row says so (`no hooks`).
 5. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
    `q` quits the UI — and the agents keep running.
+   The partition between the navigator and the content is a one-column
+   divider: drag it to give an agent's pane more columns or the navigator
+   room for long labels (bounded so neither side becomes unusable), or, with
+   the sidebar focused, `>` / `<` step it by four columns and `=` puts it back
+   to 30; a double click on the divider resets it too. The width is
+   remembered in `~/.aisquare/state.json` beside the theme.
 
 From any terminal, the same session at full fidelity:
 

@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The navigator is resizable** (#137). The partition between the sidebar and
+  the content is a one-column divider: drag it (the sidebar never drops below
+  24 columns, the content never below 40 — a pane narrower than that is not a
+  terminal), or with the sidebar focused step it with `>` / `<` and reset it
+  with `=`; a double click on the divider resets it too. The width is
+  remembered in `state.json` beside the theme and restored at the next launch;
+  an agent's pane forwards every width change to tmux, so the agent reflows.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

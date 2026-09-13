@@ -289,9 +289,16 @@ export class Net {
 
   /* ----------------------------------------------------------------- send -- */
 
+  /**
+   * Drops the frame and reports false if the socket is not open, rather than
+   * queueing it. A prompt composed against a board that has since been rebuilt
+   * is worse than a prompt that visibly did not send: the caller can retry,
+   * and after a reconnect the snapshot may have moved the session out from
+   * under it. The `auth` frame is sent from the `open` handler, so it is
+   * subject to the same check and needs no exemption.
+   */
   send(message) {
-    if (!this.isOpen && message.t !== 'auth') return false;
-    if (this.socket?.readyState !== WebSocket.OPEN) return false;
+    if (!this.isOpen) return false;
     this.socket.send(JSON.stringify(message));
     return true;
   }

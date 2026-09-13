@@ -2406,6 +2406,14 @@ def test_reap_ends_dead_panes_and_tells_the_board(
         events = [e for e in store.recent_events(project.id) if e.kind == "agent_exited"]
     assert len(events) == 1
     assert events[0].text == "coder-1 exited (2)" and events[0].session_id == coder.session_id
+    # The ended row stays on the live listing while tmux still holds its window (#138:
+    # the 💤 exited row the UI hangs Restart on) and leaves the listing with it.
+    listed = fleet_service.list_agents(project)
+    assert [(s.agent.id, s.state) for s in listed] == [
+        (manager.id, "waiting"),
+        (coder.id, "exited"),
+    ]
+    tmux.vanish(coder.pane_id)
     assert [s.agent.id for s in fleet_service.list_agents(project)] == [manager.id]
     # Idempotent: a second pass finds nothing new and emits nothing more.
     assert fleet_service.reap(project).ended == []
@@ -2481,8 +2489,13 @@ def test_the_lifecycle_addresses_the_socket_each_row_was_started_on(
 
     listed = {status.agent.id: status.state for status in fleet_service.list_agents(project)}
     assert listed == {live.id: "waiting", dead.id: "exited"}, listed
+    # #138: that listing already RECORDED the exit — seen on the row's own socket — so
+    # reap has nothing left to end; the live row is still not lost.
+    with store_session() as store:
+        recorded = store.get_fleet_agent(dead.id)
+    assert recorded is not None and recorded.exit_status == 3, "seen on its own socket"
     report = fleet_service.reap(project)
-    assert [a.id for a in report.ended] == [dead.id], "the dead pane was seen on its own socket"
+    assert report.ended == [], "the listing recorded it; reap finds nothing new"
     assert report.lost == [], "a live agent must not be lost because the config moved"
 
     ended = fleet_service.stop(project, live.label)
@@ -3216,3 +3229,317 @@ def test_spawn_passes_the_callers_size_and_otherwise_the_default_under_the_diff_
     # 110 it needs to open the panel on demand — so `/diff` still works.
     assert 110 <= width < 144
     assert height >= 24
+
+
+# --- #138: a dead pane is recorded on every read; restart brings the agent back ----------
+
+
+def test_a_listing_records_a_dead_pane_as_ended_and_keeps_the_row_while_its_window_lingers(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#138. ctrl+c inside the manager's window left a row the store called live for a
+    pane tmux called dead (``remain-on-exit`` keeps the window): 💤 on the sidebar
+    forever, and ``fleet spawn manager`` refused. Every listing now records the
+    exit the way ``reap`` does — status, board event, one nudge — and keeps the
+    row on the live listing only while tmux still shows its window."""
+    manager = fleet_service.spawn(project, "manager").agent
+    _board_session(manager, "waiting")
+    tmux.set_command(manager.pane_id, "claude")
+    coder = _coder(project)
+    tmux.die(coder.pane_id, 130)  # what ctrl+c leaves behind
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, "coder-1", live_only=True) is not None
+
+    listed = {s.agent.label: s for s in fleet_service.list_agents(project)}
+
+    seen = listed["coder-1"]
+    assert seen.state == "exited" and seen.detail == "exit 130"
+    assert seen.agent.ended_at is not None and seen.agent.exit_status == 130  # the ROW, too
+    with store_session() as store:
+        row = store.get_fleet_agent(coder.id)
+    assert row is not None and row.ended_at is not None and row.exit_status == 130
+    assert _events(project, "agent_exited") == ["coder-1 exited (130)"]
+    assert tmux.typed == [
+        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "key", "Enter"),
+    ]
+    # Idempotent: the next listing writes nothing and says nothing more.
+    assert {s.agent.label: s.state for s in fleet_service.list_agents(project)} == {
+        "manager": "waiting",
+        "coder-1": "exited",
+    }
+    assert _events(project, "agent_exited") == ["coder-1 exited (130)"] and len(tmux.typed) == 2
+    assert fleet_service.reap(project).ended == []  # nothing left for reap to record
+    # The 💤 row leaves the live listing with its window — and stays in --all.
+    tmux.vanish(coder.pane_id)
+    assert [s.agent.label for s in fleet_service.list_agents(project)] == ["manager"]
+    everything = fleet_service.list_agents(project, live_only=False)
+    assert [(s.agent.label, s.state) for s in everything] == [
+        ("manager", "waiting"),
+        ("coder-1", "exited"),
+    ]
+
+
+def test_a_vanished_pane_is_not_recorded_by_a_listing_and_an_old_exit_leaves_the_live_list(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The two negative controls of the rule above. Absence is not evidence (an
+    empty answer from a server that did not speak looks the same), so a
+    vanished pane stays a LIVE row reading ``lost`` until ``reap``; and an
+    exit older than ``RECENTLY_ENDED`` is history even while its window lingers."""
+    gone = _coder(project, label="coder-gone")
+    tmux.vanish(gone.pane_id)
+    [status] = fleet_service.list_agents(project)
+    assert status.state == "lost" and status.agent.ended_at is None
+    with store_session() as store:
+        row = store.get_fleet_agent(gone.id)
+    assert row is not None and row.ended_at is None, "absence is reap's call, not the listing's"
+    assert _events(project, "agent_exited") == []
+    fleet_service.reap(project)
+
+    old = _coder(project, label="coder-old")
+    tmux.die(old.pane_id, 1)
+    [exited] = fleet_service.list_agents(project)
+    assert exited.state == "exited"
+    long_ago = datetime.now(tz=UTC) - fleet_service.RECENTLY_ENDED - timedelta(minutes=1)
+    with store_session() as store:
+        store.upsert_fleet_agent(exited.agent.model_copy(update={"ended_at": long_ago}))
+    assert fleet_service.list_agents(project) == []  # the window is still there: too old
+    assert old.pane_id in tmux.facts
+    assert [s.agent.label for s in fleet_service.list_agents(project, live_only=False)] == [
+        "coder-gone",
+        "coder-old",
+    ]
+
+
+def test_spawn_manager_replaces_a_dead_manager_without_a_reap(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The trap the issue reports: ``fleet spawn manager`` answered "already has a
+    manager" for a manager everyone could see was dead, until a hand-run ``reap``."""
+    first = fleet_service.spawn(project, "manager").agent
+    tmux.die(first.pane_id, 130)
+    # No listing and no reap in between: the store still says live.
+    with store_session() as store:
+        assert store.fleet_agent_by_label(project.id, "manager", live_only=True) is not None
+
+    receipt = fleet_service.spawn(project, "manager")
+
+    assert receipt.agent.id != first.id and receipt.agent.label == "manager"
+    assert first.pane_id in tmux.killed, "the dead window goes with the replacement"
+    with store_session() as store:
+        old = store.get_fleet_agent(first.id)
+    assert old is not None and old.ended_at is not None and old.exit_status == 130
+    assert _events(project, "agent_exited") == ["manager exited (130)"]
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [receipt.agent.id]
+    # A LIVE manager is refused as before — the check did not get weaker.
+    with pytest.raises(FleetError, match="already has a manager"):
+        fleet_service.spawn(project, "manager")
+
+    # A dead coder: the same label takes over its window; another label leaves the
+    # 💤 row (and its readable last screen) alone and only records the exit.
+    dead = _coder(project, label="coder-auth")
+    other = _coder(project, label="coder-db")
+    tmux.die(dead.pane_id, 1)
+    tmux.die(other.pane_id, 2)
+    replacement = fleet_service.spawn(project, "coder", label="coder-auth", worktree=False)
+    assert replacement.agent.label == "coder-auth" and dead.pane_id in tmux.killed
+    assert other.pane_id in tmux.facts and other.pane_id not in tmux.killed
+    with store_session() as store:
+        recorded = store.get_fleet_agent(other.id)
+    assert recorded is not None and recorded.exit_status == 2
+    assert sorted(_events(project, "agent_exited")) == sorted(
+        ["manager exited (130)", "coder-auth exited (1)", "coder-db exited (2)"]
+    )
+
+    # The row was ended by a LISTING first (the UI's tick) and its window lingers:
+    # a spawn under that label still removes the window it supersedes — measured
+    # live before this rule: `fleet ls` showed two rows called manager.
+    tmux.die(receipt.agent.pane_id, 130)
+    [seen, *_rest] = [s for s in fleet_service.list_agents(project) if s.agent.label == "manager"]
+    assert seen.state == "exited" and receipt.agent.pane_id not in tmux.killed
+    third = fleet_service.spawn(project, "manager")
+    assert receipt.agent.pane_id in tmux.killed
+    managers = [s for s in fleet_service.list_agents(project) if s.agent.label == "manager"]
+    assert [s.agent.id for s in managers] == [third.agent.id]
+    assert other.pane_id in tmux.facts, "another label's 💤 row keeps its last screen"
+
+
+def test_restart_brings_an_exited_agent_back_under_its_label_and_resumes_its_session(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The way back the issue asks for: the dead manager's row ends and ``manager``
+    is spawned again — on the same account, and RESUMING the same session when
+    its transcript is on disk, so it comes back knowing its intake and coders."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=10)
+    agent = fleet_service.spawn(project, "manager", account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 130)
+    [seen] = fleet_service.list_agents(project)  # the UI's tick: the row is 💤 exited now
+    assert seen.state == "exited"
+
+    receipt = fleet_service.restart(project, "manager")
+
+    assert receipt.resumed is True and receipt.was_running is False
+    assert receipt.replaced.id == agent.id and receipt.replaced.exit_status == 130
+    assert receipt.started.label == "manager" and receipt.started.role == "manager"
+    assert receipt.started.session_id == agent.session_id  # the same session carries on
+    assert receipt.started.account_slot == 2  # the account it ran on, kept
+    command = _command(tmux)
+    assert _flag(command, "--resume") == str(transcript) and "--session-id" not in command
+    assert _flag(command, "--account") == "2"
+    assert agent.pane_id in tmux.killed, "the dead window leaves with the restart"
+    assert [s.agent.id for s in fleet_service.list_agents(project)] == [receipt.started.id]
+    manager = fleet_service.manager_of(project)
+    assert manager is not None and manager.id == receipt.started.id
+    assert _events(project, "restarted") == ["manager restarted — resumed its session"]
+    assert receipt.tmux_session == f"asq-{_codename(project)}"
+
+    # A LOST agent (pane vanished, row live) restarts the same way; nothing to kill.
+    tmux.vanish(receipt.started.pane_id)
+    again = fleet_service.restart(project, "manager")
+    assert again.resumed is True and again.was_running is False
+    assert again.replaced.id == receipt.started.id and again.replaced.exit_status is None
+
+
+def test_restart_stops_a_running_agent_first_and_starts_fresh_when_asked_or_without_a_transcript(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    task = _add_task(project, "Ship auth")
+    agent = _coder(project, task_id=task.id)
+    _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk
+    with store_session() as store:
+        team_service._emit(
+            store, project.id, "note", "halfway through the router", session_id=agent.session_id
+        )
+    # The new pane must look ready, or a multi-line prompt is (correctly) not typed.
+    original_spawn = tmux.spawn_window
+
+    def ready_spawn(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original_spawn(*args, **kwargs)
+        tmux.set_command(window.pane_id, "claude")
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", ready_spawn)
+
+    receipt = fleet_service.restart(project, agent.label)
+
+    assert receipt.was_running is True and receipt.resumed is False
+    assert tmux.typed[:2] == [(agent.pane_id, "literal", "/exit"), (agent.pane_id, "key", "Enter")]
+    assert receipt.replaced.ended_at is not None and receipt.replaced.exit_status == 0
+    assert any("no transcript on disk" in note for note in receipt.notes)
+    assert receipt.started.task_id == task.id and receipt.started.label == agent.label
+    assert receipt.started.session_id != agent.session_id  # fresh: a new session
+    assert "--resume" not in _command(tmux)
+    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    assert prompt.startswith(
+        f"You are {agent.label}, taking over from a previous session of this agent (restarted)."
+    )
+    assert "Ship auth" in prompt and "- note: halfway through the router" in prompt
+    assert _events(project, "restarted") == [
+        f"{agent.label} restarted — started fresh with a hand-off prompt"
+    ]
+
+    # --fresh on an agent WITH a transcript still starts over, by choice.
+    transcript = tmp_path / "present.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(receipt.started, transcript)
+    again = fleet_service.restart(project, agent.label, fresh=True)
+    assert again.resumed is False and "--resume" not in _command(tmux)
+    assert not any("no transcript" in note for note in again.notes)  # asked for, not forced
+
+    with pytest.raises(NoSuchAgent, match="no agent 'nobody-here'"):
+        fleet_service.restart(project, "nobody-here")
+
+
+def test_stop_on_an_exited_row_removes_the_lingering_window_and_the_row_leaves_the_listing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    coder = _coder(project)
+    tmux.die(coder.pane_id, 1)
+    [seen] = fleet_service.list_agents(project)
+    assert seen.state == "exited"  # ended by the listing; the window is still there
+
+    ended = fleet_service.stop(project, coder.label)
+
+    assert ended.id == coder.id and ended.exit_status == 1
+    assert tmux.killed == [coder.pane_id] and tmux.typed == []  # nothing to /exit
+    assert fleet_service.list_agents(project) == []
+    # Without a window there is nothing to stop: the old answer stands.
+    with pytest.raises(NoSuchAgent):
+        fleet_service.stop(project, coder.label)
+
+
+def test_fleet_restart_command_reports_the_restart_and_its_json(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner, tmp_path: Path
+) -> None:
+    agent = fleet_service.spawn(project, "manager").agent
+    transcript = tmp_path / "manager.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    _with_transcript(agent, transcript)
+    tmux.die(agent.pane_id, 130)
+
+    result = runner.invoke(app, ["fleet", "restart", "manager", "--project", project.id])
+    assert result.exit_code == 0, result.output
+    assert "✓ manager: restarted — resumed its session" in result.stdout
+    assert "stopped and" not in result.stdout  # it was not running
+
+    second = runner.invoke(
+        app, ["--json", "fleet", "restart", "manager", "--project", project.id, "--fresh"]
+    )
+    assert second.exit_code == 0, second.output
+    payload = json.loads(second.stdout)
+    assert payload["resumed"] is False and payload["was_running"] is True
+    assert payload["started"]["label"] == "manager" and payload["replaced"]["ended_at"] is not None
+    assert payload["replaced"]["id"] != payload["started"]["id"]
+    assert isinstance(payload["notes"], list) and payload["tmux_session"].startswith("asq-")
+
+    refused = runner.invoke(app, ["--json", "fleet", "restart", "ghost", "--project", project.id])
+    assert refused.exit_code == 1
+    assert json.loads(refused.stdout)["error"] == "no_such_agent"
+
+
+def test_a_reused_pane_id_never_makes_an_ended_row_present_nor_kills_a_live_window(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Pane ids are unique per SERVER lifetime: the fleet's server exits with its last
+    window and the next numbers from %0 again (measured live while building #138:
+    three ended rows and the running manager all at %0). An ended row's window is
+    a DEAD pane under its id; a live pane under that id is another agent's — never
+    listed as the row's, never killed for it."""
+    old = _coder(project, label="coder-old")
+    fleet_service.stop(project, "coder-old")  # its window is gone with it
+    tmux._counter = 0  # the server restarted: numbering begins again
+    new = _coder(project, label="coder-new")
+    assert new.pane_id == old.pane_id  # the shape under test
+
+    listed = fleet_service.list_agents(project)
+    assert [(s.agent.id, s.state) for s in listed] == [(new.id, "waiting")]
+    with pytest.raises(NoSuchAgent):
+        fleet_service.stop(project, "coder-old")  # nothing of coder-old's is there to stop…
+    assert new.pane_id in tmux.facts and tmux.killed == [old.pane_id]  # …coder-new keeps its window
+    restarted = fleet_service.restart(project, "coder-old")
+    assert restarted.replaced.id == old.id and restarted.started.label == "coder-old"
+    assert new.pane_id in tmux.facts and tmux.killed == [old.pane_id]
+    # A spawn under the old label after a listing: the same rule, from the supersede path.
+    fleet_service.stop(project, "coder-old", force=True)
+    tmux._counter = 0
+    third = _coder(project, label="coder-third")
+    assert third.pane_id == old.pane_id
+    fleet_service.spawn(project, "coder", label="coder-old", worktree=False)
+    assert third.pane_id in tmux.facts
+    assert [s.agent.label for s in fleet_service.list_agents(project)] == [
+        "coder-new",
+        "coder-third",
+        "coder-old",
+    ]

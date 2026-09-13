@@ -763,8 +763,10 @@ aisquare
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
 │                             [-- agent args]
 │                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
+│                   restart <label> [--fresh] · switch <label> [--to A] [--fresh] [--reason R]
 │                   attach · reap [--all] [--server-down] · rename <codename> · pause · resume
-│                   (all with [--project P]; spawn · tell · pause · resume take [--as SESSION])
+│                   (all with [--project P]; spawn · tell · restart · switch · pause · resume
+│                   take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
 ├── auth            status [--live] · token
 ├── config          list · get <key> · set <key> <value> · redaction <off|standard|strict>

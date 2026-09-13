@@ -126,6 +126,7 @@ def doctor(
         _check_harness(cwd),
         _check_self_invocation(cwd),
         _check_fleet(),
+        *_check_dead_managers(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
         # within the warn group), so a row inserted at position 12 evicted one
@@ -747,6 +748,45 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         _ok("claude-accounts", detail),
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
+    ]
+
+
+def _check_dead_managers() -> list[DoctorCheck]:
+    """A project whose manager has exited while its fleet is still up (#138).
+
+    The wake-ups other agents send target that manager and land nowhere; the
+    sidebar showed 💤 and the way back was known to nobody. One line per
+    machine naming each such project and the command that brings the manager
+    back with its session. Gated on ``context.db`` existing: doctor creates
+    nothing. Silent when no fleet is in that state.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        with store_session() as store:
+            projects = store.list_projects()
+            headless = []
+            for project in projects:
+                live = store.fleet_agents(project.id, live_only=True)
+                if not live or any(agent.role == "manager" for agent in live):
+                    continue
+                last = store.fleet_agent_by_label(project.id, "manager", live_only=False)
+                if last is not None and last.ended_at is not None:
+                    headless.append(
+                        f"{project.codename or project.root.name or project.id} "
+                        f"({len(live)} agent(s) still running)"
+                    )
+    except Exception:  # the database line reports a broken store
+        return []
+    if not headless:
+        return []
+    return [
+        _warn(
+            "fleet-manager",
+            "the manager exited while agents are still running in: " + "; ".join(headless),
+            "Bring it back with its session: aisquare fleet restart manager --project <name> "
+            "(or Restart on its row in asq)",
+        )
     ]
 
 

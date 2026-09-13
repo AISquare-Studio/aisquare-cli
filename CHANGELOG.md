@@ -524,6 +524,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never shipped.
 
 ### Fixed
+- **An exited agent can be restarted from the UI, and a dead manager no
+  longer blocks its own replacement** (#138). A manager whose Claude Code was
+  ended with ctrl+c inside its window sat on the sidebar as 💤 forever: the
+  screen derived `exited` from the dead pane while its row stayed "live" until
+  a hand-run `fleet reap`, so `fleet spawn manager` refused with "already has
+  a manager", wake-ups targeted a dead pane, and the agent view had no
+  action. Now every listing (`fleet ls`, the UI's tick) records a dead pane
+  as ended the way `reap` does — exit status, `agent_exited` on the board,
+  the manager nudged — and `fleet spawn` does the same before its checks, so
+  a dead manager is replaceable at once. The row stays on the live listing as
+  **💤 exited** (the word, not only the glyph) for a day while tmux still
+  holds its window, and the agent view gains **Stop** and **Restart**.
+  `aisquare fleet restart <label> [--fresh]` — and the button — starts the
+  agent again under its own label with the same role, task, worktree and
+  account, **resuming its session** from its transcript when that is on disk
+  (`claude --resume <transcript>`), else fresh with a hand-off prompt from the
+  board; a running agent is stopped first. **Stop** on an exited row removes
+  the dead window, and so does spawning the same label again (the replacement
+  supersedes it — no two rows called manager). The Manager tab says *manager
+  exited (130)* over its Start button instead of "no manager yet". `doctor`
+  warns when a project's manager exited while its agents still run
+  (`fleet-manager`).
 - **Fleet windows are born the width they will be shown, and never wide
   enough to grow Claude Code's diff panel on their own** (#149). Every window
   started at 200x50 and only shrank to its pane when the UI attached it; past

@@ -58,7 +58,7 @@ from aisquare.cli.ui.sidebar import (
 from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
-from aisquare.cli.ui.views.agent import AgentView
+from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
@@ -583,6 +583,31 @@ class FleetApp(App[None], inherit_bindings=False):
         await self._show(view_id, lambda: AgentView(status, id=view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
         self._set_doctor_scope(event.project_id)
+
+    async def on_agent_restarted(self, event: AgentRestarted) -> None:
+        """A restart minted a new row (#138): show it where the old one was.
+
+        The view that posted this refreshed the frame first, so the row is
+        normally in the snapshot already; one more read covers a store that
+        was briefly busy. A row still missing is reported, not invented — the
+        next tick lists it.
+        """
+        started = event.agent
+        status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
+        if status is None:
+            self.refresh_data()
+            status = self.snapshot.agent(started.project_id, started.id) if self.snapshot else None
+        if status is None:
+            self.notify(
+                f"{started.label} restarted — its row appears on the next refresh",
+                timeout=5,
+                markup=False,
+            )
+            return
+        view_id = f"agent-{status.agent.id}"
+        await self._show(view_id, lambda: AgentView(status, id=view_id))
+        self.sidebar.select(f"agent:{status.agent.id}")
+        self._set_doctor_scope(started.project_id)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.

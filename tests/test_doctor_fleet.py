@@ -1076,3 +1076,53 @@ def test_a_symlinked_home_is_a_directory_home(
 
     assert rows["home"].status is CheckStatus.ok, rows["home"]
     assert rows["database"].status is CheckStatus.ok, rows["database"]
+
+
+# --- the dead-manager line (#138) --------------------------------------------------------
+
+
+def test_doctor_names_a_project_whose_manager_exited_while_its_agents_run(
+    home: Path, tmp_path: Path
+) -> None:
+    """The wake-ups coders send target that manager and land nowhere; one warning
+    names the project and the command that brings it back with its session."""
+    project = _seed(tmp_path / "repo")
+    manager = _agent(project.id, "manager", "%1", ended=True).model_copy(update={"role": "manager"})
+    _seed(tmp_path / "repo", manager, _agent(project.id, "coder-1", "%2"))
+
+    [check] = diagnostics._check_dead_managers()
+
+    assert check.name == "fleet-manager" and check.status is CheckStatus.warn
+    assert "the manager exited while agents are still running in: repo" in check.detail
+    assert "1 agent(s) still running" in check.detail
+    assert check.fix and "aisquare fleet restart manager --project <name>" in check.fix
+    assert "Restart on its row" in check.fix
+    assert "fleet-manager" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_dead_manager_line_is_silent_for_every_other_shape(home: Path, tmp_path: Path) -> None:
+    """Negative controls: a live manager, a whole fleet that ended, a project that never
+    had a manager, and no fleet at all. Only "manager gone, agents left" is the shape."""
+    alive = _seed(tmp_path / "alive")
+    _seed(
+        tmp_path / "alive",
+        _agent(alive.id, "manager", "%1").model_copy(update={"role": "manager"}),
+        _agent(alive.id, "coder-1", "%2"),
+    )
+    finished = _seed(tmp_path / "finished")
+    _seed(
+        tmp_path / "finished",
+        _agent(finished.id, "manager", "%3", ended=True).model_copy(update={"role": "manager"}),
+        _agent(finished.id, "coder-1", "%4", ended=True),
+    )
+    headless_by_design = _seed(tmp_path / "solo")
+    _seed(tmp_path / "solo", _agent(headless_by_design.id, "coder-1", "%5"))
+    _seed(tmp_path / "empty")
+
+    assert diagnostics._check_dead_managers() == []
+
+
+def test_the_dead_manager_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_dead_managers() == []
+    assert not isolated_home.exists(), "doctor must not create the home it reports on"

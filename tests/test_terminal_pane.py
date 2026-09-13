@@ -2722,6 +2722,88 @@ def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
     assert "working" in working and "waiting" not in working
 
 
+def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#138: the two actions §4.2 promised. Stop shows only while there is a process;
+    Restart always (an exited row is exactly its case). Both run the service off
+    the UI thread, then ask the app for a fresh frame — the view guesses nothing."""
+    from textual.widgets import Button
+
+    from aisquare.cli.ui.views import agent as agent_view_module
+    from aisquare.models import ProjectInfo
+    from aisquare.services import fleet as fleet_service
+
+    server = fake.server(tmp_path)
+    project = ProjectInfo(id="prj_1", root=Path("/home/me/repo"), linked_repos=[])
+    calls: list[tuple[object, ...]] = []
+    refreshed: list[bool] = []
+    exited = _status(state="exited", exit_status=130)
+    started = _status(pane_id="%2").agent.model_copy(update={"id": "fa_2"})
+
+    def fake_stop(target: ProjectInfo, label: str, **kwargs: object) -> FleetAgent:
+        calls.append(("stop", target.id, label))
+        return exited.agent
+
+    def fake_restart(
+        target: ProjectInfo, label: str, *, size: tuple[int, int] | None = None, **kw: object
+    ) -> fleet_service.RestartReceipt:
+        calls.append(("restart", target.id, label, size))
+        return fleet_service.RestartReceipt(
+            replaced=exited.agent, started=started, resumed=True, was_running=False,
+            tmux_session="asq-amber-otter", notes=["accounts: slot 2 (the row's)"],
+        )  # fmt: skip
+
+    # The view calls the service through its module, so the module is where it is faked.
+    monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
+    monkeypatch.setattr(fleet_service, "stop", fake_stop)
+    monkeypatch.setattr(fleet_service, "restart", fake_restart)
+    posted: list[FleetAgent] = []
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            yield AgentView(exited, server=server, escape_key="f12", id="view")
+
+        def refresh_data(self) -> None:
+            refreshed.append(True)
+
+        def on_agent_restarted(self, event: agent_view_module.AgentRestarted) -> None:
+            posted.append(event.agent)
+
+    async def drive() -> tuple[bool, str, bool, str, tuple[int, int]]:
+        host = ViewHost()
+        async with host.run_test(size=(80, 12)) as pilot:
+            view = host.query_one("#view", AgentView)
+            stop = view.query_one("#agent-stop", Button)
+            restart = view.query_one("#agent-restart", Button)
+            await pilot.pause()
+            stop_on_exited, restart_label = stop.display, str(restart.label)
+            await pilot.click("#agent-restart")
+            await wait_until(pilot, lambda: len(refreshed) >= 1 and len(posted) == 1)
+            view.refresh_status(_status(state="working"))
+            await pilot.pause()
+            stop_on_working, restart_label_working = stop.display, str(restart.label)
+            await pilot.click("#agent-stop")
+            await wait_until(pilot, lambda: len(refreshed) >= 2)
+            return (
+                stop_on_exited,
+                restart_label,
+                stop_on_working,
+                restart_label_working,
+                (view.pane.content_size.width, view.pane.content_size.height),
+            )
+
+    stop_on_exited, restart_label, stop_on_working, restart_label_working, size = run(drive())
+    assert stop_on_exited is False and restart_label == "Restart (resume)"
+    assert stop_on_working is True and restart_label_working == "Restart"
+    assert calls == [
+        ("restart", "prj_1", "coder-1", size),
+        ("stop", "prj_1", "coder-1"),
+    ]
+    assert [agent.id for agent in posted] == ["fa_2"]  # the shell is told which row to show
+    assert len(refreshed) == 2  # one fresh frame per action, never an optimistic repaint
+
+
 # --- against a real tmux ------------------------------------------------------------------------
 
 _needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")

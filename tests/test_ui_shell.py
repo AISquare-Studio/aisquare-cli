@@ -335,9 +335,9 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     manager, coder, tester, scout = rows
     assert manager.startswith("🧭") and manager.rstrip().endswith("⏸")
     assert coder.startswith("🔨") and coder.rstrip().endswith("▶")
-    assert tester.startswith("🧪") and tester.rstrip().endswith("💤(3)")
+    assert tester.startswith("🧪") and tester.rstrip().endswith("💤 exited(3)")  # #138: the word
     assert scout.startswith("🤖") and "🔔" in scout  # unknown role: the custom icon
-    assert "(3)" not in coder and "💤" not in coder  # exit status only on the exited row
+    assert "(3)" not in coder and "💤" not in coder and "exited" not in coder  # only on that row
     assert "🔔" not in manager and "▶" not in manager
     # The card's chips: three alive (the exited one is not), one needing the user.
     assert title.rstrip().endswith("3 · 🔔1")
@@ -1767,3 +1767,55 @@ def test_theme_picker_applies_live_and_autosaves(
         return str(fleet_app(pilot).theme)
 
     assert drive(relaunch) == final  # restored on the next launch
+
+
+def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#138 end to end through the real app: the exited row's view offers Restart,
+    the service is called with the row's project and the pane's size, the frame is
+    re-read, and the NEW row is what the shell shows and highlights."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    exited = status("prj_a", "manager", "manager", "exited", exit_status=130)
+    script["prj_a"] = [exited]
+    started = status("prj_a", "manager", "manager", "waiting", minute=5)
+    started = started.model_copy(
+        update={"agent": started.agent.model_copy(update={"id": "agt_a_new"})}
+    )
+    calls: list[tuple[str, str, tuple[int, int] | None]] = []
+
+    def fake_restart(
+        project: ProjectInfo, label: str, *, size: tuple[int, int] | None = None, **kw: object
+    ) -> fleet_service.RestartReceipt:
+        calls.append((project.id, label, size))
+        script["prj_a"] = [started]  # what the next listing answers
+        return fleet_service.RestartReceipt(
+            replaced=exited.agent, started=started.agent, resumed=True, was_running=False,
+            tmux_session="asq-amber-otter",
+        )  # fmt: skip
+
+    monkeypatch.setattr(fleet_service, "restart", fake_restart)
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str | None, list[str], list[str]]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await pilot.pause()
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        stop_shown = view.query_one("#agent-stop", Button).display
+        await pilot.click("#agent-restart")
+        await settle(app)
+        await pilot.pause()
+        await pilot.pause()
+        current = app.current_view()
+        # The pane's own "(pane gone)" toast is there too: read them all.
+        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
+        rows = [shown(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        assert stop_shown is False
+        return (current.id if current else None), app.sidebar.selected_key, toasts, rows
+
+    current, selected, toasts, rows = drive(go, notifications=True)
+    assert calls and calls[0][:2] == ("prj_a", "manager")
+    assert current == "agent-agt_a_new" and selected == "agent:agt_a_new"
+    assert any("✓ restarted manager — resumed its session" in toast for toast in toasts), toasts
+    assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone

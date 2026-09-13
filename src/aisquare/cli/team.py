@@ -313,6 +313,12 @@ def spawn(
             env_overrides=_parse_env(env_pairs or []),
             extra_args=extra_args or [],
         )
+        defaults = harness.role_defaults(
+            role_name, binary=selected.binary.binary, args=selected.profile.args
+        )
+        arguments = agent_launch.prepare_arguments(
+            selected, [*defaults.args, *selected.profile.args]
+        )
         with harness.probe_notice(
             lambda: typer.echo(
                 "probing model availability (cached 24h; --no-probe skips)…", err=True
@@ -324,7 +330,7 @@ def spawn(
                 probe=probe,
                 refresh=refresh,
                 effort=effort,
-                raw_args=selected.profile.args,
+                raw_args=arguments,
             )
     except BadEffortError as exc:
         fail(str(exc), error="bad_effort")
@@ -361,29 +367,20 @@ def spawn(
             f"role bindings: config unreadable ({launch_profile.notice}) — launching unbound",
             err=True,
         )
-    # ONE precedence rule with `cli/launch.py`: the role's own flags
-    # (`RoleProfile.default_args`) sit after the binding's args, and an explicit
-    # flag or its `--no-` opt-out WINS wherever it appears — not because of
-    # where these land in argv, but because `role_defaults` stands down when
-    # either spelling is already in the args it is given. `team spawn` has no
-    # separate operator line to sit before: its `--arg` values are folded into
-    # `launch_profile.args`, so the role's flags come last here and in the
-    # middle in `launch`, under the same rule.
-    defaults = harness.role_defaults(role_name, binary=binary.binary, args=launch_profile.args)
-    role_args = defaults.args
+    # Role defaults were resolved before normalization. They precede any native
+    # literal separator, and stand down for explicit flags or their opt-outs.
     for note in defaults.notes:
         # The banner is meant to be pasted; a flag this role would normally
         # carry and does not is part of what the paste will do.
         typer.echo(f"{role_name}: {note}", err=True)
     if resolution is None:
-        argv = [binary.binary, *selected.adapter.native_args(launch_profile.args), *role_args]
+        argv = [binary.binary, *arguments.argv]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
         argv = [
             binary.binary,
-            *agent_launch.resolved_model_args(selected, resolution, launch_profile.args),
-            *selected.adapter.native_args(launch_profile.args),
-            *role_args,
+            *agent_launch.resolved_model_args(selected, resolution, arguments),
+            *arguments.argv,
         ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
         profile = harness.ROLE_PROFILES.get(role_name)
@@ -420,6 +417,7 @@ def spawn(
                 "--command",
                 binary.binary,
                 "--no-bound-args",
+                "--custom-role",
                 *(
                     part
                     for key, value in launch_profile.env.items()
@@ -503,9 +501,7 @@ def spawn(
                     "this one takes its own identity",
                     err=True,
                 )
-            identity = explainability_service.plan_session_identity(
-                binary.binary, launch_profile.args
-            )
+            identity = explainability_service.plan_session_identity(binary.binary, arguments.argv)
             # Same fail-open bar as `launch`: an unreadable target costs the
             # overrides and the key — so the trace — and never the spawn.
             # `resolve_target` is effectively total today; the guard is here so
@@ -532,7 +528,7 @@ def spawn(
                 # Pinned only on a spawn that is really traced: an untraced one
                 # has no Run to join, so touching its argv would be risk with
                 # no correlation to show for it.
-                argv = [*argv, *identity.inject_args]
+                argv = [argv[0], *identity.inject_args, *argv[1:]]
                 # Same marker `aisquare launch` sets: it tells a spawn command
                 # run from INSIDE this session that the ANTHROPIC_* it can see
                 # are ours to clear, not the operator's own gateway — and it
@@ -550,36 +546,46 @@ def spawn(
 
 def _fleet_model_status(selected: agent_launch.ResolvedAgent, role: str) -> dict[str, Any]:
     """Report fleet's separate argument defaults without attributing them to team spawn."""
-    from aisquare.core.agent_adapters.types import fleet_extra_args, model_overrides
+    from aisquare.core.agent_adapters.types import fleet_extra_args
     from aisquare.services import fleet
 
-    settings = fleet.role_settings(role)
-    args = fleet_extra_args(selected.adapter, settings.extra_args, settings.agent_args)
-    raw = [*selected.profile.args, *args]
+    row: dict[str, Any] = {
+        "agent_args": [],
+        "resolves_to": "",
+        "source": "native-default",
+        "effort": "",
+        "effort_source": "native-default",
+        "notes": [],
+    }
     try:
-        native = selected.adapter.native_args(raw)
-        if selected.adapter.capabilities.model_ladders:
-            # Fleet uses plain launch: Claude keeps its native model default.
-            model, effort = model_overrides(selected.adapter.id, native)
-            return {
-                "agent_args": args,
-                "resolves_to": model or "",
-                "source": "native" if model is not None else "native-default",
-                "effort": effort or "",
-                "effort_source": "native" if effort is not None else "native-default",
-                "notes": [],
-            }
-        resolution = agent_launch.model_for(selected, role, probe=False, raw_args=raw)
-        return {
-            "agent_args": args,
-            "resolves_to": resolution.model if resolution else "",
-            "source": resolution.source if resolution else "native-default",
-            "effort": resolution.effort if resolution else "",
-            "effort_source": resolution.effort_source if resolution else "native-default",
-            "notes": resolution.notes if resolution else [],
-        }
-    except ValueError as exc:
-        return {"agent_args": args, "error": str(exc)}
+        settings = fleet.role_settings(role)
+        args = fleet_extra_args(selected.adapter, settings.extra_args, settings.agent_args)
+        row["agent_args"] = args
+        arguments = agent_launch.prepare_arguments(selected, [*selected.profile.args, *args])
+        resolution = agent_launch.launch_model_for(selected, role, arguments)
+        if resolution is None:
+            row.update(
+                resolves_to=arguments.model or "",
+                source="native" if arguments.model is not None else "native-default",
+                effort=arguments.effort or "",
+                effort_source="native" if arguments.effort is not None else "native-default",
+            )
+        else:
+            row.update(
+                resolves_to=resolution.model,
+                source=resolution.source,
+                effort=resolution.effort,
+                effort_source=resolution.effort_source,
+                notes=resolution.notes,
+            )
+    except (ValueError, TypeError, AttributeError) as exc:
+        row.update(
+            error=str(exc),
+            source="error",
+            effort_source="error",
+            fix=f"Check fleet.roles.{role} and team.profiles.{role} in aisquare config.",
+        )
+    return row
 
 
 @app.command("harness")
@@ -677,7 +683,10 @@ def harness_status() -> None:
         fleet_row = row["fleet"]
         if "error" in fleet_row:
             console.print(f"  fleet: {fleet_row['error']}", markup=False)
-        elif fleet_row["agent_args"]:
+        elif fleet_row["agent_args"] or any(
+            fleet_row[key] != row[key]
+            for key in ("resolves_to", "source", "effort", "effort_source")
+        ):
             console.print(
                 f"  fleet: {fleet_row['resolves_to'] or 'native default'} "
                 f"[{fleet_row['source']}] effort={fleet_row['effort'] or 'native'} "

@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
 from collections.abc import Callable, Container, Sequence
 from importlib import metadata
 from pathlib import Path
@@ -18,7 +19,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator, paths
+from aisquare.core import harness, orchestrator, outbox, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
@@ -136,7 +137,38 @@ def doctor(
             _check_browser_tools(cwd),
             *_experiment_checks(),
             *explainability_ops.checks(live=live, target_name=target),
+            _check_outbox(),
         ]
+
+
+def _check_outbox() -> DoctorCheck:
+    """Test the actual write/rename seam; os.access is unreliable under ACLs."""
+    name = "explainability-spool"
+    directory = outbox.queue_dir()
+    fix = f"Restore write access and free space in {directory}, then rerun aisquare doctor"
+    try:
+        settings = load_config().explainability
+        if not settings.enabled or not settings.ship:
+            return _ok(name, "Insight shipping is disabled")
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".doctor-", dir=directory) as scratch:
+            source = Path(scratch) / "probe"
+            source.write_bytes(b"aisquare spool write probe")
+            source.replace(source.with_suffix(".renamed"))
+        failure = outbox.root() / "last-error.json"
+        if failure.exists():
+            recent = json.loads(failure.read_text())
+            if not isinstance(recent, dict):
+                raise ValueError("Invalid receiver diagnostic")
+            return _warn(
+                name,
+                f"Spool is writable at {directory}; last receiver failure: "
+                f"{recent.get('kind', 'unknown')} ({recent.get('code')})",
+                f"Retry insight shipping; inspect {failure} if events remain missing",
+            )
+    except (OSError, ValueError) as exc:
+        return _warn(name, f"Cannot write telemetry spool at {directory}: {exc}", fix)
+    return _ok(name, f"Telemetry spool is writable at {directory}")
 
 
 def _ok(name: str, detail: str) -> DoctorCheck:
@@ -1844,7 +1876,7 @@ def _check_other_agents(cwd: Path | None = None) -> list[DoctorCheck]:
                         filter(
                             None,
                             [
-                                detail,
+                                detail.rstrip(". "),
                                 "After reconnecting, review /hooks in Codex and start a session",
                             ],
                         )

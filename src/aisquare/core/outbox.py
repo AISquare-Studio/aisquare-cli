@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import os
+import sqlite3
+import stat
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,20 +92,34 @@ def enqueue(record: dict[str, object]) -> Path | None:
 
 def temporary_write_error(exc: OSError) -> bool:
     """Only a retry can recover these local spool failures."""
-    return exc.errno in {
-        None,
-        errno.ENOSPC,
-        errno.EDQUOT,
-        errno.EAGAIN,
-        errno.EBUSY,
-        errno.EINTR,
-        errno.EIO,
-        errno.EMFILE,
-        errno.ENFILE,
+    return exc.errno is not None and exc.errno in {
+        getattr(errno, name, None)
+        for name in ("ENOSPC", "EDQUOT", "EAGAIN", "EBUSY", "EINTR", "EIO", "EMFILE", "ENFILE")
     }
 
 
-def enqueue_retryable(record: dict[str, object]) -> Path | None:
+def report_failure(exc: BaseException) -> None:
+    """Persist a bounded, non-sensitive diagnostic for the next doctor run."""
+    with contextlib.suppress(OSError):
+        root().mkdir(parents=True, exist_ok=True)
+        (root() / "last-error.json").write_text(
+            json.dumps(
+                {
+                    "at": time.time(),
+                    "kind": type(exc).__name__,
+                    "code": getattr(exc, "sqlite_errorname", None) or getattr(exc, "errno", None),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+
+def clear_failure() -> None:
+    with contextlib.suppress(OSError):
+        (root() / "last-error.json").unlink(missing_ok=True)
+
+
+def enqueue_retryable(record: dict[str, object], *, filename: str | None = None) -> Path | None:
     """Receiver variant: raise temporary I/O failures, drop permanent failures.
 
     Primary-path observers use enqueue, which always fails open. A native
@@ -114,19 +132,22 @@ def enqueue_retryable(record: dict[str, object]) -> Path | None:
         # Time-ordered name so a drain delivers roughly in the order the user
         # acted, with a uuid tail because two hooks can fire in the same
         # nanosecond bucket on different processes.
-        target = directory / f"{time.time_ns():019d}-{uuid.uuid4().hex[:8]}.json"
+        target = directory / (filename or f"{time.time_ns():019d}-{uuid.uuid4().hex[:8]}.json")
         payload = json.dumps(record, ensure_ascii=False, default=str)
         # Write-then-rename: a sweeper listing the directory must never find a
         # half-written record and dead-letter it as corrupt.
         staging = target.with_suffix(".partial")
         staging.write_text(payload, encoding="utf-8")
         staging.replace(target)
+        staging = None
         return target
     except OSError as exc:
+        report_failure(exc)
         if temporary_write_error(exc):
             raise
         return None
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, OverflowError) as exc:
+        report_failure(exc)
         return None
     finally:
         if staging is not None:
@@ -134,12 +155,91 @@ def enqueue_retryable(record: dict[str, object]) -> Path | None:
                 staging.unlink(missing_ok=True)
 
 
+@contextlib.contextmanager
+def _receipts() -> Iterator[sqlite3.Connection]:
+    """Serialize native publication and claiming, independently of the board.
+
+    Deterministic queue names recover a writer killed before its receipt commit.
+    Claimers take the same lock and commit receipts before shipping, so a retry
+    also remains a no-op after the queue file has been delivered and removed.
+    """
+    root().mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(root() / "native-receipts.sqlite", timeout=2)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS receipt (key TEXT PRIMARY KEY, created_at INTEGER NOT NULL)"
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS receipt_time ON receipt(created_at)")
+        # Retain longer than board metadata/exporter retries. A remaining queue,
+        # claim or dead letter also prevents re-publication after this horizon.
+        connection.execute("DELETE FROM receipt WHERE created_at < ?", (time.time() - 7 * 86400,))
+        try:
+            yield connection
+        except BaseException:
+            # Keep the completed prefix without replacing the primary failure.
+            try:
+                connection.commit()
+            except Exception as exc:
+                report_failure(exc)
+            raise
+        else:
+            connection.commit()
+    finally:
+        connection.close()
+
+
+@dataclass
+class RetryBatch:
+    connection: sqlite3.Connection
+
+    def enqueue(self, record: dict[str, object], key: str) -> bool | None:
+        """True: new record; False: durable retry; None: permanent spool failure."""
+        digest = hashlib.sha256(key.encode()).hexdigest()
+        if self.connection.execute("SELECT 1 FROM receipt WHERE key = ?", (digest,)).fetchone():
+            return False
+        name = f"native-{digest}.json"
+        target = queue_dir() / name
+        recovered = any(
+            path.exists()
+            for path in (
+                target,
+                target.with_name(name + _CLAIMED_SUFFIX),
+                dead_dir() / name,
+            )
+        )
+        if not recovered and enqueue_retryable(record, filename=name) is None:
+            return None
+        self.connection.execute(
+            "INSERT INTO receipt (key, created_at) VALUES (?, ?)", (digest, int(time.time()))
+        )
+        return not recovered
+
+
+@contextlib.contextmanager
+def retry_batch() -> Iterator[RetryBatch]:
+    """One receipt commit per OTLP batch, with crash-safe per-record identity."""
+    with _receipts() as connection:
+        yield RetryBatch(connection)
+
+
 def pending(limit: int | None = None) -> list[Path]:
     """Spooled records waiting for delivery, oldest first."""
+    ordered: list[tuple[int, Path]] = []
     try:
-        files = sorted(p for p in queue_dir().glob("*.json") if p.is_file())
+        for path in queue_dir().glob("*.json"):
+            try:
+                info = path.stat()
+            except OSError:
+                continue  # A concurrent sweeper may already have claimed it.
+            if stat.S_ISREG(info.st_mode):
+                ordered.append((info.st_mtime_ns, path))
     except OSError:
         return []
+    # Native filenames are stable retry identities, not timestamps. Sort both
+    # record kinds by publication time so fresh generic events cannot starve
+    # a native event simply because "native-" sorts after a timestamp.
+    files = [path for _, path in sorted(ordered)]
     return files[:limit] if limit is not None else files
 
 
@@ -157,8 +257,16 @@ def claim(path: Path) -> Path | None:
     """
     claimed = path.with_name(path.name + _CLAIMED_SUFFIX)
     try:
-        path.rename(claimed)
-    except OSError:
+        if path.name.startswith("native-"):
+            with _receipts() as connection:
+                connection.execute(
+                    "INSERT OR IGNORE INTO receipt (key, created_at) VALUES (?, ?)",
+                    (path.stem.removeprefix("native-"), int(time.time())),
+                )
+                path.rename(claimed)
+        else:
+            path.rename(claimed)
+    except (OSError, sqlite3.Error):
         return None
     return claimed
 

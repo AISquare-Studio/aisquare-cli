@@ -8,11 +8,12 @@ removed — it validates the role, opts the repo in explicitly, then *replaces*
 this process with the agent so signals, job control and the TTY behave exactly
 as if you had run the agent yourself.
 
-Anything after the role is forwarded untouched: ``aisquare launch coder
---model opus`` runs ``claude --model opus``.
+Native arguments follow the AISquare options: ``aisquare launch coder
+--model opus`` runs ``claude --model opus``. A native command/prompt or an
+explicit ``--`` ends AISquare's option parsing.
 
 One exception, and only when tracing is on AND actually succeeded: the launch
-appends ``--session-id <uuid>`` so the agent's session id, the board row and
+prepends ``--session-id <uuid>`` so the agent's session id, the board row and
 the gateway Run's ``X-Pipeline-Id`` are one key (see
 ``services.explainability``). With tracing off — the default — the argv is
 byte-identical to what it always was.
@@ -119,6 +120,10 @@ def launch(
             help="Use the role's saved native arguments (disable to supply a complete command).",
         ),
     ] = True,
+    custom_role: Annotated[
+        bool,
+        typer.Option("--custom-role", help="Allow an unbound custom role, as team spawn does."),
+    ] = False,
     env_pairs: Annotated[
         list[str] | None,
         typer.Option(
@@ -154,7 +159,7 @@ def launch(
     ``--command`` cannot resolve — an alias is not an executable — so bind the
     variables the alias sets and keep the ordinary binary.
     """
-    if not _role_ok(role):
+    if not custom_role and not _role_ok(role):
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), or a role you have "
@@ -251,13 +256,9 @@ def launch(
             f"explainability: config unreadable ({exc}) — launching untraced",
             style="dim",
         )
-    # The role's OWN flags (`RoleProfile.default_args`), resolved before the
-    # tracing block because the identity planner below must see every arg the
-    # agent will get. ONE precedence rule, shared with `team spawn`: the role's
-    # defaults sit after the binding's args, and an explicit flag or its
-    # `--no-` opt-out WINS wherever it appears — not because of where these
-    # land in argv, but because `role_defaults` stands down when either
-    # spelling is already in the args it is given.
+    # Managed role defaults precede saved and forwarded arguments so a native
+    # literal separator cannot turn them into prompt text. Explicit opt-outs
+    # still win: role_defaults stands down when either spelling is present.
     defaults = harness.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
@@ -267,7 +268,17 @@ def launch(
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
         stderr_console().print(f"{role}: {note}", style="dim")
-    #: Appended to the agent's argv, and empty unless a trace actually happened.
+    try:
+        arguments = agent_launch.prepare_arguments(selected, [*role_args, *profile.args], ctx.args)
+        native_model = agent_launch.launch_model_for(selected, role, arguments)
+        for message in native_model.notes if native_model else []:
+            stderr_console().print(message, markup=False)
+        model_args = agent_launch.resolved_model_args(selected, native_model, arguments)
+    except BadEffortError as exc:
+        fail(str(exc), error="bad_effort")
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
+    #: Managed flags precede native arguments, and are empty unless tracing succeeded.
     pinned_id: list[str] = []
     if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
         # Fail-open by contract: wire_session returns an empty env delta (plus
@@ -292,22 +303,9 @@ def launch(
                 "this one takes its own identity",
                 style="dim",
             )
-        # The EFFECTIVE argument list, not just what this invocation typed.
-        # `argv` below is
-        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
-        # role bound with `--session-id`, `--resume` or `--continue` via
-        # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
-        # — carries it here without appearing in `ctx.args`.
-        # Planning on `ctx.args` alone therefore read those launches as fresh:
-        # a bound `--session-id X` got a SECOND `--session-id` appended after
-        # it, and a bound `--continue`/`--resume` defeated the deliberate
-        # refusal to pin — the one this module's own comment calls "pure risk
-        # for no correlation", because guessing an id merges two agents onto one
-        # board row and one Run. `team spawn` already passes its profile args
-        # (cli/team.py), so this path was the asymmetric one.
-        identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *role_args, *ctx.args]
-        )
+        # Plan from the complete normalized argument list, including saved
+        # session/resume flags. The planner ignores literal prompt text.
+        identity = explainability_service.plan_session_identity(resolution.binary, arguments.argv)
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
         # them per target, and wire_session only ever looks at the top level —
@@ -356,28 +354,17 @@ def launch(
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
     native_trace_args, native_trace_note = agent_launch.telemetry_args(
-        selected, env, [*profile.args, *role_args, *ctx.args]
+        selected, env, arguments.argv
     )
     if native_trace_note:
         stderr_console().print(native_trace_note, markup=False)
-    try:
-        raw_args = [*profile.args, *role_args, *ctx.args]
-        native_model = agent_launch.launch_model_for(selected, role, raw_args)
-        for message in native_model.notes if native_model else []:
-            stderr_console().print(message, markup=False)
-        model_args = agent_launch.resolved_model_args(selected, native_model, raw_args)
-        native_args = selected.adapter.native_args(raw_args)
-    except BadEffortError as exc:
-        fail(str(exc), error="bad_effort")
-    except ValueError as exc:
-        fail(str(exc), error="agent_configuration")
     argv = [
         resolution.binary,
         *model_args,
+        *pinned_id,
         *native_trace_args,
         *agent_launch.mcp_args(selected),
-        *native_args,
-        *pinned_id,
+        *arguments.argv,
     ]
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a

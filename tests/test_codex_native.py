@@ -303,6 +303,32 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                 )
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert requests[-1]["model"] == expected
+            # Observe the provider request too: accepting/reporting an alias
+            # is insufficient if whitespace sends it to an unused TOML key.
+            selected = agent_launch.resolve(agent="codex")
+            for alias in ("max", "ultracode"):
+                arguments = agent_launch.prepare_arguments(
+                    selected,
+                    [],
+                    [
+                        "-c",
+                        "model = gpt-5.4",
+                        "-c",
+                        f"model_reasoning_effort = {alias}",
+                        "fixture",
+                    ],
+                )
+                result = subprocess.run(
+                    [*base, "--skip-git-repo-check", "--json", *arguments.argv],
+                    cwd=workspace,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                )
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert requests[-1]["model"] == "gpt-5.4"
+                assert requests[-1]["reasoning"]["effort"] == "xhigh"
         finally:
             server.shutdown()
             thread.join(timeout=2)

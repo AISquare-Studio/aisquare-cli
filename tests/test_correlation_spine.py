@@ -276,15 +276,47 @@ def test_the_agent_name_follows_the_role(runner: CliRunner) -> None:
     assert trace_marker(_mint("planner"))[TRACE_AGENT_NAME_ENV_VAR] == "aisquare-planner"
 
 
-def test_the_spawn_template_passes_the_flag_the_parser_looks_for() -> None:
-    """Shared launch identity emits a flag the same parser recognizes."""
-    from aisquare.services.explainability import plan_session_identity
+@pytest.mark.parametrize("entry", ["launch", "printed", "execute"])
+def test_the_spawn_template_passes_the_flag_the_parser_looks_for(
+    entry: str,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read the native flag from the real launch argv and join it to the Run."""
+    import os
+    import shlex
+    from importlib import import_module
+    from unittest.mock import Mock
 
-    planned = plan_session_identity("claude", [])
-    assert planned.session_id
-    reparsed = plan_session_identity("claude", list(planned.inject_args))
-    assert reparsed.session_id == planned.session_id
-    assert not reparsed.inject_args
+    from aisquare.core.config import RoleLaunchProfile, load_config
+    from aisquare.services import agent_launch, explainability
+
+    cfg = load_config()
+    cfg.explainability.enabled = True
+    cfg.team.profiles["coder"] = RoleLaunchProfile(args=["--", "-migrate the schema"])
+    save_config(cfg)
+    monkeypatch.setenv("AISQUARE_TEAM", "1")
+    monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "claude")
+    monkeypatch.setattr(explainability, "probe_proxy", _healthy)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    monkeypatch.setattr(os, "execvpe", execute)
+    if entry == "printed":
+        printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])
+        assert printed.exit_code == 0, printed.output
+        command = shlex.split(json.loads(printed.stdout)["command"])
+        result = runner.invoke(app, command[command.index("launch") :])
+    else:
+        command = ["launch", "coder"] if entry == "launch" else ["team", "spawn", "coder", "--exec"]
+        result = runner.invoke(app, command)
+    assert result.exit_code == 0, result.output
+    argv, env = execute.call_args.args[1:]
+    # Literal spelling is deliberate: do not compare a helper with itself.
+    flag = argv.index("--session-id")
+    assert flag < argv.index("--")
+    assert argv[flag + 1] == env["AISQUARE_PIPELINE_ID"]
+    assert argv[argv.index("--") :] == ["--", "-migrate the schema"]
 
 
 def test_an_untraced_session_passes_no_session_id_at_all(

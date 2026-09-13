@@ -526,19 +526,10 @@ def env(
     can promise. ``aisquare launch`` and ``team spawn --exec`` still post the
     root, because they are about to start the agent that fills it.
 
-    ``--post-root`` IS THE OPT-IN, for the one caller on a launch's footing:
-    the command ``team spawn`` prints, ``eval "$(aisquare
-    explainability env <role> --post-root)"; claude …``. There "will an agent
-    ever start on this id" is not unknowable — the agent starts on the very
-    next command in the same shell — so the eval posts the root exactly as a
-    launch does, the pasted session owns its Run (``traceparent`` on the wire,
-    ``AISQUARE_RUN_TRACE_ID`` exported) and the launch line goes to stderr,
-    where an eval leaves it for the human. Same fail-open, same direction: a
-    refused root falls back to ``X-Pipeline-Id`` with no run key exported, a
-    dead proxy to untraced, and neither costs the paste. The flag is visible
-    rather than hidden because the line that carries it is printed for a
-    human to read, and a flag the CLI's own ``--help`` disowns is a trap; the
-    help text says when it is wrong to add by hand.
+    ``--post-root`` opts a manually composed shell launch into root creation.
+    Use it only when an agent will immediately consume the exported identity.
+    The command printed by ``team spawn`` now calls ``aisquare launch`` directly;
+    that launcher creates the identity and posts its root when it executes.
     """
     settings = load_config().explainability
     target = ops.resolve_target(settings, target_name)

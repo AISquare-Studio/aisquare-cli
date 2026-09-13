@@ -511,7 +511,7 @@ def test_fleet_native_prompt_does_not_become_a_label(
     operation = Mock(side_effect=fleet.FleetError("recorded"))
     monkeypatch.setattr(fleet, "spawn", operation)
     result = runner.invoke(
-        app, ["fleet", "spawn", "coder", "--agent", "codex", "--", "exec", "-list every file"]
+        app, ["fleet", "spawn", "coder", "--agent", "codex", "exec", "-list every file"]
     )
     assert result.exit_code != 0
     assert operation.call_count == 1

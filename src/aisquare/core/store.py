@@ -511,6 +511,14 @@ CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
 END;
 """
 
+# This version was used while the native-agent branch was being dogfooded.
+# Reserve its slot permanently and repair v16 stores made before its backfill
+# was added. Already-upgraded v17 stores have run this repair.
+_SCHEMA_V17 = """
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE updated_at = 0;
+"""
+
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -529,6 +537,7 @@ _MIGRATIONS = (
     _SCHEMA_V14,
     _SCHEMA_V15,
     _SCHEMA_V16,
+    _SCHEMA_V17,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 

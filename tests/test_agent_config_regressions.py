@@ -28,7 +28,7 @@ from tests.test_fleet_service import FakeTmux
 @pytest.mark.parametrize("binary_source", ["command", "role-env", "global-env", "config"])
 @pytest.mark.parametrize("family_source", ["user", "project", "inherited"])
 @pytest.mark.parametrize("family", ["claude-code", "codex"])
-def test_wrapper_launch_requires_a_declaration_even_with_family_defaults(
+def test_wrapper_launch_respects_defaults_and_legacy_claude_compatibility(
     binary_source: str,
     family_source: str,
     family: str,
@@ -61,9 +61,13 @@ def test_wrapper_launch_requires_a_declaration_even_with_family_defaults(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: wrapper)
     result = runner.invoke(app, args)
-    assert result.exit_code != 0, result.output
-    execute.assert_not_called()
-    assert "--agent claude-code" in result.output and "--agent codex" in result.output
+    if family_source == "user" and family == "claude-code":
+        assert result.exit_code == 0, result.output
+        assert execute.call_args.args[2]["AISQUARE_LAUNCH_AGENT"] == "claude-code"
+    else:
+        assert result.exit_code != 0, result.output
+        execute.assert_not_called()
+        assert "--agent claude-code" in result.output and "--agent codex" in result.output
     declared = runner.invoke(app, ["team", "bind", "coder", "--agent", family, "--bin", wrapper])
     assert declared.exit_code == 0, declared.output
     result = runner.invoke(app, args)

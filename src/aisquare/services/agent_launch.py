@@ -16,6 +16,7 @@ from aisquare.core.agent_adapters.types import (
     BadEffortError,
     config_home,
     model_overrides,
+    option_occurrences,
 )
 from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
 from aisquare.core.spawn import LAUNCH_AGENT_ENV as LAUNCH_AGENT_ENV
@@ -57,7 +58,8 @@ class UnknownWrapperError(ValueError):
             f"The agent family of {binary!r} is unknown. For a Claude wrapper, run: {self.fix}. "
             "For a Codex wrapper use --agent codex instead; for a Claude wrapper use "
             "--agent claude-code. "
-            "User, project and inherited defaults do not identify a wrapper's family."
+            "Non-Claude user defaults, project defaults and operator preferences "
+            "do not identify a wrapper's family."
         )
 
 
@@ -137,8 +139,8 @@ def resolve(
         (bound.agent if bound else None, "role"),
         (inferred.id if inferred else None, chosen_binary.source),
         (preferred, "project"),
-        (inherited, "inherited"),
         (owned_family, "inherited"),
+        (inherited, "operator"),
         (config.agents.default, "user"),
         ("claude-code", "default"),
     )
@@ -150,7 +152,11 @@ def resolve(
         raise ValueError(
             f"{chosen_binary.binary!r} runs {inferred.id}, but {adapter.id} was selected"
         )
-    elif inferred is None and source not in {"flag", "role", "default"}:
+    elif (
+        inferred is None
+        and source not in {"flag", "role", "default"}
+        and not (source == "user" and adapter.id == "claude-code")
+    ):
         raise UnknownWrapperError(chosen_binary.binary, role)
     effective_env = {**os.environ, **profile.env}
     return ResolvedAgent(
@@ -176,6 +182,45 @@ def use(name: str, *, project: bool = False, cwd: Path | None = None) -> str:
     return "user"
 
 
+@dataclass(frozen=True)
+class NativeArguments:
+    """One whole-argv normalization, with ownership retained for validation."""
+
+    argv: list[str]
+    model: str | None
+    effort: str | None
+    original_effort: str | None
+
+
+def prepare_arguments(
+    selected: ResolvedAgent,
+    owned: list[str],
+    forwarded: list[str] | None = None,
+) -> NativeArguments:
+    raw = [*owned, *(forwarded or [])]
+    # Saved Claude flags are part of AISquare's configuration contract. The
+    # final native override wins, and one-off passthrough belongs to the CLI
+    # (including values introduced by newer versions or wrappers).
+    if selected.adapter.id == "claude-code":
+        efforts = list(option_occurrences(raw, "--effort"))
+        if efforts and efforts[-1].index < len(owned):
+            selected.adapter.validate(None, efforts[-1].value)
+    model, original_effort = model_overrides(selected.adapter.id, raw)
+    argv = selected.adapter.native_args(raw)
+    effort = (
+        selected.adapter.effort_alias(original_effort)
+        if original_effort is not None
+        and selected.adapter.id == "codex"
+        and selected.adapter.effort_alias(original_effort) != original_effort.strip().lower()
+        else original_effort
+    )
+    return NativeArguments(argv, model, effort, original_effort)
+
+
+def _arguments(selected: ResolvedAgent, raw: list[str] | NativeArguments | None) -> NativeArguments:
+    return raw if isinstance(raw, NativeArguments) else prepare_arguments(selected, raw or [])
+
+
 def model_for(
     selected: ResolvedAgent,
     role: str,
@@ -183,15 +228,14 @@ def model_for(
     probe: bool | None = None,
     refresh: bool = False,
     effort: str | None = None,
-    raw_args: list[str] | None = None,
+    raw_args: list[str] | NativeArguments | None = None,
 ) -> harness.ModelResolution | None:
     if effort is not None:
         if not effort.strip():
             raise BadEffortError("--effort requires a reasoning level, not an empty value")
-        selected.adapter.model_args(None, effort)
-    _, original_effort = model_overrides(selected.adapter.id, raw_args or [])
-    normalized_args = selected.adapter.native_args(raw_args or [])
-    model, native_effort = model_overrides(selected.adapter.id, normalized_args)
+        selected.adapter.validate(None, effort)
+    arguments = _arguments(selected, raw_args)
+    model, native_effort = arguments.model, arguments.effort
     effective = {**os.environ, **selected.profile.env}
     if model is not None:
         effective[harness.role_env_key("MODEL", role)] = model
@@ -210,20 +254,28 @@ def model_for(
         # need the native CLI's -- separator; guessing intent changes argv.
         result = result.model_copy(update={"model": model, "source": "native", "skipped": []})
     if native_effort is not None:
-        notes: list[str] = []
+        notes = list(result.notes)
+        original_effort = arguments.original_effort
         if original_effort is not None and native_effort != original_effort:
             notes.append(
                 f"{selected.adapter.label} maps {original_effort!r} to native reasoning "
                 f"effort {native_effort!r}."
             )
-        if effort is not None and effort != native_effort:
+        if effort is not None and selected.adapter.effort_alias(effort) != native_effort:
             notes.append(
                 f"Native effort {native_effort!r} takes precedence over --effort {effort!r}."
             )
         result = result.model_copy(
-            update={"effort": native_effort.strip(), "effort_source": "native", "notes": notes}
+            update={
+                "effort": native_effort.strip(),
+                "effort_source": "native",
+                "notes": list(dict.fromkeys(notes)),
+            }
         )
-    resolved_model_args(selected, result, normalized_args)  # Validate effective owned defaults.
+    selected.adapter.validate(
+        None if model is not None else result.model or None,
+        None if native_effort is not None else result.effort or None,
+    )
     return result
 
 
@@ -260,21 +312,24 @@ def mcp_args(selected: ResolvedAgent) -> list[str]:
 
 
 def launch_model_for(
-    selected: ResolvedAgent, role: str, raw_args: list[str]
+    selected: ResolvedAgent, role: str, raw_args: list[str] | NativeArguments
 ) -> harness.ModelResolution | None:
     """Plain launch preserves Claude's native default; Codex honors saved pins."""
+    arguments = _arguments(selected, raw_args)
     if selected.adapter.capabilities.model_ladders:
-        selected.adapter.native_args(raw_args)  # Validate the native flags we own.
         return None
-    return model_for(selected, role, probe=False, raw_args=raw_args)
+    return model_for(selected, role, probe=False, raw_args=arguments)
 
 
 def resolved_model_args(
-    selected: ResolvedAgent, resolution: harness.ModelResolution | None, raw_args: list[str]
+    selected: ResolvedAgent,
+    resolution: harness.ModelResolution | None,
+    raw_args: list[str] | NativeArguments,
 ) -> list[str]:
     if resolution is None:
         return []
-    model, effort = model_overrides(selected.adapter.id, raw_args)
+    arguments = _arguments(selected, raw_args)
+    model, effort = arguments.model, arguments.effort
     return selected.adapter.model_args(
         None if model is not None else resolution.model or None,
         None if effort is not None else resolution.effort or None,

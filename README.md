@@ -337,7 +337,7 @@ agentic work. Launch a role through the harness and it resolves the ladder
 for you:
 
 ```sh
-aisquare team spawn planner            # prints: AISQUARE_ROLE=planner claude --model fable --effort high
+aisquare team spawn planner            # prints a complete aisquare launch command for this role
 aisquare team spawn coder --exec       # or replace this terminal with the session
 aisquare team harness                  # the whole role→model matrix + how it resolves now
 ```

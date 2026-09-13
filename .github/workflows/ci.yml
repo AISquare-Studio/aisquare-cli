@@ -15,6 +15,19 @@ permissions:
   contents: read
 
 jobs:
+  outbox-windows:
+    name: outbox (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Verify Windows error handling and durable retry receipts
+        run: python -m pytest -q tests/test_outbox_portability.py
+
   check:
     name: check (py${{ matrix.python-version }})
     runs-on: ubuntu-latest

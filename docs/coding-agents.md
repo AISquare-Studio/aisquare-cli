@@ -55,22 +55,25 @@ timeout. Reconnect preserves extra headroom for the two context hooks and
 restores the bounded timeouts for the other lifecycle hooks.
 
 Selection order is explicit `--agent`, role binding, an exact known binary
-override (legacy shorthand), project preference, operator `AISQUARE_CODING_AGENT`,
-inherited launch family, user default, then Claude Code. An arbitrary wrapper declares its family with
+override (legacy shorthand), project preference, inherited launch family,
+operator `AISQUARE_CODING_AGENT`, user default, then Claude Code. An arbitrary wrapper declares its family with
 `team bind ROLE --agent NAME --bin PATH` or `--agent` at launch (`NAME` is
-`claude-code` or `codex`). Without an operator-selected agent default, legacy
+`claude-code` or `codex`). With the implicit default or a saved Claude user default, legacy
 bin-only wrappers retain Claude compatibility, including inside an AISquare
 pane: the parent's exported family does not reclassify another wrapper.
-User/project defaults and an operator-exported `AISQUARE_CODING_AGENT` do not
+Non-Claude user defaults, project defaults, and operator `AISQUARE_CODING_AGENT` do not
 identify an arbitrary wrapper; with those defaults, declare its family explicitly.
 Conflicting known binaries and families are rejected.
 Changing a default affects future launches. AISquare writes the inherited family
-to `AISQUARE_LAUNCH_AGENT`; it leaves the operator preference unchanged. This
+to `AISQUARE_LAUNCH_AGENT` (source `inherited`); it leaves the operator preference
+unchanged (source `operator`). This
 applies equally to plain shells, fleet windows with an empty launch ID, and
 pasted commands. Printed commands for both agents use `aisquare launch`, which
 creates a fresh identity each time without exporting anything into the parent shell.
 Printed commands carry the resolved native arguments with `--no-bound-args` so
 the launcher does not prepend the saved arguments again.
+They also authorize custom role names with `--custom-role`; a plain `launch`
+continues to catch role typos unless that option or a saved binding declares the role.
 
 Coding agents are optional for a CLI-only installation (`install.sh --no-agent`).
 Doctor warns about a missing executable when an agent or launch profile has
@@ -151,14 +154,15 @@ Use `--` to explicitly separate native options from AISquare options. Codex
 model options such as `-mMODEL`. Legacy `-c BINARY` selects an executable;
 `--command BINARY` is unambiguous, including for a path containing `=`.
 Attached AISquare options retain their values, including spaces in executable
-paths or environment assignments. AISquare owns its declared options anywhere
-before the separator, including after unknown native options and their values.
-It cannot infer where a native subcommand or prompt begins. For example,
-`-listfiles` is AISquare's attached `-l istfiles` on `fleet spawn`; use
-`asq fleet spawn coder --agent codex -- exec -listfiles` to forward that token.
-The same rule keeps `-c/opt/my wrapper` and `-eGREETING=hello world` working.
-The first `--` belongs to AISquare. To pass a literal dash-prefixed prompt, include
-the native separator too:
+paths or environment assignments. Once a native subcommand or positional prompt
+begins, all following tokens belong to the agent. For example,
+`asq fleet spawn coder --agent codex exec -listfiles` forwards both native tokens;
+`asq launch coder --agent codex exec -- -listfiles` preserves the native separator.
+Known native option values such as `--model MODEL` and `--add-dir DIR` do not
+start that boundary. For an unknown native flag whose arity is ambiguous, put
+AISquare options first and use `--`; the parser refuses ambiguous mixed ownership.
+An explicit separator before any native command belongs to AISquare. To pass a
+literal dash-prefixed prompt directly, include the native separator too:
 
 ```sh
 asq launch coder --agent codex -- -- '-migrate the schema'
@@ -167,8 +171,9 @@ asq launch coder --agent codex -- -- '-migrate the schema'
 Explicit native model/effort options override AISquare defaults without injecting
 a second value. Codex validates its own `-c` values, including future reasoning
 levels; the shared aliases `max` and `ultracode` are rewritten to `xhigh` in the
-actual native arguments. Claude effort flags use the same validation whether
-bound with `--arg` or supplied as AISquare options. `team harness` and `team spawn` report these choices with source `native`;
+actual native arguments. AISquare validates its explicit `--effort` and the
+effective Claude effort saved with `--arg`. One-off native passthrough is validated
+by the agent, including future levels; a later native effort supersedes a saved one. `team harness` and `team spawn` report these choices with source `native`;
 these are argv overrides, not availability claims. Codex parses `-migrate` as
 `-m igrate`, including a space-containing suffix in a quoted token. To preserve
 a configured model and send that text as a prompt, use the two separators above.
@@ -303,3 +308,12 @@ Native contracts: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
 [configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
 [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and
 [non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).
+
+Native OTLP retries use deterministic spool names and durable receipts independent
+of the board. A killed receiver or locked board cannot republish an already queued,
+claimed, or delivered event within the seven-day receipt retention period. Shipping
+still retries network delivery in the existing outbox; this does not promise exactly-once
+network delivery if the gateway accepts a request but its acknowledgement is lost.
+Malformed members are skipped without discarding valid neighboring records. Permanent
+spool failures cost at most one write attempt per request, and `aisquare doctor` checks
+spool access and reports the most recent receiver failure.

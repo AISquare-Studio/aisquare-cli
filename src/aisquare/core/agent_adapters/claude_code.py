@@ -26,6 +26,36 @@ class ClaudeCodeAdapter:
         model_proxy=True,
         model_ladders=True,
         legacy_fleet_args=True,
+        value_options=frozenset(
+            {
+                "--model",
+                "-m",
+                "--add-dir",
+                "--settings",
+                "--effort",
+                "--resume",
+                "--session-id",
+                "--permission-mode",
+                "--mcp-config",
+                "--allowedTools",
+                "--disallowedTools",
+                "--system-prompt",
+                "--append-system-prompt",
+                "--max-turns",
+                "--output-format",
+                "--input-format",
+                "--name",
+            }
+        ),
+        switch_options=frozenset(
+            {
+                "--dangerously-skip-permissions",
+                "--continue",
+                "--verbose",
+                "--chrome",
+                "--no-chrome",
+            }
+        ),
     )
 
     def resolve_model(
@@ -38,7 +68,6 @@ class ClaudeCodeAdapter:
         refresh: bool,
         effort: str | None,
     ) -> harness.ModelResolution | None:
-        self.model_args(None, effort)
         return harness.resolve_model(
             role,
             probe=probe,
@@ -64,18 +93,21 @@ class ClaudeCodeAdapter:
         return (home / "CLAUDE.md",)
 
     def native_args(self, args: list[str]) -> list[str]:
-        from aisquare.core.agent_adapters.types import option_values
-
-        for effort in option_values(args, "--effort"):
-            self.model_args(None, effort)
         return list(args)
 
-    def model_args(self, model: str | None, effort: str | None) -> list[str]:
+    @staticmethod
+    def effort_alias(effort: str) -> str:
+        return effort.strip().lower()
+
+    def validate(self, model: str | None, effort: str | None) -> None:
         if effort is not None and harness.normalize_effort(effort) is None:
             raise BadEffortError(
                 f"Claude Code does not support effort {effort!r}; use one of: "
                 + ", ".join((*harness.EFFORT_SCALE, harness.ULTRACODE))
             )
+
+    def model_args(self, model: str | None, effort: str | None) -> list[str]:
+        self.validate(model, effort)
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
 
     def fleet_args(

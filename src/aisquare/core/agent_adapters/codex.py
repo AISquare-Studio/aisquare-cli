@@ -29,6 +29,39 @@ class CodexAdapter:
         positional_prompt=True,
         first_context_file_only=True,
         sandbox_permissions=True,
+        value_options=frozenset(
+            {
+                "--model",
+                "-m",
+                "--config",
+                "--add-dir",
+                "--cd",
+                "-C",
+                "--image",
+                "-i",
+                "--profile",
+                "-p",
+                "--sandbox",
+                "-s",
+                "--ask-for-approval",
+                "--output-schema",
+                "--output-last-message",
+                "-o",
+            }
+        ),
+        switch_options=frozenset(
+            {
+                "--no-alt-screen",
+                "--full-auto",
+                "--yolo",
+                "--search",
+                "--oss",
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "--ephemeral",
+            }
+        ),
     )
 
     def resolve_model(
@@ -60,12 +93,19 @@ class CodexAdapter:
         return {"max": "xhigh", "ultracode": "xhigh"}.get(normalized, normalized)
 
     def native_args(self, args: list[str]) -> list[str]:
-        from aisquare.core.agent_adapters.types import model_overrides, rewrite_option_values
+        from aisquare.core.agent_adapters.types import config_assignment, rewrite_option_values
 
         def config(value: str) -> str:
-            _, effort = model_overrides(self.id, ["-c", value])
-            if effort is not None and self.effort_alias(effort) != effort.strip().lower():
-                return value.partition("=")[0] + '="' + self.effort_alias(effort) + '"'
+            parsed = config_assignment(value)
+            if parsed is not None:
+                key, effort = parsed
+                if (
+                    key == "model_reasoning_effort"
+                    and self.effort_alias(effort) != effort.strip().lower()
+                ):
+                    return key + '="' + self.effort_alias(effort) + '"'
+                if key in {"model", "model_reasoning_effort"}:
+                    return key + "=" + value.partition("=")[2]
             return value
 
         return rewrite_option_values(args, config, "-c", "--config")
@@ -91,6 +131,9 @@ class CodexAdapter:
 
     def context_files(self, home: Path) -> tuple[Path, ...]:
         return (home / "AGENTS.override.md", home / "AGENTS.md")
+
+    def validate(self, model: str | None, effort: str | None) -> None:
+        self.reasoning_effort(effort)
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         effort = self.reasoning_effort(effort)

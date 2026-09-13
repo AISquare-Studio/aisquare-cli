@@ -392,6 +392,10 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
     may not speak the flag: same answer, for the same reason. Otherwise mint a
     fresh id and hand it over — the only case that produces a real join.
     """
+    # Flags past the native literal boundary are prompt text, not identity.
+    args = list(args)
+    if "--" in args:
+        args = args[: args.index("--")]
     present, value = _flag_value(args, _SESSION_ID_FLAG)
     if present:
         if value is None:

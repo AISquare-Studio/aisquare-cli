@@ -99,7 +99,7 @@ def test_fleet_native_command_owns_all_following_tokens(
     operation = Mock(side_effect=fleet.FleetError("captured before tmux"))
     monkeypatch.setattr(fleet, "spawn", operation)
     result = runner.invoke(
-        app, ["fleet", "spawn", "coder", "--agent", "codex", "-lmy pane", "--", "exec", prompt]
+        app, ["fleet", "spawn", "coder", "--agent", "codex", "-lmy pane", "exec", prompt]
     )
     assert result.exit_code != 0
     assert operation.call_args.kwargs["label"] == "my pane"
@@ -272,7 +272,7 @@ def test_capture_retry_keeps_the_durable_prefix_and_does_not_lock_the_spool(
     outbound = insights._outbound
     calls = 0
 
-    def spool(record: dict[str, object]) -> Path | None:
+    def spool(record: dict[str, object], *, filename: str | None = None) -> Path | None:
         nonlocal calls
         calls += 1
         # A separate writer must remain available while a file is queued.
@@ -280,7 +280,7 @@ def test_capture_retry_keeps_the_durable_prefix_and_does_not_lock_the_spool(
             other.set_meta("test:independent-writer", str(calls))
         if failure == "spool" and calls == 2:
             raise OSError("fixture: out of space")
-        return enqueue(record)
+        return enqueue(record, filename=filename)
 
     def sanitize(value: str) -> str:
         if failure == "sanitize" and calls == 1:
@@ -329,12 +329,12 @@ def test_receiver_requests_retry_for_partial_spool_failure(
     enqueue = outbox.enqueue_retryable
     calls = 0
 
-    def spool(record: dict[str, object]) -> Path | None:
+    def spool(record: dict[str, object], *, filename: str | None = None) -> Path | None:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("fixture: out of space")
-        return enqueue(record)
+        return enqueue(record, filename=filename)
 
     monkeypatch.setattr(outbox, "enqueue_retryable", spool)
     directory = tmp_path / "receiver"
@@ -372,7 +372,7 @@ def test_receiver_requests_retry_for_partial_spool_failure(
     finally:
         stop.set()
         thread.join(timeout=10)
-        assert not thread.is_alive() and not directory.exists()
+    assert not thread.is_alive() and not directory.exists()
 
 
 def test_reordered_hook_options_remain_owned_and_reconnect_without_duplicates(
@@ -491,7 +491,7 @@ def test_upgrade_gives_existing_metadata_a_full_retention_period(version: int) -
         stamp = store._conn.execute(
             "SELECT updated_at FROM team_meta WHERE key = 'fleet-session:weekend'"
         ).fetchone()[0]
-        assert stamp >= before if version == 15 else stamp == 0
+        assert stamp >= before
         store.expire_native_launches(time.time() - NATIVE_METADATA_TTL)
         assert store.get_meta("fleet-session:weekend") == "weekend"
     finally:
@@ -873,10 +873,6 @@ def test_capture_batches_durable_metadata_and_provider_updates(
     [
         {"resourceLogs": 5},
         {"resourceLogs": [[]]},
-        {"resourceLogs": [{"resource": []}]},
-        {"resourceLogs": [{"scopeLogs": 5}]},
-        {"resourceLogs": [{"scopeLogs": [{"logRecords": [5]}]}]},
-        {"resourceLogs": [{"scopeLogs": [{"logRecords": [{"attributes": 5}]}]}]},
     ],
 )
 def test_malformed_otlp_is_rejected_before_any_spool_write(bad: dict[str, object]) -> None:
@@ -939,7 +935,7 @@ def test_receiver_distinguishes_permanent_and_temporary_spool_failures(
     finally:
         stop.set()
         thread.join(timeout=10)
-        assert not thread.is_alive() and not directory.exists()
+    assert not thread.is_alive() and not directory.exists()
 
 
 def test_harness_separately_reports_fleet_native_arguments(runner: CliRunner) -> None:

@@ -49,7 +49,7 @@ def test_selection_precedence_and_mixed_roles(
     agent_launch.use("codex")
     assert agent_launch.resolve().source == "user"
     monkeypatch.setenv(agent_launch.ACTIVE_AGENT_ENV, "claude-code")
-    assert agent_launch.resolve().source == "inherited"
+    assert agent_launch.resolve().source == "operator"
     agent_launch.use("codex", project=True, cwd=tmp_path)
     assert agent_launch.resolve().source == "project"
     config = load_config()

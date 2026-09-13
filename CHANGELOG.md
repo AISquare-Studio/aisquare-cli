@@ -12,13 +12,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family selection; both printed spawn commands now use the shared launcher.
 - Preserve resumed session bindings, rate-limit cleanup for manually started
   agents too, and defer account refreshes when a sign-in changes an in-flight read.
-- Batch native telemetry checkpoints, distinguish retryable spool failures from
-  permanent ones, and reject malformed OTLP requests before writing events.
-
-
-
-- Bin-only wrappers retain Claude compatibility when no coding-agent default is selected.
-  This works inside AISquare-launched panes too. With a user, project, or
+- Deduplicate native telemetry with durable spool receipts across receiver crashes
+  and board checkpoint failures. Report spool failures in doctor and preserve valid
+  records beside malformed OTLP entries.
+- Bin-only wrappers retain Claude compatibility with the implicit or saved Claude user default.
+  This works inside AISquare-launched panes too. With a non-Claude user, project, or
   operator-exported agent default, explicitly bind the wrapper's
   family using `team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`).
 - Fleet `extra_args` retain their existing Claude ownership. Other agents use

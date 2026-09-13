@@ -936,14 +936,14 @@ def spawn(
     model_resolution = None
     # Validate native model pins before creating a worktree/window or live row.
     try:
-        selected.adapter.native_args([*selected.profile.args, *role_args, *agent_args])
-        if not selected.adapter.capabilities.model_ladders:
-            model_resolution = agent_launch.model_for(
-                selected,
-                role,
-                probe=False,
-                raw_args=[*selected.profile.args, *role_args, *agent_args],
-            )
+        defaults = harness.role_defaults(
+            role, binary=resolution.binary, args=[*selected.profile.args, *role_args, *agent_args]
+        )
+        arguments = agent_launch.prepare_arguments(
+            selected, [*defaults.args, *selected.profile.args, *role_args], list(agent_args)
+        )
+        model_resolution = agent_launch.launch_model_for(selected, role, arguments)
+        model_args = agent_launch.resolved_model_args(selected, model_resolution, arguments)
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     notes: list[str] = list(model_resolution.notes) if model_resolution else []
@@ -978,39 +978,9 @@ def spawn(
         else:
             notes.append(f"label {label!r} is held by a live agent — using {picked!r}")
 
-    use_worktree = role_config.worktree if worktree is None else worktree
-    cwd = project.root
-    if use_worktree:
-        if not is_git_project(project.root):
-            raise FleetError(
-                "not a git repository — spawn without --worktree or pick a repo inside it"
-            )
-        branch = branch_name(
-            codename,
-            task_id=resolved_task_id,
-            title=task.title if task is not None else picked,
-        )
-
-        def refuse_if_taken() -> None:
-            _refuse_occupied_worktree(project, config.worktree_dir, picked)
-
-        refuse_if_taken()
-        cwd = _ensure_worktree(
-            project.root,
-            config.worktree_dir,
-            picked,
-            branch,
-            notes,
-            refuse_if_taken=refuse_if_taken,
-        )
-
     mode = role_config.permission_mode if permission_mode is None else permission_mode
-    extra = selected.adapter.native_args(list(agent_args))
-    role_args = selected.adapter.native_args(role_args)
     identity = (
-        explainability_service.plan_session_identity(
-            resolution.binary, [*selected.profile.args, *role_args, *extra]
-        )
+        explainability_service.plan_session_identity(resolution.binary, arguments.argv)
         if selected.adapter.capabilities.assigns_session_id
         else explainability_service.SessionIdentity(None, note="native ID binds at session start")
     )
@@ -1036,7 +1006,7 @@ def spawn(
         flags += ["--command", resolution.binary]
     # The parent already resolved this family. Carry that decision through
     # tmux so a legacy wrapper is not reclassified against inherited defaults.
-    flags += ["--agent", selected.adapter.id]
+    flags += ["--agent", selected.adapter.id, "--no-bound-args"]
     native_mode = mode if selected.adapter.id == "claude-code" else permission_mode
     native_sandbox = (
         role_config.sandbox if selected.adapter.capabilities.sandbox_permissions else None
@@ -1069,7 +1039,9 @@ def spawn(
         native_args, native_env = selected.adapter.disable_native_teams()
         native += native_args
         env.update(native_env)
-    command = selfcli.argv_for(["launch", role, *flags, "--", *native, *role_args, *extra])
+    command = selfcli.argv_for(
+        ["launch", role, *flags, "--", *native, *model_args, *arguments.argv]
+    )
     if prompt and selected.adapter.capabilities.positional_prompt:
         command += ["--", prompt]
     if account is not None:
@@ -1080,6 +1052,32 @@ def spawn(
         # the Accounts page's sign-in window carries them.
         command, carried = claude_accounts_service.carry_environment(command)
         env.update(carried)
+    use_worktree = role_config.worktree if worktree is None else worktree
+    cwd = project.root
+    if use_worktree:
+        if not is_git_project(project.root):
+            raise FleetError(
+                "not a git repository — spawn without --worktree or pick a repo inside it"
+            )
+        branch = branch_name(
+            codename,
+            task_id=resolved_task_id,
+            title=task.title if task is not None else picked,
+        )
+
+        def refuse_if_taken() -> None:
+            _refuse_occupied_worktree(project, config.worktree_dir, picked)
+
+        refuse_if_taken()
+        cwd = _ensure_worktree(
+            project.root,
+            config.worktree_dir,
+            picked,
+            branch,
+            notes,
+            refuse_if_taken=refuse_if_taken,
+        )
+
     tmux_session = session_name(codename)
     try:
         window = srv.spawn_window(tmux_session, name=picked, cwd=cwd, command=command, env=env)

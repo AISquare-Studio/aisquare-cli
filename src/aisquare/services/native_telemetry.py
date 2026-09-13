@@ -8,6 +8,7 @@ owns gateway authentication, delivery and retry. It exits with its owner.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import hmac
 import json
@@ -28,7 +29,7 @@ from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
 from aisquare.core.agent_adapters.types import option_values
 from aisquare.core.agent_sessions import METADATA_PRUNE_INTERVAL, prune_metadata
 from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_TTL
-from aisquare.core.store import is_locked_error, store_session
+from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
@@ -47,7 +48,7 @@ def _read_config(path: Path, layer: str) -> dict[str, Any]:
             return tomllib.load(handle)
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise NativeConfigError(
             f"Cannot inspect Codex {layer} config {path}: {exc}. "
             "Native telemetry configuration left unchanged."
@@ -68,10 +69,10 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
         try:
             try:
                 parsed = tomllib.loads(value)
-            except tomllib.TOMLDecodeError:
+            except (tomllib.TOMLDecodeError, RecursionError):
                 # Codex accepts an unquoted string as a config override value.
                 parsed = tomllib.loads(f"{key}={json.dumps(raw)}")
-        except tomllib.TOMLDecodeError:
+        except (tomllib.TOMLDecodeError, RecursionError):
             continue  # Native argument validation belongs to Codex.
         if "otel" in parsed:
             return True
@@ -139,19 +140,12 @@ class InvalidPayload(ValueError):
     """Malformed OTLP JSON cannot succeed on retry."""
 
 
-def _object(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise InvalidPayload("OTLP object expected")
-    return value
-
-
 def _objects(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-        raise InvalidPayload("OTLP array of objects expected")
-    return value
+    """Skip malformed members; proto3 JSON null means the field is absent."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
-def _attributes(items: list[dict[str, Any]]) -> dict[str, object]:
+def _attributes(items: Any) -> dict[str, object]:
     result: dict[str, object] = {}
     for item in _objects(items):
         key = item.get("key")
@@ -175,8 +169,14 @@ def events(payload: dict[str, Any]) -> Iterator[dict[str, object]]:
     and set only the observed timestamp. Preserve that identity on retries
     without collapsing distinct calls that happen to have identical usage.
     """
-    for resource in _objects(_object(payload).get("resourceLogs", [])):
-        base = _attributes(_object(resource.get("resource", {})).get("attributes", []))
+    resources = payload.get("resourceLogs")
+    if resources is not None and (
+        not isinstance(resources, list) or (resources and not _objects(resources))
+    ):
+        raise InvalidPayload("OTLP resourceLogs must contain resource objects")
+    for resource in _objects(resources):
+        attributes = resource.get("resource")
+        base = _attributes(attributes.get("attributes") if isinstance(attributes, dict) else None)
         for scope in _objects(resource.get("scopeLogs", [])):
             for log in _objects(scope.get("logRecords", [])):
                 record = {**base, **_attributes(log.get("attributes", []))}
@@ -210,13 +210,14 @@ def _refresh_settings() -> None:
 
 
 def capture(payload: dict[str, Any], launch_id: str) -> int:
-    observations = list(events(payload))  # Validate the entire batch before writing anything.
+    observations = list(events(payload))
     _refresh_settings()
-    if not insights.shipping_enabled() or not insights.settings().enabled:
+    if not observations or not insights.shipping_enabled() or not insights.settings().enabled:
         return 0
     count = 0
-    # Queue without holding SQLite's writer lock. Checkpoint the completed
-    # prefix once, including on partial failure, before asking for a retry.
+    spool_failed = False
+    # The outbox owns durable retry identity independently of this board cache.
+    # No board writer lock is held while files are queued.
     with store_session() as store:
         session_id = store.get_meta(f"launch-session:{launch_id}")
         session = store.get_session(session_id) if session_id else None
@@ -242,45 +243,58 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
                     if providers.get(provider_key) != provider:
                         providers[provider_key] = provider
                         updates[provider_key] = provider
-            for native in observations:
-                # Redact before writing anything destined for the gateway. No raw
-                # body, prompt, tool parameters, authorization or exporter headers.
-                clean = {
-                    key: insights._outbound(value) if isinstance(value, str) else value
-                    for key, value in native.items()
-                }
-                digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
-                dedup_key = f"native-event:{launch_id}:{digest}"
-                if dedup_key in dedup:
-                    continue
-                # Provider is reported at conversation start, not on each SSE
-                # usage event. Enrich after hashing so a late startup observation
-                # cannot make a retried usage record count twice.
-                known_provider = providers.get(
-                    f"native-provider:{launch_id}:{native.get('conversation.id')}"
-                )
-                if known_provider:
-                    clean.setdefault("provider_name", known_provider)
-                record: dict[str, object] = {
-                    "v": insights.RECORD_VERSION,
-                    "kind": "native_event",
-                    "agent": "codex",
-                    "at": datetime.now(UTC).isoformat(),
-                    "run_key": launch_id,
-                    "session_id": session_id,
-                    "project_id": project_id,
-                    "text": "",
-                    "native": clean,
-                }
-                if outbox.enqueue_retryable(record) is None:
-                    continue  # Permanent spool failure: this observer must fail open.
-                updates[dedup_key] = "1"
-                dedup[dedup_key] = "1"
-                count += 1
-        finally:
+            with outbox.retry_batch() as batch:
+                for native in observations:
+                    # Redact before writing anything destined for the gateway. No raw
+                    # body, prompt, tool parameters, authorization or exporter headers.
+                    clean = {
+                        key: insights._outbound(value) if isinstance(value, str) else value
+                        for key, value in native.items()
+                    }
+                    digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
+                    dedup_key = f"native-event:{launch_id}:{digest}"
+                    if dedup_key in dedup:
+                        continue
+                    # Provider is reported at conversation start, not on each SSE
+                    # usage event. Enrich after hashing so a late startup observation
+                    # cannot make a retried usage record count twice.
+                    known_provider = providers.get(
+                        f"native-provider:{launch_id}:{native.get('conversation.id')}"
+                    )
+                    if known_provider:
+                        clean.setdefault("provider_name", known_provider)
+                    record: dict[str, object] = {
+                        "v": insights.RECORD_VERSION,
+                        "kind": "native_event",
+                        "agent": "codex",
+                        "at": datetime.now(UTC).isoformat(),
+                        "run_key": launch_id,
+                        "session_id": session_id,
+                        "project_id": project_id,
+                        "text": "",
+                        "native": clean,
+                    }
+                    queued = batch.enqueue(record, dedup_key)
+                    if queued is None:
+                        spool_failed = True
+                        break  # One failed write per request on a permanently unwritable queue.
+                    updates[dedup_key] = "1"
+                    dedup[dedup_key] = "1"
+                    count += int(queued)
+        except BaseException:
+            try:
+                with store.transaction():
+                    for key, value in updates.items():
+                        store.set_meta(key, value)
+            except Exception as checkpoint_error:
+                outbox.report_failure(checkpoint_error)
+            raise
+        else:
             with store.transaction():
                 for key, value in updates.items():
                     store.set_meta(key, value)
+    if not spool_failed:
+        outbox.clear_failure()
     return count
 
 
@@ -320,15 +334,22 @@ def serve(
                 self.send_error(400)
                 return
             except OSError as exc:
-                if outbox.temporary_write_error(exc):
+                outbox.report_failure(exc)
+                # Only known permanent write failures are acknowledged. Unknown
+                # observer bugs must be visible and must not silently lose a batch.
+                if exc.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
                     self.send_error(503)
                     return
-            except sqlite3.OperationalError as exc:
-                if is_locked_error(exc) or "disk is full" in str(exc).lower():
+            except sqlite3.Error as exc:
+                outbox.report_failure(exc)
+                code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+                if code != sqlite3.SQLITE_READONLY and "readonly database" not in str(exc).lower():
                     self.send_error(503)
                     return
-            except Exception:
-                pass  # An unrecoverable observer failure costs a trace, never a launch.
+            except Exception as exc:
+                outbox.report_failure(exc)
+                self.send_error(503)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

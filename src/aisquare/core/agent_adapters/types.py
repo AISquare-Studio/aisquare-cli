@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+import re
+import tomllib
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -29,6 +31,8 @@ class AgentCapabilities:
     first_context_file_only: bool = False
     sandbox_permissions: bool = False
     legacy_fleet_args: bool = False
+    value_options: frozenset[str] = frozenset()
+    switch_options: frozenset[str] = frozenset()
 
 
 class AgentAdapter(Protocol):
@@ -58,6 +62,8 @@ class AgentAdapter(Protocol):
         effort: str | None,
     ) -> harness.ModelResolution | None: ...
     def native_args(self, args: list[str]) -> list[str]: ...
+    def validate(self, model: str | None, effort: str | None) -> None: ...
+    def effort_alias(self, effort: str) -> str: ...
     def context_files(self, home: Path) -> tuple[Path, ...]: ...
     def model_args(self, model: str | None, effort: str | None) -> list[str]: ...
     def fleet_args(
@@ -83,89 +89,82 @@ def config_home(
     return Path(raw).expanduser().resolve()
 
 
-def option_values(args: Sequence[str], *options: str) -> list[str]:
+@dataclass(frozen=True)
+class OptionValue:
+    index: int
+    value_index: int
+    prefix: str
+    value: str
+
+
+def option_occurrences(args: Sequence[str], *options: str) -> Iterator[OptionValue]:
     """Read native option values up to the native CLI's own ``--`` boundary.
 
     The outer AISquare separator has already been consumed. Like the native
     CLI, ``-mfoo`` is a model; a literal dash-prefixed prompt needs native ``--``.
     """
-    values: list[str] = []
-    tokens = iter(args)
-    for arg in tokens:
+    tokens = iter(enumerate(args))
+    for index, arg in tokens:
         if arg == "--":
             break
         if arg in options:
-            value = next(tokens, None)
-            if value is not None and value != "--":
-                values.append(value)
-            elif value == "--":
+            following = next(tokens, None)
+            if following is not None and following[1] != "--":
+                yield OptionValue(index, following[0], "", following[1])
+            elif following is not None:
                 break
         else:
             for option in options:
                 if arg.startswith(option + "="):
-                    values.append(arg[len(option) + 1 :])
+                    yield OptionValue(index, index, option + "=", arg[len(option) + 1 :])
                     break
                 if len(option) == 2 and arg.startswith(option) and len(arg) > 2:
-                    values.append(arg[2:])
+                    yield OptionValue(index, index, option, arg[2:])
                     break
-    return values
 
 
-def has_option(args: Sequence[str], *options: str) -> bool:
-    return bool(option_values(args, *options))
+def option_values(args: Sequence[str], *options: str) -> list[str]:
+    return [item.value for item in option_occurrences(args, *options)]
 
 
 def rewrite_option_values(
     args: Sequence[str], transform: Callable[[str], str], *options: str
 ) -> list[str]:
     """Transform values while preserving native spelling and the literal boundary."""
-    result: list[str] = []
-    tokens = iter(args)
-    for arg in tokens:
-        if arg == "--":
-            result.extend([arg, *tokens])
-            break
-        if arg in options:
-            result.append(arg)
-            value = next(tokens, None)
-            if value == "--":
-                result.extend([value, *tokens])
-                break
-            if value is not None:
-                result.append(transform(value))
-            continue
-        for option in options:
-            if arg.startswith(option + "="):
-                arg = option + "=" + transform(arg[len(option) + 1 :])
-                break
-            if len(option) == 2 and arg.startswith(option) and len(arg) > 2:
-                arg = option + transform(arg[2:])
-                break
-        result.append(arg)
+    result = list(args)
+    for item in option_occurrences(args, *options):
+        result[item.value_index] = item.prefix + transform(item.value)
     return result
+
+
+def is_config_assignment(value: str) -> bool:
+    return re.match(r"^[A-Za-z_][\w.-]*\s*=", value.lstrip()) is not None
+
+
+def config_assignment(assignment: str) -> tuple[str, str] | None:
+    key, sep, value = assignment.partition("=")
+    if not sep:
+        return None
+    try:
+        decoded = tomllib.loads("value=" + value)["value"]
+    except (ValueError, RecursionError):
+        decoded = value  # Native CLI validation owns malformed/future TOML values.
+    return key.strip(), decoded if isinstance(decoded, str) else value
 
 
 def model_overrides(agent: str, args: Sequence[str]) -> tuple[str | None, str | None]:
     """Explicit native model/effort wins over AISquare's configured defaults."""
-    import tomllib
-
     model: str | None = None
     effort: str | None = None
     if agent == "codex":
         for assignment in option_values(args, "-c", "--config"):
-            key, sep, value = assignment.partition("=")
-            if not sep or key.strip() not in {"model", "model_reasoning_effort"}:
+            parsed = config_assignment(assignment)
+            if parsed is None:
                 continue
-            try:
-                decoded = tomllib.loads("value=" + value)["value"]
-            except ValueError:
-                decoded = value  # Codex also accepts bare string overrides.
-            # Even a value of the wrong TOML type belongs to Codex. Suppress
-            # our defaults and let its native config validation explain it.
-            native = decoded if isinstance(decoded, str) else value
-            if key.strip() == "model":
+            key, native = parsed
+            if key == "model":
                 model = native
-            else:
+            elif key == "model_reasoning_effort":
                 effort = native
     models = option_values(args, "--model", "-m")
     if models:

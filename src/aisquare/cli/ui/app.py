@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -54,7 +55,7 @@ from aisquare.cli.ui.sidebar import (
     SpawnAgent,
     accounts_summary_text,
 )
-from aisquare.cli.ui.terminal import EscapeToSidebar
+from aisquare.cli.ui.terminal import EscapeToSidebar, route_selection_gesture
 from aisquare.cli.ui.theme import ThemePicker, remember_theme, restore_theme
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, read_session, summarise
 from aisquare.cli.ui.views.agent import AgentView
@@ -147,6 +148,7 @@ class HelpScreen(ModalScreen[None]):
             ("↑ ↓ Enter", "move over the sidebar and open the row under the cursor"),
             (self.escape_key.upper(), "hand focus from an agent's pane back to the sidebar"),
             ("wheel", "scroll an agent pane; shift/alt+PgUp/PgDn too, shift+Home/End"),
+            ("drag", "select text in a pane (double-click: a word) — copied on release"),
             ("t", "themes (applied live, autosaved)"),
             ("r", "refresh now"),
             ("F1", "command palette"),
@@ -208,6 +210,8 @@ class FleetApp(App[None], inherit_bindings=False):
         self._doctor_worker: Worker[Any] | None = None
         """The newest doctor run; an older one's result is not ours to paint."""
         self._theme_restored = False
+        self._gesture_button: int | None = None
+        """Which button began the selection gesture now running, if one is."""
 
     # --- layout -------------------------------------------------------------------
 
@@ -283,6 +287,26 @@ class FleetApp(App[None], inherit_bindings=False):
             parent(theme_name)
         if self._theme_restored:
             remember_theme(theme_name)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Remember which button began the gesture now running.
+
+        The screen posts ``TextSelected`` from its MouseUp branch and it carries
+        no button, while the pane only sees a press that lands ON it — so a
+        right-button drag begun on the agent header read as a left one and
+        copied (review of #120, round 7). Here every press is visible.
+        """
+        self._gesture_button = event.button
+
+    def on_text_selected(self, event: events.TextSelected) -> None:
+        """A selection gesture ended anywhere on screen — tell the panes.
+
+        One line, because the routing itself lives beside the widget it serves
+        and every test host calls the same function: a harness that ends a
+        gesture differently from this is a test that proves nothing.
+        """
+        button, self._gesture_button = self._gesture_button, None
+        route_selection_gesture(self, button)
 
     # --- help / refresh ---------------------------------------------------------------
 

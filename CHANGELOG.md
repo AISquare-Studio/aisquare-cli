@@ -7,32 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Native role personalities, work briefs and command reports.** Three separate
-  features with separate controls, none of which requires the Ponytail, Spec Kit
-  or RTK plugins ([docs/personas.md](docs/personas.md),
-  [docs/native-workflow.md](docs/native-workflow.md),
+- **Work briefs and command reports.** Two separate features with separate
+  controls, neither of which requires the Ponytail, Spec Kit or RTK plugins
+  ([docs/native-workflow.md](docs/native-workflow.md),
   [docs/command-reports.md](docs/command-reports.md)).
-  - *Personas* narrate recorded board activity in a chosen cast — two ship,
-    **Studio** and **Mission Control**, with a voice per role and a fallback —
-    in a **Role narration** panel beside the manager, each worker and the Board,
-    newest record first with the original record under every caption. `asq
-    persona` (`list`, `status`, `preview`, `use [--role]`, `off`, `reset`, `add`
-    from a file, an HTTPS URL or a text description, `edit`, `export`, `remove`)
-    and the same `/persona …` commands in the interface's **Personas** dialog
-    (Persona… button, or F1 → Personas), which focuses its command box on open.
-    Personas are display-only: they never enter worker prompts, launch arguments,
-    task notes, `--json` output or Explainability events, and a replay test pins
-    every agent-facing surface byte-for-byte across Off/Studio/Mission Control.
-    Packs are validated data (no code, no markup, no control characters; a
-    hostile deeply nested document is an error, not a crash), installed
-    atomically under `~/.aisquare/personas`, versioned, and downloadable without
-    following redirects. Pattern kinds are exactly the event kinds the board
-    records (`task_added`, `task_claimed`, `task_reopened`, `brief_evidence`, …).
-    Optionally, `asq persona voice on` makes the agents *themselves* speak in
-    the cast: each new session AI Square launches for that project receives the
-    pack's per-role voice through Claude Code's `--append-system-prompt`, framed
-    to govern wording only. Off by default; a pack created from a plain
-    description uses that description as its voice.
   - *Work briefs* record what was asked as stable requirements (`R1`, `R2`, …)
     linked to ordinary board tasks, with evidence per requirement and per task;
     `asq task done` refuses a linked task without fresh evidence, `asq brief

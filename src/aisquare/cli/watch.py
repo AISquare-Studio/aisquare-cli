@@ -85,7 +85,7 @@ def _who(event: TeamEvent, roles: dict[str, str]) -> tuple[str, str, str]:
     return _ROLE_EMOJI.get(role, "🤖"), name, _ROLE_STYLE.get(role, "white")
 
 
-def feed_line(event: TeamEvent, roles: dict[str, str], project: ProjectInfo | None = None) -> Text:
+def feed_line(event: TeamEvent, roles: dict[str, str]) -> Text:
     """One bot-style feed line: ``🔨 coder·7188d074 🤝 claimed: wire auth``."""
     emoji, name, style = _who(event, roles)
     verb_emoji, verb = _KIND_VERB.get(event.kind, ("•", event.kind))
@@ -441,7 +441,7 @@ def board_frame(height: int, width: int) -> Text:
     text.append("updates (newest last)\n", style="bold cyan")
     roles = {s.id: s.role for s in sessions}
     for event in events[-room:]:
-        text.append(feed_line(event, roles, project))
+        text.append(feed_line(event, roles))
         text.append("\n")
     return text
 

@@ -1,8 +1,7 @@
-"""Real local persona controls, source identity and launcher integration."""
+"""Source identity and launcher integration."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
@@ -12,101 +11,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.app import App, ComposeResult
-from textual.containers import Vertical
-from textual.widgets import Input, Static, TextArea
 from typer.testing import CliRunner
 
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
-from aisquare.cli.ui.persona_activity import PersonaActivity
-from aisquare.cli.ui.personas import PersonaEditor, PersonaScreen
 from aisquare.core import snapshot
 from aisquare.core.source_revision import source_fingerprint, source_root_for
 from aisquare.models import ProjectInfo, Snapshot
-from aisquare.services import personas
 from aisquare.services import team as team_service
-
-
-class PersonaHost(App[None]):
-    def __init__(self, project: ProjectInfo) -> None:
-        super().__init__()
-        self.project = project
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Input("My unfinished task request", id="agent-draft")
-            yield PersonaActivity(self.project)
-
-
-def test_local_command_switches_and_edits_without_touching_agent_input(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    monkeypatch.chdir(root)
-    project = team_service.activate()
-
-    async def run() -> None:
-        host = PersonaHost(project)
-        async with host.run_test(size=(120, 50)) as pilot:
-            draft = host.query_one("#agent-draft", Input)
-            draft.focus()
-            host.push_screen(PersonaScreen(project))
-            await pilot.pause()
-            await host.workers.wait_for_complete()
-            await pilot.pause()
-            command = host.screen.query_one("#persona-command", Input)
-            command.focus()
-            command.value = "/persona use mission-control"
-            await pilot.press("enter")
-            await host.workers.wait_for_complete()
-            await pilot.pause()
-            assert personas.persona_status(project)["default"] == "mission-control@1.0.0"
-            assert draft.value == "My unfinished task request"
-            command.value = '/persona add --name calm --text "Friendly and calm"'
-            await pilot.press("enter")
-            await host.workers.wait_for_complete()
-            await pilot.pause()
-            assert isinstance(host.screen, PersonaEditor)
-            editor = host.screen.query_one("#persona-json", TextArea)
-            data = json.loads(editor.text)
-            data["generic"]["default"] = ["A fresh update is ready."]
-            editor.load_text(json.dumps(data))
-            await pilot.click("#save-persona")
-            await pilot.pause()
-            assert personas.load_pack("calm").generic["default"] == ["A fresh update is ready."]
-            await pilot.click("#persona-close")
-            await pilot.pause()
-            assert draft.value == "My unfinished task request"
-
-    asyncio.run(run())
-
-
-def test_global_command_preview_and_bad_quoting_do_not_crash() -> None:
-    async def run() -> None:
-        host: App[None] = App()
-        async with host.run_test(size=(100, 42)) as pilot:
-            host.push_screen(PersonaScreen())
-            await pilot.pause()
-            await host.workers.wait_for_complete()
-            await pilot.pause()
-            box = host.screen.query_one("#persona-command", Input)
-            box.focus()
-            box.value = "/persona preview mission-control"
-            await pilot.press("enter")
-            await host.workers.wait_for_complete()
-            await pilot.pause()
-            assert "original_failure" in str(
-                host.screen.query_one("#persona-output", Static).render()
-            )
-            box.value = '/persona add "unterminated'
-            await pilot.press("enter")
-            await pilot.pause()
-            assert "quotation" in str(host.screen.query_one("#persona-output", Static).render())
-
-    asyncio.run(run())
 
 
 def test_source_fingerprint_sees_dirty_new_deleted_but_not_generated(

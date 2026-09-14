@@ -291,16 +291,6 @@ class FleetApp(App[None], inherit_bindings=False):
 
     def get_system_commands(self, screen: Screen[None]) -> Iterable[SystemCommand]:
         yield from super().get_system_commands(screen)
-        yield SystemCommand(
-            "Personas",
-            "Choose a role voice or enter a local /persona command",
-            self.action_personas,
-        )
-
-    def action_personas(self) -> None:
-        from aisquare.cli.ui.personas import PersonaScreen
-
-        self.push_screen(PersonaScreen(self._scoped_project()))
 
     def action_refresh_now(self) -> None:
         self.refresh_data()

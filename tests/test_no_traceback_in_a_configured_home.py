@@ -110,11 +110,9 @@ def configured_home(isolated_home: Path, runner: CliRunner) -> Path:
 #: held to nothing but argument parsing while the file read as though it held
 #: ninety-seven to the property — a test narrower than the property it is named
 #: for, in the file written to close that class.
-#: `exec` has no argument to fill: the command comes after `--`. `persona add` takes
-#: a file, `--url` or `--name`, none of them required on its own. `persona voice`
-#: takes exactly `on` or `off`, which no placeholder satisfies. All three are
-#: exercised by their dedicated tests instead.
-USAGE_ONLY: set[str] = {"exec", "persona add", "persona voice"}
+#: `exec` has no argument to fill: the command comes after `--`. It is
+#: exercised by its dedicated test instead.
+USAGE_ONLY: set[str] = {"exec"}
 
 
 def _swept() -> list[tuple[str, list[str]]]:

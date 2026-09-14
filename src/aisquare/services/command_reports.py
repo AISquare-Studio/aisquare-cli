@@ -66,7 +66,7 @@ class StreamRecord(BaseModel):
 
 
 class CommandReport(BaseModel):
-    """Factual metadata; no persona text, code, hooks or credentials are loaded."""
+    """Factual metadata; no styling/display text, code, hooks or credentials are loaded."""
 
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1] = 1

@@ -122,22 +122,6 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     *(("metrics", command) for command in ("show", "list")),
     ("exec",),
     *(
-        ("persona", command)
-        for command in (
-            "list",
-            "status",
-            "preview",
-            "use",
-            "off",
-            "reset",
-            "add",
-            "edit",
-            "export",
-            "remove",
-            "voice",
-        )
-    ),
-    *(
         ("brief", command)
         for command in (
             "create",

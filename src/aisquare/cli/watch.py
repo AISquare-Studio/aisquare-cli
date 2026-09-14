@@ -96,12 +96,6 @@ def feed_line(event: TeamEvent, roles: dict[str, str], project: ProjectInfo | No
     line.append(event.text)
     if event.to_role:
         line.append(f" → {event.to_role}", style="italic yellow")
-    if project is not None:
-        from aisquare.services.personas import render_caption
-
-        narration = render_caption(event, project, roles.get(event.session_id or ""))
-        if narration:
-            line.append(f" · {narration}", style="italic")
     return line
 
 

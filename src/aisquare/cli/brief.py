@@ -28,11 +28,7 @@ Requirements = Annotated[
 
 
 def _plain(text: str) -> str:
-    """Brief text is agent-authored; controls never reach the operator's terminal.
-
-    Deliberately local: this module must not import persona code, whose helper
-    of the same shape serves display captions.
-    """
+    """Brief text is agent-authored; controls never reach the operator's terminal."""
     return "".join(
         ch if ch in "\n\t" or unicodedata.category(ch)[0] != "C" else "\ufffd" for ch in text
     )
@@ -260,11 +256,11 @@ def export(
 def mode(
     value: Annotated[str, typer.Argument(help="native or off; affects new sessions.")],
 ) -> None:
-    """Select working rules independently of personality. Existing sessions retain theirs."""
+    """Select working rules. Existing sessions retain theirs."""
     with _errors():
         selected = service.set_mode(value)
         typer.echo(
             json.dumps({"working_mode": selected})
             if get_state().json_output
-            else f"Working mode: {selected}. Applies to new sessions; personas are unchanged."
+            else f"Working mode: {selected}. Applies to new sessions."
         )

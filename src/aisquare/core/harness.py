@@ -998,7 +998,7 @@ WORK_RULES_VERSION = "native-1"
 
 
 def working_rules(role: str) -> list[str]:
-    """Our native working habits, separate from presentation-only personas."""
+    """Our native working habits."""
     role = base_role(role)
     common = [
         "Native work rules: the latest user correction takes priority over an older brief.",

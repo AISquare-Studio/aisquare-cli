@@ -172,7 +172,7 @@ def _save(
         task_statuses or {},
     )
     # Read the committed records back; traces carry the same ids/sequence that
-    # the Board shows. No persona-rendered text enters this factual path.
+    # the Board shows. No rendered/display text enters this factual path.
     for event_id in [event.id, *[f"{event.id}-{task_id}" for task_id in task_statuses or {}]]:
         stored = store.get_event(event_id)
         if stored is None:
@@ -739,7 +739,7 @@ def set_mode(mode: str, *, cwd: Path | None = None) -> str:
 
 
 def session_context(store: ContextStore, project_id: str, session_id: str, role: str) -> str:
-    """One shared direct/fleet entry point. Personas are deliberately not imported.
+    """One shared direct/fleet entry point.
 
     A session records its selected rules at its first briefing. Resumes keep
     those rules: changing project mode is a new-session choice.

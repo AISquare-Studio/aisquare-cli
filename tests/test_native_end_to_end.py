@@ -84,7 +84,7 @@ def native_cli(tmp_path: Path) -> BlackBoxCLI:
     return BlackBoxCLI(executable=executable, project=project, env=env)
 
 
-def test_login_failure_fix_recheck_personas_and_canonical_records(
+def test_login_failure_fix_recheck_and_canonical_records(
     native_cli: BlackBoxCLI, tmp_path: Path
 ) -> None:
     cli = native_cli
@@ -127,40 +127,6 @@ def test_login_failure_fix_recheck_personas_and_canonical_records(
     initial = cli.data("brief", "check", brief_id, expected=1)
     assert initial["complete"] is False
     assert {row["status"] for row in initial["requirements"]} == {"missing-evidence"}
-
-    # Every persona action and read is a new process: persistence/restart is real.
-    before_task = cli.run("task", "show", task_id).stdout
-    before_brief = cli.run("brief", "show", brief_id).stdout
-    before_log = cli.run("team", "log").stdout
-    studio = cli.data("persona", "use", "studio")
-    assert studio["data"]["enabled"] is True
-    cli.data("persona", "use", "mission-control", "--role", "coder")
-    selected = cli.data("persona", "status")["data"]
-    assert selected["effective"]["coder"].startswith("mission-control@")
-    assert selected["effective"]["tester"].startswith("studio@")
-    studio_preview = cli.data("persona", "preview", "studio", "--role", "coder")
-    mission_preview = cli.data("persona", "preview", "mission-control", "--role", "coder")
-    assert studio_preview["data"]["samples"] != mission_preview["data"]["samples"]
-    assert studio_preview["data"]["original_failure"] == mission_preview["data"]["original_failure"]
-    pack_path = tmp_path / "local-voice.json"
-    cli.data("persona", "export", "studio", "--output", str(pack_path))
-    pack = json.loads(pack_path.read_text())
-    pack.update(id="local-e2e", name="Local E2E")
-    pack["roles"]["coder"]["task_claimed"] = ["Local display voice: this task was claimed."]
-    pack_path.write_text(json.dumps(pack))
-    cli.data("persona", "add", str(pack_path))
-    cli.data("persona", "use", "local-e2e", "--role", "coder")
-    cli.data("persona", "off")
-    assert cli.data("persona", "status")["data"]["enabled"] is False
-    inactive = cli.data("persona", "use", "mission-control", "--role", "coder")
-    assert "inactive" in inactive["message"]
-    assert cli.data("persona", "status")["data"]["enabled"] is False
-    cli.data("persona", "use", "studio")
-    cli.data("persona", "use", "local-e2e", "--role", "coder")
-    assert cli.data("persona", "status")["data"]["effective"]["coder"] == "local-e2e@1.0.0"
-    assert cli.run("task", "show", task_id).stdout == before_task
-    assert cli.run("brief", "show", brief_id).stdout == before_brief
-    assert cli.run("team", "log").stdout == before_log
 
     cli.data("task", "review", task_id, "--as", coder)
     failed = cli.data(

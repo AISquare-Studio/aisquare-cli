@@ -222,11 +222,6 @@ SEAMS: dict[str, Seam] = {
     "aisquare/core/source_revision.py::_gitlink": Seam(
         EXCLUDED, "`git ls-files -s` for the commit a submodule entry records; no model"
     ),
-    "aisquare/cli/persona.py::_edit_pack": Seam(
-        EXCLUDED,
-        "the user's local text editor for a persona draft, with no shell or model invocation; "
-        "receives only a temporary pack file, outside the agent conversation",
-    ),
     "aisquare/services/command_reports.py::run_command": Seam(
         EXCLUDED,
         "the user's explicit command, with its original environment and semantics; "

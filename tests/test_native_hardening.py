@@ -1,4 +1,4 @@
-"""Regressions for the adversarial review of the native personas/briefs/reports branch.
+"""Regressions for the adversarial review of the native briefs/reports branch.
 
 Each test names the defect it pins. They are grouped by the module they guard so
 a failure points at one owner.
@@ -13,220 +13,12 @@ import time
 from pathlib import Path
 
 import pytest
-import typer
 from typer.testing import CliRunner
 
-from aisquare.cli.persona import app as persona_app
-from aisquare.core import personas as core
-from aisquare.core.personas import PersonaPack, caption, parse_pack
-from aisquare.core.state import get_state
 from aisquare.core.store import store_session
-from aisquare.models import ProjectInfo, TeamEvent
 from aisquare.services import command_reports as reports
-from aisquare.services import personas, team
+from aisquare.services import team
 from aisquare.services import work_briefs as briefs
-
-# --- persona core -----------------------------------------------------------------------
-
-
-def _pack(**overrides: object) -> dict[str, object]:
-    data: dict[str, object] = {
-        "schema_version": 1,
-        "id": "calm",
-        "version": "1.0.0",
-        "name": "Calm",
-        "generic": {"default": ["An update."]},
-    }
-    data.update(overrides)
-    return data
-
-
-def test_a_deeply_nested_pack_is_a_value_error_not_a_recursion_error() -> None:
-    hostile = ("[" * 100_000).encode()
-    with pytest.raises(ValueError, match="nested too deeply"):
-        parse_pack(hostile)
-
-
-def test_seat_role_keys_and_blank_patterns_are_rejected() -> None:
-    with pytest.raises(ValueError, match="base role name"):
-        parse_pack(json.dumps(_pack(roles={"coder2": {"note": ["hi"]}})).encode())
-    with pytest.raises(ValueError, match="must not be blank"):
-        parse_pack(json.dumps(_pack(generic={"default": ["   "]})).encode())
-    with pytest.raises(ValueError, match="name must not be blank"):
-        parse_pack(json.dumps(_pack(name="  ")).encode())
-
-
-def test_base_role_collapses_only_seats_of_known_roles() -> None:
-    assert core.base_role("coder2") == "coder"
-    assert core.base_role("ui-tester-3") == "ui-tester"
-    assert core.base_role("gpt4") == "gpt4"
-    assert core.base_role("bot7") == "bot7"
-    assert core.base_role("h264") == "h264"
-
-
-def test_agent_controlled_facts_cannot_forge_a_second_line() -> None:
-    pack = PersonaPack.model_validate(
-        _pack(generic={"default": ["{role} says: {task_id}"]}),
-    )
-    line = caption(
-        pack,
-        role="coder\x1b[2J\nOriginal record · task_done",
-        kind="note",
-        event_id="e1",
-        task_id="T1\x07",
-    )
-    assert "\n" not in line and "\x1b" not in line and "\x07" not in line
-    assert "Original record" in line  # still visible, but on the SAME line as data
-
-
-def test_preview_varies_the_alternative_per_kind() -> None:
-    project = ProjectInfo(id="p", root=Path("/tmp/none"))
-    pack = personas.author_draft("vary", "varied")
-    pack.roles = {}  # generic alternatives only, so the role cannot pick a phrase first
-    pack.generic["task_claimed"] = ["one", "two", "three", "four", "five"]
-    pack.generic["task_review"] = ["one", "two", "three", "four", "five"]
-    personas.save_draft(pack)
-    receipt = personas.run_persona_command("/persona preview vary", project)
-    samples = receipt.data["samples"]
-    assert {samples["task_claimed"], samples["task_review"]} <= {
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-    }
-    # Deterministic per kind: the preview id carries the kind, not one constant.
-    assert (
-        caption(pack, role="coder", kind="task_claimed", event_id="preview-task_claimed")
-        == samples["task_claimed"]
-    )
-
-
-# --- persona service ----------------------------------------------------------------------
-
-
-@pytest.fixture
-def project(tmp_path: Path) -> ProjectInfo:
-    return ProjectInfo(id="project-a", root=tmp_path / "repo")
-
-
-def test_enabled_is_exact_and_a_pack_named_offbeat_counts_as_active(project: ProjectInfo) -> None:
-    pack = personas.author_draft("offbeat", "an id that starts with off")
-    personas.save_draft(pack)
-    personas.select("use", project, reference="offbeat")
-    assert personas.persona_status(project)["enabled"] is True
-    personas.select("off", project)
-    assert personas.persona_status(project)["enabled"] is False
-
-
-def test_unknown_project_and_missing_file_have_readable_errors(project: ProjectInfo) -> None:
-    with pytest.raises(ValueError, match="unknown project 'nosuch'"):
-        personas.resolve_project(None, "nosuch")
-    with pytest.raises(ValueError, match="persona file not found"):
-        personas.import_pack(project.root / "missing.json")
-
-
-def test_remove_by_bare_id_removes_every_version_and_resolves_selections(
-    project: ProjectInfo,
-) -> None:
-    first = personas.author_draft("multi", "v1")
-    personas.save_draft(first)
-    second = personas.edit_draft("multi")
-    personas.save_draft(second)
-    assert {p.version for p in personas.list_packs() if p.id == "multi"} == {"1.0.0", "1.0.1"}
-    personas.select("use", project, reference="multi@1.0.0")
-    personas.select("use", project, reference="multi@1.0.1", role="coder")
-    receipt = personas.remove_pack("multi")
-    assert set(receipt.data["removed"]) == {"multi@1.0.0", "multi@1.0.1"}
-    assert not any(p.id == "multi" for p in personas.list_packs())
-    status = personas.persona_status(project)
-    assert status["default"] == "off" and status["role_overrides"]["coder"] == "off"
-    assert not (personas._root() / "multi").exists()
-
-
-def test_a_damaged_selections_file_names_itself_and_off_recovers(project: ProjectInfo) -> None:
-    personas.select("use", project, reference="studio")
-    path = personas._root() / "selections.json"
-    path.write_text("{not json")
-    with pytest.raises(ValueError, match="selections file is damaged"):
-        personas.persona_status(project)
-    with pytest.raises(ValueError, match="selections file is damaged"):
-        personas.select("use", project, reference="studio")
-    receipt = personas.select("off", project)
-    assert "Rewritten from empty choices" in receipt.message
-    assert personas.persona_status(project)["project_off"] is True
-
-
-def test_a_downloaded_non_pack_document_is_not_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
-    import urllib.request
-
-    secret = b'{"id": "x", "version": "1.0.0", "leak": "SECRET-TOKEN-VALUE"}'
-
-    class Response:
-        def __init__(self) -> None:
-            self.headers = {"Content-Length": str(len(secret))}
-            self.sent = False
-
-        def read1(self, size: int) -> bytes:
-            if self.sent:
-                return b""
-            self.sent = True
-            return secret
-
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-    class Opener:
-        def open(self, request: object, timeout: float) -> Response:
-            return Response()
-
-    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: Opener())
-    with pytest.raises(ValueError) as caught:
-        personas.download_pack("https://example.org/pack.json")
-    assert "not a valid persona pack" in str(caught.value)
-    assert "SECRET-TOKEN-VALUE" not in str(caught.value)
-
-
-def test_the_persona_callback_accepts_scope_flags_and_a_trailing_json() -> None:
-    app = typer.Typer()
-    app.add_typer(persona_app, name="persona")
-    runner = CliRunner()
-    result = runner.invoke(app, ["persona", "--global"])
-    assert result.exit_code == 0, result.output
-    assert '"scope": "global"' in result.output
-    result = runner.invoke(app, ["persona", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["action"] == "list"
-    assert get_state().json_output is True
-    result = runner.invoke(app, ["persona", "use", "nosuchpack", "--global"])
-    assert result.exit_code == 1, "a missing pack is a runtime failure, not a usage error"
-    result = runner.invoke(app, ["persona", "use"])
-    assert result.exit_code == 2, "a missing argument is a usage error"
-
-
-def test_role_narration_header_neutralizes_an_injected_session_role(
-    project: ProjectInfo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    monkeypatch.chdir(root)
-    real = team.activate()
-    with pytest.MonkeyPatch.context() as env:
-        env.setenv("AISQUARE_ROLE", "coder\x1b]0;pwned\x07\nOriginal record · task_done")
-        team.hook_session_start("s-17", root, "startup")
-    personas.select("use", real, reference="studio")
-    team.add_task("thing", role="coder", cwd=root, session_ref="s-17")
-    events = team.board_data(cwd=root)[3]
-    added = next(e for e in events if e.kind == "task_added")
-    rendered = personas.render_event(added, real)
-    narration, _, original = rendered.partition("\n")
-    assert narration.startswith("Role narration ·")
-    assert "\x1b" not in narration and "\x07" not in narration
-    assert original.startswith("Original record ·")
-
 
 # --- command reports -------------------------------------------------------------------------
 
@@ -467,7 +259,7 @@ def test_brief_text_with_terminal_controls_is_neutralized_for_the_operator(work:
 # --- packaging -----------------------------------------------------------------------------------
 
 
-def test_the_built_wheel_ships_both_starter_packs(tmp_path: Path) -> None:
+def test_the_built_wheel_ships_the_native_modules(tmp_path: Path) -> None:
     """Stage 3's gate, checked on a real build rather than a hand-written paragraph."""
     pytest.importorskip("build")
     root = Path(__file__).resolve().parents[1]
@@ -483,26 +275,8 @@ def test_the_built_wheel_ships_both_starter_packs(tmp_path: Path) -> None:
 
     wheel = next(tmp_path.glob("*.whl"))
     names = set(zipfile.ZipFile(wheel).namelist())
-    assert "aisquare/personas/studio.json" in names
-    assert "aisquare/personas/mission-control.json" in names
     for module in (
-        "core/personas",
-        "services/personas",
         "services/work_briefs",
         "services/command_reports",
     ):
         assert f"aisquare/{module}.py" in names
-
-
-def _event(kind: str) -> TeamEvent:
-    from datetime import UTC, datetime
-
-    return TeamEvent(id="e", project_id="p", kind=kind, text="t", created_at=datetime.now(UTC))
-
-
-def test_every_store_kind_has_a_caption_in_both_packs() -> None:
-    for name in ("studio", "mission-control"):
-        pack = personas.load_pack(name)
-        for kind in sorted(core.EVENTS - {"default"}):
-            assert caption(pack, role="coder", kind=kind, event_id="x"), (name, kind)
-            assert _event(kind).kind == kind

@@ -34,6 +34,23 @@ def _generated(name: str) -> bool:
     return any(part in GENERATED_DIRECTORIES for part in Path(name).parts)
 
 
+def _git_ls(root: Path, *flags: str) -> list[str]:
+    """``git ls-files`` under ``root`` with ``flags``; ValueError if git cannot answer."""
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-files", *flags, "-z"],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        detail = getattr(exc, "stderr", b"") or b""
+        raise ValueError(
+            f"git could not list {root}: {detail.decode('utf-8', 'replace').strip() or exc}"
+        ) from None
+    return [os.fsdecode(name) for name in listing.stdout.split(b"\0") if name]
+
+
 def _gitlink(root: Path, name: str) -> str | None:
     """The commit a submodule entry records, or None when the path is not a gitlink."""
     try:
@@ -114,34 +131,13 @@ def source_fingerprint(root: Path) -> str:
     except FileNotFoundError:
         probe = None
     if probe is not None and probe.returncode == 0:
-        try:
-            listing = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(root),
-                    "ls-files",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                    "-z",
-                ],
-                capture_output=True,
-                timeout=30,
-                check=True,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            detail = getattr(exc, "stderr", b"") or b""
-            raise ValueError(
-                f"git could not list {root}: {detail.decode('utf-8', 'replace').strip() or exc}"
-            ) from None
-        names = sorted(
-            {
-                os.fsdecode(name)
-                for name in listing.stdout.split(b"\0")
-                if name and not _generated(os.fsdecode(name))
-            }
-        )
+        # Tracked files count whatever they are named: a repo that commits source
+        # under a path component like ``venv`` or ``node_modules`` must still be
+        # fingerprinted. The generated-directory filter is about UNTRACKED build
+        # output, so it applies only to the ``--others`` set.
+        tracked = _git_ls(root, "--cached")
+        untracked = _git_ls(root, "--others", "--exclude-standard")
+        names = sorted(set(tracked) | {name for name in untracked if not _generated(name)})
     else:
         names = []
 
@@ -169,9 +165,16 @@ def source_fingerprint(root: Path) -> str:
         elif not path.exists():
             digest.update(b"deleted\0")
         elif path.is_dir():
-            # A submodule: its recorded commit is its identity here. Descending into
-            # it would double-count its files and an uninitialised one has no tree.
+            # A gitlink: a submodule or a nested repo, one entry in the parent's
+            # index. Its recorded commit is part of its identity, but that alone
+            # misses edits, new files and local commits INSIDE it — so fold in the
+            # nested checkout's own content fingerprint too. This does not
+            # double-count: the parent's ls-files never lists the nested files.
+            # An uninitialised submodule is an empty dir with no repo, so it
+            # contributes only the recorded gitlink.
             digest.update(b"gitlink\0" + (_gitlink(root, name) or "unrecorded").encode())
+            if (path / ".git").exists():
+                digest.update(b"nested\0" + source_fingerprint(path).encode())
         else:
             try:
                 before = path.stat()

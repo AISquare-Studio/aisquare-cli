@@ -45,6 +45,52 @@ def test_source_fingerprint_sees_dirty_new_deleted_but_not_generated(
     assert source_fingerprint(root) != changed
 
 
+def test_tracked_source_under_a_generated_named_dir_is_fingerprinted(tmp_path: Path) -> None:
+    """Finding 9: the generated-directory filter is for UNTRACKED output only.
+
+    A repo that commits source under a path component named ``venv`` /
+    ``node_modules`` / ``__pycache__`` must still be fingerprinted; only
+    untracked build output in such directories is skipped.
+    """
+    root = tmp_path / "source"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "pkg" / "venv").mkdir(parents=True)
+    tracked = root / "pkg" / "venv" / "core.py"
+    tracked.write_text("answer = 1\n")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    first = source_fingerprint(root)
+    tracked.write_text("answer = 2\n")
+    assert source_fingerprint(root) != first, "tracked source under venv/ must count"
+    # An untracked generated directory is still ignored, on the same run.
+    steady = source_fingerprint(root)
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "bundle.js").write_text("junk")
+    assert source_fingerprint(root) == steady, "untracked node_modules output stays excluded"
+
+
+def test_nested_repo_content_changes_alter_the_fingerprint(tmp_path: Path) -> None:
+    """Finding 3: a submodule / nested repo folds its own content in, not just its
+    recorded gitlink — so edits and new files inside it invalidate evidence."""
+    sup = tmp_path / "super"
+    sup.mkdir()
+    subprocess.run(["git", "init", "-q", str(sup)], check=True)
+    (sup / "main.py").write_text("x = 1\n")
+    vendor = sup / "vendor"
+    vendor.mkdir()
+    subprocess.run(["git", "init", "-q", str(vendor)], check=True)
+    (vendor / "lib.py").write_text("y = 1\n")
+    subprocess.run(["git", "-C", str(vendor), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(sup), "add", "main.py"], check=True)
+    subprocess.run(["git", "-C", str(sup), "add", "vendor"], capture_output=True, check=False)
+    first = source_fingerprint(sup)
+    (vendor / "lib.py").write_text("y = 2\n")
+    assert source_fingerprint(sup) != first, "an edit inside the nested repo must count"
+    edited = source_fingerprint(sup)
+    (vendor / "new.py").write_text("z = 1\n")
+    assert source_fingerprint(sup) != edited, "a new file inside the nested repo must count"
+
+
 def test_focus_uses_existing_index_but_never_returns_escaped_or_missing_files(
     tmp_path: Path,
 ) -> None:

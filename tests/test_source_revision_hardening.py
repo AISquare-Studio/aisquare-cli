@@ -54,7 +54,7 @@ def test_an_empty_commit_keeps_the_fingerprint_because_no_byte_changed(checkout:
     assert source_fingerprint(checkout) == before, "same bytes on another branch"
 
 
-def test_a_submodule_contributes_its_recorded_commit_not_a_crash(
+def test_a_submodule_folds_in_its_content_and_an_empty_clone_does_not_crash(
     checkout: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "library"
@@ -75,13 +75,19 @@ def test_a_submodule_contributes_its_recorded_commit_not_a_crash(
     )
     _git(checkout, "commit", "-q", "-m", "vendor")
     populated = source_fingerprint(checkout)
-    # A fresh clone has the gitlink but no checked-out tree: the same identity.
+    # Editing content inside the populated submodule now invalidates evidence
+    # (finding 3): the gitlink alone missed edits, new files and local commits.
+    (checkout / "vendor" / "lib.py").write_text("x = 2\n")
+    assert source_fingerprint(checkout) != populated
+    # A fresh clone has the gitlink but no checked-out tree: it must not crash,
+    # and — having no content to fold in — it is a DIFFERENT identity from the
+    # populated tree (the recorded gitlink only).
     clone = tmp_path / "clone"
     subprocess.run(
         ["git", "clone", "-q", str(checkout), str(clone)], check=True, capture_output=True
     )
     assert (clone / "vendor").is_dir() and not any((clone / "vendor").iterdir())
-    assert source_fingerprint(clone) == populated
+    assert source_fingerprint(clone) != populated
 
 
 def test_a_git_failure_is_a_readable_error_not_a_traceback(checkout: Path) -> None:

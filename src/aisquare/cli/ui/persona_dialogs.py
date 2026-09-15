@@ -120,6 +120,16 @@ def chosen_layer(radios: RadioSet) -> Layer:
     return "project" if pressed is not None and (pressed.id or "").endswith("-project") else "user"
 
 
+def failure(exc: Exception) -> str:
+    """What a refused write says: a persona rule as written, anything else with its class.
+
+    A ``PersonaError`` is already a sentence. An ``OSError`` from the filesystem (an
+    unwritable directory, a ``PermissionError`` from ``rmtree``) is not, and without
+    its class it reads as a bare path.
+    """
+    return str(exc) if isinstance(exc, PersonaError) else f"{type(exc).__name__}: {exc}"
+
+
 class _Dialog(ModalScreen[Any]):
     """What every dialog here shares: ``Esc`` answers the cancel value, and a Text-only note."""
 
@@ -329,13 +339,16 @@ class ImportPersonaScreen(_Dialog):
     def _skills_read(self, worker: Worker[Any], state: WorkerState) -> None:
         select = self.query_one("#import-browse", Select)
         if state is WorkerState.SUCCESS and isinstance(worker.result, list):
-            options: list[tuple[str, str]] = []
+            options: list[tuple[Text, str]] = []
             for ref in worker.result:
                 if not isinstance(ref, personas_service.SkillRef):
                     continue
                 what = ref.description if ref.recognised else f"✗ {ref.reason}"
                 imported = " · imported" if ref.imported else ""
-                options.append((f"{ref.name} · {ref.scope} · {what}{imported}", str(ref.path)))
+                # Text, not str: Select parses a str label as markup, so a description
+                # holding "[/]" raised MarkupError and one holding "[docs]" lost it.
+                label = Text(f"{ref.name} · {ref.scope} · {what}{imported}")
+                options.append((label, str(ref.path)))
             select.set_options(options)
             select.prompt = "Claude Code skills" if options else "no Claude Code skills found"
         elif state is WorkerState.ERROR:
@@ -607,8 +620,8 @@ class EditPersonaScreen(_Dialog):
         text = self.query_one("#edit-text", TextArea).text
         try:
             personas_service.save(self.persona_name, text, root=self.root, layer=self.persona_layer)
-        except PersonaError as exc:
-            self.note("#edit-status", str(exc), style="bold red")
+        except (PersonaError, OSError) as exc:
+            self.note("#edit-status", failure(exc), style="bold red")
             return
         self.dismiss(True)
 
@@ -624,8 +637,8 @@ class EditPersonaScreen(_Dialog):
                 skill=None,
                 force=self.query_one("#save-as-force", Switch).value,
             )
-        except (PersonaError, KeyError) as exc:
-            self.note("#edit-status", str(exc), style="bold red")
+        except (PersonaError, KeyError, OSError) as exc:
+            self.note("#edit-status", failure(exc), style="bold red")
             return
         self.dismiss(True)
 
@@ -733,8 +746,8 @@ class ExportPersonaScreen(_Dialog):
         kwargs = self.export_kwargs()
         try:
             written = personas_service.export(self.persona_name, **kwargs)
-        except PersonaError as exc:
-            self.note("#export-status", str(exc), style="bold red")
+        except (PersonaError, OSError) as exc:
+            self.note("#export-status", failure(exc), style="bold red")
             return
         self.dismiss(ExportDone(self.persona_name, Path(written), kwargs["skill"]))
 

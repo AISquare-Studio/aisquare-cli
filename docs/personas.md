@@ -7,9 +7,9 @@ skill**: the same directory is `--persona skeptic` to the fleet and `/skeptic`
 in Claude Code, byte for byte. There is no aisquare format to learn and nothing
 to convert.
 
-This guide covers what ships today: the persona catalogue and the
-`aisquare persona` commands. Spawning an agent *as* a persona, importing
-something that is not already a skill, and the persona views in `asq` are
+This guide covers what ships today: the persona catalogue, the
+`aisquare persona` commands, and running an agent as a persona. Importing
+something that is not already a skill, and the persona views in `asq`, are
 described in `docs/plans/spawn-personas.md` and land in later changes.
 
 ## What a persona is
@@ -90,6 +90,30 @@ personalities. They are where `persona import` finds skills and where
 
 Bundled personas cannot be edited or removed in place. Copy one into a layer you
 own and change the copy — the copy shadows the bundled one.
+
+## Running an agent as a persona
+
+```sh
+aisquare launch coder --persona skeptic
+aisquare fleet spawn coder --persona skeptic
+```
+
+`launch --persona` checks the name against this project's personas — an unknown
+one is refused with the names that exist — and exports `AISQUARE_PERSONA` to the
+agent. When the session starts, its hook records the persona on the board row
+and adds exactly the block `persona show` prints to the team briefing, once,
+after the role's cycle. Nothing is added per prompt, and the board shows only the
+name: `persona:skeptic` on the session's line, `· skeptic` in `fleet ls`. A
+persona removed or broken after launch costs one line in the briefing
+(`… — launched without it`), never the session. Setting the variable by hand,
+`AISQUARE_PERSONA=skeptic aisquare launch coder`, works too; it is checked when
+the session starts rather than before.
+
+`fleet spawn --persona` passes the name to `launch` inside the agent's window and
+records it on the fleet row; without the flag the role's
+`[fleet.roles.<role>].persona` applies (see `docs/fleet.md`). A persona whose
+`persona-roles` leave the spawned role out is spawned anyway, with a `⚠` note on
+the receipt.
 
 ## Commands
 

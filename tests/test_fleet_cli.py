@@ -294,6 +294,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "agent_args": [],
         "spawned_by": "mgr-session",
         "account": None,
+        "persona": None,
     }
 
 
@@ -1118,3 +1119,61 @@ def test_bracketed_data_survives_to_the_screen(
 
     assert result.exit_code == 0, result.output
     assert "/home/me/[archive]/api" in result.stdout
+
+
+# ── persona (docs/plans/spawn-personas.md §7 "P2") ───────────────────────────
+
+
+def test_spawn_persona_reaches_the_service_and_ends_the_receipt(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = _agent("coder-auth").model_copy(update={"persona": "skeptic"})
+    seen = _install(
+        monkeypatch, "spawn", SpawnReceipt(agent=agent, asked_label=None, tmux_session=SESSION)
+    )
+
+    result = runner.invoke(app, ["fleet", "spawn", "coder", "--persona", "skeptic"])
+
+    assert result.exit_code == 0, result.output
+    assert seen.kwargs["persona"] == "skeptic"
+    assert seen.kwargs["agent_args"] == [], "--persona is spawn's own option, not the agent's"
+    assert _plain(result.stdout).endswith(
+        "✓ spawned coder-auth (agt_coderauth) → asq-amber-otter %7 · persona skeptic"
+    )
+
+
+def test_spawn_without_persona_sends_none_and_the_receipt_says_nothing(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _install(
+        monkeypatch,
+        "spawn",
+        SpawnReceipt(agent=_agent("coder-auth"), asked_label=None, tmux_session=SESSION),
+    )
+
+    result = runner.invoke(app, ["fleet", "spawn", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert seen.kwargs["persona"] is None
+    assert "persona" not in result.stdout
+
+
+def test_ls_shows_the_persona_on_its_row_and_json_carries_it(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skeptic = _agent("coder-auth").model_copy(update={"persona": "skeptic"})
+    _install(
+        monkeypatch,
+        "list_agents",
+        [_status(skeptic, "working"), _status(_agent("tester-1", "tester", pane="%9"), "waiting")],
+    )
+
+    human = runner.invoke(app, ["fleet", "ls"])
+    as_json = runner.invoke(app, ["--json", "fleet", "ls"])
+
+    assert human.exit_code == 0, human.output
+    out = _plain(human.stdout)
+    assert "coder-auth coder ▶ working · skeptic %7" in out
+    assert "tester-1 tester ⏸ waiting %9" in out
+    payload = json.loads(as_json.stdout)
+    assert [entry["agent"]["persona"] for entry in payload["agents"]] == ["skeptic", None]

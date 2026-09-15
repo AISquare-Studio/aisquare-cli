@@ -488,6 +488,18 @@ _PREPARE: dict[int, Callable[[sqlite3.Connection], None]] = {
 _SCHEMA_V14 = """
 ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 """
+
+# v15: personas (docs/plans/spawn-personas.md §5) — the persona a session was
+# launched as and the one a fleet agent was spawned with. Nullable: no persona is
+# the default and the common case, and a row records what was ASKED even when the
+# persona could not be loaded. PROVISIONAL NUMBER: PR #169 (#144) stacks
+# fleet_agent columns as v15 to v18 on its branch; whoever lands second renumbers,
+# as v13/v14 did. Both tables exist at 14 whatever route a store took there, so
+# two plain ALTERs are safe to run last.
+_SCHEMA_V15 = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -504,6 +516,7 @@ _MIGRATIONS = (
     _SCHEMA_V12,
     _SCHEMA_V13,
     _SCHEMA_V14,
+    _SCHEMA_V15,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -560,7 +573,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort"
+    "transcript_path, account, model, effort, persona"
 )
 _TASK_COLUMNS = (
     "id, project_id, key, title, detail, status, role, needs, "
@@ -569,7 +582,7 @@ _TASK_COLUMNS = (
 _EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
 _FLEET_AGENT_COLUMNS = (
     "id, project_id, label, role, binary, tmux_socket, pane_id, session_id, cwd, worktree, "
-    "task_id, spawned_by, created_at, ended_at, exit_status"
+    "task_id, spawned_by, created_at, ended_at, exit_status, persona"
 )
 
 
@@ -740,6 +753,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         created_at=datetime.fromisoformat(row["created_at"]),
         ended_at=_maybe_dt(row["ended_at"]),
         exit_status=row["exit_status"],
+        persona=row["persona"],
     )
 
 
@@ -819,6 +833,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         account=row["account"],
         model=row["model"],
         effort=row["effort"],
+        persona=row["persona"],
     )
 
 
@@ -1246,14 +1261,15 @@ class SqliteStore:
         """Insert the session, or revive/refresh it if the id is already known."""
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
-            "effort = COALESCE(excluded.effort, effort)",
+            "effort = COALESCE(excluded.effort, effort), "
+            "persona = COALESCE(excluded.persona, persona)",
             (
                 session.id,
                 session.project_id,
@@ -1269,6 +1285,7 @@ class SqliteStore:
                 session.account,
                 session.model,
                 session.effort,
+                session.persona,
             ),
         )
         self._conn.commit()
@@ -1977,7 +1994,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -1998,6 +2015,7 @@ class SqliteStore:
                 agent.created_at.isoformat(),
                 agent.ended_at.isoformat() if agent.ended_at else None,
                 agent.exit_status,
+                agent.persona,
             ),
         )
         self._conn.commit()

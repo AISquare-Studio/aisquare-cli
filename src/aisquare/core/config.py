@@ -215,6 +215,10 @@ class FleetRoleSettings(BaseModel):
     permission_mode: str = "auto"
     worktree: bool = False
     extra_args: list[str] = Field(default_factory=list)
+    persona: str | None = None
+    """The persona every spawn of this role gets unless ``--persona`` names another
+    (docs/plans/spawn-personas.md §3.8). Checked at spawn, not at load: a name the
+    project does not have refuses the spawn with this key in the message."""
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
@@ -321,13 +325,23 @@ def _keep_unknown(existing: Any, dumped: Any, model: Any) -> Any:
     the harm actually took, all five lost keys being sub-keys of a section both
     builds knew about.
 
-    A field whose value is a plain container (``targets: dict[str, Target]``)
-    has no sub-model to recurse into, so the model owns that subtree entirely
-    and it is replaced wholesale. That is correct: its keys are data, and a
-    stale entry there is a stale deployment, not an unknown field.
+    A field whose value is a MAPPING of sub-models (``targets: dict[str,
+    Target]``, ``[fleet.roles.<role>]``) keeps two rules apart. Its keys are data,
+    so the model owns WHICH entries exist: a removed target or role stays
+    removed, and a stale entry is a stale deployment, not an unknown field. But
+    every entry the model kept is still a model, and an unknown field INSIDE it
+    survives like any other. Before that second rule, a build without
+    ``FleetRoleSettings.persona`` erased ``[fleet.roles.coder].persona`` on any
+    save — the whole mapping was replaced wholesale (docs/plans/spawn-personas.md
+    §8). A mapping of plain values has nothing to recurse into and is the model's.
     """
     if not isinstance(existing, dict) or not isinstance(dumped, dict):
         return dumped
+    if isinstance(model, dict):
+        return {
+            key: _keep_unknown(existing.get(key), value, model.get(key))
+            for key, value in dumped.items()
+        }
     fields = getattr(type(model), "model_fields", None)
     if not fields:
         return dumped

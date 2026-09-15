@@ -839,6 +839,170 @@ def test_a_spoken_prompt_reaches_a_fleet_pane_by_that_agents_label(
     assert ack["session"] == CODER
 
 
+def test_a_spoken_burst_addressed_by_prefix_reaches_the_live_pane(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The voice route resolves the header's session the way a typed prompt does.
+
+    ``_route`` is shared, so the prefix fix made for typed prompts — resolve
+    once through ``store.get_session_in_project``, match the live pane on
+    ``row.id``, address the ack on ``row.id`` — has to hold for an ``audio``
+    header too, or "say it instead of typing it" quietly means something
+    else. Matched on the client's raw string, a prefix-addressed burst found
+    no pane, was filed as a board note instead of typed, and its ack named
+    the prefix rather than the session.
+    """
+    http, project, token, _built = voice
+    told: list[tuple[str, str]] = []
+
+    def tell(
+        project_arg: ProjectInfo, label: str, text: str, *, sender: str | None = None
+    ) -> fleet_service.TellResult:
+        told.append((label, text))
+        return fleet_service.TellResult(True, "typed into the waiting pane")
+
+    monkeypatch.setattr(fleet_service, "tell", tell)
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="flt_voice_prefix",
+                project_id=project.id,
+                label="coder-xr-voice",
+                role="coder",
+                pane_id="%7",
+                session_id=CODER,
+                cwd=project.root,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+    with _authed(http, token) as connection:
+        _speak(connection, session=CODER[:8])
+        ack = json.loads(_until(connection, "ack"))
+
+    assert told == [("coder-xr-voice", CANNED)], (
+        f"the prefix must resolve to the pane's full session id; fleet.tell saw {told}"
+    )
+    assert ack["session"] == CODER, "the ack names the RESOLVED session, not the spoken prefix"
+    assert ack["ok"] is True and ack["detail"] == "typed into the waiting pane"
+
+
+def test_a_spoken_burst_to_an_ambiguous_prefix_is_refused_in_its_ack(work_dir: Path) -> None:
+    """An ambiguous ``audio.session`` prefix is answered in the ack, like a typed one.
+
+    Resolved through ``store.get_session``, whose ``AmbiguousIdError`` escaped
+    the voice worker as ``internal`` — a server fault, with no ack — the
+    operator's sentence went nowhere with nothing saying where it had been
+    aimed. The final ``stt`` still goes out, because the panel must stop
+    showing a live mic; the ack that follows says why nothing was sent.
+    """
+    project = _seed(work_dir)  # CODER = bbbb2222-...
+    _join(project, SECOND, role="coder")  # bbbb3333-..., so `bbbb` ties on this board
+    token = mcp_server.serve_token()
+    app = xr_server.build_app(
+        project, token=token, transcriber_factory=lambda: FakeTranscriber(CANNED)
+    )
+    with TestClient(app) as http, _authed(http, token) as connection:
+        _speak(connection, session="bbbb")
+        final = _final_stt(connection)
+        ack = json.loads(_until(connection, "ack"))
+    assert final["text"] == CANNED, "the sentence was heard; only its routing failed"
+    assert ack["ok"] is False, ack
+    assert "ambiguous" in ack["detail"] and "bbbb" in ack["detail"], ack["detail"]
+
+
+def test_a_spoken_burst_to_a_prefix_unique_on_this_board_resolves_despite_another_board(
+    work_dir: Path,
+) -> None:
+    """A spoken-at prefix unique on this board is not refused because another board matches.
+
+    ``store.get_session``'s ``GLOB`` fallback spans every project sharing the
+    store, so a prefix unique here came back ambiguous — and the sentence
+    unsent — because a board the operator cannot see had a session starting
+    the same way. The voice route resolves on this board only, as subscribe
+    and the typed prompt do.
+    """
+    project = _seed(work_dir)  # CODER = bbbb2222-...
+    other = team_project(work_dir / "other-board")
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.ensure_project(other)
+        store.upsert_session(
+            TeamSession(
+                id=SECOND,  # bbbb3333-..., shares the `bbbb` prefix, on ANOTHER board
+                project_id=other.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+            )
+        )
+    from aisquare.services import team as team_service
+
+    team_service.activate(project.root)
+    token = mcp_server.serve_token()
+    app = xr_server.build_app(
+        project, token=token, transcriber_factory=lambda: FakeTranscriber(CANNED)
+    )
+    with TestClient(app) as http, _authed(http, token) as connection:
+        _speak(connection, session="bbbb")
+        assert _final_stt(connection)["text"] == CANNED
+        ack = json.loads(_until(connection, "ack"))
+    assert ack["ok"] is True, ack
+    assert ack["session"] == CODER, "resolved on this board, to the one session that matches here"
+
+
+def test_an_audio_header_with_an_empty_or_glob_session_is_a_bad_message(
+    voice: tuple[TestClient, ProjectInfo, str, list[FakeTranscriber]],
+) -> None:
+    """``audio.session`` is validated at the wire boundary, like ``subscribe.session``.
+
+    ``""`` and ``*`` reach the store's prefix resolver as ``GLOB '*'`` — every
+    session on the board — and on the voice route the payload is the
+    operator's sentence. Refused before a burst opens: no frame is buffered,
+    no model is loaded for it, and the socket stays up for the next press.
+    """
+    http, _project, token, built = voice
+    with _authed(http, token) as connection:
+        for bad in ("", "*"):
+            connection.send_text(json.dumps({"t": "audio", "session": bad, "seq": 0}))
+            assert json.loads(_until(connection, "error"))["code"] == "bad_message", bad
+        connection.send_bytes(FRAME)
+        assert json.loads(_until(connection, "error"))["code"] == "audio_unexpected", (
+            "a refused header must not have opened a burst"
+        )
+        _speak(connection)
+        assert _final_stt(connection)["text"] == CANNED, "the socket lives"
+    assert len(built) == 1, "the refused headers loaded no model; the real press loaded one"
+
+
+def test_the_error_contract_names_every_code_the_server_sends() -> None:
+    """``protocol.Error``'s docstring is the client author's list, and it matches the code.
+
+    Seven branches folded into this server and each brought codes; the union
+    is the contract, and no generated schema can catch drift in it because no
+    schema describes the set of codes. A code that nobody sends outlived one
+    merge in that docstring (``session_mismatch``), and a code somebody sends
+    but nobody documents is the client showing a raw string. So both
+    directions: every code a ``code="…"`` literal or a ``_drop(…, "…")`` call
+    in the server can send is documented, and every code-shaped token in the
+    docstring is one the server sends.
+    """
+    import inspect
+    import re
+
+    source = inspect.getsource(xr_server)
+    sent = set(re.findall(r'code="([a-z_]+)"', source))
+    sent |= set(re.findall(r'_drop\(\s*\w+,\s*"([a-z_]+)"', source))
+    contract = wire.Error.__doc__ or ""
+    documented = set(re.findall(r"``([a-z]+(?:_[a-z]+)+)``", contract))
+    assert len(sent) >= 12, f"the scan read too few codes to be reading the server: {sorted(sent)}"
+    assert "auth_failed" in sent and "stt_failed" in sent, "both literal shapes are being scanned"
+    undocumented = sorted(code for code in sent if f"``{code}``" not in contract)
+    assert undocumented == [], f"sent but not in the Error docstring: {undocumented}"
+    never_sent = sorted(documented - sent)
+    assert never_sent == [], f"in the Error docstring but never sent: {never_sent}"
+
+
 def test_a_machine_with_no_speech_backend_says_so_once_and_keeps_the_ring(
     work_dir: Path,
 ) -> None:
@@ -1625,7 +1789,7 @@ def test_a_store_that_cannot_be_read_at_connect_is_an_error_frame_and_a_clean_cl
     assert answer["t"] == "error"
     assert answer["code"] == "board_unavailable"
     assert "database is locked" in answer["message"]
-    assert closed.value.code == xr_server.CLOSE_TRY_AGAIN_LATER
+    assert closed.value.code == wire.CLOSE_TRY_AGAIN_LATER
 
 
 def test_a_prompt_the_fleet_filed_as_a_note_is_acked_ok_and_a_delivery_that_raised_is_not(

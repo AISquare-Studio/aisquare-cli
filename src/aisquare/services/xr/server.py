@@ -75,6 +75,8 @@ from aisquare.services.xr.protocol import (
     AUDIO_SAMPLE_RATE_HZ,
     CLOSE_AUTH_FAILED,
     CLOSE_AUTH_TIMEOUT,
+    CLOSE_SERVICE_RESTART,
+    CLOSE_TRY_AGAIN_LATER,
     PROTOCOL_VERSION,
     Ack,
     Audio,
@@ -103,27 +105,6 @@ POLL_MS = 500
 
 AUTH_TIMEOUT_S = 5.0
 """How long a socket may stay silent before it has authenticated."""
-
-CLOSE_TRY_AGAIN_LATER = 1013
-"""Close code for a board that could not be read at connect.
-
-RFC 6455's "try again later", and it is chosen for what the client should do
-next: a locked or damaged ``context.db`` during the hello/snapshot read is a
-transient of the server's, so reconnecting with backoff is right — unlike
-:data:`CLOSE_AUTH_FAILED`, where it is wrong. The client is told why in a
-``board_unavailable`` error frame first; before that frame existed the store
-error escaped the ASGI app as a traceback and the transport was dropped with
-no close frame at all, which the client could only read as a network fault.
-"""
-
-CLOSE_SERVICE_RESTART = 1012
-"""The close code uvicorn hands the app for every open socket when it shuts down.
-
-All three of its websocket implementations deliver ``websocket.disconnect``
-with this code from ``shutdown()`` and nothing a client does produces it, so
-it is how a connection tells "the operator hit Ctrl-C" apart from "the headset
-went away" — the two cases :data:`VOICE_DRAIN_S` treats differently.
-"""
 
 VOICE_DRAIN_S = 30.0
 """How long a connection the CLIENT closed keeps working on a burst it committed.
@@ -1728,7 +1709,6 @@ def run(project: ProjectInfo, *, bind: str, port: int, token: str) -> None:
 
 
 __all__: Sequence[str] = (
-    "CLOSE_TRY_AGAIN_LATER",
     "MAX_AUDIO_BYTES",
     "MAX_UTTERANCE_S",
     "POLL_MS",

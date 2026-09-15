@@ -94,8 +94,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     replacement below the old conversation. On the wire: the auth close code
     splits into 4401 (`auth_failed`, a rejected token, do not retry) and 4408
     (`auth_timeout`/`auth_invalid`, a stalled or malformed handshake, retry); a
-    subscribe id must be a non-empty non-glob string; a mismatched `audioEnd`
-    keeps the header's session (logged, not refused) and an over-long burst is
+    session id — on `subscribe`, `prompt`, `audio` and `audioEnd` alike — must
+    be a non-empty non-glob string, and a spoken-at prefix resolves on this
+    board the way a typed one does (an ambiguous one is refused in the `ack`);
+    a mismatched `audioEnd` keeps the header's session (logged, not refused)
+    and an over-long burst is
     answered once with `audio_too_long`; and the audio format lives once in
     `protocol.py`, with `frameBytes` and the burst cap derived from it.
   - **The client** (`web/xr/`, plain ES modules, no build step; three.js from a

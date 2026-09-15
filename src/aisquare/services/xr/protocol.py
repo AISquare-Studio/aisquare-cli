@@ -116,6 +116,31 @@ ring dark until the printed URL was reopened; splitting the two is what lets a
 client retry the transient case and give up only on the hopeless one.
 """
 
+CLOSE_TRY_AGAIN_LATER = 1013
+"""Close code for a board that could not be read at connect: reconnect with backoff.
+
+RFC 6455's "try again later", chosen for what the client should do next: a
+locked or damaged ``context.db`` during the hello/snapshot read is a transient
+of the server's, so reconnecting with backoff is right — unlike
+:data:`CLOSE_AUTH_FAILED`, where it is wrong. The client is told why in a
+``board_unavailable`` error frame first; before that frame existed the store
+error escaped the ASGI app as a traceback and the transport was dropped with
+no close frame at all, which the client could only read as a network fault.
+"""
+
+CLOSE_SERVICE_RESTART = 1012
+"""The close code uvicorn hands every open socket when the server shuts down.
+
+Never sent by this server's own code and published in ``closeCodes`` as a
+note: all three of uvicorn's websocket implementations deliver
+``websocket.disconnect`` with this code from ``shutdown()`` and nothing a
+client does produces it, so it is how a connection tells "the operator hit
+Ctrl-C" apart from "the headset went away" — the two cases
+``server.VOICE_DRAIN_S`` treats differently. For the client it is an ordinary
+transport close: reconnect with backoff, and the restarted server is picked up
+without a page reload.
+"""
+
 SessionState = Literal["working", "waiting", "needs_you", "gone"]
 """What the operator needs to know about a session at a glance.
 
@@ -284,18 +309,33 @@ class Error(_Wire):
     """Something the client asked for did not happen, and why.
 
     ``code`` is the stable half — key on it. ``message`` is for a human
-    reading a console. The codes this server sends, grouped by what a client
-    should do with them:
+    reading a console. Every code this server sends, grouped by what a client
+    should do with it (the shipped client handles each of these, and shows a
+    code it does not know on the focused panel rather than dropping it).
+    ``tests/test_xr_server.py`` checks this list against the server's source
+    in both directions, because seven branches folded into this server and a
+    code that one of them stopped sending outlived the merge here once:
 
-    - ``auth_failed`` (then close 4401): the token was rejected; do not retry
-      with it. ``auth_timeout``: no auth frame arrived in time — a transport
-      problem, not a token one.
+    - Handshake, each followed by a close. ``auth_failed`` (close 4401,
+      ``retry:false``): the token was checked and rejected; do not retry with
+      it. ``auth_timeout`` (close 4408): no frame arrived within the timeout.
+      ``auth_invalid`` (close 4408): the first frame was not a valid ``auth``
+      — not JSON, the wrong type, an unknown field, or binary audio. No token
+      was checked in either 4408 case, so reconnecting with backoff is right.
     - ``board_unavailable`` (then close 1013): the board could not be read
       at connect; reconnect with backoff.
-    - ``bad_message``, ``internal``: the frame did not parse, or a handler
-      raised; the socket stays open.
-    - ``no_such_session``, ``no_transcript``: a subscribe that named a
-      session this board does not have, or one with no transcript on record.
+    - ``bad_message``, ``internal``: the frame did not parse (a session id
+      that is empty or carries a glob metacharacter is refused this way, on
+      every frame that names one), or a handler raised; the socket stays
+      open.
+    - ``no_such_session``, ``ambiguous_session``, ``no_transcript``,
+      ``transcript_gone``: a subscribe that named a session this board does
+      not have, a prefix that matches more than one session on it, a session
+      with no transcript on record, or a followed transcript that has been
+      missing for longer than ``server.TRANSCRIPT_MISSING_GRACE_S`` — the
+      tail ended, and only a re-subscribe restarts it. A prompt, typed or
+      spoken, with an unknown or ambiguous session is answered in its ``ack``
+      (``ok:false``) instead, because a prompt always gets exactly one ack.
     - Voice, each sent AT MOST ONCE per burst, after which the rest of that
       burst is accepted and discarded until the next ``audio`` header:
       ``stt_unavailable`` (no backend on this machine; the message carries
@@ -377,6 +417,13 @@ class Audio(_Wire):
     docstring states it in full and :func:`schema_document` publishes the
     numbers as the ``audio`` block, so a client author never has to open this
     file or infer the format from a comment about a byte cap.
+
+    ``session`` is a :data:`SessionRef`, exactly as on ``subscribe`` and
+    ``prompt``: the voice route resolves it through the same on-this-board
+    prefix resolver a typed prompt uses, so an empty string or a glob
+    metacharacter — which that resolver would turn into a wildcard over the
+    whole board, with the operator's spoken sentence as the payload — is
+    refused at the wire boundary as ``bad_message`` before a burst opens.
     """
 
     t: Literal["audio"] = "audio"
@@ -392,7 +439,7 @@ class Audio(_Wire):
     # in the same commit. It was found by a human reading the two fields
     # together, which is the only guard there is. `audio` is the first frame a
     # client sends, so this is the first field a client author reads.
-    session: str = Field(
+    session: SessionRef = Field(
         description=(
             "Session this burst is addressed to. The HEADER owns the burst: the "
             "microphone is opened for this session and the samples are recorded "
@@ -431,7 +478,7 @@ class AudioEnd(_Wire):
     """
 
     t: Literal["audioEnd"] = "audioEnd"
-    session: str = Field(
+    session: SessionRef = Field(
         description=(
             "Should equal the session on the audio header that opened this "
             "burst. If the two disagree the HEADER wins: the microphone was "
@@ -546,9 +593,30 @@ def schema_document() -> dict[str, Any]:
                     "handshake in time — a stalled reverse-forward, a client on "
                     "the wrong port, or a malformed first frame. No token was "
                     "checked, so reconnect with backoff (paired with the "
-                    "`auth_timeout` error frame). Every close code NOT listed "
-                    "here is likewise a transport close where retry is right; "
-                    "only CLOSE_AUTH_FAILED is terminal."
+                    "`auth_timeout` error frame for silence, or `auth_invalid` "
+                    "for a malformed, non-auth or binary first frame). Every "
+                    "close code NOT listed here is likewise a transport close "
+                    "where retry is right; only CLOSE_AUTH_FAILED is terminal."
+                ),
+            },
+            str(CLOSE_TRY_AGAIN_LATER): {
+                "name": "CLOSE_TRY_AGAIN_LATER",
+                "retry": True,
+                "description": (
+                    "The board could not be read at connect (a locked or "
+                    "damaged context.db), after a `board_unavailable` error "
+                    "frame. A transient of the server's: reconnect with backoff "
+                    "and the token kept."
+                ),
+            },
+            str(CLOSE_SERVICE_RESTART): {
+                "name": "CLOSE_SERVICE_RESTART",
+                "retry": True,
+                "description": (
+                    "The server is shutting down: uvicorn closes every open "
+                    "socket with this code on Ctrl-C, and nothing this server's "
+                    "own code sends carries it. Reconnect with backoff; a "
+                    "restarted server is picked up without a page reload."
                 ),
             },
         },

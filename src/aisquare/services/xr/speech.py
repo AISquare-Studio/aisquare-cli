@@ -40,14 +40,29 @@ from math import sqrt
 from typing import Protocol, runtime_checkable
 
 from aisquare.core.version import DISTRIBUTION
+from aisquare.services.xr.protocol import (
+    AUDIO_CHANNELS,
+    AUDIO_FRAME_BYTES,
+    AUDIO_FRAME_MS,
+    AUDIO_SAMPLE_BITS,
+    AUDIO_SAMPLE_RATE_HZ,
+)
 
-#: The wire format, fixed by the client's ``AudioWorklet`` (§10). Every byte
-#: length in this module is derived from these rather than written out, so a
-#: change to the client's frame size has one place to land.
-SAMPLE_RATE = 16_000
-SAMPLE_BYTES = 2
-FRAME_MS = 20
-FRAME_BYTES = SAMPLE_RATE * SAMPLE_BYTES * FRAME_MS // 1000
+#: The wire format has ONE home, :mod:`aisquare.services.xr.protocol`, whose
+#: ``AUDIO_*`` constants the published schema is built from; this module
+#: imports them rather than restating them, so the decoder cannot drift from
+#: the contract the client is written against (it did once: two copies of
+#: 16 kHz agreed only by luck). The short names are kept as ALIASES of those
+#: objects — not a second statement — because the tests and the server read
+#: them (``speech.SAMPLE_BYTES`` is the server's alignment unit). Every byte
+#: length below is derived from these rather than written out.
+SAMPLE_RATE = AUDIO_SAMPLE_RATE_HZ
+SAMPLE_BYTES = AUDIO_SAMPLE_BITS // 8
+CHANNELS = AUDIO_CHANNELS
+FRAME_MS = AUDIO_FRAME_MS
+FRAME_BYTES = AUDIO_FRAME_BYTES
+#: Bytes per second of audio in that format; the unit every cadence below is in.
+BYTES_PER_SECOND = SAMPLE_RATE * SAMPLE_BYTES * CHANNELS
 
 #: Which model the backend loads. ``base.en`` is the default because it is the
 #: fastest thing that reliably hears a short English command; ``small.en`` is
@@ -67,7 +82,7 @@ ALLOWED_MODELS = ("base.en", "small.en")
 #: ``feed``, so a decoder that is slower than this cadence falls one decode
 #: behind and stays there instead of falling further behind every second.
 INTERIM_SECONDS = 1.0
-INTERIM_BYTES = int(SAMPLE_RATE * SAMPLE_BYTES * INTERIM_SECONDS)
+INTERIM_BYTES = int(BYTES_PER_SECOND * INTERIM_SECONDS)
 
 #: How much of the buffer's TAIL an interim re-decodes. Whisper has no
 #: streaming API, so an interim is a re-decode of the buffer; re-decoding ALL
@@ -99,7 +114,7 @@ INTERIM_BYTES = int(SAMPLE_RATE * SAMPLE_BYTES * INTERIM_SECONDS)
 #: decodes everything, so the transcript that becomes a prompt is not a window
 #: at all.
 INTERIM_WINDOW_SECONDS = 4.0
-INTERIM_WINDOW_BYTES = int(SAMPLE_RATE * SAMPLE_BYTES * INTERIM_WINDOW_SECONDS)
+INTERIM_WINDOW_BYTES = int(BYTES_PER_SECOND * INTERIM_WINDOW_SECONDS)
 
 #: RMS below which a frame is treated as room tone. 16-bit speech at a
 #: headset mic sits in the thousands; a quiet room sits in the low hundreds.

@@ -251,6 +251,53 @@ def test_a_subscribe_id_is_rejected_before_it_can_become_a_wildcard() -> None:
             wire.parse_client(f'{{"t":"subscribe","session":{bad}}}')
 
 
+def test_the_schema_lists_the_connect_time_and_restart_closes_as_retryable() -> None:
+    """1013 and 1012 are in the contract with ``retry:true``; 4401 stays the only terminal close.
+
+    A client's reconnect policy is a function of the close code alone whenever
+    the error frame before it was lost, so every close this server can produce
+    — and the one uvicorn produces around it — must be published with its retry
+    bit. 1013 follows ``board_unavailable`` (a locked or damaged store at
+    connect); 1012 is uvicorn's shutdown close, which no code here sends but
+    every client of this server receives on Ctrl-C. Both are transport closes:
+    the token is still good, and the first version of this contract, which
+    listed only 4401, left a client to guess at exactly these two.
+    """
+    codes = wire.schema_document()["closeCodes"]
+    assert wire.CLOSE_TRY_AGAIN_LATER == 1013 and wire.CLOSE_SERVICE_RESTART == 1012
+    again = codes[str(wire.CLOSE_TRY_AGAIN_LATER)]
+    restart = codes[str(wire.CLOSE_SERVICE_RESTART)]
+    assert again["retry"] is True and "board_unavailable" in again["description"]
+    assert restart["retry"] is True and "uvicorn" in restart["description"]
+    terminal = sorted(code for code, entry in codes.items() if entry["retry"] is False)
+    assert terminal == [str(wire.CLOSE_AUTH_FAILED)], (
+        "a rejected token is the ONLY close a client must not reconnect through"
+    )
+
+
+def test_an_audio_burst_id_is_validated_like_a_subscribe() -> None:
+    """``audio.session`` and ``audioEnd.session`` are ``SessionRef`` too.
+
+    The voice route resolves the header's session through the same on-this-board
+    prefix resolver a typed prompt uses, so the glob hazard that made ``""`` and
+    ``*`` a wildcard on ``subscribe`` existed on the header as well — with the
+    operator's spoken sentence as the payload. Refused at the wire boundary, and
+    published that way: the client schema carries the same ``minLength`` and
+    ``pattern`` on all four fields, so a second implementer reads one rule.
+    """
+    assert wire.parse_client('{"t":"audio","session":"bbbb2222","seq":0}').session == "bbbb2222"
+    assert wire.parse_client('{"t":"audioEnd","session":"mcp:remote:abc"}').session
+    for frame in ("audio", "audioEnd"):
+        for bad in ('""', '"*"', '"?"', '"a b"'):
+            with pytest.raises(Exception, match=r"pattern|at least 1|string"):
+                wire.parse_client(f'{{"t":"{frame}","session":{bad}}}')
+    definitions = wire.schema_document()["client"]["$defs"]
+    for name in ("Audio", "AudioEnd", "Prompt"):
+        field = definitions[name]["properties"]["session"]
+        assert field["minLength"] == 1, name
+        assert field["pattern"] == wire._SESSION_REF_PATTERN, name
+
+
 # --- projector ------------------------------------------------------------------
 
 

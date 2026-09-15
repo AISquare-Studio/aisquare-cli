@@ -24,7 +24,17 @@
     "4408": {
       "name": "CLOSE_AUTH_TIMEOUT",
       "retry": true,
-      "description": "The socket opened but no valid auth frame completed the handshake in time \u2014 a stalled reverse-forward, a client on the wrong port, or a malformed first frame. No token was checked, so reconnect with backoff (paired with the `auth_timeout` error frame). Every close code NOT listed here is likewise a transport close where retry is right; only CLOSE_AUTH_FAILED is terminal."
+      "description": "The socket opened but no valid auth frame completed the handshake in time \u2014 a stalled reverse-forward, a client on the wrong port, or a malformed first frame. No token was checked, so reconnect with backoff (paired with the `auth_timeout` error frame for silence, or `auth_invalid` for a malformed, non-auth or binary first frame). Every close code NOT listed here is likewise a transport close where retry is right; only CLOSE_AUTH_FAILED is terminal."
+    },
+    "1013": {
+      "name": "CLOSE_TRY_AGAIN_LATER",
+      "retry": true,
+      "description": "The board could not be read at connect (a locked or damaged context.db), after a `board_unavailable` error frame. A transient of the server's: reconnect with backoff and the token kept."
+    },
+    "1012": {
+      "name": "CLOSE_SERVICE_RESTART",
+      "retry": true,
+      "description": "The server is shutting down: uvicorn closes every open socket with this code on Ctrl-C, and nothing this server's own code sends carries it. Reconnect with backoff; a restarted server is picked up without a page reload."
     }
   },
   "server": {
@@ -97,7 +107,7 @@
       },
       "Error": {
         "additionalProperties": false,
-        "description": "Something the client asked for did not happen, and why.\n\n``code`` is the stable half \u2014 key on it. ``message`` is for a human\nreading a console. The codes this server sends, grouped by what a client\nshould do with them:\n\n- ``auth_failed`` (then close 4401): the token was rejected; do not retry\n  with it. ``auth_timeout``: no auth frame arrived in time \u2014 a transport\n  problem, not a token one.\n- ``board_unavailable`` (then close 1013): the board could not be read\n  at connect; reconnect with backoff.\n- ``bad_message``, ``internal``: the frame did not parse, or a handler\n  raised; the socket stays open.\n- ``no_such_session``, ``no_transcript``: a subscribe that named a\n  session this board does not have, or one with no transcript on record.\n- Voice, each sent AT MOST ONCE per burst, after which the rest of that\n  burst is accepted and discarded until the next ``audio`` header:\n  ``stt_unavailable`` (no backend on this machine; the message carries\n  the fix), ``stt_empty`` (the burst ended with no audio frame in it),\n  ``stt_failed`` (the backend raised), ``audio_too_long`` (past\n  ``server.MAX_UTTERANCE_S`` or its byte equivalent),\n  ``audio_misaligned`` (a binary frame whose byte length is not a whole\n  number of samples: the sender lost or added a byte, so the burst is\n  dropped rather than transcribed as byte-shifted noise), and\n  ``audio_unexpected`` (a binary frame with no open burst; latched until\n  the next header). None of these closes the socket.",
+        "description": "Something the client asked for did not happen, and why.\n\n``code`` is the stable half \u2014 key on it. ``message`` is for a human\nreading a console. Every code this server sends, grouped by what a client\nshould do with it (the shipped client handles each of these, and shows a\ncode it does not know on the focused panel rather than dropping it).\n``tests/test_xr_server.py`` checks this list against the server's source\nin both directions, because seven branches folded into this server and a\ncode that one of them stopped sending outlived the merge here once:\n\n- Handshake, each followed by a close. ``auth_failed`` (close 4401,\n  ``retry:false``): the token was checked and rejected; do not retry with\n  it. ``auth_timeout`` (close 4408): no frame arrived within the timeout.\n  ``auth_invalid`` (close 4408): the first frame was not a valid ``auth``\n  \u2014 not JSON, the wrong type, an unknown field, or binary audio. No token\n  was checked in either 4408 case, so reconnecting with backoff is right.\n- ``board_unavailable`` (then close 1013): the board could not be read\n  at connect; reconnect with backoff.\n- ``bad_message``, ``internal``: the frame did not parse (a session id\n  that is empty or carries a glob metacharacter is refused this way, on\n  every frame that names one), or a handler raised; the socket stays\n  open.\n- ``no_such_session``, ``ambiguous_session``, ``no_transcript``,\n  ``transcript_gone``: a subscribe that named a session this board does\n  not have, a prefix that matches more than one session on it, a session\n  with no transcript on record, or a followed transcript that has been\n  missing for longer than ``server.TRANSCRIPT_MISSING_GRACE_S`` \u2014 the\n  tail ended, and only a re-subscribe restarts it. A prompt, typed or\n  spoken, with an unknown or ambiguous session is answered in its ``ack``\n  (``ok:false``) instead, because a prompt always gets exactly one ack.\n- Voice, each sent AT MOST ONCE per burst, after which the rest of that\n  burst is accepted and discarded until the next ``audio`` header:\n  ``stt_unavailable`` (no backend on this machine; the message carries\n  the fix), ``stt_empty`` (the burst ended with no audio frame in it),\n  ``stt_failed`` (the backend raised), ``audio_too_long`` (past\n  ``server.MAX_UTTERANCE_S`` or its byte equivalent),\n  ``audio_misaligned`` (a binary frame whose byte length is not a whole\n  number of samples: the sender lost or added a byte, so the burst is\n  dropped rather than transcribed as byte-shifted noise), and\n  ``audio_unexpected`` (a binary frame with no open burst; latched until\n  the next header). None of these closes the socket.",
         "properties": {
           "t": {
             "const": "error",
@@ -460,7 +470,7 @@
     "$defs": {
       "Audio": {
         "additionalProperties": false,
-        "description": "Header for a push-to-talk burst. Binary frames follow until ``audioEnd``.\n\nThose frames are raw ``pcm_s16le`` \u2014 16 kHz, mono, signed 16-bit\nlittle-endian PCM, no container \u2014 and never anything else. The module\ndocstring states it in full and :func:`schema_document` publishes the\nnumbers as the ``audio`` block, so a client author never has to open this\nfile or infer the format from a comment about a byte cap.",
+        "description": "Header for a push-to-talk burst. Binary frames follow until ``audioEnd``.\n\nThose frames are raw ``pcm_s16le`` \u2014 16 kHz, mono, signed 16-bit\nlittle-endian PCM, no container \u2014 and never anything else. The module\ndocstring states it in full and :func:`schema_document` publishes the\nnumbers as the ``audio`` block, so a client author never has to open this\nfile or infer the format from a comment about a byte cap.\n\n``session`` is a :data:`SessionRef`, exactly as on ``subscribe`` and\n``prompt``: the voice route resolves it through the same on-this-board\nprefix resolver a typed prompt uses, so an empty string or a glob\nmetacharacter \u2014 which that resolver would turn into a wildcard over the\nwhole board, with the operator's spoken sentence as the payload \u2014 is\nrefused at the wire boundary as ``bad_message`` before a burst opens.",
         "properties": {
           "t": {
             "const": "audio",
@@ -470,6 +480,8 @@
           },
           "session": {
             "description": "Session this burst is addressed to. The HEADER owns the burst: the microphone is opened for this session and the samples are recorded for it, so this is where the transcript is routed. A matching audioEnd that names a different session does NOT move it \u2014 the disagreement is logged and the header wins, rather than either attributing the operator's speech to whichever frame the server read last or discarding a spoken sentence over a client's bookkeeping bug. See audioEnd.session for the other half of the rule.",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_:-]+$",
             "title": "Session",
             "type": "string"
           },
@@ -499,6 +511,8 @@
           },
           "session": {
             "description": "Should equal the session on the audio header that opened this burst. If the two disagree the HEADER wins: the microphone was opened for it and the samples were recorded for it, so routing the transcript anywhere else is the defect this field exists to prevent. The mismatch is logged, not answered \u2014 a client whose two frames disagree has a bug worth finding, but discarding the operator's sentence over it would spend their words on our bookkeeping.",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_:-]+$",
             "title": "Session",
             "type": "string"
           }

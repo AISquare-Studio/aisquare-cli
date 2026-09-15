@@ -20,6 +20,8 @@ real person's voice in the repository, 95 KB.
 
 from __future__ import annotations
 
+import math
+import random
 import time
 import wave
 from pathlib import Path
@@ -139,6 +141,69 @@ def test_a_real_decode_of_silence_produces_no_prompt(live: speech.Transcriber) -
 
     assert interims == [None] * 150
     assert live.finish() == ""
+
+
+def _square(seconds: float, amplitude: int = 8000) -> bytes:
+    """The suite's ``TONE`` shape: a square wave far over the RMS gate, and not speech."""
+    out = bytearray()
+    for index in range(int(speech.SAMPLE_RATE * seconds)):
+        value = amplitude if (index // 40) % 2 == 0 else -amplitude
+        out += value.to_bytes(2, "little", signed=True)
+    return bytes(out)
+
+
+def _white(seconds: float, level: int, seed: int) -> bytes:
+    """Seeded Gaussian hiss at a level that opens the gate on its first frame."""
+    rng = random.Random(seed)
+    out = bytearray()
+    for _ in range(int(speech.SAMPLE_RATE * seconds)):
+        value = max(-32768, min(32767, int(rng.gauss(0, level))))
+        out += value.to_bytes(2, "little", signed=True)
+    return bytes(out)
+
+
+def _sine(seconds: float, hz: float, amplitude: int = 4000) -> bytes:
+    """A beep: periodic, loud, and about as far from speech as a sound gets."""
+    out = bytearray()
+    for index in range(int(speech.SAMPLE_RATE * seconds)):
+        value = int(amplitude * math.sin(2 * math.pi * hz * index / speech.SAMPLE_RATE))
+        out += value.to_bytes(2, "little", signed=True)
+    return bytes(out)
+
+
+@pytest.mark.parametrize(
+    "name, pcm",
+    [
+        ("a square tone", _square(0.6)),
+        ("white noise", _white(1.0, 3000, 1)),
+        ("a 1 kHz beep", _sine(2.0, 1000.0)),
+    ],
+    ids=["square", "white", "beep"],
+)
+def test_loud_non_speech_that_opens_the_gate_is_not_transcribed(
+    live: speech.Transcriber, name: str, pcm: bytes
+) -> None:
+    """THE NON-SPEECH GUARD: the RMS gate is not one, and the model's VAD is.
+
+    The gate is one-way and opens on a single frame over the threshold, after
+    which everything is buffered, and whisper decoding audio with no speech
+    in it hallucinates — the server routes the final text as a prompt, so
+    each hallucination was typed into an agent's pane or filed as a board
+    note. Measured on base.en with ``vad_filter=False``: this square tone
+    (the suite's own ``TONE`` shape) and this hiss came back as ``You`` and
+    the beep as ``BEEP BEEP BEEP``, in a sweep where 47 of 80 non-speech
+    presses produced text, including "Yeah. Okay. So. This is all…" over a
+    60 ms onset and hiss. With the VAD on all three are empty while the
+    spoken fixture above still transcribes exactly. Deterministic: seeded
+    noise, greedy decoding, one process.
+    """
+    chunks = frames(pcm)
+
+    interims = [text for chunk in chunks if (text := live.feed(chunk))]
+    final = live.finish()
+
+    assert final == "", f"{name} was transcribed as {final!r} — it would have been routed"
+    assert interims == [], f"{name} produced interim text: {interims}"
 
 
 def test_the_factory_returns_a_buffered_transcriber_over_the_real_model(

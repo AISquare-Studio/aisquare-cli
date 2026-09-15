@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from array import array
 from pathlib import Path
 
 import pytest
@@ -67,8 +68,12 @@ def test_rms_separates_room_tone_from_speech() -> None:
     assert speech.rms(_tone(20)) > speech.SILENCE_RMS
 
 
-def test_rms_survives_a_frame_split_mid_sample() -> None:
-    """A websocket frame can end on an odd byte; the audio path must not die for it."""
+def test_rms_is_a_level_meter_and_tolerates_a_trailing_odd_byte() -> None:
+    """One byte cannot move a level, so the meter ignores it; the buffer is another matter.
+
+    The alignment contract lives in ``feed`` (below), not here — this only
+    pins that measuring a misaligned chunk is never itself a crash.
+    """
     odd = _tone(20) + b"\x01"
 
     assert speech.rms(odd) > speech.SILENCE_RMS
@@ -171,7 +176,13 @@ def test_finish_returns_the_final_transcript_and_resets() -> None:
 
 
 def test_the_decoder_is_handed_the_whole_utterance() -> None:
-    """Whisper has no streaming API: every decode is over the buffer so far."""
+    """Whisper has no streaming API: a decode is over the buffer, not a delta.
+
+    Below :data:`speech.INTERIM_WINDOW_BYTES`, which is every utterance this
+    path is for, "the buffer so far" and "the window" are the same bytes. The
+    test that pins them apart is
+    ``test_an_interim_decodes_a_bounded_window_however_long_the_press_runs``.
+    """
     decode = Decoder("hello board")
     transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES * 2)
 
@@ -182,6 +193,143 @@ def test_the_decoder_is_handed_the_whole_utterance() -> None:
         speech.FRAME_BYTES * 2,
         speech.FRAME_BYTES * 4,
     ]
+
+
+# --- a chunk that is not sample-aligned --------------------------------------------------
+
+
+def _int16_decode(pcm: bytes) -> str:
+    """Production's decode shape: read the buffer as int16 and refuse a half sample.
+
+    ``speech.py``'s real decoder opens with
+    ``numpy.frombuffer(pcm, dtype=numpy.int16)``, which raises on a length that
+    is not a multiple of two. numpy is not a test dependency — the ``xr`` extra
+    is optional and this file runs without it — so the constraint is restated
+    rather than imported. ``array`` raises for exactly the same reason on
+    exactly the same lengths.
+    """
+    array("h").frombytes(pcm)
+    return "hello board"
+
+
+@pytest.mark.parametrize("length", [1, 639, 641])
+def test_a_chunk_that_is_not_sample_aligned_is_refused_at_the_chunk_that_caused_it(
+    length: int,
+) -> None:
+    """An odd length is a sender that lost or added a byte, and it is named at that chunk.
+
+    A websocket delivers whole messages, so a chunk never splits mid-sample
+    on its own; the byte is the client's. Concatenated raw it would raise one
+    interim later, at the next decode, with the sentence gone. Carried into
+    the next chunk — which this class did for one release — it would not
+    raise at all: every sample after it is read from the wrong pair, which is
+    noise the model transcribes with confidence and the server routes as a
+    prompt. So the refusal is immediate, with the length in the message.
+    """
+    transcriber = BufferedTranscriber(_int16_decode)
+    chunk = (_tone(20) + b"\x01")[:length]
+
+    with pytest.raises(ValueError, match=f"{length}-byte chunk"):
+        transcriber.feed(chunk)
+
+
+def test_a_refused_chunk_leaves_the_utterance_untouched() -> None:
+    """The refusal happens before the buffer is touched, so the caller decides what to do next."""
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES * 2)
+    transcriber.feed(_tone(20))
+
+    with pytest.raises(ValueError):
+        transcriber.feed(_tone(20) + b"\x01")
+    transcriber.feed(_tone(20))
+
+    assert decode.calls[-1] == _tone(20) * 2, "the aligned frames around it were kept, in order"
+    assert transcriber.finish() == "hello board"
+
+
+def test_discard_forgets_the_utterance_without_a_decode() -> None:
+    """A dropped burst must cost neither a decode of its audio nor a model reload.
+
+    ``finish`` would run the decoder over up to a minute of audio to throw
+    the answer away; dropping the object would cost the next press a model
+    load. ``discard`` is the third option, and it must leave the next
+    utterance starting from nothing: closed gate, empty buffer, no stale
+    interim to suppress the next one.
+    """
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES)
+    transcriber.feed(_tone(speech.FRAME_MS))
+    assert decode.calls, "the set-up burst earned an interim"
+    before = len(decode.calls)
+
+    transcriber.discard()
+
+    assert len(decode.calls) == before, "discard ran a decode"
+    assert transcriber.finish() == "", "the discarded audio survived into finish"
+    assert transcriber.feed(_silence(40)) is None, "the gate did not close"
+    assert transcriber.feed(_tone(speech.FRAME_MS)) == "hello board", (
+        "the next utterance's interim was suppressed as a repeat of the discarded one"
+    )
+    assert decode.calls[-1] == _tone(speech.FRAME_MS), "the next utterance started from nothing"
+
+
+def test_an_oversized_chunk_earns_at_most_one_interim() -> None:
+    """A caller that fell behind hands over several seconds at once and gets ONE decode.
+
+    The server's voice worker feeds everything that arrived during a slow
+    decode as one chunk; if this class decoded once per interim's worth of
+    bytes inside that chunk, catching up would cost as many decodes as
+    falling behind did, and the worker would never catch up.
+    """
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES)
+
+    transcriber.feed(_tone(speech.FRAME_MS * 10))
+
+    assert len(decode.calls) == 1, "one chunk, one decode, however many interims it spans"
+
+
+# --- the interim window ----------------------------------------------------------------
+
+
+def test_an_interim_decodes_a_bounded_window_however_long_the_press_runs() -> None:
+    """Re-decoding the whole buffer every second makes one press cost O(n^2).
+
+    The cap is 60 seconds (``server.MAX_UTTERANCE_S``), and unbounded that is
+    1890 audio-seconds handed to the decoder for one legal press — minutes of
+    CPU, on a path whose read loop is sequential, so the ``audioEnd`` that
+    would end it queues behind the backlog. Bounded, no single interim can
+    exceed the window no matter how long the operator talks.
+    """
+    decode = Decoder("hello board")
+    window = speech.FRAME_BYTES * 4
+    transcriber = BufferedTranscriber(decode, interim_bytes=speech.FRAME_BYTES, window_bytes=window)
+
+    for _ in range(20):
+        transcriber.feed(_tone(speech.FRAME_MS))
+
+    assert len(decode.calls) == 20, "one interim per frame, at this cadence"
+    assert max(len(call) for call in decode.calls) == window, "no interim exceeds the window"
+    assert sum(len(call) for call in decode.calls) < speech.FRAME_BYTES * 20 * 20 // 2, (
+        "the total is linear in the utterance, not quadratic"
+    )
+
+
+def test_finish_still_decodes_the_whole_utterance() -> None:
+    """The window is an interim economy. The transcript that becomes a prompt is not windowed.
+
+    This is the line between "the panel shows a rolling tail" — acceptable, it
+    is a liveness signal — and "the operator's sentence is truncated before it
+    is routed", which would not be.
+    """
+    decode = Decoder("hello board")
+    transcriber = BufferedTranscriber(decode, window_bytes=speech.FRAME_BYTES)
+
+    for _ in range(10):
+        transcriber.feed(_tone(speech.FRAME_MS))
+    transcriber.finish()
+
+    assert len(decode.calls[-1]) == speech.FRAME_BYTES * 10, "finish saw all ten frames"
 
 
 # --- FakeTranscriber ---------------------------------------------------------------------
@@ -201,6 +349,18 @@ def test_the_fake_returns_its_canned_text_and_records_what_it_was_fed() -> None:
         "the fake did not record the audio — 'the transcript came back' and 'the "
         "frames arrived' are different claims"
     )
+
+
+def test_the_fake_counts_discards_and_keeps_its_record() -> None:
+    """``fed`` is the record a test reads back, so a discard must not erase it."""
+    fake = FakeTranscriber("open the planner", interim_bytes=speech.FRAME_BYTES)
+    fake.feed(_tone(speech.FRAME_MS))
+
+    fake.discard()
+
+    assert fake.discarded == 1
+    assert bytes(fake.fed) == _tone(speech.FRAME_MS), "the record of what arrived survived"
+    assert fake.feed(_tone(speech.FRAME_MS)) == "open the planner", "the interim was re-armed"
 
 
 def test_a_silent_fake_returns_empty_text() -> None:

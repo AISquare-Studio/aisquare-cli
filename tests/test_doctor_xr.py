@@ -4,6 +4,15 @@ docs/plans/clixr.md §4 ("`aisquare doctor` gains one XR check … report and
 suggest a fix, never fail hard") and §16, where the row is a line in the
 definition of done.
 
+**Absences are ok; only faults warn.** ``install.sh`` treats any amber row but
+``brain`` as unexpected and exits 2, and ``tests/install/cell.sh`` asserts that
+exact set from a wheel with no extras and no model cache on five distributions
+— so a row that warned because the optional extra was simply not installed, or
+because a model nobody had asked for was not yet downloaded, turned the whole
+matrix red on a healthy machine. The tests in the first block below pin each
+absence as ``ok`` with its install or pre-download line in the detail, and each
+fault as ``warn`` with a fix.
+
 Every seam is injected, so nothing here installs a package, opens a port for
 longer than one connect, or looks at the operator's real Hugging Face cache —
 with two deliberate exceptions, both at the bottom: the port probe is exercised
@@ -41,6 +50,7 @@ HEALTHY = {
     "has_module": lambda module: True,
     "port_in_use": lambda port: False,
     "model_dir": lambda model: Path("/cache") / f"models--Systran--faster-whisper-{model}",
+    "model_loadable": lambda path: True,
 }
 
 
@@ -83,14 +93,50 @@ def test_everything_present_is_ok_with_no_fix() -> None:
 # --- the three facts, one at a time ---------------------------------------------------------
 
 
-def test_a_missing_extra_warns_and_names_the_modules_that_are_missing() -> None:
-    """Which import is absent is the difference between a broken install and no install."""
+def test_a_missing_extra_is_ok_and_names_the_modules_and_the_install_line() -> None:
+    """An optional extra nobody installed is not a fault: ok, with the line that installs it.
+
+    Which import is absent still goes on the line — under ``[dev]`` the web
+    half is present and only ``faster_whisper`` is not, and an operator who
+    reads "no faster_whisper" knows which half they are missing.
+    """
     result = check(has_module=lambda module: module != "faster_whisper")
 
-    assert result.status is CheckStatus.warn
+    assert result.status is CheckStatus.ok
     assert "faster_whisper" in result.detail
     assert "starlette" not in result.detail, "a module that IS installed was reported missing"
-    assert result.fix is not None and "[xr]" in result.fix
+    assert "[xr]" in result.detail, "the install line travels in the detail of an ok row"
+    assert result.fix is None
+
+
+def test_a_base_install_with_nothing_cached_is_ok_which_is_what_the_install_matrix_needs() -> None:
+    """The exact machine ``tests/install/cell.sh`` grades: a wheel with no extras, an empty cache.
+
+    Its acceptance criterion is every row ok except ``brain``; ``install.sh``
+    exits 2 on any other amber row. Both absences at once must therefore be
+    one ok line carrying both remedies.
+    """
+    result = check(has_module=lambda module: False, model_dir=lambda model: None)
+
+    assert result.status is CheckStatus.ok, result
+    assert result.fix is None
+    assert "[xr]" in result.detail
+    assert "python -c" in result.detail, "the pre-download line is on the ok line too"
+
+
+def test_a_backend_missing_its_platform_wheels_warns_with_a_reinstall() -> None:
+    """faster-whisper present without ctranslate2 or onnxruntime IS a fault, not an absence.
+
+    Both ship as platform wheels, so a pip that reported success can still
+    leave an import that fails — and it fails at the first press, as a
+    decode error, which is the worst place to learn it.
+    """
+    result = check(has_module=lambda module: module != "onnxruntime")
+
+    assert result.status is CheckStatus.warn
+    assert "onnxruntime" in result.detail
+    assert "ctranslate2" not in result.detail, "a wheel that IS present was reported missing"
+    assert result.fix is not None and "[xr]" in result.fix and "Reinstall" in result.fix
 
 
 def test_a_missing_extra_still_reports_the_facts_it_could_establish() -> None:
@@ -114,18 +160,34 @@ def test_a_held_port_warns_with_the_fix_naming_the_flag() -> None:
     assert "already running" in result.fix and "--port" in result.fix
 
 
-def test_an_uncached_model_warns_and_says_what_it_will_cost() -> None:
+def test_an_uncached_model_is_ok_and_says_what_it_will_cost() -> None:
     """THE REASON THIS CHECK EXISTS: the only one of the three that fails late.
 
     A missing extra stops the command at import and a held port stops it at
     bind — both loudly, both at the moment you start it. An uncached model lets
     everything start perfectly and goes to the network at the first
-    push-to-talk, which in a demo is the worst possible moment.
+    push-to-talk, which in a demo is the worst possible moment. It is still
+    not a fault — nothing is broken, a download simply has not happened — so
+    the verdict is ok and the pre-download line rides in the detail.
     """
     result = check(model_dir=lambda model: None)
 
-    assert result.status is CheckStatus.warn
+    assert result.status is CheckStatus.ok
     assert "first push-to-talk downloads it" in result.detail
+    assert speech.download_fix(speech.DEFAULT_MODEL) in result.detail
+    assert result.fix is None
+
+
+def test_a_cached_model_with_no_loadable_snapshot_warns_with_the_download_line() -> None:
+    """An interrupted download leaves the directory: ``is_dir`` says cached, the load fails.
+
+    That is worse than an empty cache, because the row would have said
+    "cached" and the first press then fails to load instead of downloading.
+    """
+    result = check(model_loadable=lambda path: False)
+
+    assert result.status is CheckStatus.warn
+    assert "no loadable snapshot" in result.detail
     assert result.fix == speech.download_fix(speech.DEFAULT_MODEL)
 
 
@@ -161,14 +223,17 @@ def test_an_unsupported_model_name_is_named_back_rather_than_silently_defaulted(
     assert "base.en" in result.fix and "small.en" in result.fix
 
 
-def test_several_problems_are_reported_together_with_every_fix() -> None:
+def test_a_fault_and_an_absence_together_warn_for_the_fault_and_still_name_the_absence() -> None:
+    """One line, everything on it: the held port sets the verdict, the install line stays."""
     result = check(has_module=lambda module: False, port_in_use=lambda port: True)
 
     assert result.status is CheckStatus.warn
     assert "xr extra is not installed" in result.detail
+    assert "[xr]" in result.detail, "the install line stays on the detail beside the fault"
     assert f"port {diagnostics._XR_PORT} is in use" in result.detail
     assert result.fix is not None
-    assert "[xr]" in result.fix and "--port" in result.fix
+    assert "--port" in result.fix
+    assert "[xr]" not in result.fix, "an absence is not a fault, so it is not in the fix"
 
 
 # --- failing open -----------------------------------------------------------------------------
@@ -182,7 +247,9 @@ def test_every_seam_raising_is_an_ok_not_evaluated_line() -> None:
     outcome than not knowing whether port 8748 is free. Warn is for "I looked
     and it is wrong"; this is "I could not look".
     """
-    result = check(has_module=explodes, port_in_use=explodes, model_dir=explodes)
+    result = check(
+        has_module=explodes, port_in_use=explodes, model_dir=explodes, model_loadable=explodes
+    )
 
     assert result.status is CheckStatus.ok, "a broken seam failed the machine's health"
     assert "not evaluated" in result.detail
@@ -191,7 +258,7 @@ def test_every_seam_raising_is_an_ok_not_evaluated_line() -> None:
     assert result.fix is None
 
 
-@pytest.mark.parametrize("seam", ["has_module", "port_in_use", "model_dir"])
+@pytest.mark.parametrize("seam", ["has_module", "port_in_use", "model_dir", "model_loadable"])
 def test_any_single_seam_raising_fails_open(seam: str) -> None:
     """Each seam separately, so one lucky short-circuit cannot cover the others."""
     result = check(**{seam: explodes})
@@ -280,6 +347,26 @@ def test_the_cache_falls_back_to_the_home_directory(
     assert diagnostics._hf_hub_cache() == tmp_path / ".cache" / "huggingface" / "hub"
 
 
+def test_a_snapshot_is_loadable_only_when_it_holds_the_weights(tmp_path: Path) -> None:
+    """``model.bin`` under some ``snapshots/<revision>/`` is what a complete download leaves.
+
+    An interrupted one leaves the same directory with the weights absent or
+    still ``*.incomplete`` under ``blobs/`` — which is why ``is_dir`` on the
+    model directory cannot answer this and a second look is needed.
+    """
+    model_dir = tmp_path / f"models--Systran--faster-whisper-{speech.DEFAULT_MODEL}"
+    snapshot = model_dir / "snapshots" / "0123abcd"
+    snapshot.mkdir(parents=True)
+    (model_dir / "blobs").mkdir()
+
+    assert diagnostics._whisper_snapshot_loadable(model_dir) is False, "no weights yet"
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    assert diagnostics._whisper_snapshot_loadable(model_dir) is False, "config alone is not a model"
+    (snapshot / "model.bin").write_bytes(b"\x00")
+    assert diagnostics._whisper_snapshot_loadable(model_dir) is True
+    assert diagnostics._whisper_snapshot_loadable(tmp_path / "absent") is False, "fails closed"
+
+
 def test_a_file_where_the_model_directory_should_be_is_not_a_cached_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -343,3 +430,28 @@ def test_the_xr_row_carries_a_fix_whenever_it_warns(runner: CliRunner) -> None:
     assert xr["status"] in {"ok", "warn"}, "the XR row must never fail a machine"
     if xr["status"] == "warn":
         assert xr["fix"], xr
+
+
+def test_the_row_is_ok_on_a_machine_that_merely_lacks_the_extra_and_the_model(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the CLI, with the real seams except the two that vary by machine.
+
+    The extra may or may not be installed where the suite runs and the model
+    may or may not be cached, so both are pinned to "absent" here and the port
+    is pinned free; what is measured is that ``aisquare --json doctor`` reports
+    the row ok — the shape ``install.sh`` grades.
+    """
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.setattr(diagnostics, "_has_module", lambda module: False)
+    monkeypatch.setattr(diagnostics, "_xr_port_in_use", lambda port, host="127.0.0.1": False)
+
+    rows = {
+        row["name"]: row
+        for row in json.loads(
+            runner.invoke(app, ["--json", "doctor"], catch_exceptions=False).stdout
+        )
+    }
+
+    assert rows["xr"]["status"] == "ok", rows["xr"]
+    assert "[xr]" in rows["xr"]["detail"]

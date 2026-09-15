@@ -19,7 +19,12 @@
     "4401": {
       "name": "CLOSE_AUTH_FAILED",
       "retry": false,
-      "description": "The token was rejected. Do not reconnect with it \u2014 it will be rejected again. Every close code NOT listed here is a transport close, where reconnecting with backoff is right."
+      "description": "The token was checked and rejected. Do not reconnect with it \u2014 it will be rejected again; reopen the URL `aisquare xr` printed to pick up a fresh token. Paired with the `auth_failed` error frame."
+    },
+    "4408": {
+      "name": "CLOSE_AUTH_TIMEOUT",
+      "retry": true,
+      "description": "The socket opened but no valid auth frame completed the handshake in time \u2014 a stalled reverse-forward, a client on the wrong port, or a malformed first frame. No token was checked, so reconnect with backoff (paired with the `auth_timeout` error frame). Every close code NOT listed here is likewise a transport close where retry is right; only CLOSE_AUTH_FAILED is terminal."
     }
   },
   "server": {
@@ -399,6 +404,11 @@
             "default": true,
             "title": "Final",
             "type": "boolean"
+          },
+          "reset": {
+            "default": false,
+            "title": "Reset",
+            "type": "boolean"
           }
         },
         "required": [
@@ -459,7 +469,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Session this burst is addressed to. The HEADER owns the burst: it is where the transcript is routed, and a matching audioEnd that names a different session does not move it -- the disagreement is logged, not answered, rather than attributing the operator's speech to whichever of the two frames the server happened to read last. See audioEnd.session for the whole of that rule.",
+            "description": "Session this burst is addressed to. The HEADER owns the burst: the microphone is opened for this session and the samples are recorded for it, so this is where the transcript is routed. A matching audioEnd that names a different session does NOT move it \u2014 the disagreement is logged and the header wins, rather than either attributing the operator's speech to whichever frame the server read last or discarding a spoken sentence over a client's bookkeeping bug. See audioEnd.session for the other half of the rule.",
             "title": "Session",
             "type": "string"
           },
@@ -531,6 +541,8 @@
             "type": "string"
           },
           "session": {
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_:-]+$",
             "title": "Session",
             "type": "string"
           },
@@ -548,7 +560,7 @@
       },
       "Subscribe": {
         "additionalProperties": false,
-        "description": "Start (or with ``session=None``, stop) streaming one transcript.",
+        "description": "Start (or with ``session=None``, stop) streaming one transcript.\n\n``session`` is a :data:`SessionRef`: an exact id or a unique prefix, never\nan empty string or a ``GLOB`` metacharacter, which the server would resolve\ninto \"every session on the board\".",
         "properties": {
           "t": {
             "const": "subscribe",
@@ -559,6 +571,8 @@
           "session": {
             "anyOf": [
               {
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9_:-]+$",
                 "type": "string"
               },
               {

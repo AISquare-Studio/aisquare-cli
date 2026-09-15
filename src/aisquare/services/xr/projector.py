@@ -37,18 +37,27 @@ SUMMARY_WORDS = 6
 """Hard cap on ``Session.summary``. §5 of the plan: a glanceable ring, not text."""
 
 _EVENT_SCAN = 500
-"""How far back one pass reads the event pipe, for summaries and unread counts.
+"""How far back the SUMMARY pass reads the event pipe, and the per-session cap on
+an unread badge.
 
 Deep enough that every session doing anything has said something inside it, and
 bounded so a board with a hundred thousand events costs the same per poll as a
 board with two hundred.
 
-"Back" is load-bearing and both readers honour it: this is a depth from the
-NEWEST event, so it is :meth:`~aisquare.core.store.ContextStore.recent_events`
-(``ORDER BY seq DESC``) that both callers use. The same number handed to
-``events_since`` means the OLDEST 500 past a floor, which reads identically and
-behaves in the opposite way — see :func:`_unread_counts`, which used to do
-exactly that.
+It has two distinct jobs, and they are not the same read:
+
+- **Summaries** take the newest ``_EVENT_SCAN`` events of the whole board
+  (:meth:`~aisquare.core.store.ContextStore.recent_events`, ``ORDER BY seq
+  DESC``): a session whose last word has already scrolled past that depth has
+  nothing glanceable to say, which is fine for a one-line summary.
+- **Unread badges** must NOT use that board-wide window — it is exactly what let
+  a busy session's traffic evict a quiet session's unread events, dropping its
+  badge to 0 with no subscribe. So :func:`_unread_counts` counts each session
+  from its OWN watermark
+  (:meth:`~aisquare.core.store.ContextStore.unread_counts`) and uses this number
+  only as the per-session CAP on the answer — a badge cannot report more than
+  this, and that ceiling is reached only by a session that genuinely has this
+  many unread events.
 """
 
 #: ``base_role`` output -> palette slot. Every role this repo profiles is
@@ -202,60 +211,48 @@ def _claimed(tasks: Sequence[TeamTask], session_id: str) -> TeamTask | None:
     return max(chosen, key=lambda task: task.updated_at)
 
 
-def _latest_events(store: ContextStore, project_id: str) -> dict[str, TeamEvent]:
+def _latest_events(events: Sequence[TeamEvent]) -> dict[str, TeamEvent]:
     """The most recent event per session, for summaries.
 
-    One bounded read rather than a query per session: at this scale the tail of
-    the pipe holds an event for every session that is doing anything, and a
-    session whose last word has already scrolled out has nothing glanceable to
-    say anyway.
+    Takes the already-read board window rather than issuing its own query: the
+    identical ``recent_events(_EVENT_SCAN)`` read was being made twice per
+    :func:`sessions` call, here and in the unread pass, so :func:`sessions`
+    reads it once and hands it to both. ``events`` is oldest-first (the store
+    reverses its ``DESC`` read), so the last write per session id wins and
+    ``latest`` ends up holding each session's newest event.
     """
     latest: dict[str, TeamEvent] = {}
-    for event in store.recent_events(project_id, limit=_EVENT_SCAN):
+    for event in events:
         if event.session_id:
             latest[event.session_id] = event
     return latest
 
 
 def _unread_counts(
-    store: ContextStore, project_id: str, since: Mapping[str, int]
+    store: ContextStore,
+    project_id: str,
+    rows: Sequence[TeamSession],
+    since: Mapping[str, int],
+    floor: int,
 ) -> dict[str, int]:
-    """Events per session past that session's per-connection watermark.
+    """Unread events per session on the ring, each from its own watermark.
 
-    ``since`` is owned by the connection: it is set to the board's current
-    position when the client subscribes to a session, so "unread" means "since
-    you last looked at this one", which is what the badge on a panel should
-    say. Sessions absent from the mapping have never been looked at and count
-    from the connection's own start, which the caller seeds.
+    ``since`` is owned by the connection: it holds the board position at which
+    the operator last subscribed to (focused) a session, so "unread" means
+    "since you last looked at this one". A session the connection has no
+    watermark for — a late joiner spawned while the headset was on — counts from
+    ``floor``, the board position this connection started at, so its badge fills
+    with everything it has done since it appeared rather than reading 0 forever.
+    Defaulting here is what lets the poll loop drop its per-tick re-seeding pass
+    (a ``latest_seq`` plus a second full ``team_sessions`` read) entirely.
 
-    **Scanned from the newest end, which is the whole point.** This read used to
-    be ``events_since(floor, limit=_EVENT_SCAN)`` with ``floor`` the minimum
-    watermark — and since watermarks only ever move forward on a subscribe, that
-    floor is pinned at wherever the headset connected. ``events_since`` is
-    ``ORDER BY seq ASC``, so the window was a fixed 500-event slice anchored at
-    connect time, and once the board moved past its far edge NO event on the
-    board was ever in it again. Every badge on the ring froze at whatever it
-    happened to be showing: 700 unread read 500, 1000 unread still read 500. Not
-    a cap — a number that had stopped being about anything, sitting there
-    looking like a measurement.
-
-    Counting down from the newest instead means a badge always answers to what
-    just happened. :data:`_EVENT_SCAN` still bounds the work, and it does still
-    bound the ANSWER — a badge cannot report more than the scan is deep. That
-    is a cap and it behaves like one: it is reached only by a session with 500
-    unread events, where the ring is telling the operator "a great many" and the
-    exact figure is not what they are about to act on.
+    The counting itself — per-session from each watermark, capped at
+    :data:`_EVENT_SCAN`, in one indexed pass — lives in
+    :meth:`~aisquare.core.store.ContextStore.unread_counts`, which documents why
+    it must not be a board-wide window.
     """
-    if not since:
-        return {}
-    counts: dict[str, int] = {}
-    for event in store.recent_events(project_id, limit=_EVENT_SCAN):
-        sid = event.session_id
-        if sid is None or sid not in since:
-            continue
-        if event.seq > since[sid]:
-            counts[sid] = counts.get(sid, 0) + 1
-    return counts
+    floors = {row.id: since.get(row.id, floor) for row in rows}
+    return store.unread_counts(project_id, floors, cap=_EVENT_SCAN)
 
 
 def sessions(
@@ -264,6 +261,7 @@ def sessions(
     *,
     now: datetime | None = None,
     unread_since: Mapping[str, int] | None = None,
+    unread_floor: int = 0,
 ) -> list[Session]:
     """Every session that is still on the ring, as wire models.
 
@@ -271,6 +269,11 @@ def sessions(
     ``delta.removed`` id (:func:`delta`) and then forgotten, which is what the
     client needs to tear a panel down. Ordering is the store's own, so a
     reconnecting client lays the ring out the same way it did before.
+
+    ``unread_floor`` is the board position the connection started at: a session
+    the connection has never watermarked (``unread_since``) counts its unread
+    from here, so a late joiner gets a real badge without the poll loop having
+    to re-seed watermarks every tick.
     """
     moment = now or datetime.now(tz=UTC)
     tasks = store.team_tasks(project_id)
@@ -279,10 +282,14 @@ def sessions(
         for agent in store.fleet_agents(project_id, live_only=True)
         if agent.session_id
     }
-    latest = _latest_events(store, project_id)
-    counts = _unread_counts(store, project_id, unread_since or {})
+    rows = store.team_sessions(project_id)
+    # One board-window read, shared by summaries and (its own indexed query) the
+    # unread pass — the two used to issue the identical recent_events twice.
+    window = store.recent_events(project_id, limit=_EVENT_SCAN)
+    latest = _latest_events(window)
+    counts = _unread_counts(store, project_id, rows, unread_since or {}, unread_floor)
     out: list[Session] = []
-    for row in store.team_sessions(project_id):
+    for row in rows:
         state = classify(row, now=moment)
         if state == "gone":
             continue
@@ -325,6 +332,7 @@ def snapshot(
     *,
     now: datetime | None = None,
     unread_since: Mapping[str, int] | None = None,
+    unread_floor: int = 0,
 ) -> Snapshot:
     """The whole board for one connection.
 
@@ -333,7 +341,9 @@ def snapshot(
     already parsing is the change this protocol exists to avoid.
     """
     return Snapshot(
-        sessions=sessions(store, project_id, now=now, unread_since=unread_since),
+        sessions=sessions(
+            store, project_id, now=now, unread_since=unread_since, unread_floor=unread_floor
+        ),
         tasks=tasks_of(store, project_id),
         groups=[],
     )

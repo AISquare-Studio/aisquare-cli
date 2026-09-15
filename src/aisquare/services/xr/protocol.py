@@ -35,10 +35,15 @@ of an odd byte length is half a sample and there is no way to interpret it —
 every sample after it is shifted by eight bits — so the sender's buffer must be
 sample-aligned by construction.
 
-These are not aspirational numbers. They are what
-:mod:`aisquare.services.xr.speech` decodes (``SAMPLE_RATE``/``SAMPLE_BYTES``)
-and what the client's ``AudioWorklet`` emits, and the cap on one burst
-(``server.MAX_AUDIO_BYTES``) is derived from them rather than guessed at.
+The ``AUDIO_*`` constants below are the SINGLE home of this format: the sample
+rate, sample width and channel count live here and nowhere else. The pieces that
+will speak this format — the speech backend that decodes the samples and the
+client capture path that emits them — must IMPORT these rather than restate them,
+and :data:`AUDIO_FRAME_BYTES` (which counts channels, so the frame size cannot
+disagree with :data:`AUDIO_CHANNELS`) and ``server.MAX_AUDIO_BYTES`` are both
+derived from them rather than written out. This file describes only what exists
+in this tree: a comment naming a module that has not landed is a citation a
+reader cannot check.
 """
 
 from __future__ import annotations
@@ -67,16 +72,48 @@ AUDIO_FRAME_MS = 20
 """Nominal frame duration: 320 samples, 640 bytes. The server buffers whatever
 arrives, so this is the shape to send rather than a length it enforces."""
 
+AUDIO_FRAME_BYTES = (
+    AUDIO_SAMPLE_RATE_HZ * (AUDIO_SAMPLE_BITS // 8) * AUDIO_CHANNELS * AUDIO_FRAME_MS // 1000
+)
+"""Bytes in one nominal :data:`AUDIO_FRAME_MS` frame.
+
+Derived so it CANNOT disagree with the format: sample rate x bytes-per-sample x
+:data:`AUDIO_CHANNELS` x frame-seconds. The channel factor is the load-bearing
+one — a formula that drops it publishes 640 bytes for a 20 ms frame whether the
+format is mono or stereo, and a stereo frame is 1280, so a client and this
+server would part company by a factor of two with the schema still agreeing with
+itself. It is 640 today (16 kHz, mono, 16-bit) and it is what the schema's
+``frameBytes`` is built from, so the published number moves the day any of the
+factors does.
+"""
+
 CLOSE_AUTH_FAILED = 4401
-"""Websocket close code for a rejected token: do not retry with this one.
+"""Websocket close code for a REJECTED TOKEN: do not retry with this one.
 
 In the private 4000-4999 range, and stated in the CONTRACT rather than only in
-the server because the client's reconnect policy turns on it. Every other close
-this server can produce is a transport close, where reconnecting with backoff
-is correct; this is the one case where it is wrong, because the token will be
-just as wrong the next time. A client that cannot tell the two apart from the
-schema has to guess, and the guess that costs its author nothing to write is
-the one that spins forever against a server that will never accept it.
+the server because the client's reconnect policy turns on it. This close, and
+only this close, means the token was checked and found wrong — it will be just
+as wrong the next time, so a client that reconnects on it spins forever against
+a server that will never accept it. It is paired with the ``auth_failed`` error
+frame and nothing else: a handshake that never got as far as checking a token
+(no frame in time, or a first frame that was not a valid ``auth``) closes with
+:data:`CLOSE_AUTH_TIMEOUT` instead, precisely so a transient stall is not
+mistaken for a bad credential.
+"""
+
+CLOSE_AUTH_TIMEOUT = 4408
+"""Websocket close code for a handshake that did not complete, but MAY next time.
+
+Sent when no valid ``auth`` frame arrived within ``server.AUTH_TIMEOUT_S``, or
+when the first frame was not a valid ``auth`` at all (not JSON, the wrong type,
+an unknown field). No token was checked in either case, so — unlike
+:data:`CLOSE_AUTH_FAILED` — reconnecting with backoff is the RIGHT thing: the
+cause is a reverse-forward that was not up yet, a client pointed at the wrong
+port, or a first frame lost to a race, and all three clear on their own. 4408
+echoes HTTP 408 (Request Timeout) as a mnemonic. The old contract answered every
+pre-auth failure with 4401 ``retry:false``, so one stalled handshake left the
+ring dark until the printed URL was reopened; splitting the two is what lets a
+client retry the transient case and give up only on the hopeless one.
 """
 
 SessionState = Literal["working", "waiting", "needs_you", "gone"]
@@ -92,6 +129,22 @@ SessionRole = Literal["planner", "coder", "runner", "remote"]
 
 ColorKey = Literal["planner", "coder", "runner"]
 """Palette slot. The client maps this to hex; the server never sends colour."""
+
+_SESSION_REF_PATTERN = r"^[A-Za-z0-9_:-]+$"
+"""What a client-supplied session id or prefix may contain.
+
+Non-empty, and no ``GLOB`` metacharacter (``*``, ``?``, ``[``) or whitespace.
+An empty string, or a lone ``*``, is not a harmless no-op: ``store``'s prefix
+resolver strips those characters before it globs, so ``""`` becomes ``GLOB '*'``
+over every session in the file and the request silently acts on a real, wrong
+session. Rejecting the id here — at the wire boundary, as a ``bad_message`` —
+means the resolver is never handed one. Colon and dash are allowed because a
+real id carries them: a Claude Code session is a UUID, and an MCP client's is
+``mcp:<client>:<project>``.
+"""
+
+SessionRef = Annotated[str, Field(min_length=1, pattern=_SESSION_REF_PATTERN)]
+"""A validated session id or unique prefix. See :data:`_SESSION_REF_PATTERN`."""
 
 
 class _Wire(BaseModel):
@@ -195,6 +248,17 @@ class Transcript(_Wire):
     seq: int
     text: str
     final: bool = True
+    reset: bool = False
+    """The transcript RESTARTED before this frame: clear the panel, then append.
+
+    The server sends ``reset=True`` on the first frame after it starts following
+    a different file for the same session — a compaction or ``/clear`` onto the
+    same path, a log rotation, or a resumed session re-pointed at a new
+    transcript. Without it the client appends the replacement below the old
+    conversation and shows turns twice; with it, ``seq`` also restarts at 1, so
+    a client keying replays off ``seq`` treats the reset frame as the new
+    beginning rather than a frame from the past to drop.
+    """
 
 
 class Stt(_Wire):
@@ -286,17 +350,22 @@ class Auth(_Wire):
 
 
 class Subscribe(_Wire):
-    """Start (or with ``session=None``, stop) streaming one transcript."""
+    """Start (or with ``session=None``, stop) streaming one transcript.
+
+    ``session`` is a :data:`SessionRef`: an exact id or a unique prefix, never
+    an empty string or a ``GLOB`` metacharacter, which the server would resolve
+    into "every session on the board".
+    """
 
     t: Literal["subscribe"] = "subscribe"
-    session: str | None = None
+    session: SessionRef | None = None
 
 
 class Prompt(_Wire):
     """Send text to one session, as the operator."""
 
     t: Literal["prompt"] = "prompt"
-    session: str
+    session: SessionRef
     text: str
 
 
@@ -325,12 +394,15 @@ class Audio(_Wire):
     # client sends, so this is the first field a client author reads.
     session: str = Field(
         description=(
-            "Session this burst is addressed to. The HEADER owns the burst: it "
-            "is where the transcript is routed, and a matching audioEnd that "
-            "names a different session does not move it -- the disagreement is "
-            "logged, not answered, rather than attributing the operator's "
-            "speech to whichever of the two frames the server happened to read "
-            "last. See audioEnd.session for the whole of that rule."
+            "Session this burst is addressed to. The HEADER owns the burst: the "
+            "microphone is opened for this session and the samples are recorded "
+            "for it, so this is where the transcript is routed. A matching "
+            "audioEnd that names a different session does NOT move it — the "
+            "disagreement is logged and the header wins, rather than either "
+            "attributing the operator's speech to whichever frame the server "
+            "read last or discarding a spoken sentence over a client's "
+            "bookkeeping bug. See audioEnd.session for the other half of the "
+            "rule."
         )
     )
     seq: int = Field(
@@ -363,10 +435,10 @@ class AudioEnd(_Wire):
         description=(
             "Should equal the session on the audio header that opened this "
             "burst. If the two disagree the HEADER wins: the microphone was "
-            "opened for it and the samples were recorded for it, so routing "
-            "the transcript anywhere else is the defect this field exists to "
-            "prevent. The mismatch is logged, not answered — a client whose "
-            "two frames disagree has a bug worth finding, but discarding the "
+            "opened for it and the samples were recorded for it, so routing the "
+            "transcript anywhere else is the defect this field exists to "
+            "prevent. The mismatch is logged, not answered — a client whose two "
+            "frames disagree has a bug worth finding, but discarding the "
             "operator's sentence over it would spend their words on our "
             "bookkeeping."
         )
@@ -448,7 +520,7 @@ def schema_document() -> dict[str, Any]:
             "endianness": "little",
             "channels": AUDIO_CHANNELS,
             "frameMs": AUDIO_FRAME_MS,
-            "frameBytes": AUDIO_SAMPLE_RATE_HZ * (AUDIO_SAMPLE_BITS // 8) * AUDIO_FRAME_MS // 1000,
+            "frameBytes": AUDIO_FRAME_BYTES,
             "alignment": (
                 "Every frame must be a whole number of samples. An odd byte "
                 "length is half a sample and shifts every sample after it by "
@@ -460,11 +532,25 @@ def schema_document() -> dict[str, Any]:
                 "name": "CLOSE_AUTH_FAILED",
                 "retry": False,
                 "description": (
-                    "The token was rejected. Do not reconnect with it — it will "
-                    "be rejected again. Every close code NOT listed here is a "
-                    "transport close, where reconnecting with backoff is right."
+                    "The token was checked and rejected. Do not reconnect with "
+                    "it — it will be rejected again; reopen the URL `aisquare "
+                    "xr` printed to pick up a fresh token. Paired with the "
+                    "`auth_failed` error frame."
                 ),
-            }
+            },
+            str(CLOSE_AUTH_TIMEOUT): {
+                "name": "CLOSE_AUTH_TIMEOUT",
+                "retry": True,
+                "description": (
+                    "The socket opened but no valid auth frame completed the "
+                    "handshake in time — a stalled reverse-forward, a client on "
+                    "the wrong port, or a malformed first frame. No token was "
+                    "checked, so reconnect with backoff (paired with the "
+                    "`auth_timeout` error frame). Every close code NOT listed "
+                    "here is likewise a transport close where retry is right; "
+                    "only CLOSE_AUTH_FAILED is terminal."
+                ),
+            },
         },
         "server": _SERVER.json_schema(by_alias=True, mode="serialization"),
         "client": _CLIENT.json_schema(by_alias=True, mode="validation"),

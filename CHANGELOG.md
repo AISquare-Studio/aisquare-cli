@@ -85,8 +85,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   takes presets, `SpawnDialog(project, persona=, role=, binary=, account=)`,
   applied at compose so the persona-first flow can open it filled in; a preset
   seat such as `coder2` or an account slot not read yet still shows. *Pick…* posts
-  `PickTargetRequested` for the target picker (the next change; until then it says
-  so). The Settings tab gains a persona per role, saved through `save_config` and
+  `PickTargetRequested`, which the dialog answers by opening the target picker.
+  The Settings tab gains a persona per role, saved through `save_config` and
   re-read, showing a configured name the project lacks as `<name> (custom)`; and a
   sidebar agent row carries a dim `· <persona>` from its fleet row or, failing that,
   its session. Measured in `tests/test_ui_spawn.py` (the recorder's `persona`,
@@ -125,10 +125,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `import_source` the CLI calls: its `progress` lines appear under the form and
   its `confirm` opens a draft-review modal from the worker
   (`call_from_thread(push_screen_wait, …)`, verified on Textual 8.2.8 first), so
-  when the LLM path lands the UI changes not at all. **+ New** scaffolds through
+  the LLM import path runs through the same form. **+ New** scaffolds through
   `services.personas.new` and opens the editor on it. *Attach to existing* /
-  *Attach to new* post `AttachRequested` for the target picker, which is the next
-  change. Measured headless in `tests/test_ui_personas.py`: real catalogues
+  *Attach to new* post `AttachRequested`, which the tab answers by opening the
+  target picker. Measured headless in `tests/test_ui_personas.py`: real catalogues
   written into the isolated home and a `git init` repository, every write and
   import a recorder, assertions on the keywords received, the rows, the preview
   text, and a `SKILL.md` left byte-identical when only the recorder saved.
@@ -148,12 +148,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   close its own block, and one sentence saying a persona never overrides a
   role's cycle, the lane rule, a task's contract or evidence. A body over 4,000
   characters warns and over 12,000 is refused; a directory that does not load is
-  listed, never fatal. Something that is not a skill is refused as
-  `not_recognised` until the LLM import path lands. **PyYAML** is now a core
+  listed, never fatal. Something that is not a skill goes through the LLM import
+  path; `--no-llm` refuses it as `not_recognised`. **PyYAML** is now a core
   dependency — a skill's frontmatter is full YAML and an interchange format may
   not refuse a valid one — read with `safe_load` only and imported inside the
   parser: `python -X importtime -c "import aisquare.cli.app"` shows no `yaml`.
-  Spawning an agent as a persona comes next. Plan:
+  `launch` and `fleet spawn` run an agent as a persona with `--persona`. Plan:
   `docs/plans/spawn-personas.md`; guide: `docs/personas.md`.
 - **The Spawn dialog, in `asq`.** `＋ spawn agent` under a project used to
   toast "the spawn dialog is not built yet"; it now opens a form over the same

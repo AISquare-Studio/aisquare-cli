@@ -181,4 +181,6 @@ _(appended as they arise; each with the manager's interim decision)_
    while agent worktrees exist. Interim decision: filed P9 (small), does not
    gate any PR because CI and the worktrees pass. Your call: merge P9 into rc
    with the rest, or leave for after the hackathon.
+10. **Criss-cross merge bases on a stacked absorb (14:15).** #188 merged the absorbed heads of #187 and #184; rc then merged those two PRs separately, so rc and #188 shared two merge bases. git's recursive merge is clean (verified in a scratch worktree), GitHub's mergeability check reported CONFLICTING, and one extra rc merge + CI cycle on #188/#194/P17 was the price. Rule for next time: absorb a stack from its base upward (bottom PR merges rc; each higher PR merges only its parent).
+11. **Peer reviews replaced the manager's review subagents (your 11:xx instruction).** Every PR carries a framework (`/pr-review`) comment from the *other* coder, with the verdict and comment id cited in its merge commit; reopened PRs merged only after the original reviewer confirmed the 🔴s closed on the fixed head (the re-review protocol, 12:06). Two 🔴s found this way changed behaviour: the import kill switch now fails closed (#185), and an attached persona beats the spawn-time variable so it survives `/clear` (#186 → P20 #197).
 

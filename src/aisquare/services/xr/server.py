@@ -465,15 +465,26 @@ async def _in_thread(fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwarg
     torn down — is left alone rather than set, and a loop that has already
     closed raises ``RuntimeError`` from the call, which is swallowed: in both
     cases nobody is waiting for the answer.
+
+    The spelling below is constrained by ``tests/test_config_writes_stay_in_
+    the_cli.py``, which builds a call graph by BARE NAME across the package: a
+    method call on anything but a locally bound name borrows the identity of
+    every project function spelled the same. ``threading.Thread(...).start()``
+    inline was read as ``capture.start`` — which reaches ``save_config`` — and
+    reported every hook and MCP entry point as a config writer; so the thread
+    is bound to a local first, the callback aliases the future locally before
+    asking it anything, and the thread body is not called ``run``, which is
+    already this module's server entry point.
     """
     loop = asyncio.get_running_loop()
     future: asyncio.Future[_T] = loop.create_future()
 
-    def deliver(settle: Callable[[], object]) -> None:
-        if not future.done():
+    def settle_unless_cancelled(settle: Callable[[], object]) -> None:
+        pending = future
+        if not pending.done():
             settle()
 
-    def run() -> None:
+    def speech_call() -> None:
         settle: Callable[[], object]
         try:
             result = fn(*args, **kwargs)
@@ -482,9 +493,10 @@ async def _in_thread(fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwarg
         else:
             settle = functools.partial(future.set_result, result)
         with contextlib.suppress(RuntimeError):  # the loop is closed: nobody is waiting
-            loop.call_soon_threadsafe(deliver, settle)
+            loop.call_soon_threadsafe(settle_unless_cancelled, settle)
 
-    threading.Thread(target=run, name="xr-speech", daemon=True).start()
+    worker = threading.Thread(target=speech_call, name="xr-speech", daemon=True)
+    worker.start()
     return await future
 
 

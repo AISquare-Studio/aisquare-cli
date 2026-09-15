@@ -974,6 +974,25 @@ def test_export_sends_each_destination_and_the_toast_names_the_path(
     assert (toast, "information") in notices
 
 
+def test_export_shows_a_bracketed_skills_path_verbatim(
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = tmp_path / "claude[old]"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> str:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-export")
+        dialog = await wait_for(pilot, ExportPersonaScreen)
+        return str(dialog.query_one("#export-personal", RadioButton).label)
+
+    label = drive(scenario, project=project)
+    assert str(config_dir / "skills" / "pair") in label  # "[old]" is part of the path, not a tag
+
+
 # --- a write the filesystem refuses: every handler keeps the TUI up and names the error ---
 
 DENIED_TEXT = "[Errno 13] Permission denied: '/read-only/personas'"

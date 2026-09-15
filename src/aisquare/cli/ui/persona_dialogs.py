@@ -395,6 +395,8 @@ class ConfirmDraftScreen(_Dialog):
         try:
             frontmatter, _ = core.split_frontmatter(view.skill_md)
         except PersonaError:
+            # Display only: a draft whose frontmatter will not split is shown whole, and
+            # _warnings() states the parse error in this same modal, so nothing is hidden.
             frontmatter = view.skill_md
         with Vertical():
             header = Text()
@@ -681,11 +683,16 @@ class ExportPersonaScreen(_Dialog):
         with Vertical():
             yield Static(Text(f"Export {name}", style="bold"), classes="dialog-header")
             yield RadioSet(
+                # Text, not str: a path is data, and a str label is parsed as markup.
                 RadioButton(
-                    f"Claude personal skills — {personal}", value=True, id="export-personal"
+                    Text(f"Claude personal skills — {personal}"),
+                    value=True,
+                    id="export-personal",
                 ),
                 RadioButton(
-                    f"Project skills — {project}", id="export-project", disabled=self.root is None
+                    Text(f"Project skills — {project}"),
+                    id="export-project",
+                    disabled=self.root is None,
                 ),
                 RadioButton("Directory…", id="export-directory"),
                 id="export-destination",

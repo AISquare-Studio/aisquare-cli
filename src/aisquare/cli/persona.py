@@ -326,14 +326,15 @@ def import_(
         str | None,
         typer.Option(
             "--engine",
-            help="auto, manager, api or off (default: [persona.import] engine).",
+            # Escaped: Rich reads a bare [persona.import] as a style tag and drops it.
+            help="auto, manager, api or off (default: \\[persona.import] engine).",
             metavar="ENGINE",
         ),
     ] = None,
     model: Annotated[
         str | None,
         typer.Option(
-            "--model", help="The api engine's model (default: [persona.import] api_model)."
+            "--model", help="The api engine's model (default: \\[persona.import] api_model)."
         ),
     ] = None,
     yes: Annotated[
@@ -410,7 +411,8 @@ def _emit_skills(skills: list[persona_service.SkillRef]) -> None:
         about = (
             _one_line(skill.description) if skill.recognised else f"✗ {skill.reason or 'invalid'}"
         )
-        typer.echo(f"{skill.name:<{width}}  {skill.scope:<7}  {mark}  {about}")
+        taken = f"  (name taken by {skill.taken_by} {skill.name})" if skill.taken_by else ""
+        typer.echo(f"{skill.name:<{width}}  {skill.scope:<7}  {mark}  {about}{taken}")
 
 
 @app.command("export")

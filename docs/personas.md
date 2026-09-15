@@ -166,6 +166,12 @@ the name of a skill from `import --list`. The directory is copied byte for byte
 it records the source and its sha256. A bare file becomes `<name>/SKILL.md`,
 named by `--name`, else its frontmatter `name`, else its file name.
 
+`import --list` marks a skill `imported` when a user or project persona's
+`.persona.json` names that skill as its source, whatever the persona was called.
+A persona of the same name that did not come from it (a bundled one, say) is
+not an import: the row ends `(name taken by bundled careful)`, which is why
+importing that skill needs `--name`.
+
 The default layer is `--user`. A name already taken in that layer is refused
 unless you pass `--force`; `--name` picks another directory name.
 

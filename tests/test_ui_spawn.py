@@ -36,15 +36,17 @@ from textual.widgets import Button, Input, OptionList, Select, Static, Switch, T
 
 from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import SpawnAgent, SpawnRow
+from aisquare.cli.ui.sidebar import SpawnAgent, SpawnRow, agent_row_text
 from aisquare.cli.ui.spawn import (
     LABEL_RULE,
     NO_TASK,
+    PICK_PENDING,
+    PickTargetRequested,
     SpawnDialog,
     dice_label,
     role_choices,
 )
-from aisquare.core import codenames, harness
+from aisquare.core import codenames, harness, personas
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.ids import new_task_id
@@ -59,6 +61,7 @@ from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
     ProjectInfo,
+    TeamSession,
     TeamTask,
 )
 from aisquare.services import fleet as fleet_service
@@ -193,6 +196,7 @@ UNTOUCHED: Kwargs = {
     "prompt": None,
     "agent_args": [],
     "account": None,
+    "persona": None,
 }
 """What a Spawn press sends for a form nobody changed: the role's default everywhere."""
 
@@ -214,20 +218,43 @@ def overview(*slots: tuple[int, str | None]) -> AccountsOverview:
 
 
 class Host(App[None]):
-    """A bare app that opens the dialog for one project and records what it closed with."""
+    """A bare app that opens the dialog for one project and records what surfaces from it."""
 
     def __init__(
-        self, project: ProjectInfo, *, accounts: Callable[[], AccountsOverview] | None = None
+        self,
+        project: ProjectInfo,
+        *,
+        accounts: Callable[[], AccountsOverview] | None = None,
+        presets: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._project = project
         self._accounts = accounts
+        self._presets = presets or {}
         self.results: list[fleet_service.SpawnReceipt | None] = []
+        self.notices: list[tuple[str, str]] = []
+        self.picks: list[str] = []
 
     def on_mount(self) -> None:
         self.push_screen(
-            SpawnDialog(self._project, accounts=self._accounts), callback=self.results.append
+            SpawnDialog(self._project, accounts=self._accounts, **self._presets),
+            callback=self.results.append,
         )
+
+    def on_pick_target_requested(self, event: PickTargetRequested) -> None:
+        self.picks.append(event.project_id)
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: SeverityLevel = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        self.notices.append((message, severity))
+        super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
 
 
 def drive(
@@ -235,11 +262,12 @@ def drive(
     scenario: Callable[[Pilot[None], Host, SpawnDialog], Coroutine[Any, Any, T]],
     *,
     accounts: Callable[[], AccountsOverview] | None = None,
+    presets: dict[str, str] | None = None,
 ) -> T:
     """Run ``scenario`` against the dialog open over a bare host."""
 
     async def run() -> T:
-        host = Host(project, accounts=accounts)
+        host = Host(project, accounts=accounts, presets=presets)
         async with host.run_test(size=SIZE) as pilot:
             await settle(pilot)
             dialog = host.screen
@@ -609,6 +637,7 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "prompt": "start from the failing test",
                 "agent_args": ["--model", "opus", "--append-system-prompt", "be brief"],
                 "account": "2",
+                "persona": None,
             },
         )
     ]
@@ -903,3 +932,190 @@ def test_the_module_names_its_workers_apart_from_the_manager_tabs() -> None:
     from aisquare.cli.ui.views import project as project_view
 
     assert spawn_module.SPAWN_WORKER != project_view.SPAWN_WORKER
+
+
+# --- the persona step (P4) --------------------------------------------------------------
+
+
+def configure_role(role: str, **fields: object) -> None:
+    config = load_config()
+    config.fleet.roles[role] = config.fleet.roles.get(role, FleetRoleSettings()).model_copy(
+        update=fields
+    )
+    save_config(config)
+
+
+def option_prompts(dialog: SpawnDialog, name: str) -> list[str]:
+    overlay = select(dialog, name).query_one(OptionList)
+    return [str(overlay.get_option_at_index(i).prompt) for i in range(overlay.option_count)]
+
+
+def test_the_fields_read_who_runs_it_then_as_whom(git_project: ProjectInfo) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        return [str(label.render()) for label in dialog.query(".spawn-row > Label")]
+
+    labels = drive(git_project, scenario)
+    assert labels[:5] == ["Role", "Account", "Binary", "Persona", "Label"]
+
+
+def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [
+            option_prompts(dialog, "persona"),
+            note(dialog, "#spawn-persona-description"),
+        ]
+        select(dialog, "persona").value = "skeptic"
+        await pilot.pause()
+        seen.append(note(dialog, "#spawn-persona-description"))
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    prompts, before, after = drive(git_project, scenario)
+    assert prompts == [
+        "(none)",
+        "careful · bundled",
+        "mentor · bundled",
+        "minimalist · bundled",
+        "skeptic · bundled",
+    ]
+    assert before is not None and before.startswith("(no persona")
+    assert after == personas.resolve("skeptic", git_project.root).description
+    assert spawns.calls[0][2]["persona"] == "skeptic"  # the recorder receives the choice
+
+
+def test_the_roles_persona_is_preselected_and_follows_the_role_until_touched(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    configure_role("coder", persona="minimalist")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        persona_field = select(dialog, "persona")
+        seen: list[Any] = [persona_field.value]
+        select(dialog, "role").value = "tester"
+        await pilot.pause()
+        seen.append(persona_field.value)
+        select(dialog, "role").value = "coder"
+        await pilot.pause()
+        seen.append(persona_field.value)
+        seen.append(dialog.spawn_kwargs()["persona"])  # untouched: the role's default -> None
+        persona_field.value = "mentor"  # touched
+        await pilot.pause()
+        select(dialog, "role").value = "tester"
+        await pilot.pause()
+        seen.append(persona_field.value)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario)
+    assert seen == ["minimalist", "", "minimalist", None, "mentor"]
+    assert spawns.calls[0][1] == "tester" and spawns.calls[0][2]["persona"] == "mentor"
+
+
+def test_an_explicit_none_over_a_roles_default_is_sent_as_an_empty_name(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """``spawn`` reads ``""`` as "no persona": the user's (none) beats the config."""
+    configure_role("coder", persona="minimalist")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
+        select(dialog, "persona").value = ""
+        await pilot.pause()
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+
+    drive(git_project, scenario)
+    assert spawns.calls[0][2]["persona"] == ""
+
+
+def test_presets_show_on_open_and_reach_the_recorder(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [
+            select(dialog, "role").value,
+            select(dialog, "persona").value,
+            select(dialog, "account").value,
+            dialog.query_one("#spawn-binary", Input).value,
+            option_prompts(dialog, "role")[-1],
+        ]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(
+        git_project,
+        scenario,
+        presets={"persona": "skeptic", "role": "coder2", "account": "2", "binary": "claude2"},
+        accounts=lambda: overview((1, "me@example.com"), (2, "two@example.com")),
+    )
+    assert seen == ["coder2", "skeptic", "2", "claude2", "coder2"]  # the seat is an option
+    (_project_id, role, kwargs) = spawns.calls[0]
+    assert role == "coder2"
+    assert (kwargs["persona"], kwargs["account"], kwargs["binary"]) == ("skeptic", "2", "claude2")
+
+
+def test_a_preset_account_shows_before_and_after_the_accounts_are_read(
+    git_project: ProjectInfo,
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [select(dialog, "account").value, option_prompts(dialog, "account")]
+
+    value, prompts = drive(
+        git_project, scenario, presets={"account": "7"}, accounts=lambda: overview((1, None))
+    )
+    assert value == "7"
+    assert prompts[-1] == "7 (preset)"  # a slot the read did not produce still shows
+
+
+def test_pick_posts_pick_target_requested_and_says_the_picker_is_next(
+    git_project: ProjectInfo,
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await pilot.click("#spawn-pick")
+        await pilot.pause()
+        return [host.picks, host.notices, type(host.screen).__name__]
+
+    picks, notices, screen = drive(git_project, scenario)
+    assert picks == [git_project.id]
+    assert (PICK_PENDING, "information") in notices
+    assert screen == "SpawnDialog"  # nothing else happened
+
+
+def test_a_persona_this_project_lacks_still_shows_and_says_the_spawn_refuses_it(
+    git_project: ProjectInfo,
+) -> None:
+    configure_role("coder", persona="ghost")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [select(dialog, "persona").value, note(dialog, "#spawn-persona-description")]
+
+    value, description = drive(git_project, scenario)
+    assert value == "ghost"
+    assert description is not None and "not one of this project's personas" in description
+
+
+def test_a_sidebar_agent_row_shows_the_persona_badge_only_when_there_is_one(
+    git_project: ProjectInfo,
+) -> None:
+    plain = spawned_agent(git_project)
+    with_row = plain.model_copy(update={"persona": "skeptic"})
+    now = datetime.now(tz=UTC)
+    session = TeamSession(
+        id="11111111",
+        project_id=git_project.id,
+        started_at=now,
+        last_seen_at=now,
+        persona="mentor",
+    )
+
+    def row(agent: FleetAgent, session: TeamSession | None = None) -> str:
+        return agent_row_text(FleetAgentStatus(agent=agent, state="waiting", session=session)).plain
+
+    assert "·" not in row(plain)
+    assert row(with_row).endswith(" · skeptic")
+    assert row(plain, session).endswith(" · mentor")  # the session's, when the row has none
+    assert row(with_row, session).endswith(" · skeptic")  # the row's wins

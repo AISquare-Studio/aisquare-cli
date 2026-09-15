@@ -132,6 +132,12 @@ persona again after a `/clear` or a restart. That includes an agent spawned with
 The variable applies when the agent has no fleet row, or a row with no persona,
 and either one wins over a persona a session recorded earlier. Attaching another
 persona replaces it, and the agent is told which one it replaces.
+In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
+persona right after who runs the agent — role, account, binary — with the role's
+default preselected and the persona's description under the field; `(none)`
+spawns without one even when the role has a default. The Settings tab sets each
+role's default persona, and an agent running as a persona carries a dim
+`· skeptic` on its sidebar row.
 
 ## Commands
 

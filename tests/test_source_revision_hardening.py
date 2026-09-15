@@ -105,3 +105,20 @@ def test_an_unreadable_source_file_is_unknown_not_certified(checkout: Path) -> N
             source_fingerprint(checkout)
     finally:
         secret.chmod(0o644)
+
+
+def test_source_fingerprint_refuses_a_root_that_contains_aisquare_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-git working directory under ``~`` resolves its root up to ``~`` (which
+    holds ``~/.aisquare``, a project-root marker), which would otherwise fingerprint
+    the whole home directory. Refuse a root that contains AI Square's home."""
+    from aisquare.core.paths import HOME_ENV_VAR, aisquare_home
+
+    home = tmp_path / "home"
+    monkeypatch.setenv(HOME_ENV_VAR, str(home / ".aisquare"))
+    (home / ".aisquare").mkdir(parents=True)
+    assert aisquare_home().resolve().is_relative_to(home.resolve())
+    (home / "notes.txt").write_text("a file in the home dir")
+    with pytest.raises(ValueError, match="AI Square's home"):
+        source_fingerprint(home)

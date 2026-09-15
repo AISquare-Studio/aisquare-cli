@@ -125,6 +125,15 @@ def _iter_source_entries(root: Path) -> Iterator[tuple[str, str]]:
     home = aisquare_home().resolve()
     if root.is_relative_to(home):
         raise ValueError("source directory must be outside AI Square's report/storage directory")
+    if home.is_relative_to(root):
+        # The root CONTAINS AI Square's home — it is the user's home directory (or
+        # an ancestor of it). ``.aisquare`` is a project-root marker, so a non-git
+        # working directory under ``~`` resolves its root up to ``~`` (which holds
+        # ``~/.aisquare``) and this would otherwise walk the entire home tree into
+        # the evidence fingerprint. Refuse: unknown proof, not a home-wide scan.
+        raise ValueError(
+            "source directory contains AI Square's home; refusing to walk the whole tree"
+        )
     try:
         probe = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],

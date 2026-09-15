@@ -65,6 +65,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parser: `python -X importtime -c "import aisquare.cli.app"` shows no `yaml`.
   Spawning an agent as a persona comes next. Plan:
   `docs/plans/spawn-personas.md`; guide: `docs/personas.md`.
+- **The Spawn dialog, in `asq`.** `＋ spawn agent` under a project used to
+  toast "the spawn dialog is not built yet"; it now opens a form over the same
+  `services.fleet.spawn` the CLI runs, headed with the project's name and
+  codename so a spawn from the wrong row is visible before it happens. Role
+  (the fleet's roles plus every `team bind` role; `manager` greyed out while
+  one runs), label (prefilled the way `fleet spawn` picks it, re-prefilled when
+  a task is picked unless you typed one, 🎲 for `<role>-<adjective>-<animal>`,
+  live-checked against the label rule), task (the project's open tasks),
+  worktree (disabled with "not a git repository" outside one), permission mode,
+  account (read in a worker so the dialog opens at once), binary, extra agent
+  args (`shlex`-split, a quoting error shown inline) and a first prompt. A field
+  left as it opened is sent as `None` — the role's default, exactly what an
+  omitted flag means — so the service resolves it from the config it reads at
+  spawn time; the fields that show a role default follow the role until you
+  change them. The spawn runs off the UI thread: a `FleetError` stays in the
+  dialog with its reason and *Spawn* re-enables, anything else shows its class
+  name instead of taking the app down, and success toasts the receipt plus each
+  note and opens the new agent's pane. A started spawn cannot be taken back, so
+  `Esc` waits for its answer rather than pretending to cancel it. Measured
+  headless in `tests/test_ui_spawn.py` with a recorder in place of
+  `fleet_service.spawn` — the keywords it received are the assertion — and a
+  tmux guard that fails any test addressing a socket other than its own. Found
+  on the way: a private `_running` on a Textual screen shadows the message
+  pump's own flag and silently leaves every button of the screen dead; the
+  dialog's flag is `_spawning`.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

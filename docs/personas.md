@@ -7,10 +7,11 @@ skill**: the same directory is `--persona skeptic` to the fleet and `/skeptic`
 in Claude Code, byte for byte. There is no aisquare format to learn and nothing
 to convert.
 
-This guide covers what ships today: the persona catalogue and the
-`aisquare persona` commands. Spawning an agent *as* a persona, importing
-something that is not already a skill, and the persona views in `asq` are
-described in `docs/plans/spawn-personas.md` and land in later changes.
+This guide covers what ships today: the persona catalogue, the
+`aisquare persona` commands and the Personas tab in `asq`. Spawning an agent
+*as* a persona, attaching one to a running agent, and importing something that
+is not already a skill are described in `docs/plans/spawn-personas.md` and land
+in later changes.
 
 ## What a persona is
 
@@ -90,6 +91,49 @@ personalities. They are where `persona import` finds skills and where
 
 Bundled personas cannot be edited or removed in place. Copy one into a layer you
 own and change the copy — the copy shadows the bundled one.
+
+## In `asq`: the Personas tab
+
+Open a project in `asq` and its **Personas** tab lists every persona that
+project can use — its own layer (when the project is a git repository), yours,
+and the bundled four — with the layer, the description, the roles, and a mark:
+`⇧ shadows bundled` on a persona that hides a lower one, `✗ invalid` (greyed,
+the reason in the description column) on a directory that does not load. The
+search box narrows by name, description or tag; the `project` `user` `bundled`
+checkboxes narrow by layer.
+
+Beside the list, the preview is exactly what an agent is briefed with — the
+same block `persona show` prints — then the directory, its supporting files,
+where it came from (`.persona.json`) and its warnings.
+
+For the selected persona:
+
+- **Attach to existing** (`a`) and **Attach to new** (`n`) ask for a target —
+  a running agent, or a new one. The target picker is not in this build yet;
+  the buttons say so.
+- **Edit** (`e`) opens the whole `SKILL.md` in the tab. It is checked as you
+  type — the first error, or the warnings — and *Save* is enabled only while it
+  parses; it saves through the same writer as `persona edit`, so a refused edit
+  leaves the file as it was. `Enter` on any row opens it too; a bundled persona
+  opens read-only, with *Save as…* to copy it into your layer or the project's.
+- **Export…** (`x`) writes it into Claude Code's personal skills, the
+  project's `.claude/skills`, or a directory — after either skills target it is
+  `/<name>` in Claude Code.
+- **Remove** (`Del`) asks once, naming the directory it deletes.
+- **Validate** (`v`) reports the rule a directory breaks, or its warnings.
+
+Bundled rows cannot be edited or removed ("bundled — export to a layer first");
+an invalid row cannot be attached or exported, and Edit is how you fix it.
+
+Above the list, **+ Import…** (`i`) is `persona import` as a form: a source
+(a skill directory, a `SKILL.md` or `.md` file, or a skill name — *Browse
+skills* lists Claude Code's skills and marks the ones already imported), the
+layer, a name, *Condense*, the engine and model for the LLM path, and *Force*.
+Progress appears under the form while it runs; a draft an LLM wrote is shown in
+full — engine, model, size, frontmatter, body, what it dropped — before *Save*
+keeps it or *Discard* leaves it under `.drafts`. A refusal stays in the form
+with its reason. **+ New** asks for a name, a layer and a description, creates
+the scaffold, and opens it in the editor.
 
 ## Commands
 

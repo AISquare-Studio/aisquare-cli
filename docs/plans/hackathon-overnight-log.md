@@ -51,6 +51,10 @@ read-only.
 | 2026-09-15 evening | `runner2-1`'s pane shows Claude Code's one-time "Teach auto mode about your environment?" dialog (options 1/2/3). | Direct keystrokes into a pane (`tmux send-keys`) are denied to the manager by the auto-mode classifier; `fleet tell` refuses an *attention* pane and files a note instead. Decision: observe — its own loop job `b3e8f801` may still fire; nothing is in review for hours. Plan B if it is still stuck when the first review lands: `fleet stop runner2-1`, respawn the bound seat (`fleet spawn runner2 --label runner2-1`), and re-deliver the runner prompt from `docs/plans/hackathon-loop-prompts.md` with `fleet tell` once it is waiting. | pane capture; `fleet tell` receipt "it is attention — filed as board note #6953" |
 | 2026-09-15 evening | `make check` from the ROOT checkout fails one test: `tests/test_documented_commands.py::test_the_document_list_has_not_gone_stale` sweeps every markdown file under the repo and finds the coders' worktrees under `.aisquare-worktrees/`. | Not a defect in any PR: inside a worktree, in the runner's verify worktree and in CI (clean checkout) it passes. Filed **P9** `tsk_01m2hrgbsf3s0dwcx11mjap123` (S): the sweep skips the configured `worktree_dir` and nested worktrees; assigned to whichever coder frees up first. | pytest output at fd487d5 |
 | 2026-09-15 ~01:25 | Owner dismissed the runner's onboarding dialog ("runner is unblocked"). | Pane confirmed clear: tick 1 output visible, its loop job `b3e8f801` live. The board's NEEDS YOU chip clears on its next turn. Morning-audit item 1 is resolved; the permission-rule suggestion stands for future dialogs. | pane capture 01:25 |
+| 2026-09-15 ~01:40 | Owner: both coders share the `.claude3` account and are close to its usage limit; it may expire overnight and resets in ~4 hours. **Owner's call: do not change accounts; keep both coders on the `coder3a`/`coder3b` binds.** | Decision: when the limit hits, do NOT stop the sessions — their own 10-minute loops retry and resume after the reset with their context intact. Respawn on the SAME binds only if a session wedges or dies, and then as two coders: one `--model fable --effort max`, one `--model opus --effort ultracode` (agent args after the role on `fleet spawn`; `launch` forwards them). Work in progress is safe on disk in `.aisquare-worktrees/p1-persona-core` and `p3-spawn-dialog`; a replacement is told the path, branch and task and continues. | owner message 01:40 |
+| 2026-09-15 ~01:40 | Preparation before the owner's call: probed spare accounts. `.claude5` serves Fable (live probe, `team spawn planner5 --refresh` → fable, probed). `.claude` is **not logged in** ("Not logged in · Please run /login"), so the `coder1`/`planner1`/`runner1`/`manager1` binds are dead until someone signs in there. | Findings kept for the morning; no account changes per the owner. | probe JSON; direct `claude -p` reply |
+| 2026-09-15 ~01:40 | **CLI bug found while probing:** `aisquare team spawn <role>` crashes with `AttributeError: 'list' object has no attribute 'get'` at `core/harness.py::probe_model` when `claude -p --output-format json` answers with a JSON *list* (the not-logged-in reply). `probe_model` assumes a dict. | Not hackathon scope; logged for the owner. Fix is one `isinstance` guard returning an inconclusive probe. | `/tmp/probe1.err` traceback |
+| 2026-09-15 ~01:40 | Manager's own account (`.claude4`, slot 1): 86% of the 5-hour window, resets 04:00; week 24%. | Ticks kept lean (one board read, act, one log line). If the manager is rate-limited before 04:00, its cron ticks fail until then and resume automatically; the coders and runner are unaffected. | `aisquare accounts list --usage` |
 | 2026-09-15 evening | Both coders deep in their first tasks (`coder3a-1` on P1 in `.aisquare-worktrees/p1-persona-core`, `coder3b-1` on P3 in `.aisquare-worktrees/p3-spawn-dialog`), exploring the code before writing. | No action; they were told their queues. | pane captures |
 
 ## Morning audit — questions and calls for the owner
@@ -64,7 +68,13 @@ _(appended as they arise; each with the manager's interim decision)_
    or add a Bash permission rule for `tmux -L asqui send-keys` so the manager
    can clear such dialogs itself. Interim: observe; plan B (respawn + re-tell)
    only if a review is waiting on the runner.
-2. **Doc guard vs. fleet worktrees (P9).** A root-checkout `make check` fails
+2. **Accounts.** `.claude` (the default dir behind the `coder1`, `planner1`,
+   `runner1`, `manager1` binds) is not logged in. `.claude5` serves Fable and
+   is free. Recommendation: sign `.claude` in, or retire those four binds.
+3. **`team spawn` probe crash** on a not-logged-in account (list-shaped JSON
+   reply). Recommendation: a one-line guard in `probe_model`; not filed as a
+   hackathon task.
+4. **Doc guard vs. fleet worktrees (P9).** A root-checkout `make check` fails
    while agent worktrees exist. Interim decision: filed P9 (small), does not
    gate any PR because CI and the worktrees pass. Your call: merge P9 into rc
    with the rest, or leave for after the hackathon.

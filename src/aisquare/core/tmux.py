@@ -682,6 +682,7 @@ class TmuxServer:
                 "-x", str(width), "-y", str(height), *env_flags,
                 "--", *args,
             )  # fmt: skip
+            self._forget_session_environment(session, env)
         window_id, _, pane_id = out.strip().partition(_SEP)
         return WindowInfo(
             session=session,
@@ -693,6 +694,25 @@ class TmuxServer:
             current_command=command[0] if command else "",
             activity=False,
         )
+
+    def _forget_session_environment(self, session: str, env: Mapping[str, str] | None) -> None:
+        """Take the first window's ``-e`` pairs back out of the SESSION environment.
+
+        ``new-window -e`` sets a variable for that window alone, but
+        ``new-session -e`` writes it into the session environment, which every
+        later window of the session inherits — measured on 3.7c:
+        ``show-environment`` listed it, a window opened by hand read it, and
+        after ``set-environment -u`` a third window did not. ``AISQUARE_FLEET_AGENT``
+        is an identity: the row the session-start hook briefs whoever reads it
+        on, so a window the operator opens by hand in the fleet's session
+        (``prefix c``, ``fleet attach``) would have called itself the first
+        agent (review of #135). The process in the first window already has its
+        copy; only the session's is removed. Best effort, because the window is
+        up either way: a failed unset costs exactly the leak it was closing.
+        """
+        for key in env or {}:
+            with contextlib.suppress(TmuxError):
+                self.run("set-environment", "-u", "-t", f"={session}", _data_arg(key))
 
     def list_windows(self, session: str) -> list[WindowInfo]:
         """Every window (one pane each) of ``session``; empty when it does not exist."""
@@ -739,6 +759,28 @@ class TmuxServer:
         if not facts.pane_id or (pane_id.startswith("%") and facts.pane_id != pane_id):
             return None
         return facts
+
+    def pane_pid(self, pane_id: str) -> int | None:
+        """The pid of the process tmux started in the pane, or ``None`` when it is gone.
+
+        Asked on its own rather than as one more :class:`PaneFacts` field: the
+        facts are polled for every frame of the UI, and this is read once per
+        session start by the hook that has to decide whether the process asking
+        is the pane's own (``services.team``). ``aisquare launch`` execs the
+        agent, so the pid tmux started IS the agent's — the number Claude Code
+        hands its hooks as ``CLAUDE_PID``. The same two shapes of "gone" as
+        :meth:`pane_facts` — a non-zero exit, and 3.7c's empty answer for a
+        target it could not find — and the same guard against an attached
+        client's current pane answering for the one that was asked about.
+        """
+        fmt = f"#{{pane_id}}{_SEP}#{{pane_pid}}"
+        completed = self._runner(self.argv("display-message", "-p", "-t", pane_id, fmt), None)
+        if completed.returncode != 0:
+            return None
+        answered, _, pid = completed.stdout.strip().partition(_SEP)
+        if not answered or (pane_id.startswith("%") and answered != pane_id):
+            return None
+        return _optional_int(pid)
 
     def kill_window(self, pane_id: str) -> None:
         """Kill the window holding ``pane_id`` (a dead pane included)."""

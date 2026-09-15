@@ -103,13 +103,27 @@ def classify(session: TeamSession, *, now: datetime) -> SessionState:
     ``services.team._STALE_AFTER``, imported rather than re-chosen, so a panel
     disappears from the ring at the same moment the board stops counting the
     session as present.
+
+    **The attention flag is checked BEFORE the horizon, and that order is the
+    point.** A session waiting on the operator — a permission prompt, the idle
+    notification after a finished turn — writes ``last_seen_at`` exactly once,
+    from the Notification hook, and then nothing runs on it until the operator
+    answers: Claude Code does not re-notify, and no other hook fires while it
+    is parked. With the horizon applied first, thirty-one minutes into exactly
+    the walk-away the alert exists for the poll sent ``delta.removed`` for it:
+    the ``needs_you`` panel and its bar vanished, **B** (jump to alert) found
+    nothing, a headset connecting later never saw it, and the board's own
+    ``aisquare board`` still listed the row as NEEDS YOU. So a flagged session
+    stays on the ring, alert standing, until a hook says otherwise — the next
+    prompt, tool call or session end clears the flag — and only a session with
+    no attention flag ages out on the clock.
     """
     if session.ended_at is not None:
         return "gone"
-    if now - session.last_seen_at > _STALE_AFTER:
-        return "gone"
     if session.state == "attention":
         return "needs_you"
+    if now - session.last_seen_at > _STALE_AFTER:
+        return "gone"
     if session.state == "waiting":
         return "waiting"
     return "working"

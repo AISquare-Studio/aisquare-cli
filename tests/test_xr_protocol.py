@@ -429,6 +429,32 @@ def test_an_ended_or_stale_session_is_not_on_the_ring(work_dir: Path) -> None:
     assert [session.id for session in snapshot.sessions] == [PLANNER]
 
 
+def test_a_session_waiting_on_the_operator_does_not_age_out_of_the_ring(work_dir: Path) -> None:
+    """A ``needs_you`` session stays on the ring past the staleness horizon; an unflagged one goes.
+
+    The Notification hook writes ``last_seen_at`` once and nothing else runs on
+    a parked session until the operator answers, so a horizon applied before
+    the attention check removed the alerting panel thirty minutes into the
+    walk-away the alert exists for — ``delta.removed``, bar gone, nothing for
+    **B** to jump to — while ``aisquare board`` still said NEEDS YOU. The ring
+    follows the hook, not the clock: only a session with no attention flag
+    ages out.
+    """
+    project = team_project(work_dir)
+    stale_minutes = int(_STALE_AFTER.total_seconds() // 60) + 1
+    with store_session() as store:
+        store.ensure_project(project)
+        _session(
+            store, PLANNER, project.id, role="planner", state="attention", idle_min=stale_minutes
+        )
+        _session(store, CODER, project.id, role="coder", idle_min=stale_minutes)
+        snapshot = projector.snapshot(store, project.id)
+    by_id = {session.id: session for session in snapshot.sessions}
+    assert PLANNER in by_id, "a session waiting on the operator was aged off the ring"
+    assert by_id[PLANNER].state == "needs_you", "and its alert must still stand"
+    assert CODER not in by_id, "a session with no attention flag still ages out on the clock"
+
+
 def test_summary_is_at_most_six_words_of_the_latest_board_event(work_dir: Path) -> None:
     project = team_project(work_dir)
     with store_session() as store:

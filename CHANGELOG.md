@@ -125,7 +125,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     that panel's own world position — the point being to say *where to turn*.
     It fires once on the transition in, not once per notice, because Claude
     re-notifies while parked. **B** sweeps focus through the alerting panels in
-    angle order.
+    angle order. A session
+    waiting on you stays on the ring, alert standing, however long you are away:
+    only a session with no attention flag ages out on the 30-minute clock,
+    because a parked session writes nothing until you answer it.
   - **Reconnect.** A connection chip reports the transport in words —
     `connected`, `reconnecting — attempt N`, `server gone`, `auth failed` — as
     DOM rather than scene, so it survives a WebGL context loss. Backoff runs

@@ -8,6 +8,8 @@ cannot be loaded costs one line, never the team block.
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,7 +18,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import personas
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, store_session
+from aisquare.models import FleetAgent
 from aisquare.services import team as team_service
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -173,3 +176,180 @@ def test_a_later_start_without_the_variable_keeps_the_recorded_persona(
     assert _recorded() == "skeptic"
     assert "persona:skeptic" in board
     assert sum(line.startswith("<aisquare-persona ") for line in board.split("\n")) == 1
+
+
+# --- the row fallback for an attached persona (§4.7, §7 "P8") ----------------------------
+
+
+def _fleet_row(work: Path, persona: str | None) -> str:
+    """The ``fleet_agent`` row ``AISQUARE_FLEET_AGENT`` names, carrying ``persona``."""
+    from aisquare.core.orchestrator import team_project
+    from aisquare.models import FleetAgent
+
+    project = team_project(work)
+    with store_session() as store:
+        store.ensure_project(project)
+        agent = store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_01attachedpersona",
+                project_id=project.id,
+                label="coder-1",
+                role="coder",
+                pane_id="%1",
+                cwd=work,
+                created_at=NOW,
+                persona=persona,
+            )
+        )
+    return agent.id
+
+
+def _blocks(board: str) -> list[str]:
+    return [line for line in board.split("\n") if line.startswith("<aisquare-persona ")]
+
+
+def test_an_attached_persona_on_the_fleet_row_briefs_a_start_without_the_variable(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
+
+    board = _start(work)
+
+    assert _blocks(board) == ['<aisquare-persona name="skeptic" layer="bundled">']
+    assert _recorded() == "skeptic"
+
+
+MENTOR = '<aisquare-persona name="mentor" layer="bundled">'
+SKEPTIC = '<aisquare-persona name="skeptic" layer="bundled">'
+
+
+def test_the_row_beats_the_variable_and_the_variable_beats_the_session(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P20: the row is the latest recorded intent; the variable, only the launch value."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
+
+    row_wins = _start(work)
+    assert _blocks(row_wins) == [SKEPTIC]
+    assert _recorded() == "skeptic"
+
+    monkeypatch.delenv("AISQUARE_FLEET_AGENT")
+    variable_wins = _start(work)
+
+    assert _blocks(variable_wins) == [MENTOR]
+    assert _recorded() == "mentor", "the variable replaces what the session row recorded"
+
+
+def test_an_agent_spawned_as_one_persona_keeps_an_attached_one_across_a_clear(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Peer review #194's case: one session, the launch variable unchanged, the row attached."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")  # what `fleet spawn --persona mentor` exports
+    agent_id = _fleet_row(work, "mentor")  # … and records on the row
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent_id)
+
+    spawned = team_service.hook_session_start(SID, work, "startup")
+    with store_session() as store:
+        store.set_fleet_agent_persona(agent_id, "skeptic")  # the write `persona attach` makes
+    after_clear = team_service.hook_session_start(SID, work, "clear")
+
+    assert _blocks(spawned) == [MENTOR]
+    assert _blocks(after_clear) == [SKEPTIC]
+    assert _recorded() == "skeptic"
+
+
+@pytest.mark.parametrize("row", ["absent", "without a persona"])
+def test_the_variable_applies_when_no_row_carries_a_persona(
+    work: Path, monkeypatch: pytest.MonkeyPatch, row: str
+) -> None:
+    """A hand-typed `AISQUARE_PERSONA=mentor aisquare launch coder` keeps working."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
+    if row == "without a persona":
+        monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, None))
+
+    board = _start(work)
+
+    assert _blocks(board) == [MENTOR]
+    assert _recorded() == "mentor"
+
+
+def test_an_unknown_persona_on_the_row_is_one_line_and_the_start_still_returns(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "retired-one"))
+
+    lines = _start(work).split("\n")
+
+    assert lines[-2].startswith('persona "retired-one": no persona named ')
+    assert lines[-2].endswith(" — launched without it")
+    assert lines[-1] == "</aisquare-team>"
+    assert _blocks("\n".join(lines)) == []
+    assert _recorded() == "retired-one"
+
+
+def test_a_row_that_cannot_be_read_is_logged_and_the_variable_still_applies(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P19's 🔴 on #186: the fail-open names what it skipped instead of passing silently."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_01unreadable")
+
+    def unreadable(store: object, project_id: str) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(team_service, "_fleet_row_named", unreadable)
+    with (
+        caplog.at_level(logging.WARNING, logger="aisquare.services.team"),
+        store_session() as store,
+    ):
+        asked, note = team_service._asked_persona(store, "prj_row_unreadable")
+
+    assert asked == "mentor"
+    assert note == (
+        "persona: the fleet row could not be read (RuntimeError) "
+        "— started without an attached persona"
+    )
+    (record,) = [r for r in caplog.records if r.name == "aisquare.services.team"]
+    assert "agt_01unreadable" in record.getMessage()
+    assert "prj_row_unreadable" in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[0] is RuntimeError
+
+
+def test_a_start_whose_row_cannot_be_read_says_so_in_one_line_and_still_briefs(
+    work: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P20's amendment: the attached persona must not vanish silently from the briefing."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
+    real = team_service._fleet_row_named
+    calls: list[str] = []
+
+    def locked_once(store: ContextStore, project_id: str) -> FleetAgent | None:
+        calls.append(project_id)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(store, project_id)
+
+    monkeypatch.setattr(team_service, "_fleet_row_named", locked_once)
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.team"):
+        lines = _start(work).split("\n")
+
+    assert lines[-2] == (
+        "persona: the fleet row could not be read (OperationalError) "
+        "— started without an attached persona"
+    )
+    assert lines[-1] == "</aisquare-team>"
+    assert _blocks("\n".join(lines)) == [MENTOR], "the launch variable still briefs"
+    assert "database is locked" not in "\n".join(lines), "the line names a class, never a value"
+    assert any(r.exc_info for r in caplog.records if r.name == "aisquare.services.team")
+
+
+def test_a_fleet_row_without_a_persona_leaves_the_start_byte_identical(
+    work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, None))
+
+    assert _start(work) == PINNED
+    assert _recorded() is None

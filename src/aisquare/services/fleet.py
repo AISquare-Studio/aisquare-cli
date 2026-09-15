@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+from typing import Literal
 
 from aisquare.core import codenames, harness, personas, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
@@ -157,6 +158,20 @@ class TellResult:
 
     delivered: bool
     how: str
+
+
+@dataclass(frozen=True)
+class AttachReceipt:
+    """What :func:`attach_persona` did (docs/plans/spawn-personas.md §4.7)."""
+
+    agent: FleetAgent
+    persona: str
+    replaced: str | None
+    """The persona the agent ran as before, when it was a different one."""
+    delivered: Literal["typed", "noted"]
+    """``typed`` into a waiting agent's pane, or ``noted`` on the board for a busy one."""
+    how: str
+    """``tell``'s own words for what happened."""
 
 
 @dataclass(frozen=True)
@@ -822,6 +837,17 @@ def _require_tmux(srv: TmuxServer) -> None:
         raise FleetUnavailable(str(exc)) from exc
 
 
+def role_ok(role: str) -> bool:
+    """The seat rule: whether ``spawn`` accepts ``role``.
+
+    A role is accepted when it is a fleet or harness role, a numbered seat of one
+    (``coder2``), or a role declared in ``team.profiles`` (``aisquare team bind``).
+    ``spawn`` refuses anything else, ``aisquare launch`` applies the same rule, and
+    the UI's New bind form asks it before saving a seat, so all three agree.
+    """
+    return _role_ok(role)
+
+
 def _role_ok(role: str) -> bool:
     """A fleet role, a harness role, or anything ``aisquare launch`` would accept."""
     if role in FLEET_ROLES or role in harness.ROLE_PROFILES:
@@ -1380,6 +1406,60 @@ def _file_note(project: ProjectInfo, label: str, text: str, sender: str | None) 
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc
     return f"filed as board note #{event.seq} to {label}"
+
+
+def attach_persona(
+    project: ProjectInfo, label: str, name: str, *, sender: str | None = None
+) -> AttachReceipt:
+    """Give a RUNNING agent a persona, now (docs/plans/spawn-personas.md §4.7).
+
+    The persona is resolved first — an unknown name lists the known ones before
+    the store or tmux is touched — then the live agent. One ``persona_attached``
+    board event is written (which also refuses an unknown ``sender`` before
+    anything changes); the ``fleet_agent`` row and, when the agent has joined,
+    its ``team_session`` row record the name; and the briefing goes through
+    :func:`tell` — typed into a waiting agent, a board note for a busy one, no
+    second channel. The rows are what make it last: the session-start hook reads
+    the fleet row, so a ``/clear`` or a restart briefs the agent with it again.
+    """
+    try:
+        persona = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        raise FleetError(exc.rule) from exc
+    with store_session() as store:
+        agent = _live_agent(store, project, label)
+    replaced = agent.persona if agent.persona and agent.persona != persona.name else None
+    team = _team()
+    note = f"persona {persona.name} attached to {label}"
+    try:
+        team.add_note(
+            f"{note} (replaces {replaced})" if replaced else note,
+            session_ref=sender,
+            to_role=label,
+            kind="persona_attached",
+            cwd=project.root,
+        )
+    except team.TeamDisabledError as exc:
+        raise FleetError(f"cannot record the attachment on the board: {exc}") from exc
+    except KeyError as exc:
+        raise FleetError(f"unknown sender session {sender!r}") from exc
+    with store_session() as store:
+        agent = store.set_fleet_agent_persona(agent.id, persona.name)
+        if agent.session_id is not None and store.get_session(agent.session_id) is not None:
+            store.set_session_persona(agent.session_id, persona.name)
+    tail = f"; it replaces {replaced}" if replaced else ""
+    preface = (
+        f"aisquare: the operator attached persona {persona.name} to you — it applies from "
+        f"now on{tail}"
+    )
+    result = tell(project, label, "\n".join([preface, *personas.briefing(persona)]), sender=sender)
+    return AttachReceipt(
+        agent=agent,
+        persona=persona.name,
+        replaced=replaced,
+        delivered="typed" if result.delivered else "noted",
+        how=result.how,
+    )
 
 
 def stop(

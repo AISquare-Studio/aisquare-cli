@@ -8,9 +8,9 @@ in Claude Code, byte for byte. There is no aisquare format to learn and nothing
 to convert.
 
 This guide covers what ships today: the persona catalogue, the
-`aisquare persona` commands, and running an agent as a persona. Importing
-something that is not already a skill, and the persona views in `asq`, are
-described in `docs/plans/spawn-personas.md` and land in later changes.
+`aisquare persona` commands — importing anything, a skill or not — and running
+an agent as a persona. The persona views in `asq` are described in
+`docs/plans/spawn-personas.md` and land in later changes.
 
 ## What a persona is
 
@@ -115,6 +115,23 @@ records it on the fleet row; without the flag the role's
 `persona-roles` leave the spawned role out is spawned anyway, with a `⚠` note on
 the receipt.
 
+To give an agent that is already running a persona:
+
+```sh
+aisquare persona attach skeptic --to coder-auth
+```
+
+`persona attach` records the persona on the agent's fleet row (and on its board
+session, once it has joined) and delivers the briefing the way `fleet tell`
+delivers anything: typed into the agent when it is waiting, filed as a board note
+addressed to it when it is busy — the receipt says `typed` or `noted`. The board
+gets one `persona_attached` line, with the name and never the body. Because the
+session-start hook reads the fleet row first, the agent is briefed with the
+persona again after a `/clear` or a restart. That includes an agent spawned with
+`--persona`, whose `AISQUARE_PERSONA` holds only the value it was launched with.
+The variable applies when the agent has no fleet row, or a row with no persona,
+and either one wins over a persona a session recorded earlier. Attaching another
+persona replaces it, and the agent is told which one it replaces.
 In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
 persona right after who runs the agent — role, account, binary — with the role's
 default preselected and the persona's description under the field; `(none)`
@@ -155,11 +172,68 @@ the name of a skill from `import --list`. The directory is copied byte for byte
 it records the source and its sha256. A bare file becomes `<name>/SKILL.md`,
 named by `--name`, else its frontmatter `name`, else its file name.
 
+`import --list` marks a skill `imported` when a user or project persona's
+`.persona.json` names that skill as its source, whatever the persona was called.
+A persona of the same name that did not come from it (a bundled one, say) is
+not an import: the row ends `(name taken by bundled careful)`, which is why
+importing that skill needs `--name`.
+
 The default layer is `--user`. A name already taken in that layer is refused
-unless you pass `--force`; `--name` picks another directory name. A source that
-is not a recognised skill — plain text, no frontmatter — is refused with
-`not_recognised`; converting one needs the LLM import path, which is not in this
-build yet.
+unless you pass `--force`; `--name` picks another directory name.
+
+### Import anything else — the LLM path
+
+```sh
+aisquare persona import ./notes/how-we-review.txt
+aisquare persona import https://example.com/our-reviewer.md --user
+aisquare persona import ./skills/long-skill --condense --yes
+aisquare persona import ./prompt.txt --engine api --model claude-opus-5
+aisquare persona import ./skills/code-review --no-llm
+```
+
+A source that is not a recognised skill — plain text, a JSON or YAML persona from
+another tool, a page fetched over `https://` (20 s, 2 MB; `http://` is refused) —
+is converted into a skill by an engine: a name, a one-line description, a body of
+at most 4,000 characters that keeps the source's intent, and notes on what it
+dropped. `--llm` sends a recognised skill through an engine anyway, to reshape
+it; `--condense` asks for a shorter body — the remedy for a skill over the
+4,000-character soft cap, or even over the 12,000 hard cap; `--no-llm` forbids the
+path, for a script that must never spend a token. The source is given to the
+engine as data, never as instructions.
+
+The engines, tried in this order unless `--engine` picks one:
+
+1. **manager** — the fleet's own Claude Code, headless, under the manager role's
+   binding (`team bind manager`), so the manager's account pays. One turn, no
+   tools, run from the aisquare home with the environment stripped of any role,
+   team or tracing identity.
+2. **api** — the Anthropic API through the official SDK, installed with
+   `pip install 'aisquare-cli[llm]'`. Credentials are the SDK's own
+   (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `ant auth login`); aisquare
+   stores no key. The token usage is printed.
+3. Neither can run → `no_import_engine`, naming both fixes.
+
+**An engine import costs money or quota**, and the output says which engine and
+model ran. The draft is held to the same rules as a copied skill (one retry, told
+what failed), written to `$AISQUARE_HOME/personas/.drafts/<name>/SKILL.md` before
+anything else, and shown — frontmatter, the first twelve body lines, the character
+count, engine, model and notes — for a `y/N`. `--yes` saves without asking. With
+`--json`, or without a terminal, the draft is kept and the import exits
+`needs_confirmation` with the draft's path; importing that path saves it. A draft
+that fails validation twice is kept as well (`import_invalid`). A saved import
+records engine, model and `condensed` in `.persona.json`.
+
+```toml
+[persona.import]
+engine = "auto"               # auto | manager | api | off — off refuses every conversion
+api_model = "claude-opus-5"   # the api engine's model; the manager rides the manager's ladder
+```
+
+If `config.toml` cannot be read, a conversion is refused with
+`config_unreadable`, naming only the error's class. A broken file may be the
+one that says `engine = "off"`, so its defaults are not assumed. Fix the file, or
+pass `--engine` to choose an engine for that one import; the output then says
+the config was not read.
 
 ### Export a persona
 

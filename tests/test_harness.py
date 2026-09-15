@@ -533,6 +533,67 @@ def test_inconclusive_probes_are_never_cached(
     assert harness.cached_probe("fable") is None
 
 
+#: Claude Code 2.1.272 on an account that is not logged in, with verbose JSON
+#: output: the whole message list, ending in the error envelope. Measured with an
+#: empty CLAUDE_CONFIG_DIR and `--verbose`; trimmed to the fields that matter.
+_NOT_LOGGED_IN_LIST = [
+    {"type": "system", "subtype": "init"},
+    {"type": "assistant"},
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": True,
+        "result": "Not logged in · Please run /login",
+        "modelUsage": {},
+    },
+]
+
+
+def test_a_not_logged_in_list_reply_is_inconclusive_in_the_envelopes_words(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`team spawn` died on this reply with AttributeError: 'list' object has no attribute 'get'."""
+    monkeypatch.setattr(
+        "aisquare.core.harness.subprocess.run",
+        lambda *a, **k: _Completed(0, json.dumps(_NOT_LOGGED_IN_LIST)),
+    )
+    result = harness.probe_model("fable")
+    assert (result.available, result.conclusive) == (False, False)
+    assert result.reason == (
+        "reply was a JSON list, not an object — Not logged in · Please run /login"
+    )
+    harness._probe_and_cache("fable")
+    assert harness.cached_probe("fable") is None
+
+
+@pytest.mark.parametrize(
+    ("reply", "shape"),
+    [
+        (["ok", 1], "list"),
+        ([], "list"),
+        ([{"type": "result", "is_error": False, "result": "ok"}], "list"),
+        ("ok", "string"),
+        (3, "number"),
+        (True, "boolean"),
+        (None, "null"),
+    ],
+)
+def test_a_reply_that_is_not_an_object_is_inconclusive_and_names_its_shape(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, reply: object, shape: str
+) -> None:
+    monkeypatch.setattr(
+        "aisquare.core.harness.subprocess.run",
+        lambda *a, **k: _Completed(0, json.dumps(reply)),
+    )
+    result = harness.probe_model("fable")
+    assert (result.available, result.conclusive) == (False, False)
+    assert result.reason == (
+        f"reply was a JSON {shape}, not an object — is this account logged in?"
+    )
+    harness._probe_and_cache("fable")
+    assert harness.cached_probe("fable") is None
+
+
 def test_cache_is_scoped_per_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A probe under one Claude config dir must not answer for another."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "acct-a"))

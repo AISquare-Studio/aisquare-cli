@@ -6,7 +6,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The documented-commands guard no longer fails the checkout that runs the
+  fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
+  repository for markdown with commands in a fenced block, and a root checkout
+  that hosts coder worktrees under `.aisquare-worktrees/` holds one full copy of
+  every document per agent — so `make check` from the root failed, reporting
+  each worktree's README.md and docs pages as unlisted copies of themselves,
+  while every real document passed (measured on `rc/hackathon-v1` with two
+  coder worktrees; from a clean checkout or inside a worktree it passed). The
+  sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
+  any directory holding a `.git` *file* — a linked worktree wherever it was put
+  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
+  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
+  result away. The guard's rules and its document list are unchanged, and the
+  positive control stays: the same fenced page at the repo's own level is still
+  reported.
+
 ### Added
+- **Attach a persona to a running agent.** `aisquare persona attach <name> --to
+  <label>` gives a fleet agent that is already running a persona: the name is
+  checked first (an unknown one lists the known names before anything is
+  touched), one `persona_attached` line goes on the board, the agent's
+  `fleet_agent` row — and its board session, once joined — records it, and the
+  briefing is delivered exactly as `fleet tell` delivers: typed into a waiting
+  agent, a board note for a busy one, with the receipt saying `typed` or `noted`
+  (`--json` carries `delivered`). Replacing a persona tells the agent which one it
+  replaces. The session-start hook now asks for the persona on the fleet row
+  `AISQUARE_FLEET_AGENT` names, else `AISQUARE_PERSONA`, else keeps the session's
+  own. So an attached persona is briefed again after a `/clear` or a restart,
+  even for an agent spawned with `--persona`, and a session with no persona
+  anywhere still sees byte-identical text.
+- **Import anything as a persona.** `aisquare persona import` now converts a
+  source that is not already a skill — plain text, another tool's JSON or YAML
+  persona, a page over `https://` — with an LLM: the fleet's own Claude Code,
+  headless, under the manager role's binding first; then the Anthropic API
+  through the official SDK (new optional extra `aisquare-cli[llm]`); then a
+  refusal naming both fixes. The answer is structured, held to the same rules
+  as a copied skill (one retry with the failed rule), kept as a draft under
+  `$AISQUARE_HOME/personas/.drafts/` before anything else, shown and confirmed
+  (`--yes` skips; `--json` or no terminal keeps the draft and exits
+  `needs_confirmation` with its path), and saved with engine, model and
+  `condensed` in `.persona.json`. New flags `--llm/--no-llm`, `--condense`,
+  `--engine`, `--model`, `--yes`; new config `[persona.import]` (`engine =
+  "auto" | "manager" | "api" | "off"`, `api_model`). The headless run is a ruled
+  spawn seam that strips the tracing identity, and `anthropic` and the engine
+  module are imported inside functions, so the CLI's startup and every hook load
+  neither. Saving config now keeps a newer build's unknown key inside a section
+  written under an alias, such as `[persona.import]`.
 - **The Spawn dialog asks as whom.** After who runs the agent — Role (now with
   *Pick…*), Account, Binary — the dialog has a **Persona** select: `(none)` plus
   this project's personas with their layer, the role's

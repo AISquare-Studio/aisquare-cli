@@ -571,3 +571,42 @@ def test_a_normal_command_does_not_flag_a_held_open_pipe() -> None:
     assert report.returncode == 0
     assert not report.output_pipes_held_open
     assert reports.read_stream(report.id, "stdout", raw=True) == b"done\n"
+
+
+def test_an_evidence_candidate_report_is_not_evicted_by_the_count_rule(tmp_path: Path) -> None:
+    """A fresh report captured for evidence (`--project`, so a source fingerprint)
+    could be count-evicted before `brief evidence --report` recorded it — 63 newer
+    `asq exec` runs were enough. Such a candidate is kept within the retention-days
+    window regardless of the count, while plain reports past the count still go."""
+    root = tmp_path / "proj"
+    project_id = _registered_project(root)
+    (root / "code.py").write_text("x = 1\n")
+    candidate = reports.run_command(python("print('proof')"), cwd=root, project_id=project_id)
+    assert candidate.source_fingerprint_before is not None
+    later = [reports.run_command(python(f"print({n})")) for n in range(3)]
+
+    removed = reports.prune_reports(keep=1, protect=set())
+
+    assert candidate.id not in removed, "an unrecorded evidence candidate must survive the count"
+    assert reports.load_report(candidate.id).id == candidate.id
+    assert any(r.id in removed for r in later), "plain reports past the keep are still evicted"
+
+
+def test_an_evidence_candidate_still_expires_by_age(tmp_path: Path) -> None:
+    """Kept within the days window, not forever: an aged-out candidate is still
+    removed, so disk stays bounded. Retention reads the report's recorded
+    ``finished_at``, so age it there rather than by file mtime."""
+    from datetime import UTC, datetime, timedelta
+
+    root = tmp_path / "proj"
+    project_id = _registered_project(root)
+    (root / "code.py").write_text("x = 1\n")
+    candidate = reports.run_command(python("print('proof')"), cwd=root, project_id=project_id)
+    assert candidate.source_fingerprint_before is not None
+    report_json = reports.reports_dir() / candidate.id / "report.json"
+    aged = candidate.model_copy(update={"finished_at": datetime.now(UTC) - timedelta(days=30)})
+    report_json.write_text(aged.model_dump_json())
+
+    removed = reports.prune_reports(keep=64, days=14, protect=set())
+
+    assert candidate.id in removed, "a candidate older than the retention window is still pruned"

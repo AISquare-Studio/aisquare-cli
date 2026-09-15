@@ -43,7 +43,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     interruption recorded; a background process that keeps the pipe open after the
     command exits (a `setsid`'d helper) no longer blocks the wrapper — capture
     drains and stops, recording `output_pipes_held_open`; retention (14 days /
-    newest 64) never removes a report that backs recorded evidence.
+    newest 64) never removes a report that backs recorded evidence, nor one captured with `--project` for evidence but not yet recorded (kept within the retention-days window so a burst of newer commands cannot evict it first).
   - A **ui-tester** fleet role (browser checks of a changed interface), registered
     in the Explainability roster with its own standing cycle; `fleet spawn --task`
     now hands the task to the worker (`AISQUARE_TASK_ID`, a role-aware kickoff

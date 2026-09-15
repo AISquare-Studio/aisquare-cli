@@ -86,7 +86,9 @@ originals and metadata have been written. New commands apply a default retention
 policy of 14 days and the newest 64 completed reports. A report that backs
 recorded requirement evidence (`asq brief evidence --report`) is protected: it
 neither counts against the 64 nor expires, because deleting it would turn a
-verified brief stale. In-progress reports are not deleted by retention; an
+verified brief stale. A report captured with `--project` for evidence but not
+yet recorded is kept within the retention-days window regardless of the count,
+so a burst of newer commands cannot evict it before you record it. In-progress reports are not deleted by retention; an
 in-progress directory whose wrapper process is gone for more than an hour is
 treated as abandoned and removed.
 

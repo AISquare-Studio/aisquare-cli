@@ -280,6 +280,16 @@ def prune_reports(
     against ``keep`` and never expire here. ``protect=None`` means protection
     could not be determined (finding 4): fail closed — delete no reports at all,
     only orphaned pending dirs (crashed runs, never evidence).
+
+    A report captured for evidence but not yet recorded (``source_fingerprint_before``
+    set — the ``--project`` source scan a pass is bound to) is an evidence
+    CANDIDATE. ``protect`` only lists reports already REFERENCED by saved
+    evidence, so before the fix a candidate was an ordinary report: 63 newer
+    ``asq exec`` runs were enough to count-evict it in the window between
+    capturing it and running ``brief evidence --report`` against it, and the
+    record then failed "report unavailable". So a candidate is kept within the
+    retention-days window regardless of ``keep``; it still expires by age, so
+    disk stays bounded.
     """
     if keep < 0 or days < 0:
         raise ValueError("Retention values must be non-negative.")
@@ -291,7 +301,20 @@ def prune_reports(
         for report in list_reports():
             if report.id in protected:
                 continue
-            if kept >= keep or report.finished_at.timestamp() < cutoff:
+            if report.finished_at.timestamp() < cutoff:
+                # Aged out: even an evidence candidate is gone once it is this old.
+                path = _directory(report.id)
+                try:
+                    shutil.rmtree(path)
+                except FileNotFoundError:
+                    continue  # another runner pruned the same old completed report
+                removed.append(report.id)
+                continue
+            if report.source_fingerprint_before is not None:
+                # An unrecorded evidence candidate: kept within the days window so
+                # a burst of newer commands cannot evict it before it is recorded.
+                continue
+            if kept >= keep:
                 path = _directory(report.id)
                 try:
                     shutil.rmtree(path)

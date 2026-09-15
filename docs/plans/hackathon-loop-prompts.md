@@ -17,6 +17,12 @@ aisquare fleet spawn tester --label tester-hackathon    -P aisquare-cli
 ```
 
 The cap is four agents per project and the manager counts, so this fills it.
+
+**Live fleet, 2026-09-15:** the owner spawned the seats `coder3a-1` (plays
+coder-persona-core: P1 → P2 → P5 → P8), `coder3b-1` (plays coder-spawn-dialog:
+P3 → P6 → P4 → P7) and `runner2-1` (the runner). The prompts are label-agnostic
+— each agent reads its own label from `aisquare --json fleet ls` — so they paste
+unchanged; the board's `OWNER:` notes carry the live labels.
 The `asqui` tmux server's stale `AISQUARE_TEAM_HUB` was removed on 2026-09-15;
 agents spawned from now on read the aisquare-cli board.
 
@@ -63,7 +69,7 @@ nobody has to infer them:
 ## What the manager does the moment the fleet is up
 
 1. Confirms each agent's row on the aisquare-cli board and its label.
-2. Tells each coder its first task by label: coder-persona-core → P1, coder-spawn-dialog → P3.
+2. Tells each coder its first task by label: coder3a-1 → P1, coder3b-1 → P3 (done 2026-09-15).
 3. Watches the board every ten minutes: reopen with reasons, unblock, tell the next task when its needs are done, cheer what lands.
 4. Brings anything ambiguous to the owner in one line, with a recommendation.
 5. Never writes code. Never merges. The owner merges into `rc/hackathon-v1`.

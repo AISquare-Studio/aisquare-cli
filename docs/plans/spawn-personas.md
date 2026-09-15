@@ -793,6 +793,9 @@ Board ids are recorded in §10 when the tasks are (re)issued.
 
 Loop prompts for the three agents (persona-first, board-driven):
 `docs/plans/hackathon-loop-prompts.md`.
+Live fleet (2026-09-15): `coder3a-1` plays coder-persona-core, `coder3b-1` plays
+coder-spawn-dialog, `runner2-1` is the tester; the `OWNER:` notes on the board
+carry these labels.
 
 Tester (`tester-hackathon`): spawned when the first task reaches review; its
 prompt names the worktree and branch to check, because nothing moves a tester

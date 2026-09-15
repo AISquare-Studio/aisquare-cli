@@ -250,6 +250,57 @@ def test_import_list_shows_claude_skills_and_marks_the_imported_ones(
     assert "imported" not in rows["personal-one"]
 
 
+def test_a_skill_that_only_shares_a_bundled_name_is_not_imported_and_says_why(
+    runner: CliRunner, claude_dir: Path
+) -> None:
+    """The validator's case: a gstack `careful` skill beside the bundled `careful` persona."""
+    _skill(claude_dir / "skills", "careful", description="Safety guardrails.")
+
+    code, payload = _json(runner, "import", "--list")
+    listed = runner.invoke(app, ["persona", "import", "--list"])
+
+    assert code == 0
+    (skill,) = payload["skills"]
+    assert (skill["name"], skill["imported"], skill["taken_by"]) == ("careful", False, "bundled")
+    (row,) = listed.stdout.splitlines()
+    assert "imported" not in row
+    assert row.endswith("Safety guardrails.  (name taken by bundled careful)")
+
+
+def test_imported_is_decided_by_provenance_even_under_another_name(
+    runner: CliRunner, claude_dir: Path
+) -> None:
+    _skill(claude_dir / "skills", "careful", description="Safety guardrails.")
+    _skill(claude_dir / "skills", "notes", description="Mine.")
+
+    renamed = runner.invoke(app, ["persona", "import", "careful", "--name", "guardrails"])
+    same = runner.invoke(app, ["persona", "import", "notes"])
+    code, payload = _json(runner, "import", "--list")
+
+    assert renamed.exit_code == 0, renamed.output
+    assert same.exit_code == 0, same.output
+    assert code == 0
+    by_name = {skill["name"]: skill for skill in payload["skills"]}
+    assert set(by_name) == {"careful", "notes"}, "the renamed persona is not listed as a skill"
+    assert (by_name["careful"]["imported"], by_name["careful"]["taken_by"]) == (True, "bundled")
+    assert (by_name["notes"]["imported"], by_name["notes"]["taken_by"]) == (True, None)
+
+
+def test_a_same_named_persona_from_another_source_does_not_mark_the_skill_imported(
+    runner: CliRunner, claude_dir: Path, tmp_path: Path
+) -> None:
+    _skill(claude_dir / "skills", "notes", description="Mine.")
+    elsewhere = _skill(tmp_path / "elsewhere", "notes", description="Someone else's.")
+
+    imported = runner.invoke(app, ["persona", "import", str(elsewhere), "--user"])
+    code, payload = _json(runner, "import", "--list")
+
+    assert imported.exit_code == 0, imported.output
+    assert code == 0
+    (skill,) = payload["skills"]
+    assert (skill["imported"], skill["taken_by"]) == (False, "user")
+
+
 def test_export_prints_writes_a_directory_and_refuses_an_existing_target(
     runner: CliRunner, tmp_path: Path, claude_dir: Path
 ) -> None:

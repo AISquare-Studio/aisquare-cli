@@ -557,13 +557,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   widget: a Line API widget has no `render()` for Textual's default selection to
   read, and switched on alone every drag resolved to select-all, because the
   compositor takes the drag's content offset from segment metadata only the
-  `render()` path stamped. The pane now stamps every row it renders, supplies
+  `render()` path stamped. The pane now stamps the row the terminal library
+  reads when it resolves a press or a drag (that row only — see below), supplies
   its own extraction (a drag in the blank area below the output used to raise
   out of the handler), and paints the span itself — as cells, so a row with wide
   glyphs highlights what is copied, and tinting behind the text rather than over
   it, since the theme's selection style resolves with foreground equal to
   background. The text is copied when the gesture ends, wherever on screen it
-  ends — the app hears that from the screen and tells the panes, so a drag that
+  ends — the app sees every press and release itself and tells the panes, so a drag that
   crosses the pane's edge copies in either direction instead of depending on
   whether the neighbouring widget happens to capture the mouse. Only a
   left-button gesture that actually changed a pane's selection copies: a

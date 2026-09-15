@@ -1499,7 +1499,7 @@ def test_a_click_is_handled_once_and_focuses_the_pane(
 def test_the_notice_row_is_highlighted_by_the_same_drag_that_copies_it(
     fake: FakeTmux, tmp_path: Path
 ) -> None:
-    """`_row_text` reports the notice as the row's text, so a drag copies it —
+    """The displayed row reports the notice as its text, so a drag copies it —
     while the early return that built the notice strip skipped every overlay, so
     it was the one row a selection never tinted (review)."""
 

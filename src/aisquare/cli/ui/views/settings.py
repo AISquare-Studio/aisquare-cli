@@ -106,6 +106,8 @@ class SettingsView(VerticalScroll):
     SettingsView .section { text-style: bold; margin-top: 1; }
     SettingsView #settings-buttons Button { margin-right: 1; }
     SettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
+    SettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
+    SettingsView #settings-personas-unavailable.shown { display: block; }
     """
     ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree and persona per role"
 
@@ -114,14 +116,21 @@ class SettingsView(VerticalScroll):
         self.project = project
         self.fleet = fleet_service.settings()
         self._roles: list[str] = role_order(self.fleet)
-        self._persona_names: list[str] = self._read_persona_names()
+        self._persona_names, self._personas_unavailable = self._read_persona_names()
 
-    def _read_persona_names(self) -> list[str]:
+    def _read_persona_names(self) -> tuple[list[str], str | None]:
+        """This project's persona names — or none, and the reason, which the form shows.
+
+        ``catalogue`` never raises for one bad directory, so whatever reaches the
+        ``except`` is a real failure (an unreadable layer, a bug). It costs the list,
+        never the tab, and it is said under the roles, the way the Spawn dialog says
+        it under its Persona field.
+        """
         try:
             found, _invalid = personas.catalogue(self.project.root)
-        except Exception:  # a layer we cannot read costs the list; configured names still show
-            return []
-        return [persona.name for persona in found]
+        except Exception as exc:
+            return [], f"personas unavailable — {type(exc).__name__}: {exc}"
+        return [persona.name for persona in found], None
 
     # --- layout ----------------------------------------------------------------------
 
@@ -137,6 +146,11 @@ class SettingsView(VerticalScroll):
             )
             yield Button("Rename", id="rename-codename")
         yield Static(self.ROLE_SECTION, classes="section")
+        yield Static(
+            Text(self._personas_unavailable or ""),
+            id="settings-personas-unavailable",
+            classes="shown" if self._personas_unavailable else "",
+        )
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
             suffix = widget_suffix(role)
@@ -196,7 +210,10 @@ class SettingsView(VerticalScroll):
         """Discard edits: show what the file holds (the roles list can change with it)."""
         self.fleet = fleet_service.settings()
         self._roles = role_order(self.fleet)
-        self._persona_names = self._read_persona_names()
+        self._persona_names, self._personas_unavailable = self._read_persona_names()
+        unavailable = self.query_one("#settings-personas-unavailable", Static)
+        unavailable.update(Text(self._personas_unavailable or ""))
+        unavailable.set_class(bool(self._personas_unavailable), "shown")
         self.query_one("#codename", Input).value = self.project.codename or ""
         self.query_one("#escape-key", Input).value = self.fleet.escape_key
         self.query_one("#max-agents", Input).value = str(self.fleet.max_agents_per_project)

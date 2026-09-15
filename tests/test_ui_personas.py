@@ -28,6 +28,7 @@ from typing import Any, TypeVar
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.geometry import Region
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.screen import Screen
@@ -585,6 +586,34 @@ def test_the_import_dialog_browses_skills_and_guards_the_layer_and_the_name(
     assert drive(inside_git, dialog=ImportPersonaScreen(repo)) is False
 
 
+def test_a_skill_description_with_brackets_is_listed_verbatim_not_parsed_as_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bracketed = personas_service.SkillRef(
+        name="odd",
+        description="Reviews [docs] and [/] code.",
+        path=Path("/claude/skills/odd"),
+        scope="user",
+        recognised=True,
+    )
+    monkeypatch.setattr(personas_service, "importable_skills", Recorder(lambda root: [bracketed]))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        browse: Select[str] = host.screen.query_one("#import-browse", Select)
+        browse.expanded = True  # render the options the way the reader sees them
+        await pilot.pause()
+        await pilot.pause()
+        overlay = browse.query_one(OptionList)
+        # The border rows are not in virtual_size: leave room for them and every option.
+        height = max(overlay.virtual_size.height, overlay.size.height) + 4
+        region = Region(0, 0, overlay.size.width, height)
+        return [strip.text.strip() for strip in overlay.render_lines(region)]
+
+    rendered = drive(scenario, dialog=ImportPersonaScreen(None))
+    # A str label is parsed as markup: "[docs]" and "[/]" vanish from the rendered row.
+    assert any("Reviews [docs] and [/]" in line for line in rendered), rendered
+
+
 def result_for(directory: Path, engine: str = "copy") -> personas_service.ImportResult:
     loaded = persona(directory)
     return personas_service.ImportResult(persona=loaded, engine=engine, source="test")
@@ -943,6 +972,125 @@ def test_export_sends_each_destination_and_the_toast_names_the_path(
     if claude_hint:
         toast += " — it is /pair in Claude Code now"
     assert (toast, "information") in notices
+
+
+def test_export_shows_a_bracketed_skills_path_verbatim(
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = tmp_path / "claude[old]"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> str:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-export")
+        dialog = await wait_for(pilot, ExportPersonaScreen)
+        return str(dialog.query_one("#export-personal", RadioButton).label)
+
+    label = drive(scenario, project=project)
+    assert str(config_dir / "skills" / "pair") in label  # "[old]" is part of the path, not a tag
+
+
+# --- a write the filesystem refuses: every handler keeps the TUI up and names the error ---
+
+DENIED_TEXT = "[Errno 13] Permission denied: '/read-only/personas'"
+
+
+def denied(*args: object, **kwargs: object) -> Any:
+    """A write the filesystem refuses, raised the way ``shutil`` and ``Path`` raise it."""
+    raise PermissionError(13, "Permission denied", "/read-only/personas")
+
+
+def test_a_save_the_filesystem_refuses_keeps_the_editor_open_and_names_the_error(
+    catalogue: dict[str, Path], repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save = Recorder(denied)
+    monkeypatch.setattr(personas_service, "save", save)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        dialog = host.screen
+        area = dialog.query_one("#edit-text", TextArea)
+        area.clear()
+        area.insert(skill_text("Pairs, now."))
+        await pilot.pause(PARSE_DEBOUNCE + 0.2)
+        await press(pilot, "#edit-save")
+        status = shown(dialog.query_one("#edit-status", Static))
+        return [type(host.screen).__name__, status, list(host.results)]
+
+    screen, status, results = drive(
+        scenario, dialog=EditPersonaScreen("pair", "user", catalogue["pair"], repo)
+    )
+    assert len(save.calls) == 1
+    assert screen == "EditPersonaScreen" and results == []  # still open, nothing dismissed
+    assert status == f"PermissionError: {DENIED_TEXT}"
+
+
+def test_a_save_as_the_filesystem_refuses_keeps_the_editor_open_and_names_the_error(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    export = Recorder(denied)
+    monkeypatch.setattr(personas_service, "export", export)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        await select_row(pilot, host, "bundled:skeptic")
+        host.query_one("#persona-table", DataTable).focus()
+        await pilot.press("enter")
+        editor = await wait_for(pilot, EditPersonaScreen)
+        await press(pilot, "#edit-save-as")
+        await settle(pilot)
+        return [type(host.screen).__name__, shown(editor.query_one("#edit-status", Static))]
+
+    screen, status = drive(scenario, project=project)
+    assert len(export.calls) == 1
+    assert screen == "EditPersonaScreen"
+    assert status == f"PermissionError: {DENIED_TEXT}"
+
+
+def test_an_export_the_filesystem_refuses_keeps_the_dialog_open_and_names_the_error(
+    project: ProjectInfo, catalogue: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    export = Recorder(denied)
+    monkeypatch.setattr(personas_service, "export", export)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-export")
+        dialog = await wait_for(pilot, ExportPersonaScreen)
+        dialog.query_one("#export-directory", RadioButton).value = True
+        await pilot.pause()
+        dialog.query_one("#export-dir", Input).value = "/read-only/personas"
+        await pilot.pause()
+        await press(pilot, "#export-submit")
+        status = shown(dialog.query_one("#export-status", Static))
+        return [type(host.screen).__name__, status, list(host.notices)]
+
+    screen, status, notices = drive(scenario, project=project)
+    assert len(export.calls) == 1
+    assert screen == "ExportPersonaScreen"
+    assert status == f"PermissionError: {DENIED_TEXT}"
+    assert not any(message.startswith("✓ exported") for message, _ in notices)
+
+
+def test_a_remove_the_filesystem_refuses_is_an_error_toast_and_the_tab_stays_up(
+    project: ProjectInfo, catalogue: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remove = Recorder(denied)
+    monkeypatch.setattr(personas_service, "remove", remove)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
+        await select_row(pilot, host, "user:pair")
+        await press(pilot, "#persona-remove")
+        await wait_for(pilot, ConfirmRemoveScreen)
+        await press(pilot, "#remove-confirm")
+        await settle(pilot)
+        return [list(host.notices), len(rows(host))]
+
+    notices, row_count = drive(scenario, project=project)
+    assert len(remove.calls) == 1
+    assert (f"PermissionError: {DENIED_TEXT}", "error") in notices
+    assert row_count > 0  # the tab re-read the catalogue and is still there
 
 
 def test_export_offers_the_project_skills_only_inside_a_git_repository() -> None:

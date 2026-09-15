@@ -72,6 +72,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `[explainability.targets.<name>]` entry, because those tables were
   replaced wholesale; from this build on each kept entry is merged field by
   field, so a later build's role key survives this one.
+- **A Personas tab in the Project view.** Every persona the project can use —
+  project, user and bundled layers — in one searchable table with the layer,
+  description, roles and the `⇧ shadows` / `✗ invalid` marks, and beside it a
+  preview that is byte-for-byte the block an agent is briefed with, followed by
+  the directory, supporting files, `.persona.json` provenance and warnings. The
+  selected persona can be edited in place (a `TextArea` over the whole
+  `SKILL.md`, re-parsed as you type, *Save* only while it parses, saved through
+  `services.personas.save` — the writer `persona edit` uses — so a refused edit
+  keeps the old bytes), exported to Claude Code's personal or project skills or
+  a directory, removed after one question naming the directory, and validated.
+  Bundled rows open read-only with *Save as…* into a layer. **+ Import…** is
+  `persona import` as a form, run in a thread worker over the same
+  `import_source` the CLI calls: its `progress` lines appear under the form and
+  its `confirm` opens a draft-review modal from the worker
+  (`call_from_thread(push_screen_wait, …)`, verified on Textual 8.2.8 first), so
+  when the LLM path lands the UI changes not at all. **+ New** scaffolds through
+  `services.personas.new` and opens the editor on it. *Attach to existing* /
+  *Attach to new* post `AttachRequested` for the target picker, which is the next
+  change. Measured headless in `tests/test_ui_personas.py`: real catalogues
+  written into the isolated home and a `git init` repository, every write and
+  import a recorder, assertions on the keywords received, the rows, the preview
+  text, and a `SKILL.md` left byte-identical when only the recorder saved.
 - **Personas — and a persona is a Claude Code skill.** `aisquare persona`
   (`list`, `show`, `new`, `edit`, `rm`, `validate`, `import`, `export`, every
   reporting verb with `--json`) manages how an agent works — a skeptic, a mentor,

@@ -43,6 +43,7 @@ from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
+from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgentStatus, ProjectInfo
@@ -232,6 +233,7 @@ class ProjectView(TabbedContent):
         "tab-doctor",
         "tab-explainability",
         "tab-settings",
+        "tab-personas",
     )
 
     def __init__(
@@ -275,6 +277,9 @@ class ProjectView(TabbedContent):
                 id="tab-explainability",
             ),
             TabPane("Settings", SettingsView(project, id="project-settings"), id="tab-settings"),
+            # Personas live with the fleet they serve (spawn-personas.md §4.2):
+            # the project supplies the project layer and every attach target.
+            TabPane("Personas", PersonasTab(project, id="project-personas"), id="tab-personas"),
         )
         for pane in panes:
             self.compose_add_child(pane)
@@ -308,6 +313,12 @@ class ProjectView(TabbedContent):
         views = self.query(DoctorView)
         if views:
             views.first().show(list(checks), cwd=self.project.root)
+
+    @on(TabbedContent.TabActivated, pane="#tab-personas")
+    def reload_personas(self) -> None:
+        """Re-read the catalogue each time the tab is opened: the disk may have changed."""
+        for tab in self.query(PersonasTab):
+            tab.reload()
 
     @on(TabbedContent.TabActivated, pane="#tab-doctor")
     def run_project_doctor(self) -> None:

@@ -49,6 +49,7 @@ from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
+from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
@@ -301,7 +302,7 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo) -> None:
+def test_project_view_has_the_six_tabs_with_their_widgets(project: ProjectInfo) -> None:
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, list[str], str]:
         view = host.query_one(ProjectView)
         for pane_id, widget_type in (
@@ -310,13 +311,14 @@ def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo)
             ("#tab-doctor", DoctorView),
             ("#tab-explainability", ExplainabilityView),
             ("#tab-settings", SettingsView),
+            ("#tab-personas", PersonasTab),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         ids = [pane.id or "" for pane in view.query("TabPane")]
         return view.tab_count, ids, view.active
 
     count, ids, active = drive(project, scenario)
-    assert count == 5
+    assert count == 6
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
 

@@ -74,6 +74,13 @@ def _emit_footer(
     interrupted = (
         f"; interrupted by signal {report.interrupted_by}" if report.interrupted_by else ""
     )
+    # The command finished but a background process it left running held the pipe
+    # open; capture drained and stopped rather than waiting for it (finding 12).
+    held = (
+        "; a background process held the output open — later output not captured"
+        if (report.output_pipes_held_open)
+        else ""
+    )
     hint = (
         f"Originals: asq reports show {report.id} --raw (saved bytes; never reruns)."
         if not raw
@@ -83,7 +90,7 @@ def _emit_footer(
     # recovery reads our stderr, so the receipt goes to stdout there.
     typer.echo(
         f"\n[asq report {report.id}; exit {report.exit_code}; {report.format}"
-        f"{truncation}{interrupted}]\n{hint}",
+        f"{truncation}{interrupted}{held}]\n{hint}",
         err=stream != "stderr",
     )
 

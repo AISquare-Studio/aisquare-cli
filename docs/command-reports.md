@@ -91,11 +91,21 @@ in-progress directory whose wrapper process is gone for more than an hour is
 treated as abandoned and removed.
 
 Signals: while the command runs, SIGINT, SIGTERM and SIGHUP are forwarded to its
-process group. A second interrupt escalates to SIGTERM and a third to SIGKILL, so
-a command that ignores Ctrl-C cannot hold your terminal. The report is still
-saved, with `interrupted_by` recording what you sent; an interrupt that arrives
-after the command finished (during the source scan or compaction) is honoured
-only after the report is published.
+process group — the new session the command runs in, so the whole group is
+reached, not only the direct child. A second interrupt escalates to SIGTERM and a
+third to SIGKILL, so a command that ignores Ctrl-C cannot hold your terminal. The
+report is still saved, with `interrupted_by` recording what you sent; an interrupt
+that arrives after the command finished (during the source scan or compaction) is
+honoured only after the report is published.
+
+If the command exits but leaves a background process holding its output pipe open
+— `asq exec -- sh -c 'setsid sleep 600 & echo started'`, a server or browser
+helper it started — the wrapper does not wait for that process. Once the command
+has exited it drains what is already buffered and stops, records
+`output_pipes_held_open` and notes it in the receipt, and returns. A process that
+called `setsid` is in its own session and no group signal can reach it; leaving it
+running is deliberate, and the report of the command that started it is not lost
+to its lifetime.
 
 ```sh
 asq exec --raw -- python -m pytest -q

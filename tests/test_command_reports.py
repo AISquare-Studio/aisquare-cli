@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import signal
 import stat
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -524,3 +526,48 @@ def test_source_proof_uses_actual_linked_worktree(tmp_path: Path) -> None:
     updated = reports.run_command(python("print('new check')"), cwd=worktree, project_id=project.id)
     assert updated.source_fingerprint_after != report.source_fingerprint_after
     assert (main / "file.py").read_text() == "main source"
+
+
+def test_a_backgrounded_grandchild_holding_the_pipe_does_not_hang_capture() -> None:
+    """Finding 12: `asq exec -- sh -c 'setsid sleep 600 & echo started'` blocked
+    for the sleeper's whole lifetime, because capture read until BOTH pipes hit
+    EOF and the detached grandchild kept stdout open after the command exited.
+
+    Here the child backgrounds a ``start_new_session=True`` grandchild (setsid's
+    effect) that inherits stdout and sleeps well past the drain window, prints,
+    and exits. Capture must return once the child exits — within the bounded
+    drain, not the sleeper's lifetime — keep the exit status and the printed
+    output, and record that a pipe was held open.
+    """
+    holder = (
+        "import subprocess, sys, time;"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(12)'],"
+        " start_new_session=True);"
+        "print('started', p.pid, flush=True)"
+    )
+    started = time.monotonic()
+    report = reports.run_command(python(holder))
+    elapsed = time.monotonic() - started
+    stdout = reports.read_stream(report.id, "stdout", raw=True)
+    grandchild = int(stdout.split()[-1])
+    try:
+        assert report.returncode == 0, stdout
+        assert stdout.startswith(b"started ")
+        assert report.output_pipes_held_open, "a held-open pipe must be recorded"
+        assert elapsed < 8.0, (
+            f"capture waited {elapsed:.1f}s — it is blocking on the held-open pipe "
+            "instead of stopping after the bounded drain"
+        )
+        assert reports.load_report(report.id).output_pipes_held_open
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(grandchild, signal.SIGKILL)
+
+
+def test_a_normal_command_does_not_flag_a_held_open_pipe() -> None:
+    """The negative half: a command that closes its own pipes at exit reaches EOF
+    the ordinary way, so the drain path never fires and nothing is flagged."""
+    report = reports.run_command(python("print('done')"))
+    assert report.returncode == 0
+    assert not report.output_pipes_held_open
+    assert reports.read_stream(report.id, "stdout", raw=True) == b"done\n"

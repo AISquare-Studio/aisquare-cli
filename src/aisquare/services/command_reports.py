@@ -83,6 +83,13 @@ class CommandReport(BaseModel):
     #: a child that swallowed the interrupt and exited 0 still shows the run was
     #: interrupted rather than looking like a clean pass.
     interrupted_by: int | None = None
+    #: The command exited but a background process it started (a `setsid`'d
+    #: grandchild, a helper it left running) kept its stdout/stderr pipe open,
+    #: so capture stopped after a bounded drain rather than at EOF (finding 12).
+    #: Output after the drain was not captured; the leftover writer was not
+    #: waited for. Distinct from ``truncated`` (a size cap) and ``interrupted_by``
+    #: (an operator signal): the command itself finished cleanly.
+    output_pipes_held_open: bool = False
     session_id: str | None = None
     task_id: str | None = None
     project_id: str | None = None
@@ -381,6 +388,14 @@ def _forward_signals(child: subprocess.Popen[bytes], seen: _Interrupts) -> Itera
     until they SIGKILL the wrapper, orphaning the child with the pipes open. The
     second interrupt sends SIGTERM to the group, the third SIGKILL; the report
     is still written, with what was sent recorded.
+
+    The signal goes to ``child.pid``'s group, which is the new session
+    ``run_command`` starts the child in (``start_new_session=True``) — the whole
+    group/session the report tracks, not only the direct child. A grandchild
+    that called ``setsid`` put itself in a DIFFERENT session and no group signal
+    can reach it; that case does not hang the wrapper either, because
+    :func:`_capture` stops at a bounded drain once the child has exited rather
+    than waiting for the held-open pipe to reach EOF (finding 12).
     """
     previous: dict[int, Callable[[int, FrameType | None], Any] | int | None] = {}
     if threading.current_thread() is threading.main_thread():
@@ -429,12 +444,42 @@ def _defer_interrupts() -> Iterator[None]:
             raise KeyboardInterrupt if pending[0] == signal.SIGINT else SystemExit(128 + pending[0])
 
 
+#: How often the capture loop re-checks whether the child has exited while it is
+#: still running. Only matters when the child is silent: any output wakes the
+#: ``select`` at once, and a child that exits closing its pipes wakes it with
+#: EOF, so a normal run pays nothing for this. It bounds only how long a child
+#: that has ALREADY exited but left a pipe held open goes unnoticed.
+_POLL_WHILE_RUNNING = 1.0
+
+#: After the child has exited, how long capture keeps draining a pipe a
+#: background process is holding open before giving up on it (finding 12). The
+#: window is refreshed whenever bytes are still arriving, so real trailing
+#: output survives; it ends the loop only after silence, because the command
+#: itself has finished and the remaining writer is a process we are not waiting
+#: for (a `setsid`'d grandchild, a helper the command backgrounded). Without
+#: this the loop ended only at EOF, so `asq exec -- sh -c 'setsid sleep 600 &
+#: echo started'` blocked for the sleeper's whole lifetime after `sh` exited.
+_DRAIN_AFTER_EXIT = 2.0
+
+
 def _capture(
     child: subprocess.Popen[bytes], directory: Path, limit: int, seen: _Interrupts
-) -> dict[str, StreamRecord]:
+) -> tuple[dict[str, StreamRecord], bool]:
+    """Stream both pipes to disk; return the per-stream records and whether a
+    background process held a pipe open past the child's exit.
+
+    The loop waits on the CHILD, not on pipe EOF. A grandchild that inherited
+    stdout/stderr keeps the pipe open after the command exits, so a loop that
+    ends only at EOF hangs for that grandchild's lifetime (finding 12). Once the
+    child has exited, whatever is already buffered is drained and then the loop
+    stops even if a pipe is still open, recording that it was. A command that
+    exits normally closes its own pipes, so EOF empties the selector first and
+    that path is byte-for-byte the old behaviour.
+    """
     counts = {"stdout": 0, "stderr": 0}
     kept = {"stdout": 0, "stderr": 0}
     handles: dict[str, BinaryIO] = {}
+    pipes_held_open = False
     try:
         with selectors.DefaultSelector() as selector:
             for name, pipe in (("stdout", child.stdout), ("stderr", child.stderr)):
@@ -443,19 +488,36 @@ def _capture(
                 handles[name] = os.fdopen(fd, "wb")
                 selector.register(pipe, selectors.EVENT_READ, data=name)
             with _forward_signals(child, seen):
+                last_data = time.monotonic()
                 while selector.get_map():
-                    for key, _ in selector.select():
+                    child_done = child.poll() is not None
+                    if child_done:
+                        timeout = max(0.0, _DRAIN_AFTER_EXIT - (time.monotonic() - last_data))
+                    else:
+                        timeout = _POLL_WHILE_RUNNING
+                    got_data = False
+                    for key, _ in selector.select(timeout):
                         pipe = cast(BinaryIO, key.fileobj)
                         data = os.read(pipe.fileno(), 65536)
                         if not data:
                             selector.unregister(pipe)
                             pipe.close()
                             continue
+                        got_data = True
                         name = str(key.data)
                         counts[name] += len(data)
                         retained = data[: max(0, limit - kept[name])]
                         handles[name].write(retained)
                         kept[name] += len(retained)
+                    if got_data:
+                        last_data = time.monotonic()
+                        continue
+                    # No bytes this pass. If the child has finished and the drain
+                    # window has elapsed in silence, a pipe still open is being
+                    # held by something we did not launch to wait for — stop.
+                    if child_done and time.monotonic() - last_data >= _DRAIN_AFTER_EXIT:
+                        pipes_held_open = bool(selector.get_map())
+                        break
                 child.wait()
     except BaseException:
         # A failed storage write must not leave an invisible child running.
@@ -476,7 +538,7 @@ def _capture(
             truncated=counts[name] > kept[name],
         )
         for name in counts
-    }
+    }, pipes_held_open
 
 
 def _write_file(path: Path, data: bytes) -> None:
@@ -581,8 +643,9 @@ def run_command(
                     truncated=len(error_data) > max_output_bytes,
                 ),
             }
+            pipes_held_open = False
         else:
-            records = _capture(child, pending, max_output_bytes, seen)
+            records, pipes_held_open = _capture(child, pending, max_output_bytes, seen)
             returncode = child.returncode
         with _defer_interrupts():
             return _publish(
@@ -597,6 +660,7 @@ def run_command(
                     signal=-returncode if returncode < 0 else None,
                     launch_error=launch_error,
                     interrupted_by=seen.first,
+                    output_pipes_held_open=pipes_held_open,
                     session_id=session_id,
                     task_id=task_id,
                     project_id=project_id,

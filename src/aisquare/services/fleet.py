@@ -822,6 +822,17 @@ def _require_tmux(srv: TmuxServer) -> None:
         raise FleetUnavailable(str(exc)) from exc
 
 
+def role_ok(role: str) -> bool:
+    """The seat rule: whether ``spawn`` accepts ``role``.
+
+    A role is accepted when it is a fleet or harness role, a numbered seat of one
+    (``coder2``), or a role declared in ``team.profiles`` (``aisquare team bind``).
+    ``spawn`` refuses anything else, ``aisquare launch`` applies the same rule, and
+    the UI's New bind form asks it before saving a seat, so all three agree.
+    """
+    return _role_ok(role)
+
+
 def _role_ok(role: str) -> bool:
     """A fleet role, a harness role, or anything ``aisquare launch`` would accept."""
     if role in FLEET_ROLES or role in harness.ROLE_PROFILES:

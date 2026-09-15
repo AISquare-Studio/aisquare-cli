@@ -25,7 +25,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from aisquare.cli.app import app
 from aisquare.core import codenames, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings
 from aisquare.core.ids import new_agent_id, new_task_id
@@ -555,6 +557,18 @@ def test_spawn_refuses_an_unknown_role_but_accepts_a_bound_one(
     receipt = fleet_service.spawn(project, "scribe")
     assert receipt.agent.role == "scribe" and receipt.agent.label == "scribe-1"
     assert _command(tmux)[5] == "scribe"
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [("tester", True), ("coder2", True), ("scribe", True), ("codr", False)],
+)
+def test_role_ok_is_the_public_name_of_the_rule_spawn_applies(role: str, expected: bool) -> None:
+    """A fleet role, a numbered seat, a name bound with `team bind`, and a typo."""
+    bound = CliRunner().invoke(app, ["team", "bind", "scribe", "--bin", "claude"])
+    assert bound.exit_code == 0, bound.output
+    assert fleet_service.role_ok(role) is expected
+    assert fleet_service.role_ok(role) is fleet_service._role_ok(role)
 
 
 def test_spawn_refuses_a_worktree_outside_git(

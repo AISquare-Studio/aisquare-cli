@@ -204,7 +204,9 @@ follows as a `⚠` line.
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
-repository, an unknown role.
+repository, an unknown role. A known role is one of `aisquare launch`'s roles, a
+numbered seat of one (`coder2`), or a role bound with `team bind` — the same rule
+`aisquare launch` applies, public as `services.fleet.role_ok`.
 
 ### `fleet ls` / `fleet status`
 

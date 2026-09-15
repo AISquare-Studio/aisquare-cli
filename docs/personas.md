@@ -8,10 +8,10 @@ in Claude Code, byte for byte. There is no aisquare format to learn and nothing
 to convert.
 
 This guide covers what ships today: the persona catalogue, the
-`aisquare persona` commands and the Personas tab in `asq`. Spawning an agent
-*as* a persona, attaching one to a running agent, and importing something that
-is not already a skill are described in `docs/plans/spawn-personas.md` and land
-in later changes.
+`aisquare persona` commands, running an agent as a persona, and the Personas tab
+in `asq`. Importing something that is not already a skill, attaching a persona
+to a running agent, the Spawn dialog's persona step and the target picker are
+described in `docs/plans/spawn-personas.md` and land in later changes.
 
 ## What a persona is
 
@@ -92,6 +92,30 @@ personalities. They are where `persona import` finds skills and where
 Bundled personas cannot be edited or removed in place. Copy one into a layer you
 own and change the copy — the copy shadows the bundled one.
 
+## Running an agent as a persona
+
+```sh
+aisquare launch coder --persona skeptic
+aisquare fleet spawn coder --persona skeptic
+```
+
+`launch --persona` checks the name against this project's personas — an unknown
+one is refused with the names that exist — and exports `AISQUARE_PERSONA` to the
+agent. When the session starts, its hook records the persona on the board row
+and adds exactly the block `persona show` prints to the team briefing, once,
+after the role's cycle. Nothing is added per prompt, and the board shows only the
+name: `persona:skeptic` on the session's line, `· skeptic` in `fleet ls`. A
+persona removed or broken after launch costs one line in the briefing
+(`… — launched without it`), never the session. Setting the variable by hand,
+`AISQUARE_PERSONA=skeptic aisquare launch coder`, works too; it is checked when
+the session starts rather than before.
+
+`fleet spawn --persona` passes the name to `launch` inside the agent's window and
+records it on the fleet row; without the flag the role's
+`[fleet.roles.<role>].persona` applies (see `docs/fleet.md`). A persona whose
+`persona-roles` leave the spawned role out is spawned anyway, with a `⚠` note on
+the receipt.
+
 ## In `asq`: the Personas tab
 
 Open a project in `asq` and its **Personas** tab lists every persona that
@@ -167,6 +191,12 @@ the name of a skill from `import --list`. The directory is copied byte for byte
 — aisquare never rewrites a file it did not author — and a `.persona.json` beside
 it records the source and its sha256. A bare file becomes `<name>/SKILL.md`,
 named by `--name`, else its frontmatter `name`, else its file name.
+
+`import --list` marks a skill `imported` when a user or project persona's
+`.persona.json` names that skill as its source, whatever the persona was called.
+A persona of the same name that did not come from it (a bundled one, say) is
+not an import: the row ends `(name taken by bundled careful)`, which is why
+importing that skill needs `--name`.
 
 The default layer is `--user`. A name already taken in that layer is refused
 unless you pass `--force`; `--name` picks another directory name. A source that

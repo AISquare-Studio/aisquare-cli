@@ -351,7 +351,8 @@ def _emit_skills(skills: list[persona_service.SkillRef]) -> None:
         about = (
             _one_line(skill.description) if skill.recognised else f"✗ {skill.reason or 'invalid'}"
         )
-        typer.echo(f"{skill.name:<{width}}  {skill.scope:<7}  {mark}  {about}")
+        taken = f"  (name taken by {skill.taken_by} {skill.name})" if skill.taken_by else ""
+        typer.echo(f"{skill.name:<{width}}  {skill.scope:<7}  {mark}  {about}{taken}")
 
 
 @app.command("export")

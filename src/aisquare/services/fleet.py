@@ -40,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
-from aisquare.core import codenames, harness, selfcli
+from aisquare.core import codenames, harness, personas, selfcli
 from aisquare.core.config import FleetRoleSettings, FleetSettings, load_config
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session
@@ -879,6 +879,7 @@ def spawn(
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
     account: str | None = None,
+    persona: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -896,6 +897,11 @@ def spawn(
     ``extra_args`` and the caller's ``agent_args``. ``AISQUARE_FLEET_AGENT``
     carries the row id into the window; ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0``
     keeps Claude's native teams out of the fleet unless configured otherwise (§7.6).
+
+    ``persona`` — the flag, else ``[fleet.roles.<role>].persona``, else none — is
+    checked against the project's personas before anything starts, travels to the
+    window as ``launch --persona`` and is recorded on the row
+    (docs/plans/spawn-personas.md §3.7, §3.8).
     """
     config = settings()
     if not _role_ok(role):
@@ -913,6 +919,7 @@ def spawn(
         )
     role_config = role_settings(role, config)
     notes: list[str] = []
+    chosen_persona = _chosen_persona(project, role, persona, role_config, notes)
     with store_session() as store:
         project = ensure_codename(project, store)
         codename = project.codename or codenames.codename_for(project.id)
@@ -997,6 +1004,9 @@ def spawn(
         # variables inside the window; a slot that does not exist fails there
         # with `unknown_account`, exactly as a hand-typed launch would.
         flags += ["--account", account]
+    if chosen_persona is not None:
+        # A flag, not an env var: the window's environment is the tmux SERVER's.
+        flags += ["--persona", chosen_persona]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {"AISQUARE_FLEET_AGENT": agent_id}
@@ -1030,6 +1040,7 @@ def spawn(
         task_id=resolved_task_id,
         spawned_by=spawned_by,
         created_at=_now(),
+        persona=chosen_persona,
     )
     stored = _record(
         agent, project, srv, wanted=label, notes=notes, cap=config.max_agents_per_project
@@ -1037,6 +1048,42 @@ def spawn(
     if prompt:
         _type_prompt(srv, stored.pane_id, prompt, notes)
     return SpawnReceipt(agent=stored, asked_label=label, tmux_session=tmux_session, notes=notes)
+
+
+def _chosen_persona(
+    project: ProjectInfo,
+    role: str,
+    flag: str | None,
+    role_config: FleetRoleSettings,
+    notes: list[str],
+) -> str | None:
+    """The spawn's persona — flag > ``[fleet.roles.<role>].persona`` > none — checked
+    against the project's personas before any window or worktree exists.
+
+    A name nothing resolves refuses with the known names; one that came from the
+    config names the key, so a stale default is found at the first spawn rather
+    than after a day of work (§3.7). ``persona-roles`` is advisory: a persona
+    written for other roles is a receipt note, never a refusal. A seat
+    (``coder2``) counts as its role.
+    """
+    name = flag if flag is not None else role_config.persona
+    if not name:
+        return None
+    try:
+        found = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        if flag is not None:
+            raise FleetError(exc.rule) from exc
+        raise FleetError(
+            f"[fleet.roles.{role}].persona = {name!r}: {exc.rule} — fix the key or pass --persona"
+        ) from exc
+    seat_of = re.sub(r"\d+$", "", role)
+    if found.roles and role not in found.roles and seat_of not in found.roles:
+        notes.append(
+            f"persona {name} is written for {', '.join(found.roles)}, not {role} — spawned "
+            "with it anyway"
+        )
+    return name
 
 
 def _refuse_occupied_worktree(project: ProjectInfo, worktree_dir: str, label: str) -> None:

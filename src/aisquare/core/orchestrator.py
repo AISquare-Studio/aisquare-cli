@@ -53,6 +53,17 @@ def env_role() -> str | None:
     return role or None
 
 
+def env_persona() -> str | None:
+    """The persona this session was launched as, if any (``AISQUARE_PERSONA``).
+
+    What ``launch --persona`` exports and the session-start hook reads — not a
+    config input, so a hand-typed ``AISQUARE_PERSONA=skeptic aisquare launch
+    coder`` works with no fleet at all (docs/plans/spawn-personas.md §3.8).
+    """
+    persona = os.environ.get("AISQUARE_PERSONA", "").strip()
+    return persona or None
+
+
 def env_fleet_agent() -> str | None:
     """The ``fleet_agent`` row this session runs as (``AISQUARE_FLEET_AGENT``).
 

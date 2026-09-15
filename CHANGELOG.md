@@ -6,7 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The documented-commands guard no longer fails the checkout that runs the
+  fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
+  repository for markdown with commands in a fenced block, and a root checkout
+  that hosts coder worktrees under `.aisquare-worktrees/` holds one full copy of
+  every document per agent — so `make check` from the root failed, reporting
+  each worktree's README.md and docs pages as unlisted copies of themselves,
+  while every real document passed (measured on `rc/hackathon-v1` with two
+  coder worktrees; from a clean checkout or inside a worktree it passed). The
+  sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
+  any directory holding a `.git` *file* — a linked worktree wherever it was put
+  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
+  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
+  result away. The guard's rules and its document list are unchanged, and the
+  positive control stays: the same fenced page at the repo's own level is still
+  reported.
+
 ### Added
+- **Run an agent as a persona.** `aisquare launch <role> --persona NAME` and
+  `aisquare fleet spawn <role> --persona NAME` — default: the role's new
+  `[fleet.roles.<role>].persona` — start an agent as someone. The name is checked
+  before anything starts (an unknown one is refused with the known names; a stale
+  config default names its key) and travels as `AISQUARE_PERSONA`, never the body.
+  The SessionStart hook records it on the board row (store v15:
+  `team_session.persona`, `fleet_agent.persona`) and adds the persona's block to
+  the team briefing once, after the role cycle and the lane rule. A session
+  without a persona gets byte-identical text — pinned against the base in
+  `tests/test_persona_briefing.py` — the per-prompt delta and `aisquare board`
+  carry no persona text, and a persona that can no longer be loaded costs one
+  line, never the team block. The board's session line reads `persona:<name>`,
+  `fleet ls` shows `· <name>`, a spawn receipt ends `· persona <name>`, and a
+  persona written for other roles is a receipt note, not a refusal. Found on
+  the way: saving config dropped an unknown key INSIDE a `[fleet.roles.<role>]`
+  or `[explainability.targets.<name>]` entry, because those tables were
+  replaced wholesale; from this build on each kept entry is merged field by
+  field, so a later build's role key survives this one.
 - **A Personas tab in the Project view.** Every persona the project can use —
   project, user and bundled layers — in one searchable table with the layer,
   description, roles and the `⇧ shadows` / `✗ invalid` marks, and beside it a

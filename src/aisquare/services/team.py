@@ -1290,6 +1290,9 @@ def hook_session_start(
                 account=session_account(transcript_path),
                 model=model,
                 effort=effort,
+                # Recorded as ASKED, loadable or not (§3.7); a start without the
+                # variable keeps what the row already holds (the store's COALESCE).
+                persona=orchestrator.env_persona(),
             )
         )
         if role is not None and known is not None and known.role != role:
@@ -1304,6 +1307,7 @@ def hook_session_start(
             store.recent_events(project.id, limit=_BOARD_EVENTS),
             me=session,
             assigned=assigned,
+            briefing=True,
         )
 
 
@@ -1748,7 +1752,11 @@ def _render_board(
     *,
     me: TeamSession | None,
     assigned: Assignment | None = None,
+    briefing: bool = False,
 ) -> str:
+    """The ``<aisquare-team>`` block. ``briefing`` is SessionStart's alone: it adds
+    ``me``'s persona after the role cycle — never on the board command, never on a
+    per-prompt path, so no factual surface carries persona text (§3.1)."""
     now = _now()
     lines = ["<aisquare-team>"]
     if me is not None:
@@ -1778,6 +1786,8 @@ def _render_board(
                 mismatch = harness.model_mismatch(base_role(session.role), session.model)
                 if mismatch:
                     parts.append("⚠ off-ladder")
+            if session.persona:
+                parts.append(f"persona:{session.persona}")
             if session.focus:
                 parts.append(f"— focus: {session.focus}")
             parts.append(f"— {_age(session.last_seen_at, now)} ago")
@@ -1815,6 +1825,8 @@ def _render_board(
             "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
             *_role_cycle(me),
         ]
+        if briefing and me.persona:
+            lines += _persona_briefing(me.persona, project.root)
     lines.append("</aisquare-team>")
     return "\n".join(lines)
 
@@ -2075,6 +2087,24 @@ def _role_cycle(me: TeamSession) -> list[str]:
     seat's own comment in ``cli/launch.py`` promises it does not lose.
     """
     return harness.role_cycle(base_role(me.role), short_id(me.id))
+
+
+def _persona_briefing(name: str, root: Path) -> list[str]:
+    """The persona block for a session start (docs/plans/spawn-personas.md §3.2).
+
+    NEVER raises: a raise here loses the whole team block, role cycle and lane
+    rule included (``harness._lane_rule``'s docstring). A persona removed or
+    broken since launch — or anything else going wrong — is one line saying so,
+    and the session runs without it. Imported here, not at module level, so a
+    session with no persona pays nothing for the persona code.
+    """
+    try:
+        from aisquare.core import personas
+
+        return personas.briefing(personas.resolve(name, root))
+    except Exception as exc:
+        reason = getattr(exc, "rule", None) or f"{type(exc).__name__}: {exc}"
+        return [f'persona "{name}": {reason} — launched without it']
 
 
 def event_line(event: TeamEvent, roles: dict[str, str]) -> str:

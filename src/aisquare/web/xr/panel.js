@@ -33,6 +33,9 @@ import {
 /** Metres per texel, and the bar width expressed in metres. */
 const BAR_W_M = CELL.barW / ATLAS.density;
 
+/** The louvre yaw, in radians. Positive leans local −X (the bar edge) inward. */
+const LOUVRE = (RING.louvreDeg * Math.PI) / 180;
+
 /** Trim `text` to fit `maxW` texels, with a tail ellipsis. */
 function fitText(ctx, text, maxW) {
   const s = String(text ?? '');
@@ -260,8 +263,12 @@ export class Panel {
     this.angle = angle;
     this.radius = radius;
     this.mesh.position.set(radius * Math.sin(angle), 0, radius * Math.cos(angle));
-    // Facing the centre means the plane's +Z normal points inward: a + π.
-    this.mesh.rotation.y = angle + Math.PI;
+    // Facing the centre means the plane's +Z normal points inward: a + π. The
+    // louvre on top of that leans the panel's LEFT edge — the bar — toward the
+    // operator, so where neighbours overlap (the 12-panel cap, a pulled-in
+    // ring) the bar wins the depth test instead of vanishing behind the panel
+    // to its left. See RING.louvreDeg for the geometry and the measurement.
+    this.mesh.rotation.y = angle + Math.PI + LOUVRE;
   }
 
   /** World position of the panel centre — where its alert chime is emitted

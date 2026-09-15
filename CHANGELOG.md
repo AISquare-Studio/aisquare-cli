@@ -125,7 +125,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     that panel's own world position — the point being to say *where to turn*.
     It fires once on the transition in, not once per notice, because Claude
     re-notifies while parked. **B** sweeps focus through the alerting panels in
-    angle order. A session
+    angle order. The bar is the panel's left edge, and neighbours overlap where
+    the arc compresses — twelve panels, or the ring pulled in — so every panel
+    is louvred 6° with that edge leaning toward you: the bar wins the depth
+    test at a seam instead of vanishing behind the panel to its left. A session
     waiting on you stays on the ring, alert standing, however long you are away:
     only a session with no attention flag ages out on the 30-minute clock,
     because a parked session writes nothing until you answer it.

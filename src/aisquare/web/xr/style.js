@@ -81,6 +81,33 @@ export const RING = {
    *  is sized for 1.6 m and does not re-render at a new distance. */
   minRadius: 1.15,
   maxRadius: 1.6,
+  /**
+   * Louvre: every panel is yawed this much past "facing the centre", so its
+   * LEFT edge leans toward the operator and its right edge away — shingles,
+   * hung so the edge that carries the bar is always the nearer one at a seam.
+   *
+   * Neighbours overlap wherever the pitch is narrower than a panel's angular
+   * width: at the twelve-panel cap (pitch 18.2° against 19.5° at 1.6 m) and
+   * whenever the ring is pulled in (at 1.15 m a panel spans 26.9° against the
+   * 21.0° comfortable pitch, so even three panels overlap). Two facing panels
+   * meet at their seam at the same depth, so the depth test hands each side of
+   * the seam to the panel whose centre is nearer — and the strip a panel loses
+   * is its own outer edge, which on the LEFT is exactly the 22 mm bar an alert
+   * lives on. Measured with a ray from the anchor to the bar: at the cap the
+   * left neighbour covers all of it; pulled in, all of it at any count.
+   *
+   * The smallest louvre that clears the whole bar, from the same geometry the
+   * layout uses (a ray from the anchor to the bar, against the neighbour's
+   * plane) and confirmed in headless Chromium against the real meshes: 0.6° at
+   * the twelve-panel cap at 1.6 m, 3.0° for any count pulled in to 1.15 m, and
+   * 4.5° for twelve panels at 1.15 m. 4° — enough on paper for the first two —
+   * still lost the bar in that last case, which is why the number below is the
+   * worst case plus the same 1.5° margin the pitch's gutter uses, not a guess.
+   * Nothing else moves: the panel centre, its angle (which B's jump-to-alert
+   * reads) and the chime position are unchanged, and 6° of obliquity costs the
+   * type nothing legible.
+   */
+  louvreDeg: 6,
 };
 
 /**
@@ -98,7 +125,9 @@ export const PITCH_DEG = PANEL_ANGLE_DEG + 1.5; // ≈ 21.01°
  * then compress to fit it — "fill the arc; scroll the surplus" (plan §7).
  * Ten panels span 189° at the comfortable pitch; at the 12-panel cap the pitch
  * compresses to 18.2° and neighbours overlap by ~1.3°, which is the visual cost
- * of the cap and the reason pagination exists above it.
+ * of the cap and the reason pagination exists above it. What the overlap may
+ * never cost is the alert bar on a panel's left edge — `RING.louvreDeg` is what
+ * keeps that edge in front of the neighbour that would otherwise cover it.
  *
  * Index 0 gets the largest positive angle. For a +Z-forward viewer with +Y up,
  * screen-right is −X, so the largest positive angle is the LEFT-most panel:

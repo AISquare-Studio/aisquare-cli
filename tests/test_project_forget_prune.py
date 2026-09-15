@@ -598,3 +598,55 @@ def test_json_project_list_carries_the_name_the_table_shows(
 
     (project,) = _json(listed.stdout)
     assert project["name"] == "alpha"
+
+
+def test_forget_purge_deletes_work_briefs_and_native_meta_and_spares_a_bystander(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The native work-brief rows and the work_mode / work_rules meta are deleted by
+    ``--purge`` and no test exercised that path with real rows: a purge that quietly
+    left them behind would resurface them if the root were registered again, and the
+    counts would silently understate the purge."""
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")  # the bystander
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        for project_id, brief_id in ((alpha, "brief_alpha"), (beta, "brief_beta")):
+            store.save_work_brief(
+                brief_id,
+                project_id,
+                1,
+                json.dumps({"id": brief_id}),
+                None,
+                TeamEvent(
+                    id=new_event_id(),
+                    project_id=project_id,
+                    kind="brief_created",
+                    text="a contract",
+                    created_at=now,
+                ),
+                {},
+            )
+        # A real session records its rule set under its own id; the purge cleans
+        # those keys for the project's sessions.
+        store.upsert_session(
+            TeamSession(id="sess-alpha", project_id=alpha, started_at=now, last_seen_at=now)
+        )
+        store.set_meta(f"work_mode/{alpha}", "native")
+        store.set_meta("work_rules/sess-alpha", "native-1")
+        store.set_meta("work_rules_text/sess-alpha", "[]")
+        store.set_meta("work_rules_role/sess-alpha", "coder")
+        store.set_meta(f"work_mode/{beta}", "off")
+
+    result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    removed = _json(result.stdout)["removed"]
+    assert removed["work_brief"] == 1, "the alpha brief row must be counted and deleted"
+    assert removed["team_meta"] == 4, "work_mode + the three work_rules meta rows"
+    assert _raw("SELECT COUNT(*) FROM work_brief WHERE project_id = ?", (alpha,)) == [(0,)]
+    assert _raw("SELECT COUNT(*) FROM team_meta WHERE key = ?", (f"work_mode/{alpha}",)) == [(0,)]
+    assert _raw("SELECT COUNT(*) FROM team_meta WHERE key GLOB 'work_rules*/sess-alpha'") == [(0,)]
+    # The bystander keeps its brief and its mode.
+    assert _raw("SELECT COUNT(*) FROM work_brief WHERE project_id = ?", (beta,)) == [(1,)]
+    assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"work_mode/{beta}",)) == [("off",)]

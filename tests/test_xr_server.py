@@ -456,6 +456,18 @@ def _burst(connection: Any, frames: list[bytes], *, session: str = CODER, seq: i
     connection.send_text(json.dumps({"t": "audioEnd", "session": session}))
 
 
+def _voice_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``frames`` without the poller's deltas.
+
+    The poll task runs on its own clock and may put a ``delta`` anywhere in
+    a drained sequence — it did, between an interim and a final, on a py3.11
+    CI runner — so an assertion about the ORDER of voice frames drops them
+    first. What is asserted is what the voice worker sent, in the order it
+    sent it; the deltas are a different task's traffic.
+    """
+    return [frame for frame in frames if frame.get("t") != "delta"]
+
+
 def _speak(connection: Any, *, frames: int = FRAMES_PER_INTERIM, session: str = CODER) -> None:
     """A burst of ``frames`` identical silent frames — the common shape, spelled once."""
     _burst(connection, [FRAME] * frames, session=session)
@@ -710,9 +722,12 @@ def test_a_machine_with_no_speech_backend_says_so_once_and_keeps_the_ring(
     for http, _project, token in _voice(work_dir, missing):
         with _authed(http, token) as connection:
             _speak(connection, frames=10)
+            # The error is the worker's answer, on its own clock; wait for it
+            # before provoking the delta, or a fast poller ends the drain first.
+            answered = _drain_until(connection, "error")
             with store_session() as store:
                 store.mark_attention(CODER)
-            frames = _drain_until(connection, "delta")
+            frames = answered + _drain_until(connection, "delta")
 
     errors = [frame for frame in frames if frame["t"] == "error"]
     assert len(errors) == 1, [frame["t"] for frame in frames]
@@ -875,9 +890,12 @@ def test_an_utterance_that_transcribes_to_nothing_is_not_a_prompt(
     for http, _project, token in _voice(work_dir, lambda: FakeTranscriber("")):
         with _authed(http, token) as connection:
             _speak(connection)
+            # The final is the worker's answer, on its own clock; wait for it
+            # before provoking the delta, or a fast poller ends the drain first.
+            answered = _drain_until(connection, "stt")
             with store_session() as store:
                 store.mark_attention(CODER)
-            frames = _drain_until(connection, "delta")
+            frames = answered + _drain_until(connection, "delta")
 
     stt = [frame for frame in frames if frame["t"] == "stt"]
     assert stt == [{"t": "stt", "text": "", "final": True}]
@@ -1309,13 +1327,17 @@ def test_a_burst_with_no_audio_frames_is_stt_empty_not_a_quiet_press(
     http, _project, token, built = voice
     with _authed(http, token) as connection:
         _burst(connection, [])
+        answered = _voice_frames(_drain_until(connection, "error"))
         with store_session() as store:
             store.mark_attention(CODER)
-        frames = _drain_until(connection, "delta")
+        after = _drain_until(connection, "delta")
 
-    assert [frame["t"] for frame in frames] == ["error", "delta"], frames
-    assert frames[0]["code"] == "stt_empty"
-    assert "no audio arrived" in frames[0]["message"]
+    assert [frame["t"] for frame in answered] == ["error"], answered
+    assert answered[0]["code"] == "stt_empty"
+    assert "no audio arrived" in answered[0]["message"]
+    assert [frame["t"] for frame in after] == ["delta"], (
+        f"the error was not the whole answer: {after}"
+    )
     assert _eventually(lambda: len(built) == 1)
     assert not built[0].finished, "nothing was buffered, so nothing was decoded"
 
@@ -1344,9 +1366,12 @@ def test_a_header_during_an_open_burst_ends_it_like_audioend_and_keeps_the_model
             connection.send_bytes(FRAME)
         connection.send_text(json.dumps({"t": "audio", "session": CODER, "seq": 1}))
         connection.send_text(json.dumps({"t": "audioEnd", "session": CODER}))
-        with store_session() as store:
-            store.mark_attention(CODER)
-        frames = _drain_until(connection, "delta")
+        # Up to burst #2's answer, which is the LAST voice frame: the worker
+        # answers bursts in wire order, so everything #1 produced is before it.
+        # Deltas are the poller's, on its own clock, and are not part of the
+        # order being asserted — one landed between the interim and the final
+        # on a py3.11 runner and ended a drain-until-delta early.
+        frames = _voice_frames(_drain_until(connection, "error"))
 
     kinds = [(frame["t"], frame.get("code") or frame.get("final")) for frame in frames]
     assert kinds == [
@@ -1354,7 +1379,6 @@ def test_a_header_during_an_open_burst_ends_it_like_audioend_and_keeps_the_model
         ("stt", True),
         ("ack", None),
         ("error", "stt_empty"),
-        ("delta", None),
     ], kinds
     assert frames[1]["text"] == CANNED, "burst #1's sentence was lost"
     assert frames[2]["ok"] is True

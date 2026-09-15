@@ -95,7 +95,10 @@ tmux can see and its row says so (`no hooks`).
    anything a user sees, and a reviewer as the
    work needs them, reopens what fails, calls a validator once everything is
    done, and posts `READY: <PRs + evidence>` when its gate passes. It never
-   writes code and never merges — a human does (Phase 5).
+   writes code and never merges — a human does (Phase 5). The project's
+   **Personas** tab lists the personas it can use, previews exactly what an
+   agent is briefed with, and imports, edits, exports, removes and validates
+   them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal

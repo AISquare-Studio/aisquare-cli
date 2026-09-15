@@ -509,8 +509,8 @@ class PersonasTab(Vertical):
                 return
             try:
                 removed = personas_service.remove(entry.name, layer=entry.layer, root=self.root)
-            except PersonaError as exc:
-                self.notify(str(exc), severity="error", timeout=8, markup=False)
+            except (PersonaError, OSError) as exc:
+                self.notify(dialogs.failure(exc), severity="error", timeout=8, markup=False)
             else:
                 self.notify(f"✓ removed {removed}", timeout=6, markup=False)
             self.reload()

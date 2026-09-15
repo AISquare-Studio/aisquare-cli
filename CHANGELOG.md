@@ -587,8 +587,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The `(exited 0)` notice row is tinted by the drag that copies it, like every
   other row, and so is the `[↑k/history]` marker — whatever a row displays is
   what it highlights and what it copies, cut to the columns the pane shows
-  rather than to the width of a tmux window that outgrew it. The highlight and
-  the clipboard read the same rows at the same moment, so they cannot disagree:
+  rather than to the width of a tmux window that outgrew it. A line tmux
+  soft-wrapped is copied as one line (the copy asks tmux for its wrap flags
+  once and joins those rows, keeping a space that fell on the wrap; if the
+  screen moved in between it falls back to one line per row), a tab is
+  expanded to the cells it occupies on screen so what is highlighted is what
+  the eye sees, and an emoji or a wide glyph is one unit to the highlight, the
+  cursor and the copy alike — the paint, the offsets the terminal library
+  resolves a drag with and the copied text share one grapheme model of the
+  row. The tint is visible on reverse-video cells too, and the cursor stays
+  visible inside a highlight. Painting no longer stamps every row with
+  selection offsets: that gave each segment a unique link id and made a plain
+  mouse hover repaint the whole pane (120 pointer moves on a 200x60 pane: 7200
+  row renders, now 0), doubled the CPU per streamed frame (8.2 → 4.0 ms) and
+  held twice the memory in the strip cache; only the terminal library's own
+  offset lookup is stamped now. The highlight and the clipboard read the same
+  rows at the same moment, so they cannot disagree:
   under an agent that is still printing, a drag copies the text at release.
   Switching the pane to another agent drops the selection, so does hiding the
   pane behind another tab, and changing the theme drops the highlight's

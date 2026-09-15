@@ -646,8 +646,13 @@ without the trailing cell, and the highlight stops there too, so what you see
 is what you get. What is copied is always what is shown under the highlight at
 the moment you copy: cut to the columns the pane actually shows, and including
 the `[↑k/history]` marker and the `(exited 0)` notice where those are what the
-row displays. Under an agent that is still printing that means the text at
-release, not at the press — the same text you can see highlighted.
+row displays. A line tmux soft-wrapped is copied as one line, as tmux's own
+copy mode copies it — the pane asks tmux which rows are wrapped when you copy,
+and falls back to one line per row if the screen moved in between. Tabs are
+copied as the spaces they occupy on screen, and an emoji or a wide glyph is
+always highlighted and copied whole. Under an agent that is still printing that
+means the text at release, not at the press — the same text you can see
+highlighted.
 Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in

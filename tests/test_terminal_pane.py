@@ -49,6 +49,7 @@ from aisquare.cli.ui.terminal import (
     NO_PANE,
     PANE_GONE,
     TMUX_UNAVAILABLE,
+    DisplayedRow,
     EscapeToSidebar,
     SelectionHost,
     TerminalPane,
@@ -1087,7 +1088,7 @@ def test_the_scroll_marker_is_measured_in_cells_not_characters(
             await wait_until(pilot, lambda: synced(widget))
             widget.post_message(scroll_event(widget, up=True))
             await wait_until(pilot, lambda: widget.scrollback > 0)
-            text = widget._row_text(0)
+            text = widget._displayed_row(0).text
             base = [style_at(rows(widget)[0], x).bgcolor for x in range(40)]
             widget.screen.selections = {widget: Selection(Offset(30, 0), Offset(40, 0))}
             await pilot.pause()
@@ -1634,14 +1635,14 @@ def test_a_backwards_selection_copies_nothing_because_nothing_is_painted() -> No
     shape is unreachable through the UI — pinned so the next reader inherits the
     fact rather than re-deriving it, and so ``_extract`` cannot quietly start
     answering for a highlight that does not exist (review of the ninth)."""
-    rows = ["aaa", "bbb", "ccc"]
+    rows = [DisplayedRow(text) for text in ("aaa", "bbb", "ccc")]
     backwards = Selection(Offset(1, 2), Offset(1, 0))
     assert all(backwards.get_span(y) is None for y in range(len(rows))), "the premise"
-    assert _extract(backwards, rows) == ""
+    assert _extract(backwards, rows, 3) == ""
     # The negative half: ordered, it is the span the paint does cover.
     forwards = Selection(Offset(1, 0), Offset(1, 2))
     assert [forwards.get_span(y) for y in range(3)] == [(1, -1), (0, -1), (0, 1)]
-    assert _extract(forwards, rows) == "aa\nbbb\nc"
+    assert _extract(forwards, rows, 3) == "aa\nbbb\nc"
 
 
 def test_what_is_copied_is_exactly_what_is_painted(fake: FakeTmux, tmp_path: Path) -> None:
@@ -1657,14 +1658,6 @@ def test_what_is_copied_is_exactly_what_is_painted(fake: FakeTmux, tmp_path: Pat
     rounds 3 to 5 found real splits.
     """
     fake.panes["%1"].screen = ["日本語abcdef", "second row", "", "tail 🎉 end"]
-
-    def characters(text: str, cells: int) -> int:
-        """The character index at cell offset ``cells`` in ``text``."""
-        used = index = 0
-        while index < len(text) and used < cells:
-            used += cell_len(text[index])
-            index += 1
-        return index
 
     async def drive() -> list[tuple[str, str]]:
         host = Host(fake.server(tmp_path), "%1")
@@ -1686,10 +1679,9 @@ def test_what_is_copied_is_exactly_what_is_painted(fake: FakeTmux, tmp_path: Pat
                         ]
                         if not tinted:
                             continue
-                        text = pane._row_text(y)
-                        lo = characters(text, min(tinted))
-                        hi = characters(text, max(tinted) + 1)
-                        pieces.append(text[lo:hi])
+                        # The tinted cells, read back through the same row model
+                        # the copy uses — ``slice`` is cell-addressed.
+                        pieces.append(pane._displayed_row(y).slice(min(tinted), max(tinted) + 1))
                     pairs.append(("\n".join(pieces).rstrip("\n"), pane.selected_text() or ""))
             return pairs
 
@@ -2436,6 +2428,270 @@ def test_an_empty_copy_never_reaches_the_terminal(
     clipboard, osc52 = run(drive())
     assert clipboard == "abc", "the empty copy changed nothing"
     assert len(osc52) == 1, f"one OSC 52, for the real copy: {osc52}"
+
+
+def test_hovering_over_the_pane_repaints_nothing(fake: FakeTmux, tmp_path: Path) -> None:
+    """Finding 3 of the #135 review. ``render_line`` stamped offset metadata on
+    every painted row, which gave each segment a unique Rich link id and
+    defeated Textual's per-style caches: plain mouse hover repainted the whole
+    pane at every segment crossing — measured at the PR head, 120 motion
+    reports on a 200x60 pane cost 7200 ``render_line`` calls — streaming frames
+    cost twice the CPU, and a full strip cache held tens of MB of stamped
+    copies. Painted rows carry no offsets now; the compositor's own direct
+    ``render_line`` lookup, the only reader, still gets them.
+
+    Two halves: hover must ask for no row at all, and the offsets must still
+    be there for a drag — ``test_drag_select_highlights_the_rows_and_copies_on_release``
+    proves the drag, this proves where the stamps are and are not."""
+
+    async def drive() -> tuple[int, bool, bool]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await pilot.pause(0.6)
+            rendered = pane.lines_rendered
+            for y in range(6):
+                for x in (0, 4, 9, 20):
+                    await move(pilot, pane, (x, y))
+            repaints = pane.lines_rendered - rendered
+            painted = [segment for strip in rows(pane) for segment in strip]
+            stamped = list(pane.render_line(0))  # the compositor's direct call
+            return (
+                repaints,
+                any("offset" in (s.style.meta if s.style else {}) for s in painted),
+                all(s.style is not None and "offset" in s.style.meta for s in stamped),
+            )
+
+    repaints, painted_stamped, lookup_stamped = run(drive())
+    assert repaints == 0, f"24 hovers with no button repainted {repaints} rows"
+    assert not painted_stamped, "the painted rows carry no offset metadata"
+    assert lookup_stamped, "the compositor's direct lookup still gets every segment stamped"
+
+
+def test_a_selection_over_emoji_paints_and_copies_whole_glyphs(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Finding 8 of the #135 review. ``⚠️`` and ``✔️`` are one 2-cell grapheme
+    each to rich 15 and to tmux, but per code point ``[1, 0]``, so a crop
+    snapped per code point cut through them: a drag from the first cell of ✔️
+    repainted the row as 41 cells with a doubled ``d`` and copied a stray
+    U+FE0F with no ✔. A ZWJ sequence with the cursor after it lost a
+    character on every frame. One grapheme model for the paint and the copy."""
+    fake.panes["%1"].screen = ["⚠️ disk ✔️ ok done", "👩‍🚀 xyz"]
+    fake.panes["%1"].cursor = (3, 1)
+
+    async def drive() -> tuple[str, int, str | None, str, list[int]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "done" in rows(pane)[0].text)
+            pane.focus()
+            await drag(pilot, pane, (8, 0), (12, 0))  # the first cell of ✔️ to the k of ok
+            row = rows(pane)[0]
+            cursor_row = rows(pane)[1]
+            reversed_cells = [x for x in range(40) if style_at(cursor_row, x).reverse]
+            return (
+                row.text.rstrip(),
+                row.cell_length,
+                pane.selected_text(),
+                cursor_row.text.rstrip(),
+                reversed_cells,
+            )
+
+    painted, cells, copied, cursor_row, reversed_cells = run(drive())
+    assert painted == "⚠️ disk ✔️ ok done", "the row is drawn intact under the highlight"
+    assert cells == 40, "and is still exactly the pane's width"
+    assert copied == "✔️ ok", "the glyph is copied whole, with no stray selector"
+    assert cursor_row == "👩‍🚀 xyz", "a ZWJ sequence survives a cursor overlay on its row"
+    assert reversed_cells == [3], "and the cursor sits on the cell after it, alone"
+
+
+def test_a_soft_wrapped_line_is_copied_as_one_line(fake: FakeTmux, tmp_path: Path) -> None:
+    """Finding 9 of the #135 review. Rows are captured one screen row each and
+    joined with newlines, so a command tmux had wrapped copied as three lines
+    split mid-token, with a space lost where the wrap fell on one — pasted into
+    a shell, three broken commands. tmux 3.7c's ``capture-pane -F`` marks a
+    wrapped row ``W``; a copy asks for the flags once and joins those rows,
+    keeping the wrap-point space. The negative half: a row that merely fills
+    the width, unwrapped, still ends its line."""
+    pane_fake = fake.panes["%1"]
+    pane_fake.width, pane_fake.height = 40, 6
+    pane_fake.screen = [
+        "aisquare task review tsk_01K9ABCDEF --no",
+        "te 'rm -rf build && make test' --as sess",
+        "1234",
+        "word word word word word word word word ",
+        "tail",
+        "0123456789012345678901234567890123456789",
+    ]
+    pane_fake.wrapped = {0, 1, 3}
+
+    async def drive() -> tuple[str | None, str | None, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "tail" in rows(pane)[4].text)
+            await drag(pilot, pane, (0, 0), (3, 2))
+            command = pane.selected_text()
+            asked = fake.flag_captures
+            await drag(pilot, pane, (0, 3), (39, 5))
+            return command, pane.selected_text(), asked
+
+    command, words, asked = run(drive())
+    assert command == (
+        "aisquare task review tsk_01K9ABCDEF --note 'rm -rf build && make test' --as sess1234"
+    ), command
+    assert (
+        words
+        == "word word word word word word word word tail\n0123456789012345678901234567890123456789"
+    )
+    assert asked >= 1, "the flags were asked for at the copy"
+
+
+def test_wrap_flags_that_no_longer_match_the_frame_are_not_used(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """The flags describe tmux's screen NOW; the copy reads the frame on screen.
+    A busy agent can change the rows between the two, and joining rows that are
+    not the ones highlighted would be a copy of text nobody selected — so on any
+    difference the answer is dropped whole and the rows keep their newlines. The
+    paint never asks: only a copy pays for the extra process."""
+    pane_fake = fake.panes["%1"]
+    pane_fake.screen = ["first line that wraps into the second on", "e", "third"]
+    pane_fake.wrapped = {0}
+
+    async def drive() -> tuple[int, str | None, str | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "third" in rows(pane)[2].text)
+            await press(pilot, pane, (0, 0))
+            await move(pilot, pane, (3, 1), button=1)
+            while_dragging = fake.flag_captures
+            await release(pilot, pane, (3, 1))
+            joined = pane.selected_text()
+            # The screen moves under the standing highlight's rows only at the
+            # copy: the frame on screen is stale for that one call, and the
+            # flags tmux answers describe rows other than the ones highlighted.
+            pane_fake.screen = ["first line that wraps into the second on", "e MORE", "third"]
+            extracted = pane.get_selection(Selection(Offset(0, 0), Offset(4, 1)))
+            return while_dragging, joined, extracted[0] if extracted else None
+
+    while_dragging, joined, after_change = run(drive())
+    assert while_dragging == 0, "painting a drag asks tmux for nothing"
+    assert joined == "first line that wraps into the second one"
+    assert after_change == "first line that wraps into the second on\ne", (
+        "flags for a screen that moved are dropped: newlines, not a wrong join"
+    )
+
+
+def test_a_row_with_tabs_copies_and_highlights_what_the_pointer_covers(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Finding 14 of the #135 review. tmux prints a tab cell as a literal TAB
+    and pads the row as if expanded; passed through as a 0-cell character the
+    terminal expanded it, while the offsets, the highlight and the copy placed
+    everything after it eight cells to the left of what the eye saw — a drag
+    over the visible ``c end`` copied nothing, and a drag over ``a..b`` copied
+    the whole row. The strip expands tabs to the default stops."""
+    fake.panes["%1"].screen = ["a\tb\tc end"]
+
+    async def drive() -> tuple[str, str | None, str | None]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "c end" in rows(pane)[0].text)
+            shown = rows(pane)[0].text
+            await drag(pilot, pane, (16, 0), (20, 0))
+            tail = pane.selected_text()
+            await drag(pilot, pane, (0, 0), (8, 0))
+            return shown, tail, pane.selected_text()
+
+    shown, tail, head = run(drive())
+    assert "\t" not in shown and shown.startswith("a       b       c end"), repr(shown)
+    assert tail == "c end", "the text under the pointer, at the cells the eye sees it in"
+    assert head == "a       b", "and a drag over the first tab stop copies what it covers"
+
+
+def test_the_highlight_is_visible_on_reverse_video_cells(fake: FakeTmux, tmp_path: Path) -> None:
+    """Cut finding of the #135 review. A background tint on a reverse-video cell
+    recoloured the glyph and left the block behind it unchanged — invisible on
+    a blank reversed cell, which is what a chosen menu row or a status bar is
+    made of. A reversed cell in the highlight is un-reversed with its colours
+    swapped, so the tint sits behind the glyph like everywhere else."""
+    fake.panes["%1"].screen = ["\x1b[7mrev\x1b[0m x"]
+
+    async def drive() -> tuple[Style, Style, Style]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "rev x" in rows(pane)[0].text)
+            before = style_at(rows(pane)[0], 1)
+            await drag(pilot, pane, (0, 0), (1, 0))  # "re" of the reversed word
+            row = rows(pane)[0]
+            return before, style_at(row, 1), style_at(row, 2)
+
+    before, tinted, untouched = run(drive())
+    tint = Style(bgcolor=tinted.bgcolor)
+    assert before.reverse, "the premise: the cell is drawn in reverse video"
+    assert not tinted.reverse and tinted.bgcolor is not None, "un-reversed under the highlight"
+    assert tinted.bgcolor != before.bgcolor and tinted.bgcolor != untouched.bgcolor, tint
+    assert untouched.reverse, "and the reversed cell outside the highlight is as it was"
+
+
+def test_the_cursor_stays_visible_inside_a_highlight(fake: FakeTmux, tmp_path: Path) -> None:
+    """The cursor was painted before the selection, so a highlight over the
+    cursor's cell painted the tint over its reverse video and it vanished. It
+    is painted last: reverse video over the tint, distinct from both."""
+
+    async def drive() -> tuple[Style, Style]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            pane.focus()
+            await drag(pilot, pane, (0, 0), (5, 0))  # the cursor sits at (2, 0)
+            row = rows(pane)[0]
+            return style_at(row, 2), style_at(row, 3)
+
+    cursor, beside = run(drive())
+    assert beside.bgcolor is not None and not beside.reverse, "the premise: a tinted neighbour"
+    assert cursor.reverse, "the cursor cell is still drawn in reverse video"
+    assert cursor.bgcolor == beside.bgcolor, "over the tint, not instead of it"
+
+
+def test_extending_a_drag_repaints_only_the_rows_whose_span_changed(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup of the #135 review: every MouseMove of a drag repainted every row
+    of the old and new selection, so a forty-row highlight was redrawn whole
+    for a pointer that moved one row. A row whose span did not change is not
+    repainted; the row the pointer left and the row it reached are."""
+    fake.panes["%1"].screen = [f"row {n}" for n in range(6)]
+    regions: list[Region] = []
+
+    async def drive() -> list[int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane) and "row 5" in rows(pane)[5].text)
+            await press(pilot, pane, (0, 0))
+            await move(pilot, pane, (3, 3), button=1)
+            await pilot.pause()
+            original = TerminalPane.refresh
+
+            def record(self: TerminalPane, *args: object, **kwargs: object) -> TerminalPane:
+                regions.extend(a for a in args if isinstance(a, Region))
+                return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(TerminalPane, "refresh", record)
+            await move(pilot, pane, (3, 4), button=1)
+            await pilot.pause()
+            return sorted({region.y for region in regions})
+
+    repainted = run(drive())
+    assert repainted == [3, 4], f"the row the pointer left and the one it reached: {repainted}"
 
 
 def test_a_pane_without_history_does_not_scroll(fake: FakeTmux, tmp_path: Path) -> None:

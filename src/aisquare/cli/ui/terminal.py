@@ -8,10 +8,22 @@ Rendering. A frame is one ``server.capture`` (one tmux process:
 SGR escapes; rows are diffed against the previous frame as STRINGS, and only
 the rows that changed — plus the old and new cursor rows — are marked dirty,
 so Textual's Line API (:meth:`render_line`) is asked for exactly those. A row
-string becomes a :class:`Strip` through ``rich.text.Text.from_ansi``, cached by
-the string, so a row that scrolled by one line is a dict lookup. The cursor is
-a reverse-video cell (underline while the pane is unfocused) when tmux says it
-is visible and the view is live (scrollback 0).
+string becomes a :class:`Strip` through ``rich.text.Text.from_ansi`` — tabs
+expanded, because tmux prints a tab cell as a literal TAB and pads the row as
+if expanded — cached by the string, so a row that scrolled by one line is a
+dict lookup. The cursor is a reverse-video cell (underline while the pane is
+unfocused) when tmux says it is visible and the view is live (scrollback 0).
+
+Rows are painted UNSTAMPED. The compositor reads a drag's content offset from
+segment metadata, and stamping every painted row with it gave each segment a
+unique Rich link id, which defeated Textual's per-style caches: plain mouse
+hover repainted the whole pane at every segment crossing (120 motion reports
+on a 200x60 pane: 7200 ``render_line`` calls), streaming frames cost twice the
+CPU, and a full strip cache held tens of MB of stamped copies (review of #135,
+finding 3). The compositor asks :meth:`render_line` directly, and only there,
+when it resolves a press or a drag; painting goes through :meth:`render_lines`,
+so that one call is the only one stamped — in CELLS, one segment per grapheme
+whose character count and cell count differ (see :class:`DisplayedRow`).
 
 Cadence. A one-shot timer re-arms itself after every frame: :attr:`FAST_INTERVAL`
 (50 ms) while the last frame changed something, :attr:`IDLE_INTERVAL` (500 ms)
@@ -73,11 +85,11 @@ from __future__ import annotations
 
 import contextlib
 import weakref
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from collections.abc import Callable
 from typing import Any, ClassVar
 
-from rich.cells import cell_len
+from rich.cells import cell_len, set_cell_size, split_graphemes
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
@@ -113,9 +125,99 @@ PANE_GONE = "(pane gone)"
 TMUX_UNAVAILABLE = "(tmux unavailable)"
 
 
-def _extract(selection: Selection, rows: list[str]) -> str:
+class DisplayedRow:
+    """One row as the pane displays it: its text, its graphemes' cell boundaries,
+    and whether tmux wrapped it into the row below.
+
+    ONE model of a row for the paint and the copy, in CELLS. Selection offsets
+    are cell positions (what :meth:`TerminalPane.render_line` stamps), and every
+    crop, tint, cursor cell, word boundary and copied slice is snapped to the
+    grapheme boundaries of the text ``rich`` actually draws. Measuring per code
+    point with ``cell_len`` — what every earlier version did, and what Textual's
+    compositor does — disagrees with rich 15 and tmux 3.7c on VS16 emoji (``⚠️``
+    is one 2-cell grapheme, per code point ``[1, 0]``) and ZWJ sequences
+    (``👩‍🚀``: ``[2, 0, 2]`` for 2 cells), so an overlay crop cut through them and
+    corrupted the row, and the copied text differed from the drawn text (review
+    of #135, finding 8). ``rich.cells.split_graphemes`` is the same table the
+    drawing uses, so the two cannot disagree.
+    """
+
+    __slots__ = ("bounds", "starts", "text", "wrapped")
+
+    def __init__(self, text: str, *, wrapped: bool = False) -> None:
+        self.text = text
+        self.wrapped = wrapped
+        """tmux soft-wrapped this row into the next: a copy joins them without a newline."""
+        bounds = [0]
+        starts = [0]
+        for _start, end, width in split_graphemes(text)[0]:
+            bounds.append(bounds[-1] + width)
+            starts.append(end)
+        self.bounds: tuple[int, ...] = tuple(bounds)
+        """Cell position at which grapheme ``i`` starts; the last entry is the row's cell width."""
+        self.starts: tuple[int, ...] = tuple(starts)
+        """Character index at which grapheme ``i`` starts; the last entry is ``len(text)``."""
+
+    @property
+    def cells(self) -> int:
+        return self.bounds[-1]
+
+    def _floor(self, cell: int) -> int:
+        """The grapheme whose start is the last boundary at or before ``cell``."""
+        index = bisect_left(self.bounds, cell)
+        if index == len(self.bounds) or self.bounds[index] != cell:
+            index -= 1
+        return index
+
+    def _ceil(self, cell: int) -> int:
+        """The grapheme whose start is the first boundary at or after ``cell``."""
+        return bisect_left(self.bounds, cell)
+
+    def snap(self, start: int, end: int) -> tuple[int, int]:
+        """``[start, end)`` in cells, widened to grapheme boundaries of the text.
+
+        Only WITHIN the text. Past its last grapheme every cell is one cell wide
+        and blank, so there is no boundary to widen to — and widening anyway
+        stretched a span that starts out there back to the end of the text: the
+        cursor on any quiet shell row became a black bar from the text to the
+        cursor (review of #120, round 3).
+        """
+        cells = self.cells
+        snapped_start = self.bounds[self._floor(start)] if 0 <= start < cells else start
+        snapped_end = self.bounds[self._ceil(end)] if 0 <= end < cells else end
+        return snapped_start, snapped_end
+
+    def slice(self, start: int, end: int) -> str:
+        """The text under cells ``[start, end)``, whole graphemes, nothing past the text."""
+        start, end = self.snap(max(start, 0), end)
+        cells = self.cells
+        if start >= cells or end <= start:
+            return ""
+        return self.text[self.starts[self._floor(start)] : self.starts[self._ceil(min(end, cells))]]
+
+    def word_at(self, cell: int) -> tuple[int, int] | None:
+        """The cell span of the run of non-blank graphemes under ``cell``, if any."""
+        if not 0 <= cell < self.cells:
+            return None
+        index = self._floor(cell)
+
+        def blank(i: int) -> bool:
+            return self.text[self.starts[i] : self.starts[i + 1]].isspace()
+
+        if blank(index):
+            return None
+        first, last = index, index
+        while first > 0 and not blank(first - 1):
+            first -= 1
+        while last + 1 < len(self.starts) - 1 and not blank(last + 1):
+            last += 1
+        return self.bounds[first], self.bounds[last + 1]
+
+
+def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
     """The text ``selection`` covers in ``rows`` — read off the SAME spans
-    :meth:`Selection.get_span` hands :meth:`TerminalPane._render_row` to paint.
+    :meth:`Selection.get_span` hands :meth:`TerminalPane._render_row` to paint,
+    on a widget ``width`` cells wide.
 
     Derived, not re-clamped. Every earlier version computed its own start and
     end from the endpoints, and each review found one more geometry the last
@@ -137,20 +239,29 @@ def _extract(selection: Selection, rows: list[str]) -> str:
         span = selection.get_span(y)
         if span is None:
             continue
-        pieces.append(_piece(row, span))
+        start, end = span
+        if start >= (width if end == -1 else min(end, width)):
+            # No cell of this row is highlighted — a zero-width span, or one
+            # that starts past the widget's width (a selection left over from a
+            # wider pane) — so it contributes nothing, not even a newline:
+            # ``_with_selection`` tints such a row nowhere, and the paint and
+            # the copy must count the same rows (review of #120, round 10).
+            continue
+        pieces.append(row.slice(start, row.cells if end == -1 else end))
+        # A row tmux soft-wrapped continues on the next one: joined, as tmux's
+        # own copy mode joins it. Copying a wrapped command as three lines split
+        # mid-token, with a space lost at each wrap, pasted into a shell as three
+        # broken commands (review of #135, finding 9). Only when the span runs
+        # to the row's end — a selection that stops short of it has no
+        # continuation to join.
+        pieces.append("" if row.wrapped and end == -1 else "\n")
     # Trailing newlines dropped, as Textual's own ``get_selected_text`` does. A
     # zero-width span is not ``None`` — the paint leaves that row untinted while
     # the join still gave it a newline — and a drag ending in the blank area
     # below the output, which is how this PR's reporter grabs a command, put a
     # run of Enters on the clipboard for a shell outside bracketed paste to
     # execute (review of the tenth version).
-    return "\n".join(pieces).rstrip("\n")
-
-
-def _piece(row: str, span: tuple[int, int]) -> str:
-    """The part of ``row`` a span from :meth:`Selection.get_span` covers (``-1``: to the end)."""
-    start, end = span
-    return row[start:] if end == -1 else row[start:end]
+    return "".join(pieces).rstrip("\n")
 
 
 _MOUNTED_PANES: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
@@ -455,6 +566,8 @@ class TerminalPane(Widget, can_focus=True):
         """Where and when the last real click on this pane was released."""
         self._painted_span: Selection | None = None
         """The selection the rows on screen were last painted for."""
+        self._painting = False
+        """Inside :meth:`render_lines`: rows are being painted, not read for offsets."""
         # A tmux pane's links are the agent's, not Textual's: no hover highlight,
         # and no repaint of the whole pane when the pointer crosses one.
         self.auto_links = False
@@ -690,17 +803,21 @@ class TerminalPane(Widget, can_focus=True):
                 continue
             if y in replaced:
                 return True
-            old = (
-                self._clip(self._strip_for(previous[y]).text.rstrip(), width)
-                if y < len(previous)
-                else ""
-            )
-            new = (
-                self._clip(self._strip_for(lines[y]).text.rstrip(), width) if y < len(lines) else ""
-            )
-            if _piece(old, span) != _piece(new, span):
+            start, end = span
+            old = self._line_row(previous[y] if y < len(previous) else "", width)
+            new = self._line_row(lines[y] if y < len(lines) else "", width)
+            if old.slice(start, old.cells if end == -1 else end) != new.slice(
+                start, new.cells if end == -1 else end
+            ):
                 return True
         return False
+
+    def _line_row(self, line: str, width: int) -> DisplayedRow:
+        """A captured line as a row of ``width`` cells, before any overlay."""
+        text = self._strip_for(line).text
+        if cell_len(text) > width:
+            text = set_cell_size(text, width)
+        return DisplayedRow(text.rstrip())
 
     def _fail(self, notice: str) -> bool:
         """Keep the last frame, show ``notice`` in the bottom row; True when that is new."""
@@ -732,24 +849,72 @@ class TerminalPane(Widget, can_focus=True):
 
     # --- the Line API ------------------------------------------------------------------
 
+    def render_lines(self, crop: Region) -> list[Strip]:
+        """Textual's paint path: the rows it asks :meth:`render_line` for are unstamped.
+
+        The compositor takes a widget's picture through here (and the style
+        under the pointer, for hover), and resolves a press or a drag's content
+        offset by calling :meth:`render_line` directly — the one and only direct
+        caller, measured on Textual 8.2.8. Stamping the painted rows too gave
+        every segment a unique link id, and the module docstring has what that
+        cost (review of #135, finding 3).
+        """
+        self._painting = True
+        try:
+            return super().render_lines(crop)
+        finally:
+            self._painting = False
+
     def render_line(self, y: int) -> Strip:
-        # Every row is offset-stamped: the compositor reads a drag's content
-        # offset from segment metadata that Textual's ``render()`` path stamps
-        # and a Line API widget must stamp itself — on EVERY row, or a drag that
-        # touches an unstamped one (the notice row, a blank row) resolves to
-        # "select all".
-        #
-        # Stamped fresh each time, with no cache of the finished strip. One was
-        # tried and measured: on the render loop it never hit, because
-        # ``_repaint_rows`` only asks for rows whose text just CHANGED — 0 hits
-        # in 1500 calls, 21% slower per changed row for the insert, and the dict
-        # churning to its cap. It paid only on a full repaint with no selection
-        # (50 rows, 0.63 ms → 0.15 ms), which is resize, focus and theme — never
-        # the drag, since a standing selection skipped the cache anyway. Against
-        # that: it held rows with ``rich_style`` already applied, so it had to be
-        # invalidated on every theme and CSS change or an idle pane kept the old
-        # palette (review of the second and third versions). Not worth it.
-        return self._render_row(y).apply_offsets(0, y)
+        strip = self._render_row(y)
+        return strip if self._painting else self._stamped(strip, y)
+
+    @staticmethod
+    def _stamped(strip: Strip, y: int) -> Strip:
+        """``strip`` with the compositor's ``offset`` metadata, in CELLS.
+
+        The compositor walks a segment's characters with per-code-point widths to
+        find the offset under the pointer, and adds ``len(segment.text)`` to reach
+        the end. Both count characters. Handing it one segment per grapheme whose
+        character count and cell count differ keeps that arithmetic inside a
+        single glyph, where the answer is at most one past the glyph's first cell
+        and :meth:`DisplayedRow.snap` lands it on the glyph; every other run of
+        text is one segment, characters and cells being the same thing there.
+        Built fresh, without ``Strip.apply_offsets``: that caches its stamped
+        copy on the strip, keyed by row, and rows scrolling through every row of
+        a pane held a copy per row in the strip cache (review of #135, finding 3).
+        """
+        segments: list[Segment] = []
+        x = 0
+        for text, style, control in strip:
+            if control:
+                segments.append(Segment(text, style, control))
+                continue
+            for run, cells in TerminalPane._runs(text):
+                meta = Style.from_meta({"offset": (x, y)})
+                segments.append(Segment(run, style + meta if style is not None else meta))
+                x += cells
+        return Strip(segments, strip.cell_length)
+
+    @staticmethod
+    def _runs(text: str) -> list[tuple[str, int]]:
+        """``text`` as ``(run, cells)`` pieces: plain runs, and every complex grapheme alone."""
+        if text.isascii() and text.isprintable():
+            return [(text, len(text))]
+        runs: list[tuple[str, int]] = []
+        plain_start: int | None = None
+        for start, end, width in split_graphemes(text)[0]:
+            if end - start == 1 and width == 1:
+                if plain_start is None:
+                    plain_start = start
+                continue
+            if plain_start is not None:
+                runs.append((text[plain_start:start], start - plain_start))
+                plain_start = None
+            runs.append((text[start:end], width))
+        if plain_start is not None:
+            runs.append((text[plain_start:], len(text) - plain_start))
+        return runs
 
     def _render_row(self, y: int) -> Strip:
         width, height = self.content_size
@@ -761,171 +926,119 @@ class TerminalPane(Widget, can_focus=True):
             if y == 0:
                 return Strip([Segment(NO_PANE, base + PLACEHOLDER)]).adjust_cell_length(width, base)
             return Strip.blank(width, base)
-        notice = self.notice if y == height - 1 else None
-        if notice is not None:
-            # Built, not returned: the overlays below still apply. Returning here
-            # left the one row that `_row_text` reports as displayed — and that a
-            # drag therefore COPIES — as the only row a selection never tinted
-            # (review of the third version).
-            strip = Strip([Segment(notice, base + NOTICE)]).adjust_cell_length(width, base)
+        strip = self._composed_strip(y)
+        cursor = self._cursor
+        notice = self.notice is not None and y == height - 1
+        cursor_x = (
+            cursor[0]
+            if not notice and cursor is not None and cursor[1] == y and cursor[0] < width
+            else None
+        )
+        selection = self._own_selection()
+        span = None if selection is None else selection.get_span(y)
+        if cursor_x is None and span is None:
+            return strip
+        # The row the overlays are measured against is the row AS COMPOSED —
+        # ``Strip.text`` of what is about to be painted, the notice and the
+        # corner marker included — so the paint, the copy and the word under a
+        # double click cannot come apart (review of #120, rounds 3 to 5). Read
+        # only when an overlay actually runs: ``Strip.text`` is uncached and the
+        # common row has neither a cursor nor a highlight on it.
+        row = DisplayedRow(strip.text)
+        if span is not None:
+            strip = self._with_selection(strip, span, row, width)
+        if cursor_x is not None:
+            # LAST: reverse video over the tint keeps the cursor visible inside
+            # a highlight; painted first it disappeared under it.
+            strip = self._with_cursor(strip, cursor_x, row)
+        return strip
+
+    def _composed_strip(self, y: int) -> Strip:
+        """Row ``y`` as it is shown, before any overlay: the frame's row, or the
+        notice in its place, with the corner marker composed into row 0 while
+        the view is scrolled. The paint and the copy both start from here."""
+        width, height = self.content_size
+        base = self.rich_style
+        if self.notice is not None and y == height - 1:
+            # Built, not returned: the overlays still apply. Returning early
+            # left the one row a drag COPIES as the only row a selection never
+            # tinted (review of #120, round 3).
+            strip = Strip([Segment(self.notice, base + NOTICE)]).adjust_cell_length(width, base)
         else:
             line = self._lines[y] if y < len(self._lines) else ""
             strip = self._strip_for(line).apply_style(base).adjust_cell_length(width, base)
-        cursor = self._cursor
-        cursor_x = (
-            cursor[0]
-            if notice is None and cursor is not None and cursor[1] == y and cursor[0] < width
-            else None
-        )
-        selection = self.text_selection
-        span = None if selection is None else selection.get_span(y)
-        marker = y == 0 and bool(self.scrollback)
-        if cursor_x is None and span is None and not marker:
-            return strip
-        # Every restyle below crops the strip, and ``Strip.crop`` through a wide
-        # glyph renders it as two single-cell spaces — one character more than
-        # the row had, which shifts every offset stamped after it (measured: a
-        # cursor on ``日`` at cell 0 moved a drag's whole selection by one).
-        # So every crop is snapped to a glyph boundary, and this is the text
-        # those boundaries come from. Read only when one of them actually runs:
-        # ``Strip.text`` joins every segment, is uncached, and the common row has
-        # no cursor, selection or marker on it (review of the third version).
-        # ONE join for the row, reused by every overlay below: ``Strip.text`` is
-        # uncached and walks every segment, and the selection branch used to ask
-        # for its own copy through ``_row_text`` (review of the fifth version).
-        text = self._raw_row_text(y)
-        if cursor_x is not None:
-            strip = self._with_cursor(strip, cursor_x, text)
-        if marker:
-            strip = self._with_scroll_marker(strip, width, text)
-            text = self._with_marker_text(text, y)
-        if span is not None:
-            # LAST, and against the row's DISPLAYED text — which now includes the
-            # marker. Painted before it, the marker rebuilt the tail of row 0 and
-            # threw the tint away while `_extract` copied that text anyway; and
-            # its replacement changed the row's character count, so the offsets
-            # stamped on the tail no longer indexed it (review of the fourth).
-            strip = self._with_selection(strip, span, text, width)
+        if y == 0 and self.scrollback:
+            strip = self._with_scroll_marker(strip, width)
         return strip
 
-    @staticmethod
-    def _snap(text: str, start: int, end: int) -> tuple[int, int]:
-        """``[start, end)`` in cells, widened to the glyph boundaries of ``text``.
-
-        Only WITHIN the text. Past its last glyph every cell is one cell wide and
-        blank, so there is no boundary to widen to — and widening anyway stretched
-        a span that starts out there back to the end of the text. The cursor is
-        the caller that lands there: ``capture-pane -e`` trims trailing spaces, so
-        on any row where the cursor sits past the last printed glyph — every quiet
-        shell pane — one reverse-video cell became a black bar all the way from
-        the text to the cursor (review of the third version).
-        """
-        bounds = [0]
-        for char in text:
-            bounds.append(bounds[-1] + cell_len(char))
-        span = bounds[-1]
-        # ``bounds`` is ascending, so a binary search replaces two full scans of
-        # it — this runs once per overlay per row (review of the fourth version).
-        snapped_start = bounds[bisect_right(bounds, start) - 1] if start < span else start
-        snapped_end = bounds[bisect_left(bounds, end)] if end < span else end
-        return snapped_start, snapped_end
-
-    def _restyled(self, strip: Strip, start: int, end: int, style: Style, text: str) -> Strip:
-        """``strip`` with cells ``[start, end)`` restyled — ``style`` layered LAST.
-
-        ``Strip.apply_style`` puts the segment's own style on top, and every
-        segment already carries the widget background from ``apply_style(base)``
-        — so a tint applied that way lost to it. Rich's ``post_style`` is the
-        layering that wins, and control segments keep their ``None`` style.
-        The span is snapped to glyph boundaries of ``text`` (see ``_render_row``).
-        """
-        start, end = self._snap(text, start, end)
-        if start >= end:
-            return strip
-        span = strip.crop(start, end)
-        painted = Strip(list(Segment.apply_style(span, post_style=style)), span.cell_length)
-        return Strip.join([strip.crop(0, start), painted, strip.crop(end)])
-
-    def _with_selection(self, strip: Strip, span: tuple[int, int], text: str, width: int) -> Strip:
-        """Paint ``span`` — CHARACTER offsets from the compositor — as cells.
-
-        ``apply_offsets`` counts characters; ``Strip.crop`` counts cells. On a row
-        with wide glyphs (emoji status markers, CJK) the two diverge by one
-        column per wide character, so what was painted was not what was copied.
-        The row's own text converts one to the other.
-        """
-        start, end = span
-        cell_start = cell_len(text[:start])
-        cell_end = width if end == -1 else min(cell_len(text[:end]), width)
-        if self._selection_bg is None:
-            # The BACKGROUND only. The theme's ``screen--selection`` component
-            # style resolves with foreground equal to background (``#094472 on
-            # #094472`` — measured), so applying it whole painted the text
-            # invisible: a solid block where the word was.
-            bg = self.selection_style.bgcolor
-            self._selection_bg = Style(bgcolor=bg) if bg is not None else Style(reverse=True)
-        return self._restyled(strip, min(cell_start, width), cell_end, self._selection_bg, text)
-
-    @staticmethod
-    def _clip(text: str, width: int) -> str:
-        """``text`` cut to ``width`` cells, as ``adjust_cell_length`` cuts the strip.
-
-        A row longer than the widget renders truncated but was copied whole: a
-        failed ``resize-window`` leaves the tmux window at its spawn geometry
-        while captures keep succeeding, which is the documented state where rows
-        are wider than the pane (review of the fourth version).
-        """
-        if width <= 0:
-            return ""
-        cells = 0
-        for index, char in enumerate(text):
-            cells += cell_len(char)
-            if cells > width:
-                return text[:index]
-        return text
-
-    def _raw_row_text(self, y: int) -> str:
-        """The row's own text, clipped to the widget — before any overlay."""
-        width = self.content_size.width
-        if self.notice is not None and y == self.content_size.height - 1:
-            return self._clip(self.notice, width)  # displayed, not the row under it
-        line = self._lines[y] if y < len(self._lines) else ""
-        return self._clip(self._strip_for(line).text.rstrip(), width)
-
-    def _row_text(self, y: int) -> str:
+    def _displayed_row(self, y: int, *, wrapped: bool = False) -> DisplayedRow:
         """Row ``y`` as the widget DISPLAYS it — the text a drag over it copies.
 
-        The row's own text plus whatever is composed into it: the notice, and the
-        ``[↑k/history]`` marker on row 0 while the view is scrolled. The marker
-        replaces the tail of that row on screen, so a selection there has to be
-        measured, painted and copied against the same string.
+        Trailing blanks are the pane's padding, not text, and are dropped — except
+        on a row tmux wrapped, where every cell up to the pane's width was
+        written by the program and a space at the wrap point is real (review of
+        #135, finding 9).
         """
-        return self._with_marker_text(self._raw_row_text(y), y)
+        text = self._composed_strip(y).text
+        if wrapped:
+            facts = self.facts
+            pane_width = facts.width if facts is not None else self.content_size.width
+            if cell_len(text) > pane_width:
+                text = set_cell_size(text, pane_width)
+            return DisplayedRow(text, wrapped=True)
+        return DisplayedRow(text.rstrip())
 
-    def _with_marker_text(self, text: str, y: int) -> str:
-        """``text`` with the corner marker composed in, when row ``y`` carries one."""
-        if y != 0 or not self.scrollback:
-            return text
-        layout = self._marker_layout(text, self.content_size.width)
-        if layout is None:
-            return text
-        cut, gap, marker = layout
-        # Padded out to ``cut``, not merely cut to it: the STRIP is the
-        # full-width row, so cropping it to ``cut`` keeps the blanks a short row
-        # was padded with, and the text has to carry them too or the two stop
-        # lining up cell for cell.
-        head = self._clip(text, cut)
-        return head + " " * (cut - cell_len(head) + gap) + marker
+    def _displayed_rows(self, wrapped: list[bool] | None) -> list[DisplayedRow]:
+        # Exactly the rows the widget RENDERS: the height alone. Taking the longer
+        # of the height and ``_lines`` copied rows that are not on screen — a pane
+        # whose captures are failing keeps the taller frame (review of #120,
+        # round 8). The notice row and a marker row display something other than
+        # the frame's row, so neither continues onto the next.
+        height = self.content_size.height
+        rows: list[DisplayedRow] = []
+        for y in range(height):
+            joined = bool(wrapped and wrapped[y])
+            if (self.notice is not None and y == height - 1) or (y == 0 and self.scrollback):
+                joined = False
+            rows.append(self._displayed_row(y, wrapped=joined))
+        return rows
 
-    def _row_texts(self) -> list[str]:
-        # Exactly the rows the widget RENDERS. ``render_line`` stamps offsets up
-        # to ``content_size.height``, and rows past the end of a short ``_lines``
-        # already read as empty — so the height alone covers the grow-resize this
-        # once used ``max()`` for. Taking the longer of the two instead copied
-        # rows that are not on screen: a pane whose captures are failing keeps
-        # the taller frame, and a crossing drag then put seven unrendered rows on
-        # the clipboard (review of the eighth version).
-        return [self._row_text(y) for y in range(self.content_size.height)]
+    def _wrapped_rows(self) -> list[bool] | None:
+        """Which rows on screen tmux soft-wrapped into the next, or ``None`` if unknowable.
+
+        One ``capture-pane -p -N -F`` process, asked when text is COPIED and never
+        per frame: tmux 3.7c prints each line's flags before it (``W`` for a
+        wrapped line, measured), and reading them on every 50 ms tick would cost
+        a parse per row for a fact only a copy uses. The flags describe tmux's
+        screen NOW while the copy reads the frame on screen, so every row's text
+        is compared with the frame's and the answer is dropped whole on any
+        difference — a busy agent then gets newline joins, never a join of rows
+        that were not the ones highlighted. A tmux that cannot answer (older
+        than the flag, gone) is the same case.
+        """
+        facts = self.facts
+        if self.pane_id is None or self.server is None or facts is None:
+            return None
+        scrollback = self.scrollback
+        window = ["-E", str(facts.height - 1 - scrollback)] if scrollback and facts.height else []
+        try:
+            out = self.server.run(
+                "capture-pane", "-p", "-N", "-F",
+                "-S", str(-scrollback), *window, "-t", self.pane_id,
+            )  # fmt: skip
+        except (TmuxError, TmuxUnavailable):
+            return None
+        captured = out.rstrip("\n").split("\n") if out.strip("\n") else []
+        flagged = [(flags, text) for flags, _, text in (row.partition(" ") for row in captured)]
+        height = self.content_size.height
+        flagged = flagged[max(0, len(flagged) - height) :]
+        flagged += [("-", "")] * (height - len(flagged))
+        lines = self._lines
+        for y, (_flags, text) in enumerate(flagged):
+            shown = Text.from_ansi(lines[y], end="").plain if y < len(lines) else ""
+            if shown != text:
+                return None
+        return ["W" in flags for flags, _ in flagged]
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The plain text under ``selection``, from the rows this widget shows.
@@ -938,7 +1051,8 @@ class TerminalPane(Widget, can_focus=True):
         """
         if self.pane_id is None or selection == SELECT_ALL:
             return None  # a whole-pane selection is never this pane's (class docstring, rule 4)
-        return _extract(selection, self._row_texts()), "\n"
+        rows = self._displayed_rows(self._wrapped_rows())
+        return _extract(selection, rows, self.content_size.width), "\n"
 
     def selected_text(self) -> str | None:
         """What a drag has selected in this pane, or ``None`` when nothing is.
@@ -977,15 +1091,10 @@ class TerminalPane(Widget, can_focus=True):
         and this reverses a first-round decision deliberately. It could not hold
         the property it was for: the STRIP is always built from the live
         ``_lines``, so a frozen text made the copy disagree with the paint
-        instead of agreeing with it, and ctrl+c seconds later copied a screen
-        that was no longer under the highlight. Re-freezing it per gesture is
-        not available either — the widget cannot see a press or a release that
-        lands on another widget, so no signal marks a gesture's end (reviews of
-        the fourth and fifth versions found both halves of that). Reading the
-        live rows for BOTH means they always agree, which is the property that
-        was actually wanted; the cost is that a drag over a printing agent
-        copies the text at release rather than at press, which is also what the
-        user has highlighted on screen at release.
+        instead of agreeing with it. Reading the live rows for BOTH means they
+        always agree, which is the property that was actually wanted; and a
+        highlight whose text changes under it is dropped (class docstring, rule
+        3), so a copy never reads a screen that is no longer under it.
         """
         if selection == SELECT_ALL:
             # A neighbour's triple click, or a drag past both of this pane's
@@ -1005,42 +1114,100 @@ class TerminalPane(Widget, can_focus=True):
         self._repaint_selection(selection)
 
     def _repaint_selection(self, selection: Selection | None) -> None:
-        """Repaint the rows this selection change can have altered.
+        """Repaint the rows whose SPAN this selection change altered.
 
         A bare ``refresh()`` here redrew every row of the widget on every
         MouseMove of a drag — and each row with a span pays for a text join and
-        a glyph-boundary scan (review of the fourth version). An endpoint off the
-        row list (``None``, the shape Textual hands a widget a drag crossed out
-        of) still means the whole widget.
+        a grapheme scan (review of #120, round 4); repainting every row of the
+        old and new selection still redrew a forty-row highlight for a pointer
+        that moved one row (cleanup of #135). Only rows the widget has: a stale
+        selection names rows a shrunken pane no longer renders, and handing
+        those to ``refresh`` is the Region-outside-the-widget shape
+        ``refresh_frame`` documents as measured harm (review of #120, round 8).
         """
-        rows = self._selection_row_span(selection) | self._selection_row_span(self._painted_span)
-        self._painted_span = selection
+        painted, self._painted_span = self._painted_span, selection
+        rows = {
+            y
+            for y in range(self.content_size.height)
+            if (None if painted is None else painted.get_span(y))
+            != (None if selection is None else selection.get_span(y))
+        }
         if rows:
             self._repaint_rows(rows)
 
-    def _selection_row_span(self, selection: Selection | None) -> set[int]:
-        """The rows of this widget a selection covers — never rows it does not have.
+    def _restyled(self, strip: Strip, start: int, end: int, style: Style) -> Strip:
+        """``strip`` with cells ``[start, end)`` restyled — ``style`` layered LAST.
 
-        A stale selection names rows a shrunken pane no longer renders, and
-        handing those to ``refresh`` is the Region-outside-the-widget shape
-        ``refresh_frame`` documents as measured harm (review of the eighth).
+        ``Strip.apply_style`` puts the segment's own style on top, and every
+        segment already carries the widget background from ``apply_style(base)``
+        — so a tint applied that way lost to it. Rich's ``post_style`` is the
+        layering that wins, and control segments keep their ``None`` style.
+        Callers snap ``start`` and ``end`` to grapheme boundaries first: a crop
+        through a wide glyph renders it as two single-cell spaces, one character
+        more than the row had (measured: a cursor on ``日`` at cell 0 moved a
+        drag's whole selection by one).
         """
-        if selection is None:
-            return set()
-        height = self.content_size.height
-        start, end = selection.start, selection.end
-        if start is None or end is None:
-            return set(range(height))
-        return set(range(max(min(start.y, end.y), 0), min(max(start.y, end.y) + 1, height)))
+        if start >= end:
+            return strip
+        span = strip.crop(start, end)
+        painted = Strip(list(Segment.apply_style(span, post_style=style)), span.cell_length)
+        return Strip.join([strip.crop(0, start), painted, strip.crop(end)])
 
-    def _with_scroll_marker(self, strip: Strip, width: int, text: str) -> Strip:
+    def _with_selection(
+        self, strip: Strip, span: tuple[int, int], row: DisplayedRow, width: int
+    ) -> Strip:
+        """Paint ``span`` — CELL offsets from the compositor, ``-1`` to the end — as cells."""
+        start, end = span
+        cell_start = min(max(start, 0), width)
+        cell_end = width if end == -1 else min(end, width)
+        if cell_start >= cell_end:
+            return strip  # no cell of this row: nothing to widen, nothing to tint
+        cell_start, cell_end = row.snap(cell_start, cell_end)
+        tint = self._selection_tint()
+        painted = strip.crop(cell_start, cell_end)
+        segments = [self._tinted(segment, tint) for segment in painted]
+        return Strip.join(
+            [strip.crop(0, cell_start), Strip(segments, painted.cell_length), strip.crop(cell_end)]
+        )
+
+    def _selection_tint(self) -> Style:
+        if self._selection_bg is None:
+            # The BACKGROUND only. The theme's ``screen--selection`` component
+            # style resolves with foreground equal to background (``#094472 on
+            # #094472`` — measured), so applying it whole painted the text
+            # invisible: a solid block where the word was.
+            bg = self.selection_style.bgcolor
+            self._selection_bg = Style(bgcolor=bg) if bg is not None else Style(reverse=True)
+        return self._selection_bg
+
+    def _tinted(self, segment: Segment, tint: Style) -> Segment:
+        """``segment`` with the selection tint behind its text.
+
+        A reverse-video cell draws its glyph in its background colour on its
+        foreground colour, so a background tint layered on it changed the glyph's
+        colour and left the block behind it as it was — invisible on a blank
+        reversed cell, which is what Claude Code's chosen menu row and a shell's
+        status bar are made of (cut finding of #135). Such a cell is un-reversed
+        and its colours swapped by hand, so the tint sits behind the glyph as
+        it does everywhere else.
+        """
+        text, style, control = segment
+        if control:
+            return segment
+        if style is not None and style.reverse:
+            shown = style.bgcolor if style.bgcolor is not None else self.rich_style.bgcolor
+            over = Style(reverse=False, color=shown, bgcolor=tint.bgcolor)
+            return Segment(text, style + over)
+        return Segment(text, style + tint if style is not None else tint)
+
+    def _with_scroll_marker(self, strip: Strip, width: int) -> Strip:
         """``[↑k/history]`` in the top-right corner while the view is in history.
 
         tmux's own copy-mode indicator, in the same place: without it a scrolled
         pane is indistinguishable from a live one that happens to be quiet. The
-        cut is snapped to a glyph boundary; a widened gap is blank.
+        cut is snapped to a grapheme boundary; a widened gap is blank.
         """
-        layout = self._marker_layout(text, width)
+        layout = self._marker_layout(DisplayedRow(strip.text), width)
         if layout is None:
             return strip
         cut, gap, marker = layout
@@ -1062,7 +1229,7 @@ class TerminalPane(Widget, can_focus=True):
     East-Asian Ambiguous and resolves to one cell, so the shipped marker cannot
     tell the two apart (review of the ninth version)."""
 
-    def _marker_layout(self, text: str, width: int) -> tuple[int, int, str] | None:
+    def _marker_layout(self, row: DisplayedRow, width: int) -> tuple[int, int, str] | None:
         """``(cut, gap, marker)`` in cells — one answer for the strip and the text."""
         marker = self.SCROLL_MARKER_TEMPLATE.format(
             scrollback=self.scrollback, history=self.history_size
@@ -1074,8 +1241,16 @@ class TerminalPane(Widget, can_focus=True):
         marker_cells = cell_len(marker)
         if marker_cells >= width:
             return None
-        cut, _ = self._snap(text, width - marker_cells, width - marker_cells)
+        cut, _ = row.snap(width - marker_cells, width - marker_cells)
         return cut, width - marker_cells - cut, marker
+
+    TAB_STOPS: ClassVar[int] = 8
+    """Where a TAB cell advances to. tmux stores a tab as a cell and prints it as
+    a literal TAB, with the row padded as if expanded (measured on 3.7c); the
+    terminal would expand it, but this widget is the terminal here, and a
+    0-cell TAB put every offset, highlight and copy after it eight cells to the
+    left of what the eye saw (review of #135, finding 14). Default stops only:
+    a program that moves them is rare, and costs one row's alignment."""
 
     def _strip_for(self, line: str) -> Strip:
         strip = self._strip_cache.get(line)
@@ -1083,14 +1258,16 @@ class TerminalPane(Widget, can_focus=True):
             if len(self._strip_cache) >= self.CACHE_LIMIT:
                 self._strip_cache.clear()
             text = Text.from_ansi(line, end="")
+            text.expand_tabs(self.TAB_STOPS)
             strip = Strip(text.render(self.app.console)).simplify()
             self._strip_cache[line] = strip
         return strip
 
-    def _with_cursor(self, strip: Strip, x: int, text: str) -> Strip:
+    def _with_cursor(self, strip: Strip, x: int, row: DisplayedRow) -> Strip:
         style = CURSOR if self.has_focus else UNFOCUSED_CURSOR
         widened = strip.extend_cell_length(x + 1, self.rich_style)
-        return self._restyled(widened, x, x + 1, style, text)  # a wide glyph: both cells
+        start, end = row.snap(x, x + 1)  # a wide glyph: both cells
+        return self._restyled(widened, start, end, style)
 
     # --- input ---------------------------------------------------------------------------
 
@@ -1242,20 +1419,10 @@ class TerminalPane(Widget, can_focus=True):
         return self._clicks
 
     def _select_word(self, x: int, y: int) -> None:
-        text = self._row_text(y)
-        # Cell → character index, as the compositor does for a drag.
-        index, cells = 0, 0
-        while index < len(text) and cells + cell_len(text[index]) <= x:
-            cells += cell_len(text[index])
-            index += 1
-        if index >= len(text) or text[index].isspace():
+        span = self._displayed_row(y).word_at(x)
+        if span is None:
             return
-        start = index
-        while start > 0 and not text[start - 1].isspace():
-            start -= 1
-        end = index
-        while end < len(text) and not text[end].isspace():
-            end += 1
+        start, end = span
         word = Selection(Offset(start, y), Offset(end, y))
         self._set_own_selection(word)
         # Copied here, and folded into the baseline. The release this click IS

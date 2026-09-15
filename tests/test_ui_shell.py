@@ -53,6 +53,7 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.terminal import (
     EscapeToSidebar,
+    SelectionHost,
     TerminalPane,
     route_selection_gesture,
 )
@@ -68,6 +69,7 @@ from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
+from tests.pane_harness import FakePane, FakeTmux, move, press, release
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -483,41 +485,20 @@ def test_clicking_a_project_opens_its_project_view_once(tmp_path: Path, script: 
     assert selected
 
 
-class PaneScript:
-    """A tmux runner that answers a pane's frames, so a real ``AgentView`` in a
-    real ``FleetApp`` shows real rows.
+def scripted_pane(ran: list[tuple[str, ...]], rows: list[str]) -> FakeTmux:
+    """The shared fake tmux, answering one pane's frames so a real ``AgentView``
+    in a real ``FleetApp`` shows real rows.
 
     ``no_real_tmux`` stubs every command into a failure, which is right for
     tests about routing and wrong for one about SELECTING text — there is
-    nothing on screen to select. This answers the one call the pane makes per
-    frame (``capture-pane`` + ``display-message`` in a single process) and reads
-    the pane's size back out of the ``resize-window`` that precedes it, exactly
-    as the real server would.
+    nothing on screen to select. The fake answers the one call the pane makes
+    per frame (``capture-pane`` + ``display-message`` in a single process) and
+    follows the ``resize-window`` that precedes it, exactly as the real server
+    would; ``record=ran`` keeps the socket guard reading every argv.
     """
-
-    def __init__(self, ran: list[tuple[str, ...]], rows: list[str]) -> None:
-        self.ran = ran
-        self.rows = rows
-        self.width, self.height = 40, len(rows)
-
-    def __call__(self, argv: Sequence[str], stdin: bytes | None) -> Completed:
-        args = list(argv)
-        self.ran.append(tuple(args))
-        if args[1:] == ["-V"]:
-            return Completed(0, "tmux 3.5a\n", "")
-        command = args[5:]
-        if command and command[0] == "resize-window":
-            self.width = int(command[command.index("-x") + 1])
-            self.height = int(command[command.index("-y") + 1])
-            return Completed(0, "", "")
-        if command and command[0] == "capture-pane":
-            body = [*self.rows, *([""] * (self.height - len(self.rows)))][: self.height]
-            facts = tmux_core._SEP.join(
-                ["%1", str(self.width), str(self.height), "0", "0", "1", "0", "0",
-                 "0", "", "0", "bash", "0", "0", ""]
-            )  # fmt: skip
-            return Completed(0, "\n".join([*body, facts]) + "\n", "")
-        return Completed(0, "", "")
+    tmux = FakeTmux(record=ran)
+    tmux.panes["%1"] = FakePane(screen=list(rows), width=40, height=len(rows))
+    return tmux
 
 
 async def _agent_pane(pilot: Pilot[None]) -> tuple[TerminalPane, Static]:
@@ -548,33 +529,35 @@ def test_a_drag_from_the_agent_header_into_the_pane_copies_through_the_app(
 ) -> None:
     """The app is what turns the end of a selection gesture into a copy.
 
-    ``FleetApp.on_text_selected`` is the only thing that makes a drag crossing
-    the pane's edge copy, and nothing exercised it: replacing its body with
-    ``return`` left the whole suite green, because every test of that gesture
-    re-implemented the handler on its own test ``Host`` (review of #120, round
-    7). This drives the real app, the real ``AgentView``, and the real header.
+    ``SelectionHost.on_event`` — ``FleetApp``'s, by inheritance — is the only
+    thing that makes a drag crossing the pane's edge copy, and nothing used to
+    exercise it: replacing the app's handler with ``return`` left the whole
+    suite green, because every test of that gesture re-implemented the handler
+    on its own test ``Host`` (review of #120, round 7). This drives the real
+    app, the real ``AgentView``, and the real header, with the events the
+    driver would post.
     """
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
 
     async def go(pilot: Pilot[None]) -> tuple[str, int, str, int]:
         app = fleet_app(pilot)
         pane, header = await _agent_pane(pilot)
-        await pilot.mouse_down(header, offset=(1, 0))
-        await pilot.hover(pane, offset=(5, 1))
-        await pilot.mouse_up(pane, offset=(5, 1))
+        await press(pilot, header, (1, 0))
+        await move(pilot, pane, (5, 1), button=1)
+        await release(pilot, pane, (5, 1))
         await pilot.pause()
         crossed, toasts = app.clipboard, len(app._notifications)
         # The negative half: a gesture that touches no row of the pane must
         # leave both the clipboard and the toast count exactly as they were.
         app.screen.clear_selection()
         await pilot.pause()
-        await pilot.mouse_down(header, offset=(1, 0))
-        await pilot.hover(header, offset=(6, 0))
-        await pilot.mouse_up(header, offset=(6, 0))
+        await press(pilot, header, (1, 0))
+        await move(pilot, header, (6, 0), button=1)
+        await release(pilot, header, (6, 0))
         await pilot.pause()
         return crossed, toasts, app.clipboard, len(app._notifications)
 
@@ -592,22 +575,23 @@ def test_a_right_button_drag_from_the_agent_header_copies_nothing_through_the_ap
     no_real_tmux: list[tuple[str, ...]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``FleetApp.on_mouse_down`` is the whole of the button fix: a pane only
-    sees a press that lands ON it, so without the app a right-button drag begun
-    on the header reads as a left one and copies. Nothing reached that handler —
-    replacing its body left the suite green (review of #120, round 8)."""
+    """The app's record of the press is the whole of the button fix: a pane
+    only sees a press that lands ON it, so without the app a right-button drag
+    begun on the header reads as a left one and copies. Nothing reached that
+    handler once — replacing its body left the suite green (review of #120,
+    round 8) — and it has since moved into ``SelectionHost.on_event``."""
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
 
     async def go(pilot: Pilot[None]) -> tuple[str, int, bool]:
         app = fleet_app(pilot)
         pane, header = await _agent_pane(pilot)
-        await pilot.mouse_down(header, offset=(1, 0), button=3)
-        await pilot.hover(pane, offset=(5, 1))
-        await pilot.mouse_up(pane, offset=(5, 1))
+        await press(pilot, header, (1, 0), button=3)
+        await move(pilot, pane, (5, 1), button=3)
+        await release(pilot, pane, (5, 1), button=3)
         await pilot.pause()
         return app.clipboard, len(app._notifications), pane.text_selection is not None
 
@@ -632,7 +616,7 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
         status("prj_a", "coder-two", "coder", "working", minute=1),
     ]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
 
     logged: list[str] = []
@@ -653,9 +637,9 @@ def test_one_panes_failure_does_not_stop_the_others_being_told(
         assert len(panes) >= 2, "the app keeps a view per opened agent mounted"
 
         async def cross() -> None:
-            await pilot.mouse_down(header, offset=(1, 0))
-            await pilot.hover(pane, offset=(5, 1))
-            await pilot.mouse_up(pane, offset=(5, 1))
+            await press(pilot, header, (1, 0))
+            await move(pilot, pane, (5, 1), button=1)
+            await release(pilot, pane, (5, 1))
             await pilot.pause()
 
         # The negative half first, while every pane still works.
@@ -696,7 +680,7 @@ def test_a_screen_that_cannot_be_queried_is_logged_not_a_crash(
     seed(tmp_path, ("prj_a", "alpha", None))
     script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
     monkeypatch.setattr(
-        tmux_core, "_tmux", PaneScript(no_real_tmux, ["red plain", "second row", "third row"])
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
     )
     logged: list[str] = []
     original_call = Logger.__call__
@@ -722,6 +706,69 @@ def test_a_screen_that_cannot_be_queried_is_logged_not_a_crash(
     recorded, alive = drive(go)
     assert alive, "the app survives a screen it cannot resolve"
     assert any("no screen to tell" in line for line in recorded), recorded
+
+
+def test_the_shell_and_the_test_host_share_the_gesture_handlers() -> None:
+    """The pane tests' ``Host`` once mirrored ``FleetApp``'s gesture handlers by
+    hand and fell behind, which hid two regressions (reviews of #120, rounds 6
+    and 9). Both derive from ``SelectionHost`` now and add nothing of their own
+    to the press, the release, the copy key or the clipboard — so a change to
+    the shell's gesture path is a change to what the pane tests exercise."""
+    from tests.test_terminal_pane import Host
+
+    for app in (FleetApp, Host):
+        assert issubclass(app, SelectionHost), app
+        for name in ("on_event", "get_default_screen", "copy_to_clipboard", "on_mouse_down"):
+            assert name not in vars(app), f"{app.__name__} overrides {name}"
+            assert name not in vars(app) and "on_text_selected" not in vars(app)
+
+
+def test_ctrl_c_from_the_sidebar_copies_what_the_drag_copied(
+    tmp_path: Path,
+    script: Script,
+    no_real_tmux: list[tuple[str, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 10 of the #135 review, in the real shell. A drag from the agent
+    header into the pane leaves focus in the sidebar, and the pane's toast
+    promises that ctrl+c copies again — but the key reached Textual's own
+    ``screen.copy_text``, which joined the header line onto the pane's text. The
+    default screen is ``PaneScreen`` now: the pane copies, exactly as its
+    release did, and clears its highlight."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [status("prj_a", "coder-auth", "coder", "working")]
+    monkeypatch.setattr(
+        tmux_core, "_tmux", scripted_pane(no_real_tmux, ["red plain", "second row", "third row"])
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, int, bool, bool]:
+        app = fleet_app(pilot)
+        pane, header = await _agent_pane(pilot)
+        app.sidebar.focus()
+        await pilot.pause()
+        await press(pilot, header, (1, 0))
+        await move(pilot, pane, (5, 1), button=1)
+        await release(pilot, pane, (5, 1))
+        dragged = app.clipboard
+        in_sidebar = app.focused is app.sidebar or app.sidebar in (
+            app.focused.ancestors if app.focused else []
+        )
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        return (
+            dragged,
+            app.clipboard,
+            len(app._notifications),
+            in_sidebar,
+            pane.text_selection is None,
+        )
+
+    dragged, again, toasts, in_sidebar, cleared = drive(go, notifications=True)
+    assert dragged == "red plain\nsecon"
+    assert in_sidebar, "the premise: focus never left the sidebar"
+    assert again == dragged, "ctrl+c copied the pane's text, not the header line joined onto it"
+    assert toasts == 2, "and said so, as the release did"
+    assert cleared, "and cleared the highlight, as the pane's own ctrl+c does"
 
 
 def test_clicking_an_agent_opens_its_agent_view(tmp_path: Path, script: Script) -> None:
@@ -1167,7 +1214,9 @@ def test_q_quits_from_the_sidebar_but_reaches_a_focused_terminal_pane(
     keys, alive, with_pane, from_sidebar, after_q = drive(go)
     assert keys == list(probes)  # every probe reached the pane, none was eaten
     assert alive is None  # …and q / ctrl+q did not quit
-    assert with_pane == "Screen"  # no palette (f1), theme picker (t) or help (?) opened
+    # The default screen is the app's ``PaneScreen`` (the copy key outside a pane):
+    # no palette (f1), theme picker (t) or help (?) opened over it.
+    assert with_pane == "PaneScreen"
     assert from_sidebar == "CommandPalette"
     assert after_q == 0
 
@@ -1229,7 +1278,7 @@ def test_the_app_keys_are_refused_while_focus_is_in_a_view(tmp_path: Path, scrip
     # reader should read "q quit from a form", not "the second probe lost focus".
     assert codes == [None, None], "q in a form must not quit the fleet UI"
     assert focused == ["Button", "Switch", "Button"]  # the probes really had focus
-    assert screens == ["Screen", "Screen", "HelpScreen", "HelpScreen"]
+    assert screens == ["PaneScreen", "PaneScreen", "HelpScreen", "HelpScreen"]
     assert quit_code == 0  # …and the sidebar still quits
 
 

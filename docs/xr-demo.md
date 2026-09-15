@@ -52,12 +52,18 @@ cache:
 aisquare doctor
 ```
 
-Look for the row named `xr`. It **warns, never fails** — every other command
-works without any of this. The third fact is the one worth reading before a
-demo, because it is the only one that fails *late*: with no cached model the
-server starts perfectly and the first push-to-talk goes to the network. The fix
-printed alongside it pre-downloads the model; run it on the machine that will
-be demoing, on its own network, not five minutes before.
+Look for the row named `xr`. It is **ok when something is merely absent** — the
+extra not installed, the model not yet downloaded — with the install line and
+the pre-download line on the row itself, and it **warns only for a fault you can
+act on**: port 8748 held by another process, a faster-whisper install missing
+its ctranslate2 or onnxruntime wheel, a cached model with no loadable snapshot
+(an interrupted download), or an unsupported name in `AISQUARE_XR_WHISPER_MODEL`.
+It never fails: every other command works without any of this, and `install.sh`
+treats any amber row but `brain` as an installer failure. The third fact is the
+one worth reading before a demo, because it is the only one that fails *late*:
+with no cached model the server starts perfectly and the first push-to-talk goes
+to the network. The line printed beside it pre-downloads the model; run it on
+the machine that will be demoing, on its own network, not five minutes before.
 
 To use the larger model, set `AISQUARE_XR_WHISPER_MODEL=small.en` before both
 the download and the run. `base.en` (the default) and `small.en` are the only
@@ -161,7 +167,9 @@ summon rather than on session start is what makes this survive guardian drift
 ## If something is wrong
 
 - **No `xr` row in `aisquare doctor`, or it warns** — read the fix it prints;
-  it names the exact command for each of the three facts.
+  it names the exact command for each fault. An ok row that says the extra is
+  not installed or the model is not cached is not a fault, but voice will not
+  work until you run the line on that row.
 - **`navigator.xr` is undefined / no *Enter AR* button** — trap 1. It is almost
   always this.
 - **Voice produces nothing at all** — the transcriber refuses to start rather

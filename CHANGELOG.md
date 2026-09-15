@@ -38,6 +38,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
     takes `follow_imports_for_stubs` as well as `follow_imports` — the first
     alone leaves the stub parsed and the run still red.
+  - `doctor` gains an `xr` row — the extra, port 8748 and the cached whisper
+    model on one line, below `browser tools` so it cannot evict an actionable
+    row from the fleet sidebar. Absences are **ok**: an extra nobody installed
+    and a model nobody has downloaded are not faults, and `install.sh` exits 2
+    on any amber row but `brain`, so the row stays green on a base install and
+    carries the install and pre-download lines in its detail instead. It
+    **warns** only for something to act on: 8748 held, a faster-whisper install
+    missing its ctranslate2 or onnxruntime wheel, a cached model directory with
+    no loadable snapshot, or an unsupported `AISQUARE_XR_WHISPER_MODEL`.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

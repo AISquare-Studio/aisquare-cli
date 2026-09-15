@@ -158,6 +158,8 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for knob in (
         "AISQUARE_TEAM",
         "AISQUARE_ROLE",
+        # Exported by `launch --persona`; a fleet agent running the suite has one.
+        "AISQUARE_PERSONA",
         "AISQUARE_TEAM_HUB",
         "AISQUARE_TEAM_DELTA",
         "AISQUARE_TEAM_LEASE_MIN",

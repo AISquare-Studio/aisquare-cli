@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Run an agent as a persona.** `aisquare launch <role> --persona NAME` and
+  `aisquare fleet spawn <role> --persona NAME` — default: the role's new
+  `[fleet.roles.<role>].persona` — start an agent as someone. The name is checked
+  before anything starts (an unknown one is refused with the known names; a stale
+  config default names its key) and travels as `AISQUARE_PERSONA`, never the body.
+  The SessionStart hook records it on the board row (store v15:
+  `team_session.persona`, `fleet_agent.persona`) and adds the persona's block to
+  the team briefing once, after the role cycle and the lane rule. A session
+  without a persona gets byte-identical text — pinned against the base in
+  `tests/test_persona_briefing.py` — the per-prompt delta and `aisquare board`
+  carry no persona text, and a persona that can no longer be loaded costs one
+  line, never the team block. The board's session line reads `persona:<name>`,
+  `fleet ls` shows `· <name>`, a spawn receipt ends `· persona <name>`, and a
+  persona written for other roles is a receipt note, not a refusal. Found on
+  the way: saving config dropped an unknown key INSIDE a `[fleet.roles.<role>]`
+  or `[explainability.targets.<name>]` entry, because those tables were
+  replaced wholesale; from this build on each kept entry is merged field by
+  field, so a later build's role key survives this one.
 - **Personas — and a persona is a Claude Code skill.** `aisquare persona`
   (`list`, `show`, `new`, `edit`, `rm`, `validate`, `import`, `export`, every
   reporting verb with `--json`) manages how an agent works — a skeptic, a mentor,

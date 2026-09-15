@@ -491,6 +491,9 @@ class TeamSession(BaseModel):
     """The model id the session reported at start (optional in hook payloads)."""
     effort: str | None = None
     """The effort level the session reported at start (optional in hook payloads)."""
+    persona: str | None = None
+    """The persona the session was launched as (``AISQUARE_PERSONA``), recorded at start —
+    what was ASKED, even when it could not be loaded (docs/plans/spawn-personas.md §3.7)."""
 
 
 class TeamTask(BaseModel):
@@ -690,6 +693,9 @@ class FleetAgent(BaseModel):
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None
+    persona: str | None = None
+    """The persona the agent was spawned with: ``--persona``, else the role's
+    ``[fleet.roles.<role>].persona``, else none."""
 
 
 class FleetAgentStatus(BaseModel):

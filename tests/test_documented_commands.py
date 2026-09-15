@@ -883,7 +883,9 @@ CENSUS = {
     # Measured 2026-08-28 the same way, on the day the document was written: 29
     # fenced commands (the reference plus troubleshooting) and one classified
     # mention (the `aisquare-cli[tui]` pip requirement). Re-measure when it grows.
-    "docs/fleet.md": (29, 1),
+    # Re-measured 2026-09-15 when `fleet spawn --persona` joined the reference:
+    # 41 — the page had grown to 40 (the Accounts section) without a re-measure.
+    "docs/fleet.md": (41, 1),
     # Two commands in the smoke block; the export line is upper-case and is not a
     # mention this audit sees.
     "docs/ci-contract.md": (2, 0),
@@ -893,8 +895,9 @@ CENSUS = {
     # Measured 2026-09-15 on the day the persona guide was written: eighteen
     # fenced `aisquare persona …` commands, no classified mentions (the layout
     # and the SKILL.md example are `text`/`markdown` fences, which this audit
-    # does not read).
-    "docs/personas.md": (18, 0),
+    # does not read). Twenty since P2 added `launch --persona` and
+    # `fleet spawn --persona`.
+    "docs/personas.md": (20, 0),
 }
 
 

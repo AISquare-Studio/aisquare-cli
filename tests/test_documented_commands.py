@@ -117,6 +117,10 @@ DOCUMENTED = (
     # every `aisquare fleet …` line there is a step the reader types, so a flag
     # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
     "docs/fleet.md",
+    # The persona guide: every `aisquare persona …` line in an `sh` fence is a
+    # step the reader types (docs/plans/spawn-personas.md §6 — planned commands
+    # stay inline or in `text` fences until they exist).
+    "docs/personas.md",
     # The CI test bed's smoke: `aisquare doctor` and `aisquare metrics list`
     # against the stub server, meant to be typed.
     "docs/ci-contract.md",
@@ -886,6 +890,11 @@ CENSUS = {
     # Measured 2026-09-02: eight commands, two path mentions (`../aisquare-ci`,
     # `src/aisquare/...`).
     "docs/ci-live-wiring-handoff.md": (8, 2),
+    # Measured 2026-09-15 on the day the persona guide was written: eighteen
+    # fenced `aisquare persona …` commands, no classified mentions (the layout
+    # and the SKILL.md example are `text`/`markdown` fences, which this audit
+    # does not read).
+    "docs/personas.md": (18, 0),
 }
 
 

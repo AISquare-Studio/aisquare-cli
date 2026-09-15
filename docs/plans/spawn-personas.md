@@ -681,6 +681,12 @@ class Provenance(BaseModel):
 
 class PersonaError(ValueError):
     """str(exc) names the path, the line (when there is one) and the rule."""
+    def __init__(self, rule: str, *, path: Path | str | None = None, line: int | None = None, code: str = "invalid_persona")
+    # .rule (no location) · .line · .code: not_recognised, too_large, invalid_name, unknown_persona,
+    #   persona_exists, target_exists, bundled_read_only, no_project, source_not_found, source_empty, …
+
+BUNDLED_DIR: Path; SKILL_FILE = "SKILL.md"; PROVENANCE_FILE = ".persona.json"; CLAUDE_CODE_KEYS: frozenset[str]
+def guard_sentence(name: str) -> str                                  # briefing()'s last line, on its own
 
 def split_frontmatter(text: str) -> tuple[str, str]                 # (yaml text, body) or PersonaError
 def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona   # the recognised test lives here
@@ -703,11 +709,17 @@ def import_source(source: str, *, layer: Layer, root: Path | None, name: str | N
     # confirm and progress are the UI's seam (§4.3): the CLI passes y/N and a stderr printer, the TUI passes modals
 def importable_skills(root: Path | None) -> list[SkillRef]           # <config dir>/skills + <repo>/.claude/skills
 def new(name: str, *, layer: Layer, root: Path | None) -> Path        # scaffold, then edit
-def edit(name: str, *, root: Path | None) -> Persona | None            # $EDITOR via core.editor.edit_text; invalid result keeps the old file
+def edit(name: str, *, root: Path | None, layer: Layer | None = None) -> Persona | None   # $EDITOR via core.editor.edit_text; invalid result keeps the old file; layer None = the winner's copy
 def save(name: str, text: str, *, root: Path | None, layer: Layer | None = None) -> Persona   # the ONE text writer: parse_skill first (old bytes untouched on error), bundled refused, staged replace, load; edit() calls it; the UI editor (§4.4) calls it
 def remove(name: str, *, layer: Layer, root: Path | None) -> Path      # bundled: PersonaError
 def export(name: str, *, root: Path | None, to: Path | None, skill: Literal["user", "project"] | None, force: bool) -> Path | str
 def validate(path: Path) -> tuple[Persona, list[str]]                  # persona + warnings
+def locate(name: str, root: Path | None) -> tuple[Layer, Path]         # first directory of that name, loadable or not (what edit/rm act on)
+def shadows(persona: Persona, root: Path | None) -> list[Layer]        # lower layers holding the same name ("⇧ shadows …")
+
+class SkillRef(BaseModel):          # name, description, path, scope: "user" | "project", recognised, reason, imported
+class PersonaDraftView(BaseModel):  # name, description, body, skill_md, engine, model, notes, draft_path — P5 builds it
+class ImportResult(BaseModel):      # persona: Persona, engine, model, source, replaced, warnings
 ```
 
 ```python
@@ -1111,3 +1123,4 @@ exists; validator once all eight are done.
 | 2026-09-15 | **Rev 3 — the persona TUI.** Owner asked for the whole lifecycle in `asq`: §4 becomes 4.1 Spawn dialog, 4.2 Personas view (sidebar section, Doctor-style project scope, catalogue + preview), 4.3 Import dialog with `progress` and the confirm-draft modal bridged from a thread worker, 4.4 in-UI editor (TextArea, validate-on-save, bundled read-only), 4.5 Export to Claude's skill dirs / Remove, 4.6 Spawn with… + Import… in the dialog. `import_source` gains `progress`; the UI consumes the CLI's own callbacks and never re-implements import. Tasks: **P6** `tsk_01m2hn7whzm1edrxb78mf03g86` (needs P1, L) and **P7** `tsk_01m2hn7wyktx1kksfpsw7yqz8n` (needs P4, P6, S) added; P5 reassigned to coder-persona-core (P1 → P2 → P5); coder-spawn-dialog runs P3 → P6 → P4 → P7. The stale `AISQUARE_TEAM_HUB` was removed from the `asqui` tmux server's global env before any teammate is spawned. | owner + manager `8e92f6af` |
 | 2026-09-15 02:05 | `services.personas.save(name, text, *, root, layer)` added to the §5 contract at coder3b-1's request (P6's in-UI editor must write through the service); lands in P1's PR #181 before merge. Also verified by coder3b-1 on Textual 8.2.8: a thread worker can `app.call_from_thread(app.push_screen_wait, …)` and block on the result — §4.3's primary path holds, no fallback needed. | manager `8e92f6af` + coder3b-1 |
 | 2026-09-15 | **Rev 4 — persona-first, two steps, no global section.** Owner: personas are a selection when spawning; a Personas **tab** under the project replaces rev 3's sidebar section; each persona has **Attach to existing** / **Attach to new**, both opening one **target picker** (Agents · Binds · Accounts, ordered by intent, all selectable) with **+ New bind** (through `team bind`) and **+ New account** (the Accounts page); an agent gets the persona now via `fleet tell` and keeps it through the hook's row fallback (new **P8**); a bind or account opens the Spawn dialog preset; **Pick…** in the dialog is the same picker. Tasks re-issued: P4 `tsk_01m2hqgwsk4g7p49gdass3qey3` (needs P2, P3), P6 `tsk_01m2hqgvvcd9nqv06v57pty8cf` (needs P1), P8 `tsk_01m2hqgwb1v812egwahakzg0c7` (needs P2), P7 `tsk_01m2hqgx8d7hs9tbd7d1es54h2` (needs P4, P6, P8); P1/P2/P3/P5 unchanged. Assignments: coder-persona-core P1 → P2 → P5 → P8; coder-spawn-dialog P3 → P6 → P4 → P7. Loop prompts are persona-style and board-driven; the manager assigns by task notes and `fleet tell`. | owner + manager `8e92f6af` |
+| 2026-09-15 | **P1 as built** (`feat/persona-core`). §5's names unchanged; additions recorded in §5 for P5/P6/P8 to import: `SkillRef`, `PersonaDraftView`, `ImportResult` fields; `services.personas.locate` and `shadows`; `edit(..., layer=None)` so `persona new` edits the copy it just made; `PersonaError(rule, *, path, line, code)` carrying the machine code the CLI reports; `core.personas.guard_sentence`. The project layer's root is `workspace.git_common_root(cwd)` — `find_project_root` falls back to the cwd and counts `~/.aisquare` as a marker, so from `$HOME` the user layer would be read twice. The briefing neutralises any line carrying an `<aisquare-…>` tag, not only the persona fence, because the block sits inside `<aisquare-team>`. `persona new`/`edit` open an editor only when one is named or a terminal exists (`vi` on no input would hang a sweep); conftest clears `EDITOR`/`VISUAL`. Export writes a `.persona.json` when the source has none (bundled), per §7. A skill named in both Claude Code directories imports the personal one, as Claude Code ranks them. `hatchling` joins the dev extra so `test_packaging` builds the real wheel. | coder3a-1 `022c1186` |

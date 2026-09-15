@@ -7,6 +7,79 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`aisquare xr` — the board as a spatial client (cliXR, M1).** A new command
+  serving a static WebXR client and one websocket on `127.0.0.1:8748`, beside
+  `serve` on 8747, from the new `[xr]` extra. It projects live board state:
+  one session per panel, with the role bucket, `working` / `waiting` /
+  `needs_you`, a claimed task's title, and a six-word summary computed from the
+  session's most recent board event — never from its transcript, which reaches
+  a client only for the one session it explicitly subscribes to. The projector
+  polls the store every 500 ms and sends a delta only when something moved, so
+  nothing in the hook path changes and no agent session can be blocked by a
+  headset.
+  - The wire protocol is generated, not described: a Pydantic model per message
+    in `services/xr/protocol.py`, with `python -m aisquare.services.xr.protocol
+    --write` emitting `web/xr/protocol.schema.json` and `--check` failing on
+    drift, so the browser client and the server cannot diverge silently. One
+    message beyond the plan's draft — `ack` — because a prompt sent to a panel
+    is delivered either by typing into a waiting pane or by filing a board note
+    (`fleet tell`'s own two paths), and an operator wants to know which.
+  - Auth is `serve`'s bearer token, from the same 0600 file: one credential for
+    both servers. It arrives in the socket's first frame (a browser cannot set
+    a header on a `WebSocket`) and is printed as a URL fragment, which is never
+    sent to a server and never lands in a log. `xr` prints the `adb reverse
+    tcp:8748 tcp:8748` line and the `chrome://flags` secure-origin note on
+    start, because `navigator.xr` exists only in a secure context and a LAN
+    address is not one. An occupied port is a sentence and exit 1
+    (`xr_port_busy`), checked before anything is activated.
+  - One toolchain note that comes with the extra: `faster-whisper` pulls in
+    numpy, whose stubs are PEP 695, and mypy parses them under this project's
+    `python_version = "3.11"` and stops the whole run on a syntax error in a
+    file nobody here imports. A `[[tool.mypy.overrides]]` skips them, which
+    takes `follow_imports_for_stubs` as well as `follow_imports` — the first
+    alone leaves the stub parsed and the run still red.
+  - **Voice (M6, server half).** Between an `audio` header and its `audioEnd`
+    the binary frames go to a per-connection faster-whisper transcriber
+    (`base.en` by default, `AISQUARE_XR_WHISPER_MODEL=small.en` allowed):
+    interim `stt` frames while the operator speaks, then the final `stt`, and
+    the SERVER routes the final text as the prompt — `fleet tell` into a
+    waiting pane or a board note — and answers with the same `ack` a typed
+    prompt gets. Releasing the trigger is the commit; the client sends no
+    `prompt` for voice. Every call into the model runs on a daemon thread from
+    a per-connection worker fed in wire order, so the socket keeps being read
+    (pongs answered, typed prompts and `audioEnd` not queued behind a decode),
+    frames that arrive during a slow decode are fed as one chunk, and Ctrl-C
+    stops the server while a model is still downloading. The model's
+    voice-activity gate decides whether a press had speech in it, so a breath
+    or a click is an empty final and never a prompt. Each burst is answered by
+    at most one error, after which its remaining frames are accepted and
+    discarded: `stt_unavailable` (no backend; the message carries the install
+    or pre-download line), `stt_empty` (no audio frame arrived at all),
+    `stt_failed` (the backend raised), `audio_too_long` (past 60 s or its byte
+    equivalent, counted as frames arrive), `audio_misaligned` (a frame that is
+    not a whole number of samples — the sender lost or added a byte, so the
+    burst is dropped rather than transcribed as byte-shifted noise) and
+    `audio_unexpected` (audio with no open burst). An `audio` header that
+    arrives while a burst is open ends that burst as its `audioEnd` would have
+    and opens the next, so a trigger bounce loses neither sentence. A headset
+    that disconnects after releasing the trigger still gets its sentence
+    routed; one that disconnects mid-burst loses only that burst, quietly. A
+    board that cannot be read at connect is a `board_unavailable` error and a
+    clean close 1013 (try again later) rather than a dropped transport, and a
+    binary first frame is refused like any other non-auth frame (`auth_failed`,
+    close 4401). `ack.ok` is true whenever the text reached the agent by either
+    route and false only when delivery raised. Ambient summaries of task events
+    lead with a board-status verb (`doing:`, `review:`, `done:`, `released:` …)
+    so a claim and a hand-off are different panels.
+  - `doctor` gains an `xr` row — the extra, port 8748 and the cached whisper
+    model on one line, below `browser tools` so it cannot evict an actionable
+    row from the fleet sidebar. Absences are **ok**: an extra nobody installed
+    and a model nobody has downloaded are not faults, and `install.sh` exits 2
+    on any amber row but `brain`, so the row stays green on a base install and
+    carries the install and pre-download lines in its detail instead. It
+    **warns** only for something to act on: 8748 held, a faster-whisper install
+    missing its ctranslate2 or onnxruntime wheel, a cached model directory with
+    no loadable snapshot, or an unsupported `AISQUARE_XR_WHISPER_MODEL`.
 - **Accounts, in `asq` and on the command line.** A new **Accounts** section in
   the fleet UI's sidebar opens a page with the AISquare sign-in on top and the
   Claude Code accounts under it. The AISquare card runs `aisquare login`'s

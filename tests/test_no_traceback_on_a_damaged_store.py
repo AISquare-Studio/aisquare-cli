@@ -65,6 +65,7 @@ from aisquare.core import paths
 #: so a rename cannot quietly widen this list into a hiding place.
 UNINVOKED = {
     "serve": "binds a port and blocks",
+    "xr": "binds a port and blocks",
     "launch": "spawns a real agent process",
     "team spawn": "spawns a real agent process",
     "login": "polls the identity provider until a browser approval arrives",

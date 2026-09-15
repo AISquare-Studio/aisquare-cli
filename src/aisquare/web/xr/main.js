@@ -371,14 +371,17 @@ function showNotice(target, text, opts = {}) {
     // The target's final is still being read. Hold the receipt behind it (the
     // final's timer replays it), so it does not clobber the words — including the
     // "heard:" HUD toast for an unfocused session. A PROBLEM still reaches the
-    // HUD at once, because an ok:false receipt must never be discarded unseen.
-    rec.pendingNotice = { text, opts };
+    // HUD at once, because an ok:false receipt must never be discarded unseen —
+    // and the replay is told so (`hudSent`), so the HUD copy goes up exactly once
+    // rather than again when the timer fires, which would also restart its timer
+    // and keep a stale message up for the sum of the two.
+    rec.pendingNotice = { text, opts: { ...opts, hudToo: false, hudSent: hudToo } };
     if (hudToo) hud.toast(text, ms);
     return;
   }
   // Not deferred: show now — on the panel if that session is focused, else on
-  // the HUD (also on the HUD for any problem).
-  if (text && (hudToo || !onPanel)) hud.toast(text, ms);
+  // the HUD (also on the HUD for any problem), unless the HUD already has it.
+  if (text && (hudToo || (!onPanel && !opts.hudSent))) hud.toast(text, ms);
   if (target == null) return;
   renderNotice(target, text, opts);
 }
@@ -1277,7 +1280,11 @@ window.__xr = {
   },
   /** Capture state: whether the mic is live, the frame and byte counters for
    *  the current burst, and whether the worklet is resampling or passing
-   *  through. `bytes / 640` must equal `frames` — every frame is 20 ms. */
+   *  through. Every frame but the last is 640 bytes (20 ms); the last one of an
+   *  utterance is the worklet's flush of a PARTIAL frame, so after a release
+   *  `(frames - 1) * 640 < bytes <= frames * 640` — not `bytes / 640 === frames`,
+   *  which only holds mid-hold, before the tail has crossed. (A measured burst:
+   *  35 frames, 22272 bytes.) */
   get voice() {
     return { ...voice.state, speakingAt };
   },

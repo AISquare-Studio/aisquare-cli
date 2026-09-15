@@ -30,6 +30,7 @@ import {
   barColor,
   focusFont,
   rgba,
+  stateLabel,
   voiceFont,
 } from './style.js';
 
@@ -155,7 +156,16 @@ export class FocusPanel {
     this.blitScene.add(
       new THREE.Mesh(
         new THREE.PlaneGeometry(1, 1),
-        new THREE.MeshBasicMaterial({ map: this.texture, transparent: true }),
+        // No depth test: this is a single full-frame quad blitted into the
+        // compositor's colour texture, and the layer render target carries no
+        // usable depth buffer (see `ensureLayer`), so a depth test would be
+        // comparing against nothing.
+        new THREE.MeshBasicMaterial({
+          map: this.texture,
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+        }),
       ),
     );
 
@@ -220,12 +230,36 @@ export class FocusPanel {
     const before = this.scrollOffset;
     this.scrollOffset -= delta;
     this.clampScroll();
-    if (this.scrollOffset !== before) this.dirty = true;
+    // Redraw only when the DRAWN (whole-line) position moves. The offset itself
+    // is fractional so the thumbstick, which asks for well under one line per
+    // frame (y·10·dt ≈ 0.08–0.14 at 72–120 Hz), accumulates across frames; the
+    // old `Math.round` in clampScroll threw that fraction away every frame and
+    // the stick could not scroll in the headset at all above ~20 fps.
+    if (Math.round(this.scrollOffset) !== Math.round(before)) this.dirty = true;
   }
 
   clampScroll() {
     const max = Math.max(0, this.lines.length - FOCUS.rows);
-    this.scrollOffset = Math.min(max, Math.max(0, Math.round(this.scrollOffset)));
+    // Clamp WITHOUT rounding: the fraction is the sub-line scroll position, and
+    // `draw` rounds only for the line it slices. Rounding here would defeat the
+    // accumulation the thumbstick depends on.
+    this.scrollOffset = Math.min(max, Math.max(0, this.scrollOffset));
+  }
+
+  /** Forget the transcript sequence high-water mark.
+   *
+   * The server restarts `seq` at 1 on every connection and every subscribe, so
+   * after a reconnect the replayed stream's `seq` counts up from 1 again. Left
+   * alone, `append`'s `seq <= this.seq` replay guard would discard the whole new
+   * stream up to the old high-water mark — the panel would freeze at the last
+   * record it saw before the drop while the chip read "connected". main.js calls
+   * this before it re-subscribes. The lines are cleared too: the server replays
+   * its backlog on subscribe, so keeping the old lines would double the tail. */
+  resetSeq() {
+    this.seq = -1;
+    this.lines = [];
+    this.scrollOffset = 0;
+    this.dirty = true;
   }
 
   /**
@@ -394,7 +428,19 @@ export class FocusPanel {
       });
       this.layer.quality = 'text-optimized';
 
-      this.layerTarget = new THREE.WebGLRenderTarget(FOCUS.pixelWidth, FOCUS.pixelHeight);
+      // three r186's `setRenderTargetTextures` does
+      // `properties.get(renderTarget.depthTexture).__webglTexture = …`
+      // UNCONDITIONALLY, so a render target with no `depthTexture` makes it call
+      // `WeakMap.set(null)` and throw on the first blit — which the catch in
+      // `update` turns into a permanent fallback to the in-scene plane, silently
+      // costing the headset the text-optimized layer this tier exists for. Give
+      // the target a real DepthTexture so that access resolves, and
+      // `resolveDepthBuffer: false` so three neither expects nor binds an
+      // external depth image (the quad blit needs none — see `blitScene`).
+      this.layerTarget = new THREE.WebGLRenderTarget(FOCUS.pixelWidth, FOCUS.pixelHeight, {
+        depthTexture: new THREE.DepthTexture(FOCUS.pixelWidth, FOCUS.pixelHeight),
+        resolveDepthBuffer: false,
+      });
 
       // Array order is back to front, so appending puts the focused transcript
       // over the projection layer — which is where a pulled-forward panel is.
@@ -435,7 +481,7 @@ export class FocusPanel {
     try {
       const sub = this.binding.getSubImage(this.layer, frame);
       const target = this.layerTarget;
-      this.renderer.setRenderTargetTextures(target, sub.colorTexture);
+      this.renderer.setRenderTargetTextures(target, sub.colorTexture, sub.depthStencilTexture ?? undefined);
       if (sub.viewport) {
         target.viewport.set(sub.viewport.x, sub.viewport.y, sub.viewport.width, sub.viewport.height);
       }
@@ -443,9 +489,18 @@ export class FocusPanel {
       // bound target is three.js's own projection-layer target, and handing it
       // back a null would drop the frame the ring is drawn into.
       const previous = this.renderer.getRenderTarget();
+      // Blit with the XR path OFF for this one render. `renderer.render()` swaps
+      // in the XR array camera whenever `xr.isPresenting`, ignoring the camera
+      // passed to it — so the orthographic blit camera would be discarded and
+      // NOTHING would be drawn into the layer (zero draw calls; the layer stays
+      // whatever the compositor last had). Disabling xr for the blit restores
+      // the ortho camera; it is re-enabled immediately, before the ring renders.
+      const xrWasEnabled = this.renderer.xr.enabled;
+      this.renderer.xr.enabled = false;
       this.renderer.setRenderTarget(target);
       this.renderer.render(this.blitScene, this.blitCamera);
       this.renderer.setRenderTarget(previous);
+      this.renderer.xr.enabled = xrWasEnabled;
     } catch (err) {
       console.warn('[xr] quad layer blit failed; falling back to an in-scene plane', err);
       this.destroyLayer();
@@ -489,10 +544,14 @@ export class FocusPanel {
     const alerting = this.session.state === 'needs_you';
 
     // Title bar: title on the left, state (or the scroll position) on the right.
-    const right = this.scrollOffset > 0 ? `▲${this.scrollOffset}` : String(this.session.state ?? '');
+    // The state reads the way an operator does — "needs you", not "needs_you" —
+    // via the shared label, and the scroll indicator shows whole lines because
+    // the offset is now fractional (sub-line thumbstick accumulation).
+    const scrolledLines = Math.round(this.scrollOffset);
+    const right = scrolledLines > 0 ? `▲${scrolledLines}` : stateLabel(this.session);
     ctx.font = focusFont(600);
     const rightW = ctx.measureText(right).width;
-    ctx.fillStyle = this.scrollOffset > 0 ? COLOR.inkDim : alerting ? COLOR.alert : COLOR.ink;
+    ctx.fillStyle = scrolledLines > 0 ? COLOR.inkDim : alerting ? COLOR.alert : COLOR.ink;
     ctx.fillText(right, w - FOCUS.padR - rightW, FOCUS.titleH / 2);
 
     ctx.fillStyle = COLOR.ink;
@@ -503,8 +562,10 @@ export class FocusPanel {
     ctx.fillRect(FOCUS.barW, FOCUS.titleH, w - FOCUS.barW, 3);
 
     // Transcript, newest at the bottom. The slice is taken from the end so the
-    // tail is what shows when `scrollOffset` is 0.
-    const end = this.lines.length - this.scrollOffset;
+    // tail is what shows when `scrollOffset` is 0. Rounded to a whole line for
+    // the slice; the fractional part is the sub-line scroll position the drawing
+    // does not resolve (§9's thumbstick moves well under a line per frame).
+    const end = this.lines.length - scrolledLines;
     const start = Math.max(0, end - FOCUS.rows);
     const page = this.lines.slice(start, Math.max(start, end));
 

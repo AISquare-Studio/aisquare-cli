@@ -330,6 +330,24 @@ export const FOCUS = {
   },
 };
 
+/**
+ * A session state, spelled the way an operator reads it (plan §11/M7).
+ *
+ * The wire spells the states in snake_case because Python wrote them
+ * (`SessionState` in protocol.py); every tier that shows one to a person spells
+ * `needs_you` as "needs you" — an underscore in the middle of the alert state is
+ * the sort of detail that makes a demo look unfinished, and the focus panel's
+ * title bar showed the raw form. Shared here so the ambient cell and the focus
+ * panel cannot drift. Anything unrecognised is passed through with underscores
+ * turned to spaces, so a server that grows a fourth state shows it, not nothing.
+ */
+const STATE_LABEL = { working: 'working', waiting: 'waiting', needs_you: 'needs you', gone: 'gone' };
+
+export function stateLabel(session) {
+  const state = String(session?.state ?? '');
+  return STATE_LABEL[state] ?? state.replace(/_/g, ' ');
+}
+
 /** Canvas font shorthand for the focus tier's voice line. */
 export function voiceFont(weight = 400) {
   return `${weight} ${FOCUS.voiceFontPx}px ${FONT_FAMILY}`;

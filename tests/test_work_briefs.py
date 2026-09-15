@@ -480,3 +480,18 @@ def test_an_oversized_check_is_clipped_in_session_context(work: Path) -> None:
     assert huge not in context, "the oversized check must not reach the session verbatim"
     assert len(context) < 12_000, "session context stays bounded"
     assert "asq brief show" in context
+
+
+def test_a_blocked_task_cannot_be_claimed_without_reopening(work: Path, proof: Path) -> None:
+    """Finding 10: a task blocked after three failed checks needs reopening, not a
+    silent re-claim that would bypass the re-planning stop."""
+    brief = briefs.create("Login", ["Phone layout fits"])
+    for n in range(3):
+        briefs.finding(brief.id, "R1", summary=f"clip {n}", artifact=proof)
+    task = briefs.show(brief.id).requirements[0].task_ids[0]
+    assert team.show_task(task).status == "blocked"
+    with pytest.raises(ValueError, match="blocked"):
+        team.claim_task(task)
+    team.reopen_task(task, reason="re-planned")
+    claimed = team.claim_task(task)
+    assert claimed.status == "doing"

@@ -1034,21 +1034,36 @@ def spawn(
     )
     kickoff = prompt
     if kickoff is None and resolved_task_id is not None:
-        # Same protocol as the session-start <aisquare-assignment> block: coders
-        # claim, every verifying role inspects and leaves ownership alone.
-        if harness.base_role(role) == "coder":
+        # Finding 10: the kickoff follows the task's ACTUAL status, exactly as the
+        # session-start <aisquare-assignment> block does. It must never tell a
+        # coder to "claim it" for a blocked, in-review, done or dropped task — a
+        # blocked-task claim would bypass the three-failures re-planning stop and
+        # contradict the assignment block the same session receives.
+        show = (
+            f"Work on assigned board task {resolved_task_id}. Read it with "
+            f"aisquare --json task show {resolved_task_id}."
+        )
+        status = task.status if task is not None else "todo"
+        if status == "blocked":
             kickoff = (
-                f"Work on assigned board task {resolved_task_id}. Read it with "
-                f"aisquare --json task show {resolved_task_id}, follow your role's work cycle, "
-                "and report the result on that task. Claim it before editing; if another "
-                "worker owns it or dependencies are unmet, report that and do not duplicate work."
+                f"{show} This task is BLOCKED after failed checks; do not claim it. "
+                "Report what would unblock it, and stop."
+            )
+        elif status in ("review", "done", "dropped"):
+            kickoff = (
+                f"{show} This task is {status}; do not claim or edit it. Inspect it and its "
+                "evidence, report and stop."
+            )
+        elif harness.base_role(role) == "coder":
+            kickoff = (
+                f"{show} Follow your role's work cycle and report the result on that task. "
+                "Claim it before editing; if another worker owns it or dependencies are unmet, "
+                "report that and do not duplicate work."
             )
         else:
             kickoff = (
-                f"Work on assigned board task {resolved_task_id}. Read it with "
-                f"aisquare --json task show {resolved_task_id}. Inspect it and its evidence, "
-                "preserve its existing ownership and do not claim it; follow your role's work "
-                "cycle and report the result on that task."
+                f"{show} Inspect it and its evidence, preserve its existing ownership and do not "
+                "claim it; follow your role's work cycle and report the result on that task."
             )
     if kickoff:
         _type_prompt(srv, stored.pane_id, kickoff, notes)

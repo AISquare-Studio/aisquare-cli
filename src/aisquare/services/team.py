@@ -977,6 +977,14 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
         task = store.get_task(ref)
         if task is None:
             raise KeyError(ref)
+        if task.status == "blocked":
+            # Finding 10: a task blocked after three failed checks needs human
+            # re-planning (`asq task reopen`), not a silent re-claim that would
+            # bypass that stop (done/review/dropped are already refused below).
+            raise ValueError(
+                f"task {task.id} is blocked; reopen it before claiming "
+                "(`asq task reopen`) so the re-planning stop is not bypassed"
+            )
         session = _resolve_session(store, session_ref)
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())

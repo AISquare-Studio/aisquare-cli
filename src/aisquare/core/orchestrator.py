@@ -17,6 +17,11 @@ branch is the gate:
 - ``AISQUARE_TEAM_DELTA=0``— mute the per-prompt teammate delta injection.
 - ``AISQUARE_TEAM_LEASE_MIN`` — claim lease in minutes (default 120; long
                              agentic turns only renew on prompt submit).
+- ``AISQUARE_FLEET_AGENT``  — the fleet_agent row this session runs in; set by
+                             ``fleet spawn`` on the window, read at session start
+                             to join the session to its row and brief it on the
+                             task it was spawned for. Inherited by the agent's
+                             own child processes — see ``team._assignment``.
 """
 
 from __future__ import annotations
@@ -46,6 +51,29 @@ def env_role() -> str | None:
     """The role this session was launched with, if any (``AISQUARE_ROLE``)."""
     role = os.environ.get("AISQUARE_ROLE", "").strip()
     return role or None
+
+
+def env_persona() -> str | None:
+    """The persona this session was launched as, if any (``AISQUARE_PERSONA``).
+
+    What ``launch --persona`` exports and the session-start hook reads — not a
+    config input, so a hand-typed ``AISQUARE_PERSONA=skeptic aisquare launch
+    coder`` works with no fleet at all (docs/plans/spawn-personas.md §3.8).
+    """
+    persona = os.environ.get("AISQUARE_PERSONA", "").strip()
+    return persona or None
+
+
+def env_fleet_agent() -> str | None:
+    """The ``fleet_agent`` row this session runs as (``AISQUARE_FLEET_AGENT``).
+
+    ``fleet spawn`` sets it on the tmux window it starts, so the session that
+    comes up inside can be joined to the row — and told the task the row was
+    spawned for. Nothing read it before: the task was recorded on the row and
+    named the label and branch, and the agent itself was never told.
+    """
+    agent_id = os.environ.get("AISQUARE_FLEET_AGENT", "").strip()
+    return agent_id or None
 
 
 def delta_enabled() -> bool:

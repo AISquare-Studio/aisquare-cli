@@ -103,7 +103,8 @@ def _agent_line(status: FleetAgentStatus) -> str:
         chip = f"{chip}({agent.exit_status})"
     extra = f"  {status.detail}" if status.detail else ""
     where = "  (worktree)" if agent.worktree else ""
-    return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{extra}  {agent.pane_id}"
+    persona = f"  · {agent.persona}" if agent.persona else ""
+    return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{persona}{extra}  {agent.pane_id}"
 
 
 def _emit_agents(project: ProjectInfo, agents: list[FleetAgentStatus]) -> None:
@@ -169,6 +170,15 @@ def spawn(
             metavar="SLOT",
         ),
     ] = None,
+    persona: Annotated[
+        str | None,
+        typer.Option(
+            "--persona",
+            help="Persona the agent runs as (see `aisquare persona list`); default: the "
+            "role's [fleet.roles.<role>].persona, else none.",
+            metavar="NAME",
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -192,6 +202,7 @@ def spawn(
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",
             account=account,
+            persona=persona,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -214,10 +225,11 @@ def spawn(
         if receipt.asked_label and receipt.asked_label != receipt.agent.label
         else ""
     )
+    persona = f" · persona {receipt.agent.persona}" if receipt.agent.persona else ""
     console = stdout_console()
     console.print(
         f"✓ spawned {receipt.agent.label}{asked} ({receipt.agent.id}) → "
-        f"{receipt.tmux_session} {receipt.agent.pane_id}"
+        f"{receipt.tmux_session} {receipt.agent.pane_id}{persona}"
     )
     for note in receipt.notes:
         console.print(f"  ⚠ {note}")

@@ -748,3 +748,41 @@ def test_a_numbered_seat_exports_the_seat_and_resolves_to_its_base_role() -> Non
     assert launch_cli._SEAT.match("codr1") is None
     assert team_service.base_role("codr1") == "codr1"
     assert launch_cli._SEAT.match("1") is None
+
+
+# --- --persona (docs/plans/spawn-personas.md §7 "P2") -----------------------------------
+
+
+def test_launch_persona_exports_the_name_for_the_session_start_hook(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    assert spy["argv"] == ["claude"], "the persona is a variable, never an agent argument"
+
+
+def test_launch_refuses_an_unknown_persona_listing_the_known_ones(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    import json
+
+    as_json = runner.invoke(app, ["--json", "launch", "coder", "--persona", "nope"])
+    human = runner.invoke(app, ["launch", "coder", "--persona", "nope"])
+
+    assert as_json.exit_code == 1
+    assert json.loads(as_json.stdout) == {"error": "unknown_persona", "ref": "nope"}
+    assert human.exit_code == 1
+    assert "known: careful, mentor, minimalist, skeptic" in human.output
+    assert spy == {}, "nothing may launch with a persona that does not exist"
+
+
+def test_launch_without_persona_exports_no_persona_variable(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_ROLE"] == "coder"
+    assert "AISQUARE_PERSONA" not in spy["env"]

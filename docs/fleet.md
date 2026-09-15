@@ -95,13 +95,36 @@ tmux can see and its row says so (`no hooks`).
    anything a user sees, and a reviewer as the
    work needs them, reopens what fails, calls a validator once everything is
    done, and posts `READY: <PRs + evidence>` when its gate passes. It never
-   writes code and never merges — a human does (Phase 5).
+   writes code and never merges — a human does (Phase 5). The project's
+   **Personas** tab lists the personas it can use, previews exactly what an
+   agent is briefed with, and imports, edits, exports, removes and validates
+   them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
    bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
-   session; click into the pane and every key you type goes to it. `＋ spawn
-   agent` on a project starts one of your own (Phase 4).
+   session; click into the pane and every key you type goes to it.
+   **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
+   project, headed with its name and codename. It reads in two steps. First who
+   runs it: role (the fleet's roles plus any role bound with `team bind`;
+   `manager` is greyed out while one runs; *Pick…* beside it opens the target
+   picker — a bound teammate or an account fills these fields), account and
+   binary. Then as whom:
+   **persona** — `(none)` or one of the project's personas, the role's
+   `[fleet.roles.<role>].persona` preselected, its description shown under it,
+   and *Import…* beside it to bring one in (`docs/personas.md`).
+   Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
+   picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
+   disables *Spawn* and shows the rule), task (the project's open tasks),
+   worktree (disabled with "not a git repository" outside one), permission mode,
+   extra agent args (split like a shell would; a quoting error is shown inline)
+   and a first prompt. A field left as it opened means the role's default,
+   exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
+   that has a default persona spawns without one. A refusal —
+   the agent limit, a binary not on your `PATH` — stays in the dialog with its
+   reason; a spawn toasts its receipt and notes and opens the new agent's pane.
+   `Esc` cancels, except while a spawn is already running: that one cannot be
+   taken back, so the dialog waits for its answer.
 5. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
    `q` quits the UI — and the agents keep running.
@@ -166,15 +189,17 @@ aisquare fleet spawn manager
 aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
+aisquare fleet spawn coder --persona skeptic
 aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
 Starts an agent in the project's tmux session — a window running
 `aisquare launch <role> …` — with the role's permission flags and a session id
 minted *before* launch, records it, and prints a receipt:
-`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`. Anything the receipt
-should tell you — a label that had to be suffixed, a worktree or branch that
-already existed, an agent that did not come up before its prompt was typed —
+`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`, ending `· persona skeptic`
+when the agent runs as one. Anything the receipt should tell you — a label that
+had to be suffixed, a worktree or branch that already existed, an agent that did
+not come up before its prompt was typed, a persona written for other roles —
 follows as a `⚠` line.
 
 | Flag | Meaning | Default |
@@ -186,12 +211,18 @@ follows as a `⚠` line.
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | first message typed once the agent is up | none |
+| `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
-repository, an unknown role.
+repository, an unknown role, a persona the project does not have (the known
+names are listed; a stale `[fleet.roles.<role>].persona` default names its key).
+All of these are checked before any window exists. A known role is one of
+`aisquare launch`'s roles, a numbered seat of one (`coder2`), or a role bound with
+`team bind` — the same rule `aisquare launch` applies, public as
+`services.fleet.role_ok`.
 
 ### `fleet ls` / `fleet status`
 
@@ -201,7 +232,7 @@ aisquare fleet ls --all
 aisquare fleet status --project amber-otter
 ```
 
-One row per agent — label, role, state chip, `(worktree)`, the detail behind
+One row per agent — label, role, state chip, `(worktree)`, `· <persona>`, the detail behind
 the state, the pane id — under a header naming the project, its codename and
 its tmux session. `ls` shows live agents; `--all` (`-a`) includes the ones that
 have ended. `status` is the same data, always live only.
@@ -223,6 +254,11 @@ Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted). Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
+
+`aisquare persona attach <name> --to <label>` uses the same delivery to give a
+running agent a persona, and keeps it on the agent's row so a `/clear` or a restart
+briefs it again ([docs/personas.md](personas.md)); its receipt reads `typed` or
+`noted`.
 
 ### `fleet stop`
 
@@ -406,9 +442,11 @@ precedence rule:
 
 > per-spawn flag  >  `[fleet]` config  >  built-in default
 
-**No `[fleet]` setting is read from the environment**: there is no
-`AISQUARE_FLEET_*` variable, and the fleet reads this section from the config
-file alone. The environment layer is real one level down — the model, effort
+**No `[fleet]` setting is read from the environment**: the fleet reads this
+section from the config file alone. (`AISQUARE_FLEET_AGENT` exists, but it is
+not a setting — `fleet spawn` sets it on each window as the agent's identity,
+and the session-start hook reads it to brief the agent on the task it was
+spawned for.) The environment layer is real one level down — the model, effort
 and binary a launch resolves (`AISQUARE_MODEL_<ROLE>` and friends, below) —
 which is the harness's rule, not this one.
 
@@ -461,6 +499,14 @@ extra_args = []                           # --chrome is the role's own default; 
 permission_mode = "auto"
 worktree = false
 extra_args = []
+```
+
+A role may also name a default persona — every spawn of that role runs as it
+unless `--persona` names another:
+
+```toml
+[fleet.roles.coder]
+persona = "minimalist"                    # checked at spawn: a name the project lacks refuses, naming this key
 ```
 
 A role the file omits gets the built-in shape (`auto`, no worktree, no extra
@@ -603,9 +649,18 @@ tmux -L asq list-sessions
 ```
 
 **Keys.** With a pane focused, every key goes to the agent except the escape
-hatch (`F12`) and the scroll keys below. Printable characters travel as typed; special keys are
-translated into tmux's names (Enter, BSpace, ctrl+c → `C-c`, shift+tab →
-`BTab`, …). Paste is bracketed, so Claude Code sees one paste and not one Enter
+hatch (`F12`), the scroll keys below, ctrl+c while text is selected (it copies)
+and cmd+c, which is only ever the copy. Printable characters travel as typed —
+except with alt held, where the chord is the meaning: an ASCII letter or digit
+(`M-p`, so Claude Code's alt+p switches the model) or a key tmux has a name for
+(alt+space is `M-Space`). Special keys are translated into tmux's names (Enter,
+BSpace, ctrl+c → `C-c` when nothing is selected, shift+tab → `BTab`, …). Where
+there is no safe name the character still travels: `ctrl+alt+1` types a `1`, and
+so does a chord your tmux is too old to carry (below 3.5, `ctrl+alt+space`
+inserts a space rather than doing nothing). The one exception is a modifier tmux
+cannot spell at all — Cmd (super) or hyper — which is dropped rather than typed,
+because Cmd+V is a command and not a request for a `v`.
+Paste is bracketed, so Claude Code sees one paste and not one Enter
 per line. The wheel goes to whoever can use it: a program that tracks the mouse
 (Claude Code's fullscreen TUI does) receives it as its own mouse event and
 scrolls its transcript; a fullscreen program that does not is left alone (its own
@@ -617,12 +672,36 @@ tmux copy mode stays tmux's. The keyboard scrolls too: shift+PgUp / shift+PgDn
 scrollback), shift+Home (the top) and shift+End (live) — through the same
 decision as the wheel, so on a Claude Code pane they scroll Claude's transcript.
 A pane scrolled into tmux history shows `[↑k/history]` in its top-right corner.
+Drag to select text in a pane (double-click selects a word): it is copied to
+your clipboard on release (OSC 52 — your terminal has to accept it; Windows
+Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies again
+while the selection stands. Only a left-button drag is a copy, so a right-click
+over a highlight leaves your clipboard alone, and so does a drag somewhere else
+entirely while a highlight stands. A drag that crosses the pane's edge — begun
+on the agent header, or released outside it — copies too, one character short
+of the same gesture made inside the pane: the terminal library reports the
+crossing endpoint without the trailing cell, and the highlight stops there too,
+so what you see is what you get. What is copied is always what is shown under the
+highlight at the moment you copy: cut to the columns the pane actually shows,
+and including the `[↑k/history]` marker and the `(exited 0)` notice where those
+are what the row displays. Under an agent that is still printing that means the
+text at release, not at the press — the same text you can see highlighted.
 Modifier
 chords beyond ctrl and alt depend on your *outer* terminal speaking the kitty
 keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+The alt chord has two limits, both in Textual's key parser rather than in this
+UI, and the kitty protocol is the *worse* case for this one rather than the
+better one. A terminal speaking it reports the typed text alongside the chord,
+and the parser then drops the `alt` token from the key name — so under kitty,
+ghostty, wezterm and foot, and on macOS where Option produces a character,
+alt+p still types a `p` and does not switch the model. And Escape is what the
+parser has to tell an alt chord from: a letter arriving within ~100 ms of a
+lone Escape is read as that chord, so pressing Esc and immediately typing `p`
+switches the model instead of typing the letter.
 
 ---
 

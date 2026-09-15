@@ -31,13 +31,22 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aisquare.core import orchestrator
 from aisquare.core.paths import aisquare_home
-from aisquare.core.source_revision import source_fingerprint, source_root_for
+from aisquare.core.source_revision import (
+    fingerprint_of,
+    source_file_hashes,
+    source_fingerprint,
+    source_root_for,
+)
 from aisquare.core.store import store_session
 
 DEFAULT_STREAM_LIMIT = 1024 * 1024
 MAX_STREAM_LIMIT = 16 * 1024 * 1024
 RETAIN_REPORTS = 64
 RETAIN_DAYS = 14
+#: The per-file source map (finding 14) is stored in the report JSON, which is
+#: bounded by ``_REPORT_JSON_LIMIT``. A checkout large enough to exceed this is
+#: not stored per-file; the gate falls back to the whole-tree comparison there.
+_SOURCE_MAP_BUDGET = 200_000
 _REPORT_ID = re.compile(r"^[0-9a-f]{32}$")
 _OFF = {"0", "false", "no", "off"}
 # Strip complete terminal sequences before parsing; raw files never go through this.
@@ -98,6 +107,14 @@ class CommandReport(BaseModel):
     source_root: str | None = None
     source_fingerprint_before: str | None = None
     source_fingerprint_after: str | None = None
+    #: The per-file content hashes of the checkout BEFORE the command ran
+    #: (finding 14). The evidence gate compares this file by file with the
+    #: checkout now, so a per-run output the check wrote (a
+    #: ``pytest --junitxml`` report, a ``.coverage``) is a new path it can
+    #: ignore while a changed source file still fails. ``None`` when source
+    #: capture was off, failed, or the map was too large to store, in which
+    #: case the gate falls back to the whole-tree before/after equality.
+    source_files_before: dict[str, str] | None = None
     source_capture_error: str | None = None
     stdout: StreamRecord
     stderr: StreamRecord
@@ -549,10 +566,17 @@ def _write_file(path: Path, data: bytes) -> None:
         os.fsync(handle.fileno())
 
 
-def _source_before(project_id: str | None, cwd: Path) -> tuple[Path | None, str | None, str | None]:
-    """Opt-in proof with --project; a capture failure never prevents execution."""
+def _source_before(
+    project_id: str | None, cwd: Path
+) -> tuple[Path | None, str | None, dict[str, str] | None, str | None]:
+    """Opt-in proof with --project; a capture failure never prevents execution.
+
+    Returns the per-file map as well as the combined fingerprint: the map is what
+    lets the evidence gate tell a new output file the check wrote from an edit to
+    source (finding 14), so it is captured BEFORE the command runs.
+    """
     if project_id is None:
-        return None, None, None
+        return None, None, None, None
     root: Path | None = None
     try:
         with store_session() as store:
@@ -563,10 +587,11 @@ def _source_before(project_id: str | None, cwd: Path) -> tuple[Path | None, str 
         if not cwd.is_relative_to(root) and orchestrator.team_project(cwd).root.resolve() != root:
             raise ValueError("command working directory is outside the named project's board")
         root = source_root_for(root, cwd)
-        return root, source_fingerprint(root), None
+        files = source_file_hashes(root)
+        return root, fingerprint_of(files), files, None
     except Exception as exc:  # source capture is an observer, never an execution gate
         # No usable "before" means no proof either way; do not spend an "after" scan.
-        return None, None, f"Before command: {exc}"[:2048]
+        return None, None, None, f"Before command: {exc}"[:2048]
 
 
 def _source_after(root: Path | None) -> tuple[str | None, str | None]:
@@ -619,7 +644,14 @@ def run_command(
     started = datetime.now(UTC)
     working_dir = (cwd or Path.cwd()).resolve()
     launch_error = None
-    source_root, source_before, source_error = _source_before(project_id, working_dir)
+    source_root, source_before, source_files_before, source_error = _source_before(
+        project_id, working_dir
+    )
+    if source_files_before is not None and (
+        len(json.dumps(source_files_before)) > _SOURCE_MAP_BUDGET
+    ):
+        # Too large to store: the gate falls back to whole-tree equality.
+        source_files_before = None
     try:
         try:
             child = subprocess.Popen(
@@ -667,6 +699,7 @@ def run_command(
                     pipeline_id=pipeline_id,
                     source_root=str(source_root) if source_root is not None else None,
                     source_fingerprint_before=source_before,
+                    source_files_before=source_files_before,
                     source_capture_error=source_error,
                     stdout=records["stdout"],
                     stderr=records["stderr"],

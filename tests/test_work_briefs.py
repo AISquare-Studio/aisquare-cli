@@ -482,3 +482,48 @@ def test_an_oversized_check_is_clipped_in_session_context(work: Path) -> None:
     assert huge not in context, "the oversized check must not reach the session verbatim"
     assert len(context) < 12_000, "session context stays bounded"
     assert "asq brief show" in context
+
+
+def test_a_check_that_writes_a_per_run_output_file_can_still_pass(work: Path) -> None:
+    """Finding 14: a check that writes a per-run output file into the checkout
+    (`pytest --junitxml=report.xml`, a non-git project's `.coverage`) changed the
+    whole-tree fingerprint on every run, so its report could never be recorded as
+    a pass. Per file, the new file is not source and is ignored; a modified
+    source file still invalidates the pass."""
+    import sys
+
+    from aisquare.services import command_reports
+
+    brief, task = contract(work)
+    # The check runs and, like a JUnit/coverage run, drops a new non-ignored file
+    # into the checkout. `work` is not a git repo, so report.xml is plain source
+    # by the old whole-tree rule; before it never existed, so per file it is new.
+    report = command_reports.run_command(
+        [sys.executable, "-c", "from pathlib import Path; Path('report.xml').write_text('run-1')"],
+        cwd=work,
+        project_id=brief.project_id,
+        task_id=task,
+    )
+    assert report.returncode == 0
+    # The whole-tree fingerprints DO differ (report.xml appeared during the run):
+    # the old gate would refuse this as "stale".
+    assert report.source_fingerprint_before != report.source_fingerprint_after
+    for requirement in ("R1", "R2"):
+        briefs.record_evidence(
+            brief.id,
+            requirement,
+            task_ref=task,
+            verdict="pass",
+            summary="the check wrote report.xml and passed",
+            report_id=report.id,
+        )
+    assert briefs.check(brief.id).complete, "a new per-run output file must not block a pass"
+    # A regenerated output file (new content, new path never in the before map) is
+    # still ignored by the coverage check.
+    (work / "report.xml").write_text("run-2, different bytes")
+    assert briefs.check(brief.id).complete, "regenerating the output file must not stale the pass"
+    # But a real edit to a pre-existing source file still invalidates it.
+    (work / "app.py").write_text("version = 99\n")
+    result = briefs.check(brief.id)
+    assert not result.complete
+    assert all(row.status == "stale" for row in result.requirements)

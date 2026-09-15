@@ -212,9 +212,11 @@ SEAMS: dict[str, Seam] = {
         "runs; no model process",
     ),
     "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
-    "aisquare/core/source_revision.py::source_fingerprint": Seam(
+    "aisquare/core/source_revision.py::_iter_source_entries": Seam(
         EXCLUDED,
-        "local git inventory/HEAD reads to invalidate evidence when source changes; no model",
+        "local git inventory/HEAD reads to invalidate evidence when source changes; no model. "
+        "The `git rev-parse` probe moved here from source_fingerprint when the per-file map "
+        "(finding 14) became the single enumeration both fingerprint forms build on.",
     ),
     "aisquare/core/source_revision.py::source_root_for": Seam(
         EXCLUDED, "local git checkout path lookup for command/evidence provenance; no model"

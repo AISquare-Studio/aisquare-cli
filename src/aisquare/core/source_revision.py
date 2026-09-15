@@ -6,6 +6,7 @@ import hashlib
 import os
 import stat
 import subprocess
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from aisquare.core.paths import aisquare_home
@@ -102,17 +103,21 @@ def source_root_for(project_root: Path, cwd: Path | None = None) -> Path:
     return start
 
 
-def source_fingerprint(root: Path) -> str:
-    """Hash the working CONTENTS of tracked and nonignored files.
+def _iter_source_entries(root: Path) -> Iterator[tuple[str, str]]:
+    """Yield ``(relative path, per-file content hash)`` for every source file.
+
+    The one place the working set is enumerated and hashed; both
+    :func:`source_fingerprint` (a single combined identity) and
+    :func:`source_file_hashes` (the per-file map finding 14 needs) are built from
+    it, so the two can never disagree about what counts as source.
 
     Content, not history: an empty commit, an amend or a branch switch that
-    leaves every file byte-identical keeps the same fingerprint, because the
-    evidence was about those bytes. Uncommitted and untracked work count.
-    Git-ignored outputs, well-known generated directories and AI Square's home
-    are excluded. Submodules contribute the commit they record, not their
-    trees. Symlinks are hashed as links; no reads escape the project through
-    them. A failed or incomplete read raises rather than certifying stale
-    evidence.
+    leaves every file byte-identical yields the same hashes. Uncommitted and
+    untracked work count. Git-ignored outputs, well-known generated directories
+    and AI Square's home are excluded. Submodules contribute the commit they
+    record plus, when checked out, their own content. Symlinks are hashed as
+    links; no reads escape the project through them. A failed or incomplete read
+    raises rather than certifying stale evidence.
     """
     root = root.resolve()
     if not root.is_dir():
@@ -120,7 +125,6 @@ def source_fingerprint(root: Path) -> str:
     home = aisquare_home().resolve()
     if root.is_relative_to(home):
         raise ValueError("source directory must be outside AI Square's report/storage directory")
-    digest = hashlib.sha256()
     try:
         probe = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
@@ -159,11 +163,14 @@ def source_fingerprint(root: Path) -> str:
             continue
         if not path.parent.resolve().is_relative_to(root):
             raise ValueError(f"source path escapes through a directory link: {path}")
-        digest.update(os.fsencode(name) + b"\0")
+        # A per-file digest fed the SAME bytes, in the same order, that the
+        # combined fingerprint used to fold in for this entry.
+        entry = hashlib.sha256()
+        entry.update(os.fsencode(name) + b"\0")
         if path.is_symlink():
-            digest.update(b"link\0" + os.fsencode(os.readlink(path)))
+            entry.update(b"link\0" + os.fsencode(os.readlink(path)))
         elif not path.exists():
-            digest.update(b"deleted\0")
+            entry.update(b"deleted\0")
         elif path.is_dir():
             # A gitlink: a submodule or a nested repo, one entry in the parent's
             # index. Its recorded commit is part of its identity, but that alone
@@ -172,23 +179,67 @@ def source_fingerprint(root: Path) -> str:
             # double-count: the parent's ls-files never lists the nested files.
             # An uninitialised submodule is an empty dir with no repo, so it
             # contributes only the recorded gitlink.
-            digest.update(b"gitlink\0" + (_gitlink(root, name) or "unrecorded").encode())
+            entry.update(b"gitlink\0" + (_gitlink(root, name) or "unrecorded").encode())
             if (path / ".git").exists():
-                digest.update(b"nested\0" + source_fingerprint(path).encode())
+                entry.update(b"nested\0" + source_fingerprint(path).encode())
         else:
             try:
                 before = path.stat()
                 if not stat.S_ISREG(before.st_mode):
                     raise ValueError(f"source is not a regular file: {path}")
-                digest.update(str(before.st_mode).encode() + b"\0")
+                entry.update(str(before.st_mode).encode() + b"\0")
                 with path.open("rb") as stream:
                     while chunk := stream.read(1024 * 1024):
-                        digest.update(chunk)
+                        entry.update(chunk)
             except OSError as exc:
                 # Unreadable is unknown, and unknown must never certify evidence.
                 raise ValueError(f"cannot read source file {path}: {exc}") from None
             after = path.stat()
             if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
                 raise ValueError(f"source changed while checking: {path}")
-        digest.update(b"\0")
+        entry.update(b"\0")
+        yield name, entry.hexdigest()
+
+
+def fingerprint_of(files: Mapping[str, str]) -> str:
+    """Combine a per-file map into one content identity, deterministically."""
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(os.fsencode(name) + b"\0" + files[name].encode() + b"\0")
     return "sha256:" + digest.hexdigest()
+
+
+def source_file_hashes(root: Path) -> dict[str, str]:
+    """The per-file content hash of every source file under ``root``.
+
+    Finding 14: an evidence gate that compares only the SINGLE combined
+    fingerprint of the whole tree cannot tell a NEW file a check wrote (a
+    ``pytest --junitxml`` report, a non-git project's ``.coverage``) from an edit
+    to source — every run differs, so such a check can never be recorded as a
+    pass. This map lets a caller compare file by file: a path present only in the
+    later map is a new output and is ignored; a path whose hash changed, or that
+    has vanished, is a real source change. See :func:`source_unchanged`.
+    """
+    return dict(_iter_source_entries(root))
+
+
+def source_unchanged(recorded: Mapping[str, str], current: Mapping[str, str]) -> bool:
+    """Whether every file recorded at check time is byte-identical now.
+
+    A file that appears only in ``current`` is new since the check — the per-run
+    output a command wrote into the tree — and does not invalidate the record. A
+    recorded file that is now missing or different does (finding 14). "New output
+    file" and "mutated source" are distinguishable only per file: at the whole-
+    tree level both merely make the combined hash differ.
+    """
+    return all(current.get(name) == digest for name, digest in recorded.items())
+
+
+def source_fingerprint(root: Path) -> str:
+    """One content identity for the working set — the combine of the per-file map.
+
+    Kept as the quick "did anything at all change" signal and the value stored on
+    manual evidence; per-file comparisons go through :func:`source_file_hashes`
+    and :func:`source_unchanged`.
+    """
+    return fingerprint_of(source_file_hashes(root))

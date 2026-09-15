@@ -256,6 +256,13 @@ or newly added files.
   Ignored build outputs, external services, environment changes, and production
   data can change behaviour without changing that fingerprint; relevant checks
   must account for them.
+- A command check that writes a per-run output file into the checkout — a
+  `pytest --junitxml=report.xml`, a non-git project's `.coverage` — can still be
+  recorded as a pass and stays checkable: the report captures the checkout's
+  per-file hashes before the command, so a file that did not exist then is new
+  output and is ignored, while a pre-existing source file that changed or vanished
+  still makes the evidence stale. (Manual `--artifact` evidence keeps the whole-
+  tree fingerprint, so keep screenshots and reports outside the source checkout.)
 - A command report captured with `--task` can only back evidence for that task.
   A report captured without `--task` may back any task linked to the requirement,
   so pass `--task` whenever the check belongs to one task.

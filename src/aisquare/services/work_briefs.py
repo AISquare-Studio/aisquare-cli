@@ -20,7 +20,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aisquare.core import harness, insights, orchestrator
 from aisquare.core.ids import new_event_id
-from aisquare.core.source_revision import source_fingerprint, source_root_for
+from aisquare.core.source_revision import (
+    source_file_hashes,
+    source_fingerprint,
+    source_root_for,
+    source_unchanged,
+)
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import TeamEvent, TeamTask
 from aisquare.services import command_reports
@@ -443,13 +448,11 @@ def record_evidence(
                 report_root = (
                     Path(report.source_root).resolve() if report.source_root else source_root
                 )
-                current = source_fingerprint(report_root)
-                if (
-                    report.source_capture_error
-                    or not report.source_fingerprint_before
-                    or report.source_fingerprint_before != report.source_fingerprint_after
-                    or report.source_fingerprint_after != current
-                ):
+                if report.source_capture_error or not report.source_fingerprint_before:
+                    raise ValueError(
+                        "command evidence is stale or source changed during the check; rerun"
+                    )
+                if not _command_source_unchanged(report, report_root):
                     raise ValueError(
                         "command evidence is stale or source changed during the check; rerun"
                     )
@@ -570,6 +573,65 @@ def finding(
     )
 
 
+def _command_source_unchanged(report: command_reports.CommandReport, root: Path) -> bool:
+    """Whether the checkout is still what a command report was run against (finding 14).
+
+    Per file: a NEW file the check wrote into the tree (a ``pytest --junitxml``
+    report, a non-git project's ``.coverage``) never existed at command start, so
+    it is not in the recorded map and does not invalidate the pass; a source file
+    that has changed or vanished since does. "New output" and "mutated source"
+    are distinguishable ONLY per file — at the whole-tree level both merely make
+    the combined hash differ, which is why such a check could never be recorded
+    as a pass before. Falls back to the whole-tree before/after/now equality when
+    the per-file map was too large to store.
+    """
+    try:
+        if report.source_files_before is not None:
+            return source_unchanged(report.source_files_before, source_file_hashes(root))
+        current = source_fingerprint(root)
+        return (
+            report.source_fingerprint_before == report.source_fingerprint_after
+            and report.source_fingerprint_after == current
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def _evidence_source_ok(
+    latest: Evidence,
+    root: str,
+    fingerprints: dict[str, str],
+    file_maps: dict[str, dict[str, str] | None],
+) -> bool:
+    """Whether ``latest`` still describes the current source at ``root``.
+
+    Command evidence is judged per file against the report's recorded pre-command
+    map (finding 14): a per-run output file the check wrote is absent from that
+    map and is ignored, while a changed source file makes the evidence stale.
+    Manual evidence (and a command report whose map was too large to store) keeps
+    the whole-tree fingerprint it was recorded with.
+    """
+    if latest.report_id is not None:
+        try:
+            report = command_reports.load_report(latest.report_id)
+        except (OSError, ValueError):
+            return False
+        if report.source_files_before is not None:
+            if root not in file_maps:
+                try:
+                    file_maps[root] = source_file_hashes(Path(root))
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    file_maps[root] = None
+            current = file_maps[root]
+            return current is not None and source_unchanged(report.source_files_before, current)
+    if root not in fingerprints:
+        try:
+            fingerprints[root] = source_fingerprint(Path(root))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            fingerprints[root] = ""
+    return latest.source_fingerprint == fingerprints[root]
+
+
 def coverage(
     brief: WorkBrief,
     tasks: list[TeamTask],
@@ -584,6 +646,7 @@ def coverage(
     """
     indexed = {task.id: task for task in tasks}
     fingerprints: dict[str, str] = {}
+    file_maps: dict[str, dict[str, str] | None] = {}
     rows: list[RequirementCoverage] = []
     for requirement in brief.requirements:
         row = RequirementCoverage(
@@ -620,15 +683,10 @@ def coverage(
                 outcome.provenance = latest.provenance
                 outcome.status, outcome.reason = "stale", "Requirement/source changed; check again"
                 root = str(source_root.resolve()) if source_root else latest.source_root
-                if root not in fingerprints:
-                    try:
-                        fingerprints[root] = source_fingerprint(Path(root))
-                    except (OSError, ValueError, subprocess.SubprocessError):
-                        fingerprints[root] = ""
                 if (
                     latest.requirement_revision == requirement.revision
                     and latest.source_revision == requirement.source_revision
-                    and latest.source_fingerprint == fingerprints[root]
+                    and _evidence_source_ok(latest, root, fingerprints, file_maps)
                 ):
                     try:
                         _, digest = _artifact(Path(latest.artifact))

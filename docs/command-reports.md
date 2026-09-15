@@ -142,6 +142,12 @@ source during the command, changed source before evidence is recorded, an unknow
 source identity, or a failed process cannot be submitted as a fresh successful
 command check. The validator still evaluates whether the check covers the request.
 
+Source identity is captured per file, so a check that writes a per-run output
+file into the checkout (`pytest --junitxml=report.xml`, a non-git project's
+`.coverage`) can still be recorded as a pass: a file that did not exist before the
+command is new output and is ignored, while any pre-existing source file that
+changed or vanished still invalidates the pass.
+
 If source capture fails, the command still runs and its ordinary output remains
 available. The report explicitly records unknown proof; it cannot then provide
 fresh source-backed evidence. No persona setting changes these facts.

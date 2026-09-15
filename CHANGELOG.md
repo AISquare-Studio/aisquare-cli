@@ -18,8 +18,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     correction reopens finished tasks while a task still being worked on keeps
     its owner. Command evidence is bound to a content fingerprint of the
     checkout (tracked and nonignored files, submodule commits; not Git HEAD, not
-    `__pycache__`-style generated directories), so a real edit — and only a real
-    edit — makes a pass stale. Three failures by one task against one
+    `__pycache__`-style generated directories), compared per file so a per-run
+    output the check itself writes (a `pytest --junitxml` report, a `.coverage`)
+    is new output and does not block the pass, while a real edit — and only a
+    real edit — to a pre-existing file makes it stale. Three failures by one task
+    against one
     requirement revision block that task; a correction restarts the count.
     Role-specific working rules (`native-1`) reach manager-spawned and directly
     launched sessions through the shared session-start briefing and follow the

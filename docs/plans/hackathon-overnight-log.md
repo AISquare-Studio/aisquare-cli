@@ -7,6 +7,27 @@
 > merges to `main` and deploys. Every entry: when, what, why, evidence.
 > Questions the owner must answer are collected at the bottom.
 
+## Midday at a glance (12:20, 2026-09-15)
+
+**Status: merging under your 2026-09-15 authorisation — eleven of sixteen PRs
+are in `rc/hackathon-v1`**, each as a merge commit whose body cites the runner's
+verdict, the peer review (framework verdict + comment id), CI 6/6 and my
+read-only review: #180 P3 · #182 P9 · #189 P11 · #181 P1 · #195 P16 · #183 P2 ·
+#190 P10 · #191 P12 · #192 P13 · #185 P5 · #193 P15. Peer reviews are done by the
+coders for each other's work (your 11:xx instruction); a reopened PR merges only
+after its ORIGINAL reviewer confirms the 🔴s closed on the fixed head, the runner
+re-verifies, and CI is green.
+
+**Still to land, in stack order:** #186 P8 + #197 P20 together (runner verifying
+P20) → #187 P4 (peer Approve, CI green, runner re-verify) → #184 P6 (fixed
+@a8e99ff, CI running, re-review + re-verify) → #188 P7 → #194 P14 (after #197 so
+the `/clear` sentence is plain) → P17 (one line, after #188). Then a final
+`make check` on the merged rc and ONE PR `rc/hackathon-v1` → `main` carrying the
+features table from `docs/plans/hackathon-rc-summary.md`. I never merge that one.
+
+The 07:05 snapshot below is kept as written; the timeline has every merge.
+
+
 ## Morning at a glance (07:05, 2026-09-15)
 
 **Status: the train is VERIFIED and waiting on your merges.** Sixteen tasks,
@@ -126,6 +147,7 @@ read-only.
 | 2026-09-15 11:34–11:43 | `coder3a-1`: **P5 fixed** on `feat/persona-import` @3272f21 (import kill switch fails CLOSED with `config_unreadable`; a truncated api answer is `EngineUnavailable`, `--json` prints `no_import_engine`; both new tests fail on the old head), restacked #193 @f772578 and #186 @ba67766 clean; **#192 absorbed rc** @9b01a3e (docs/fleet.md, both sides) — pushed only after re-running `make install` in that worktree (its `.venv` predated the pyyaml dependency now in rc) and 199 tests green. P5 re-claimed for the runner's re-verification; P20 (+ the logged fail-open line) verifying. | #192 merges when its CI finishes (pending at 11:50). #185 merges after the runner re-verifies the fix. | board 11:34, 11:41 |
 | 2026-09-15 11:50–11:58 | P5 #185 back in review @3272f21 (both 🔴s fixed on the PR's own branch; #193/#186 restacked on it, CI green). **Merged #192 P13 → 4c91222** after its docs-only rc absorb went green. Nine of sixteen in rc. | Next: runner re-verifies P5 → #185 → #193; #186 merges with P20's PR after coder3b-1 peer-reviews P20. | board 11:50–11:51 |
 | 2026-09-15 12:00–12:05 | **P20 → PR #197** (stacked on #186): the fleet row's persona beats `AISQUARE_PERSONA` when set; an unreadable row fails open loudly; P8's precedence test replaced by one named for the new rule; the `/clear` scenario is now a real hook test. **Peer-approved by coder3b-1 within four minutes.** **P4 #187 fixed** @0fb9d0a (`_read_persona_names` returns `(names, reason)` like the Spawn dialog's reader; the failure is shown, not swallowed), CI running. | Re-review protocol posted: the original reviewer confirms 🔴s closed on the fixed head; gate = that + runner re-verify + CI. Manager review posted on #197. | board 12:00–12:04 |
+| 2026-09-15 12:12–12:20 | **Merged #185 P5 → e04dd6f** (runner re-verified @3272f21 at 12:12: BEFORE, the reviewer's broken config with `engine = "off"` still started the engine, argv captured; AFTER, exit 1 `config_unreadable`, zero engine processes, no value leaked; coder3b-1's re-review follow-up 5683790019 → Approve w/ suggestions; CI 6/6). **Merged #193 P15 → e6d352a** (verified f5de142, restack f772578 carries #185's fix, peer Approve 5682902561, CI 6/6). **Eleven of sixteen in rc.** coder3a-1 re-reviewed #187 @0fb9d0a → Approve (5683775504), bite re-run. coder3b-1 pushed **#184 P6 @a8e99ff** (10c716d the two 🔴s: OSError kept in-dialog, `Text` labels measured on Textual 8.2.8; 30d12e4 the cheap 🟡s; a8e99ff the rc absorb; `make check` 3851 passed, 0 failed). | Told: runner → P20 #197 → P4 #187 → P6 #184, in that order; coder3a-1 → re-review follow-up on #184; coder3b-1 → one-line follow-up on #186 (its 🔴s are closed by #197's be542b2 + fd69096) so #186 + #197 merge together on an honest gate. Remaining order: #186 + #197 → #187 → #184 → #188 → #194 → P17. | board 12:12–12:20, notes 7669–7672, merges e04dd6f · e6d352a |
 | 2026-09-15 evening | Both coders deep in their first tasks (`coder3a-1` on P1 in `.aisquare-worktrees/p1-persona-core`, `coder3b-1` on P3 in `.aisquare-worktrees/p3-spawn-dialog`), exploring the code before writing. | No action; they were told their queues. | pane captures |
 
 ## Morning audit — questions and calls for the owner

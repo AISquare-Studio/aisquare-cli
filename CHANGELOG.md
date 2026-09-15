@@ -107,7 +107,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `import_source` the CLI calls: its `progress` lines appear under the form and
   its `confirm` opens a draft-review modal from the worker
   (`call_from_thread(push_screen_wait, …)`, verified on Textual 8.2.8 first), so
-  when the LLM path lands the UI changes not at all. **+ New** scaffolds through
+  the LLM import path runs through the same form. **+ New** scaffolds through
   `services.personas.new` and opens the editor on it. *Attach to existing* /
   *Attach to new* post `AttachRequested`, which the tab answers by opening the
   target picker. Measured headless in `tests/test_ui_personas.py`: real catalogues

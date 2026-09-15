@@ -24,6 +24,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reported.
 
 ### Added
+- **Personas — and a persona is a Claude Code skill.** `aisquare persona`
+  (`list`, `show`, `new`, `edit`, `rm`, `validate`, `import`, `export`, every
+  reporting verb with `--json`) manages how an agent works — a skeptic, a mentor,
+  a minimalist — as `<name>/SKILL.md` directories in three layers: the project
+  (`<repo>/.aisquare/personas`), the user (`$AISQUARE_HOME/personas`) and four
+  bundled ones (`skeptic`, `mentor`, `minimalist`, `careful`), the higher layer
+  winning and `list` saying what it shadows. The same directory is `/name` in
+  Claude Code: `persona import` copies a skill in byte for byte (a skill
+  directory, a `.claude/agents` file, a Cursor rule, stdin, or a skill by name
+  from `import --list`) with a `.persona.json` recording source and sha256, and
+  `persona export --skill --user|--project` copies one out into Claude Code's
+  skills. A round trip is byte-identical. `persona show` prints exactly the
+  block an agent will be briefed with: the body, sanitised, fenced so it cannot
+  close its own block, and one sentence saying a persona never overrides a
+  role's cycle, the lane rule, a task's contract or evidence. A body over 4,000
+  characters warns and over 12,000 is refused; a directory that does not load is
+  listed, never fatal. Something that is not a skill is refused as
+  `not_recognised` until the LLM import path lands. **PyYAML** is now a core
+  dependency — a skill's frontmatter is full YAML and an interchange format may
+  not refuse a valid one — read with `safe_load` only and imported inside the
+  parser: `python -X importtime -c "import aisquare.cli.app"` shows no `yaml`.
+  Spawning an agent as a persona comes next. Plan:
+  `docs/plans/spawn-personas.md`; guide: `docs/personas.md`.
 - **The Spawn dialog, in `asq`.** `＋ spawn agent` under a project used to
   toast "the spawn dialog is not built yet"; it now opens a form over the same
   `services.fleet.spawn` the CLI runs, headed with the project's name and

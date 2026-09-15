@@ -192,6 +192,11 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         # A sign-in token in the operator's shell would make every test run as them.
         "AISQUARE_TOKEN",
         "BROWSER",
+        # `persona new` and `persona edit` open the operator's editor. The
+        # command sweeps run every leaf; an exported EDITOR=vim would put a real
+        # editor on the developer's terminal mid-run. Tests that edit set one.
+        "EDITOR",
+        "VISUAL",
         # The CI test bed's switches. An operator who has them exported would
         # otherwise run the suite's hooks against THEIR endpoint, with THEIR
         # token — measured once: four real POSTs to a listener during a green

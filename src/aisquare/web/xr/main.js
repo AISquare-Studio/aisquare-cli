@@ -210,6 +210,10 @@ function toggleFocus(sessionId) {
   subscribe(sessionId);
   if (MOCK) focus.setTranscript(mockTranscript(session));
   refreshSayField();
+  // `focus.show` reset the strip; re-light the mic dot if this is the panel the
+  // operator is currently talking to, so re-focusing it mid-utterance does not
+  // drop the indicator until the next capture-state change.
+  syncVoiceDot();
   return sessionId;
 }
 
@@ -260,81 +264,146 @@ const hud = new Hud(document.getElementById('toast'));
 const FINAL_TEXT_MS = 3000;
 const ACK_MS = 6000;
 
-const voiceTimers = { speech: null, notice: null };
+/**
+ * Voice-strip state, keyed by session id.
+ *
+ * The strip is one line on one panel, but the feedback on it belongs to the
+ * SESSION the microphone was pointed at — not to whatever panel happens to be
+ * focused when a late frame lands. So each session's timers and its queued
+ * receipt are kept here and only ever DRAWN on the panel while that session is
+ * the focused one. The old single-slot state drew A's receipt under B's title,
+ * and lost a receipt into a panel the operator had already closed; keying by
+ * session is what fixes both.
+ */
+const voiceState = new Map();
+function vs(id) {
+  let rec = voiceState.get(id);
+  if (!rec) {
+    rec = { speechTimer: null, noticeTimer: null, pendingNotice: null };
+    voiceState.set(id, rec);
+  }
+  return rec;
+}
 
 /**
- * The session the utterance in flight was aimed at.
+ * Utterances whose audio has gone out, oldest first, as `{ session, seq }`.
  *
- * `stt` frames carry no session id — the server has at most one open utterance
- * per socket, so it does not need to say — which means the client is the only
- * side that knows where the microphone was pointed. Kept so that speech landing
- * after the operator has moved the focus goes to the HUD instead of appearing
- * under a different session's title, and so the ack can say the same.
+ * `stt` and `error` frames carry no session id — the server has at most one open
+ * utterance per socket — so the client matches them to the FRONT of this queue.
+ * An utterance is pushed when its header reaches the wire (the `live`
+ * transition) and shifted on its final or its error. Keyed by the `seq` this
+ * client chose per press, so a late error for utterance N can be told from the
+ * utterance N+1 the operator is already speaking, and does not tear it down.
  */
+const utteranceQueue = [];
+let lastLiveSeq = 0;
+
+/** The session of the most recent capture: a fallback when the queue is empty,
+ *  and what `__xr.voice.speakingAt` reports. */
 let speakingAt = null;
 
 /**
- * A notice waiting for the final transcript to finish being read.
+ * Put speech for `target` on the strip — or on the HUD when that session is not
+ * the focused one — and schedule a final's removal.
  *
- * The strip is one line, and after `audioEnd` the server sends the final `stt`
- * and then the `ack` a few milliseconds later — `_close_utterance` transcribes,
- * routes, and sends both without pausing. Rendering whichever arrived last
- * would mean the operator never sees what was HEARD, only where it went, and
- * that is the one check they have that ASR got their sentence right. So the two
- * are shown in the order they happened: the words for their three seconds, then
- * where they landed.
+ * After `audioEnd` the server sends the final `stt` and then the `ack` a few
+ * milliseconds later, so a receipt held behind the final (see `showNotice`) is
+ * revealed only once the words have had their three seconds: the operator sees
+ * WHAT was heard before WHERE it went, which is their one check that ASR got the
+ * sentence right (acceptance criterion 1).
  */
-let pendingNotice = null;
-
-function clearVoiceTimer(key) {
-  clearTimeout(voiceTimers[key]);
-  voiceTimers[key] = null;
+function showSpeech(target, text, final) {
+  if (target == null) return;
+  const rec = vs(target);
+  clearTimeout(rec.speechTimer);
+  rec.speechTimer = null;
+  const onPanel = target === focus.sessionId;
+  // An empty final (silence) must not repaint an already-empty strip, so mark it
+  // committed only when there is text — setVoice's compare then sees no change.
+  const committed = final && Boolean(text);
+  if (onPanel) {
+    focus.setVoice({ speech: text, speechFinal: committed });
+    // A fresh interim clears any notice sitting on the strip, so the live words
+    // are what the operator sees while they are still talking (not a stale ack).
+    if (!final && text) focus.setVoice({ notice: '', alert: false });
+  } else if (committed) {
+    hud.toast(`heard: ${text}`, FINAL_TEXT_MS);
+  }
+  if (committed) {
+    rec.speechTimer = setTimeout(() => {
+      rec.speechTimer = null;
+      if (target === focus.sessionId) focus.setVoice({ speech: '', speechFinal: false });
+      const queued = rec.pendingNotice;
+      rec.pendingNotice = null;
+      // Re-run through showNotice, not renderNotice: the target may be unfocused
+      // now, in which case the receipt belongs on the HUD, and showNotice is what
+      // decides panel-vs-HUD. The timer is cleared above, so it will not re-defer.
+      if (queued) showNotice(target, queued.text, queued.opts);
+    }, FINAL_TEXT_MS);
+  }
 }
 
-/** Put speech on the focus panel, and schedule its removal if it is final. */
-function showSpeech(text, final) {
-  clearVoiceTimer('speech');
-  focus.setVoice({ speech: text, speechFinal: final });
-  if (!final || !text) {
-    // An interim frame supersedes a queued ack from the PREVIOUS utterance: the
-    // operator has started a new sentence, and the old one's receipt is no
-    // longer what they are waiting to read.
-    if (!final) pendingNotice = null;
-    return;
-  }
-  voiceTimers.speech = setTimeout(() => {
-    voiceTimers.speech = null;
-    focus.setVoice({ speech: '', speechFinal: false });
-    const queued = pendingNotice;
-    pendingNotice = null;
-    if (queued) showNotice(queued.text, queued.opts);
-  }, FINAL_TEXT_MS);
+/** Clear a dead half-sentence for `target`: an utterance that ended without a
+ *  final (a socket drop, `stt_failed`, `audio_too_long`) leaves its interim on
+ *  the strip forever otherwise. */
+function clearSpeech(target) {
+  if (target == null) return;
+  const rec = vs(target);
+  clearTimeout(rec.speechTimer);
+  rec.speechTimer = null;
+  if (target === focus.sessionId) focus.setVoice({ speech: '', speechFinal: false });
 }
 
 /**
- * The ack or error line on the strip, and on the HUD when it is bad.
+ * The ack or error line for `target`.
  *
- * Held back while a final transcript is still being read — see `pendingNotice`.
- * The HUD copy is NOT held back: it is a different surface with its own line,
- * so there is nothing for it to collide with, and a problem should reach the
- * operator at the moment it happens.
+ * Deferred behind that session's final while it is still being read (queued as
+ * `pendingNotice`). A problem also gets a HUD copy at once — so an `ok:false`
+ * receipt is never discarded unseen the way the old single slot discarded it,
+ * and so a message with no focused panel to draw on still reaches the operator.
  */
-function showNotice(text, opts = {}) {
-  const { alert = false, ms = ACK_MS, hudToo = false } = opts;
-  // A problem also goes to the HUD: it may have arrived when no panel is
-  // focused, and on a desktop the HUD is where a tester is already looking.
-  if (hudToo && text) hud.toast(text, ms);
-  if (text && voiceTimers.speech) {
-    pendingNotice = { text, opts };
+function showNotice(target, text, opts = {}) {
+  const { ms = ACK_MS, hudToo = false } = opts;
+  const onPanel = target != null && target === focus.sessionId;
+  const rec = target != null ? vs(target) : null;
+  const deferred = Boolean(text && rec && rec.speechTimer);
+  if (deferred) {
+    // The target's final is still being read. Hold the receipt behind it (the
+    // final's timer replays it), so it does not clobber the words — including the
+    // "heard:" HUD toast for an unfocused session. A PROBLEM still reaches the
+    // HUD at once, because an ok:false receipt must never be discarded unseen.
+    rec.pendingNotice = { text, opts };
+    if (hudToo) hud.toast(text, ms);
     return;
   }
-  clearVoiceTimer('notice');
+  // Not deferred: show now — on the panel if that session is focused, else on
+  // the HUD (also on the HUD for any problem).
+  if (text && (hudToo || !onPanel)) hud.toast(text, ms);
+  if (target == null) return;
+  renderNotice(target, text, opts);
+}
+
+/** Draw the notice on the panel when `target` is focused (the HUD copy, if any,
+ *  was already sent by `showNotice`), and time it out. */
+function renderNotice(target, text, opts = {}) {
+  const { alert = false, ms = ACK_MS } = opts;
+  if (target !== focus.sessionId) return;
+  const rec = vs(target);
+  clearTimeout(rec.noticeTimer);
+  rec.noticeTimer = null;
   focus.setVoice({ notice: text, alert });
   if (!text) return;
-  voiceTimers.notice = setTimeout(() => {
-    voiceTimers.notice = null;
-    focus.setVoice({ notice: '', alert: false });
+  rec.noticeTimer = setTimeout(() => {
+    rec.noticeTimer = null;
+    if (target === focus.sessionId) focus.setVoice({ notice: '', alert: false });
   }, ms);
+}
+
+/** Re-assert the mic dot after a focus change: `focus.show` resets the strip, so
+ *  a panel re-focused while its own capture is live would otherwise lose the dot
+ *  until the next capture-state change. */
+function syncVoiceDot() {
+  focus.setVoice({ live: voice.state.live && voice.state.session === focus.sessionId });
 }
 
 const voice = new VoiceCapture({
@@ -353,25 +422,42 @@ const voice = new VoiceCapture({
   onChange: (state) => {
     if (state.capturing) {
       speakingAt = state.session;
-      // A fresh utterance starts from a clean strip: the last one's words and
-      // its receipt both belong to a sentence that is over.
-      clearVoiceTimer('notice');
-      pendingNotice = null;
-      focus.setVoice({ notice: '', alert: false });
-      showSpeech('', false);
+      // A fresh utterance starts from a clean strip FOR ITS OWN SESSION: the
+      // last one's words and receipt belong to a sentence that is over.
+      const rec = vs(state.session);
+      clearTimeout(rec.speechTimer);
+      rec.speechTimer = null;
+      clearTimeout(rec.noticeTimer);
+      rec.noticeTimer = null;
+      rec.pendingNotice = null;
+      if (state.session === focus.sessionId) {
+        focus.setVoice({ notice: '', alert: false, speech: '', speechFinal: false });
+      }
+    }
+    // Enqueue the utterance once, when its header reaches the wire (`live`), so a
+    // late final/error can be matched to the right session and seq even after the
+    // focus and the current capture have moved on.
+    if (state.live && state.seq !== lastLiveSeq) {
+      lastLiveSeq = state.seq;
+      utteranceQueue.push({ session: state.session, seq: state.seq });
     }
     // `state.live`, not `state.capturing`: the dot means audio is reaching the
     // server, which on a first press is later than the trigger going down by
     // however long the permission prompt was up. And only while the panel being
     // spoken to is the one in front of the operator.
-    focus.setVoice({ live: state.live && speakingAt === focus.sessionId });
+    focus.setVoice({ live: state.live && state.session === focus.sessionId });
+  },
+  // Every capture-side failure voice.js detects. It has already put this on the
+  // HUD; draw it on the focus PANEL too, because the HUD is not composited in an
+  // immersive session without dom-overlay — the exact rule main.js already
+  // applies to the server's stt_unavailable, now applied to mic-blocked, no mic,
+  // not-connected, the disconnect, the worklet failure and the cap (§10). Routed
+  // to the utterance's own session so it never lands under another panel's title.
+  report: (message, { session } = {}) => {
+    const target = session ?? speakingAt ?? focus.sessionId;
+    renderNotice(target, message, { alert: true, ms: 6000 });
   },
 });
-
-/** True when voice feedback belongs on the panel rather than on the HUD. */
-function speechOnPanel() {
-  return focus.open && (speakingAt === null || speakingAt === focus.sessionId);
-}
 
 input.on('hover', ({ targetId }) => ring.setHover(targetId));
 input.on('rotate', ({ delta }) => ring.rotate(delta));
@@ -440,11 +526,21 @@ const sayForm = document.getElementById('say');
 const sayText = document.getElementById('say-text');
 const saySend = document.getElementById('say-send');
 
-/** Enabled only when there is both a panel to talk to and a socket to talk on. */
+/** Enabled when there is both a panel to talk to and a socket to talk on — but
+ *  never disabled out from under an operator who is typing in it.
+ *
+ *  Disabling a focused element moves focus to <body>, and every keystroke after
+ *  that reaches input.js's window shortcut map: a reconnect mid-sentence turned
+ *  "fix the retry test" into recenter / push-to-talk / select-and-close. So a
+ *  field (or its send button) that currently has focus stays enabled through a
+ *  drop; a submit attempted while the socket is still down fails visibly (the
+ *  submit handler shows "not connected"), and `net.on('open'/'status')` re-runs
+ *  this the instant the socket is back. */
 function refreshSayField() {
   const ready = Boolean(focus.sessionId) && (MOCK || Boolean(net?.isOpen));
-  sayText.disabled = !ready;
-  saySend.disabled = !ready;
+  const typing = document.activeElement === sayText || document.activeElement === saySend;
+  sayText.disabled = !ready && !typing;
+  saySend.disabled = !ready && !typing;
   sayText.placeholder = focus.sessionId
     ? `prompt ${ring.sessions.get(focus.sessionId)?.title ?? focus.sessionId}`
     : 'focus a panel, then type to send it a prompt';
@@ -460,31 +556,39 @@ sayForm.addEventListener('submit', (event) => {
     return;
   }
   if (!net?.prompt(session, text)) {
-    showNotice('not connected — the prompt was not sent', { alert: true, hudToo: true });
+    showNotice(session, 'not connected — the prompt was not sent', { alert: true, hudToo: true });
     return;
   }
   // Cleared optimistically: the ack that follows says where it landed, and a
   // field that still held the text would invite a second send of the same line.
   sayText.value = '';
-  speakingAt = null; // a typed prompt's ack belongs to the focused panel
 });
 
 /**
- * The field owns the keyboard while it has focus.
+ * The whole form owns the keyboard while any of it has focus.
  *
  * `input.js` binds its whole key map on `window` in the bubble phase, so a
- * keystroke into this field would reach it too: typing "test" would fire
+ * keystroke into this form would reach it too: typing "test" would fire
  * push-to-talk on the `t`, and Enter is bound to `select`, which toggles the
- * focus panel — so submitting a prompt would close the panel it was aimed at.
- * Stopping propagation here cuts every one of those off at the source.
+ * focus panel — so submitting a prompt would close or re-target the panel it was
+ * aimed at. The listener is on the FORM, not just the text input, because Enter
+ * pressed while the send BUTTON has keyboard focus (Tab to it, or a prior click)
+ * bubbles from the button; a listener on the input alone never sees it, and the
+ * window binding fired `select` before the button submitted — sending the prompt
+ * to whatever panel the gaze tie then resolved to.
  *
- * Enter is stopped along with the rest, and the form still submits: propagation
- * and default actions are different things, and implicit form submission is the
- * latter. Only `preventDefault` would have cancelled it, and this is not that.
+ * Only KEYDOWN is stopped, not keyup. Push-to-talk ends on the window `keyup`
+ * for `t`, and if the field swallowed that keyup a `t` still held when focus
+ * moved into the field would latch the mic on to voice's cap. Stopping only
+ * keydown means a typed `t` never STARTS push-to-talk (its keydown is caught
+ * here) while a held `t`'s release still ENDS it (its keyup reaches window,
+ * where `talkEnd` is a no-op unless a hold is actually active).
+ *
+ * The form still submits: propagation and default actions are different things,
+ * and implicit form submission is the latter — only `preventDefault` would have
+ * cancelled it, and this is not that.
  */
-for (const type of ['keydown', 'keyup']) {
-  sayText.addEventListener(type, (event) => event.stopPropagation());
-}
+sayForm.addEventListener('keydown', (event) => event.stopPropagation());
 
 /* --------------------------------------------------------------- AR entry -- */
 
@@ -551,7 +655,10 @@ async function enterAR() {
       // universal, and a hard dependency would refuse the session outright on a
       // device that simply lacks it — trading the whole demo for one control.
       optionalFeatures: ['layers', 'hand-tracking', 'anchors', 'dom-overlay'],
-      domOverlay: { root: document.body },
+      // Only the in-session controls (the voice HUD and the typed field), not the
+      // whole <body>: handing the page over floated #keys and #chip — desktop
+      // chrome — over AR passthrough on a device that grants the overlay.
+      domOverlay: { root: document.getElementById('xr-overlay') },
     });
     await renderer.xr.setSession(session);
   } catch (err) {
@@ -601,9 +708,15 @@ renderer.xr.addEventListener('sessionend', () => {
   xrState.placed = false;
   // Out of the headset the overlay question does not arise: this is a web page.
   sayForm.hidden = false;
-  // A trigger still held as the session ends would otherwise latch the mic on
-  // with no way to release it.
-  voice.abort(null);
+  // A trigger still held as the session ends must CLOSE the utterance, not abort
+  // it. three.js disconnects the controllers BEFORE it fires 'sessionend', so
+  // input.js has usually already emitted talkEnd and voice.release() has armed
+  // the drain — calling abort here would cancel that drain and drop the finished
+  // sentence with no audioEnd (the next press then makes the server discard the
+  // orphan and reload whisper). So close a still-live capture, and leave a drain
+  // already in flight to finish and send its audioEnd on the socket that is, for
+  // a moment yet, still open.
+  if (voice.capturing) voice.release();
   scene.background = new THREE.Color(MOCK_BACKGROUND);
   renderer.setClearAlpha(1);
   controls.enabled = true;
@@ -924,6 +1037,13 @@ function startLiveFeed() {
   // focused panel must survive a reconnect, or walking away from the desk for
   // the length of a backoff would silently stop its transcript.
   net.on('open', () => {
+    // The server restarts transcript `seq` at 1 on every connection and every
+    // subscribe, and the client never reset its high-water mark — so after any
+    // drop, `append`'s `seq <= this.seq` replay guard silently discarded the new
+    // stream's first N records and the panel froze while the chip read
+    // "connected". Reset before re-subscribing; the server replays its backlog,
+    // so the transcript rebuilds from the current tail.
+    focus.resetSeq();
     net.subscribe(focus.sessionId);
     refreshSayField();
   });
@@ -936,10 +1056,19 @@ function startLiveFeed() {
   // ordinary path and there is no special reconnect branch to get wrong.
   net.on('snapshot', (msg) => {
     ring.applySnapshot(msg.sessions ?? []);
-    focus.setSession(ring.sessions.get(focus.sessionId));
+    // A focused session that is no longer on the board has ended: close the
+    // panel rather than leave typing and push-to-talk aimed at a dead session
+    // (the server would accept and ack a prompt for it, routing it to a role).
+    if (focus.sessionId && !ring.sessions.has(focus.sessionId)) closeFocus();
+    else focus.setSession(ring.sessions.get(focus.sessionId));
   });
   net.on('delta', (msg) => {
     ring.applyDelta(msg);
+    if (focus.sessionId && msg.removed?.includes(focus.sessionId)) {
+      // Same as above, on the transition: the focused session was removed.
+      closeFocus();
+      return;
+    }
     focus.setSession(ring.sessions.get(focus.sessionId));
   });
 
@@ -966,9 +1095,13 @@ function startLiveFeed() {
   net.on('stt', (msg) => {
     lastFrames.stt = msg;
     const text = String(msg.text ?? '');
-    if (speechOnPanel()) showSpeech(text, Boolean(msg.final));
-    else if (msg.final && text) hud.toast(`heard: ${text}`, FINAL_TEXT_MS);
-    if (msg.final) speakingAt = null;
+    // The frame belongs to the oldest open utterance (FIFO on one socket).
+    // `showSpeech` decides panel vs HUD from whether that session is focused, so
+    // a final for A that arrives after the operator has focused B lands on the
+    // HUD, not under B's title.
+    const target = utteranceQueue[0]?.session ?? speakingAt;
+    showSpeech(target, text, Boolean(msg.final));
+    if (msg.final) utteranceQueue.shift();
   });
 
   /**
@@ -983,44 +1116,64 @@ function startLiveFeed() {
     lastFrames.ack = msg;
     const detail = String(msg.detail ?? '');
     const line = msg.ok ? `sent — ${detail}` : `not sent — ${detail || 'no detail'}`;
-    if (msg.session && msg.session === focus.sessionId) showNotice(line, { alert: !msg.ok });
-    else hud.toast(line, ACK_MS);
+    // Routed to the ack's OWN session, and an `ok:false` receipt always gets a
+    // HUD copy so it is never discarded unseen (fleet.tell returns ok:false
+    // whenever the agent is not waiting — the common case, so this is not rare).
+    const target = msg.session ?? speakingAt ?? focus.sessionId;
+    showNotice(target, line, { alert: !msg.ok, hudToo: !msg.ok });
     if (msg.ok === false) console.warn(`[xr] ack: ${msg.for} rejected — ${detail || 'no detail'}`);
   });
 
   /**
    * A server error about something the client asked for (§6).
    *
-   * `stt_unavailable` is pinned rather than toasted: its message carries the
-   * doctor's install line, which is a thing to go and do, and a fix that has
-   * already scrolled away cannot be acted on. Everything else passes through —
-   * the server writes these for a human to read and re-wording them here would
-   * only put this client's guess in front of the server's knowledge.
+   * EVERY code is made visible — a silent server error was how a typed prompt
+   * lost to a store failure (`internal`), or a panel stuck forever on "waiting
+   * for transcript…" (`no_transcript` for an MCP session with no transcript),
+   * left the operator with nothing to read. The codes split three ways:
+   *
+   *  - `auth*` belongs to the connection chip (net.js), which already decides
+   *    terminal-vs-transient; drawing it here too would double the message.
+   *  - A VOICE-utterance error (`stt*`, `audio*`, `session_mismatch`) ends one
+   *    utterance: match it to the front of the queue, clear that session's dead
+   *    interim, and abort the LIVE capture only when the error is FOR it — a late
+   *    error for utterance N must not tear down the N+1 the operator is speaking.
+   *  - Anything else is a subscribe/prompt error: show it on the focused panel
+   *    and the HUD.
+   *
+   * `message` is the server's own words, repeated rather than re-worded — it is
+   * written for a human, and this client's paraphrase would only drift from it.
    */
   net.on('error', (msg) => {
     lastFrames.error = msg;
     const code = String(msg.code ?? '');
     const message = String(msg.message ?? code);
-    if (!code.startsWith('stt') && !code.startsWith('audio')) return; // not ours
-    // Whatever went wrong, this utterance is over: the server has already
-    // dropped it, and a mic dot still lit would be a lie.
-    voice.abort(null);
-    if (code === 'stt_unavailable') {
-      // The full message carries the install command, so it is PINNED on the
-      // HUD where it can be read and acted on. But the HUD does not exist in a
-      // session without `dom-overlay`, and this is the one error an operator in
-      // a headset is most likely to hit — so a short form goes on the panel
-      // too, and says where the long form is. Without it the most important
-      // failure in the voice path would be silent in the headset.
-      hud.pin(message);
-      showNotice('speech is not installed on the host — see the message on screen', {
-        alert: true,
-        ms: 8000,
-      });
+    if (code.startsWith('auth')) return; // the connection chip owns auth codes
+    const isVoice =
+      code.startsWith('stt') || code.startsWith('audio') || code === 'session_mismatch';
+    if (isVoice) {
+      const errored = utteranceQueue.shift() ?? { session: speakingAt ?? focus.sessionId, seq: -1 };
+      // Abort the live capture only if this error is for it — otherwise a late
+      // error for a released utterance would kill the one being spoken now.
+      if (!voice.state.capturing || voice.state.seq === errored.seq) voice.abort(null);
+      clearSpeech(errored.session);
+      if (code === 'stt_unavailable') {
+        // The full message carries the doctor's fix line, so it is PINNED on the
+        // HUD where it can be read and acted on. A short, NEUTRAL pointer goes on
+        // the panel (the HUD is not composited without dom-overlay) — neutral
+        // because the cause varies (extra missing, unknown model, load failure)
+        // and naming "not installed" was wrong for the last two.
+        hud.pin(message);
+        showNotice(errored.session, 'speech is unavailable on the host — see the message on screen', {
+          alert: true,
+          ms: 8000,
+        });
+      } else {
+        showNotice(errored.session, message, { alert: true, ms: 8000, hudToo: true });
+      }
     } else {
-      showNotice(message, { alert: true, ms: 8000, hudToo: true });
+      showNotice(focus.sessionId, message, { alert: true, ms: 8000, hudToo: true });
     }
-    speakingAt = null;
   });
 
   /**
@@ -1029,11 +1182,31 @@ function startLiveFeed() {
    * The server forgets a burst whose connection closed, so there is no
    * transcript coming and nothing to wait for. Saying so is the whole point:
    * silence here is indistinguishable from a slow decode, and the operator
-   * would stand there waiting for words that were discarded on the far end.
+   * would stand there waiting for words that were discarded on the far end. The
+   * old handler said so only through `voice.abort`, which toasts ONLY while still
+   * capturing — so a drop during the drain, or during the server's decode after
+   * release, was silent. Here the message is unconditional (when anything was in
+   * flight), and each dead session's interim is cleared.
    */
   net.on('drop', () => {
+    const wasActive =
+      voice.state.capturing || voice.state.draining || utteranceQueue.length > 0;
+    const targets = utteranceQueue.length
+      ? utteranceQueue.map((u) => u.session)
+      : speakingAt
+        ? [speakingAt]
+        : [];
+    utteranceQueue.length = 0;
+    voice.abort(null);
+    for (const target of targets) clearSpeech(target);
+    if (wasActive) {
+      hud.toast('dropped — say it again', ACK_MS);
+      const focused = focus.sessionId;
+      if (focused && (targets.length === 0 || targets.includes(focused))) {
+        renderNotice(focused, 'dropped — say it again', { alert: true, ms: ACK_MS });
+      }
+    }
     speakingAt = null;
-    voice.abort('dropped — say it again');
     refreshSayField();
   });
 

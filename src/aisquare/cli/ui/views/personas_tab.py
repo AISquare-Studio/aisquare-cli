@@ -14,9 +14,12 @@ next. Reads are ``core.personas`` (pure: directories in, models out); every writ
 goes through ``services.personas`` — the seam the CLI uses — looked up on the
 module at call time, so a test replaces each with a recorder.
 
-**Attach to existing / Attach to new** post :class:`AttachRequested`. The target
-picker that answers it is P7; until then the tab answers its own message with a
-toast and lets it bubble on, so P7 handles it above and deletes one handler here.
+**Attach to existing / Attach to new** post :class:`AttachRequested`, which the
+tab answers itself with the target picker (``cli/ui/attach.py``): an agent is
+attached to after one confirmation (``fleet_service.attach_persona`` in a thread
+worker; the toast says whether the briefing was typed or noted), a bind or an
+account opens the Spawn dialog preset with the persona, and *+ New account* hands
+over to the Accounts page. The message is not stopped, so the shell can see it.
 
 Bundled rows disable Edit and Remove ("bundled — export to a layer first"); the
 row itself still opens — ``Enter`` on any row opens the SKILL.md, and a bundled
@@ -38,20 +41,30 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Checkbox, DataTable, Input, Static
+from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import persona_dialogs as dialogs
+from aisquare.cli.ui.attach import (
+    AttachTargetScreen,
+    ConfirmAttachScreen,
+    NewAccountRequested,
+    Target,
+)
+from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.core import personas as core
 from aisquare.core.personas import Layer, Persona, PersonaError
 from aisquare.core.workspace import git_common_root
 from aisquare.models import ProjectInfo
+from aisquare.services import claude_accounts as accounts_service
+from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 
 AttachIntent = Literal["existing", "new"]
 
 LAYERS: tuple[Layer, ...] = ("project", "user", "bundled")
 
-ATTACH_PENDING = "target picker arrives with P7"
-"""What an Attach button says until the target picker (P7) answers :class:`AttachRequested`."""
+ATTACH_WORKER = "persona-attach"
+"""The worker that attaches a persona to a running agent."""
 
 BUNDLED_REASON = "bundled — export to a layer first"
 
@@ -349,8 +362,73 @@ class PersonasTab(Vertical):
         self._request_attach("new")
 
     def on_attach_requested(self, event: AttachRequested) -> None:
-        # Not stopped: the picker (P7) answers above; until it exists, say so.
-        self.notify(ATTACH_PENDING, timeout=4)
+        """The second step — who runs it: the target picker, ordered by the intent."""
+        persona = event.persona
+        self.app.push_screen(
+            AttachTargetScreen(
+                self.project,
+                persona=persona,
+                intent=event.intent,
+                accounts=accounts_service.overview,
+            ),
+            callback=lambda target: self._target_chosen(persona, target),
+        )
+
+    def _target_chosen(self, persona: str, target: Target | None) -> None:
+        if target is None:
+            return
+        if target.kind == "agent":
+            label = target.key
+            self.app.push_screen(
+                ConfirmAttachScreen(persona, label, target.persona),
+                callback=lambda yes: self._attach_persona(persona, label) if yes else None,
+            )
+        elif target.kind == "new-account":
+            self.post_message(NewAccountRequested())
+        else:
+            self.app.push_screen(
+                SpawnDialog(
+                    self.project,
+                    persona=persona,
+                    role=target.role,
+                    binary=target.binary,
+                    account=target.account,
+                    accounts=accounts_service.overview,
+                ),
+                callback=self._spawned,
+            )
+
+    def _spawned(self, receipt: fleet_service.SpawnReceipt | None) -> None:
+        if receipt is not None:
+            self.post_message(SpawnCompleted(receipt))  # the shell's own receipt path
+
+    def _attach_persona(self, persona: str, label: str) -> None:
+        project = self.project
+        self.run_worker(
+            lambda: fleet_service.attach_persona(project, label, persona),
+            name=ATTACH_WORKER,
+            group=ATTACH_WORKER,
+            thread=True,
+            exit_on_error=False,  # a refusal is an answer to show, not a crash
+        )
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != ATTACH_WORKER:
+            return
+        if event.state is WorkerState.SUCCESS:
+            receipt = event.worker.result
+            if isinstance(receipt, fleet_service.AttachReceipt):
+                self.notify(
+                    f"✓ attached {receipt.persona} to {receipt.agent.label} ({receipt.delivered})",
+                    timeout=6,
+                    markup=False,
+                )
+            self.reload()
+        elif event.state is WorkerState.ERROR:
+            error = event.worker.error
+            known = isinstance(error, (fleet_service.FleetError, PersonaError))
+            reason = str(error) if known else f"{type(error).__name__}: {error}"
+            self.notify(f"✗ could not attach: {reason}", severity="error", timeout=10, markup=False)
 
     # --- the dialogs ------------------------------------------------------------------
 

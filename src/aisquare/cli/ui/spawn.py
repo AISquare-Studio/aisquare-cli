@@ -25,8 +25,11 @@ applied at compose, never by poking widgets after mount: the persona-first flow
 choice, and is sent. A preset role the list does not name (a numbered seat,
 ``coder2``) and a preset account the accounts read has not produced yet are
 added as options, so they show on open. *Pick…* posts
-:class:`PickTargetRequested`; until the picker exists the dialog answers its own
-message with a toast and lets it bubble on.
+:class:`PickTargetRequested`, which the dialog answers itself: the target picker
+(``cli/ui/attach.py``) in "new" order, whose choice fills Role, Binary and Account
+through their own change handlers — an open form keeps what was typed — and whose
+*+ New account* hands over to the Accounts page. *Import…* beside the Persona
+select opens the Personas tab's import dialog and selects what it imports.
 
 Two things are sent although nobody touched them, because the default cannot
 stand: in a project that is not a git repository the worktree switch is off and
@@ -63,14 +66,18 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Select, Static, Switch, TextArea
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
+from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.views.settings import permission_options
 from aisquare.core import codenames, harness, personas
 from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona
 from aisquare.core.store import store_session
+from aisquare.core.workspace import git_common_root
 from aisquare.models import AccountsOverview, ClaudeAccountStatus, ProjectInfo, TeamTask
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import personas as personas_service
 
 SPAWN_WORKER = "spawn-agent"
 """The worker that runs the spawn. Not ``spawn-manager`` — that is the Manager
@@ -87,9 +94,6 @@ THIS_SHELL = ""
 
 NO_PERSONA = ""
 """The Persona field's ``(none)`` — and what ``spawn`` reads as "no persona"."""
-
-PICK_PENDING = "target picker arrives with P7"
-"""What *Pick…* says until the target picker (P7) answers :class:`PickTargetRequested`."""
 
 OPEN_TASK_STATUSES = ("todo", "doing", "review", "blocked")
 """A task an agent can still be spawned for; ``done`` and ``dropped`` are refused by the service."""
@@ -108,6 +112,14 @@ class PickTargetRequested(Message):
 
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
+        super().__init__()
+
+
+class SpawnCompleted(Message):
+    """A Spawn dialog opened away from the sidebar row closed with a receipt."""
+
+    def __init__(self, receipt: fleet_service.SpawnReceipt) -> None:
+        self.receipt = receipt
         super().__init__()
 
 
@@ -186,6 +198,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog .spawn-row > Input { width: 1fr; }
     SpawnDialog #spawn-dice { min-width: 7; width: 7; }
     SpawnDialog #spawn-pick { min-width: 10; width: 10; }
+    SpawnDialog #spawn-import { min-width: 12; width: 12; }
     SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
     SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
@@ -215,6 +228,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._roles = roles if self._role in roles else [*roles, self._role]
         self._preset_binary = binary or ""
         self._preset_account = account
+        self._account_statuses: list[ClaudeAccountStatus] = []
         self._personas, self._personas_unavailable = self._read_personas()
         self._persona_touched = persona is not None
         """A preset or a pick: from then on the persona no longer follows the role."""
@@ -350,6 +364,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         value=self._persona_shown,
                         allow_blank=False,
                         id="spawn-persona",
+                    )
+                    yield Button(
+                        "Import…", id="spawn-import", tooltip="import a persona, then pick it"
                     )
                 yield Static(id="spawn-persona-description", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
@@ -565,8 +582,71 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self.post_message(PickTargetRequested(self.project.id))
 
     def on_pick_target_requested(self, event: PickTargetRequested) -> None:
-        # Not stopped: the picker (P7) answers above; until it exists, say so.
-        self.notify(PICK_PENDING, timeout=4)
+        """The dialog's own *Pick…*: the target picker in "new" order; the choice fills the form."""
+        self.app.push_screen(
+            AttachTargetScreen(
+                self.project,
+                persona=self._persona_value() or None,
+                intent="new",
+                accounts=self._accounts,
+            ),
+            callback=self._picked,
+        )
+
+    def _picked(self, target: Target | None) -> None:
+        if target is None:
+            return
+        if target.kind == "new-account":
+            self.post_message(NewAccountRequested())
+            self.dismiss(None)
+            return
+        self.apply_target(role=target.role, binary=target.binary, account=target.account)
+
+    def apply_target(
+        self, *, role: str | None = None, binary: str | None = None, account: str | None = None
+    ) -> None:
+        """Fill who runs it from a picked target, as if the user had chosen each field.
+
+        Unlike the constructor presets this acts on an open form, so it goes through
+        the fields' own change handlers: a new role brings its label, worktree,
+        permission mode and (untouched) persona with it, and nothing typed is lost.
+        """
+        if role:
+            roles = self.query_one("#spawn-role", Select)
+            if role not in self._roles:
+                self._roles.append(role)
+                roles.set_options([(self._role_prompt(r), r) for r in self._roles])
+                if self._manager_live:
+                    self.call_after_refresh(self._grey_out_manager)
+            roles.value = role
+        if binary:
+            self.query_one("#spawn-binary", Input).value = binary
+        if account:
+            self._preset_account = account
+            slots = self.query_one("#spawn-account", Select)
+            slots.set_options(self._account_options(self._account_statuses))
+            slots.value = account
+
+    # --- import a persona from here ------------------------------------------------------
+
+    @on(Button.Pressed, "#spawn-import")
+    def _import_persona(self) -> None:
+        self.app.push_screen(
+            ImportPersonaScreen(git_common_root(self.project.root)), callback=self._imported
+        )
+
+    def _imported(self, result: personas_service.ImportResult | None) -> None:
+        """Select what was just imported — re-reading the catalogue it landed in."""
+        if result is None:
+            return
+        name = result.persona.name
+        self._personas, self._personas_unavailable = self._read_personas()
+        self._persona_touched = True
+        self._persona_shown = name
+        field = self.query_one("#spawn-persona", Select)
+        field.set_options(self._persona_options())
+        field.value = name
+        self._describe_persona()
 
     # --- spawn --------------------------------------------------------------------------
 
@@ -652,6 +732,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if state is WorkerState.SUCCESS and isinstance(worker.result, AccountsOverview):
             select = self.query_one("#spawn-account", Select)
             current = select.value
+            self._account_statuses = list(worker.result.accounts)
             options = self._account_options(worker.result.accounts)
             select.set_options(options)
             if current in {value for _, value in options}:

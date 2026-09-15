@@ -7,6 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The Spawn dialog asks as whom.** After who runs the agent — Role (now with
+  *Pick…*), Account, Binary — the dialog has a **Persona** select: `(none)` plus
+  this project's personas with their layer, the role's
+  `[fleet.roles.<role>].persona` preselected and followed as the role changes
+  until you pick one, and the persona's description under the field. It sends
+  `persona=None` while it shows the role's default, the name once one is chosen,
+  and `""` for an explicit `(none)` over a role that has a default — which
+  `fleet spawn` reads as "no persona", so the choice beats the config. The dialog
+  takes presets, `SpawnDialog(project, persona=, role=, binary=, account=)`,
+  applied at compose so the persona-first flow can open it filled in; a preset
+  seat such as `coder2` or an account slot not read yet still shows. *Pick…* posts
+  `PickTargetRequested` for the target picker (the next change; until then it says
+  so). The Settings tab gains a persona per role, saved through `save_config` and
+  re-read, showing a configured name the project lacks as `<name> (custom)`; and a
+  sidebar agent row carries a dim `· <persona>` from its fleet row or, failing that,
+  its session. Measured in `tests/test_ui_spawn.py` (the recorder's `persona`,
+  `role`, `account` and `binary`) and `tests/test_ui_project.py` (the bytes of
+  `[fleet.roles.coder] persona = "skeptic"` in `config.toml`).
 - **Run an agent as a persona.** `aisquare launch <role> --persona NAME` and
   `aisquare fleet spawn <role> --persona NAME` — default: the role's new
   `[fleet.roles.<role>].persona` — start an agent as someone. The name is checked

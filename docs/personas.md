@@ -115,6 +115,13 @@ records it on the fleet row; without the flag the role's
 `persona-roles` leave the spawned role out is spawned anyway, with a `⚠` note on
 the receipt.
 
+In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
+persona right after who runs the agent — role, account, binary — with the role's
+default preselected and the persona's description under the field; `(none)`
+spawns without one even when the role has a default. The Settings tab sets each
+role's default persona, and an agent running as a persona carries a dim
+`· skeptic` on its sidebar row.
+
 ## Commands
 
 Every reporting command takes `--json` before the subcommand

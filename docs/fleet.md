@@ -102,15 +102,20 @@ tmux can see and its row says so (`no hooks`).
    bell), **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it.
    **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
-   project, headed with its name and codename: role (the fleet's roles plus any
-   role bound with `team bind`; `manager` is greyed out while one runs), label
-   (prefilled `<role>-1`, or `<role>-<task short id>` once a task is picked;
-   🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
+   project, headed with its name and codename. It reads in two steps. First who
+   runs it: role (the fleet's roles plus any role bound with `team bind`;
+   `manager` is greyed out while one runs; *Pick…* beside it will open the target
+   picker, which is not in this build yet), account and binary. Then as whom:
+   **persona** — `(none)` or one of the project's personas, the role's
+   `[fleet.roles.<role>].persona` preselected, its description shown under it.
+   Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
+   picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),
    worktree (disabled with "not a git repository" outside one), permission mode,
-   account, binary, extra agent args (split like a shell would; a quoting error
-   is shown inline) and a first prompt. A field left as it opened means the
-   role's default, exactly as an omitted `fleet spawn` flag does. A refusal —
+   extra agent args (split like a shell would; a quoting error is shown inline)
+   and a first prompt. A field left as it opened means the role's default,
+   exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
+   that has a default persona spawns without one. A refusal —
    the agent limit, a binary not on your `PATH` — stays in the dialog with its
    reason; a spawn toasts its receipt and notes and opens the new agent's pane.
    `Esc` cancels, except while a spawn is already running: that one cannot be

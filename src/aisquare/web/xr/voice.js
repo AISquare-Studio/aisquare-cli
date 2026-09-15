@@ -31,10 +31,10 @@
  *
  * The server drops an utterance past 60 s OR past 1.92 MB, whichever comes
  * first (`MAX_UTTERANCE_S` / `MAX_AUDIO_BYTES`). This module stops at
- * {@link MAX_UTTERANCE_MS} — 55 s — so the operator is told by their own client,
+ * {@link MAX_UTTERANCE_MS} — 50 s — so the operator is told by their own client,
  * with the mic dot going out, rather than discovering it from an error frame
- * after the fact. At a fixed 32 kB/s one wall clock governs both caps: 55 s is
- * 1.76 MB, comfortably inside the byte cap too.
+ * after the fact. At a fixed 32 kB/s one wall clock governs both caps: 50 s is
+ * 1.6 MB, comfortably inside the byte cap too.
  *
  * ## Gestures
  *
@@ -53,7 +53,7 @@ const FRAME_MS = 20;
 const FRAME_SAMPLES = (TARGET_RATE * FRAME_MS) / 1000; // 320 samples = 640 bytes
 
 /**
- * Our own utterance cap, five seconds inside the server's 60 s.
+ * Our own utterance cap, ten seconds inside the server's 60 s.
  *
  * The headroom is not superstition: it covers the drain of frames still in the
  * worklet's port queue plus the difference between a `performance.now()` here
@@ -61,8 +61,15 @@ const FRAME_SAMPLES = (TARGET_RATE * FRAME_MS) / 1000; // 320 samples = 640 byte
  * `audio_too_long` error and a dropped sentence; stopping ourselves produces a
  * mic dot that goes out and a line saying why, which is the same information
  * delivered before the operator has finished wasting their breath.
+ *
+ * Set to 50 s rather than 55 s after review: `performance.now()` is wall time,
+ * and on a loaded CPU the worklet's own clock can lag it — 55 s of `startedAt`
+ * arithmetic here can already be 56–58 s of audio on the far side, close enough
+ * to the server's 60 s that a slow machine loses the whole 45–54 s utterance to
+ * `audio_too_long` instead of to our own graceful stop. Ten seconds of slack
+ * buys back that margin and still leaves any realistic spoken command room.
  */
-const MAX_UTTERANCE_MS = 55_000;
+const MAX_UTTERANCE_MS = 50_000;
 
 /** How long to wait for the worklet's flush before sending `audioEnd` anyway. */
 const DRAIN_TIMEOUT_MS = 250;
@@ -258,6 +265,22 @@ export class Hud {
     this.render();
   }
 
+  /**
+   * Drop only the pinned line, leaving any toast alone.
+   *
+   * A pinned message names something the operator had to go and do — the mic is
+   * blocked, speech is not installed. Once that thing is done (the very next
+   * press captures audio), the instruction is stale and must come down on its
+   * own, or it sits over the scene contradicting a mic that is now live. `clear`
+   * is too broad: it would also wipe a toast that has nothing to do with the
+   * pin. So this clears the pin and nothing else.
+   */
+  unpin() {
+    if (!this.pinned) return;
+    this.pinned = '';
+    this.render();
+  }
+
   get text() {
     return this.transient || this.pinned;
   }
@@ -290,13 +313,20 @@ export class VoiceCapture {
    * @param {(state: object) => void} [opts.onChange] told whenever state moves
    * @param {boolean} [opts.forceResample] skip the 16 kHz context request, so
    *   the worklet's resampler runs on hardware that would not have needed it
+   * @param {(message: string, meta?: object) => void} [opts.report] told about
+   *   every capture-side failure the operator must see, with the session it
+   *   belongs to. main.js draws it on the focus PANEL as well as the HUD,
+   *   because the DOM HUD is not composited in an immersive session without
+   *   `dom-overlay` — so a failure reported only to the HUD is silent in the
+   *   headset. `{ session, pin }` say which panel and whether it was pinned.
    */
-  constructor({ net, hud, focusedSession, onChange = () => {}, forceResample = false }) {
+  constructor({ net, hud, focusedSession, onChange = () => {}, forceResample = false, report = () => {} }) {
     this.net = net;
     this.hud = hud;
     this.focusedSession = focusedSession;
     this.onChange = onChange;
     this.forceResample = forceResample;
+    this.report = report;
 
     /** Held across the page's life once granted. */
     this.stream = null;
@@ -304,15 +334,38 @@ export class VoiceCapture {
     this.source = null;
     this.node = null;
     this.moduleUrl = null;
-    /** Set once permission has been refused, so every later press says so
-     *  immediately instead of re-prompting a browser that will not ask again. */
+    /** True only for a CONFIRMED block (the Permissions API reports `denied`),
+     *  never for a merely dismissed prompt — a dismissal is a `NotAllowedError`
+     *  too, and the browser will ask again on the next press, so latching here
+     *  would make voice impossible to recover without a reload (which in the
+     *  headset means leaving the session). Lifted by a permission change. */
     this.denied = false;
+    /** The permission-status object we watch, so `denied` tracks reality even
+     *  when the operator grants the mic from the browser's own UI. Resolved
+     *  lazily and best-effort — the API is absent on some browsers. */
+    this.micPermission = null;
+    this.permissionWatched = false;
+
+    /** In-flight setup, shared by concurrent presses so a re-press during the
+     *  first press's permission prompt does not start a second getUserMedia or
+     *  build a node before the worklet module is registered. A rejection clears
+     *  the promise so the NEXT press retries rather than being wedged. */
+    this.streamPromise = null;
+    this.modulePromise = null;
+    this.moduleReady = false;
+    /** Set once a browser has refused a mic source at the 16 kHz context rate
+     *  (Firefox before 148), so the context is rebuilt at the hardware rate and
+     *  the worklet resamples. See ensureGraph. */
+    this.avoid16k = false;
 
     /** True from the press until the release — what the mic dot follows. */
     this.capturing = false;
     /** The session this utterance was opened for. The focus may move mid-
      *  sentence; the audio still belongs to where it started. */
     this.session = null;
+    /** The session a failure is reported against: `session` is nulled the moment
+     *  an utterance ends, and a failure can surface after that. */
+    this.utteranceSession = null;
     this.seq = 0;
     this.bytes = 0;
     this.frames = 0;
@@ -321,6 +374,11 @@ export class VoiceCapture {
     this.generation = 0;
     this.capTimer = null;
     this.drainTimer = null;
+    /** True while `closeAfterDrain` is waiting for the worklet's flush, with the
+     *  session that drain will close. A re-press must not reuse the stopping
+     *  node, so it force-finishes this drain first — see `press`. */
+    this.draining = false;
+    this.drainSession = null;
     /** True once the header is on the wire: only then may binary frames go. */
     this.headerSent = false;
   }
@@ -366,6 +424,14 @@ export class VoiceCapture {
    */
   async press() {
     if (this.capturing) return;
+    // A re-press while the previous utterance is still draining must NOT reuse
+    // the stopping worklet node (its port handler is drain-aware and its 250 ms
+    // timer would tear down the new utterance). Close the old drain now — its
+    // `audioEnd` goes out before the new header, preserving order — and build a
+    // fresh node below. The old utterance loses at most its trailing 20 ms, far
+    // better than both sentences vanishing. This is the exact XR-runtime case
+    // where the left source is removed and re-added mid-hold in one frame.
+    if (this.draining) this.finishDrain();
 
     const session = this.focusedSession();
     if (!session) {
@@ -375,12 +441,15 @@ export class VoiceCapture {
       this.hud.toast('focus a panel first — press f, or A on a controller', 2000);
       return;
     }
-    if (!this.net?.isOpen) {
-      this.hud.toast('not connected — nothing to talk to yet', 2000);
+    this.utteranceSession = session;
+    if (this.denied) {
+      // A CONFIRMED block only. `watchPermission` clears this the moment the
+      // operator grants the mic, so this branch is not a life sentence.
+      this.announce(MIC_DENIED, { pin: true });
       return;
     }
-    if (this.denied) {
-      this.hud.pin(MIC_DENIED);
+    if (!this.net?.isOpen) {
+      this.announce('not connected — nothing to talk to yet');
       return;
     }
 
@@ -420,18 +489,33 @@ export class VoiceCapture {
       return;
     }
     this.headerSent = true;
+    // The mic is live, so any stale mic-permission notice is now false and comes
+    // down (the low-severity "pinned message never cleared" case).
+    this.hud.unpin();
     this.source.connect(this.node); // frames start here, and not before
     this.notify(); // ...and the dot lights here, for the same reason
 
     this.capTimer = setTimeout(() => {
       // Our cap, not the server's. See MAX_UTTERANCE_MS.
-      this.hud.toast(
+      this.announce(
         `that ran past ${Math.round(MAX_UTTERANCE_MS / 1000)}s and was sent as-is — ` +
           'let go of the trigger between sentences',
-        5000,
       );
       this.release();
     }, MAX_UTTERANCE_MS);
+  }
+
+  /**
+   * A failure the operator must see. Goes to the HUD here — the surface that
+   * survives a WebGL context loss and that a desktop tester reads — AND through
+   * `report`, which main.js also draws on the focus panel, because the HUD does
+   * not exist in an immersive session without `dom-overlay`. Without the panel
+   * copy, every capture-side failure would be silent in the headset (§10).
+   */
+  announce(message, { pin = false } = {}) {
+    if (pin) this.hud.pin(message);
+    else this.hud.toast(message, 5000);
+    this.report(message, { session: this.utteranceSession, pin });
   }
 
   /** `talkEnd`: stop feeding, let the worklet flush, then close the utterance. */
@@ -465,19 +549,26 @@ export class VoiceCapture {
    * Stop without closing an utterance: the socket dropped, or the press could
    * not be completed. The server forgets a burst whose socket went away, so
    * there is nothing to tell it — only the operator needs telling.
+   *
+   * A message is shown if a capture was live OR a drain was in flight, because
+   * in both states the operator is waiting for a transcript that is no longer
+   * coming. It goes through `announce`, so it reaches the focus panel and not
+   * only the HUD.
    */
   abort(message) {
-    const wasCapturing = this.capturing;
+    const active = this.capturing || this.draining;
     this.capturing = false;
     this.session = null;
     this.headerSent = false;
+    this.draining = false;
+    this.drainSession = null;
     this.generation += 1;
     clearTimeout(this.capTimer);
     clearTimeout(this.drainTimer);
     this.capTimer = null;
     this.drainTimer = null;
     this.teardownGraph();
-    if (wasCapturing && message) this.hud.toast(message, 4000);
+    if (active && message) this.announce(message);
     this.notify();
   }
 
@@ -492,19 +583,18 @@ export class VoiceCapture {
    * hand by then. The timer is the answer to a worklet that never replies (a
    * suspended context, a node the graph already dropped): the utterance still
    * closes, just without its last 20 ms.
+   *
+   * `draining`/`drainSession` are instance state, not closure state, so a
+   * re-press (`press`) or a session-end can force the drain to complete from
+   * outside — `finishDrain` is idempotent and the single place `audioEnd` for a
+   * released utterance is sent.
    */
   closeAfterDrain(session) {
-    const finish = () => {
-      if (!this.drainTimer && !this.node) return; // already finished
-      clearTimeout(this.drainTimer);
-      this.drainTimer = null;
-      this.headerSent = false; // the utterance is closed as this frame goes out
-      this.teardownGraph();
-      this.net.audioEnd(session);
-    };
+    this.draining = true;
+    this.drainSession = session;
 
     // Stop the flow of new audio. The node stays connected to the port so the
-    // flush can still cross it; `teardownGraph` drops the rest in `finish`.
+    // flush can still cross it; `teardownGraph` drops the rest in `finishDrain`.
     try {
       this.source?.disconnect(this.node);
     } catch {
@@ -512,12 +602,30 @@ export class VoiceCapture {
     }
     if (this.node) {
       this.node.port.onmessage = (event) => {
-        if (typeof event.data === 'string') finish();
+        if (typeof event.data === 'string') this.finishDrain();
         else this.onFrame(event.data);
       };
       this.node.port.postMessage('stop');
+      this.drainTimer = setTimeout(() => this.finishDrain(), DRAIN_TIMEOUT_MS);
+    } else {
+      // Nothing to flush — released before the graph was ready. Close at once.
+      this.finishDrain();
     }
-    this.drainTimer = setTimeout(finish, DRAIN_TIMEOUT_MS);
+  }
+
+  /** Close the drained utterance: send its `audioEnd` and tear the node down.
+   *  Idempotent, so the worklet's `done`, the timeout, and a re-press can all
+   *  call it and only the first does the work. */
+  finishDrain() {
+    if (!this.draining) return;
+    this.draining = false;
+    clearTimeout(this.drainTimer);
+    this.drainTimer = null;
+    const session = this.drainSession;
+    this.drainSession = null;
+    this.headerSent = false; // the utterance is closed as this frame goes out
+    this.teardownGraph();
+    this.net.audioEnd(session);
   }
 
   /* --------------------------------------------------------------- frames -- */
@@ -557,8 +665,10 @@ export class VoiceCapture {
       // does the work and the worklet's box filter becomes a pass-through.
       // Chrome and the Quest browser both honour this; anything that refuses
       // throws here and gets the hardware rate with the worklet resampling.
+      // `avoid16k` is set after a browser (Firefox before 148) accepts the 16 kHz
+      // context but then refuses to connect a mic source to it — see ensureGraph.
       try {
-        if (this.forceResample) throw new Error('forced: #audio48');
+        if (this.forceResample || this.avoid16k) throw new Error('forced: hardware rate');
         this.ctx = new Ctor({ sampleRate: TARGET_RATE });
       } catch {
         try {
@@ -575,58 +685,183 @@ export class VoiceCapture {
     return true;
   }
 
-  /** Mic + worklet module + node. Everything here is once-per-page. */
+  /** Mic + worklet module + node. Everything here is once-per-page, except when
+   *  the mic is re-requested (its track ended) or the context is rebuilt at the
+   *  hardware rate (a browser that refused a 16 kHz source). */
   async ensureGraph() {
     if (!(await this.ensureStream())) return false;
     await this.ensureModule();
-    if (!this.node) {
-      this.node = new AudioWorkletNode(this.ctx, 'pcm-framer', {
-        numberOfInputs: 1,
-        numberOfOutputs: 0,
-        channelCount: 1,
-        channelCountMode: 'explicit',
-        channelInterpretation: 'speakers',
-      });
-      this.node.onprocessorerror = (err) => {
-        console.error('[xr] the audio worklet failed', err);
-        this.abort('the audio pipeline failed — say it again');
-        this.node = null;
-      };
+    if (!this.node) this.buildNode();
+    if (!this.source) {
+      try {
+        this.source = this.ctx.createMediaStreamSource(this.stream);
+      } catch (err) {
+        // Firefox before 148 accepts `new AudioContext({sampleRate: 16000})` but
+        // then refuses to connect a mic source running at the hardware rate to
+        // it (NotSupportedError, "different sample-rate ... not supported"). The
+        // 16 kHz try/catch in openContext cannot see this — the context built
+        // fine. Rebuild at the hardware rate and let the worklet resample, once.
+        const mismatch =
+          err?.name === 'NotSupportedError' || /sample-rate|sample rate/i.test(err?.message ?? '');
+        if (!this.avoid16k && this.ctx?.sampleRate === TARGET_RATE && mismatch) {
+          this.avoid16k = true;
+          this.resetContext();
+          if (!this.openContext()) return false;
+          await this.ensureModule();
+          this.buildNode();
+          this.source = this.ctx.createMediaStreamSource(this.stream);
+        } else {
+          throw err;
+        }
+      }
     }
-    this.node.port.onmessage = (event) => {
-      if (typeof event.data !== 'string') this.onFrame(event.data);
-    };
-    if (!this.source) this.source = this.ctx.createMediaStreamSource(this.stream);
     return true;
   }
 
+  /** Build the worklet node and wire its frame handler. */
+  buildNode() {
+    this.node = new AudioWorkletNode(this.ctx, 'pcm-framer', {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+    });
+    this.node.onprocessorerror = (err) => {
+      console.error('[xr] the audio worklet failed', err);
+      // abort tears the node down; do not null it separately or the drain path
+      // loses the reference it needs to stop the processor.
+      this.abort('the audio pipeline failed — say it again');
+    };
+    this.node.port.onmessage = (event) => {
+      if (typeof event.data !== 'string') this.onFrame(event.data);
+    };
+  }
+
+  /** True only when a cached stream is still usable — a track that has ended
+   *  (mic unplugged, permission revoked) reports `ended` and must be replaced,
+   *  or every press lights the dot and streams silence. */
+  streamLive() {
+    return Boolean(this.stream) && this.stream.getTracks().every((t) => t.readyState === 'live');
+  }
+
   async ensureStream() {
-    if (this.stream) return true;
+    if (this.streamLive()) return true;
+    if (this.stream) this.dropStream(); // a dead cached stream: re-request below
     const media = navigator.mediaDevices;
     if (!media?.getUserMedia) {
       // The usual cause is an insecure origin, which is also §13's first trap
       // and already explained by the page's own notice — so name it here too
-      // rather than reporting a missing API the operator cannot install.
-      this.hud.pin(
+      // rather than reporting a missing API the operator cannot install. The
+      // port is read from the page, not hard-coded, so the advice is right when
+      // the server is not on 8748.
+      const host = globalThis.location?.host ?? 'localhost:8748';
+      const port = globalThis.location?.port || '8748';
+      this.announce(
         'No microphone API on this origin. getUserMedia needs a secure context — ' +
-          'use `adb reverse tcp:8748 tcp:8748` and open http://localhost:8748.',
+          `use \`adb reverse tcp:${port} tcp:${port}\` and open http://${host}.`,
+        { pin: true },
       );
       return false;
     }
-    try {
-      this.stream = await media.getUserMedia(CONSTRAINTS);
-    } catch (err) {
-      this.failOpen(err);
-      return false;
+    // Share one getUserMedia across concurrent presses: a re-press while the
+    // first press's permission prompt is still up must not open a second stream
+    // and orphan the first. A rejection clears the promise so the next press
+    // retries rather than being wedged on a stale failure.
+    if (!this.streamPromise) {
+      this.streamPromise = media
+        .getUserMedia(CONSTRAINTS)
+        .then((stream) => {
+          this.attachStream(stream);
+          return true;
+        })
+        .catch((err) => {
+          this.failOpen(err);
+          return false;
+        })
+        .finally(() => {
+          this.streamPromise = null;
+        });
     }
-    return true;
+    return this.streamPromise;
+  }
+
+  /** Adopt a fresh mic stream and watch its tracks for the device going away. */
+  attachStream(stream) {
+    this.stream = stream;
+    for (const track of stream.getTracks()) {
+      track.addEventListener('ended', () => this.onTrackEnded());
+    }
+  }
+
+  /** A mic track ended mid-page (unplugged, or permission revoked). Drop the
+   *  cached stream so the next press re-requests it, and if we were mid-sentence
+   *  say so — a lit dot over a dead mic is the "talking into nothing" §10 warns
+   *  the operator against. */
+  onTrackEnded() {
+    this.dropStream();
+    if (this.capturing || this.draining) this.abort('microphone disconnected — say it again');
+    else this.notify();
+  }
+
+  /** Stop and forget the cached stream and the source bound to it. */
+  dropStream() {
+    this.stream?.getTracks().forEach((track) => {
+      try {
+        track.stop();
+      } catch {
+        /* already stopped */
+      }
+    });
+    this.stream = null;
+    // The source is bound to the now-dead stream; a new stream needs a new one.
+    this.source = null;
   }
 
   async ensureModule() {
-    if (this.moduleUrl) return;
-    const blob = new Blob([WORKLET_SOURCE], { type: 'text/javascript' });
-    this.moduleUrl = URL.createObjectURL(blob);
-    await this.ctx.audioWorklet.addModule(this.moduleUrl);
+    if (this.moduleReady) return;
+    // One in-flight load, shared by concurrent callers: `moduleUrl` used to be
+    // set before addModule resolved, so a second press during the first load
+    // skipped it and built a node before `pcm-framer` was registered. A rejected
+    // load clears the promise so a later press retries instead of being stuck.
+    if (!this.modulePromise) {
+      const blob = new Blob([WORKLET_SOURCE], { type: 'text/javascript' });
+      const url = URL.createObjectURL(blob);
+      this.modulePromise = this.ctx.audioWorklet
+        .addModule(url)
+        .then(() => {
+          this.moduleUrl = url;
+          this.moduleReady = true;
+        })
+        .catch((err) => {
+          URL.revokeObjectURL(url);
+          this.modulePromise = null;
+          throw err;
+        });
+    }
+    await this.modulePromise;
+  }
+
+  /** Drop the context and everything registered against it, for a rebuild at a
+   *  different sample rate. The stream is kept — it is rate-independent. */
+  resetContext() {
+    if (this.node) {
+      // Silence the discarded node's port before dropping it: closing the context
+      // below drops the node itself, but a flush already queued on its port would
+      // otherwise reach `onFrame` and inject a stray tail into the new utterance.
+      this.node.port.onmessage = null;
+    }
+    this.node = null;
+    this.source = null;
+    this.moduleReady = false;
+    this.modulePromise = null;
+    this.moduleUrl = null;
+    try {
+      this.ctx?.close();
+    } catch {
+      /* already closing */
+    }
+    this.ctx = null;
   }
 
   /** A failure that ends this utterance and says why, without killing voice. */
@@ -639,20 +874,68 @@ export class VoiceCapture {
     this.capTimer = null;
 
     if (name === 'NotAllowedError' || name === 'SecurityError') {
-      this.denied = true;
-      this.hud.pin(MIC_DENIED);
+      // A NotAllowedError covers BOTH a hard block and a merely dismissed
+      // prompt, and Chrome would re-prompt after a dismissal. So do not latch
+      // `denied` on the error alone: pin the advice, and ask the Permissions API
+      // whether it is a real block. A dismissal leaves `denied` false, so the
+      // next press prompts again — which is exactly what MIC_DENIED's own words
+      // ("press to talk again") tell the operator to do, and what a page reload
+      // used to be the only way to reach.
+      this.announce(MIC_DENIED, { pin: true });
+      this.confirmBlock();
     } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
-      this.hud.pin('No microphone was found, so push-to-talk has nothing to record.');
+      this.announce('No microphone was found, so push-to-talk has nothing to record.', { pin: true });
     } else {
       console.error('[xr] microphone unavailable', err);
-      this.hud.toast(`Microphone unavailable: ${err?.message ?? err}`, 6000);
+      this.announce(`Microphone unavailable: ${err?.message ?? err}`);
     }
     this.notify();
+  }
+
+  /** Ask the Permissions API whether the mic is genuinely blocked (state
+   *  `denied`) rather than merely dismissed, and start watching it. Best-effort:
+   *  the API is absent on some browsers, where every dismissal simply re-prompts
+   *  on the next press — the safe direction. */
+  confirmBlock() {
+    const perms = globalThis.navigator?.permissions;
+    if (!perms?.query) return;
+    perms
+      .query({ name: 'microphone' })
+      .then((status) => {
+        this.denied = status.state === 'denied';
+        if (this.denied) this.notify();
+        this.watchPermission(status);
+      })
+      .catch(() => {});
+  }
+
+  /** Track the mic permission so a grant from the browser's own UI (the padlock)
+   *  lifts the block without a page reload — which in the headset would mean
+   *  leaving the immersive session. */
+  watchPermission(status) {
+    if (this.permissionWatched || !status) return;
+    this.permissionWatched = true;
+    this.micPermission = status;
+    const onChange = () => {
+      this.denied = status.state === 'denied';
+      if (!this.denied) this.hud.unpin();
+      this.notify();
+    };
+    if (status.addEventListener) status.addEventListener('change', onChange);
+    else status.onchange = onChange;
   }
 
   /** Drop the node's wiring. The stream and the context are kept for the page. */
   teardownGraph() {
     if (this.node) {
+      // Tell the processor to stop so it returns false and the graph drops it.
+      // Without this, an aborted utterance leaks one live AudioWorklet processor
+      // (`process` keeps returning true) for the life of the page.
+      try {
+        this.node.port.postMessage('stop');
+      } catch {
+        /* no port */
+      }
       try {
         this.source?.disconnect(this.node);
       } catch {

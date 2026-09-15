@@ -137,6 +137,12 @@ export class Net {
     this.generation = 0;
     this.authFailed = false;
     this.closedByUs = false;
+    /** The reason behind a TRANSIENT auth refusal (`auth_timeout`,
+     *  `auth_invalid`), kept so the chip can say it: the server closes 4408
+     *  right after the frame and `scheduleReconnect` would otherwise overwrite
+     *  the only explanation with a bare "reconnecting — attempt N". Cleared by
+     *  the next `hello`. */
+    this.transientAuth = '';
 
     // A machine that has gone offline will not connect; say so rather than
     // burning the backoff ladder against a dead adapter.
@@ -226,8 +232,16 @@ export class Net {
       // waiting on a transcript that is never coming (§11/M7).
       this.emit('drop', { code: event.code, reason: event.reason });
       if (this.closedByUs || this.authFailed) return;
-      // 1008 is policy violation — how a server refuses a bad token.
-      if (event.code === 1008) return this.failAuth(event.reason || 'token rejected');
+      // Every close here is transient and reconnects with backoff. The one
+      // terminal case — a rejected token — is driven by the `auth_failed` ERROR
+      // FRAME the server sends just before it closes (see `receive`), never by
+      // the close code alone. The codes the server uses, none terminal by
+      // itself: 4401 after `auth_failed` (the frame already ended us above);
+      // 4408 after `auth_timeout` (silence) or `auth_invalid` (a malformed or
+      // non-auth first frame) — retry: true in the published contract; 1013
+      // after `board_unavailable`; 1012 for a service restart; and the ordinary
+      // 1001/1006 of a socket that simply went away. Keying off the frame keeps
+      // a stalled reconnect retrying instead of deleting a still-valid token.
       this.scheduleReconnect();
     });
 
@@ -246,16 +260,20 @@ export class Net {
     const base = Math.min(BACKOFF_MIN_MS * 2 ** this.attempt, BACKOFF_MAX_MS);
     const delay = base * (0.75 + Math.random() * 0.5);
     this.attempt += 1;
+    // A transient auth refusal names its reason on the chip, or the operator
+    // sees a rising attempt count with no way to tell a stalled adb reverse from
+    // a server they forgot to start.
+    const why = this.transientAuth ? ` — ${this.transientAuth}` : '';
     if (navigator.onLine === false) {
       this.setStatus('offline');
     } else if (this.attempt > GONE_AFTER_ATTEMPTS) {
       // Still retrying on the same ladder — only the wording has given up.
-      this.setStatus('server gone', `retrying · attempt ${this.attempt}`);
+      this.setStatus('server gone', `retrying · attempt ${this.attempt}${why}`);
     } else {
       // The attempt count is what makes this chip testable: "reconnecting" that
       // never changes is indistinguishable from a frozen client, and the M7
       // criterion is a RISING count (§11/M7).
-      this.setStatus('reconnecting', `attempt ${this.attempt}`);
+      this.setStatus('reconnecting', `attempt ${this.attempt}${why}`);
     }
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -312,6 +330,7 @@ export class Net {
 
     if (msg.t === 'hello') {
       this.attempt = 0;
+      this.transientAuth = '';
       this.generation += 1;
       this.hub = msg.hub;
       this.protocol = msg.protocol;
@@ -322,8 +341,20 @@ export class Net {
 
     if (msg.t === 'error') {
       console.warn(`[xr] server error ${msg.code}: ${msg.message}`);
-      if (String(msg.code ?? '').startsWith('auth')) {
+      // ONLY a genuinely rejected token is terminal. `auth_failed` is the code
+      // the server reserves for that; `auth_timeout` (and any other transport
+      // stall) must stay transient and keep the stored token, because the token
+      // was never the problem — the frame simply did not arrive in time, and the
+      // next connection may well succeed with the same one. The published
+      // `closeCodes` contract says as much: 4401 is do-not-retry only for a
+      // rejected token, and the error frame is how the client tells which 4401
+      // this is. Everything else falls through to the app's own `error` handler.
+      if (msg.code === 'auth_failed') {
         this.failAuth(msg.message || msg.code);
+      } else if (String(msg.code ?? '').startsWith('auth')) {
+        // `auth_timeout` / `auth_invalid`: transient, and the reason rides the
+        // chip through the 4408 close that follows (see scheduleReconnect).
+        this.transientAuth = msg.message || msg.code;
       }
     }
 
@@ -365,12 +396,22 @@ export class Net {
     return true;
   }
 
-  /** `null` means ambient only — no transcript stream (plan §6). */
+  /** `null` means ambient only — no transcript stream (plan §6).
+   *
+   *  The server now requires a non-empty id (`^[A-Za-z0-9_:-]+$`) wherever a
+   *  session is named and answers anything else with `bad_message`. This client
+   *  only ever names ids it received from the server, so an empty string can
+   *  reach here only through a bug — and the honest reading of "subscribe to
+   *  nothing" is ambient, so `''` is sent as `null` rather than refused. */
   subscribe(sessionId = null) {
-    return this.send({ t: 'subscribe', session: sessionId ?? null });
+    return this.send({ t: 'subscribe', session: sessionId || null });
   }
 
+  /** A frame that NAMES a session cannot be sent without one: the server would
+   *  refuse it as `bad_message` and the caller would learn nothing it could act
+   *  on. `false` here is the same answer as a closed socket — nothing was sent. */
   prompt(sessionId, text) {
+    if (!sessionId) return false;
     return this.send({ t: 'prompt', session: sessionId, text });
   }
 
@@ -382,6 +423,7 @@ export class Net {
    * caller must not start the worklet until this has returned true.
    */
   audioStart(sessionId, seq = 0) {
+    if (!sessionId) return false;
     return this.send({ t: 'audio', session: sessionId, seq });
   }
 
@@ -392,6 +434,7 @@ export class Net {
    * sentence twice.
    */
   audioEnd(sessionId) {
+    if (!sessionId) return false;
     return this.send({ t: 'audioEnd', session: sessionId });
   }
 }

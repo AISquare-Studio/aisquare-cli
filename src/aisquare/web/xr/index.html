@@ -64,6 +64,14 @@
         font-family: var(--font-mono);
       }
 
+      /* `hidden` must win over every element's own `display`. #say is
+         `display:flex`, which overrides the UA `[hidden]{display:none}`, so
+         `sayForm.hidden = true` on a device without dom-overlay left the field
+         on screen. `!important` makes the attribute do what it says everywhere. */
+      [hidden] {
+        display: none !important;
+      }
+
       #scene {
         display: block;
         width: 100%;
@@ -107,12 +115,23 @@
       #chip[data-state='reconnecting']::before {
         background: #f2b33d;
       }
+      /* "server gone" is still retrying (fail-open), but five failures at the
+         backoff ceiling is no longer amber-blip territory — give it the alert
+         edge rather than letting the dot fall back to the idle grey, which read
+         as "offline / nothing happening" for a chip that is actively working. */
+      #chip[data-state='server-gone']::before {
+        background: var(--alert);
+      }
       #chip[data-state='auth-failed']::before {
         background: var(--alert);
       }
 
+      /* Lifted clear of the typed field (#say), which owns the very bottom row
+         at bottom:12px full-width. At desktop widths the legend wraps wide
+         enough to run under the centred field, so the two overlapped along the
+         bottom edge; 58px puts the legend above the field's ~34px height. */
       #keys {
-        bottom: 12px;
+        bottom: 58px;
         left: 12px;
         color: var(--ink-dim);
       }
@@ -247,29 +266,39 @@
 
     <div id="notice" class="overlay" hidden></div>
 
-    <!-- Voice feedback that has nowhere else to go. Everything an operator in
-         the headset must see is ALSO drawn on the focus panel, because this
-         element is only visible in an immersive session when `dom-overlay` was
-         granted. -->
-    <div id="toast" class="overlay" hidden></div>
-
     <!--
-      The typed path (plan §10). Kept, not optional: "repo names, branch names
-      and identifiers will be mangled by ASR". This is the ONLY thing in the
-      client that sends `{t:"prompt"}` — the voice path never does, because the
-      server routes a final transcript as the prompt itself.
+      The WebXR dom-overlay root. ONLY the controls that must exist inside an
+      immersive session live here — the voice HUD and the typed field. #chip,
+      #keys and #notice stay outside it: they are desktop chrome, and handing the
+      whole <body> to `domOverlay` (the old default) floated the key legend and
+      the connection chip over AR passthrough on a device that grants the
+      overlay. main.js passes this element as `domOverlay.root`.
     -->
-    <form id="say" autocomplete="off">
-      <input
-        id="say-text"
-        type="text"
-        placeholder="focus a panel, then type to send it a prompt"
-        aria-label="Send a typed prompt to the focused session"
-        maxlength="2000"
-        disabled
-      />
-      <button id="say-send" type="submit" disabled>send</button>
-    </form>
+    <div id="xr-overlay">
+      <!-- Voice feedback that has nowhere else to go. Everything an operator in
+           the headset must see is ALSO drawn on the focus panel, because this
+           element is only visible in an immersive session when `dom-overlay` was
+           granted. -->
+      <div id="toast" class="overlay" hidden></div>
+
+      <!--
+        The typed path (plan §10). Kept, not optional: "repo names, branch names
+        and identifiers will be mangled by ASR". This is the ONLY thing in the
+        client that sends `{t:"prompt"}` — the voice path never does, because the
+        server routes a final transcript as the prompt itself.
+      -->
+      <form id="say" autocomplete="off">
+        <input
+          id="say-text"
+          type="text"
+          placeholder="focus a panel, then type to send it a prompt"
+          aria-label="Send a typed prompt to the focused session"
+          maxlength="2000"
+          disabled
+        />
+        <button id="say-send" type="submit" disabled>send</button>
+      </form>
+    </div>
 
     <!--
       Not a module, and above main.js on purpose: this has to report even when

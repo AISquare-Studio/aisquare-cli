@@ -27,6 +27,7 @@ import {
   ambientFont,
   barColor,
   rgba,
+  stateLabel,
 } from './style.js';
 
 /** Metres per texel, and the bar width expressed in metres. */
@@ -44,25 +45,6 @@ function fitText(ctx, text, maxW) {
     else hi = mid - 1;
   }
   return `${s.slice(0, lo)}…`;
-}
-
-/**
- * The state chip's text (plan §11/M7: "state chips, unread counts").
- *
- * The wire spells the three states in snake_case because Python wrote them
- * (`SessionState` in protocol.py); the panel spells them the way an operator
- * reads them. `needs_you` → "needs you" is the only one that differs, and it is
- * the one that matters most — an underscore in the middle of the alert state is
- * the sort of detail that makes a demo look unfinished.
- *
- * Anything unrecognised is passed through rather than blanked: a server that
- * grows a fourth state should show it, not show nothing.
- */
-const STATE_LABEL = { working: 'working', waiting: 'waiting', needs_you: 'needs you', gone: 'gone' };
-
-function stateLabel(session) {
-  const state = String(session.state ?? '');
-  return STATE_LABEL[state] ?? state.replace(/_/g, ' ');
 }
 
 /**

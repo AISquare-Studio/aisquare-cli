@@ -7,6 +7,29 @@
 > merges to `main` and deploys. Every entry: when, what, why, evidence.
 > Questions the owner must answer are collected at the bottom.
 
+## Done — what to do this morning (15:16, 2026-09-15)
+
+**Status: READY.** Eighteen PRs are merged into `rc/hackathon-v1` as merge
+commits, zero are open, all twenty tasks are done, and the runner's final gate
+on the last code change (4738e90) is green: 3930 passed, 0 failed, ruff and
+mypy --strict clean; the demo path replayed on that exact head. **PR #201**
+(`rc/hackathon-v1` → `main`) is open for you with the features table
+(impact · outcome · how · PRs), the hygiene table, every merge with its SHA,
+the verification evidence, three notes for the demo keyboard and the reviewer's
+guide. I did not merge it and did not touch `main` or infra.
+
+1. Review PR #201 — https://github.com/AISquare-Studio/aisquare-cli/pull/201
+   (its body is `docs/plans/hackathon-rc-summary.md`, kept in sync).
+2. Run the demo from `docs/plans/hackathon-demo.md` (measured three times on
+   three heads by the runner; the "Before the demo" notes in the summary save
+   you the three surprises).
+3. Merge #201 and deploy. The morning audit items (1–11 below) list every
+   decision I took under your authorisation.
+
+The 12:20 and 07:05 snapshots below are kept as written; the timeline has every
+merge and decision.
+
+
 ## Midday at a glance (12:20, 2026-09-15)
 
 **Status: merging under your 2026-09-15 authorisation — eleven of sixteen PRs
@@ -158,6 +181,7 @@ read-only.
 | 2026-09-15 14:32–14:45 | **Merged #194 P14 → f096622** at 654ecac (phase 1 verified at 25bae2d: twelve `sh` fences replayed verbatim, eleven output blocks matching; phase 2 at a38aad1: line 189 measured on the runbook's own agent; coder3a-1's merge-time Approve 5685243419; CI 6/6; replay-verified). **Seventeen PRs in rc** — the demo runbook is on the branch. | Only P17 remains: coder3b-1 opens the PR on fix/hack-p17-ui-role-ok @73d37a9 (diff vs rc: `cli/ui/attach.py` alone), the runner verifies, then the final `make check` on the merged head and READY. | merge f096622 |
 | 2026-09-15 14:45–15:00 | **P17 → PR #200** @73d37a9 (coder3b-1): the picker's seat check asks the public `services.fleet.role_ok` (#192) instead of the private `_role_ok`; diff vs rc is `cli/ui/attach.py` alone; bite (public `role_ok` forced to accept every seat → the seat-check test goes red) and full gate (3929/0) in the PR body. Manager review posted (5685751179): no private reference left under `cli/ui`, nothing blocking. Task in review for the runner. | The last verification of the train is the runner's P17 verdict; then merge on CI green, the final `make check` on the merged head, READY, and the single rc → main PR (body drafted from `docs/plans/hackathon-rc-summary.md`). | PR #200; board 14:45–15:00 |
 | 2026-09-15 14:40–15:12 | **Runner verified P17 #200 @73d37a9** (14:40): the bite run from both sides — the public `role_ok` forced to accept every seat turns the seat-check test red on this head and leaves it green on rc @f06e755 where the private name was still asked, so the test observes which name is called; no `_role_ok` left under `cli/ui`; all nine original P7 checks pass; gate 3929/0. **Merged #200 P17 → 4738e90.** **The train is assembled:** eighteen PRs in `rc/hackathon-v1`, zero open, all twenty tasks done. Last code change on the branch: 4738e90. | Final gate requested from the runner on 4738e90 (`make check` in the pre-built fresh tree + the demo-path smoke). READY follows that verdict; then the single rc → main PR. Docs-only log commits after 4738e90 carry their own docs guards and the rc → main PR's CI. Both coders released to standby. | merge 4738e90; board 14:40–15:12 (notes 7839–7842) |
+| 2026-09-15 15:09–15:16 | **FINAL GATE GREEN** (runner, on rc@4738e90, the last code change; fresh worktree, own venv, isolated home): ruff format clean (283 files), ruff check clean, mypy --strict clean (279 source files), pytest **3930 passed, 1 skipped, 0 failed** in 13:15. Three end-to-end runs on this host across the night: 3855 → 3875 → 3930, never red. **Demo path re-run on the exact head: PASS**, including the P20 hard case, torn down after. **READY posted** (board seq 7867) with the eighteen PRs and the evidence. **PR #201 `rc/hackathon-v1` → `main` opened** for the owner with the features table, hygiene table, the eighteen merges and SHAs, verification, the demo notes and the reviewer's guide; the manager never merges it. Team released to standby. | Owner: review #201, run `docs/plans/hackathon-demo.md`, merge, deploy. Any reopen from #201's CI or the review comes through the board. | board 15:09–15:16 (notes 7867–7870); PR #201 |
 | 2026-09-15 evening | Both coders deep in their first tasks (`coder3a-1` on P1 in `.aisquare-worktrees/p1-persona-core`, `coder3b-1` on P3 in `.aisquare-worktrees/p3-spawn-dialog`), exploring the code before writing. | No action; they were told their queues. | pane captures |
 
 ## Morning audit — questions and calls for the owner

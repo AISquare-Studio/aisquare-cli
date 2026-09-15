@@ -6,9 +6,10 @@
 > acceptance (`docs/plans/spawn-personas.md` §7) in its own worktree, reviewed
 > read-only by the manager and against the workspace 9-dimension framework,
 > and gated by CI. The validator's gate on the assembled head was
-> **PASS-WITH-FIXES**, and every finding was closed on the branch. Decisions,
-> timeline and evidence: `docs/plans/hackathon-overnight-log.md`. Demo:
-> `docs/plans/hackathon-demo.md`.
+> **PASS-WITH-FIXES**, and every finding was closed on the branch. Final gate on the last code change (4738e90): 3930 passed,
+> 0 failed, ruff and mypy --strict clean, demo path replayed on that head. The
+> PR this describes: #201. Decisions, timeline and evidence:
+> `docs/plans/hackathon-overnight-log.md`. Demo: `docs/plans/hackathon-demo.md`.
 
 ## Features
 

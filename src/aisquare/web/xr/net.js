@@ -226,8 +226,13 @@ export class Net {
       // waiting on a transcript that is never coming (§11/M7).
       this.emit('drop', { code: event.code, reason: event.reason });
       if (this.closedByUs || this.authFailed) return;
-      // 1008 is policy violation — how a server refuses a bad token.
-      if (event.code === 1008) return this.failAuth(event.reason || 'token rejected');
+      // Every close here is transient and reconnects with backoff. The one
+      // terminal case — a rejected token — is driven by the `auth_failed` ERROR
+      // FRAME the server sends just before it closes (see `receive`), not by the
+      // close code: the server closes 4401 for a rejected token AND for an
+      // `auth_timeout` (a transport stall, its own comment says so), so the code
+      // cannot tell the two apart. Keying off the frame keeps a stalled
+      // reconnect retrying instead of deleting a still-valid token forever.
       this.scheduleReconnect();
     });
 
@@ -322,7 +327,15 @@ export class Net {
 
     if (msg.t === 'error') {
       console.warn(`[xr] server error ${msg.code}: ${msg.message}`);
-      if (String(msg.code ?? '').startsWith('auth')) {
+      // ONLY a genuinely rejected token is terminal. `auth_failed` is the code
+      // the server reserves for that; `auth_timeout` (and any other transport
+      // stall) must stay transient and keep the stored token, because the token
+      // was never the problem — the frame simply did not arrive in time, and the
+      // next connection may well succeed with the same one. The published
+      // `closeCodes` contract says as much: 4401 is do-not-retry only for a
+      // rejected token, and the error frame is how the client tells which 4401
+      // this is. Everything else falls through to the app's own `error` handler.
+      if (msg.code === 'auth_failed') {
         this.failAuth(msg.message || msg.code);
       }
     }
